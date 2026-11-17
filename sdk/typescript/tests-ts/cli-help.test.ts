@@ -190,7 +190,11 @@ describe("CLI help", () => {
     const cveReport = branchWith("cve");
     const packageReport = branchWith("package");
     expect(cveReport.required).toEqual(
-      expect.arrayContaining(["cve", "uses", "status"]),
+      expect.arrayContaining(["cve", "uses", "schemaVersion"]),
+    );
+    expect(cveReport.required).not.toContain("status");
+    expect(cveReport.properties.uses.items.properties.verdict.enum).toContain(
+      "unknown",
     );
     expect(packageReport.required).toEqual(
       expect.arrayContaining(["package", "checks"]),

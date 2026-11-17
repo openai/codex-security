@@ -1,1171 +1,799 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  DependencyAssessment,
-  DependencyUse,
-} from "../src/dependency-reachability.js";
 import { readDependencyCheckOutput } from "../src/dependency-reachability.js";
 import {
   readDependencyReportCode,
   renderDependencyReport,
 } from "../src/dependency-report-renderer.js";
+import {
+  broadReport,
+  place,
+  receiptRef,
+  report,
+  reviewed,
+  service,
+  sourceRef,
+  unresolved,
+  variantReport,
+  zeroReport,
+} from "./support/dependency-report-fixtures.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
-const assessment = {
-  status: "potentially_exploitable",
-  uses: [
-    {
-      location: "Example worker",
-      component: "example-decoder",
-      version: "2.3.4",
-      verdict: "potentially_exploitable",
-      deployment: "configured",
-      reason: "The selected path opens the configured input.",
-      evidence: [
-        {
-          path: "src/worker.ts",
-          startLine: 17,
-          endLine: 24,
-          supports: ["affected_copy", "affected_use"],
-        },
-      ],
-      observations: [
-        {
-          server: "fixture-inventory",
-          record: "fixture-record-712",
-          supports: ["running"],
-        },
-      ],
-    },
-  ],
-  limitations: ["The caller identity is unresolved."],
-} satisfies DependencyAssessment;
-
-const check = {
-  ...assessment,
-  advisories: ["GHSA-aaaa-bbbb-cccc"],
-  usage: null,
-};
-const cveReport = { ...check, cve: "CVE-2099-12345" };
-
-const reportedSource = "POST /upload";
-const reportedPath = "src/route.ts:17 → decodeFrame()";
-const routeEvidence = {
-  path: "src/route.ts",
-  startLine: 15,
-  endLine: 19,
-  supports: ["affected_use"],
-} satisfies DependencyUse["evidence"][number];
-const walkedUse = {
-  ...assessment.uses[0]!,
-  location: `${reportedSource} → ${reportedPath}`,
-  evidence: [
-    routeEvidence,
-    {
-      path: "package-lock.json",
-      startLine: 7,
-      endLine: 7,
-      supports: ["affected_copy"],
-    },
-  ],
-} satisfies DependencyUse;
-const walkedReport = { ...cveReport, uses: [walkedUse] };
-const productionMeasurement = {
-  useId: "use-1-1",
-  location: walkedUse.location,
-  step: "sink",
-  environment: "prod",
-  count: 0,
-  from: "2026-01-01T00:00:00Z",
-  until: "2026-01-01T01:00:00Z",
-  target: "synthetic target",
-  record: "synthetic receipt",
-} as const;
-
-function visibleText(html: string): string {
+function text(html: string) {
   return html
-    .replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1>/giu, "")
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/giu, "")
     .replace(/<[^>]*>/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
 }
-
-function selectElements(
-  html: string,
-  selector: string,
-  attributes: string[] = [],
-) {
-  const elements: Array<{
-    text: string;
-    attributes: Record<string, string | null>;
-  }> = [];
+function elements(html: string, selector: string, attrs: string[] = []) {
+  const result: { text: string; attrs: Record<string, string | null> }[] = [];
   new HTMLRewriter()
     .on(selector, {
       element(node) {
-        elements.push({
+        result.push({
           text: "",
-          attributes: Object.fromEntries(
-            attributes.map((name) => [name, node.getAttribute(name)]),
+          attrs: Object.fromEntries(
+            attrs.map((a) => [a, node.getAttribute(a)]),
           ),
         });
       },
       text(node) {
-        elements.at(-1)!.text += ` ${node.text}`;
+        result.at(-1)!.text += " " + node.text;
       },
     })
     .transform(html);
-  return elements.map((node) => ({
-    ...node,
-    text: node.text.replace(/\s+/gu, " ").trim(),
+  return result.map((r) => ({
+    ...r,
+    text: r.text.replace(/\s+/gu, " ").trim(),
   }));
 }
+function panel(html: string, id: string) {
+  return (
+    html
+      .split(`<article class="finding" id="${id}"`)[1]
+      ?.split("</article>")[0] ?? ""
+  );
+}
+const call = (useId: string, location: string, count = 0) => ({
+  useId,
+  location,
+  step: "sink" as const,
+  environment: "prod" as const,
+  count,
+  from: "2026-01-01T00:00:00Z",
+  until: "2026-01-01T01:00:00Z",
+  target: "Synthetic prod worker",
+  record: "sample-measurement-1",
+});
 
-describe("dependency report renderer", () => {
-  test("loads cited coverage source from the supplied checkout", async () => {
-    await using repo = await scopedTemporaryDirectory("coverage-code-");
-    await writeFile(
-      join(repo.path, "entry.ts"),
-      'export const output = "html";\n',
+describe("service-oriented exploitability report", () => {
+  test("reconciles unique uses, information gaps, exclusions and separate coverage leads", () => {
+    const html = renderDependencyReport(broadReport());
+    expect(elements(html, ".check-heading h2")[0]!.text).toBe(
+      "Reviewed places",
     );
-    const citation = {
-      path: "entry.ts",
-      startLine: 1,
-      endLine: 1,
-      supports: [],
+    const metrics = text(elements(html, ".totals")[0]!.text);
+    expect(metrics).toContain("64 reviewed uses");
+    expect(metrics).toContain("48 Requires more information");
+    expect(metrics).toContain("16 Ruled out");
+    expect(metrics).toContain("24 unresolved coverage items");
+    const items = elements(html, "article[data-finding]", [
+      "id",
+      "data-kind",
+      "data-services",
+    ]);
+    expect(items.filter((i) => i.attrs["data-kind"] === "use")).toHaveLength(
+      64,
+    );
+    expect(
+      items.filter((i) => i.attrs["data-kind"] === "coverage"),
+    ).toHaveLength(24);
+    expect(new Set(items.map((i) => i.attrs["id"])).size).toBe(88);
+    expect(items.every((i) => !!i.attrs["data-services"])).toBe(true);
+    expect(text(html)).toContain("Service not established");
+    expect(text(html)).toContain("Source-only findings");
+    expect(html).toContain(
+      '<option value="unknown">Requires more information</option>',
+    );
+    expect(metrics).toContain("8 internet");
+    expect(metrics).toContain("8 not internet");
+    expect(metrics).toContain("72 unverified");
+  });
+  test("triages the evidenced input boundary and exact instance rather than inferring exposure from a service or code path", () => {
+    const item = reviewed(1, {
+      place: place({
+        kind: "service",
+        workload: "cedar-web-stable",
+        environment: "prod",
+        variant: "stable",
+        deploymentBasis: "observed",
+      }),
+    });
+    const r = receiptRef("input-and-runtime");
+    item.decidingEvidence.push(r);
+    item.services = [service("svc:cedar", "Cedar", item.decidingEvidence[0]!)];
+    item.inputSource = {
+      exposure: "internet",
+      endpoint: "POST /upload",
+      evidence: [r],
     };
-    const report = {
-      ...cveReport,
-      uses: [],
-      coverage: [
-        {
-          kind: "dismissed",
-          reason: "The output operation is outside the advisory.",
-          evidence: [citation],
-          observations: [],
+    item.runtimeContext = {
+      launch: { command: "worker --guard=on", basis: "configured" },
+      mitigation: {
+        state: "enabled",
+        basis: "configured",
+        detail: "The process setting has not been observed.",
+      },
+      containerUrl: "https://registry.example.invalid/image/cedar",
+      evidence: [r],
+    };
+    item.tags = [{ name: "documents", evidence: [r] }];
+    const unmapped = reviewed(2, { location: "Public-looking code path" });
+    unmapped.services = [
+      service("svc:public", "Public service", unmapped.decidingEvidence[0]!),
+    ];
+    unmapped.inputSource = {
+      exposure: "internet",
+      endpoint: "POST /unverified",
+      evidence: [receiptRef("not-cited")],
+    };
+    const html = renderDependencyReport(report([item, unmapped]));
+    const rows = elements(html, "article[data-finding]", [
+      "id",
+      "data-exposure",
+      "data-tags",
+    ]);
+    expect(rows[0]!.attrs["data-exposure"]).toBe("internet");
+    expect(rows[1]!.attrs["data-exposure"]).toBe("unknown");
+    expect(text(panel(html, "use-1-1"))).toContain("cedar-web-stable");
+    expect(text(panel(html, "use-1-1"))).toContain("POST /upload");
+    expect(text(panel(html, "use-1-1"))).toContain("worker --guard=on");
+    expect(text(panel(html, "use-1-1"))).toContain(
+      "Mitigation enabled (configured)",
+    );
+    expect(panel(html, "use-1-2")).not.toContain("POST /unverified");
+    expect(html).toContain("data-exposure-filter");
+    expect(html).toContain("data-tag-filter");
+    expect(html).toContain('data-mode="instances"');
+    expect(html).toContain('data-mode-button="code"');
+    expect(html).toContain(
+      'href="https://registry.example.invalid/image/cedar"',
+    );
+  });
+  test("starts on actual call sites when the report has no instance context", () => {
+    const html = renderDependencyReport(report([reviewed(1)]));
+    expect(html).toContain('data-mode="code"');
+    expect(html).toContain('data-mode-button="code" aria-pressed="true"');
+    expect(html).toContain("Operation / call site");
+  });
+  test("diagrams an artifact exclusion without fabricating a reachable operation", () => {
+    const use = reviewed(1, {
+      verdict: "ruled_out",
+      reason: "The selected artifact contains the verified fix.",
+      place: place({ kind: "artifact", artifact: "sha256:" + "3".repeat(64) }),
+    });
+    const html = panel(renderDependencyReport(report([use])), "use-1-1");
+    expect(html).toContain("Why this target is ruled out");
+    expect(html).toContain("The selected artifact contains the verified fix.");
+    expect(html).not.toContain("Source to operation");
+    expect(html).not.toContain("Vulnerable operation bound");
+  });
+  test("opens material unresolved leads when there are no reviewed uses", () => {
+    const html = renderDependencyReport(zeroReport());
+    expect(text(html)).toContain("0 reviewed uses");
+    expect(text(html)).toContain("5 unresolved coverage items");
+    expect(text(html)).toContain("No reviewed use was established");
+    expect(elements(html, "article[data-kind=coverage]")).toHaveLength(5);
+    expect(html).toContain('id="coverage-1-1"');
+    expect(panel(html, "coverage-1-1")).toContain("<details open>");
+    expect(text(panel(html, "coverage-1-1"))).toContain(
+      "Submitted bytes reach the parser entrypoint",
+    );
+    expect(text(panel(html, "coverage-1-1"))).toContain(
+      "Which registered provider handles this field?",
+    );
+    const stable = text(panel(html, "coverage-1-1"));
+    const canary = text(panel(html, "coverage-1-2"));
+    expect(stable).toContain("Observed running");
+    expect(stable).toContain("linux/amd64");
+    expect(stable).toContain("enables the document renderer");
+    expect(canary).toContain("linux/arm64");
+    expect(canary).toContain("disables the document renderer");
+    expect(stable).not.toContain("linux/arm64");
+    expect(text(html).toLowerCase()).not.toContain("all clear");
+  });
+  test("groups library callers and jobs by reviewed associations and counts a shared finding once", () => {
+    const html = renderDependencyReport(variantReport());
+    const nav = elements(html, "a[data-service-link]", [
+      "data-name",
+      "href",
+      "data-service",
+    ]);
+    expect(nav.find((a) => a.attrs["data-name"] === "Cedar")?.text).toMatch(
+      /3 reviewed uses/,
+    );
+    expect(nav.find((a) => a.attrs["data-name"] === "Spruce")?.text).toMatch(
+      /1 reviewed use.*1 unresolved item/,
+    );
+    expect(elements(html, ".totals")[0]!.text).toContain("3 reviewed uses");
+    expect(elements(html, "article#use-1-3")).toHaveLength(1);
+    expect(
+      (
+        elements(html, "article#use-1-3", ["data-services"])[0]!.attrs[
+          "data-services"
+        ] ?? ""
+      ).split(" "),
+    ).toHaveLength(2);
+    expect(text(panel(html, "use-1-1"))).toContain("stable");
+    expect(text(panel(html, "use-1-2"))).toContain("canary");
+    expect(text(panel(html, "use-1-1"))).toContain("linux/amd64");
+    expect(text(panel(html, "use-1-2"))).toContain("linux/arm64");
+    expect(text(panel(html, "use-1-1"))).toContain("Image index");
+    expect(text(panel(html, "use-1-1"))).toContain("Platform manifest");
+    expect(panel(html, "use-1-1")).not.toContain("3".repeat(64));
+    expect(panel(html, "use-1-2")).not.toContain("2".repeat(64));
+  });
+  test("does not trust a service kind, free-text name, or an unreviewed association", () => {
+    const u = reviewed(1, {
+      location: "misleading-service",
+      place: place({ kind: "service" }),
+      services: [
+        service("svc:spoof", "Wrong service", sourceRef("different.ts", 2)),
+      ],
+    });
+    const html = renderDependencyReport(report([u]));
+    expect(text(html)).toContain("Service not established");
+    expect(
+      elements(html, "a[data-service-link]", ["data-name"]).some(
+        (a) => a.attrs["data-name"] === "Wrong service",
+      ),
+    ).toBe(false);
+    expect(text(panel(html, "use-1-1"))).toContain("not confirmed");
+  });
+  test("renders exact questions, target, exclusion and next check without inventing them from historical prose", () => {
+    const html = renderDependencyReport(variantReport());
+    const p = text(panel(html, "use-1-1"));
+    expect(p).toContain("Is the affected mode enabled for the stable worker?");
+    expect(p).toContain("Cedar prod stable linux/amd64");
+    expect(p).toContain("Read the admitted worker setting");
+    expect(p).toContain("The guard rejects");
+    expect(p).toContain("Request reaches decoder before authentication");
+    const legacy = reviewed(9, {
+      reason: "The source was checked. The runtime flag is unknown.",
+      place: place({ unresolvedQuestions: ["The runtime flag is unknown."] }),
+    });
+    const h = panel(renderDependencyReport(report([legacy])), "use-1-1");
+    expect(text(h).split("The runtime flag is unknown.")).toHaveLength(2);
+    expect(text(h)).toContain("No separate deciding check was recorded");
+    expect(text(h)).toContain("No inspection attempt was recorded");
+  });
+  test("distinguishes open reviewed use from an unbound implementation handoff", () => {
+    const html = renderDependencyReport(variantReport());
+    expect(text(panel(html, "use-1-1"))).toContain("Requires more information");
+    const c = text(panel(html, "coverage-1-1"));
+    expect(c).toContain("Unresolved coverage");
+    expect(c).toContain("Document bytes reach the parser entrypoint");
+    expect(c).toContain("has not been linked to decodeFrame");
+    expect(c).not.toContain("Requires more information");
+  });
+  test("keeps denied, unsupported, timed out, not attempted and successful fallback inspections separate", () => {
+    const u = reviewed(1);
+    const refs = ["denied", "unsupported", "timeout", "fallback"].map((id, i) =>
+      receiptRef(id, String(i + 1)),
+    );
+    u.decidingEvidence.push(...refs);
+    const target = {
+      label: "Cedar stable platform image",
+      relationship: "target" as const,
+      platform: "linux/amd64",
+      imageIndex: "sha256:index",
+      platformManifest: "sha256:amd64",
+    };
+    u.inspections = [
+      ...(["denied", "unsupported", "timeout"] as const).map((outcome, i) => ({
+        question: `Inspect selected JAR via ${outcome}`,
+        target,
+        source: "artifact inventory",
+        outcome,
+        result:
+          outcome === "denied"
+            ? "Registry returned 403."
+            : "Inspection did not complete.",
+        evidence: [refs[i]!],
+      })),
+      {
+        question: "Inspect registered plugin",
+        target,
+        outcome: "not_attempted",
+        evidence: [],
+      },
+      {
+        question: "Inspect publisher copy",
+        target: { ...target, relationship: "shared_artifact" },
+        source: "publisher artifact",
+        outcome: "succeeded",
+        result: "Digest-matched publisher copy contains the backport.",
+        evidence: [refs[3]!],
+        transferBasis:
+          "The publisher file has the identical selected platform-manifest digest.",
+      },
+    ];
+    const h = panel(renderDependencyReport(report([u])), "use-1-1");
+    for (const v of [
+      "Access denied",
+      "Unsupported source",
+      "Timed out",
+      "Not attempted",
+      "Completed",
+      "Registry returned 403",
+      "Digest-matched publisher copy",
+      "Transfer basis",
+      "Platform manifest",
+    ])
+      expect(text(h)).toContain(v);
+    expect(text(h)).not.toContain("retried");
+  });
+  test("attributes CPU samples to exact or comparison workloads and distinguishes zero, missing, partial and absent symbols", () => {
+    const u = reviewed(1);
+    const refs = ["zero", "missing", "partial", "peer", "confirmed"].map(
+      (id, i) => receiptRef(id, String(i + 1)),
+    );
+    u.decidingEvidence.push(...refs);
+    const t = {
+      label: "Cedar target JVM",
+      relationship: "target" as const,
+      workload: "cedar-stable",
+      observationWindow: "00:00–01:00",
+    };
+    const p = {
+      label: "Cedar peer",
+      relationship: "comparison" as const,
+      workload: "cedar-peer",
+      observationWindow: "00:00–01:00",
+    };
+    u.inspections = [
+      {
+        question: "Target samples",
+        target: t,
+        source: "CPU profiler",
+        outcome: "zero_results",
+        evidence: [refs[0]!],
+        measurement: { unit: "cpu_samples", count: 0 },
+        completeness: "not_reported",
+      },
+      {
+        question: "Target measurement",
+        target: t,
+        source: "CPU profiler",
+        outcome: "no_data",
+        evidence: [refs[1]!],
+      },
+      {
+        question: "Partial window",
+        target: t,
+        source: "CPU profiler",
+        outcome: "partial",
+        evidence: [refs[2]!],
+        completeness: "partial",
+      },
+      {
+        question: "Peer frame coverage",
+        target: p,
+        source: "CPU profiler",
+        outcome: "insufficient_symbols",
+        result:
+          "Peer rows do not establish Java-function execution on the target.",
+        evidence: [refs[3]!],
+        measurement: {
+          unit: "cpu_samples",
+          count: 321,
+          frameTypes: ["native", "kernel", "other"],
         },
-      ],
-    };
-    const code = await readDependencyReportCode(report, repo.path);
-    expect(code.get(JSON.stringify([citation.path, 1, 1]))).toBe(
-      'export const output = "html";',
-    );
-    expect(visibleText(renderDependencyReport(report, { code }))).toContain(
-      "export const output",
-    );
-  });
-
-  test("shows reviewed coverage decisions with their own cited source", () => {
-    const citation = {
-      path: "src/frontend.ts",
-      startLine: 3,
-      endLine: 3,
-      supports: [],
-    };
-    const html = renderDependencyReport(
-      {
-        ...cveReport,
-        coverage: [
-          {
-            kind: "dismissed",
-            reason: "This entry renders HTML without the affected operation.",
-            evidence: [citation],
-            observations: [],
-          },
-          {
-            kind: "unresolved",
-            reason: "The optional entrypoint selection is not recorded.",
-            evidence: [{ ...citation, startLine: 7, endLine: 7 }],
-            observations: [],
-          },
-        ],
+        completeness: "not_reported",
       },
       {
-        code: new Map([
-          [
-            JSON.stringify([citation.path, 3, 3]),
-            'export const output = "html";',
-          ],
-        ]),
+        question: "Target function execution",
+        target: t,
+        source: "CPU profiler",
+        outcome: "succeeded",
+        evidence: [refs[4]!],
+        measurement: { unit: "cpu_samples", count: 3, frameTypes: ["java"] },
+        result: "The exact target sample contains Decoder.decodeFrame.",
       },
-    );
-    const text = visibleText(html);
-    expect(text).toContain("Other checked code");
-    expect(text).toContain("Excluded");
-    expect(text).toContain("Unresolved");
-    expect(text).toContain("src/frontend.ts:3");
-    expect(text).toContain(
-      "This entry renders HTML without the affected operation.",
-    );
-    expect(text).toContain(
-      "The optional entrypoint selection is not recorded.",
-    );
-    expect(text).toContain("export const output");
+    ];
+    const h = text(panel(renderDependencyReport(report([u])), "use-1-1"));
+    for (const v of [
+      "Returned zero",
+      "0 CPU samples",
+      "No measurement or data",
+      "backend reported partial",
+      "Comparison workload: Cedar peer",
+      "321 CPU samples",
+      "Required symbols absent",
+      "not reported by backend",
+      "Decoder.decodeFrame",
+    ])
+      expect(h).toContain(v);
+    expect(h).not.toContain("321 calls");
   });
-
-  test("opens unresolved coverage when there are no reviewed places", () => {
-    const report = { ...cveReport, uses: [], limitations: [] };
-    const coverage = {
-      reason: "The consumer implementation is unavailable.",
-      evidence: [
-        { path: "src/dispatch.ts", startLine: 8, endLine: 8, supports: [] },
-      ],
-      observations: [],
-    };
-    const html = renderDependencyReport({
-      ...report,
-      coverage: [{ ...coverage, kind: "unresolved" }],
-    });
-    expect(visibleText(html)).toContain(
-      "0 reviewed places · 1 unresolved item",
-    );
-    expect(html).toMatch(
-      /<details class="coverage" open>[\s\S]*The consumer implementation is unavailable\.[\s\S]*src\/dispatch.ts:8/u,
-    );
-    expect(html).not.toContain("data-use-row data-verdict=");
-
-    const dismissed = renderDependencyReport({
-      ...report,
-      coverage: [
-        { ...coverage, kind: "dismissed", reason: "The route is unused." },
-      ],
-    });
-    expect(visibleText(dismissed)).not.toContain("unresolved item");
-    expect(dismissed).toContain('<details class="coverage">');
-  });
-
-  test("renders a CVE report with separate source and runtime evidence", () => {
-    const text = visibleText(renderDependencyReport(cveReport));
-
-    for (const value of [
-      cveReport.cve,
-      check.advisories[0]!,
-      "Example worker",
-      "example-decoder",
-      "2.3.4",
-      "The selected path opens the configured input.",
-      "The caller identity is unresolved.",
-    ]) {
-      expect(text).toContain(value);
-    }
-    expect(text).toMatch(/potentially[ _-]exploitable/iu);
-    expect(text).toMatch(/configured/iu);
-    expect(text).toMatch(
-      /source citations.*src\/worker\.ts:17[–-]24.*dependency copy.*applicable use.*inventory observations.*fixture-inventory.*fixture-record-712.*running revision/iu,
-    );
-  });
-
-  test.each(["answer", "data"])("opens a saved %s envelope", (key) => {
-    const html = renderDependencyReport({
-      [key]: cveReport,
-      provenance: "synthetic saved envelope metadata",
-    });
-
-    expect(html).toBe(renderDependencyReport(cveReport));
-  });
-
-  test("keeps advisory checks and their results distinct in a package report", () => {
-    const text = visibleText(
-      renderDependencyReport({
-        package: { ecosystem: "npm", name: "example-decoder" },
-        checks: [
-          { ...check, advisoryId: cveReport.cve },
-          {
-            ...check,
-            advisoryId: "CVE-2099-67890",
-            status: "ruled_out",
-            uses: [
-              {
-                ...assessment.uses[0]!,
-                location: "Example command",
-                version: "4.0.0",
-                verdict: "ruled_out",
-                deployment: "unknown",
-                observations: [],
-              },
-            ],
+  test("keeps receipt metadata but never embeds raw inventory payloads in HTML", () => {
+    const u = reviewed(1);
+    const ref = receiptRef("fixture-receipt");
+    u.decidingEvidence.push(ref);
+    const r = {
+      ...report([u]),
+      claimEvidence: {
+        sources: {},
+        receipts: {
+          r1: {
+            receiptId: "fixture-receipt",
+            originalPayloadSha256: "a".repeat(64),
+            server: "artifacts",
+            origin: { tool: "inspect", arguments: { secret: "DO_NOT_EMBED" } },
+            result: { token: "DO_NOT_EMBED", massiveStack: "DO_NOT_EMBED" },
           },
+        },
+      },
+    };
+    const html = renderDependencyReport(r);
+    expect(html).toContain("fixture-receipt");
+    expect(html).toContain("SHA-256");
+    expect(html).not.toContain("DO_NOT_EMBED");
+  });
+  test("preserves original use IDs and sidecar bindings after priority sorting and service filtering", () => {
+    const a = reviewed(1, {
+        verdict: "ruled_out",
+        reason: "Excluded by a source guard.",
+      }),
+      b = reviewed(2, { verdict: "potentially_exploitable", version: "1.0" });
+    a.services = [service("svc:a", "Alpha", a.decidingEvidence[0]!)];
+    b.services = [service("svc:b", "Beta", b.decidingEvidence[0]!)];
+    const input = report([a, b]);
+    const html = renderDependencyReport(input, {
+      productionCalls: [call("use-1-1", a.location, 0)],
+      code: new Map([
+        [JSON.stringify([a.evidence[0]!.path, 2, 2]), "const mode = 'safe';"],
+      ]),
+    });
+    expect(html.indexOf('id="use-1-2"')).toBeLessThan(
+      html.indexOf('id="use-1-1"'),
+    );
+    expect(text(panel(html, "use-1-1"))).toContain("0 production calls");
+    expect(panel(html, "use-1-2")).not.toContain("production calls");
+    expect(panel(html, "use-1-1")).toContain("const");
+    expect(html).toContain("history.pushState");
+    expect(html).toContain("popstate");
+    expect(html).toContain('value="unknown"');
+    expect(html).toContain('href="#use-1-1"');
+  });
+  test("rejects an incorrect measurement identity, invalid interval and proof outside a bound source range", () => {
+    const u = reviewed(1);
+    expect(() =>
+      renderDependencyReport(report([u]), {
+        productionCalls: [call("use-1-1", "Wrong")],
+      }),
+    ).toThrow("does not match");
+    expect(() =>
+      renderDependencyReport(report([u]), {
+        productionCalls: [
+          { ...call("use-1-1", u.location), until: "2025-12-01T00:00:00Z" },
         ],
       }),
-    );
-
-    expect(text).toMatch(/\bnpm\b/iu);
-    expect(text).toContain("example-decoder");
-    expect(text).toMatch(/CVE-2099-12345.*Example worker.*2\.3\.4/u);
-    expect(text).toMatch(/CVE-2099-67890.*Example command.*4\.0\.0/u);
-    expect(text).toMatch(/ruled[ _-]out/iu);
-    expect(text).toMatch(/unknown/iu);
-  });
-
-  test("keeps every use and orders priority stably within each check", () => {
-    const base = assessment.uses[0]!;
-    const use = (
-      location: string,
-      verdict: DependencyUse["verdict"],
-      deployment: DependencyUse["deployment"],
-    ): DependencyUse => ({ ...base, location, verdict, deployment });
-
-    const html = renderDependencyReport({
-      package: { ecosystem: "npm", name: "example-decoder" },
-      checks: [
-        {
-          ...check,
-          advisoryId: cveReport.cve,
-          status: "exploitable",
-          uses: [
-            use("Configured excluded route", "ruled_out", "configured"),
-            use("Unobserved library", "potentially_exploitable", "unknown"),
-            use(
-              "Zulu configured worker",
-              "potentially_exploitable",
-              "configured",
-            ),
-            use("Observed affected service", "exploitable", "confirmed"),
-            use(
-              "Alpha configured worker",
-              "potentially_exploitable",
-              "configured",
-            ),
-            use("Confirmed candidate", "potentially_exploitable", "confirmed"),
-          ],
-        },
-        {
-          ...check,
-          advisoryId: "CVE-2099-67890",
-          status: "exploitable",
-          uses: [use("Separate advisory service", "exploitable", "confirmed")],
-        },
-      ],
-    });
-
-    const expected = [
-      "Observed affected service",
-      "Confirmed candidate",
-      "Zulu configured worker",
-      "Alpha configured worker",
-      "Unobserved library",
-      "Configured excluded route",
-      "Separate advisory service",
-    ];
-    const rows = selectElements(html, "[data-use-row]");
-    const links = selectElements(html, "[data-use-row] a[aria-controls]", [
-      "href",
-      "aria-controls",
-    ]);
-    const panels = selectElements(html, "[data-use-panel]", ["id"]);
-    expect(
-      rows.map((row) => expected.find((name) => row.text.includes(name))),
-    ).toEqual(expected);
-    expect(links).toHaveLength(expected.length);
-    expect(panels).toHaveLength(expected.length);
-    for (const [index, link] of links.entries()) {
-      const id = link.attributes["aria-controls"];
-      expect(link.attributes["href"]).toBe(`#${id}`);
-      const panel = panels.find((item) => item.attributes["id"] === id);
-      expect(panel?.text).toContain(expected[index]!);
-    }
-  });
-
-  test("keeps source evidence and empty lookup results on the right use", () => {
-    const library = {
-      ...assessment.uses[0]!,
-      location: "Library default",
-      deployment: "unknown",
-      observations: [
-        {
-          server: "fixture-inventory",
-          record: "No matching record for the fixture image",
-          supports: [],
-        },
-      ],
-    } satisfies DependencyUse;
-    const service = {
-      ...assessment.uses[0]!,
-      location: "Configured service",
-      version: "3.4.5",
-      verdict: "ruled_out",
-      deployment: "configured",
-      reason: "The configured route disables this operation.",
-      evidence: [
-        {
-          path: "service/route.json",
-          startLine: 6,
-          endLine: 9,
-          supports: ["affected_use"],
-        },
-      ],
-      observations: [],
-    } satisfies DependencyUse;
-    const html = renderDependencyReport({
-      ...cveReport,
-      uses: [service, library],
-    });
-
-    const rows = selectElements(html, "[data-use-row]");
-    expect(rows).toHaveLength(2);
-    expect(rows[0]!.text).toContain(library.location);
-    expect(rows[0]!.text).toContain("2.3.4");
-    expect(rows[0]!.text).toContain("Potentially exploitable");
-    expect(rows[1]!.text).toContain(service.location);
-    expect(rows[1]!.text).toContain("3.4.5");
-    expect(rows[1]!.text).toContain("Ruled out");
-    expect(rows[1]!.text).toContain("Configured");
-
-    const panels = selectElements(html, "[data-use-panel]");
-    expect(panels).toHaveLength(2);
-    const libraryText = panels.find((panel) =>
-      panel.text.includes(library.location),
-    )!.text;
-    const serviceText = panels.find((panel) =>
-      panel.text.includes(service.location),
-    )!.text;
-    expect(libraryText).toContain("2.3.4");
-    expect(libraryText).toContain("Potentially exploitable");
-    expect(libraryText).toContain("src/worker.ts:17–24");
-    expect(libraryText).toContain("No matching record for the fixture image");
-    expect(libraryText).toMatch(/no deciding fact/i);
-    expect(libraryText).not.toContain("service/route.json");
-
-    expect(serviceText).toContain("3.4.5");
-    expect(serviceText).toContain("Ruled out");
-    expect(serviceText).toContain("Configured");
-    expect(serviceText).toContain("service/route.json:6–9");
-    expect(serviceText).toMatch(/no inventory observations/i);
-    expect(serviceText).not.toContain("fixture-inventory");
-    expect(serviceText).not.toContain("src/worker.ts");
-  });
-
-  test("exposes search, verdict and deployment filters and report limitations", () => {
-    const html = renderDependencyReport(cveReport);
-    expect(
-      selectElements(html, 'input[type="search"][data-search]'),
-    ).toHaveLength(1);
-
-    const optionValues = (control: string) =>
-      selectElements(html, `select[${control}] option`, ["value"]).map(
-        (option) => option.attributes["value"],
-      );
-    expect(optionValues("data-verdict-filter")).toEqual(
-      expect.arrayContaining([
-        "exploitable",
-        "potentially_exploitable",
-        "unknown",
-        "ruled_out",
-      ]),
-    );
-    expect(optionValues("data-deployment-filter")).toEqual(
-      expect.arrayContaining(["confirmed", "configured", "unknown"]),
-    );
-
-    const limitations = selectElements(html, "details").find((details) =>
-      /report limitations/iu.test(details.text),
-    );
-    expect(limitations?.text).toContain(assessment.limitations[0]!);
-  });
-
-  test.each(["exploitable", "potentially_exploitable", "ruled_out"] as const)(
-    "shows a scoped source-to-sink walkthrough for %s",
-    (verdict) => {
-      const reason =
-        verdict === "ruled_out"
-          ? "This route supplies the safe format flag, which bypasses the affected branch."
-          : "This route passes the uploaded bytes to the decoder.";
-      const record = "Fixture image revision observed at deployment";
-      const use = {
-        ...walkedUse,
-        deployment: verdict === "exploitable" ? "confirmed" : "configured",
-        verdict,
-        reason,
-        observations: [
-          {
-            server: "fixture-inventory",
-            record,
-            supports: ["running", "access"],
-          },
-        ],
-      } satisfies DependencyUse;
-      const html = renderDependencyReport({
-        ...walkedReport,
-        status: verdict,
-        uses: [use],
-      });
-      const order = ["source", "path", "sink", "result"];
-      expect(selectElements(html, "[data-walkthrough]")).toHaveLength(1);
-      const steps = selectElements(
-        html,
-        "[data-walkthrough] button[data-flow-step]",
-        ["data-flow-step"],
-      );
-      const details = selectElements(
-        html,
-        "[data-walkthrough] [data-flow-detail]",
-        ["data-flow-detail"],
-      );
-      expect(steps.map((step) => step.attributes["data-flow-step"])).toEqual(
-        order,
-      );
-      expect(
-        details.map((detail) => detail.attributes["data-flow-detail"]),
-      ).toEqual(order);
-
-      const stepText = (key: string) =>
-        [
-          steps.find((step) => step.attributes["data-flow-step"] === key)?.text,
-          details.find(
-            (detail) => detail.attributes["data-flow-detail"] === key,
-          )?.text,
-        ].join(" ");
-      expect(stepText("source")).toContain(reportedSource);
-      expect(stepText("path")).toContain(reportedPath);
-      expect(stepText("path")).toContain("src/route.ts:15–19");
-      expect(stepText("sink")).toContain(use.component);
-      expect(stepText("sink")).toContain(use.version);
-      if (verdict === "ruled_out") {
-        expect(stepText("result")).toContain(reason);
-        expect(stepText("result")).not.toMatch(
-          /(?:all|every) (?:affected )?sinks? (?:is|are) unreachable/iu,
-        );
-      }
-      for (const step of ["source", "path", "sink"]) {
-        expect(stepText(step)).not.toContain(record);
-      }
-      expect(visibleText(html)).toMatch(
-        /inventory observations.*Fixture image revision observed at deployment.*running revision.*caller access/iu,
-      );
-    },
-  );
-
-  test.each([
-    [
-      "potentially_exploitable",
-      "path",
-      "The running build remains unverified.",
-    ],
-    ["ruled_out", "result", "The recorded mode skips the affected decoder."],
-  ] as const)(
-    "uses the recorded path without a placeholder source for %s",
-    (verdict, initial, result) => {
-      const location = "src/route.ts:17 native image decoder";
-      const routing = "The caller passes input to src/route.ts.";
-      const html = renderDependencyReport({
-        ...walkedReport,
-        status: verdict,
-        uses: [
-          {
-            ...walkedUse,
-            location,
-            verdict,
-            reason: `${routing} ${result}`,
-          },
-        ],
-      });
-
-      const steps = selectElements(html, "[data-flow-step]", [
-        "data-flow-step",
-        "aria-pressed",
-      ]);
-      expect(steps.map((step) => step.attributes["data-flow-step"])).toEqual([
-        "path",
-        "sink",
-        "result",
-      ]);
-      expect(steps[0]!.text).toContain(location);
-      expect(
-        steps
-          .filter((step) => step.attributes["aria-pressed"] === "true")
-          .map((step) => step.attributes["data-flow-step"]),
-      ).toEqual([initial]);
-      expect(
-        selectElements(html, '[data-flow-detail="path"]')[0]!.text,
-      ).toContain(routing);
-      expect(
-        selectElements(html, '[data-flow-detail="result"]')[0]!.text,
-      ).toContain(result);
-      expect(visibleText(html)).not.toContain("Input described in report");
-    },
-  );
-
-  test("shows the bound sink and conditions for each use before the report details", () => {
-    const excluded = {
-      ...walkedUse,
-      location: "Configured thumbnail route",
-      verdict: "ruled_out",
-      reason: "The configured route selects the safe frame mode.",
-    } satisfies DependencyUse;
-    const callSite = { path: routeEvidence.path, line: 18 };
-    const operation = "decoder.decodeVerifiedFrame";
-    const html = renderDependencyReport(
-      { ...walkedReport, uses: [walkedUse, excluded] },
-      {
-        code: new Map([
-          [
-            JSON.stringify([
-              routeEvidence.path,
-              routeEvidence.startLine,
-              routeEvidence.endLine,
-            ]),
-            [
-              "const header = readHeader(raw);",
-              "const frame = header.frame;",
-              "const mode = selectMode(frame);",
-              `${operation}(frame, mode);`,
-              "return frame;",
-            ].join("\n"),
-          ],
-        ]),
+    ).toThrow();
+    expect(() =>
+      renderDependencyReport(report([u]), {
         useEvidence: [
           {
             useId: "use-1-1",
-            location: walkedUse.location,
-            sink: { function: operation, callSite },
-            conditions: [
-              {
-                label: "Uses the affected frame mode",
-                status: "met",
-                explanation:
-                  "This call passes the configured mode to the decoder.",
-                citations: [callSite],
-              },
-              {
-                label: "Caller can choose the frame",
-                status: "unknown",
-                explanation: "The caller's capabilities are unresolved.",
-                citations: [],
-              },
-            ],
-          },
-          {
-            useId: "use-1-2",
-            location: excluded.location,
-            conditions: [
-              {
-                label: "Uses the affected frame mode",
-                status: "ruled_out",
-                explanation: excluded.reason,
-                citations: [{ ...callSite, line: 17 }],
-              },
-            ],
+            location: u.location,
+            sink: { function: "f", callSite: { path: "outside.ts", line: 1 } },
+            conditions: [],
           },
         ],
-      },
-    );
-
-    const sink = '#use-1-1 [data-flow-detail="sink"]';
-    expect(selectElements(html, sink)[0]!.text).toContain(operation);
-    expect(selectElements(html, sink)[0]!.text).toContain(
-      "Call site src/route.ts:18",
-    );
-    const highlighted = selectElements(html, `${sink} [data-highlighted]`, [
-      "data-line",
-    ]);
-    expect(highlighted.map((row) => row.attributes["data-line"])).toEqual([
-      "18",
-    ]);
-    expect(highlighted[0]!.text).toContain(`${operation}(frame, mode);`);
-    expect(selectElements(html, "#use-1-2 [data-highlighted]")).toHaveLength(0);
-
-    const conditions = (id: string) =>
-      selectElements(html, `#${id} [data-condition]`, ["data-condition"]);
-    const positive = conditions("use-1-1");
-    expect(positive.map((row) => row.attributes["data-condition"])).toEqual([
-      "met",
-      "unknown",
-    ]);
-    expect(positive[0]!.text).toContain("src/route.ts:18");
-    expect(positive[1]!.text).toContain("Caller can choose the frame");
-    const ruledOut = conditions("use-1-2");
-    expect(ruledOut.map((row) => row.attributes["data-condition"])).toEqual([
-      "ruled_out",
-    ]);
-    expect(ruledOut[0]!.text).toContain(excluded.reason);
-    expect(ruledOut[0]!.text).toContain("src/route.ts:17");
-
-    const finalSections = selectElements(
-      html,
-      'details.limits, footer[aria-label="Report details"]',
-    );
-    expect(finalSections).toHaveLength(2);
-    expect(finalSections[0]!.text).toContain(assessment.limitations[0]!);
-    expect(finalSections[1]!.text).toContain("Advisory references");
+      }),
+    ).toThrow("outside");
   });
-
-  test("escapes code excerpts and renders only cited ranges", () => {
-    const raw = "<img src=x onerror=alert(x)>";
-    const html = renderDependencyReport(walkedReport, {
-      code: new Map([
-        [
-          JSON.stringify([
-            routeEvidence.path,
-            routeEvidence.startLine,
-            routeEvidence.endLine,
-          ]),
-          `decodeFrame(${raw} & input);`,
-        ],
-        [JSON.stringify([routeEvidence.path, 99, 100]), "uncited fixture code"],
-      ]),
+  test("loads v1 JSON, retains the enum, and displays honest fallbacks", () => {
+    const u = reviewed(1);
+    const { decidingEvidence: _refs, place: _p, ...old } = u;
+    const legacy = {
+      cve: "CVE-2099-44001",
+      advisories: [],
+      usage: null,
+      status: "unknown",
+      uses: [old],
+      limitations: [],
+    };
+    const parsed = readDependencyCheckOutput(legacy);
+    expect("cve" in parsed && parsed.uses[0]!.verdict).toBe("unknown");
+    const html = renderDependencyReport(legacy);
+    const h = text(html);
+    expect(h).toContain("Requires more information");
+    expect(h).toContain("Service not established");
+    expect(text(panel(html, "use-1-1"))).toContain("Deployment unverified");
+    expect(h).toContain("Version unverified");
+    const observed = renderDependencyReport({
+      ...legacy,
+      uses: [{ ...old, deployment: "confirmed" }],
     });
-
-    expect(html).toContain(
-      "decodeFrame(&lt;img src=x onerror=alert(x)&gt; &amp; input);",
-    );
-    expect(html).not.toContain(raw);
-    expect(html).not.toContain("uncited fixture code");
+    expect(text(panel(observed, "use-1-1"))).toContain("Observed running");
   });
-
-  test.each(["unknown", "ruled_out"] as const)(
-    "keeps every supplied citation visible for %s, including producer code",
-    (verdict) => {
-      const reader = {
-        path: "src/reader.py",
-        startLine: 10,
-        endLine: 11,
-        supports: [],
-      };
-      const producer = {
-        path: "src/producer.py",
-        startLine: 20,
-        endLine: 22,
-        supports: [],
-      };
-      const use = {
-        ...assessment.uses[0]!,
-        location: "src/reader.py:10",
-        verdict,
-        version: null,
-        deployment: "unknown",
-        reason:
-          verdict === "unknown"
-            ? "The reader is identified, but its selected native copy is unknown."
-            : "The producer selects the safe encoding for this exact payload.",
-        evidence: [reader, producer],
-        observations: [],
-      } satisfies DependencyUse;
-      const html = renderDependencyReport(
-        { ...cveReport, status: verdict, uses: [use] },
-        {
-          code: new Map([
-            [
-              JSON.stringify([reader.path, 10, 11]),
-              "result = decoder.read(payload)\nreturn result",
-            ],
-            [
-              JSON.stringify([producer.path, 20, 22]),
-              "def make_payload(frame):\n    payload = encode_safe(frame)\n    return payload",
-            ],
-            [JSON.stringify(["src/uncited.py", 1, 1]), "uncited_code()"],
-          ]),
-        },
-      );
-
-      const evidence = selectElements(html, "#use-1-1 details.evidence")[0]!;
-      expect(evidence.text).toContain("decoder.read(payload)");
-      expect(evidence.text).toContain("payload = encode_safe(frame)");
-      expect(evidence.text).toContain("return payload");
-      expect(
-        selectElements(html, "#use-1-1 details.evidence .snippet"),
-      ).toHaveLength(2);
-      expect(selectElements(html, "#use-1-1 [data-walkthrough]")).toHaveLength(
-        1,
-      );
-      expect(visibleText(html)).toContain("No production call count recorded.");
-      expect(visibleText(html)).not.toContain("uncited_code");
-      expect(
-        selectElements(html, "#use-1-1 [data-condition]", [
-          "data-condition",
-        ]).map((row) => row.attributes["data-condition"]),
-      ).toEqual(["unknown", "unknown"]);
-    },
-  );
-
-  test("renders the saved proof and highlights an unknown use without a sidecar", () => {
-    const callSite = { path: routeEvidence.path, line: 18 };
-    const use = {
-      ...walkedUse,
-      verdict: "unknown",
-      version: null,
-      reason:
-        "The decoder call is identified, but its selected copy is unknown.",
-      evidence: [{ ...routeEvidence, supports: [] }],
-      observations: [],
-      proof: {
-        sink: { function: "decoder.readFrame", callSite },
-        conditions: [
-          {
-            label: "Calls the decoder",
-            status: "met",
-            explanation: "The source passes the payload to the decoder.",
-            citations: [callSite],
-          },
-          {
-            label: "Selected affected copy",
-            status: "unknown",
-            explanation: "The native build was not identified.",
-            citations: [],
-          },
-        ],
-      },
-    } satisfies DependencyUse;
-    const html = renderDependencyReport(
-      { ...cveReport, status: "unknown", uses: [use] },
-      {
-        code: new Map([
-          [
-            JSON.stringify([routeEvidence.path, 15, 19]),
-            [
-              "const payload = receive();",
-              "const metadata = inspect(payload);",
-              "const mode = metadata.mode;",
-              "decoder.readFrame(payload, mode);",
-              "return metadata;",
-            ].join("\n"),
-          ],
-        ]),
-      },
-    );
-
-    const sink = selectElements(html, '#use-1-1 [data-flow-detail="sink"]')[0]!;
-    expect(sink.text).toContain("decoder.readFrame");
-    expect(sink.text).toContain("Call site src/route.ts:18");
-    expect(
-      selectElements(
-        html,
-        '#use-1-1 [data-flow-detail="sink"] [data-highlighted]',
-        ["data-line"],
-      ).map((row) => row.attributes["data-line"]),
-    ).toEqual(["18"]);
-    expect(
-      selectElements(html, "#use-1-1 details.evidence [data-highlighted]", [
-        "data-line",
-      ]).map((row) => row.attributes["data-line"]),
-    ).toEqual(["18"]);
-    expect(
-      selectElements(html, "#use-1-1 [data-condition]", ["data-condition"]).map(
-        (row) => row.attributes["data-condition"],
-      ),
-    ).toEqual(["met", "unknown"]);
-    expect(visibleText(html)).toContain("The native build was not identified.");
-    expect(selectElements(html, ".production")).toHaveLength(0);
-    expect(selectElements(html, "#use-1-1 .runtime-proof")).toHaveLength(1);
-  });
-
-  test("distinguishes a recorded zero production count from a missing measurement", () => {
-    const empty = visibleText(renderDependencyReport(walkedReport));
-    expect(empty).toContain("No production call count recorded");
-
-    const html = renderDependencyReport(walkedReport, {
-      productionCalls: [productionMeasurement],
-    });
-    const sink = selectElements(html, '[data-flow-detail="sink"]')[0]!.text;
-    expect(sink).toMatch(/production calls.*\b0\b/iu);
-    expect(sink).toContain(productionMeasurement.target);
-    expect(sink).toContain(productionMeasurement.record);
-    expect(
-      selectElements(html, '[data-flow-detail="path"]')[0]!.text,
-    ).not.toContain(productionMeasurement.record);
-  });
-
-  test("rejects production measurements for the wrong use or interval", () => {
-    for (const mismatch of [
-      { useId: "use-2-1" },
-      { location: "POST /different-use" },
-      { from: productionMeasurement.until, until: productionMeasurement.from },
-    ]) {
-      expect(() =>
-        renderDependencyReport(walkedReport, {
-          productionCalls: [{ ...productionMeasurement, ...mismatch }],
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("renders saved advisory details and escapes advisory-supplied names", () => {
-    const url = "https://advisory.example.invalid/decoder";
-    const raw = "<img src=x onerror=alert(1)>";
-    const escaped = "&lt;img src=x onerror=alert(1)&gt;";
+  test("keeps independent advisory checks, anchors, custom descriptions, and status filters", () => {
+    const first = reviewed(1),
+      second = unresolved(1);
+    first.services = [
+      service("svc:cedar", "Cedar", first.decidingEvidence[0]!),
+    ];
+    second.services = [
+      service("svc:cedar", "Cedar", second.decidingEvidence![0]!),
+    ];
+    const { cve: _cve, ...one } = report([first]);
+    const { cve: _cve2, ...two } = report([], [second]);
     const html = renderDependencyReport({
-      ...cveReport,
-      advisories: [url],
+      package: { ecosystem: "npm", name: "sample-codec" },
+      vulnDescription: "A supplied advisory description.",
+      checks: [
+        { ...one, advisoryId: "CVE-2099-44001" },
+        { ...two, advisoryId: "CVE-2099-44002" },
+      ],
+    });
+    expect(text(html)).toContain("A supplied advisory description.");
+    expect(html).toContain('id="check-1"');
+    expect(html).toContain('id="check-2"');
+    expect(html).toContain('id="coverage-2-1"');
+    expect(html).toContain('data-check-link="check-2"');
+    expect(html).toContain("data-search");
+    expect(html).toContain("data-deployment-filter");
+    expect(html).toContain("data-advisory-search");
+    const overview = elements(html, "[data-overview-service]");
+    expect(overview).toHaveLength(1);
+    expect(overview[0]!.text).toContain("CVE-2099-44001");
+    expect(overview[0]!.text).toContain("CVE-2099-44002");
+    expect(html).toContain('data-check-selection="check-2"');
+  });
+  test("renders advisory description, affected package versions and vulnerable functions with safe links", () => {
+    const u = reviewed(1),
+      url = "https://example.invalid/advisories/CVE-2099-44001",
+      raw = "<img src=x onerror=alert(1)>";
+    const r = {
+      ...report([u]),
       advisoryDetails: [
         {
           url,
-          summary: `Synthetic decoder advisory ${raw}`,
-          overview: "The decoder fails to bound a synthetic frame.",
-          applicability: "Only the configured frame mode is affected.",
-          vulnerableFunctions: [`Decoder.Decode ${raw}`],
+          summary: `Decoder issue ${raw}`,
+          overview: "A malformed frame crosses a bound.",
+          applicability: "Only frame mode is affected.",
+          vulnerableFunctions: [`Decoder.decode ${raw}`],
           affected: [
             {
-              package: { ecosystem: "npm", name: `example-decoder ${raw}` },
+              package: { ecosystem: "npm", name: "sample-codec" },
               ranges: [
                 {
                   type: "SEMVER",
-                  events: [{ introduced: "0" }, { fixed: "2.3.5" }],
+                  events: [{ introduced: "0" }, { fixed: "1.2.4" }],
                 },
               ],
             },
           ],
         },
       ],
-    });
-
-    const text = visibleText(html);
-    expect(text).toContain("The decoder fails to bound a synthetic frame.");
-    expect(text).toContain("Only the configured frame mode is affected.");
-    expect(text).toMatch(/vulnerable functions.*Decoder\.Decode/iu);
-    expect(text).toMatch(
-      /affected packages.*example-decoder.*fixed in 2\.3\.5/iu,
-    );
+      advisories: [url, "javascript:alert(1)"],
+    };
+    const html = renderDependencyReport(r);
+    for (const v of [
+      "A malformed frame",
+      "Vulnerable functions",
+      "Decoder.decode",
+      "sample-codec",
+      "fixed in 1.2.4",
+      "Only frame mode",
+    ])
+      expect(text(html)).toContain(v);
     expect(html).not.toContain(raw);
-    for (const marker of [
-      "Synthetic decoder advisory",
-      "Decoder.Decode",
-      "example-decoder",
-    ]) {
-      expect(html).toContain(`${marker} ${escaped}`);
-    }
+    expect(html).not.toContain('href="javascript:');
+    expect(html).toContain("&lt;img");
+    expect(() =>
+      renderDependencyReport(report([u]), {
+        advisoryDetails: [{ url: "https://unrelated.invalid", affected: [] }],
+      }),
+    ).toThrow("not referenced");
   });
-
   test.each([
     [
       "Go",
       {
-        package: { ecosystem: "Go", name: "example.test/decoder" },
-        ecosystem_specific: {
-          imports: [
-            {
-              path: "example.test/decoder/internal",
-              symbols: ["Decoder.Decode"],
-              goos: ["linux"],
-              goarch: ["amd64"],
-            },
-          ],
-        },
+        imports: [
+          { path: "example.invalid/codec", symbols: ["Decoder.Decode"] },
+        ],
       },
       "Decoder.Decode",
     ],
-    [
-      "Rust",
-      {
-        package: { ecosystem: "crates.io", name: "example-decoder" },
-        ecosystem_specific: {
-          affects: {
-            functions: ["decode::run"],
-            os: ["linux"],
-            arch: ["x86_64"],
-          },
-        },
-      },
-      "decode::run",
-    ],
+    ["Rust", { affects: { functions: ["decode::run"] } }, "decode::run"],
   ] as const)(
-    "renders vulnerable functions from %s advisory metadata",
-    (_, affected, name) => {
-      const url = "https://advisory.example.invalid/metadata";
-      const text = visibleText(
-        renderDependencyReport({
-          package: affected.package,
-          checks: [
-            {
-              ...check,
-              advisoryId: cveReport.cve,
-              advisories: [url],
-              advisoryDetails: [{ url, affected: [affected] }],
-            },
-          ],
-        }),
-      );
-
-      expect(text).toMatch(/vulnerable functions/iu);
-      expect(text).toContain(name);
+    "extracts %s vulnerable functions from ecosystem metadata",
+    (_, metadata, symbol) => {
+      const r = report([reviewed(1)]);
+      const html = renderDependencyReport({
+        ...r,
+        advisoryDetails: [
+          {
+            url: r.advisories[0],
+            affected: [{ ecosystem_specific: metadata }],
+          },
+        ],
+      });
+      expect(text(html)).toContain(symbol);
     },
   );
-
-  test("supplements a legacy advisory only at its exact saved URL", () => {
-    const url = "https://advisory.example.invalid/legacy";
-    const legacy = { ...cveReport, advisories: [url] };
-    const details = {
-      url,
-      overview: "A synthetic description for the archived advisory.",
-      affected: [],
+  test("loads only cited source ranges including dismissed coverage, and highlights the exact call site", async () => {
+    await using repo = await scopedTemporaryDirectory("report-code-");
+    await writeFile(
+      join(repo.path, "entry.ts"),
+      "const input = 1;\nconst value = decodeFrame(input);\nconst unused = 3;\n",
+    );
+    const u = reviewed(1, {
+      location: "POST /upload → decodeFrame",
+      evidence: [{ path: "entry.ts", startLine: 2, endLine: 2, supports: [] }],
+      decidingEvidence: [sourceRef("entry.ts", 2)],
+      proof: {
+        sink: {
+          function: "decodeFrame",
+          callSite: { path: "entry.ts", line: 2 },
+        },
+        conditions: [],
+      },
+    });
+    const dismissed = unresolved(2, {
+      kind: "dismissed",
+      reason: "Excluded from the requested scope.",
+      evidence: [{ path: "entry.ts", startLine: 1, endLine: 1, supports: [] }],
+      decidingEvidence: [sourceRef("entry.ts", 1)],
+    });
+    const r = report([u], [dismissed]);
+    const codeMap = await readDependencyReportCode(r, repo.path);
+    expect(codeMap.size).toBe(2);
+    const html = renderDependencyReport(r, { code: codeMap });
+    expect(html).toContain("data-highlighted");
+    expect(html).toContain("tok-keyword");
+    expect(html).toContain("decodeFrame(input)");
+    expect(text(html)).toContain("const input");
+    expect(html).not.toContain("const unused");
+  });
+  test("deduplicates unresolved limitations without removing source records or merging leads", () => {
+    const a = unresolved(1, { reason: "The selected build is missing." }),
+      b = unresolved(2, { reason: "The selected build is missing." });
+    const r = {
+      ...report([], [a, b]),
+      limitations: [
+        "The selected build is missing. Unresolved source locations: src/parser-1.ts:2.",
+        "The selected build is missing. Unresolved source locations: src/parser-2.ts:3.",
+        "Independent shared limitation.",
+      ],
     };
-
-    const supplemented = visibleText(
-      renderDependencyReport(legacy, { advisoryDetails: [details] }),
+    const html = renderDependencyReport(r);
+    expect(elements(html, "article[data-kind=coverage]")).toHaveLength(2);
+    expect(text(html)).toMatch(/Affected: Parser 1\s*,\s*Parser 2/u);
+    expect(text(html)).toContain("Independent shared limitation");
+    expect(text(html)).toContain("src/parser-1.ts:2.");
+    expect(text(html)).toContain("src/parser-2.ts:3.");
+    expect(html.indexOf("Report limitations")).toBeLessThan(
+      html.indexOf("Investigation scope and search coverage"),
     );
-    expect(supplemented).toContain(details.overview);
-    expect(() =>
-      renderDependencyReport(legacy, {
-        advisoryDetails: [{ ...details, url: `${url}?mirror=1` }],
-      }),
-    ).toThrow();
   });
-
-  test("renders HTTP advisory links without activating unsafe URLs", () => {
-    const html = renderDependencyReport({
-      ...cveReport,
-      advisories: [
-        "https://advisory.example.invalid/example",
-        "javascript:alert(1)",
-      ],
+  test("escapes untrusted metadata and snippets, has a valid script hash, offline styles, keyboard and print fallbacks", () => {
+    const raw = '<svg onload="alert(1)">',
+      u = reviewed(1, {
+        location: raw,
+        reason: raw,
+        component: raw,
+        services: [service("svc:x", raw, sourceRef("src/handler-1.ts", 2))],
+      });
+    const r = { ...report([u]), limitations: [raw] };
+    const html = renderDependencyReport(r, {
+      code: new Map([[JSON.stringify(["src/handler-1.ts", 2, 2]), raw]]),
     });
-
-    expect(html).toContain('href="https://advisory.example.invalid/example"');
-    expect(html).not.toContain('href="javascript:');
-    expect(visibleText(html)).toContain("javascript:alert(1)");
-  });
-
-  test("renders a supplied description without an advisory identifier", () => {
-    const text = visibleText(
-      renderDependencyReport({
-        package: { ecosystem: "npm", name: "example-decoder" },
-        vulnDescription: "The decoder can reject a malformed fixture.",
-        checks: [{ ...check, advisories: [], advisoryId: null }],
-      }),
+    expect(html).not.toContain(raw);
+    expect(html).toContain("&lt;svg");
+    const script = html.match(/<script>([\s\S]*?)<\/script>/u)![1]!;
+    expect(html).toContain(
+      `script-src 'sha256-${createHash("sha256").update(script).digest("base64")}'`,
     );
-
-    expect(text).toContain("The decoder can reject a malformed fixture.");
-    expect(text).toContain("Example worker");
+    expect(html).toContain("default-src 'none'");
+    expect(html).toContain("@media print");
+    expect(html).toContain(":focus-visible");
+    expect(html).toMatch(/@media\s*\(max-width:\s*650px\)/u);
+    expect(html).toContain("Skip to report");
+    expect(html).not.toContain("<script src=");
+    expect(html).not.toContain("<link rel=");
   });
-
-  test("renders empty uses and advisory checks as empty states", () => {
-    const emptyUses = visibleText(
-      renderDependencyReport({ ...cveReport, status: "unknown", uses: [] }),
-    );
-    const emptyChecks = visibleText(
-      renderDependencyReport({
-        package: { ecosystem: "npm", name: "example-decoder" },
-        checks: [],
-      }),
-    );
-
-    expect(emptyUses).toContain(cveReport.cve);
-    expect(emptyUses).toMatch(/no\b.*\bplaces\b/iu);
-    expect(emptyChecks).toContain("example-decoder");
-    expect(emptyChecks).toMatch(/no\b.*\b(?:checks|advisories)\b/iu);
-  });
-
-  test("renders mixed place verdicts and partial inventory without a checkout verdict", () => {
-    const report = readDependencyCheckOutput(cveReport);
-    if (!("cve" in report)) throw new Error("Expected CVE report");
-    const place = report.uses[0]!;
-    const html = renderDependencyReport({
-      ...report,
-      uses: [
-        {
-          ...place,
-          location: "Fixed configured service",
-          verdict: "ruled_out",
-          reason: "The source passes only a fixed input.",
-        },
-        {
-          ...place,
-          location: "Separate nightly job",
-          verdict: "unknown",
-          place: {
-            ...place.place,
-            kind: "job",
-            deploymentBasis: "unknown",
-            unresolvedQuestions: ["Which job image ran?"],
-          },
-        },
-      ],
-      searches: [
-        {
-          source: "fixture-inventory",
-          tool: "get_run",
-          scope: ["run_id=run-123"],
-          startedAt: null,
-          finishedAt: "2026-01-01T12:00:00Z",
-          result: "no_match",
-          completeness: "partial",
-          details: ["Provider response was truncated."],
-          evidenceReferences: ["inventory-1"],
-        },
-      ],
-    });
-    const visible = visibleText(html);
-    expect(visible).not.toContain("Checkout verdict");
-    expect(visible).toContain("Fixed configured service");
-    expect(visible).toContain("Ruled out");
-    expect(visible).toContain("Which job image ran?");
-    expect(visible).toContain("No match observed Partial");
-    expect(visible).toContain("inventory-1");
-    expect(visible).not.toContain("Assumed not deployed");
-  });
-
-  test("rejects an invalid report inside a saved envelope", () => {
+  test("rejects an invalid report envelope and reports empty checks without an all-clear", () => {
     expect(() =>
       renderDependencyReport({
         answer: {
-          ...cveReport,
-          uses: [{ ...assessment.uses[0]!, version: 2 }],
+          ...report([reviewed(1)]),
+          uses: [{ ...reviewed(1), version: 2 }],
         },
       }),
     ).toThrow();
+    expect(
+      text(
+        renderDependencyReport({
+          package: { ecosystem: "npm", name: "codec" },
+          checks: [],
+        }),
+      ),
+    ).toContain("No advisory checks");
+    expect(text(renderDependencyReport(report([])))).toContain(
+      "No reviewed uses or unresolved coverage items were recorded",
+    );
   });
-
-  test("escapes untrusted report fields as text", () => {
-    const payload = "<img src=x onerror=alert(1)>";
-    const escaped = "&lt;img src=x onerror=alert(1)&gt;";
-    const markers = [
-      "ecosystem",
-      "package",
-      "description",
-      "advisory",
-      "alias",
-      "location",
-      "component",
-      "version",
-      "reason",
-      "path",
-      "server",
-      "record",
-      "limitation",
-    ];
-    const html = renderDependencyReport({
-      package: {
-        ecosystem: `ecosystem${payload}`,
-        name: `package${payload}`,
+  test("renders a blocked run as an operational status, never as a use verdict", () => {
+    const blocked = {
+      status: "blocked",
+      code: "INVESTIGATION_BLOCKED",
+      reason: "The required inventory server did not start.",
+      category: "widespread_required_data_unavailable",
+      affectedScope: "Synthetic production workers",
+      coverage: {
+        basis: "server_startup",
+        server: "inventory",
+        receiptId: "inventory-1",
+        requiredCheck: "Resolve selected artifacts",
       },
-      vulnDescription: `description${payload}`,
+      scopeImpact: "Required artifact evidence is unavailable.",
+      unblockCondition: "Restore the inventory service and start a new check.",
+      evidenceReferences: [],
+      retainedEvidence: {
+        assessmentRevisions: [],
+        inventoryReceiptIds: ["inventory-1"],
+      },
+    };
+    const html = renderDependencyReport(blocked);
+    expect(text(html)).toContain("Investigation blocked before final review");
+    expect(text(html)).toContain(
+      "operational outcome, not an exploitability verdict",
+    );
+    expect(elements(html, "article[data-finding]")).toHaveLength(0);
+    const { cve: _cve, ...complete } = report([reviewed(1)]);
+    const mixed = renderDependencyReport({
+      status: "blocked",
+      code: "INVESTIGATION_BLOCKED",
+      package: { ecosystem: "npm", name: "sample-codec" },
       checks: [
-        {
-          ...check,
-          advisoryId: `advisory${payload}`,
-          advisories: [`alias${payload}`],
-          uses: [
-            {
-              ...assessment.uses[0]!,
-              location: `location${payload}`,
-              component: `component${payload}`,
-              version: `version${payload}`,
-              reason: `reason${payload} & more`,
-              evidence: [
-                {
-                  ...assessment.uses[0]!.evidence[0]!,
-                  path: `path${payload}`,
-                },
-              ],
-              observations: [
-                {
-                  ...assessment.uses[0]!.observations[0]!,
-                  server: `server${payload}`,
-                  record: `record${payload}`,
-                },
-              ],
-            },
-          ],
-          limitations: [`limitation${payload}`],
-        },
+        { ...complete, advisoryId: "CVE-2099-44001" },
+        { ...blocked, advisoryId: "CVE-2099-44002" },
       ],
     });
-
-    expect(html).not.toContain(payload);
-    for (const marker of markers) {
-      expect(html).toContain(marker + escaped);
-    }
-    expect(html).toContain(" &amp; more");
-    expect(
-      renderDependencyReport({ ...cveReport, cve: `cve${payload}` }),
-    ).toContain("cve" + escaped);
+    expect(mixed).toContain('id="use-1-1"');
+    expect(mixed).toContain('id="check-2"');
+  });
+  test("does not activate or display credential-bearing URLs", () => {
+    const suspicious =
+      "https://fixture:synthetic-password@example.invalid/advisory?token=synthetic-token";
+    const html = renderDependencyReport({
+      ...report([reviewed(1)]),
+      advisories: [suspicious],
+    });
+    expect(html).toContain("Link omitted (credentials in URL)");
+    expect(html).not.toContain("synthetic-password");
+    expect(html).not.toContain("synthetic-token");
+  });
+  test("rejects workload samples presented as transferable immutable artifact evidence", () => {
+    const u = reviewed(1);
+    u.inspections = [
+      {
+        question: "Sample a worker",
+        target: { label: "shared bytes", relationship: "shared_artifact" },
+        source: "profiler",
+        outcome: "succeeded",
+        evidence: [u.decidingEvidence[0]!],
+        measurement: { unit: "cpu_samples", count: 1 },
+        transferBasis: "The files match.",
+      },
+    ];
+    expect(() => renderDependencyReport(report([u]))).toThrow();
   });
 });

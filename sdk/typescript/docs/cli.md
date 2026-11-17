@@ -2348,6 +2348,8 @@ same milestones and results as plain text. Repeated rule-outs with the same
 reviewed proof are summarized with a representative location and a distinct
 callsite count. At the end, stderr summarizes the verdict counts for all
 completed checks. The final stdout report includes every selected reviewed use.
+Human progress calls the `unknown` use verdict **Requires more information**;
+JSON and progress events keep the `unknown` key.
 Use `--report-file FILE` to also save the completed report as JSON and print its
 absolute path on stderr. Its parent directory must exist, and the destination
 must be a new file. The CLI saves it with owner-only permissions on POSIX. To
@@ -2410,7 +2412,7 @@ An accepted abort cancels that investigation's native workers and helpers and
 returns exit code `2` with a diagnostic JSON outcome: `status: "blocked"`,
 `code: "INVESTIGATION_BLOCKED"`, the scoped data-loss evidence and unblock condition.
 This operational outcome is separate from a reviewed exploitability verdict and
-cannot be rendered as one. A startup failure that prevents the coordinator
+is rendered as a blocked run, not as a verdict. A startup failure that prevents the coordinator
 from starting still exits as a setup error.
 Ctrl-C and SIGTERM keep their existing exit codes `130` and `143`.
 
@@ -2435,6 +2437,58 @@ node sdk/typescript/scripts/render-exploitability-report.mjs assessment.json > a
 ```
 
 Use `-` as the input path to read JSON from stdin. Open the HTML file in a browser.
+
+The offline report indexes reviewed uses and unresolved coverage by verified
+service association. Jobs and library callers can belong to a service. A shared
+use may appear under several services, but each advisory's total counts it once;
+unresolved coverage is counted separately. An unmapped item remains visible under
+**Service not established** or **Source-only findings**. Each advisory is kept
+separate, and the original `use-<check>-<row>` anchors continue to bind optional
+sidecars even when the display is sorted or filtered.
+Browse by advisory or by service across the checks contained in the report. Within
+an advisory, use the instance view for launch and mitigation decisions or the code
+path view for call sites. Reports with no instance context start on code paths.
+Filter by the actual input source's internet exposure,
+outcome, deployment state and recorded tags. An exposure filter applies to findings,
+not to whether a repository or service name looks public. Unrecorded exposure remains
+unverified.
+
+New reports can include optional reviewed fields on a use or unresolved item:
+
+- `services`: stable service `id`, readable `name`, identified mapping `source`,
+  and original `evidence` references. The reviewer must cite that mapping; a
+  service-like name or path does not establish ownership.
+  The graph catalog supplies `scope` as the stable ID, `name`, `source`, and
+  exact `receiptSelections`; the inventory metadata supplies the original hash.
+- `openConditions`: a deciding `question`, its `target`, and an optional
+  `decidingCheck`, `ruledOutIf`, or evidenced `assignee`.
+- `inputSource`: the input boundary's `exposure` (`internet`, `not_internet`, or
+  `unknown`), the exact `endpoint` when known, and original `evidence`. Exposure
+  does not by itself establish control of the input bytes or reachability of the
+  affected operation.
+- `runtimeContext`: the exact instance's `launch` command and observed/configured
+  basis, a `mitigation` state, basis and detail, optional `containerUrl` or
+  `traceUrl`, and original `evidence`. A configured flag is not an observed
+  effective process setting.
+- `tags`: confirmed names with original `evidence`. The HTML can also filter
+  recorded place attributes such as environment, role, variant, and platform.
+- `inspections`: the question, exact target and its relationship (`target`,
+  `shared_artifact`, or `comparison`), actual source, outcome, scoped result
+  and original evidence references. The target can distinguish an image index,
+  selected platform manifest, revision, workload and window. CPU samples and
+  call counts retain their own units; a comparison workload's execution does
+  not establish execution on the target.
+- Unresolved `coverage` can additionally save its `location`, `place`,
+  verified/missing `handoff`, and reviewer-selected `decidingEvidence`.
+
+References are either source ranges or original receipt IDs with their payload
+hash and optional exact record selection. The HTML exposes those safe references
+and cited source excerpts, not unrestricted receipt payloads. New data passes
+through independent review and survives `--report-file` without a sidecar. The
+v2 schema remains backward compatible: historical reports still load, retain
+their machine verdicts, and display only the mappings, inspections and next
+checks they actually recorded. Blocked investigation diagnostics render as run
+status, not as a reviewed verdict.
 
 New OSV-backed checks include advisory metadata in their JSON. For an older
 saved report that contains only advisory URLs, pass `--advisory FILE` with a saved raw OSV

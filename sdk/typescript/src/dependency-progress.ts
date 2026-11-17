@@ -2,6 +2,7 @@ import { closeSync, openSync, writeFileSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import stringWidth from "string-width";
 import type { DependencyUse } from "./dependency-reachability.js";
+import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
 import { errorMessage } from "./errors.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 
@@ -30,12 +31,7 @@ type Verdict = DependencyUse["verdict"];
 type VerdictCounts = Record<Verdict, number>;
 export type DependencyAccessProgram =
   "daybreak_blue" | "daybreak_red" | "standard" | "unconfirmed";
-const verdictLabels: Record<Verdict, string> = {
-  ruled_out: "Ruled out",
-  unknown: "Unknown",
-  potentially_exploitable: "Potentially exploitable",
-  exploitable: "Exploitable",
-};
+const verdictLabels = dependencyVerdictLabels;
 const verdictTones: Record<Verdict, number> = {
   ruled_out: 32,
   unknown: 33,

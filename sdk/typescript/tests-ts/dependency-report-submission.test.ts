@@ -394,7 +394,12 @@ test("keeps reviewed source exclusions in the final report", async () => {
         ["output-scope"],
       ),
     ).toMatchObject({ accepted: true });
-    expect(submission.acceptedReport()).toHaveProperty("coverage", [exclusion]);
+    expect(submission.acceptedReport().coverage).toMatchObject([exclusion]);
+    expect(
+      submission.publicReport().coverage?.[0]?.decidingEvidence,
+    ).toContainEqual(
+      expect.objectContaining({ kind: "source", path: "worker.ts" }),
+    );
     expect(submission.acceptedReport().uses).toEqual([]);
     expect(submission.acceptedReport().status).toBe("unknown");
   } finally {
@@ -1913,7 +1918,7 @@ test("a turn without a submission costs one attempt and the final attempt can st
     (await finalize(submission, report.limitations, ["scope"])).accepted,
   ).toBe(true);
   expect(submission.continuationPrompt()).toBeUndefined();
-  expect(submission.acceptedReport()).toEqual({
+  expect(submission.acceptedReport()).toMatchObject({
     ...report,
     coverage: [
       {

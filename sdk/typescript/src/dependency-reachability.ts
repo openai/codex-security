@@ -96,6 +96,12 @@ const dependencyPlaceSchema = z.strictObject({
   patch: placeText.describe(
     "Advisory-specific patch or override status for the selected copy. Use null when unresolved or immaterial to a source exclusion.",
   ),
+  workload: z.string().trim().min(1).optional(),
+  variant: z.string().trim().min(1).optional(),
+  role: z.string().trim().min(1).optional(),
+  platform: z.string().trim().min(1).optional(),
+  imageIndex: z.string().trim().min(1).optional(),
+  platformManifest: z.string().trim().min(1).optional(),
   unresolvedQuestions: z
     .array(z.string().trim().min(1))
     .describe(
@@ -124,6 +130,187 @@ const reviewReference = z.discriminatedUnion("kind", [
   }),
 ]);
 export type DependencyReviewReference = z.infer<typeof reviewReference>;
+
+const findingText = z.string().trim().min(1);
+const serviceAssociation = z.strictObject({
+  id: findingText.describe(
+    "Stable service identity from the identified mapping source.",
+  ),
+  name: findingText.describe(
+    "Readable service name or verified display alias.",
+  ),
+  source: findingText.describe(
+    "The catalog or other explicitly identified mapping source.",
+  ),
+  evidence: z
+    .array(reviewReference)
+    .min(1)
+    .describe(
+      "Original bound evidence that establishes this service association.",
+    ),
+});
+const openCondition = z.strictObject({
+  question: findingText,
+  target: findingText.describe(
+    "The caller, workload, artifact or environment to which this question applies.",
+  ),
+  decidingCheck: findingText.optional(),
+  ruledOutIf: findingText.optional(),
+  assignee: z
+    .strictObject({
+      name: findingText,
+      evidence: z.array(reviewReference).min(1),
+    })
+    .optional(),
+});
+const inputSource = z.strictObject({
+  exposure: z
+    .enum(["internet", "not_internet", "unknown"])
+    .describe(
+      "Internet exposure of the actual input source for this caller, not of the source code or merely of the service.",
+    ),
+  endpoint: findingText
+    .optional()
+    .describe("Exact URL, route, or input endpoint when established."),
+  evidence: z.array(reviewReference).min(1),
+});
+const runtimeContext = z.strictObject({
+  launch: z
+    .strictObject({
+      command: findingText,
+      basis: z.enum(["observed", "configured"]),
+    })
+    .optional(),
+  mitigation: z
+    .strictObject({
+      state: z.enum(["enabled", "disabled", "unknown"]),
+      basis: z.enum(["observed", "configured", "unknown"]),
+      detail: findingText,
+    })
+    .optional(),
+  containerUrl: findingText.optional(),
+  traceUrl: findingText.optional(),
+  evidence: z.array(reviewReference).min(1),
+});
+const findingTag = z.strictObject({
+  name: findingText,
+  evidence: z.array(reviewReference).min(1),
+});
+const inspectionTarget = z.strictObject({
+  label: findingText,
+  relationship: z.enum(["target", "shared_artifact", "comparison"]),
+  environment: findingText.optional(),
+  workload: findingText.optional(),
+  variant: findingText.optional(),
+  role: findingText.optional(),
+  revision: findingText.optional(),
+  artifact: findingText.optional(),
+  imageIndex: findingText.optional(),
+  platformManifest: findingText.optional(),
+  platform: findingText.optional(),
+  observationWindow: findingText.optional(),
+});
+const inspection = z
+  .strictObject({
+    question: findingText,
+    target: inspectionTarget,
+    source: findingText
+      .optional()
+      .describe(
+        "The tool or source actually used, not a proposed future lookup.",
+      ),
+    outcome: z.enum([
+      "succeeded",
+      "denied",
+      "unsupported",
+      "timeout",
+      "unavailable",
+      "failed",
+      "no_data",
+      "zero_results",
+      "partial",
+      "insufficient_symbols",
+      "not_attempted",
+    ]),
+    result: findingText
+      .optional()
+      .describe(
+        "The scoped observation and what it establishes, without raw payloads or credentials.",
+      ),
+    evidence: z.array(reviewReference),
+    completeness: z.enum(["complete", "partial", "not_reported"]).optional(),
+    measurement: z
+      .strictObject({
+        unit: z.enum(["cpu_samples", "calls"]),
+        count: z.number().int().nonnegative(),
+        frameTypes: z.array(findingText).optional(),
+      })
+      .optional(),
+    transferBasis: findingText
+      .optional()
+      .describe(
+        "Why an immutable artifact observation can transfer to this target; never transfer workload-specific measurements.",
+      ),
+  })
+  .superRefine((value, ctx) => {
+    if (
+      value.outcome !== "not_attempted" &&
+      (!value.source || !value.evidence.length)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message:
+          "An attempted inspection requires its actual source and original bound evidence.",
+      });
+    if (
+      value.outcome === "not_attempted" &&
+      (value.source || value.evidence.length || value.measurement)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["outcome"],
+        message:
+          "A check that was not attempted cannot claim an inspection source, evidence or measurement.",
+      });
+    if (value.target.relationship === "shared_artifact" && !value.transferBasis)
+      ctx.addIssue({
+        code: "custom",
+        path: ["transferBasis"],
+        message:
+          "Shared artifact evidence requires its verified transfer basis.",
+      });
+    if (value.target.relationship === "shared_artifact" && value.measurement)
+      ctx.addIssue({
+        code: "custom",
+        path: ["measurement"],
+        message:
+          "Workload-specific calls and CPU samples cannot be transferred as shared artifact evidence.",
+      });
+  });
+
+/** Optional, independently reviewed context. Older saved reports omit it. */
+export const dependencyFindingDetailsShape = {
+  services: z.array(serviceAssociation).optional(),
+  openConditions: z.array(openCondition).optional(),
+  inspections: z.array(inspection).optional(),
+  inputSource: inputSource.optional(),
+  runtimeContext: runtimeContext.optional(),
+  tags: z.array(findingTag).optional(),
+};
+export const dependencyCoverageHandoffSchema = z.strictObject({
+  verified: findingText,
+  missing: findingText,
+});
+export type DependencyFindingDetails = {
+  services?: z.infer<typeof serviceAssociation>[];
+  openConditions?: z.infer<typeof openCondition>[];
+  inspections?: z.infer<typeof inspection>[];
+  inputSource?: z.infer<typeof inputSource>;
+  runtimeContext?: z.infer<typeof runtimeContext>;
+  tags?: z.infer<typeof findingTag>[];
+};
+export { dependencyPlaceSchema };
 export const dependencyUseSchema = z
   .strictObject({
     location: z
@@ -161,6 +348,7 @@ export const dependencyUseSchema = z
       .describe(
         "Inventory observations for this use, including lookup results that establish no deciding fact. Use [] when no observations were obtained.",
       ),
+    ...dependencyFindingDetailsShape,
     proof: dependencyUseProofSchema
       .optional()
       .describe(
@@ -201,8 +389,15 @@ export const dependencyTestScopeClassification = z.literal(
 export const dependencyCoverageDispositionSchema = z.strictObject({
   kind: z.enum(["dismissed", "unresolved"]),
   reason: z.string().min(1),
+  location: findingText.optional(),
+  place: dependencyPlaceSchema.optional(),
+  handoff: dependencyCoverageHandoffSchema.optional(),
+  ...dependencyFindingDetailsShape,
   evidence: dependencyUseSchema.shape.evidence,
   observations: dependencyUseSchema.shape.observations,
+  decidingEvidence: z.array(reviewReference).optional(),
+  conclusionClaim: dependencyClaimReferenceSchema.optional(),
+  supportingClaims: z.array(dependencyClaimReferenceSchema).optional(),
   classification: dependencyTestScopeClassification.optional(),
   locations: z
     .array(

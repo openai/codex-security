@@ -1648,6 +1648,14 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
           { path: "scope.txt", startLine: 1, endLine: 10, supports: [] },
         ],
         observations: [],
+        decidingEvidence: [
+          { kind: "source", path: "scope.txt", startLine: 1, endLine: 10 },
+        ],
+        conclusionClaim: {
+          id: "application:scope",
+          revision: 10,
+          hash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
       },
     ],
     limitations: [

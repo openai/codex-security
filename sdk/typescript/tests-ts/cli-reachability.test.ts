@@ -2289,7 +2289,9 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
     stderr
       .text()
       .split("\n")
-      .filter((line) => /(?:RULED OUT|UNKNOWN|EXPLOITABLE)  /u.test(line));
+      .filter((line) =>
+        /(?:RULED OUT|REQUIRES MORE INFORMATION|EXPLOITABLE)  /u.test(line),
+      );
   const delayed = Promise.withResolvers<void>();
   let staleStarted = false;
   const started = new Set<string>();
@@ -2529,7 +2531,7 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
       );
       expect(
         lines().some((line) =>
-          line.includes("UNKNOWN  app.ts:2 · was ruled out"),
+          line.includes("REQUIRES MORE INFORMATION  app.ts:2 · was ruled out"),
         ),
       ).toBe(true);
       const otherPlace = assessment(
@@ -2571,7 +2573,9 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
         delayed.resolve();
       }
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("UNKNOWN  app.ts:6")),
+        lines().some((line) =>
+          line.includes("REQUIRES MORE INFORMATION  app.ts:6"),
+        ),
       );
       expect(lines().filter((line) => line.includes("app.ts:6"))).toHaveLength(
         1,
