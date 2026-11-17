@@ -175,6 +175,10 @@ import {
   savedScanWorkbench,
 } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
+import {
+  createSeverityDiagnostics,
+  severityDiagnosticsEnabled,
+} from "./classify-severity-diagnostics.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
@@ -5980,7 +5984,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; accepts --runs.",
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
           ),
         reprocess: z
           .boolean()
@@ -8518,6 +8522,11 @@ export async function main(
           ? await runHostRecordsProtocol(recordsCommand, input, output, {
               signal: controller.signal,
               classificationRuns,
+              diagnostics:
+                recordsCommand === "classify-severity" &&
+                severityDiagnosticsEnabled()
+                  ? createSeverityDiagnostics(() => dependencies.now())
+                  : undefined,
             })
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
