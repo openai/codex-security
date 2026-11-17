@@ -3,6 +3,7 @@ import stringWidth from "string-width";
 import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
+import { isRecord } from "./record.js";
 import {
   formatCoverageScopeParts,
   type CoverageSummary,
@@ -301,9 +302,14 @@ export function renderScanHistory(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
       `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
-    if (typeof result["startedAt"] === "string") {
-      lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
-    } else if (typeof result["updatedAt"] === "string") {
+    const lifecycle = result["lifecycle"];
+    const startedAt =
+      (isRecord(lifecycle) ? lifecycle["startedAt"] : undefined) ??
+      result["startedAt"];
+    if (typeof startedAt === "string") {
+      lines.push(`  ${strong("STARTED")}  ${clean(startedAt)}`);
+    }
+    if (typeof result["updatedAt"] === "string") {
       lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
     }
     const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
@@ -394,6 +400,21 @@ export function renderScanHistory(
         );
       }
     }
+    const observedFiles = result["observedFilesRead"];
+    const observedCount =
+      isRecord(observedFiles) && typeof observedFiles["count"] === "number"
+        ? observedFiles["count"]
+        : null;
+    wrap(
+      `Files shown to model (observed): ${observedCount ?? "unavailable"}`,
+      2,
+    );
+    wrap(
+      observedCount === null
+        ? "No saved output observation is available."
+        : "Best effort from saved source excerpts; not a count of fully reviewed files.",
+      4,
+    );
     const knowledgeBase = recipe?.["knowledgeBasePaths"] as
       string[] | undefined;
     if (knowledgeBase?.length) {

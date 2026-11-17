@@ -43,6 +43,7 @@ describe("scan navigation", () => {
           scanId: completedId,
           targetPath: join(root, "repository"),
           mode: "deep",
+          startedAt: "2026-01-01T11:00:00Z",
           updatedAt: "2026-01-01T12:00:00Z",
           progress: { status: "complete" },
           findings: [],
@@ -51,6 +52,7 @@ describe("scan navigation", () => {
           ...completed,
           scanId: latestId,
           continuationThreadId: "latest-thread",
+          startedAt: "2026-01-02T11:00:00Z",
           updatedAt: startedAt,
           progress: { status },
         };
@@ -88,6 +90,9 @@ describe("scan navigation", () => {
           expect(show.stderr.text()).toContain(
             `updated ${completed.updatedAt}`,
           );
+          expect(show.stderr.text()).toContain(
+            `started ${completed.startedAt}`,
+          );
           expect(show.stderr.text()).not.toContain(`scans logs ${completedId}`);
           expect(show.stderr.text()).not.toContain(latestId);
 
@@ -100,6 +105,7 @@ describe("scan navigation", () => {
             "including failed and active runs",
           );
           expect(logs.stderr.text()).toContain(`updated ${latest.updatedAt}`);
+          expect(logs.stderr.text()).toContain(`started ${latest.startedAt}`);
           expect(logs.stderr.text()).toContain(`scans show ${latestId}`);
           expect(logs.stderr.text()).not.toContain(completedId);
         }

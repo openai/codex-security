@@ -37,6 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
+import workbench_observed_files as observed_files
 import workbench_progress as progress
 import workbench_publication as publication
 import workbench_remediation as remediation_state
@@ -2862,12 +2863,10 @@ def scan_result(
         "artifacts": artifacts,
         **model_fields,
         "canceledAt": scan["canceled_at"],
-        "logCompletedAt": scan["log_completed_at"],
-        **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
+        "observedFilesRead": observed_files.observed_files_summary(connection, scan["id"]),
+        **scan_usage.saved_scan_log_fields(connection, scan),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
-        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
-        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
         "lifecycle": json.loads(scan["lifecycle_json"]),
         "findings": [
@@ -3385,6 +3384,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             ),
             "set-scan-thread": set_scan_thread,
             "set-scan-cost-limit": set_scan_cost_limit,
+            "record-observed-files": partial(observed_files.record_command, command_context),
             "read-scan-usage": read_scan_usage,
             "finalize-scan-usage": finalize_scan_usage,
             "list-global-findings": native_indexes.list_global_findings,

@@ -204,6 +204,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     add_command("rename-scan", "--scan-id", "--name")
 
+    add_command("record-observed-files", "--scan-id")
+
     read_scan_usage = add_command("read-scan-usage", "--scan-id", "--thread-id")
     read_scan_usage.add_argument("--validation-thread-id")
 

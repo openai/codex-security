@@ -227,6 +227,8 @@ import {
 } from "./security-policy.js";
 import { writeMockScanDraft } from "./mock-scan.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import { refreshObservedFiles } from "./saved-file-observations.js";
+import type { ScanLogSource } from "./scan-logs.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
@@ -2282,6 +2284,11 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    let observation: {
+      id: string;
+      options: WorkbenchCommandOptions;
+      codexHome: string;
+    } | null = null;
     let stopHeadDriftMonitor: (() => void) | undefined;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
@@ -3242,6 +3249,7 @@ export class CodexSecurity {
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
       activeScan = { id: scanId, options: workbenchOptions };
+      observation = { ...activeScan, codexHome: runtime.codexHome };
       await this.#operationTelemetry?.bindScan(scanId);
       if (options.resumeScanId === undefined)
         notifyScanLifecycle(options, registration);
@@ -4399,6 +4407,32 @@ export class CodexSecurity {
       stopHeadDriftMonitor?.();
       budgetAbortController.abort();
       scanProgressTracker?.stop();
+      if (observation !== null) {
+        try {
+          const workbenchOptions = {
+            ...observation.options,
+            signal: undefined,
+          };
+          const saved = await workbench(workbenchOptions, [
+            "get-scan",
+            "--scan-id",
+            observation.id,
+          ]);
+          const scan = saved["scan"];
+          if (isRecord(scan) && scan["scanId"] === observation.id) {
+            await refreshObservedFiles(
+              scan as ScanLogSource,
+              [observation.codexHome],
+              (args, input) => workbench(workbenchOptions, args, input),
+            );
+          }
+        } catch (error) {
+          notifyObserver(
+            options,
+            "onWarning",
+          )(`Could not update observed files read: ${errorMessage(error)}`);
+        }
+      }
       // Temporary-input cleanup must not replace the scan's outcome.
       try {
         for (const cleanup of await Promise.allSettled([

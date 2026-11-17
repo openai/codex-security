@@ -230,6 +230,50 @@ for (const version of [48, 50, 63]) {
   });
 }
 
+for (const mainReader of [false, true]) {
+  test(`keeps observed-file records from preview migration 58 (main reader: ${mainReader})`, (t) => {
+    const database = memory(t, mainReader ? 72 : 57);
+    if (mainReader)
+      database.exec("DELETE FROM schema_migrations WHERE version = 58");
+    const observation = migrations.find((item) => item.version === 73)!;
+    database.exec(observation.statements.join("\n"));
+    database
+      .prepare("INSERT INTO schema_migrations VALUES (58, ?, 'preview-time')")
+      .run(observation.name);
+    insertScan(database);
+    database.exec(`
+      UPDATE scans SET observed_files_read_at = 'observed';
+      INSERT INTO scan_observed_files VALUES ('scan', 'example.py', 'worker', 'call');
+    `);
+
+    applyMigrations(database);
+    applyMigrations(database);
+    assertMigrationNames(database, 58, 73);
+    assert.equal(
+      database
+        .prepare("SELECT applied_at FROM schema_migrations WHERE version = 73")
+        .get()?.applied_at,
+      "preview-time",
+    );
+    assert.equal(
+      storedValue(database, "scans", "observed_files_read_at"),
+      "observed",
+    );
+    assert.deepEqual(
+      { ...database.prepare("SELECT * FROM scan_observed_files").get() },
+      {
+        scan_id: "scan",
+        path: "example.py",
+        thread_id: "worker",
+        call_id: "call",
+      },
+    );
+    database
+      .prepare("SELECT terminal_reviewed_surface_count FROM deep_scan_runs")
+      .get();
+  });
+}
+
 for (const previewVersion of [58, 59]) {
   test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
     const database = memory(t, previewVersion - 1);
@@ -1687,6 +1731,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "local_finding_embeddings" &&
           name !== "finding_issue_receipts" &&
           name !== "deep_scan_worker_threads" &&
+          name !== "scan_observed_files" &&
           name !== "external_source_reports" &&
           name !== "external_finding_imports" &&
           name !== "external_finding_import_members" &&
@@ -1704,6 +1749,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
               "launch_plugin_version",
               "launch_kind",
               "log_completed_at",
+              "observed_files_read_at",
               "windows_resume_output_identity",
               "windows_resume_target_identity",
             ]) {
@@ -1724,6 +1770,10 @@ with sqlite3.connect(sys.argv[2]) as connection:
         name !== "finding_publications" &&
         name !== "sqlite_sequence",
     ),
+  );
+  assert.deepEqual(
+    initialized.prepare("SELECT * FROM scan_observed_files").all(),
+    [],
   );
   assert.deepEqual(
     initialized.prepare("SELECT * FROM deep_scan_worker_threads").all(),

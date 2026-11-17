@@ -692,6 +692,23 @@ codex-security scans show SCAN_ID --json
 codex-security scans logs SCAN_ID
 ```
 
+**Files shown to model (observed)** counts unique repository-relative paths
+identified in retained tool output from the scan's registered execution threads
+and their descendants. A shared Desktop conversation alone cannot establish
+which worker performed a read. The CLI and SDK refresh the count when a scan
+terminates. `scans show` also refreshes it when execution logs are available
+locally. Its JSON output includes `observedFilesRead` with `count` and
+`observedAt`.
+
+A single-file read or a search excerpt can count even when the model saw only
+part of the file. Ambiguous search output, directory listings and opaque scripts
+do not contribute to the count. Use the review receipts to check completed
+review. A measured zero means the analysis found no qualifying excerpts.
+An unavailable count means no measurement was saved.
+
+Previously recorded paths survive log expiry and database upgrades, including
+paths recorded by the earlier preview's attribution rules.
+
 Replace `SCAN_ID` with the ID from the completion or failure summary. A scan can
 fail after registration but before writing its artifacts; investigate those
 failures through its history record and any available logs. When artifacts were

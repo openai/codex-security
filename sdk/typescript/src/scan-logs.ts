@@ -26,6 +26,8 @@ interface ScanLogOptions {
   completedAt?: string | null;
   logCompletedAt?: string | null;
   allowMissingRoot?: boolean;
+  executionOnly?: boolean;
+  onEvent?: (entry: Record<string, unknown>) => void;
 }
 
 export type ScanLogSource = JsonObject & {
@@ -60,7 +62,10 @@ export function savedScanLogBoundaries(scan: ScanLogSource) {
 export function readSavedScanLogs(
   scan: ScanLogSource,
   codexHome: string | readonly string[],
-  options: { allowMissingRoot?: boolean } = {},
+  options: Pick<
+    ScanLogOptions,
+    "allowMissingRoot" | "executionOnly" | "onEvent"
+  > = {},
 ) {
   const threadId = scan.continuationThreadId;
   if (!threadId && !options.allowMissingRoot) {
@@ -74,8 +79,9 @@ export function readSavedScanLogs(
     threadIds: scan.threadIds,
     executionThreadIds: scan.executionThreadIds ?? [],
     codexHome,
-    allowMissingRoot: options.allowMissingRoot,
-    scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+    ...options,
+    scanDirectory:
+      scan.mode === "deep" && !options.executionOnly ? scan.scanDir : undefined,
     startedAt: scan.lifecycle?.startedAt,
     ...savedScanLogBoundaries(scan),
   });
@@ -142,11 +148,16 @@ export async function readScanLogs(options: ScanLogOptions) {
     typeof timestamp === "string" &&
     compareTimestamps(timestamp, options.logCompletedAt) >= 0;
 
-  const included = new Set([
-    ...(options.threadId ? [options.threadId] : []),
-    ...(options.threadIds ?? []),
-    ...(options.executionThreadIds ?? []),
-  ]);
+  // Saved file observations use only registered executions and their descendants.
+  const included = new Set(
+    options.executionOnly
+      ? options.executionThreadIds
+      : [
+          ...(options.threadId ? [options.threadId] : []),
+          ...(options.threadIds ?? []),
+          ...(options.executionThreadIds ?? []),
+        ],
+  );
   // A Desktop owner can contain other work. Include its log without treating
   // the whole conversation tree as part of this scan.
   const traversed = new Set(options.executionThreadIds ?? included);
@@ -218,6 +229,16 @@ export async function readScanLogs(options: ScanLogOptions) {
   for (const parentId of traversed) {
     for (const session of children.get(parentId) ?? []) {
       if (startsAfterCompletion(session.timestamp)) continue;
+      if (
+        options.executionOnly &&
+        (!session.timestamp ||
+          !options.startedAt ||
+          !(compareTimestamps(session.timestamp, options.startedAt) >= 0) ||
+          (!options.logCompletedAt &&
+            options.completedAt &&
+            compareTimestamps(session.timestamp, options.completedAt) > 0))
+      )
+        continue;
       included.add(session.threadId);
       traversed.add(session.threadId);
     }
@@ -251,7 +272,9 @@ export async function readScanLogs(options: ScanLogOptions) {
         replaying = false;
       }
       if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
-      events.push({ threadId: session.threadId, event });
+      const entry = { threadId: session.threadId, event };
+      if (options.onEvent) options.onEvent(entry);
+      else events.push(entry);
     }
   }
 

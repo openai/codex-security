@@ -120,6 +120,7 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (73, "persist observed files from saved tool outputs"),
 ]
 
 
@@ -200,6 +201,43 @@ def create_historical_database(
     with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
         apply_migrations(connection)
     return connection, apply_migrations
+
+
+@pytest.mark.parametrize("main_reader", [False, True])
+def test_observed_file_preview_keeps_measurements_after_upgrade(main_reader) -> None:
+    # Main retained the preview receipt at 58 even when it installed the released column.
+    connection, migrate = create_historical_database(73 if main_reader else 58)
+    if main_reader:
+        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
+    _, name, sql = SCHEMA.MIGRATIONS[72]
+    apply_historical_migrations(connection, ((58, name, sql),), "preview-time")
+    insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
+    insert_legacy_scan(connection, "started", observed_files_read_at="observed")
+    connection.execute(
+        "INSERT INTO scan_observed_files VALUES ('legacy-scan', 'example.py', 'worker', 'call')"
+    )
+
+    migrate(connection)
+    migrate(connection)
+    assert connection.execute(
+        "SELECT name, applied_at FROM schema_migrations WHERE version = 73"
+    ).fetchone()[:] == (name, "preview-time")
+    assert (
+        connection.execute("SELECT name FROM schema_migrations WHERE version = 58").fetchone()[0]
+        == SCHEMA.MIGRATIONS[57][1]
+    )
+    assert "terminal_reviewed_surface_count" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+    assert (
+        connection.execute("SELECT observed_files_read_at FROM scans").fetchone()[0] == "observed"
+    )
+    assert connection.execute("SELECT * FROM scan_observed_files").fetchone()[:] == (
+        "legacy-scan",
+        "example.py",
+        "worker",
+        "call",
+    )
 
 
 @pytest.mark.parametrize("reopened", [False, True])
@@ -1414,6 +1452,7 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
             **row,
             "target_id": target_id,
             "log_completed_at": None,
+            "observed_files_read_at": None,
             "windows_resume_output_identity": None,
             "windows_resume_target_identity": None,
             "repository_generation": None,

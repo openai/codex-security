@@ -22,6 +22,8 @@
     "            THEN 'UPDATE schema_migrations SET version = 71'",
     "        WHEN version IN (48, 50, 63) AND name = 'persist scan log completion boundaries'",
     "            THEN 'UPDATE schema_migrations SET version = 64'",
+    "        WHEN version = 58 AND name = 'persist observed files from saved tool outputs'",
+    "            THEN 'UPDATE schema_migrations SET version = 73'",
     "        WHEN version IN (58, 59) AND name = 'record classification rubric provenance'",
     "            THEN 'UPDATE schema_migrations SET version = 60'",
     "        WHEN version IN (47, 48, 50, 52, 53, 54) AND name = 'freeze stopped scan checkpoint selections'",
@@ -98,7 +100,7 @@
     "WHERE version IN (43, 50) AND schema_migrations.name != history.name;"
   ],
   [
-    "-- A released reader can add its columns while a repository preview still owns the version.",
+    "-- A released reader can add its columns while a preview still owns the version.",
     "WITH released(version, table_name, column_name) AS (",
     "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",
     "        (55, 'deep_scan_runs', 'pending_target_project_path'),",
@@ -111,7 +113,8 @@
     "        released.version || ', ' || quote(json_extract(history.value, '$.name')) || ', ?)' AS value",
     "FROM released JOIN json_each(:history) AS history",
     "    ON json_extract(history.value, '$.version') = released.version",
-    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'persist repository identities')",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations AS receipt WHERE receipt.name = 'persist repository identities'",
+    "    OR (released.version = 58 AND receipt.version = 73 AND receipt.name = 'persist observed files from saved tool outputs'))",
     "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = released.version)",
     "    AND EXISTS (SELECT 1 FROM pragma_table_info(released.table_name) WHERE name = released.column_name);"
   ],

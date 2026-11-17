@@ -362,6 +362,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import { refreshObservedFiles } from "./saved-file-observations.js";
 import {
   OperationTelemetry,
   type OperationTelemetryEvent,
@@ -3041,13 +3042,28 @@ export async function main(
         return presentHistory(
           await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
+            let observedScan = scan as ScanLogSource;
+            try {
+              observedScan = await refreshObservedFiles(
+                observedScan,
+                [
+                  codexSecurityCredentialHome(dependencies.environment),
+                  configuredCodexHome(dependencies.environment),
+                ],
+                (args, input) => dependencies.runWorkbench(args, input),
+              );
+            } catch (error) {
+              errorOutput.write(
+                `Could not update observed files read: ${diagnosticLines(error)}\n`,
+              );
+            }
             await showHistoryNavigation(
-              scan as ScanLogSource,
+              observedScan,
               format,
               requestedId === "latest" ? "latest completed scan" : undefined,
             );
             return {
-              ...(scan as JsonObject),
+              ...observedScan,
               ...(recipe === undefined ? {} : { recipe }),
               ...(parentScanId === undefined ? {} : { parentScanId }),
             };
@@ -13059,6 +13075,9 @@ function printScanReference(
   const scanId = scan["scanId"];
   if (typeof scanId !== "string") return;
   const progress = scan["progress"] as JsonObject | undefined;
+  const startedAt =
+    (scan["lifecycle"] as ScanLogSource["lifecycle"])?.startedAt ??
+    scan["startedAt"];
   const detail = [
     `Scan ${diagnosticValue(scanId)}`,
     ...(typeof progress?.["status"] === "string"
@@ -13067,11 +13086,12 @@ function printScanReference(
     ...(typeof progress?.["phase"] === "string"
       ? [diagnosticValue(progress["phase"])]
       : []),
-    ...(typeof scan["startedAt"] === "string"
-      ? [`started ${diagnosticValue(scan["startedAt"])}`]
-      : typeof scan["updatedAt"] === "string"
-        ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
-        : []),
+    ...(typeof startedAt === "string"
+      ? [`started ${diagnosticValue(startedAt)}`]
+      : []),
+    ...(typeof scan["updatedAt"] === "string"
+      ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
+      : []),
   ];
   const argument = quoteCliPath(diagnosticValue(scanId));
   output.write(

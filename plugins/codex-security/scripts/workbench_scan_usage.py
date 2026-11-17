@@ -69,6 +69,15 @@ def stored_scan_cost_fields(value: str | None) -> dict[str, Any]:
     }
 
 
+def saved_scan_log_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "logCompletedAt": scan["log_completed_at"],
+        "threadIds": _scan_root_thread_ids(connection, scan, None),
+        "executionThreadIds": _scan_execution_thread_ids(connection, scan),
+        **stored_scan_cost_fields(scan["cost_json"]),
+    }
+
+
 def reconcile_completed_scan_cost(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,

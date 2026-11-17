@@ -72,6 +72,24 @@ function taskStarted(turnId: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("delivers scan events to the consumer without retaining them", async () => {
+    const home = await temporaryHome();
+    await writeSession(home, "worker", [commandEvent("cat a.ts", "read")]);
+    const events: Record<string, unknown>[] = [];
+    const logs = await readScanLogs({
+      codexHome: home,
+      scanId: "scan",
+      threadId: "worker",
+      onEvent: (entry) => events.push(entry),
+    });
+    expect(events).toHaveLength(2);
+    expect(events[1]).toEqual({
+      threadId: "worker",
+      event: commandEvent("cat a.ts", "read"),
+    });
+    expect(logs.events).toEqual([]);
+  });
+
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
     ["complete first", [0, 1, 1, 2], [0], 0, false, false],
