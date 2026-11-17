@@ -26,7 +26,7 @@ from finalize_scan_contract import (
     write_export_output,
     write_sarif_projection,
 )
-from snapshot_sqlite import readonly_sqlite_uri
+from snapshot_sqlite import readonly_sqlite_uri, windows_long_path
 from validate_scan_contract import validate_contract
 from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
@@ -214,7 +214,7 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     path = db.database_path()
     if payload["action"] == "inspect" or require_history:
         try:
-            path.stat()
+            os.stat(windows_long_path(path))
         except FileNotFoundError:
             if require_history:
                 raise SystemExit(

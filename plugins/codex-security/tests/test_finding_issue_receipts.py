@@ -375,3 +375,99 @@ def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutati
     result = run_workbench(state, "finding-issues", input_text=json.dumps(payload), check=False)
     assert result["returncode"] != 0
     assert not state.exists()
+
+
+def test_windows_long_path_and_readonly_uri_preserve_unc_and_escaping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = load_script("snapshot_sqlite")
+    monkeypatch.setattr(snapshot.os, "name", "nt")
+
+    long_drive = Path("C:\\" + "\\".join(["segment_padding_12345"] * 12) + "\\workbench.sqlite3")
+    extended = snapshot.windows_long_path(long_drive)
+    assert extended.startswith("\\\\?\\")
+    assert extended.endswith("workbench.sqlite3")
+    uri = snapshot.readonly_sqlite_uri(long_drive)
+    assert uri.startswith("file:%5C%5C%3F%5C")
+    assert uri.endswith("?mode=ro")
+
+    long_unc = Path("\\\\fileserver\\share\\" + "\\".join(["segment_padding_12345"] * 12) + "\\workbench.sqlite3")
+    extended_unc = snapshot.windows_long_path(long_unc)
+    assert extended_unc.startswith("\\\\?\\UNC\\fileserver\\share\\")
+    unc_uri = snapshot.readonly_sqlite_uri(long_unc)
+    assert unc_uri.startswith("file:%5C%5C%3F%5CUNC%5C")
+    assert unc_uri.endswith("?mode=ro")
+
+
+def test_finding_issues_inspect_uses_extended_path_for_long_windows_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scan_dir, validated = source(tmp_path)
+    short_state = tmp_path / "short-state"
+    receipt = receipt_for(validated)
+    recorded = issues(short_state, scan_dir, "record", receipts=[receipt])
+    assert len(recorded["receipts"]) == 1
+
+    publication = load_script("workbench_publication")
+    snapshot = sys.modules["snapshot_sqlite"]
+    workbench_db = load_script("workbench_db")
+
+    long_dir = tmp_path
+    while len(str(long_dir)) < 244:
+        long_dir = long_dir / "nested_state_segment"
+    long_dir.mkdir(parents=True, exist_ok=True)
+    long_db = long_dir / "workbench.sqlite3"
+
+    monkeypatch.setattr(snapshot.os, "name", "nt")
+    copy_dest = snapshot.windows_long_path(long_db) if os.name == "nt" else long_db
+    shutil.copy2(short_state / "workbench.sqlite3", copy_dest)
+
+    real_stat = os.stat
+    real_connect = sqlite3.connect
+
+    def guarded_stat(target, *args, **kwargs):
+        if not str(target).startswith("\\\\?\\") and len(str(target)) >= 248:
+            raise FileNotFoundError(target)
+        return real_stat(target, *args, **kwargs)
+
+    def guarded_connect(target, *args, **kwargs):
+        if isinstance(target, str) and target.startswith("file:"):
+            if not target.startswith("file:%5C%5C%3F%5C"):
+                raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(publication.os, "stat", guarded_stat)
+    monkeypatch.setattr(publication.sqlite3, "connect", guarded_connect)
+
+    class FakeDb:
+        @staticmethod
+        def database_path() -> Path:
+            return long_db
+
+        @staticmethod
+        def now() -> str:
+            return workbench_db.now()
+
+    inspected = publication.finding_issues(
+        FakeDb(),
+        {
+            "action": "inspect",
+            "scanDirectory": str(scan_dir),
+            "destination": LINEAR,
+        },
+    )
+    assert inspected["storeExists"] is True
+    assert inspected["receipts"] == [{**receipt, "scanId": validated["manifest"]["scan"]["id"]}]
+
+    # Preserve missing-store behavior when the extended path does not exist.
+    os.unlink(copy_dest)
+    missing = publication.finding_issues(
+        FakeDb(),
+        {
+            "action": "inspect",
+            "scanDirectory": str(scan_dir),
+            "destination": LINEAR,
+        },
+    )
+    assert missing["storeExists"] is False
+    assert missing["receipts"] == []
