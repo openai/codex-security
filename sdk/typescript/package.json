@@ -17,6 +17,11 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#classify-severity-records-logs": {
+      "codex-security-records-logs-v1": "./dist/classify-severity-diagnostics.js"
+    }
+  },
   "exports": {
     "./server": {
       "types": "./dist/server/api.d.ts",

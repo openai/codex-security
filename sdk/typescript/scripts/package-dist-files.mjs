@@ -22,6 +22,7 @@ const distModules = [
   "cli-signals",
   "cli-token-view",
   "classify-severity",
+  "classify-severity-diagnostics",
   "classify-severity-records",
   "codeowners",
   "classify-scan-severity",
