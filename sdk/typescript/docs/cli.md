@@ -50,6 +50,19 @@ by default. Use its help to see the commands available in your installed version
 CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability --help
 ```
 
+Supply one CVE and the three documents described by the package’s `schemas/dependency-stack-inputs-v1.schema.json`. The stack document identifies the repository and the exact Git commit checked out. A single investigator reads the checkout and uses the same public commands available to external investigators.
+
+```sh
+CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability check CVE-2099-0001 \
+  --sources sources.json --sinks sinks.json --stacks stacks.json --json
+```
+
+An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt. `run tools --state <database>` lists operation schemas. Use `next` and `read-stacks` to select evidence, `record-evidence` and `record-claims` to save it, and `query-claims` to retrieve its exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file.
+
+When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
+
+A missing observation or a gap in the evidence can yield a completed `unknown` assessment. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
+
 ## Updating the CLI
 
 Run `cs update` to update an npm global installation managed by the running

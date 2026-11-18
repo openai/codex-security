@@ -8,6 +8,7 @@
 <summary>Changes to review for highlights</summary>
 
 - add an opt-in foundation for dependency investigations ([#2712](https://github.com/openai/codex-security/pull/2712))
+- investigate supplied dependency stacks ([#2713](https://github.com/openai/codex-security/pull/2713))
 
 </details>
 
