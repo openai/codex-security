@@ -10,6 +10,23 @@ type Advisory = Awaited<
 type Affected = Advisory["affected"][number];
 type Range = NonNullable<Affected["ranges"]>[number];
 
+/** PEP 440 pads stable numeric releases with zeros for comparison. */
+export function comparePythonReleases(
+  left: string,
+  right: string,
+): number | undefined {
+  const numeric = /^\d+(?:\.\d+)*$/u;
+  if (!numeric.test(left) || !numeric.test(right)) return;
+  const a = left.split(".").map(BigInt);
+  const b = right.split(".").map(BigInt);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const first = a[i] ?? 0n;
+    const second = b[i] ?? 0n;
+    if (first !== second) return first < second ? -1 : 1;
+  }
+  return 0;
+}
+
 // OSV's ordered events delimit disjoint intervals. Only rule out an entire
 // version when every relevant range is understood and excludes it.
 function inRange(
@@ -90,20 +107,19 @@ export function affectedByFrozenVersion(
     ),
   );
   if (!relevant.length) return;
-  const matches = relevant.map((entry) => {
-    if (entry.versions?.includes(version)) return true;
-    if (entry.ranges?.length) {
-      const ranges = entry.ranges.map((range) =>
-        inRange(version, range, pkg.ecosystem),
-      );
-      return ranges.includes(true)
-        ? true
-        : ranges.includes(undefined)
-          ? undefined
-          : false;
-    }
-    if (entry.versions?.length) return false;
-    return undefined;
+  const matches = relevant.flatMap((entry) => {
+    const versions = (entry.versions ?? []).map((listed) => {
+      if (listed === version) return true;
+      if (pkg.ecosystem !== "PyPI") return false;
+      const order = comparePythonReleases(version, listed);
+      return order === undefined ? undefined : order === 0;
+    });
+    const ranges = (entry.ranges ?? []).map((range) =>
+      inRange(version, range, pkg.ecosystem),
+    );
+    return versions.length || ranges.length
+      ? [...versions, ...ranges]
+      : [undefined];
   });
   return matches.includes(true)
     ? true

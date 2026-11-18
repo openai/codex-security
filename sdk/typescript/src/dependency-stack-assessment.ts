@@ -18,6 +18,7 @@ import {
   type StackPacket,
   type StackWorkItem,
 } from "./dependency-stack-packet.js";
+import { comparePythonReleases } from "./dependency-advisory-version.js";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import {
   inventoryReceiptSelectionSchema,
@@ -240,8 +241,6 @@ function pythonReleaseMatches(
   version: string,
   specifier: string,
 ): boolean | undefined {
-  if (!/^\d+(?:\.\d+)*$/u.test(version)) return;
-  const release = version.split(".").map(BigInt);
   let unknown = false;
   for (const term of specifier.split(",")) {
     const match = /^\s*(<=|>=|==|!=|<|>)\s*(\d+(?:\.\d+)*)\s*$/u.exec(term);
@@ -249,16 +248,8 @@ function pythonReleaseMatches(
       unknown = true;
       continue;
     }
-    const bound = match[2]!.split(".").map(BigInt);
-    let order = 0;
-    for (let i = 0; i < Math.max(bound.length, release.length); i++) {
-      const a = release[i] ?? 0n;
-      const b = bound[i] ?? 0n;
-      if (a !== b) {
-        order = a < b ? -1 : 1;
-        break;
-      }
-    }
+    const order = comparePythonReleases(version, match[2]!);
+    if (order === undefined) return;
     const result = {
       "<": order < 0,
       ">": order > 0,
