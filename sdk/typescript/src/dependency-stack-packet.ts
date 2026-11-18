@@ -133,6 +133,12 @@ const observation = z
           package: text,
           version: text,
           provenance: text,
+          frameIndices: z
+            .array(z.int().nonnegative())
+            .optional()
+            .describe(
+              "Original zero-based frames executed by this package copy, as established by the capture producer. Omit or leave empty when only the workload or build is known.",
+            ),
           imageDigest: text.optional(),
           sourceSha: dependencyGitCommitSchema.optional(),
           evidence: z.array(sourceRange).optional(),
@@ -141,6 +147,16 @@ const observation = z
       .optional(),
   })
   .superRefine((value, ctx) => {
+    for (const [i, binding] of (value.bindings ?? []).entries()) {
+      for (const [j, rawIndex] of (binding.frameIndices ?? []).entries()) {
+        if (rawIndex >= value.frames.length)
+          ctx.addIssue({
+            code: "custom",
+            path: ["bindings", i, "frameIndices", j],
+            message: "Package binding index is outside the captured frames.",
+          });
+      }
+    }
     if (value.sinkIndex === null && value.sinkIds?.length) {
       ctx.addIssue({
         code: "custom",

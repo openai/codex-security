@@ -339,13 +339,7 @@ function assessProof(
   if (!records.length)
     fail("A decided assessment needs at least one exact supporting claim.");
   const mapped = stackSinkMatches(observation);
-  const sinks = packet.sinks.sinks.filter((sink) =>
-    mapped.some(
-      ({ sinkId, rawIndex }) =>
-        sinkId === sink.id && observation.frames[rawIndex],
-    ),
-  );
-  if (!sinks.length)
+  if (!mapped.length)
     fail(
       "A decided assessment needs an observation mapped to a supplied sink.",
     );
@@ -383,30 +377,36 @@ function assessProof(
       }),
     );
   };
-  const matches = (s: StackSink) =>
-    bindings.flatMap((b, i) =>
-      b.package === s.package ? [{ binding: b, index: i }] : [],
+  const bindingEvidence = bindings.map((binding, index) => ({
+    binding,
+    cited: hasBindingEvidence(index),
+  }));
+  // Packet decoding checks each catalog ID and its original sampled frame.
+  const matches = mapped.map(({ sinkId, rawIndex }) => {
+    const sink = packet.sinks.sinks.find((s) => s.id === sinkId)!;
+    const copies = bindingEvidence.filter(
+      ({ binding }) =>
+        binding.package === sink.package &&
+        binding.frameIndices?.includes(rawIndex),
     );
-  if (
-    row.verdict === "ruled_out" &&
-    sinks.every((sink) => {
-      const bound = matches(sink);
-      return (
-        bound.length > 0 &&
-        bound.every(
-          ({ binding, index }) =>
-            hasBindingEvidence(index) &&
-            affectedVersion(sink, binding.version) === false,
-        )
+    const fixed =
+      copies.length > 0 &&
+      copies.every(
+        ({ binding, cited }) =>
+          cited && affectedVersion(sink, binding.version) === false,
       );
-    })
-  ) {
+    return { sink, rawIndex, copies, fixed };
+  });
+  if (row.verdict === "ruled_out" && matches.every(({ fixed }) => fixed)) {
+    const use = row.use;
     if (
-      row.use &&
-      !bindings.some(
-        (b) =>
-          b.package === row.use!.component &&
-          (row.use!.version === null || b.version === row.use!.version),
+      use &&
+      !matches.some(
+        ({ sink, copies }) =>
+          sink.package === use.component &&
+          (!use.proof?.sink || sink.function === use.proof.sink.function) &&
+          (use.version === null ||
+            copies.some(({ binding }) => binding.version === use.version)),
       )
     )
       fail(
@@ -415,95 +415,118 @@ function assessProof(
     return;
   }
 
-  const selected = sinks.find(
-    (s) =>
-      s.package === row.use?.component &&
-      s.function === row.use.proof?.sink?.function,
+  const use = row.use;
+  const selectedFrames = matches.filter(
+    ({ sink }) =>
+      sink.package === use?.component &&
+      sink.function === use?.proof?.sink?.function,
   );
-  if (!row.use || !selected)
+  if (!use || !selectedFrames.length)
     fail("Supply an evidence-backed use and proof for the mapped sink.");
-  const sourceBindings = bindings.filter(
-    (binding, index) =>
-      binding.sourceSha !== undefined && hasBindingEvidence(index),
-  );
-  const bound = matches(selected);
-  // A version and a source revision can be recorded independently only when
-  // they identify the same immutable artifact.
-  const sourceMatchesBuild = bound.length
-    ? bound.every(({ binding, index }) => {
-        if (!hasBindingEvidence(index)) return false;
-        const sameBuild = sourceBindings.filter(
-          (source) =>
-            source === binding ||
-            (binding.imageDigest !== undefined &&
-              source.imageDigest === binding.imageDigest),
-        );
-        return (
-          sameBuild.length > 0 &&
-          sameBuild.every((source) => source.sourceSha === sha)
-        );
-      })
-    : work.scope.image_digest !== undefined &&
-      sourceBindings.length > 0 &&
-      sourceBindings.every(
-        (source) =>
-          source.imageDigest === work.scope.image_digest &&
-          source.sourceSha === sha,
+  const sourceMatchesBuild = ({
+    sink,
+    rawIndex,
+    copies,
+  }: (typeof matches)[number]) => {
+    const sources = bindingEvidence.flatMap(({ binding, cited }) =>
+      cited &&
+      binding.sourceSha !== undefined &&
+      (!binding.frameIndices?.length || binding.frameIndices.includes(rawIndex))
+        ? [binding]
+        : [],
+    );
+    // A source-based exclusion can use an observation-wide build binding to
+    // verify the caller even when the dependency copy has no frame attribution.
+    const builds =
+      row.verdict === "ruled_out" && !copies.length
+        ? bindingEvidence.filter(
+            ({ binding }) =>
+              binding.package === sink.package && !binding.frameIndices?.length,
+          )
+        : copies;
+    if (!builds.length)
+      return (
+        work.scope.image_digest !== undefined &&
+        sources.length > 0 &&
+        sources.every(
+          (s) =>
+            s.imageDigest === work.scope.image_digest && s.sourceSha === sha,
+        )
       );
-  const conditions = row.use.proof!.conditions;
+    return builds.every(({ binding, cited }) => {
+      if (!cited) return false;
+      // A separate source record must describe the same immutable artifact.
+      const sameBuild = sources.filter(
+        (s) =>
+          s === binding ||
+          (binding.imageDigest !== undefined &&
+            s.imageDigest === binding.imageDigest),
+      );
+      return (
+        sameBuild.length > 0 && sameBuild.every((s) => s.sourceSha === sha)
+      );
+    });
+  };
+  const conditions = use.proof!.conditions;
   if (new Set(conditions.map((c) => c.label)).size !== conditions.length)
     fail("Each advisory condition must have one disposition.");
-  const disproved = selected.preconditions.some((p) =>
-    conditions.some((c) => c.label === p && c.status === "ruled_out"),
-  );
+  const disproved = (sink: StackSink) =>
+    sink.preconditions.some((p) =>
+      conditions.some((c) => c.label === p && c.status === "ruled_out"),
+    );
   if (row.verdict === "ruled_out") {
-    if (sinks.length === 1 && disproved) {
-      if (!sourceMatchesBuild)
+    if (matches.length === 1 && disproved(matches[0]!.sink)) {
+      if (!sourceMatchesBuild(matches[0]!))
         fail(
           "A guard in the target source needs a cited build-to-source binding for this running workload.",
         );
       return;
     }
     fail(
-      "An exclusion requires a cited fixed-version binding or a disproved advisory condition.",
+      "An exclusion requires a cited fixed-version binding for every matched sink frame or a disproved advisory condition.",
     );
   }
-  if (disproved)
+  const applicable = selectedFrames.filter(({ sink }) => !disproved(sink));
+  if (!applicable.length)
     fail("A required advisory condition was ruled out for this path.");
-  if (
-    bound.length &&
-    bound.every(
-      ({ binding, index }) =>
-        hasBindingEvidence(index) &&
-        affectedVersion(selected, binding.version) === false,
-    )
-  )
+  const possible = applicable.filter(({ fixed }) => !fixed);
+  if (!possible.length)
     fail("The observed dependency version falls outside the affected ranges.");
+  const version = use.version;
   if (row.verdict === "potentially_exploitable") {
+    if (
+      version !== null &&
+      possible.every(({ sink }) => affectedVersion(sink, version) === false)
+    )
+      fail(
+        "The reported dependency version falls outside the affected ranges.",
+      );
     if (!row.remainingQuestions.length)
       fail(
         "Name the remaining conditions for a potentially exploitable assessment.",
       );
     return;
   }
-  if (!sourceMatchesBuild)
+  const affectedFrames = possible.filter(
+    ({ sink, copies }) =>
+      version !== null &&
+      affectedVersion(sink, version) === true &&
+      copies.length > 0 &&
+      copies.every(
+        ({ binding, cited }) => cited && binding.version === version,
+      ),
+  );
+  if (!affectedFrames.length)
+    fail(
+      "An exploitable assessment needs a cited affected running dependency binding for the matched sink frame.",
+    );
+  const confirmed = affectedFrames.filter(sourceMatchesBuild);
+  if (!confirmed.length)
     fail(
       "An exploitable use needs a cited build-to-source binding for the running workload.",
     );
-  if (
-    bound.some(({ binding }) => binding.version !== row.use!.version) ||
-    !bound.some(
-      ({ binding, index }) =>
-        hasBindingEvidence(index) &&
-        binding.version === row.use!.version &&
-        affectedVersion(selected, binding.version) === true,
-    )
-  )
-    fail(
-      "An exploitable assessment needs a cited running dependency binding for this observation.",
-    );
   const control = row.attackerControlClaim;
-  const accessCitations = row.use.evidence.filter((range) =>
+  const accessCitations = use.evidence.filter((range) =>
     range.supports.includes("access"),
   );
   if (
@@ -520,8 +543,10 @@ function assessProof(
       "An exploitable assessment needs a supporting claim with source evidence for attacker control of the deciding input.",
     );
   if (
-    !selected.preconditions.every((p) =>
-      conditions.some((c) => c.label === p && c.status === "met"),
+    !confirmed.some(({ sink }) =>
+      sink.preconditions.every((p) =>
+        conditions.some((c) => c.label === p && c.status === "met"),
+      ),
     )
   )
     fail(

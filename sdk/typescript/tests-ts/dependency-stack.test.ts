@@ -17,18 +17,17 @@ import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const cve = "CVE-2099-0001";
 const condition = "Caller controls the decoder input.";
+const callerEvidence = { path: "app.js", startLine: 1, endLine: 2 };
 async function sample(
   root: string,
   bindSource: boolean,
   separateImage?: "same" | "other",
+  callerSource = "export function request(bytes) {\n  return decode(bytes);\n}\n",
 ) {
   const repo = join(root, "target");
   await mkdir(repo);
   git(repo, "init", "--quiet");
-  await writeFile(
-    join(repo, "app.js"),
-    "export function request(bytes) {\n  return decode(bytes);\n}\n",
-  );
+  await writeFile(join(repo, "app.js"), callerSource);
   git(repo, "add", "app.js");
   git(
     repo,
@@ -62,6 +61,7 @@ async function sample(
     bindings: [
       {
         package: sink.package,
+        frameIndices: [0],
         version: "1.0.0",
         imageDigest: "sha256:" + "a".repeat(64),
         provenance: "sample process",
@@ -137,6 +137,85 @@ async function sample(
   };
 }
 
+async function startProof(
+  root: string,
+  files: Awaited<ReturnType<typeof sample>>,
+) {
+  const inputs = join(root, "packet"),
+    state = join(root, "attempt.sqlite");
+  await prepareStackPacket({
+    cve,
+    ...files,
+    repository: files.repo,
+    inputsDir: inputs,
+    toolRevision: "test",
+  });
+  await executeStackRun("init", { state, repo: files.repo, inputs });
+  const call = (command: string, input?: unknown) =>
+    executeStackRun(command, { state, input });
+  const { workItem, receiptId } = (await call("next")) as {
+    workItem: { id: string };
+    receiptId: string;
+  };
+  const capture = (await call("read-stacks", { workItemId: workItem.id })) as {
+    observation: { bindings?: unknown[] };
+  };
+  const write = {
+    operationId: "proof",
+    claims: [
+      {
+        id: "caller",
+        scope: "sample caller",
+        payload: "The caller supplies bytes to decode.",
+        evidence: [callerEvidence],
+        receiptSelections: (capture.observation.bindings ?? []).map(
+          (_, index) => ({
+            receiptId,
+            textBlock: null,
+            record: ["observation", "bindings", index],
+          }),
+        ),
+      },
+    ],
+  };
+  const { claims } = (await call("record-claims", write)) as {
+    claims: DependencyClaimReference[];
+  };
+  const row = {
+    workItemId: workItem.id,
+    reason: "The caller supplies the decoder input.",
+    verdict: "exploitable",
+    supportingClaims: claims,
+    attackerControlClaim: claims[0],
+    use: {
+      location: "decoder",
+      component: "sample-codec",
+      version: "1.0.0",
+      deployment: "confirmed",
+      verdict: "exploitable",
+      reason: "The captured build accepts the input.",
+      evidence: [
+        {
+          ...callerEvidence,
+          supports: ["affected_copy", "affected_use", "running", "access"],
+        },
+      ],
+      proof: {
+        sink: { function: "decode", callSite: { path: "app.js", line: 2 } },
+        conditions: [
+          {
+            label: condition,
+            status: "met",
+            explanation: "The parameter is passed to decode.",
+            citations: [{ path: "app.js", line: 2 }],
+          },
+        ],
+      },
+    },
+  };
+  return { inputs, state, call, capture, claims, write, row };
+}
+
 for (const [label, bindSource, separateImage, expectedPositive] of [
   ["source and version in one binding", true, undefined, true],
   ["source not recorded", false, undefined, false],
@@ -146,84 +225,16 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
   test("stack verdict with " + label, async () => {
     await using dir = await scopedTemporaryDirectory("stack-proof-");
     const files = await sample(dir.path, bindSource, separateImage);
-    const inputs = join(dir.path, "packet"),
-      state = join(dir.path, "attempt.sqlite");
-    await prepareStackPacket({
-      cve,
-      ...files,
-      repository: files.repo,
-      inputsDir: inputs,
-      toolRevision: "test",
-    });
-    await executeStackRun("init", { state, repo: files.repo, inputs });
-    const call = (command: string, input?: unknown) =>
-      executeStackRun(command, { state, input });
-    const { workItem, receiptId } = (await call("next")) as {
-      workItem: { id: string };
-      receiptId: string;
-    };
-    expect(
-      await call("read-stacks", { workItemId: workItem.id }),
-    ).toMatchObject({
+    const { inputs, state, call, capture, claims, write, row } =
+      await startProof(dir.path, files);
+    expect(capture).toMatchObject({
       rootFirstRawIndices: [1, 0],
       observation: { frames: [{ offset: "9007199254740993" }, {}] },
     });
-    const evidence = { path: "app.js", startLine: 1, endLine: 2 };
-    const write = {
-      operationId: "proof",
-      claims: [
-        {
-          id: "caller",
-          scope: "sample caller",
-          payload: "The caller supplies bytes to decode.",
-          evidence: [evidence],
-          receiptSelections: (separateImage ? [0, 1] : [0]).map((index) => ({
-            receiptId,
-            textBlock: null,
-            record: ["observation", "bindings", index],
-          })),
-        },
-      ],
-    };
-    const { claims } = (await call("record-claims", write)) as {
-      claims: DependencyClaimReference[];
-    };
     expect(await call("record-claims", write)).toEqual({ claims });
     expect(await call("query-claims", { ids: ["caller"] })).toMatchObject({
       claims: [{ ...claims[0], state: "recorded" }],
     });
-    const row = {
-      workItemId: workItem.id,
-      reason: "The caller supplies the decoder input.",
-      verdict: "exploitable",
-      supportingClaims: claims,
-      attackerControlClaim: claims[0],
-      use: {
-        location: "decoder",
-        component: "sample-codec",
-        version: "1.0.0",
-        deployment: "confirmed",
-        verdict: "exploitable",
-        reason: "The captured build accepts the input.",
-        evidence: [
-          {
-            ...evidence,
-            supports: ["affected_copy", "affected_use", "running", "access"],
-          },
-        ],
-        proof: {
-          sink: { function: "decode", callSite: { path: "app.js", line: 2 } },
-          conditions: [
-            {
-              label: condition,
-              status: "met",
-              explanation: "The parameter is passed to decode.",
-              citations: [{ path: "app.js", line: 2 }],
-            },
-          ],
-        },
-      },
-    };
     if (!expectedPositive) {
       await expect(
         call("record-assessments", { items: [row] }),
@@ -244,7 +255,7 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
         scope: "caller",
         question: "Who supplies bytes?",
         claim: "Caller supplied bytes.",
-        evidence: [evidence],
+        evidence: [callerEvidence],
       }),
     ).rejects.toThrow(/finalized/);
     await chmod(join(inputs, "stacks.json"), 0o600);
@@ -253,6 +264,151 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
       (await readFile(join(inputs, "stacks.json"), "utf8")) + "\n",
     );
     await expect(call("next")).rejects.toThrow();
+  });
+}
+
+async function sampledCopies(
+  root: string,
+  bindings: readonly {
+    version: string;
+    frameIndices?: readonly number[];
+    sourceBound?: boolean;
+  }[],
+  sinkFrames: readonly number[],
+) {
+  const files = await sample(root, true);
+  const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
+  const observation = capture.queries[0].groups[0].observations[0];
+  observation.frames[0].location = "primary/decode.js";
+  observation.frames.splice(1, 0, {
+    name: "decode",
+    type: "javascript",
+    location: "secondary/decode.js",
+  });
+  observation.sourceIndex = 2;
+  observation.sinkIndex = 1;
+  observation.sinkIds = [];
+  observation.sinkMatches = sinkFrames.map((rawIndex) => ({
+    sinkId: "decode",
+    rawIndex,
+  }));
+  observation.bindings = bindings.map(({ sourceBound = true, ...binding }) => ({
+    ...binding,
+    package: "sample-codec",
+    imageDigest: "sha256:" + "a".repeat(64),
+    ...(sourceBound && { sourceSha: capture.target.sha }),
+    provenance: "loaded modules",
+  }));
+  await writeFile(files.stacksPath, JSON.stringify(capture));
+  return startProof(root, files);
+}
+
+const fixedSink = { version: "2.1.0", frameIndices: [0] };
+const fixedWrapper = { ...fixedSink, frameIndices: [1] };
+const affectedSink = { version: "1.5.0", frameIndices: [0] };
+const affectedWrapper = { ...affectedSink, frameIndices: [1] };
+for (const [label, bindings, sinkFrames, ruledOut] of [
+  ["unattributed version", [{ version: "2.1.0" }], [0], false],
+  ["empty frame list", [{ version: "2.1.0", frameIndices: [] }], [0], false],
+  ["queried wrapper only", [fixedWrapper], [0], false],
+  ["conflicting sink versions", [fixedSink, affectedSink], [0], false],
+  ["fixed sink and affected wrapper", [fixedSink, affectedWrapper], [0], true],
+  ["partially covered sinks", [fixedSink], [0, 1], false],
+  ["both sink frames covered", [fixedSink, fixedWrapper], [0, 1], true],
+] as const) {
+  test("version exclusion with " + label, async () => {
+    await using dir = await scopedTemporaryDirectory("stack-copies-");
+    const { call, row } = await sampledCopies(dir.path, bindings, sinkFrames);
+    const item = {
+      workItemId: row.workItemId,
+      verdict: "ruled_out",
+      reason: "The sampled decoder is fixed.",
+      supportingClaims: row.supportingClaims,
+    };
+    const result = call("record-assessments", { items: [item] });
+    if (ruledOut) {
+      await result;
+      expect(await call("finalize")).toMatchObject({ verdict: "ruled_out" });
+    } else {
+      await expect(result).rejects.toThrow();
+      const unknown = {
+        ...item,
+        verdict: "unknown",
+        reason: "Missing copy identity.",
+        remainingQuestions: ["Which copy supplied the sink?"],
+      };
+      await call("record-assessments", { items: [unknown] });
+      expect(await call("finalize")).toMatchObject({ verdict: "unknown" });
+    }
+  });
+}
+
+for (const sourceBound of [true, false]) {
+  const label = sourceBound
+    ? "both copies linked to source"
+    : "only the fixed copy linked to source";
+  test("an affected sink beside a fixed sink with " + label, async () => {
+    await using dir = await scopedTemporaryDirectory("stack-peer-");
+    const { call, row } = await sampledCopies(
+      dir.path,
+      [{ ...affectedSink, sourceBound }, fixedWrapper],
+      [0, 1],
+    );
+    row.use.version = affectedSink.version;
+    const result = call("record-assessments", { items: [row] });
+    if (sourceBound) {
+      await result;
+      expect(await call("finalize")).toMatchObject({ verdict: "exploitable" });
+    } else {
+      await expect(result).rejects.toThrow();
+    }
+  });
+}
+
+for (const version of ["1.5.0", "2.1.0"]) {
+  test("potential verdict with only a build selecting " + version, async () => {
+    await using dir = await scopedTemporaryDirectory("stack-configured-");
+    const source = `import { decode } from "npm:sample-codec@${version}";\nexport function request(bytes) { return decode(bytes); }\n`;
+    const files = await sample(dir.path, false, undefined, source);
+    const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
+    const earlier = {
+      ...catalog.sinks[0],
+      id: "decode-earlier",
+      affectedVersions: ["<1.1.0"],
+    };
+    catalog.sinks.unshift(earlier);
+    await writeFile(files.sinksPath, JSON.stringify(catalog));
+    const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
+    const observation = capture.queries[0].groups[0].observations[0];
+    observation.sinkIds.unshift(earlier.id);
+    delete observation.bindings;
+    await writeFile(files.stacksPath, JSON.stringify(capture));
+    const { call, row } = await startProof(dir.path, files);
+    const verdict = "potentially_exploitable";
+    const use = {
+      ...row.use,
+      version,
+      verdict,
+      deployment: "configured",
+      evidence: row.use.evidence.map((range) => ({
+        ...range,
+        supports: ["affected_copy", "affected_use"],
+      })),
+    };
+    const item = {
+      ...row,
+      use,
+      verdict,
+      remainingQuestions: ["Which build ran?"],
+    };
+    const result = call("record-assessments", { items: [item] });
+    if (version === "1.5.0") {
+      await result;
+      expect(await call("finalize")).toMatchObject({ verdict });
+    } else {
+      await expect(result).rejects.toThrow(/affected range/);
+      expect(await call("summarize-coverage")).toMatchObject({ assessed: 0 });
+    }
   });
 }
 
