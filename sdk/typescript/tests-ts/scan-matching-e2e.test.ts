@@ -96,7 +96,6 @@ test("matches sealed scan history end to end without merging related findings", 
       manifest.scan.id = scanId;
       manifest.scan.target.kind = "directory_snapshot";
       const draftScan: Partial<ScanManifest["scan"]> = manifest.scan;
-      delete draftScan.sealedAt;
       delete draftScan.artifacts;
       await writeJson(join(scanDir, "scan-manifest.json"), manifest);
       const document = await readJson<FindingsDocument>(

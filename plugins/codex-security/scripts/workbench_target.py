@@ -59,9 +59,7 @@ def diff_snapshot_digest(scan: sqlite3.Row, manifest: dict[str, Any] | None) -> 
     if scan["diff_target_kind"] in {"commit", "range"}:
         manifest_scan = manifest.get("scan") if manifest is not None else None
         # Preserve the recorded digest when recovery rebuilds a sealed manifest.
-        if isinstance(manifest_scan, dict) and (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts")
-        ):
+        if isinstance(manifest_scan, dict) and manifest_scan.get("artifacts"):
             target = manifest_scan.get("target")
             return target.get("snapshotDigest") if isinstance(target, dict) else None
         return committed_diff_snapshot_digest(

@@ -277,7 +277,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["displayName"] == target.name
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
-    assert manifest["scan"]["sealedAt"]
+    assert manifest["scan"]["artifacts"]
     assert warning in manifest["scan"]["scope"]["limitations"]
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"

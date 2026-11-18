@@ -152,21 +152,27 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         manifest["scan"].pop("artifacts")
         self.write_json("scan-manifest.json", manifest)
 
-        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "manifest.scan.artifacts"):
             VALIDATOR.validate_contract(self.scan_dir)
 
-    def test_recovers_omitted_timestamp_only_for_intact_sealed_artifacts(self) -> None:
+    def test_ignores_legacy_timestamp_and_requires_intact_sealed_artifacts(self) -> None:
         manifest = self.read_json("scan-manifest.json")
-        seal = manifest["scan"].pop("sealedAt")
+        del manifest["scan"]["sealedAt"]
         self.write_json("scan-manifest.json", manifest)
         manifest_path = self.scan_dir / "scan-manifest.json"
         original = manifest_path.read_bytes()
 
         validated = VALIDATOR.validate_contract(self.scan_dir)
 
-        self.assertEqual(validated["manifest"]["scan"]["sealedAt"], seal)
+        self.assertNotIn("sealedAt", validated["manifest"]["scan"])
         self.assertEqual(validated["findings"], self.read_json("findings.json"))
         self.assertEqual(manifest_path.read_bytes(), original)
+
+        manifest["scan"]["sealedAt"] = "obsolete and unrelated to completion"
+        self.write_json("scan-manifest.json", manifest)
+        self.assertEqual(
+            VALIDATOR.validate_contract(self.scan_dir)["findings"], validated["findings"]
+        )
 
         manifest["scan"]["complete"] = False
         self.write_json("scan-manifest.json", manifest)

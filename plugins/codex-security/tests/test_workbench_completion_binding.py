@@ -517,7 +517,7 @@ def test_completion_binds_diff_snapshot_digest(
         expected = f"codex-security-snapshot/v1:sha256:{digest}"
     sealed_manifest = json.loads(manifest_path.read_text())
     assert sealed_manifest["scan"]["target"]["snapshotDigest"] == expected
-    assert sealed_manifest["scan"]["sealedAt"]
+    assert sealed_manifest["scan"]["artifacts"]
     sealed_artifacts = _sealed_artifacts(scan_dir)
     for _ in range(2):
         completed = scan_command(state_dir, "complete-scan", scan_id)
@@ -650,7 +650,7 @@ def test_cli_scan_completes_when_draft_omits_registered_target(
         assert target["snapshotDigest"] == registered_target["requiredSnapshotDigest"]
     if target_kind != "directory_snapshot":
         assert target["revision"] == registered["targetRevision"]
-    assert manifest["scan"]["sealedAt"]
+    assert manifest["scan"]["artifacts"]
     assert (scan_dir / "report.md").is_file()
 
 
@@ -692,7 +692,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
     assert coverage["includePaths"] == expected_scope["includePaths"]
     assert coverage["excludePaths"] == expected_scope["excludePaths"]
     assert coverage["mode"] == "scoped_path"
-    assert manifest["scan"]["sealedAt"]
+    assert manifest["scan"]["artifacts"]
     assert (scan_dir / "report.md").is_file()
 
 
@@ -707,7 +707,7 @@ def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: P
 
     assert prepared["scan"]["progress"]["status"] == "running"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    assert manifest["scan"]["sealedAt"]
+    assert manifest["scan"]["artifacts"]
     assert (scan_dir / "report.md").is_file()
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute(
@@ -1122,7 +1122,7 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     }
     assert sealed_manifest["scan"]["startedAt"] == stored_started_at
     assert sealed_manifest["scan"]["completedAt"] == stored_completed_at
-    assert sealed_manifest["scan"]["sealedAt"] == stored_completed_at
+    assert sealed_manifest["scan"]["completedAt"] == stored_completed_at
     assert "coverageRef" not in sealed_manifest["scan"]
     assert not (scan_dir / "coverage.json").exists()
     assert sealed_manifest["scan"]["findingsRef"] == "findings.json"
@@ -1740,7 +1740,7 @@ def test_completion_retry_preserves_missing_writeup_warning(tmp_path: Path, mode
     assert "completion commit failed" in rejected["stderr"]
     pending = get_scan(state_dir, scan_id)["scan"]
     assert pending["progress"]["status"] == "running"
-    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["artifacts"]
     assert "writeup" not in json.loads(path.read_text())["findings"][0]
     sealed_bytes = {
         name: (scan_dir / name).read_bytes()

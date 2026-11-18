@@ -58,7 +58,6 @@ async function writeCompletedScan(env) {
   );
   manifest.scan.id = env.CODEX_SECURITY_SCAN_ID;
   manifest.scan.producer.version = pluginManifest.version;
-  delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   manifest.scan.target = {
     kind: env.CODEX_SECURITY_TARGET_KIND,

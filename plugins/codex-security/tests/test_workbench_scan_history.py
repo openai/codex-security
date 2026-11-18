@@ -366,7 +366,6 @@ def test_get_scan_rejects_unverifiable_legacy_sealed_history_coverage(
             / ("coverage.json" if corruption == "missing-coverage" else "scan-manifest.json")
         ).unlink()
     elif corruption == "unsealed":
-        del manifest["scan"]["sealedAt"]
         del manifest["scan"]["artifacts"]
         manifest_path.write_text(json.dumps(manifest))
     elif corruption == "owner":

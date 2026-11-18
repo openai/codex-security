@@ -9,7 +9,6 @@ type CompletedResult = {
   manifest: {
     scan: {
       status: string;
-      sealedAt: string;
       mode: string;
       scope: { includePaths: string[]; excludePaths: string[] };
       artifacts: unknown[];
@@ -1023,7 +1022,7 @@ async function testSemanticScanDraftCompletion(
     );
     assert.equal(results.scanId, scanId);
     assert.equal(results.manifest.scan.status, "completed");
-    assert.ok(results.manifest.scan.sealedAt);
+    assert.equal("sealedAt" in results.manifest.scan, false);
     assert.ok(results.manifest.scan.artifacts.length > 0);
     assert.equal(results.findings.findings.length, 1);
     const savedFinding = results.findings.findings[0];

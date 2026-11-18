@@ -180,7 +180,7 @@ def threat_model_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     scan = _require_dict(manifest, "scan", "manifest")
     target = _require_dict(scan, "target", "manifest.scan") if "target" in scan else {}
     status = scan.get("status")
-    if status == "completed" and not scan.get("sealedAt"):
+    if status == "completed" and not manifest_is_sealed(scan):
         status = "draft"
     return {
         "source": "scan",
@@ -190,7 +190,7 @@ def threat_model_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
         "snapshotDigest": target.get("snapshotDigest"),
         "scanScope": scan.get("scope"),
         "status": status,
-        "provisional": scan.get("status") != "completed" or not scan.get("sealedAt"),
+        "provisional": status != "completed",
     }
 
 
@@ -1989,10 +1989,10 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     for key in ("id", "startedAt", "completedAt"):
         _require_str(scan, key, "manifest.scan")
-    if "sealedAt" in scan or not scan.get("artifacts"):
-        _require_str(scan, "sealedAt", "manifest.scan")
     if scan.get("status") not in {"completed", "failed", "canceled", "interrupted"}:
         raise ContractError("manifest.scan.status: expected a terminal scan outcome")
+    if scan["status"] == "completed" and scan.get("complete") is False:
+        raise ContractError("manifest.scan: cannot validate an incomplete scan as completed")
     producer = _require_dict(scan, "producer", "manifest.scan")
     _require_str(producer, "name", "manifest.scan.producer")
     _require_str(producer, "version", "manifest.scan.producer")
@@ -2733,18 +2733,9 @@ def _validate_existing_seal(
     *,
     artifact_contents: dict[str, bytes] | None = None,
 ) -> None:
-    sealed_at = scan.get("sealedAt")
     artifacts = scan.get("artifacts")
-    if sealed_at is None and artifacts is None:
+    if artifacts is None:
         return
-    if (
-        "sealedAt" not in scan
-        and scan.get("complete") is False
-        and scan.get("status") == "completed"
-    ):
-        raise ContractError("manifest.scan: cannot recover a seal timestamp for an incomplete scan")
-    if "sealedAt" in scan and sealed_at != scan.get("completedAt"):
-        raise ContractError("manifest.scan.sealedAt: must match completedAt")
     if not isinstance(artifacts, list) or not artifacts:
         raise ContractError("manifest.scan.artifacts: sealed manifest requires artifact records")
     artifact_collision_keys: set[str] = set()
@@ -2764,10 +2755,6 @@ def _validate_existing_seal(
                 reason="artifact_digest_mismatch",
                 location=path,
             )
-    # Older or incomplete envelopes may omit this copy of completedAt. Preserve
-    # the original bytes and expose it only after verifying the recorded seal.
-    if "sealedAt" not in scan:
-        scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
 
 
 def _read_scan_artifacts(
@@ -2803,7 +2790,7 @@ def _read_sealed_scan(
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     scan = _require_dict(manifest, "scan", "manifest")
     _validate_contract_refs(scan)
-    if not manifest_is_sealed(scan) or scan.get("artifacts") is None:
+    if not manifest_is_sealed(scan):
         raise ContractError(f"manifest.scan: {required_for} requires a sealed scan")
     findings, coverage, findings_bytes = _read_sealed_artifacts(scan_dir, scan)
     _validate_manifest(manifest)
@@ -3123,8 +3110,8 @@ class PreparedScanFinalization(NamedTuple):
 
 
 def manifest_is_sealed(scan: dict[str, Any]) -> bool:
-    """Return whether the manifest records a seal time or sealed artifacts."""
-    return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
+    """Return whether the manifest claims an artifact index that must be verified."""
+    return scan.get("artifacts") not in (None, [])
 
 
 def _prepare_scan_finalization(
@@ -3149,7 +3136,7 @@ def _prepare_scan_finalization(
         else _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     )
     scan = _require_dict(manifest, "scan", "manifest")
-    if scan.get("sealedAt") is None and scan.get("artifacts") == []:
+    if scan.get("artifacts") == []:
         del scan["artifacts"]
     was_sealed = manifest_is_sealed(scan)
     if (
@@ -3161,6 +3148,8 @@ def _prepare_scan_finalization(
     ):
         scan["coverageRef"] = "coverage.json"
     if not was_sealed:
+        # Fresh publication drops obsolete metadata copied from an older input.
+        scan.pop("sealedAt", None)
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
     if draft_documents is None:
@@ -3196,7 +3185,6 @@ def _prepare_scan_finalization(
             f"coverage.mode: must match selected scan mode {expected_coverage_mode}"
         )
     _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
-    scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
     findings_for_validation = (
