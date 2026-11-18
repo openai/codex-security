@@ -121,7 +121,7 @@ import {
 } from "./external-findings.js";
 import {
   canonicalNumber,
-  SCANNER_IMPORT_MEDIA_TYPE,
+  scannerImportMediaType,
   importResponseMediaType,
   cloudRepositoryUrlKey,
   validateImportRequest,
@@ -1167,6 +1167,7 @@ async function preparePublicationInput(
     (() => readCloudCredentials(environment, dependencies.signal))
   )();
   let canStartJob = false;
+  const scannerMedia = scannerImportMediaType(options.provider);
   const legacyRepository = ["wiz", "endor", "snyk"].includes(options.provider);
   const legacyUnversionedJob =
     legacyRepository ||
@@ -1188,8 +1189,8 @@ async function preparePublicationInput(
     const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
     const repositoryCatalog = endpoint.startsWith("/repositories?");
     const accept = repositoryCatalog
-      ? `${SCANNER_IMPORT_MEDIA_TYPE}, application/json;q=0.9`
-      : (importMedia ?? SCANNER_IMPORT_MEDIA_TYPE);
+      ? `${scannerMedia}, application/json;q=0.9`
+      : (importMedia ?? scannerMedia);
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${cloudApiUrl}${endpoint}`,
       {
@@ -1247,7 +1248,7 @@ async function preparePublicationInput(
         if (declaredScope !== null && declaredScope !== scope) scope = null;
       }
       if (
-        (media !== SCANNER_IMPORT_MEDIA_TYPE && media !== "application/json") ||
+        (media !== scannerMedia && media !== "application/json") ||
         (scope !== "personal" && scope !== "workspace") ||
         (importScope !== undefined &&
           (scope !== importScope || media !== importMedia))
@@ -1269,7 +1270,7 @@ async function preparePublicationInput(
       )
         canStartJob = false;
     } else if (
-      importMedia === SCANNER_IMPORT_MEDIA_TYPE &&
+      importMedia === scannerMedia &&
       importResponseMediaType(response) !== importMedia
     ) {
       throw new CodexSecurityError(
@@ -2099,7 +2100,7 @@ async function preparePublicationInput(
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
                 apiVersion:
-                  importMedia === SCANNER_IMPORT_MEDIA_TYPE
+                  importMedia === scannerMedia
                     ? "current"
                     : (checkpoint.jobApiVersion ?? 1),
               },

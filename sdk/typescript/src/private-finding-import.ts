@@ -9,6 +9,8 @@ import {
 import type { ExternalFinding } from "./external-findings.js";
 import {
   SCANNER_IMPORT_MEDIA_TYPE,
+  SCANNER_IMPORT_V2_MEDIA_TYPE,
+  scannerImportMediaType,
   importResponseMediaType,
 } from "./external-import-contract.js";
 import type { ImportSource } from "./external-import-models.js";
@@ -371,8 +373,9 @@ export function privateImportClient(
       );
     }
     if (
-      mediaType === SCANNER_IMPORT_MEDIA_TYPE &&
-      importResponseMediaType(response) !== SCANNER_IMPORT_MEDIA_TYPE
+      (mediaType === SCANNER_IMPORT_MEDIA_TYPE ||
+        mediaType === SCANNER_IMPORT_V2_MEDIA_TYPE) &&
+      importResponseMediaType(response) !== mediaType
     )
       throw new CodexSecurityError(
         "Cloud returned an unexpected media type for the private import job.",
@@ -448,7 +451,7 @@ export function privateImportClient(
       const jobs = prefix + "/finding-imports/jobs";
       const mediaType =
         apiVersion === "current"
-          ? SCANNER_IMPORT_MEDIA_TYPE
+          ? scannerImportMediaType(input.source.provider)
           : "application/json";
       const readJob = (id: string) =>
         request(`${jobs}/${id}`, undefined, mediaType);

@@ -158,6 +158,8 @@ afterEach(async () => {
 });
 const scannerMediaType =
   "application/vnd.openai.codex-security.scanner-imports.v1+json";
+const scannerV2MediaType =
+  "application/vnd.openai.codex-security.scanner-imports.v2+json";
 const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
 const scopeHeader = "Codex-Security-Import-Scope";
 const providerHeader = "Codex-Security-Private-Import-Providers";
@@ -362,7 +364,12 @@ test("ArmorCode rejects generic rows from a different Cloud repository before pu
       ],
     },
   };
-  const f = await fixture(report, sourceRepositoryUrl);
+  const f = await fixture(
+    report,
+    sourceRepositoryUrl,
+    "github",
+    scannerV2MediaType,
+  );
   const selection = {
     ...options,
     provider: "armorcode" as const,
@@ -504,6 +511,7 @@ async function fixture(
   records: unknown = [normalized()],
   repositoryUrl = "https://github.com/example/project",
   repoConnectorId = "github",
+  requestedMedia = scannerMediaType,
 ) {
   const root = await mkdtemp(join(tmpdir(), "external-findings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -542,7 +550,7 @@ async function fixture(
     brokenReadback: false,
     throttle: false,
     catalogReads: 0,
-    catalogMediaType: scannerMediaType,
+    catalogMediaType: requestedMedia,
     catalogHeaders: { [scopeHeader]: "personal" } as Record<string, string>,
     sourceLookups: [] as string[],
     postBudget: Infinity,
@@ -572,7 +580,7 @@ async function fixture(
       if (url.pathname.endsWith("/repositories")) {
         state.catalogReads++;
         expect(incoming.headers.accept).toBe(
-          scannerMediaType + ", application/json;q=0.9",
+          requestedMedia + ", application/json;q=0.9",
         );
         response.setHeader("Content-Type", state.catalogMediaType);
         for (const [name, value] of Object.entries(state.catalogHeaders))
@@ -1577,7 +1585,10 @@ async function privateUploadFixture(
   provider: FindingImportRequest["source"]["provider"],
   repositoryUrl?: string,
 ) {
-  const f = await fixture(raw, repositoryUrl);
+  const expectedMedia = ["armorcode", "crowdstrike"].includes(provider)
+    ? scannerV2MediaType
+    : scannerMediaType;
+  const f = await fixture(raw, repositoryUrl, "github", expectedMedia);
   const settings = { ...options, provider };
   f.state.catalogHeaders = {
     [scopeHeader]: "workspace",
@@ -1609,10 +1620,14 @@ async function privateUploadFixture(
       if (pathname === "/backend-api/aardvark/finding-imports/jobs") {
         expect(init.method).toBe("POST");
         const job = JSON.parse(String(init.body));
+        expect(new Headers(init.headers).get("accept")).toBe(expectedMedia);
+        expect(new Headers(init.headers).get("content-type")).toBe(
+          expectedMedia,
+        );
         jobs.push(job);
         return Response.json(
           privateJobReceipt(job, "import_" + "b".repeat(32)),
-          { headers: { "Content-Type": scannerMediaType } },
+          { headers: { "Content-Type": expectedMedia } },
         );
       }
       if (pathname.endsWith("/finding-imports/files")) {
@@ -1676,9 +1691,37 @@ test("Tenable SDK retry publishes the approved file selection with the native oc
   });
 });
 
+test("a previous scanner representation cannot admit ArmorCode", async () => {
+  const { f, deps, uploads, jobs } = await privateUploadFixture(
+    readerReports.armorcode,
+    "armorcode",
+    exampleRepository,
+  );
+  f.state.catalogMediaType = scannerMediaType;
+  await expect(
+    prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider: "armorcode",
+        sourceRepositoryUrl: exampleRepository,
+      },
+      deps,
+    ),
+  ).rejects.toThrow(/representation/iu);
+  expect(uploads).toHaveLength(0);
+  expect(jobs).toHaveLength(0);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("selected CrowdStrike findings use the saved checkout and validate the Cloud destination", async () => {
   const report = { ...crowdstrikeReport, rule_detections: [crowdstrikeRule] };
-  const cloud = await fixture(report, exampleRepository);
+  const cloud = await fixture(
+    report,
+    exampleRepository,
+    "github",
+    scannerV2MediaType,
+  );
   await using local = await storedPublicationFixture(cloud);
   const { repository, deps } = local;
   await mkdir(join(repository, "infra", "net"), { recursive: true });
