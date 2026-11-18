@@ -6,6 +6,7 @@ import {
   coordinatorFixture,
   startCoordinator,
   DeepScanCoordinatorRegistry,
+  DeepScanRemoteCoordinator,
   eventually,
   FakeExecutor,
   FakeStore,
@@ -48,7 +49,9 @@ export async function testDeepScanLifecycle(context: TestContext) {
     plainParentDetachKeepsScanRunning,
     lateWorkerCompletionCannotOverwriteParentRefusalFailure,
     parentTurnRefusalDuringPublicationFailsScan,
-    parentTurnRefusalDuringFinishFailsScan,
+    parentTurnRefusalAfterFinishCommitKeepsCommittedSuccess,
+    parentTurnRefusalWhenFinishThrowsFailsScan,
+    parentTurnRefusalAfterLostFinishResponseKeepsCommittedSuccess,
     canceledPublicationWaitsForHeartbeat,
     delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
@@ -381,7 +384,7 @@ export async function testDeepScanLifecycle(context: TestContext) {
     await terminal;
   }
 
-  async function parentTurnRefusalDuringFinishFailsScan() {
+  async function parentTurnRefusalAfterFinishCommitKeepsCommittedSuccess() {
     const config = {
       workers: 1,
       subagents: 0,
@@ -390,9 +393,13 @@ export async function testDeepScanLifecycle(context: TestContext) {
     };
     const fixture = await fixtureRun(config);
     const store = new FakeStore(fixture.run);
+    // The real Workbench commits success inside finish() and only then
+    // returns, so gate the finish response after that commit: the refusal
+    // arrives while the response is still in flight.
+    store.commitFinishBeforeGate = true;
     store.finishGate = Promise.withResolvers<void>();
     const executor = new FakeExecutor({
-      discoveryCandidateId: "276-finish",
+      discoveryCandidateId: "276-finish-commit",
     });
     const registry = new DeepScanCoordinatorRegistry();
     const coordinator = registry.start({
@@ -408,8 +415,83 @@ export async function testDeepScanLifecycle(context: TestContext) {
       const waiterController = new AbortController();
       const waiter = coordinator.wait(waiterController.signal);
       void waiter.catch(() => {});
-      // The scan reaches store.finish; the refusal arrives while the
-      // finish persistence is still in flight.
+      // The scan reaches store.finish and the commit lands before the
+      // refusal arrives.
+      await eventually(() => store.run.status === "succeeded");
+      assert.ok(store.run.manifestPath);
+      waiterController.abort(parentTurnRefusal);
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the abort"),
+        (error: unknown) => error,
+      );
+      assert.equal(knownPolicyRefusalFromAbort(waiterError), parentTurnRefusal);
+      assert.equal(coordinator.failOnParentRefusal(parentTurnRefusal), true);
+    } finally {
+      store.finishGate.resolve();
+    }
+    const stopped = await terminal;
+    // Committed success stays authoritative: no failure write is accepted
+    // after the commit, so the local result, the persisted result, and a
+    // later rejoin all read succeeded with the committed manifest.
+    assert.equal(stopped.status, "succeeded");
+    assert.equal(stopped.error, undefined);
+    assert.equal(stopped.manifestPath, store.run.manifestPath);
+    assert.deepEqual(store.failureMessages, []);
+    assert.equal(store.finishCalls.length, 1);
+    assert.equal(store.iterations.length, 1);
+    const persisted = await store.get(fixture.run.scanId, "fixture-owner");
+    assert.equal(persisted.status, "succeeded");
+    assert.equal(persisted.manifestPath, store.run.manifestPath);
+    assert.equal(persisted.error, undefined);
+    const rejoined = new DeepScanRemoteCoordinator({
+      run: persisted,
+      registry: new DeepScanCoordinatorRegistry(),
+      options: {
+        store,
+        executor,
+        pluginRoot: fixture.pluginRoot,
+        threadId: "fixture-owner",
+      },
+    });
+    const rejoinedTerminal = await rejoined.wait(undefined, 5_000);
+    assert.equal(rejoinedTerminal?.status, "succeeded");
+    assert.equal(rejoinedTerminal?.manifestPath, store.run.manifestPath);
+    assert.equal(rejoinedTerminal?.error, undefined);
+    registry.shutdown("fixture cleanup");
+    await terminal;
+  }
+
+  async function parentTurnRefusalWhenFinishThrowsFailsScan() {
+    const config = {
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 1,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    // Finish throws before committing anything, so the refusal can still
+    // fail the scan: this is the contrast to a refusal that arrives after
+    // the finish commit.
+    store.failFinish = true;
+    store.finishGate = Promise.withResolvers<void>();
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-finish-throws",
+    });
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
       await eventually(() => store.finishCalls.length === 1);
       waiterController.abort(parentTurnRefusal);
       const waiterError = await waiter.then(
@@ -427,6 +509,68 @@ export async function testDeepScanLifecycle(context: TestContext) {
     assert.deepEqual(store.failureMessages, [parentTurnRefusal]);
     assert.equal(store.finishCalls.length, 1);
     assert.equal(store.iterations.length, 1);
+    const persisted = await store.get(fixture.run.scanId, "fixture-owner");
+    assert.equal(persisted.status, "failed");
+    assert.equal(persisted.error, parentTurnRefusal);
+    registry.shutdown("fixture cleanup");
+    await terminal;
+  }
+
+  async function parentTurnRefusalAfterLostFinishResponseKeepsCommittedSuccess() {
+    const config = {
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 1,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    // Finish commits success and then its response is lost, so the
+    // coordinator only learns of the commit through the rejected failure
+    // write and a persisted-state re-read.
+    store.commitFinishBeforeGate = true;
+    store.throwFinishAfterCommit = true;
+    store.finishGate = Promise.withResolvers<void>();
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-finish-lost-response",
+    });
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
+      await eventually(() => store.run.status === "succeeded");
+      assert.ok(store.run.manifestPath);
+      waiterController.abort(parentTurnRefusal);
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the abort"),
+        (error: unknown) => error,
+      );
+      assert.equal(knownPolicyRefusalFromAbort(waiterError), parentTurnRefusal);
+      assert.equal(coordinator.failOnParentRefusal(parentTurnRefusal), true);
+    } finally {
+      store.finishGate.resolve();
+    }
+    const stopped = await terminal;
+    assert.equal(stopped.status, "succeeded");
+    assert.equal(stopped.error, undefined);
+    assert.equal(stopped.manifestPath, store.run.manifestPath);
+    assert.deepEqual(store.failureMessages, []);
+    assert.equal(store.finishCalls.length, 1);
+    assert.equal(store.iterations.length, 1);
+    const persisted = await store.get(fixture.run.scanId, "fixture-owner");
+    assert.equal(persisted.status, "succeeded");
+    assert.equal(persisted.manifestPath, store.run.manifestPath);
+    assert.equal(persisted.error, undefined);
     registry.shutdown("fixture cleanup");
     await terminal;
   }

@@ -374,6 +374,30 @@ export class DeepScanCoordinator {
     return true;
   }
 
+  /**
+   * After a failure write is rejected, re-read persisted state: when the
+   * store already holds committed success, adopt it instead of resolving a
+   * local failure that persistence contradicts. Returns true when committed
+   * success was adopted.
+   */
+  private async adoptCommittedSuccessAfterRejectedFailure(): Promise<boolean> {
+    const threadId = this.options.threadId;
+    if (threadId === undefined) return false;
+    let persisted: DeepScanRunState;
+    try {
+      persisted = await this.options.store.get(this.state.scanId, threadId);
+    } catch {
+      return false;
+    }
+    if (persisted.status !== "succeeded") return false;
+    this.state = persisted;
+    this.log({
+      event: "coordinator_failure_rejected_success_committed",
+      scanId: this.state.scanId,
+    });
+    return true;
+  }
+
   private async run(): Promise<void> {
     try {
       // A replacement coordinator must honor a worker failure committed before handoff.
@@ -437,10 +461,23 @@ export class DeepScanCoordinator {
         omittedWorkerIds: [],
       });
       if (this.canceled || this.externallyFailed) return;
-      // The same refusal can land while store.finish is persisting. The
-      // failure below supersedes the success that persistence just wrote.
-      if (this.parentRefusalFailure !== undefined)
-        throw new DeepScanNonRetryableError(this.parentRefusalFailure);
+      // A parent-turn refusal can land while store.finish is persisting.
+      // When finish returns a committed success, that success stays
+      // authoritative: the Workbench rejects a failure write once success
+      // is committed with a manifest, so throwing here would resolve a
+      // local failure that persistence contradicts. Only fail the scan when
+      // finish did not commit success.
+      if (this.parentRefusalFailure !== undefined) {
+        if (completed.status === "succeeded") {
+          this.log({
+            event: "coordinator_parent_refusal_after_success_commit",
+            scanId: this.state.scanId,
+            reason: this.parentRefusalFailure,
+          });
+        } else {
+          throw new DeepScanNonRetryableError(this.parentRefusalFailure);
+        }
+      }
       this.state = completed;
       this.log({
         event: "coordinator_terminal",
@@ -496,6 +533,11 @@ export class DeepScanCoordinator {
           ))
         )
           return;
+        // A rejected failure write can mean success was already committed
+        // (for example, finish committed and then its response was lost).
+        // Never resolve a local failure when persistence holds committed
+        // success.
+        if (await this.adoptCommittedSuccessAfterRejectedFailure()) return;
         this.state = {
           ...this.state,
           status: "failed",
