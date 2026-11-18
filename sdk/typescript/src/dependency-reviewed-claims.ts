@@ -3,6 +3,7 @@ import {
   claimInputs,
   premiseKey,
   type Premise,
+  type PremiseRef,
 } from "./dependency-review-queue.js";
 import { z } from "zod";
 import {
@@ -26,14 +27,12 @@ import {
 } from "./dependency-evidence-sources.js";
 import { dependencyPremiseRefSchema } from "./dependency-review-queue.js";
 import {
-  dependencyEvidencePayload,
   bindReceiptSelections,
   dependencyReceiptSelectionSchema,
   selectedReceiptReference,
   selectedReceiptKey,
   selectedReceiptValue,
   type DependencyReceiptSelection,
-  selectDependencyEvidenceField,
 } from "./dependency-graph-evidence.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
@@ -391,6 +390,33 @@ function verifiedLocation(
   return linked ? proposed : scope.location;
 }
 
+export type DecidingPremiseEvidence = (
+  ref: PremiseRef,
+) => DependencyReviewReference[];
+
+function coversReference(
+  proof: DependencyReviewReference,
+  ref: DependencyReviewReference,
+  revision: string,
+) {
+  if (ref.kind === "source")
+    return (
+      proof.kind === "source" &&
+      proof.path === ref.path &&
+      (proof.commit ?? revision) === (ref.commit ?? revision) &&
+      proof.startLine <= ref.startLine &&
+      ref.startLine <= ref.endLine &&
+      ref.endLine <= proof.endLine
+    );
+  return (
+    proof.kind === "receipt" &&
+    proof.receiptId === ref.receiptId &&
+    proof.originalPayloadSha256 === ref.originalPayloadSha256 &&
+    dependencyRecordHash(proof.selection ?? null) ===
+      dependencyRecordHash(ref.selection ?? null)
+  );
+}
+
 export async function verifyProposedUse(
   directory: string,
   scope: Scope,
@@ -399,6 +425,7 @@ export async function verifyProposedUse(
   affectedVersion?: boolean,
   records: readonly DependencyEvidenceRecord[] = [],
   callerScope?: string,
+  decidingPremiseEvidence?: DecidingPremiseEvidence,
 ) {
   const revision = scope.discovery.revision;
   const component = use.component ?? scope.component;
@@ -548,57 +575,88 @@ export async function verifyProposedUse(
   const selections: DependencyReceiptSelection[] = [
     ...(use.receiptSelections ?? []),
   ];
-  function originalReference(ref: DependencyReviewReference): boolean {
-    if (ref.kind === "source")
-      return evidence.some(
-        (source) =>
-          source.path === ref.path &&
-          source.commit === (ref.commit ?? revision) &&
-          source.startLine <= ref.startLine &&
-          ref.startLine <= ref.endLine &&
-          ref.endLine <= source.endLine,
-      );
+  const recordById = new Map(records.map((r) => [r.sha256, r]));
+  const details: { field: string; ref: DependencyReviewReference }[] = [];
+  function register(
+    field: string,
+    refs: readonly DependencyReviewReference[] | undefined,
+  ) {
+    refs?.forEach((ref, i) =>
+      details.push({ field: field + ".evidence[" + i + "]", ref }),
+    );
+  }
+  use.services?.forEach((v, i) => register("services[" + i + "]", v.evidence));
+  use.inspections?.forEach((v, i) =>
+    register("inspections[" + i + "]", v.evidence),
+  );
+  use.tags?.forEach((v, i) => register("tags[" + i + "]", v.evidence));
+  register("inputSource", use.inputSource?.evidence);
+  register("runtimeContext", use.runtimeContext?.evidence);
+  use.openConditions?.forEach((v, i) =>
+    register("openConditions[" + i + "].assignee", v.assignee?.evidence),
+  );
+  // Existing callers can bind a row from an observation by citing its original response and selector.
+  for (const { ref } of details)
     if (
-      !observations.some(
+      ref.kind === "receipt" &&
+      ref.selection &&
+      observations.some(
         (r) =>
           r.sha256 === ref.receiptId &&
           r.originalPayloadSha256 === ref.originalPayloadSha256,
-      )
+      ) &&
+      !use.receiptSelections?.some((row) => row.receiptId === ref.receiptId)
     )
-      return false;
-    if (!ref.selection) return true;
-    selections.push({ receiptId: ref.receiptId, ...ref.selection });
-    const original = records.find((r) => r.sha256 === ref.receiptId)!;
-    const payload = dependencyEvidencePayload(
-      original,
-      ref.selection.textBlock,
-    );
-    return (
-      selectDependencyEvidenceField(payload, ref.selection.record) !== undefined
-    );
-  }
-  const checkReferences = (
-    refs: readonly DependencyReviewReference[] | undefined,
-  ) => {
-    if (refs?.some((ref) => !originalReference(ref)))
-      throw new CodexSecurityError(
-        "Reviewed finding details must cite source ranges or recorded receipts belonging to this use.",
-      );
-  };
-  for (const attached of [
-    ...(use.services ?? []),
-    ...(use.inspections ?? []),
-    ...(use.tags ?? []),
-    use.inputSource,
-    use.runtimeContext,
-  ])
-    checkReferences(attached?.evidence);
-  for (const condition of use.openConditions ?? [])
-    checkReferences(condition.assignee?.evidence);
-  const recordById = new Map(records.map((r) => [r.sha256, r]));
+      selections.push({ receiptId: ref.receiptId, ...ref.selection });
   const boundReceipts = bindReceiptSelections(selections, (id) =>
     recordById.get(id),
   );
+  const candidates: { key: string; ref: DependencyReviewReference }[] = [];
+  if (details.length) {
+    for (const range of evidence)
+      candidates.push({
+        key: dependencyRecordHash(range),
+        ref: {
+          kind: "source",
+          path: range.path,
+          commit: range.commit,
+          startLine: range.startLine,
+          endLine: range.endLine,
+        },
+      });
+    for (const row of boundReceipts)
+      candidates.push({
+        key: selectedReceiptKey(row),
+        ref: selectedReceiptReference(row),
+      });
+    for (const obs of observations)
+      if (!boundReceipts.some((row) => row.receiptId === obs.sha256))
+        candidates.push({
+          key: obs.sha256,
+          ref: {
+            kind: "receipt",
+            receiptId: obs.sha256,
+            originalPayloadSha256: obs.originalPayloadSha256,
+          },
+        });
+    for (const premise of use.premises ?? [])
+      for (const ref of decidingPremiseEvidence?.(premise) ?? [])
+        candidates.push({ key: premiseKey(premise), ref });
+  }
+  const findingEvidence = details.map(({ field, ref }) => {
+    const keys = candidates
+      .filter((c) => coversReference(c.ref, ref, revision))
+      .map((c) => c.key);
+    if (!keys.length)
+      throw new CodexSecurityError(
+        "Unbound finding evidence at " +
+          field +
+          ": " +
+          JSON.stringify(ref) +
+          ". Cite a contained range at its Git revision, the exact selected original receipt and payload hash, or an approved premise that selected that evidence.",
+      );
+    return { field, keys: [...new Set(keys)] };
+  });
   const linkedObservations = observations.map((observation) => {
     const candidates = boundReceipts.filter(
       (row) => row.receiptId === observation.sha256,
@@ -725,6 +783,7 @@ export async function verifyProposedUse(
     evidence,
     observations: linkedObservations,
     ...(boundReceipts.length && { boundReceipts }),
+    ...(findingEvidence.length && { findingEvidence }),
     location,
     component,
     revision,
@@ -786,6 +845,16 @@ export function approveDependencyClaims(
             claim.id,
         );
       const use = claim.value.kind === "use" ? claim.value.use : undefined;
+      const unselected = use?.findingEvidence?.find(
+        (binding) =>
+          !binding.keys.some((key) => decision.evidenceKeys.includes(key)),
+      );
+      if (decision.approved && unselected)
+        throw new DependencyReviewRejection(
+          "The reviewer must select the original evidence or approved premise for " +
+            unselected.field +
+            ".",
+        );
       if (
         decision.approved &&
         use?.verdict === "exploitable" &&
@@ -858,7 +927,9 @@ export function reportedUse(
           !evidenceKeys || evidenceKeys.includes(selectedReceiptKey(row)),
       )
       .map(selectedReceiptReference),
-    ...premiseEvidence,
+    ...new Map(
+      premiseEvidence.map((ref) => [dependencyRecordHash(ref), ref]),
+    ).values(),
   ];
   return {
     location: use.location,

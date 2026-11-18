@@ -2,17 +2,13 @@ import { Cli, z } from "incur";
 import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
 import { dependencyCheckOutputSchema } from "./dependency-reachability.js";
-import { withDependencyCheckOutput } from "./dependency-check-output.js";
 import {
+  withDependencyCheckOutput,
   DependencyInvestigationBlockedError,
-  runReviewedDependencyCheck,
-} from "./dependency-reviewed-check.js";
+} from "./dependency-check-output.js";
 import type { DependencyCliContext } from "./dependency-stack-cli.js";
 import { stackInvestigationReportSchema } from "./dependency-stack-assessment.js";
-import {
-  runLocalStackInvestigation,
-  stackInvestigationPrompt,
-} from "./dependency-stack-launcher.js";
+import type { runLocalStackInvestigation } from "./dependency-stack-launcher.js";
 import { CodexSecurityError } from "./errors.js";
 import { readProjectConfig } from "./project-config.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
@@ -176,6 +172,8 @@ export function registerDependencyCheck(
             },
             async (emit) => {
               if (sources && sinks && stacks) {
+                const { runLocalStackInvestigation, stackInvestigationPrompt } =
+                  await import("./dependency-stack-launcher.js");
                 emit("investigation");
                 return runLocalStackInvestigation({
                   cve: args.subject.toUpperCase(),
@@ -199,6 +197,8 @@ export function registerDependencyCheck(
               const project = config
                 ? await readProjectConfig(config, cwd)
                 : undefined;
+              const { runReviewedDependencyCheck } =
+                await import("./dependency-reviewed-check.js");
               const reviewed = await runReviewedDependencyCheck(
                 {
                   directory: repository,

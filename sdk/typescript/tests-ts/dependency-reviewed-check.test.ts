@@ -1242,6 +1242,33 @@ test("an investigator tool cannot substitute for a running deployment and proven
   };
   const verify = (u: Proposal["uses"][number]) =>
     verifyProposedUse(f.path, scope, u, signal, true, [rec, records[1]!]);
+  // Findings may cite an explicitly bound item receipt even when it did not
+  // establish runtime or access and is absent from the observations array.
+  const configured = {
+    ...f.use,
+    services: associated.services,
+    receiptSelections: [{ receiptId: rec.sha256, ...ref.selection }],
+  };
+  expect((await verify(configured)).services).toEqual(associated.services);
+  await expect(
+    verify({
+      ...configured,
+      receiptSelections: [
+        { receiptId: rec.sha256, textBlock: null, record: ["workloads", 1] },
+      ],
+    }),
+  ).rejects.toThrow("services[0].evidence[0]");
+  await expect(
+    verify({
+      ...configured,
+      services: [
+        {
+          ...associated.services[0]!,
+          evidence: [{ ...ref, originalPayloadSha256: "0".repeat(64) }],
+        },
+      ],
+    }),
+  ).rejects.toThrow("services[0].evidence[0]");
   const verified = await verify(associated);
   expect(verified.services).toEqual(associated.services);
   const store = new DependencyAttemptStore(":memory:");
@@ -1274,6 +1301,13 @@ test("an investigator tool cannot substitute for a running deployment and proven
         [{ ...decision, evidenceKeys: [keys[0]!] }],
       ),
     ).toThrow("running build and caller access");
+    expect(() =>
+      approveDependencyClaims(
+        store,
+        [claim],
+        [{ ...decision, evidenceKeys: [records[1]!.sha256] }],
+      ),
+    ).toThrow("services[0].evidence[0]");
     approveDependencyClaims(
       store,
       [claim],
@@ -1950,8 +1984,46 @@ test("a reviewed premise retains independently selected rows of the historical m
           }[];
           expect(approved!.state).toBe("approved");
           const { id, revision, hash } = approved!;
+          const use = { ...f.use, premises: [{ id, revision, hash }] };
+          const tag = (index: number) => ({
+            name: "writer",
+            evidence: [
+              {
+                kind: "receipt" as const,
+                receiptId: captured.sha256,
+                originalPayloadSha256: dependencyRecordHash(captured.result),
+                selection: { textBlock: 0, record: ["frames", index] },
+              },
+            ],
+          });
+          await expect(
+            tools.call("submit_dependency_assessments", {
+              assessments: [
+                {
+                  id: "adjacent",
+                  expectedRevision: 0,
+                  use: { ...use, tags: [tag(2)] },
+                },
+              ],
+            }),
+          ).rejects.toThrow("tags[0].evidence[0]");
+          await expect(
+            tools.call("submit_dependency_assessments", {
+              assessments: [
+                {
+                  id: "stale",
+                  expectedRevision: 0,
+                  use: {
+                    ...use,
+                    premises: [{ id, revision, hash: "0".repeat(64) }],
+                    tags: [tag(1)],
+                  },
+                },
+              ],
+            }),
+          ).rejects.toThrow("currently approved premise");
           return JSON.stringify({
-            uses: [{ ...f.use, premises: [{ id, revision, hash }] }],
+            uses: [{ ...use, tags: [tag(1)] }],
             limitations: [],
           });
         }
@@ -2006,6 +2078,7 @@ test("a reviewed premise retains independently selected rows of the historical m
         "aef67dc0480fc12d9500fe1377a828a759fde9662a75d2908a65a8d36a6aab08",
       selection,
     };
+    if (index === 1) expect(report.uses[0]!.tags?.[0]?.evidence).toEqual([ref]);
     expect(report.uses[0]!.decidingEvidence).toContainEqual(ref);
     expect(report.claimEvidence.receipts[key]).toMatchObject({
       key: key.slice(8),

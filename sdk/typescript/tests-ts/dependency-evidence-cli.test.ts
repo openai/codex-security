@@ -3,6 +3,8 @@ import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
+import { readDependencyCheckOutput } from "../src/dependency-reachability.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -12,13 +14,21 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd: repo.path });
   git("init", "-q");
+  await writeFile(
+    join(repo.path, "caller.js"),
+    "export const decode = value => value;\n",
+  );
+  await writeFile(
+    join(repo.path, "package.json"),
+    JSON.stringify({ name: "fixture", version: "1.0.0" }),
+  );
+  git("add", "caller.js", "package.json");
   git(
     "-c",
     "user.name=Fixture",
     "-c",
     "user.email=fixture@example.invalid",
     "commit",
-    "--allow-empty",
     "-qm",
     "fixture",
   );
@@ -42,6 +52,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     }),
   );
   const result = { content: [{ type: "text", text: "Build unavailable." }] };
+  const wireReceipts = new Map<string, Record<string, unknown>>();
   let reviewed = false;
   const stdout = capture();
   const stderr = capture();
@@ -159,6 +170,58 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
           expect(args.find((s) => s.startsWith("mcp_servers="))).toContain(
             "read_build",
           );
+          // A source trace with no structural rule returns incomplete coverage.
+          // The plugin's in-memory partial scope has optional undefined properties.
+          for (const [name, arguments_] of [
+            [
+              "trace_codex_security_code",
+              {
+                package: "sample",
+                files: ["caller.js"],
+                symbol: "decode",
+                max_hops: 0,
+                time_budget_ms: 1000,
+              },
+            ],
+            [
+              "trace_codex_security_code",
+              {
+                package: "fixture",
+                files: ["package.json"],
+                max_hops: 0,
+                time_budget_ms: 1000,
+                rules: [
+                  {
+                    id: "fixture",
+                    metadata: JSON.parse(
+                      '{"__proto__":{"observed":true},"labels":[null,false,{"name":"fixture"}]}',
+                    ),
+                  },
+                ],
+              },
+            ],
+            ["query_codex_security_graph", { node: "caller.js" }],
+          ] as const) {
+            const reply = await call("tools/call", {
+              name,
+              arguments: arguments_,
+            });
+            const value = JSON.parse(reply.content![0]!.text);
+            if (
+              name === "trace_codex_security_code" &&
+              !("rules" in arguments_)
+            ) {
+              expect(value.coverage.complete).toBe(false);
+              expect(value.coverage.partial.length).toBeGreaterThan(0);
+            }
+            const original = {
+              server: "dependency_investigation",
+              tool: name,
+              arguments: arguments_,
+              result: { structuredContent: value },
+            };
+            wireReceipts.set(dependencyRecordHash(original), original);
+          }
           await readSkillCommandOutput(
             (async function* () {
               yield JSON.stringify({
@@ -197,7 +260,13 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   expect(status, stderr.text() || stdout.text()).toBe(0);
   expect(reviewed).toBe(true);
-  expect(JSON.parse(stdout.text()).checks[0].usage).toMatchObject({
+  const report = readDependencyCheckOutput(JSON.parse(stdout.text()));
+  if (!("checks" in report)) throw new Error("Expected a package report.");
+  const check = report.checks[0]!;
+  const receipts = check.claimEvidence!.receipts;
+  for (const [id, row] of wireReceipts)
+    expect(receipts[id]).toEqual({ ...row, sha256: id });
+  expect(check.usage).toMatchObject({
     input_tokens: 12,
     output_tokens: 6,
   });

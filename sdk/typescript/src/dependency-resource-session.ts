@@ -120,6 +120,7 @@ export function createDependencyResourceSession(
   }
 
   return {
+    permissionsMatch: dependencyResourcePermissionsMatch,
     register(id: string) {
       root = id;
     },

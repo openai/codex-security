@@ -10,10 +10,29 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { DependencyInvestigationBlockedError } from "./dependency-reviewed-check.js";
+import type { DependencyPackage } from "./dependency-advisory.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+
+export type BlockedCheck = {
+  status: "blocked";
+  code: "INVESTIGATION_BLOCKED";
+  reason: string;
+};
+export class DependencyInvestigationBlockedError extends CodexSecurityError {
+  constructor(
+    readonly outcome: BlockedCheck & {
+      cve?: string;
+      package?: DependencyPackage;
+      checks?: unknown[];
+      pendingAdvisories?: (string | null)[];
+    },
+    cause: unknown,
+  ) {
+    super(`Dependency investigation blocked: ${outcome.reason}`, { cause });
+  }
+}
 
 async function existing(path: string) {
   return lstat(path).catch((error: NodeJS.ErrnoException) => {

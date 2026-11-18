@@ -5,17 +5,8 @@ import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
-import {
-  createDependencyResourceSession,
-  dependencyResourcePermissionsMatch,
-  type DependencyResourceEvents,
-} from "./dependency-resource-session.js";
-import { createDependencyLinkedResourceCapture } from "./dependency-linked-resources.js";
+import type { DependencyResourceEvents } from "./dependency-resource-session.js";
 import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
-import {
-  createDependencyEvidenceCapture,
-  selectDependencyEvidenceServers,
-} from "./dependency-evidence-sources.js";
 import {
   providerPreflightCommand,
   restoreProviderProfile,
@@ -253,10 +244,6 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./config.js";
-import {
-  startInvestigationTools,
-  investigationServer,
-} from "./dependency-investigation-session.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import { batchScanBudget } from "./batch-cost.js";
 import {
@@ -10690,18 +10677,20 @@ async function runDependencyAgent(
   dependencies: CliDependencies,
   stderr: Writable,
 ): Promise<string> {
-  const bridge = request.investigationTools
-    ? await startInvestigationTools(request.investigationTools)
-    : undefined;
+  if (!request.investigationTools)
+    return executeDependencyAgent(request, dependencies, stderr);
+  const { startInvestigationTools } =
+    await import("./dependency-investigation-session.js");
+  const bridge = await startInvestigationTools(request.investigationTools);
   try {
     return await executeDependencyAgent(
       request,
       dependencies,
       stderr,
-      bridge?.url,
+      bridge.url,
     );
   } finally {
-    await bridge?.close();
+    await bridge.close();
   }
 }
 
@@ -10799,19 +10788,24 @@ async function executeDependencyAgent(
     request.readOnly ? undefined : request.directory,
     deny,
   );
-  const servers = request.onEvidence
-    ? selectDependencyEvidenceServers(
+  const evidence = request.onEvidence
+    ? await import("./dependency-evidence-sources.js")
+    : undefined;
+  const servers = evidence
+    ? evidence.selectDependencyEvidenceServers(
         project?.input.exploitability?.evidence_sources ?? [],
         project?.input.codex?.["mcp_servers"],
       )
     : {};
-  const captureEvidence = createDependencyEvidenceCapture(
+  const captureEvidence = evidence?.createDependencyEvidenceCapture(
     servers,
     request.onEvidenceFailure,
   );
   const linked =
     request.coordinator && request.onEvidence && Object.keys(servers).length
-      ? createDependencyLinkedResourceCapture({
+      ? (
+          await import("./dependency-linked-resources.js")
+        ).createDependencyLinkedResourceCapture({
           servers: { ...servers },
           onEvidence: request.onEvidence,
           onDiagnostic: (message) => {
@@ -10823,7 +10817,7 @@ async function executeDependencyAgent(
   const linkedEvidence: DependencyResourceEvents | undefined = linked
     ? {
         async item(event, read, invocation) {
-          const origin = captureEvidence(event);
+          const origin = captureEvidence?.(event);
           if (!origin) return;
           request.onEvidence?.(origin);
           await linked(origin, read, invocation);
@@ -10832,6 +10826,8 @@ async function executeDependencyAgent(
       }
     : undefined;
   if (toolsUrl) {
+    const { investigationServer } =
+      await import("./dependency-evidence-sources.js");
     if (Object.hasOwn(servers, investigationServer))
       throw new ConfigurationError(
         "The project MCP server name conflicts with the built-in investigation tools.",
@@ -10932,7 +10928,7 @@ async function executeDependencyAgent(
             const usage = tokenUsage(event["usage"]);
             if (usage) request.onUsage?.(usage);
           }
-          const record = captureEvidence(event);
+          const record = captureEvidence?.(event);
           if (record) request.onEvidence?.(record);
         },
       }),
@@ -11408,7 +11404,9 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const resources = appServer?.linkedEvidence
-    ? createDependencyResourceSession(appServer.linkedEvidence, send)
+    ? (
+        await import("./dependency-resource-session.js")
+      ).createDependencyResourceSession(appServer.linkedEvidence, send)
     : undefined;
   const startTurn = (): void => {
     const selected = appServer?.cyberAccessProgram;
@@ -11590,10 +11588,7 @@ export async function readSkillCommandOutput(
             appServer.input.end();
             continue;
           }
-          if (
-            resources &&
-            !dependencyResourcePermissionsMatch(config, layers)
-          ) {
+          if (resources && !resources.permissionsMatch(config, layers)) {
             error =
               "Codex did not resolve the requested investigation permission profile.";
             appServer.input.end();

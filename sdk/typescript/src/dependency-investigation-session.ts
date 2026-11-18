@@ -325,7 +325,16 @@ export function createInvestigationSession(options: {
     args: unknown,
     result: Record<string, unknown>,
   ) => {
-    const data = { server: investigationServer, tool, arguments: args, result };
+    // Bundled tools return JS objects in process. Capture the same JSON an MCP
+    // client can receive, before hashing or exposing the response to the ledger.
+    const data: Omit<DependencyEvidenceRecord, "sha256"> = JSON.parse(
+      JSON.stringify({
+        server: investigationServer,
+        tool,
+        arguments: args,
+        result,
+      }),
+    );
     const record = { ...data, sha256: dependencyRecordHash(data) };
     options.record(record);
     return record.sha256;
