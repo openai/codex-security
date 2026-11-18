@@ -162,6 +162,7 @@ import {
   loadContract,
   readScanFile,
   requireScanFile,
+  validatedFileDigests,
   type ScanExpectation,
 } from "./contract.js";
 import {
@@ -3922,6 +3923,35 @@ export class CodexSecurity {
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
+      if (this.#dependencies.hostedScan !== undefined) {
+        const publicationDigests = completion["publicationDigests"];
+        const fileDigests = validatedFileDigests.get(result.manifest);
+        if (
+          !isRecord(publicationDigests) ||
+          typeof publicationDigests["report.md"] !== "string" ||
+          typeof publicationDigests["scan-manifest.json"] !== "string"
+        ) {
+          throw new IncompleteScanError(
+            "The workbench did not validate the published scan bundle.",
+          );
+        }
+        if (
+          fileDigests?.get("scan-manifest.json") !==
+          publicationDigests["scan-manifest.json"]
+        ) {
+          throw new IncompleteScanError(
+            "The sealed scan manifest changed while it was being published.",
+          );
+        }
+        // The hosted receipt checks the report against the bytes validated at completion.
+        validatedFileDigests.set(
+          result.manifest,
+          new Map(fileDigests).set(
+            "report.md",
+            publicationDigests["report.md"],
+          ),
+        );
+      }
       stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];

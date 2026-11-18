@@ -1720,7 +1720,7 @@ def _validate_completion_binding(
     coverage: dict[str, Any],
     completion_binding: dict[str, Any] | None,
 ) -> None:
-    """Verify populated workbench-owned fields before an unsealed draft is written."""
+    """Verify workbench-owned fields against the registered scan and outcome."""
 
     if completion_binding is None:
         return
@@ -1763,6 +1763,27 @@ def path_within_scope(path: str, scope: str) -> bool:
     if candidate.is_absolute() or ".." in candidate.parts:
         return False
     return candidate.is_relative_to(requested)
+
+
+def finding_has_in_scope_location(
+    finding: dict[str, Any],
+    finding_scope: list[tuple[str, bool]] | None,
+    excluded_paths: list[str],
+) -> bool:
+    """Check that at least one finding location belongs to the requested scope."""
+    return any(
+        not any(path_within_scope(location["path"], path) for path in excluded_paths)
+        and (
+            finding_scope is None
+            or any(
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for path, is_file in finding_scope
+            )
+        )
+        for location in finding["locations"]
+    )
 
 
 def _validate_finding(finding: dict[str, Any], context: str) -> None:
@@ -3209,19 +3230,7 @@ def _prepare_scan_finalization(
         scoped_findings = []
         excluded_findings = []
         for finding in findings["findings"]:
-            in_scope = any(
-                not any(path_within_scope(location["path"], path) for path in requested_exclusions)
-                and (
-                    finding_scope is None
-                    or any(
-                        PurePosixPath(location["path"]) == PurePosixPath(path)
-                        if is_file
-                        else path_within_scope(location["path"], path)
-                        for path, is_file in finding_scope
-                    )
-                )
-                for location in finding["locations"]
-            )
+            in_scope = finding_has_in_scope_location(finding, finding_scope, requested_exclusions)
             (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
             label = "Deep scan" if finding_scope is not None else "scan"

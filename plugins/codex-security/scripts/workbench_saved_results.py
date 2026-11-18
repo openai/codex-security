@@ -124,6 +124,10 @@ def refresh_completed_scan(
             expected_coverage_mode=db.expected_coverage_mode(scan),
             projection_warnings=warnings,
         )
+        validated = db.validate_completed_bundle(
+            scan, scan_dir, db.workbench_completion_binding(scan, scan["completed_at"], manifest)
+        )
+        manifest = validated["manifest"]
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
     db.verify_manifest_binding(scan, manifest)
@@ -137,7 +141,13 @@ def refresh_completed_scan(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
                 (json.dumps(warnings), scan["id"]),
             )
-    return db.scan_context(connection, scan["id"])
+    return {
+        **db.scan_context(connection, scan["id"]),
+        "publicationDigests": {
+            "scan-manifest.json": manifest_digest.removeprefix("sha256:"),
+            "report.md": validated["reportSha256"],
+        },
+    }
 
 
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:

@@ -9,6 +9,7 @@ import {
   stat,
   symlink,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
@@ -697,7 +698,12 @@ test("sealed review with follow-up diagnostics remains completed", async () => {
   );
 });
 
-test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
+test.each([
+  "scan-manifest.json",
+  "findings.json",
+  "artifacts/evidence.txt",
+  "report.md",
+])(
   "changed bytes in %s cannot produce a completed hosted receipt",
   async (path) => {
     const original = CodexSecurity.prototype.run;
@@ -876,9 +882,10 @@ test("--host=false leaves a scan preview in CLI mode", async () => {
   expect(JSON.parse(stdout.text()).dryRun).toBe(true);
 });
 
-test.each([false, true])(
-  "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
-  async (cancel) => {
+test.each(["completed", "canceled", "empty report"] as const)(
+  "scan --host reports progress and a terminal result for %s",
+  async (outcome) => {
+    const cancel = outcome === "canceled";
     const input = await fixture();
     if (!cancel) {
       input.reasoningEffort = "synthetic-future-effort";
@@ -940,7 +947,44 @@ test.each([false, true])(
           if (cancel) {
             send(child.stdin, { method: "cancel", params: { id: "run" } });
           } else {
-            await writeDraft(message.params);
+            const request: ScanExecutionRequest = message.params;
+            await writeDraft(request);
+            if (outcome === "empty report") {
+              await runWorkbench(
+                {
+                  python: pythonExecutable()!,
+                  pluginRoot: request.runtime.pluginRoot,
+                  environment: {
+                    ...process.env,
+                    CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+                  },
+                },
+                ["prepare-scan-completion", "--scan-id", request.scanId],
+              );
+              const manifestFile = join(
+                request.runtime.outputDirectory,
+                "scan-manifest.json",
+              );
+              const manifest = await readJson<{
+                scan: {
+                  artifacts: {
+                    mediaType: string;
+                    path: string;
+                    sha256: string;
+                  }[];
+                };
+              }>(manifestFile);
+              await writeFile(
+                join(request.runtime.outputDirectory, "report.md"),
+                "",
+              );
+              manifest.scan.artifacts.push({
+                mediaType: "text/markdown",
+                path: "report.md",
+                sha256: hash("sha256", ""),
+              });
+              await writeJson(manifestFile, manifest);
+            }
             send(child.stdin, {
               id: message.id,
               result: receipt(message.params, {
@@ -961,7 +1005,7 @@ test.each([false, true])(
           });
         }
       }
-      expect(await closed, stderr).toBe(cancel ? 1 : 0);
+      expect(await closed, stderr).toBe(outcome === "completed" ? 0 : 1);
       expect(
         messages.filter((message) => message.method === "execution.run"),
       ).toHaveLength(1);
@@ -975,12 +1019,17 @@ test.each([false, true])(
       expect(response).toMatchObject({
         id: "run",
         result: {
-          status: cancel ? "canceled" : "completed",
+          status: outcome === "empty report" ? "failed" : outcome,
           execution: { sessionId: "fake-host", usage },
         },
       });
       if (cancel) {
         expect(response.result).not.toHaveProperty("severityRubric");
+      } else if (outcome === "empty report") {
+        expect(response.result.error).toContain(
+          "report.md: expected a nonempty report",
+        );
+        expect(response.result.artifacts).toEqual([]);
       } else {
         expect(response.result.severityRubric).toEqual(severityRubric);
         expect(response.result).not.toHaveProperty("ownerSuggestionsError");

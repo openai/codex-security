@@ -39,7 +39,7 @@ type ScanResult = {
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { hash, randomUUID } from "node:crypto";
 import {
   mkdtemp,
   mkdir,
@@ -153,6 +153,61 @@ try {
     testRegisteredScanOwner(shipped));
   await test("shipped: semantic scan draft completion", () =>
     testSemanticScanDraftCompletion(shipped, "shipped"));
+  await test("shipped: an empty sealed report prevents scan completion", async () => {
+    const { repoRoot, environment } = await createScanFixture("empty-report");
+    await writeFile(path.join(repoRoot, "src", "fixture.py"), "pass\n");
+    const client = await startClient(shipped, environment);
+    const call = toolCaller(client, "empty-report");
+    try {
+      const started = requireSuccessfulTool<WorkspaceResult>(
+        await call("start_codex_security_prompt_only_scan", {
+          targetPath: repoRoot,
+          mode: "standard",
+          scope: ".",
+        }),
+      );
+      const { scanId, scanDir } = started.workspace.results;
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", {
+          ...workerDraft([]),
+          scanId,
+        }),
+      );
+      execFileSync(
+        fixturePython,
+        [
+          "-I",
+          "-B",
+          path.join(bundledPluginRoot, "scripts", "workbench_db.py"),
+          "prepare-scan-completion",
+          "--scan-id",
+          scanId,
+        ],
+        { env: { ...process.env, ...environment } },
+      );
+      const manifest = await readJson(scanDir, "scan-manifest.json");
+      await writeFile(path.join(scanDir, "report.md"), "");
+      manifest.scan.artifacts.push({
+        mediaType: "text/markdown",
+        path: "report.md",
+        sha256: hash("sha256", ""),
+      });
+      await writeFile(
+        path.join(scanDir, "scan-manifest.json"),
+        JSON.stringify(manifest, null, 2) + "\n",
+      );
+
+      const result = await call("complete_codex_security_scan", { scanId });
+      requireToolError(
+        result,
+        /report\.md: expected a nonempty report/,
+        "completion rejects the empty report even with a matching seal",
+      );
+      assert.equal(result.structuredContent, undefined);
+    } finally {
+      await client.close();
+    }
+  });
   for (const artifactWriter of [false, true]) {
     await test(`shipped: large ${artifactWriter ? "worker" : "parent"} draft checkpoints`, () =>
       testLargeScanDraftCheckpoints(shipped, "shipped", artifactWriter));
@@ -1007,10 +1062,13 @@ async function testSemanticScanDraftCompletion(
       unit: null,
     });
 
-    const completed = requireSuccessfulTool<ScanResult>(
+    const completed = requireSuccessfulTool<
+      ScanResult & { completed: boolean }
+    >(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
       `${runtimeLabel}: finalize the accepted draft exactly once`,
     );
+    assert.equal(completed.completed, true);
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
 

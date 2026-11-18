@@ -1576,15 +1576,16 @@ export function createCodexSecurityServer(): McpServer {
     async ({ scanId, handoffClaimToken }, extra) => {
       try {
         const threadId = threadIdFromExtra(extra);
-        const completed = await workbench("complete-scan", {
-          scanId,
-          claimToken: handoffClaimToken,
-          threadId,
-          modelThreadId: threadId ?? "",
-          turnId: securityScanTurnId(extra),
-        });
+        const { publicationDigests: _publicationDigests, ...completed } =
+          await workbench("complete-scan", {
+            scanId,
+            claimToken: handoffClaimToken,
+            threadId,
+            modelThreadId: threadId ?? "",
+            turnId: securityScanTurnId(extra),
+          });
         return scanActionResult(
-          modelScanContext(completed),
+          { ...modelScanContext(completed), completed: true },
           "Validated and indexed the completed Codex Security scan.",
           isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
         );

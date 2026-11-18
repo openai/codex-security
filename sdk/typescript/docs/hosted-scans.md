@@ -101,8 +101,9 @@ Preparation errors throw before execution. Execution and finalization return a
 `HostedScanResult` receipt with status `completed`, `failed`,
 `canceled`, or `acceptance_unknown`. The receipt retains the executor's outcome, session
 identity, usage, message and structured error even if artifact finalization
-fails. Only validated artifacts receive hashes and sizes. Repeated invocations
-are separate scans; the host decides whether a new invocation is allowed.
+fails. The CLI returns `completed` after the sealed bundle passes validation,
+including a check for a nonempty `report.md`. Repeated invocations are separate
+scans; the host decides whether a new invocation is allowed.
 
 Temporary runtime cleanup failures preserve the terminal receipt, including
 its execution outcome, session identity, usage, and validated artifacts. They
@@ -229,7 +230,7 @@ hashes and sizes are illustrative and do not validate any real files.
 
 | Final scan status      | Host handling                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `completed`            | Verify artifact receipts and seals before accepting output.                                      |
+| `completed`            | Accept the validated output from the pinned CLI.                                                 |
 | `failed` or `canceled` | Retain identity, diagnostics and any execution/usage receipt.                                    |
 | `acceptance_unknown`   | Reconcile the existing remote attempt and collect usage before cleanup; do not resubmit blindly. |
 
@@ -318,5 +319,5 @@ completed scans; required-output failures return `failed`, and unvalidated files
 never receive artifact receipts. `acceptance_unknown`, failed
 and canceled results are not accepted completed scans.
 
-The host verifies receipt paths, hashes, sizes, scope, revision and seals before
-accepting output.
+The host can use the artifact receipts to verify files after copying them to
+another location.
