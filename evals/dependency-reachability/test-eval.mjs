@@ -103,6 +103,7 @@ test("the probe measures the affected and fixed releases and withholds exactly o
 
 function approvedUseClaim(use, sources) {
   const evidence = structuredClone(use.evidence);
+  use.decidingEvidence = evidence.map((ref) => ({ kind: "source", ...ref }));
   const sourceIds = evidence.map((source) => {
     const id = sha256(JSON.stringify(source, Object.keys(source).sort()));
     sources[id] = source;
@@ -111,7 +112,7 @@ function approvedUseClaim(use, sources) {
   return {
     ...use.conclusionClaim,
     state: "approved",
-    decision: { accepted: true, evidenceKeys: sourceIds },
+    decision: { accepted: true, evidenceKeys: [...sourceIds] },
     payload: { kind: "use", use: { ...use, evidence } },
     evidence: { sourceIds },
   };
@@ -163,6 +164,41 @@ test("the repository grader binds each service's verdict to its own checkout evi
     );
   }
   assert.equal(gradeMixed(report, fixture).outcomes.length, 2);
+  const context = structuredClone(report);
+  const row = context.uses[0];
+  // Context was approved with this exact claim, but the reviewer did not use
+  // this unrelated path as the reason for the reported verdict.
+  row.evidence.push(citation("server.mjs", "import"));
+  context.claims[0] = approvedUseClaim(row, context.claimEvidence.sources);
+  context.claims[0].decision.evidenceKeys.pop();
+  assert.throws(
+    () => gradeMixed(context, fixture),
+    /source selected by the reviewer/u,
+  );
+  row.decidingEvidence.pop();
+  assert.equal(gradeMixed(context, fixture).outcomes.length, 2);
+  const premise = structuredClone(context);
+  const leaf = premise.claims[0];
+  const source = leaf.payload.use.evidence.at(-1);
+  const id = leaf.evidence.sourceIds.at(-1);
+  const ref = { id: "premise:binding", revision: 1, hash: sha256("binding") };
+  const dep = {
+    ...ref,
+    state: "approved",
+    payload: { kind: "premise", sources: [source] },
+    dependencies: [],
+    decision: { accepted: true, evidenceKeys: [id] },
+    evidence: { sourceIds: [id], receiptIds: [] },
+  };
+  leaf.dependencies = [ref];
+  leaf.decision.evidenceKeys.push(
+    "claim:" + JSON.stringify([ref.id, ref.revision, ref.hash]),
+  );
+  premise.claims.push(dep);
+  premise.uses[0].decidingEvidence.push({ kind: "source", ...source });
+  assert.equal(gradeMixed(premise, fixture).outcomes.length, 2);
+  dep.state = "rejected";
+  assert.throws(() => gradeMixed(premise, fixture), /approved premise/u);
   const compact = structuredClone(report);
   for (const use of compact.uses) {
     use.place = { revision: fixture.sha };
@@ -288,8 +324,20 @@ test("the evidence grader checks citations against the stdio server's original r
     calls.map((c) => c.result),
     replies.slice(2),
   );
-  const report = { claimEvidence: { receipts: {} } },
-    use = { observations: [], decidingEvidence: [] };
+  const conclusion = { id: "notes", revision: 1, hash: sha256("notes") };
+  const use = {
+    observations: [],
+    decidingEvidence: [],
+    conclusionClaim: conclusion,
+  };
+  const claim = {
+    ...conclusion,
+    state: "approved",
+    evidence: { receiptIds: [] },
+    decision: { accepted: true, evidenceKeys: [] },
+    payload: { use: { observations: [] } },
+  };
+  const report = { claimEvidence: { receipts: {} }, claims: [claim] };
   for (const [i, c] of calls.entries()) {
     const key = sha256(JSON.stringify(c));
     report.claimEvidence.receipts[key] = {
@@ -303,12 +351,45 @@ test("the evidence grader checks citations against the stdio server's original r
       record: c.result.content[0].text,
       supports: [i === 0 ? "running" : "access"],
     });
-    use.decidingEvidence.push({ kind: "receipt", receiptId: key });
+    const ref = use.observations.at(-1);
+    const payloadSha = sha256(
+      JSON.stringify({
+        content: c.result.content.map(({ text, type }) => ({ text, type })),
+      }),
+    );
+    use.decidingEvidence.push({
+      kind: "receipt",
+      receiptId: key,
+      originalPayloadSha256: payloadSha,
+    });
+    claim.decision.evidenceKeys.push(key);
+    claim.evidence.receiptIds.push(key);
+    claim.payload.use.observations.push({
+      server: ref.server,
+      tool: ref.tool,
+      sha256: key,
+      quote: ref.record,
+      supports: ref.supports,
+    });
   }
   gradeEvidenceSource(report, use, { calls, withAccess: true });
+  const compact = structuredClone(use);
+  for (const ref of compact.observations) {
+    delete ref.sha256;
+    delete ref.tool;
+  }
+  gradeEvidenceSource(report, compact, { calls, withAccess: true });
+  const unreviewed = structuredClone(report);
+  unreviewed.claims[0].decision.evidenceKeys.pop();
+  assert.throws(
+    () => gradeEvidenceSource(unreviewed, compact, { calls, withAccess: true }),
+    /actual request_record/u,
+  );
   const access = use.observations[1];
   report.claimEvidence.receipts[access.sha256].result.content[0].text =
-    access.record = "An invented request.";
+    claim.payload.use.observations[1].quote =
+    access.record =
+      "An invented request.";
   assert.throws(
     () => gradeEvidenceSource(report, use, { calls, withAccess: true }),
     /actual request_record response/u,
@@ -354,12 +435,34 @@ test("the optional suite grades a caller's actual route and config in the same a
   const sources = {};
   const report = {
     cve: scenario.cve,
+    searches: [
+      {
+        source: "Checkout trace graph",
+        tool: "trace_codex_security_code",
+        scope: ["package=" + scenario.component, "paths=service"],
+        startedAt: null,
+        finishedAt: new Date().toISOString(),
+        result: "matches",
+        completeness: "partial",
+        details: [],
+        evidenceReferences: [],
+      },
+    ],
     schemaVersion: 2,
     claimEvidence: { sources },
     claims: [approvedUseClaim(use, sources)],
     uses: [use],
   };
   assert.equal(gradeSnapshot(report, scenario, repo, commit).pass, true);
+  const untraced = gradeSnapshot(
+    { ...report, searches: [] },
+    scenario,
+    repo,
+    commit,
+  );
+  assert.equal(untraced.pass, false);
+  assert.match(untraced.errors.join(" "), /checkout tracer outcome/u);
+  assert.equal(untraced.verdictLabelCorrect, true);
   const partial = structuredClone(report);
   partial.uses[0].evidence.pop();
   partial.claims[0] = approvedUseClaim(
@@ -375,4 +478,62 @@ test("the optional suite grades a caller's actual route and config in the same a
   partial.uses.push(other);
   partial.claims.push(approvedUseClaim(other, partial.claimEvidence.sources));
   assert.equal(gradeSnapshot(partial, scenario, repo, commit).pass, false);
+});
+
+test("the skill and standalone adapter use the same 23 blind questions and verify exact source lines", async () => {
+  const { runAdapter } = await import("./upstream/adapter.mjs");
+  const { runBaseline } = await import("./upstream/skill-baseline.mjs");
+  const { questions } = await import("./upstream/skill-questions.mjs");
+  const { cases } = await import("./upstream/cases.mjs");
+  assert.deepEqual([...questions.keys()].sort(), cases.map((c) => c.id).sort());
+  const repo = join(root, "skill-baseline");
+  await mkdir(repo);
+  await writeFile(join(repo, "source.js"), "export const version = '2';\n");
+  const sha = commitFixture(repo);
+  const scenario = {
+    id: "address-backport",
+    version: "2",
+    verdict: "ruled_out",
+    evidenceGroups: [
+      [{ path: "source.js", contains: "version", completeFile: true }],
+    ],
+  };
+  const fixture = {
+    verdict: "ruled_out",
+    dependency_version: "2",
+    reason: "The fixed version is installed.",
+    evidence: [
+      {
+        path: "source.js",
+        startLine: 1,
+        endLine: 1,
+        code: "export const version = '2';",
+      },
+    ],
+  };
+  const adapter = join(root, "baseline-adapter.mjs");
+  await writeFile(
+    adapter,
+    `import fs from "node:fs";
+    if (!fs.readFileSync(0,"utf8").includes("CVE-2025-14874")) process.exit(2);
+    if (!fs.existsSync("source.js")) process.exit(3);
+    console.log(JSON.stringify(${JSON.stringify(fixture)}));`,
+  );
+  const { grade, usage } = await runBaseline(
+    (cwd, prompt) => runAdapter([process.execPath, adapter], cwd, prompt),
+    scenario,
+    repo,
+    sha,
+  );
+  assert.equal(grade.pass, true);
+  assert.equal(usage, null);
+  fixture.evidence[0].code = "inexact citation";
+  const negative = await runBaseline(
+    async () => ({ answer: fixture, usage: null }),
+    scenario,
+    repo,
+    sha,
+  );
+  assert.equal(negative.grade.pass, false);
+  assert.equal(negative.grade.evidenceCorrect, false);
 });

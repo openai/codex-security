@@ -482,6 +482,7 @@ jobs:
       - name: Test dependency reachability eval contracts
         run: |
           node --test evals/dependency-reachability/test-eval.mjs
+          node --experimental-strip-types --test evals/package-application-mapping/test_grade.mts
           python3 -B -m unittest discover -s evals/dependency-reachability/upstream/fixtures/zip -p test_catalog.py
           node evals/dependency-reachability/run.mjs contracts --cli sdk/typescript/bin/codex-security.mjs
       - name: Test Standard time-budget eval contracts

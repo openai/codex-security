@@ -345,6 +345,78 @@ function rangeKey({ path, startLine, endLine }) {
   return JSON.stringify([path, startLine, endLine]);
 }
 
+function modernDecision(report, conclusion) {
+  const selected = new Set([conclusion]);
+  const sources = new Map();
+  const receipts = new Map();
+  const keyFor = (ref) =>
+    "claim:" + JSON.stringify([ref.id, ref.revision, ref.hash]);
+  for (const claim of selected) {
+    assert(
+      claim.state === "approved" && claim.decision?.accepted === true,
+      "approved premise",
+    );
+    const refs = new Map(
+      (claim.dependencies ?? []).map((ref) => [keyFor(ref), ref]),
+    );
+    const proposed =
+      claim.payload?.kind === "use"
+        ? claim.payload.use.evidence
+        : claim.payload?.sources;
+    assert(Array.isArray(proposed), "approved source evidence");
+    const available = new Map(
+      proposed.map((source) => [
+        sha256(JSON.stringify(canonical(source))),
+        source,
+      ]),
+    );
+    for (const [id, source] of available) {
+      assert(
+        claim.evidence.sourceIds.includes(id),
+        "approved source reference",
+      );
+      assert.deepEqual(
+        report.claimEvidence.sources[id],
+        source,
+        "original approved source",
+      );
+    }
+    for (const id of claim.decision.evidenceKeys) {
+      if (refs.has(id)) {
+        const premise = exactClaim(report.claims, refs.get(id));
+        assert.equal(
+          premise.payload?.kind,
+          "premise",
+          "deciding claim is a premise",
+        );
+        selected.add(premise);
+      } else if (available.has(id)) {
+        const source = available.get(id);
+        sources.set(rangeKey(source), source);
+      } else {
+        assert(
+          claim.evidence.receiptIds?.includes(id),
+          "approved receipt reference",
+        );
+        const record = report.claimEvidence.receipts[id];
+        assert(record, "original approved receipt");
+        const { server, tool, arguments: args, result } = record;
+        assert.equal(
+          sha256(
+            JSON.stringify(
+              canonical({ server, tool, arguments: args, result }),
+            ),
+          ),
+          id,
+          "receipt identity",
+        );
+        receipts.set(id, sha256(JSON.stringify(canonical(result))));
+      }
+    }
+  }
+  return { sources, receipts };
+}
+
 export function approvedCitations(report, use, read, sha) {
   const claim = exactClaim(report.claims, use.conclusionClaim);
   assert(
@@ -362,20 +434,8 @@ export function approvedCitations(report, use, read, sha) {
   assert(Array.isArray(approvedUse.evidence), "approved source evidence");
   const legacy = claim.application && legacySources(report, claim);
   const reviewed = new Map();
+  const selected = !legacy && modernDecision(report, claim);
   for (const source of approvedUse.evidence) {
-    if (!legacy) {
-      const id = sha256(JSON.stringify(canonical(source)));
-      assert(
-        claim.evidence.sourceIds.includes(id) &&
-          claim.decision.evidenceKeys.includes(id),
-        "approved source reference",
-      );
-      assert.deepEqual(
-        report.claimEvidence.sources[id],
-        source,
-        "original approved source",
-      );
-    }
     let commit = source.commit ?? approvedUse.place?.revision;
     if (!commit && legacy) {
       const envelope = legacy.sources.find(
@@ -399,7 +459,7 @@ export function approvedCitations(report, use, read, sha) {
     [...reviewed.keys()].sort(),
     "reported ranges match approved source evidence",
   );
-  return use.evidence.map((citation) => {
+  const checked = use.evidence.map((citation) => {
     const source = reviewed.get(rangeKey(citation));
     read(source);
     return read({
@@ -407,10 +467,71 @@ export function approvedCitations(report, use, read, sha) {
       commit: citation.commit ?? use.place?.revision ?? source.commit,
     });
   });
+  if (legacy) return checked;
+  const deciding = use.decidingEvidence;
+  assert(Array.isArray(deciding), "reported deciding evidence");
+  const displayedSources = new Set();
+  const displayedReceipts = new Set();
+  for (const ref of deciding) {
+    if (ref.kind === "source") {
+      const key = rangeKey(ref);
+      const source = selected.sources.get(key);
+      assert(
+        source && source.commit === ref.commit,
+        "source selected by the reviewer",
+      );
+      displayedSources.add(key);
+    } else {
+      assert.equal(ref.kind, "receipt");
+      assert(
+        selected.receipts.has(ref.receiptId),
+        "receipt selected by the reviewer",
+      );
+      assert.equal(
+        ref.originalPayloadSha256,
+        selected.receipts.get(ref.receiptId),
+        "original receipt payload",
+      );
+      displayedReceipts.add(ref.receiptId);
+    }
+  }
+  assert.deepEqual(
+    displayedSources,
+    new Set(selected.sources.keys()),
+    "display every selected source",
+  );
+  assert.deepEqual(
+    displayedReceipts,
+    new Set(selected.receipts.keys()),
+    "display every selected receipt",
+  );
+  return [...selected.sources.values()].map(read);
 }
 
 // Compare report citations with replies recorded by the independent MCP process.
 export function gradeEvidenceSource(report, use, { calls, withAccess }) {
+  const claim = exactClaim(report.claims, use.conclusionClaim);
+  assert(
+    claim.state === "approved" && claim.decision.accepted === true,
+    "approved runtime observations",
+  );
+  const records = claim.payload.use.observations;
+  const compact = ({ server, record, supports }) => ({
+    server,
+    record,
+    supports,
+  });
+  assert.deepEqual(
+    use.observations.map(compact),
+    records.map(({ server, quote, supports }) => ({
+      server,
+      record: quote,
+      supports: supports.filter((s) =>
+        ["running", "access", "affected_copy"].includes(s),
+      ),
+    })),
+    "runtime citations belong to the independently approved claim",
+  );
   const expected = { running: "release_record", access: "request_record" };
   for (const [support, tool] of Object.entries(expected)) {
     const actual = calls.filter(
@@ -430,12 +551,15 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
       continue;
     }
     assert(
-      use.observations.some((ref) => {
+      records.some((ref, index) => {
+        const shown = use.observations[index];
         if (
           !ref.supports.includes(support) ||
           ref.server !== "service_records" ||
           ref.tool !== tool ||
-          !ref.record?.trim()
+          !ref.quote?.trim() ||
+          (shown.tool !== undefined && shown.tool !== ref.tool) ||
+          (shown.sha256 !== undefined && shown.sha256 !== ref.sha256)
         )
           return false;
         const receipt = report.claimEvidence.receipts[ref.sha256];
@@ -443,8 +567,14 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
           !receipt ||
           receipt.server !== ref.server ||
           receipt.tool !== tool ||
+          !claim.evidence.receiptIds.includes(ref.sha256) ||
+          !claim.decision.evidenceKeys.includes(ref.sha256) ||
           !use.decidingEvidence.some(
-            (r) => r.kind === "receipt" && r.receiptId === ref.sha256,
+            (r) =>
+              r.kind === "receipt" &&
+              r.receiptId === ref.sha256 &&
+              r.originalPayloadSha256 ===
+                sha256(JSON.stringify(canonical(receipt.result))),
           )
         )
           return false;
@@ -452,7 +582,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
           (c) =>
             isDeepStrictEqual(receipt.arguments, c.arguments) &&
             isDeepStrictEqual(receipt.result.content, c.result.content) &&
-            c.result.content[0].text.includes(ref.record),
+            c.result.content[0].text.includes(ref.quote),
         );
       }),
       "approved use cites the actual " + tool + " response",
@@ -510,20 +640,6 @@ export function gradeMixed(
       service === "notes" && evidenceSource ? "confirmed" : "configured",
     );
     if (service === "notes" && evidenceSource) {
-      const claim = exactClaim(report.claims, use.conclusionClaim);
-      assert.deepEqual(
-        use.observations,
-        claim.payload.use.observations.map(
-          ({ server, tool, sha256, quote, supports }) => ({
-            server,
-            tool,
-            sha256,
-            record: quote,
-            supports,
-          }),
-        ),
-        "runtime citations belong to the independently approved claim",
-      );
       gradeEvidenceSource(report, use, evidenceSource);
     }
     assert(use.reason?.trim());
