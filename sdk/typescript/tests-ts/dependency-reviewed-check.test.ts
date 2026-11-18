@@ -29,10 +29,13 @@ import {
   runReviewedDependencyCheck,
 } from "../src/dependency-reviewed-check";
 import type { DependencyEvidenceRecord } from "../src/dependency-evidence-sources";
-import type { RepositoryDiscovery } from "../src/dependency-discovery";
+import {
+  discoverDependencyRepository,
+  type RepositoryDiscovery,
+} from "../src/dependency-discovery";
 
 const signal = new AbortController().signal;
-async function fixture() {
+async function fixture(extraFiles: Record<string, string> = {}) {
   const path = await mkdtemp(join(tmpdir(), "dependency-reviewed-test-"));
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
@@ -45,6 +48,8 @@ async function fixture() {
     join(path, "secondary.js"),
     'import parse from "fixture-parser";\nparse(other.body);\n',
   );
+  for (const [name, contents] of Object.entries(extraFiles))
+    await writeFile(join(path, name), contents);
   git("init", "-q");
   git("add", ".");
   git(
@@ -808,4 +813,66 @@ test("a runtime display name shared by two packages cannot establish either depl
   ).rejects.toThrow("this running service");
   f.discovery.manifests[1]!.name = "notes";
   expect(reviewScopes([f.discovery])[1]!.runtimeServices).toEqual(["reviews"]);
+});
+
+test("an unnamed root manifest binds a service through its observed revision and cited caller", async () => {
+  await using f = await fixture({
+    "requirements.txt": "fixture-parser==1.0.0\n",
+    "receiver.py":
+      "import fixture_parser\nfixture_parser.parse(request.body)\n",
+  });
+  const discovery = await discoverDependencyRepository({
+    repository: f.path,
+    package: { ecosystem: "PyPI", name: "fixture-parser" },
+    environment: { PATH: "" },
+  });
+  const scope = reviewScopes([discovery])[0]!;
+  expect(scope).toMatchObject({ location: ".", manifest: "requirements.txt" });
+  const { positive, records } = deploymentFor(f, "example");
+  const verify = (...running: string[]) => {
+    const callSite = { path: "receiver.py", line: 2 };
+    return verifyProposedUse(
+      f.path,
+      scope,
+      {
+        ...positive,
+        observations: [
+          ...running.map((quote) => ({ ...positive.observations[0]!, quote })),
+          positive.observations[1]!,
+        ],
+        evidence: [
+          { ...positive.evidence[0]!, path: "receiver.py" },
+          { ...positive.evidence[1]!, path: "requirements.txt" },
+        ],
+        proof: {
+          sink: { function: "parse", callSite },
+          conditions: positive.proof.conditions.map((c) => ({
+            ...c,
+            citations: [callSite],
+          })),
+        },
+      },
+      signal,
+      true,
+      [
+        ...running.map((quote) => returnedEvidence("running", quote)),
+        records[1]!,
+      ],
+    );
+  };
+  const release = positive.observations[0]!.quote;
+  expect(await verify(`${release} Entrypoint: ./receiver.py`)).toMatchObject({
+    scope: scope.id,
+    location: "example",
+    verdict: "exploitable",
+  });
+  await expect(
+    verify(
+      `${release} Entrypoint: sibling/receiver.py`,
+      `${release} Entrypoint: ../receiver.py`,
+      `${release.replace("1.0.0", "2.0.0")} Entrypoint: receiver.py`,
+      `Deployed another service at ${f.revision} with entrypoint receiver.py.`,
+      "Deployed example at a different revision with entrypoint receiver.py.",
+    ),
+  ).rejects.toThrow("this running service");
 });

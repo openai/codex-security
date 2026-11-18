@@ -50,7 +50,7 @@ const proposedUse = z.strictObject({
   location: text
     .optional()
     .describe(
-      "Specific consumer, service or build when discovered from source.",
+      "Specific consumer, service or build when discovered from source. For an unnamed root manifest, quote one running observation naming the service, package, version, Git revision and path to its cited manifest or caller.",
     ),
   placeKind: z
     .enum([
@@ -223,12 +223,61 @@ function containsQuote(record: DependencyEvidenceRecord, quote: string) {
 }
 
 /** Match complete identifiers, so e.g. 1.2.0 does not match a record for 11.2.0. */
-function mentions(quote: string, value: string) {
+function mentions(quote: string, value: string, sourcePath = false) {
   const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  if (sourcePath) {
+    // Accept checkout-relative paths only, including "./" and quoted names with spaces.
+    return new RegExp(
+      String.raw`(?:^|[\s"'=:,(\[{])(?:\./)?${escaped}(?=$|[\s"',;)\]}]|\.(?:\s|$))`,
+      "u",
+    ).test(quote);
+  }
   return new RegExp(
     `(?<![\\p{L}\\p{N}_/+~-]|[\\p{L}\\p{N}]\\.)${escaped}(?![\\p{L}\\p{N}_/+~-]|\\.[\\p{L}\\p{N}])`,
     "u",
   ).test(quote);
+}
+
+function verifiedLocation(
+  scope: Scope,
+  use: Proposal["uses"][number],
+  running: string[],
+  covers: (path: string | undefined, line: number | undefined) => boolean,
+) {
+  const proposed = use.location;
+  if (!scope.manifest) return proposed ?? scope.location;
+  if (
+    scope.location !== "." ||
+    scope.name ||
+    !proposed ||
+    proposed === "." ||
+    !use.version
+  )
+    return scope.location;
+  if (
+    scope.discovery.manifests.some(
+      (m) => m.project === proposed || m.name === proposed,
+    )
+  )
+    return scope.location;
+  const paths = scope.discovery.callers
+    .filter((c) => c.manifest === scope.manifest && covers(c.path, c.line))
+    .map((c) => c.path);
+  if (covers(scope.manifest, scope.manifestLine)) paths.push(scope.manifest);
+  // Without a declared project name, the deployment itself must identify the
+  // exact revision and a cited source path belonging to this manifest.
+  const identity = [
+    proposed,
+    scope.discovery.revision,
+    scope.component,
+    use.version,
+  ];
+  const linked = running.some(
+    (q) =>
+      identity.every((id) => mentions(q, id)) &&
+      paths.some((path) => mentions(q, path, true)),
+  );
+  return linked ? proposed : scope.location;
 }
 
 export async function verifyProposedUse(
@@ -240,9 +289,6 @@ export async function verifyProposedUse(
   records: readonly DependencyEvidenceRecord[] = [],
 ) {
   const revision = scope.discovery.revision;
-  const location = scope.manifest
-    ? scope.location
-    : (use.location ?? scope.location);
   if (scope.selectedVersion && use.version !== scope.selectedVersion)
     throw new CodexSecurityError(
       `The version for ${scope.location} differs from its selected dependency version.`,
@@ -299,15 +345,16 @@ export async function verifyProposedUse(
       originalPayloadSha256: dependencyRecordHash(matches[0]!.result),
     };
   });
-  const names = (scope.manifest ? scope.runtimeServices : [location]).filter(
-    (name) => name !== ".",
-  );
   const quotes = (support: "running" | "access") =>
     observations
       .filter((r) => r.supports.includes(support))
       .map((r) => r.quote);
   const running = quotes("running"),
     access = quotes("access");
+  const location = verifiedLocation(scope, use, running, covers);
+  const names = [location, ...scope.runtimeServices].filter(
+    (name) => name !== ".",
+  );
   if (
     running.length &&
     (!use.version ||
