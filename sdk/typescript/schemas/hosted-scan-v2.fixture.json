@@ -8,7 +8,8 @@
       "repository": "/workspace/repository",
       "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "scope": {
-        "paths": ["service-a", "service-b"]
+        "paths": ["service-a", "service-b"],
+        "excludePaths": ["service-a/generated"]
       },
       "outputDirectory": "/scan/output",
       "stateDirectory": "/scan/state",
@@ -35,7 +36,8 @@
       "repository": "/workspace/repository",
       "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "scope": {
-        "paths": ["service-a", "service-b"]
+        "paths": ["service-a", "service-b"],
+        "excludePaths": ["service-a/generated"]
       },
       "identity": {
         "runId": "run-1",
@@ -102,7 +104,8 @@
       "repository": "/workspace/repository",
       "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "scope": {
-        "paths": ["service-a", "service-b"]
+        "paths": ["service-a", "service-b"],
+        "excludePaths": ["service-a/generated"]
       },
       "identity": {
         "runId": "run-1",

@@ -24,6 +24,7 @@ import { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import { errorMessage } from "./errors.js";
 import {
   abortable,
+  normalizeExcludedPaths,
   normalizeRepository,
   repositoryRevision,
 } from "./targets.js";
@@ -35,7 +36,10 @@ export const HostedScanInputSchema = z.strictObject({
   repository: z.string().min(1),
   revision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
   scope: z
-    .strictObject({ paths: z.array(z.string().min(1)).min(1) })
+    .strictObject({
+      paths: z.array(z.string().min(1)).min(1),
+      excludePaths: z.array(z.string().min(1)).optional(),
+    })
     .optional(),
   outputDirectory: z.string().min(1),
   stateDirectory: z.string().min(1),
@@ -119,6 +123,18 @@ export function normalizeHostedPaths(
       "Repository scope cannot be mixed with narrower paths.",
     );
   return normalized;
+}
+
+function normalizeHostedExclusions(
+  paths: readonly string[] | undefined,
+): string[] {
+  try {
+    const normalized = normalizeExcludedPaths(paths);
+    for (const path of normalized) safeScopePath(path);
+    return normalized.sort(comparePaths);
+  } catch (error) {
+    throw new HostedScanPreparationError("scope_syntax", errorMessage(error));
+  }
 }
 
 /** Validate every path at the frozen commit before registering a scan/executing. */
@@ -214,10 +230,14 @@ export async function runHostedScanInternal(
   options: HostedScanOptions,
 ) {
   const input = HostedScanInputSchema.parse(value);
+  const excludePaths = normalizeHostedExclusions(input.scope?.excludePaths);
   const context = {
     repository: input.repository,
     revision: input.revision,
-    scope: { paths: normalizeHostedPaths(input.scope?.paths) },
+    scope: {
+      paths: normalizeHostedPaths(input.scope?.paths),
+      ...(excludePaths.length ? { excludePaths } : {}),
+    },
     identity: input.identity,
     ...(input.severityRubric === undefined
       ? {}
@@ -301,6 +321,7 @@ export async function runHostedScanInternal(
           ? "repository"
           : context.scope.paths.map((path) => `./${path}`),
       mode: "standard",
+      excludePaths,
       outputDir: outputDirectory,
       signal: options.signal,
       ownerSuggestions: input.ownerSuggestions,
@@ -335,7 +356,10 @@ export async function runHostedScanInternal(
         [...result.manifest.scan.scope.includePaths].sort(comparePaths),
         context.scope.paths,
       ) ||
-      result.manifest.scan.scope.excludePaths.length !== 0
+      !isDeepStrictEqual(
+        [...result.manifest.scan.scope.excludePaths].sort(comparePaths),
+        excludePaths,
+      )
     )
       throw new Error("Completed artifacts do not match the requested scope.");
     const sources = result.manifest.scan["preservedSources"];

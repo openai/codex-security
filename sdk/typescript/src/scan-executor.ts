@@ -16,7 +16,7 @@ export interface ScanExecutionRequest {
   scanId: string;
   repository: string;
   revision: string;
-  scope: { paths: string[] };
+  scope: { paths: string[]; excludePaths?: string[] };
   identity: { runId: string; attemptId: string; buildId: string };
   severityRubric?: z.infer<typeof severityRubricSnapshotSchema>;
   prompt: string;
