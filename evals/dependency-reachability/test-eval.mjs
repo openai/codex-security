@@ -101,6 +101,22 @@ test("the probe measures the affected and fixed releases and withholds exactly o
   ]);
 });
 
+function approvedUseClaim(use, sources) {
+  const evidence = structuredClone(use.evidence);
+  const sourceIds = evidence.map((source) => {
+    const id = sha256(JSON.stringify(source, Object.keys(source).sort()));
+    sources[id] = source;
+    return id;
+  });
+  return {
+    ...use.conclusionClaim,
+    state: "approved",
+    decision: { accepted: true, evidenceKeys: sourceIds },
+    payload: { kind: "use", use: { ...use, evidence } },
+    evidence: { sourceIds },
+  };
+}
+
 test("the repository grader binds each service's verdict to its own checkout evidence and approved revision", async () => {
   const fixture = await mixedFixture(root);
   const citation = (path, needle) => {
@@ -111,21 +127,18 @@ test("the repository grader binds each service's verdict to its own checkout evi
     assert(line > 0, needle);
     return { path, startLine: line, endLine: line, commit: fixture.sha };
   };
-  const report = { schemaVersion: 2, cve: reviewedCve, claims: [], uses: [] };
+  const report = {
+    schemaVersion: 2,
+    cve: reviewedCve,
+    claims: [],
+    uses: [],
+    claimEvidence: { sources: {} },
+  };
   for (const [service, version, verdict] of [
     ["notes", "5.0.0", "potentially_exploitable"],
     ["reviews", "5.0.1", "ruled_out"],
   ]) {
     const ref = { id: service, revision: 1, hash: sha256(service) };
-    report.claims.push({
-      ...ref,
-      state: "approved",
-      decision: { accepted: true },
-      payload: {
-        kind: "use",
-        use: { location: service, version, component: "linkify-it", verdict },
-      },
-    });
     report.uses.push({
       location: service,
       component: "linkify-it",
@@ -145,6 +158,9 @@ test("the repository grader binds each service's verdict to its own checkout evi
         citation("server.mjs", "links.match(await text(request))"),
       ],
     });
+    report.claims.push(
+      approvedUseClaim(report.uses.at(-1), report.claimEvidence.sources),
+    );
   }
   assert.equal(gradeMixed(report, fixture).outcomes.length, 2);
   const compact = structuredClone(report);
@@ -154,7 +170,7 @@ test("the repository grader binds each service's verdict to its own checkout evi
   }
   assert.equal(gradeMixed(compact, fixture).outcomes.length, 2);
   compact.uses[0].place.revision = "wrong";
-  assert.throws(() => gradeMixed(compact, fixture), /pinned source identity/u);
+  assert.throws(() => gradeMixed(compact, fixture), /cited revision/u);
   assert.equal(
     gradeMixed(
       {
@@ -169,14 +185,46 @@ test("the repository grader binds each service's verdict to its own checkout evi
   const stale = structuredClone(report);
   stale.uses[0].conclusionClaim.revision++;
   assert.throws(() => gradeMixed(stale, fixture), /one exact claim revision/u);
+  const missing = structuredClone(report);
+  missing.claims[0].payload.use.evidence = [];
+  missing.claims[0].evidence.sourceIds = [];
+  missing.claims[0].decision.evidenceKeys = [];
+  assert.throws(
+    () => gradeMixed(missing, fixture),
+    /reported ranges match approved/u,
+  );
+  delete missing.claims[0].payload.use.evidence;
+  assert.throws(
+    () => gradeMixed(missing, fixture),
+    /approved source evidence/u,
+  );
+  const unrelated = structuredClone(report);
+  unrelated.claims[0].evidence.sourceIds =
+    unrelated.claims[1].evidence.sourceIds;
+  assert.throws(
+    () => gradeMixed(unrelated, fixture),
+    /approved source reference/u,
+  );
+  unrelated.claims[0].application = { assessmentId: "notes" };
+  assert.throws(
+    () => gradeMixed(unrelated, fixture),
+    /legacy application claim/u,
+  );
+  const reordered = structuredClone(report);
+  reordered.uses[0].evidence.reverse();
+  assert.equal(gradeMixed(reordered, fixture).outcomes.length, 2);
   const wrongService = structuredClone(report);
   wrongService.uses[1].evidence[0] = report.uses[0].evidence[0];
   assert.throws(
     () => gradeMixed(wrongService, fixture),
-    /installed version evidence/u,
+    /reported ranges match approved/u,
   );
   const outside = structuredClone(report);
   outside.uses[0].evidence[0].path = "../outside";
+  outside.claims[0] = approvedUseClaim(
+    outside.uses[0],
+    outside.claimEvidence.sources,
+  );
   assert.throws(() => gradeMixed(outside, fixture), /fixture checkout/u);
 });
 
@@ -303,30 +351,21 @@ test("the optional suite grades a caller's actual route and config in the same a
       endLine: git(repo, "show", commit + ":" + path).split("\n").length,
     })),
   };
+  const sources = {};
   const report = {
     cve: scenario.cve,
     schemaVersion: 2,
-    claims: [
-      {
-        ...ref,
-        state: "approved",
-        decision: { accepted: true },
-        payload: {
-          kind: "use",
-          use: {
-            location: use.location,
-            component: use.component,
-            version: use.version,
-            verdict: use.verdict,
-          },
-        },
-      },
-    ],
+    claimEvidence: { sources },
+    claims: [approvedUseClaim(use, sources)],
     uses: [use],
   };
   assert.equal(gradeSnapshot(report, scenario, repo, commit).pass, true);
   const partial = structuredClone(report);
   partial.uses[0].evidence.pop();
+  partial.claims[0] = approvedUseClaim(
+    partial.uses[0],
+    partial.claimEvidence.sources,
+  );
   const other = {
     ...use,
     location: "second",
@@ -334,11 +373,6 @@ test("the optional suite grades a caller's actual route and config in the same a
     conclusionClaim: { id: "second", revision: 1, hash: sha256("second") },
   };
   partial.uses.push(other);
-  partial.claims.push({
-    ...other.conclusionClaim,
-    state: "approved",
-    decision: { accepted: true },
-    payload: { kind: "use", use: other },
-  });
+  partial.claims.push(approvedUseClaim(other, partial.claimEvidence.sources));
   assert.equal(gradeSnapshot(partial, scenario, repo, commit).pass, false);
 });

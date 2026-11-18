@@ -289,8 +289,62 @@ export function gradeStack(report, fixture) {
   };
 }
 
-// A v2 report can put the revision on the use or in a host-verified source
-// envelope. Newer reports can carry it directly on each compact citation.
+// Legacy reports can include deciding excerpts from the conclusion's approved
+// premises. Follow only the exact dependency revisions selected by the reviewer.
+function legacySources(report, conclusion) {
+  assert.equal(
+    conclusion.id,
+    "application:" + conclusion.application.assessmentId,
+    "legacy application claim",
+  );
+  const dependencies = new Set([conclusion]);
+  const byKey = new Map();
+  for (const claim of dependencies) {
+    for (const ref of claim.dependencies) {
+      const premise = exactClaim(report.claims, ref);
+      byKey.set(
+        "claim:" + JSON.stringify([ref.id, ref.revision, ref.hash]),
+        premise,
+      );
+      dependencies.add(premise);
+    }
+  }
+  const selected = new Set([conclusion]);
+  const sources = [];
+  const premises = [];
+  for (const claim of selected) {
+    assert(
+      claim.state === "approved" && claim.decision?.accepted === true,
+      "approved premise",
+    );
+    for (const key of claim.decision.evidenceKeys) {
+      if (key.startsWith("claim:")) {
+        assert(byKey.has(key), "reviewed dependency revision");
+        selected.add(byKey.get(key));
+      }
+    }
+    for (const id of claim.evidence.sourceIds) {
+      if (!claim.decision.evidenceKeys.includes(id)) continue;
+      const source = report.claimEvidence.sources[id];
+      assert.equal(
+        id,
+        "excerpt:" + sha256(JSON.stringify(canonical(source))),
+        "original approved excerpt",
+      );
+      if (source.sourceIdentity?.status !== "verified") continue;
+      const { commit, blob, contentSha256 } = source.sourceIdentity;
+      const pinned = { ...source, commit, blob, contentSha256 };
+      sources.push(pinned);
+      if (claim !== conclusion) premises.push(pinned);
+    }
+  }
+  return { sources, premises };
+}
+
+function rangeKey({ path, startLine, endLine }) {
+  return JSON.stringify([path, startLine, endLine]);
+}
+
 export function approvedCitations(report, use, read, sha) {
   const claim = exactClaim(report.claims, use.conclusionClaim);
   assert(
@@ -304,25 +358,54 @@ export function approvedCitations(report, use, read, sha) {
   );
   for (const field of ["location", "version", "component", "verdict"])
     assert.equal(claim.payload.use[field], use[field], "approved " + field);
+  const approvedUse = claim.payload.use;
+  assert(Array.isArray(approvedUse.evidence), "approved source evidence");
+  const legacy = claim.application && legacySources(report, claim);
+  const reviewed = new Map();
+  for (const source of approvedUse.evidence) {
+    if (!legacy) {
+      const id = sha256(JSON.stringify(canonical(source)));
+      assert(
+        claim.evidence.sourceIds.includes(id) &&
+          claim.decision.evidenceKeys.includes(id),
+        "approved source reference",
+      );
+      assert.deepEqual(
+        report.claimEvidence.sources[id],
+        source,
+        "original approved source",
+      );
+    }
+    let commit = source.commit ?? approvedUse.place?.revision;
+    if (!commit && legacy) {
+      const envelope = legacy.sources.find(
+        (record) =>
+          record.commit === sha &&
+          record.path === source.path &&
+          record.startLine <= source.startLine &&
+          record.endLine >= source.endLine,
+      );
+      assert(envelope, "compact citation has a pinned source identity");
+      read(envelope);
+      commit = envelope.commit;
+    }
+    reviewed.set(rangeKey(source), { ...source, commit });
+  }
+  for (const source of legacy?.premises ?? [])
+    reviewed.set(rangeKey(source), source);
+  const displayed = use.evidence.map(rangeKey);
+  assert.deepEqual(
+    [...new Set(displayed)].sort(),
+    [...reviewed.keys()].sort(),
+    "reported ranges match approved source evidence",
+  );
   return use.evidence.map((citation) => {
-    if (citation.commit !== undefined) return read(citation);
-    if (use.place?.revision === sha) return read({ ...citation, commit: sha });
-    const source = Object.values(report.claimEvidence?.sources ?? {}).find(
-      (s) =>
-        s.path === citation.path &&
-        s.startLine <= citation.startLine &&
-        s.endLine >= citation.endLine &&
-        s.sourceIdentity?.status === "verified" &&
-        s.sourceIdentity.commit === sha,
-    );
-    assert(source, "compact citation has a pinned source identity");
-    read({
-      ...source,
-      commit: sha,
-      blob: source.sourceIdentity.blob,
-      contentSha256: source.sourceIdentity.contentSha256,
+    const source = reviewed.get(rangeKey(citation));
+    read(source);
+    return read({
+      ...citation,
+      commit: citation.commit ?? use.place?.revision ?? source.commit,
     });
-    return read({ ...citation, commit: sha });
   });
 }
 
