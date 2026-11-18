@@ -1,7 +1,7 @@
 # Import ArmorCode findings
 
 Import a saved response from ArmorCode's `POST /api/findings` endpoint into the
-local workbench. Cloud publication of ArmorCode findings is unverified. The reader
+local workbench or a Cloud destination that supports ArmorCode. The reader
 accepts the API's `data.findings` envelope, as well as a top-level `findings`
 array for exported reports. Each finding needs a stable numeric or string `id`
 and a `title`. Reuse the same source key for repeat imports from the same
@@ -51,3 +51,20 @@ Review the preview's findings, exclusions, repository and source key. Remove
 `codex-security findings imported . --format json` to read them back.
 Records omitted from a later import remain stored. Use the normalized field
 names above when an export uses different field names.
+
+## Publish to Cloud
+
+Set `repository_url` to the connected repository’s verified HTTPS clone URL and
+use the same source key you reviewed locally.
+
+```sh
+repository_url=https://github.com/example/project
+codex-security publish findings "$report_dir/armorcode-findings.json" \
+  --to cloud --repository "$repository_url" --provider armorcode \
+  --source-repository-url "$repository_url" --source-key ORG_ID/APP_ID \
+  --dry-run --format json
+```
+
+Check the destination, findings and exclusions. An ArmorCode report that names
+a different repository fails validation. To publish the reviewed selection,
+remove `--dry-run` and confirm. [Verify the import](README.md#verify-the-import).
