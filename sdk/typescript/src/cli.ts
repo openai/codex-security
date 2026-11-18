@@ -804,45 +804,92 @@ function renderImportedFindings(
   const lines = [
     `${formatItemCount(findings.length, "imported finding")} in ${diagnosticValue(repository)}`,
   ];
-  for (const { provider, sourceKey, sourceFindingId, evidence } of findings) {
-    lines.push("", `[${evidence.severity}] ${diagnosticValue(evidence.title)}`);
-    if (evidence.title === evidence.details?.rule?.id) {
-      const message = evidence.description?.trim().split(/[\r\n]/u, 1)[0];
-      if (message && message !== evidence.title)
-        lines.push(
-          fitProgressLine(`  Message: ${diagnosticValue(message)}`, width),
-        );
-    }
-    const scanner = evidence.details?.scanner_origin?.trim();
-    if (scanner && scanner.toLowerCase() !== provider.toLowerCase())
-      lines.push(`  Scanner: ${diagnosticValue(scanner)}`);
-    lines.push(
-      `  Source: ${diagnosticValue(provider)} (${diagnosticValue(sourceKey)})  Finding ID: ${diagnosticValue(sourceFindingId)}`,
-    );
-
-    const pkg = evidence.packages?.[0];
-    if (pkg) {
-      const parts = [`  Package: ${diagnosticValue(pkg.name)}`];
-      if (pkg.installed_version)
-        parts.push(`Installed: ${diagnosticValue(pkg.installed_version)}`);
-      if (pkg.vulnerable_version_range)
-        parts.push(
-          `Affected: ${diagnosticValue(pkg.vulnerable_version_range)}`,
-        );
-      if (pkg.fixed_versions?.length)
-        parts.push(`Fixed: ${diagnosticValue(pkg.fixed_versions.join(", "))}`);
-      lines.push(parts.join("  "));
-    }
-    const location = evidence.locations?.[0];
-    if (location)
+  // These readers put the scanner's primary advisory first. Other providers
+  // may import advisory bulletins, historical alerts, or independent IDs.
+  const groups = new Map<string | null, StoredExternalFinding[]>();
+  for (const finding of findings) {
+    const packageScan =
+      finding.provider === "trivy" || finding.provider === "grype";
+    const advisory =
+      packageScan && finding.evidence.packages?.length
+        ? (finding.evidence.advisory_ids?.[0] ?? null)
+        : null;
+    const group = groups.get(advisory);
+    if (group) group.push(finding);
+    else groups.set(advisory, [finding]);
+  }
+  for (const [advisory, occurrences] of groups) {
+    if (advisory === null && groups.size > 1)
+      lines.push("", "Other imported findings");
+    if (advisory !== null)
       lines.push(
-        `  Location: ${diagnosticValue(location.path)}${location.line == null ? "" : `:${location.line}`}`,
+        "",
+        `${diagnosticValue(advisory)} · ${formatItemCount(occurrences.length, "package finding")}`,
       );
-    if (evidence.url)
-      lines.push(`  Reference: ${diagnosticValue(evidence.url)}`);
-    const fileUrl = evidence.details?.file_url;
-    if (fileUrl && fileUrl !== evidence.url)
-      lines.push(`  File: ${diagnosticValue(fileUrl)}`);
+    for (const {
+      provider,
+      sourceKey,
+      sourceFindingId,
+      evidence,
+    } of occurrences) {
+      lines.push(
+        "",
+        `[${evidence.severity}] ${diagnosticValue(evidence.title)}`,
+      );
+      if (evidence.title === evidence.details?.rule?.id) {
+        const message = evidence.description?.trim().split(/[\r\n]/u, 1)[0];
+        if (message && message !== evidence.title)
+          lines.push(
+            fitProgressLine(`  Message: ${diagnosticValue(message)}`, width),
+          );
+      }
+      const scanner = evidence.details?.scanner_origin?.trim();
+      if (scanner && scanner.toLowerCase() !== provider.toLowerCase())
+        lines.push(`  Scanner: ${diagnosticValue(scanner)}`);
+      lines.push(
+        `  Source: ${diagnosticValue(provider)} (${diagnosticValue(sourceKey)})  Finding ID: ${diagnosticValue(sourceFindingId)}`,
+      );
+
+      for (const pkg of evidence.packages ?? []) {
+        const parts = [`  Package: ${diagnosticValue(pkg.name)}`];
+        if (pkg.installed_version)
+          parts.push(`Installed: ${diagnosticValue(pkg.installed_version)}`);
+        if (pkg.vulnerable_version_range)
+          parts.push(
+            `Affected: ${diagnosticValue(pkg.vulnerable_version_range)}`,
+          );
+        if (pkg.fixed_versions?.length)
+          parts.push(
+            `Fixed: ${diagnosticValue(pkg.fixed_versions.join(", "))}`,
+          );
+        lines.push(parts.join("  "));
+        if (advisory !== null) {
+          if (!pkg.manifest_path)
+            lines.push(
+              "  Next: Identify the consuming repository and build input.",
+            );
+          else
+            lines.push(
+              `  Source to confirm: ${diagnosticValue(pkg.manifest_path)}`,
+            );
+          lines.push(
+            pkg.fixed_versions?.length
+              ? "  Once confirmed: Generate a patch for the reported upgrade and test it."
+              : "  Once confirmed: Investigate exposure and check for a vendor fix.",
+          );
+        }
+      }
+      const location = evidence.locations?.[0];
+      if (location)
+        lines.push(
+          `  Location: ${diagnosticValue(location.path)}${location.line == null ? "" : `:${location.line}`}`,
+        );
+      if (evidence.url)
+        lines.push(`  Reference: ${diagnosticValue(evidence.url)}`);
+      const fileUrl = evidence.details?.file_url;
+      if (fileUrl && fileUrl !== evidence.url)
+        lines.push(`  File: ${diagnosticValue(fileUrl)}`);
+    }
   }
   if (findings.length)
     lines.push(

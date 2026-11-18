@@ -566,6 +566,52 @@ test.each([true, false])(
   },
 );
 
+test("terminal advisory groups preserve occurrences and distinguish upgrade and investigation", async () => {
+  const repository = resolve("fixture");
+  const deps = dependencies({ currentDirectory: repository });
+  deps.readLocalExternalFindings = async () => ({
+    repository,
+    findings: ["one", "two", "ambiguous"].map((id, index) => ({
+      repository,
+      id,
+      version: 1,
+      provider: index === 2 ? "github" : "trivy",
+      sourceKey: "fixture",
+      sourceFindingId: id,
+      createdAt: "",
+      updatedAt: "",
+      assessment: { state: "not_assessed" },
+      evidence: {
+        title: id,
+        severity: "high",
+        advisory_ids:
+          index === 2
+            ? ["CVE-2099-1000", "CVE-2099-1001"]
+            : ["CVE-2099-1000", "alias"],
+        packages: [
+          {
+            name: id,
+            ...(index === 0
+              ? { manifest_path: "package.json", fixed_versions: ["2"] }
+              : {}),
+          },
+        ],
+      },
+    })),
+  });
+  const cli = createCliTest(main, { stdout: true });
+  expect(await cli.runCli(["findings", "imported"], deps)).toBe(0);
+  const view = cli.stdout.text();
+  expect(view).toContain("CVE-2099-1000 · 2 package findings");
+  expect(view).toContain("Other imported findings");
+  for (const id of ["one", "two", "ambiguous"])
+    expect(view).toContain(`Finding ID: ${id}`);
+  expect(view).toContain("Source to confirm: package.json");
+  expect(view).toContain("Identify the consuming repository");
+  expect(view).toContain("Investigate exposure");
+  expect(view).toContain("Generate a patch");
+});
+
 test("imported readback resolves its repository argument and supports structured output", async () => {
   const deps = dependencies({ currentDirectory: resolve("workspace") });
   deps.readLocalExternalFindings = async ({ repository }, settings) => {
