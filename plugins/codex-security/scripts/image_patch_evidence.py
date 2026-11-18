@@ -26,11 +26,11 @@ def image_identity(source):
 
 def package_identity(artifact):
     purl = required_text(artifact["purl"], "package URL")
-    path, separator, suffix = purl.partition("?")
+    path = purl.partition("?")[0]
     name, version_separator, _ = path.rpartition("@")
     if not version_separator or not name.startswith("pkg:"):
         raise ValueError("Expected a versioned package URL")
-    return name + separator + suffix
+    return name
 
 
 def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=None):
@@ -153,7 +153,7 @@ def scan_sbom(path):
     contents = path.read_bytes()
     sbom = json.loads(contents)
     scan = subprocess.run(
-        ["grype", "-o", "json"], input=contents, stdout=subprocess.PIPE, check=True
+        ["grype", "--file", "", "-o", "json"], input=contents, stdout=subprocess.PIPE, check=True
     )
     return sbom, json.loads(scan.stdout), hashlib.sha256(contents).hexdigest()
 

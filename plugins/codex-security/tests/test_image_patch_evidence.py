@@ -129,3 +129,14 @@ def test_platform_variants_and_removed_layers():
         sbom["descriptor"]["configuration"]["search"]["scope"] = "all-layers"
     with pytest.raises(ValueError, match="squashed"):
         run(items)
+
+
+def test_other_distro_copy_with_residual_match():
+    items = reports()
+    artifact = {
+        **items[1]["matches"][0]["artifact"],
+        "purl": "pkg:apk/vendor/example@1?distro=other",
+    }
+    items[2]["artifacts"].append(artifact)
+    items[3]["matches"].append({**items[1]["matches"][0], "artifact": artifact})
+    assert run(items)["scanner_evidence"] == "still_reported"
