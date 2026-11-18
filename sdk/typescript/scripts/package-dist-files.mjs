@@ -1,5 +1,15 @@
 const distModules = [
   "api",
+  "dependency-stack-assessment",
+  "dependency-stack-claims",
+  "dependency-stack-cli",
+  "dependency-stack-evidence",
+  "dependency-stack-launcher",
+  "dependency-stack-packet",
+  "dependency-stack-run",
+  "dependency-stack-use",
+  "stack-packet",
+
   "batch-cost",
   "scan-executor",
   "host-protocol",

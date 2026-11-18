@@ -95,16 +95,24 @@ export async function readDependencySourceCitation(
     range.path,
     signal,
   );
-  const text = new TextDecoder("utf-8", {
-    fatal: true,
-    ignoreBOM: true,
-  }).decode(bytes);
-  const lines = text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
-  if (range.startLine > lines.length)
+  // Git line boundaries are LF bytes. Other lines can use another source encoding.
+  let start = 0;
+  let end = 0;
+  let endLine = 0;
+  while (end < bytes.length && endLine < range.endLine) {
+    endLine++;
+    if (endLine === range.startLine) start = end;
+    const newline = bytes.indexOf(0x0a, end);
+    end = newline < 0 ? bytes.length : newline + 1;
+  }
+  if (range.startLine > endLine)
     throw new CodexSecurityError(
       "Source range starts past the end of the Git file.",
     );
-  const endLine = Math.min(range.endLine, lines.length);
+  const excerpt = new TextDecoder("utf-8", {
+    fatal: true,
+    ignoreBOM: true,
+  }).decode(bytes.subarray(start, end));
   return {
     path: identity.repositoryPath,
     commit: identity.commit,
@@ -112,6 +120,6 @@ export async function readDependencySourceCitation(
     contentSha256: identity.contentSha256,
     startLine: range.startLine,
     endLine,
-    excerpt: lines.slice(range.startLine - 1, endLine).join(""),
+    excerpt,
   };
 }

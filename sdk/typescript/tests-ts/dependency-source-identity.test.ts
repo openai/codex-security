@@ -10,7 +10,7 @@ test("source citations bind an exact regular Git blob and report the actual cove
   await using directory = await scopedTemporaryDirectory("source-identity-");
   const repo = directory.path;
   git(repo, "init", "-q");
-  const source = "first\r\nsecond\nlast";
+  const source = "\uFEFFfirst\r\nsecond\nlast";
   await writeFile(join(repo, "source.txt"), source);
   git(repo, "-c", "core.autocrlf=false", "add", "source.txt");
   const blob = git(repo, "rev-parse", ":source.txt");
@@ -25,7 +25,7 @@ test("source citations bind an exact regular Git blob and report the actual cove
     commit,
     blob,
     contentSha256: hash("sha256", source),
-    excerpt: "first\r\nsecond\n",
+    excerpt: "\uFEFFfirst\r\nsecond\n",
   });
   expect(
     await readDependencySourceCitation(repo, commit, {
@@ -54,4 +54,32 @@ test("source citations bind an exact regular Git blob and report the actual cove
       endLine: 5,
     }),
   ).rejects.toThrow(/end of the Git file/);
+});
+
+test("validates only the cited bytes as UTF-8 and hashes the entire source blob", async () => {
+  await using directory = await scopedTemporaryDirectory("source-encoding-");
+  const repo = directory.path;
+  const bytes = Buffer.from(
+    "# coding: latin-1\n# caf\u00e9\nprint(1)\r\n# derni\u00e8re",
+    "latin1",
+  );
+  git(repo, "init", "-q");
+  await writeFile(join(repo, "example.py"), bytes);
+  git(repo, "-c", "core.autocrlf=false", "add", "example.py");
+  git(repo, "commit", "-qm", "Add mixed-encoding source");
+  const commit = git(repo, "rev-parse", "HEAD");
+  const cite = (startLine: number, endLine: number) =>
+    readDependencySourceCitation(repo, commit, {
+      path: "example.py",
+      startLine,
+      endLine,
+    });
+  expect(await cite(3, 3)).toMatchObject({
+    startLine: 3,
+    endLine: 3,
+    excerpt: "print(1)\r\n",
+    contentSha256: hash("sha256", bytes),
+  });
+  await expect(cite(2, 3)).rejects.toThrow();
+  await expect(cite(3, 9)).rejects.toThrow();
 });
