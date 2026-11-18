@@ -77,7 +77,12 @@ export type BaselineAttempt = {
   usage: BaselineUsage | null;
 } & (
   | { status: "completed"; report: BaselineCompletedReport; error?: never }
-  | { status: "failed"; error: string; report?: never }
+  | {
+      status: "failed";
+      /** Preserved verbatim from RunRecord.error; review for local paths, command output, or secrets before distribution. */
+      error: string;
+      report?: never;
+    }
 );
 
 export interface ReleaseBaseline {
@@ -533,6 +538,14 @@ function normalizeRuns(
   );
 }
 
+/**
+ * Build a portable baseline snapshot omitting structured host path fields
+ * (`scanDir`, `reportPath`, executable paths) and raw fixture source text.
+ * Failed attempts retain `record.error` verbatim (and `compareBaselines`
+ * surfaces those strings in `failures`), so review exported baselines and
+ * comparison outputs for local paths, command output, or secrets before
+ * sharing or publishing them.
+ */
 export function createReleaseBaseline({
   experiment,
   fixture,

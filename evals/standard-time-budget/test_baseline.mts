@@ -212,6 +212,96 @@ test("export strips host paths and raw source while round-tripping comparison re
   );
 });
 
+test("export omits structured host path fields while keeping synthetic failure host-path diagnostics verbatim", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "baseline-failure-diagnostic-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runDir = join(root, "run-1");
+  await mkdir(runDir, { recursive: true });
+  const fixture = createFixture();
+  const experiment = makeSavedExperiment(fixture);
+  const failureDiagnostic =
+    "spawn /local/host/worktrees/scan-state/worker failed: ENOENT (synthetic token=keep-verbatim)";
+  const runs: RunRecord[] = [
+    completedRun(
+      fixture,
+      1,
+      "baseline",
+      fixture.positives.map((entry) => entry.id),
+    ),
+    {
+      pair: 1,
+      variant: "time-aware",
+      startedAt: "2026-10-01T00:02:00.000Z",
+      advisoryBudgetMinutes: 5,
+      promptSha256: null,
+      status: "failed",
+      error: failureDiagnostic,
+      elapsedMs: 350,
+      usage: null,
+    },
+  ];
+  await Promise.all([
+    writeFile(join(runDir, "experiment.json"), JSON.stringify(experiment)),
+    writeFile(join(runDir, "fixture.json"), JSON.stringify(fixture)),
+    writeFile(join(runDir, "runs.json"), JSON.stringify(runs)),
+  ]);
+
+  const exportPath = join(root, "baseline.json");
+  const exportRun = spawnSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      baselineScript,
+      "export",
+      runDir,
+      exportPath,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(exportRun.status, 0, exportRun.stderr);
+
+  const exportedText = await readFile(exportPath, "utf8");
+  assert.equal(exportedText.includes("/local/host/bin/codex"), false);
+  assert.equal(
+    exportedText.includes("/local/host/libexec/codex-native"),
+    false,
+  );
+  assert.equal(exportedText.includes("/local/host/reports/run-1/"), false);
+  assert.equal(exportedText.includes("scanDir"), false);
+  assert.equal(exportedText.includes("reportPath"), false);
+  assert.equal(exportedText.includes(failureDiagnostic), true);
+
+  const reloaded = await loadBaseline(exportPath);
+  const failedAttempt = reloaded.runs.find(
+    (run) => run.pair === 1 && run.variant === "time-aware",
+  );
+  assert.equal(failedAttempt?.status, "failed");
+  assert.equal(failedAttempt.error, failureDiagnostic);
+
+  const comparisonPath = join(root, "comparison.json");
+  const compareRun = spawnSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      baselineScript,
+      "compare",
+      exportPath,
+      exportPath,
+      comparisonPath,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(compareRun.status, 0, compareRun.stderr);
+  const comparison = JSON.parse(await readFile(comparisonPath, "utf8"));
+  assert.deepEqual(comparison.arms["time-aware"].baseline.failures, [
+    { pair: 1, error: failureDiagnostic },
+  ]);
+  assert.deepEqual(comparison.arms["time-aware"].candidate.failures, [
+    { pair: 1, error: failureDiagnostic },
+  ]);
+  assert.equal(comparison.arms["time-aware"].flags.hasRunFailures, true);
+});
+
 test("corpus expansion scores comparable cases without false regressions and catches masked drops", () => {
   const fiveCase = createFiveCaseFixture();
   const sevenCase = createFixture();
