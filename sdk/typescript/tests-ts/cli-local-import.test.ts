@@ -587,7 +587,10 @@ test("terminal advisory groups preserve occurrences and distinguish upgrade and 
         advisory_ids:
           index === 2
             ? ["CVE-2099-1000", "CVE-2099-1001"]
-            : ["CVE-2099-1000", "alias"],
+            : index === 0
+              ? ["alias", "CVE-2099-1000"]
+              : ["CVE-2099-1000", "alias"],
+        source_data: { vulnerability: { VulnerabilityID: "CVE-2099-1000" } },
         packages: [
           {
             name: id,

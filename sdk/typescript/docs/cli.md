@@ -1749,8 +1749,7 @@ For Tenable One Code Repository findings, use `--provider tenable --to local` an
 
 For CrowdStrike FCS CLI 4.x IaC reports, use `--provider crowdstrike --to local` and select the directory where FCS ran with `--repository`. It does not need to be a Git checkout, but each scanned file must be unchanged since the scan. Add `--source-repository-url` to record the repository; it must match a fetch remote when the directory is a Git checkout. A `git::https://` report names its repository, and a different `--source-repository-url` stops the import. [CrowdStrike import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/crowdstrike.md)
 
-In a terminal, Trivy and Grype package matches appear together under the scanner’s
-primary advisory. Each keeps its scanner ID, packages, and reported fixes. Confirm the
+In a terminal, stored Trivy and Grype package matches appear together under the scanner’s primary advisory. Grype records can be supplied by a normalized SDK import. Each keeps its scanner ID, packages, and reported fixes. Confirm the
 consumer and manifest or image build input before generating a patch. When a
 scanner supplies no fixed version, investigate exposure and vendor guidance.
 JSON readback preserves the individual unassessed records.

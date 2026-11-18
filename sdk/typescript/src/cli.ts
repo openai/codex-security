@@ -804,15 +804,30 @@ function renderImportedFindings(
   const lines = [
     `${formatItemCount(findings.length, "imported finding")} in ${diagnosticValue(repository)}`,
   ];
-  // These readers put the scanner's primary advisory first. Other providers
-  // may import advisory bulletins, historical alerts, or independent IDs.
   const groups = new Map<string | null, StoredExternalFinding[]>();
   for (const finding of findings) {
-    const packageScan =
-      finding.provider === "trivy" || finding.provider === "grype";
+    const { provider, evidence } = finding;
+    const ids = evidence.advisory_ids ?? [];
+    const data = evidence.source_data;
+    const match = data?.["match"];
+    const vulnerability =
+      provider === "grype" && isJsonObject(match)
+        ? match["vulnerability"]
+        : data?.["vulnerability"];
+    const nativeId = isJsonObject(vulnerability)
+      ? vulnerability[provider === "grype" ? "id" : "VulnerabilityID"]
+      : undefined;
+    // A normalized SDK import may reorder aliases or omit native metadata.
+    const primary =
+      typeof nativeId === "string" && ids.includes(nativeId)
+        ? nativeId
+        : ids.length === 1
+          ? ids[0]
+          : null;
     const advisory =
-      packageScan && finding.evidence.packages?.length
-        ? (finding.evidence.advisory_ids?.[0] ?? null)
+      (provider === "trivy" || provider === "grype") &&
+      evidence.packages?.length
+        ? (primary ?? null)
         : null;
     const group = groups.get(advisory);
     if (group) group.push(finding);
