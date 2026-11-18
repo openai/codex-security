@@ -4825,12 +4825,15 @@ describe("runtime directories and plugin Python boundary", () => {
       "SD",
       "WD",
       "WO",
-      "DC",
+      "DT",
       "0x40",
       "0x10000",
       "0x40000",
       "0x80000",
       "0x1301bf",
+      "0x40000000", // GW
+      "0x00120116", // FW
+      "0x1201bf", // FW plus read and execute
     ]) {
       expect(
         inspectWindowsCredentialAcl(
@@ -4847,6 +4850,11 @@ describe("runtime directories and plugin Python boundary", () => {
       ["", "GRGX"],
       ["", "AFAX"],
       ["", "0x1200a9"],
+      ["", "0x1200ab"], // read/execute and FILE_ADD_FILE
+      ["", "DC"], // SDDL 0x2 is FILE_ADD_FILE on a directory
+      ["", "0x2"],
+      ["", "0x6"], // FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY
+      ["IO", "0x00120116"],
       ["IO", "FA"],
     ] as const) {
       expect(
@@ -4866,7 +4874,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ] as const) {
       expect(
         inspectWindowsCredentialAcl(
-          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;DC;;;${principal})`,
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;DT;;;${principal})`,
           user,
           { scope: "ancestor" },
         ).untrustedPrincipals,
@@ -4896,6 +4904,41 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ).toThrow("owner is not a trusted principal");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "distinguishes directory create-file and delete-child grants on Windows",
+    async () => {
+      const parent = await temporaryDirectory();
+      const user = windowsUserSid()!;
+      for (const [right, replacement] of [
+        ["WD", false],
+        ["DC", true],
+      ] as const) {
+        const grant = windowsTestCommand("icacls.exe", [
+          parent,
+          "/inheritance:r",
+          "/grant:r",
+          `*${user}:(OI)(CI)F`,
+          `*S-1-1-0:(${right})`,
+        ]);
+        expect(grant.status, grant.stderr).toBe(0);
+        const descriptor = inspectWindowsTestAcl(
+          [
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:TEST_PARENT).Sddl",
+          ],
+          { ...process.env, TEST_PARENT: parent },
+        );
+        expect(descriptor.status, descriptor.stderr).toBe(0);
+        const { untrustedPrincipals } = inspectWindowsCredentialAcl(
+          descriptor.stdout.trim(),
+          user,
+          { scope: "ancestor" },
+        );
+        expect(untrustedPrincipals.includes("S-1-1-0")).toBe(replacement);
+      }
+    },
+  );
 
   test("accepts private credential-file ACLs without inheritance flags", () => {
     const user = "S-1-5-21-111-222-333-1001";
