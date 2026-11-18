@@ -873,7 +873,7 @@ The versioned document contains each item's verdict, before and after severity,
 provider severity, reason bases, claim match, issue URL and evidence freshness.
 Related flaws retain Codex severity. Sealed findings and `--fail-on-severity` do
 not change. Local-tree drift and provider source identity are not compared.
-See [Continuum validation](../../../docs/scanner-imports/continuum.md#use-continuum-for-follow-up-validation)
+See [validation providers](../../../docs/validation-providers.md)
 for configuration, permissions and limits.
 
 ### Understand scan scope and follow-up work

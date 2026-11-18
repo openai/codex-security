@@ -117,7 +117,7 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
   scanPromptFile: inputPath.optional(),
   validationPrompt: z.string().optional(),
   validationPromptFile: inputPath.optional(),
-  validationProviderConfig: ValidationProviderSettingsSchema.optional(),
+  validationProvider: ValidationProviderSettingsSchema.optional(),
   postScanPrompt: z.string().optional(),
   postScanPromptFile: inputPath.optional(),
   outputDir: inputPath.optional(),

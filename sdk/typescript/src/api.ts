@@ -4686,7 +4686,7 @@ export class CodexSecurity {
     telemetry?: {
       command: OperationTelemetryEvent["command"];
       repository: string;
-      options: ScanOptions;
+      options: Omit<ScanOptions, "validationProvider">;
       mode?: ScanMode;
     },
   ): Promise<T> {
@@ -5779,7 +5779,7 @@ export class CodexSecurity {
 
   async #prepareLocalInputs(
     repository: string,
-    options: ScanOptions,
+    options: Omit<ScanOptions, "validationProvider">,
     signal?: AbortSignal,
     protectedRoots?: readonly string[],
     allowExistingOutput = false,

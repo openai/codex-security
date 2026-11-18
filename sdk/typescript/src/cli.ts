@@ -5760,15 +5760,13 @@ export async function main(
               throw new CodexSecurityError(
                 "--validate=NAME requires a provider name.",
               );
-            settings.validationProviderConfig = {
-              ...settings.validationProviderConfig,
+            settings.validationProvider = {
+              ...settings.validationProvider,
               provider: validationProviderOverride,
             };
           }
-          if (options.validate && settings.validationProviderConfig) {
-            validationProviderFromConfiguration(
-              settings.validationProviderConfig,
-            );
+          if (options.validate && settings.validationProvider) {
+            validationProviderFromConfiguration(settings.validationProvider);
           }
           if (options.archiveExisting && settings.outputDir === undefined) {
             throw new CodexSecurityError(
@@ -12582,7 +12580,7 @@ async function executeScan(
           }
         };
         const findings = result.findings.findings;
-        const configuredValidation = arguments_.validationProviderConfig;
+        const configuredValidation = arguments_.validationProvider;
         const validationProvider =
           configuredValidation === undefined
             ? undefined

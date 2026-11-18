@@ -100,19 +100,15 @@ export type { CustomValidationResult } from "./custom-validation.js";
 export type {
   ValidationProvider,
   ValidationProviderAssessment,
-  ValidationProviderConfiguration,
   ValidationProviderContext,
   ValidationProvenance,
   ValidationItemRecord,
   ValidationBasis,
   ValidationClaimMatch,
 } from "./validation-provider.js";
-export {
-  ContinuumValidationProvider,
-  assessClaimMatch,
-  deterministicClientToken,
-  findingToOcsf,
-} from "./continuum-validation-provider.js";
+export { ContinuumValidationProvider } from "./continuum-validation-provider.js";
+export type { ContinuumValidationOptions } from "./continuum-validation-provider.js";
+export type { ValidationProviderSettings } from "./scan-settings.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";
 export type {

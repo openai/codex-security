@@ -67,7 +67,7 @@ const PROJECT_SETTING_KEYS = {
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
   validationPromptFile: "scan.validation_file",
-  validationProviderConfig: "scan.validation.provider",
+  validationProvider: "scan.validation.provider",
   outputDir: "output.directory",
   failureSeverity: "policy.fail_on_severity",
   maxCostUsd: "limits.max_cost_usd_per_scan",
@@ -443,10 +443,10 @@ export function resolveScanSettings(
       filePath(file?.scan?.validation_file),
       cliPath(overrides.validationPromptFile),
     ),
-    validationProviderConfig: choose(
+    validationProvider: choose(
       "scan.validation.provider",
       file?.scan?.validation,
-      overrides.validationProviderConfig,
+      overrides.validationProvider,
     ),
     postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(

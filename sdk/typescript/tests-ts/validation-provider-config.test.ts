@@ -29,13 +29,13 @@ test("parses scan.validation provider configuration", () => {
   );
   expect(
     resolveProjectConfig({ scan: { validation: configured } }, "/repo").options
-      .validationProviderConfig,
+      .validationProvider,
   ).toEqual(configured);
 });
 
 test("no provider preserves the existing validation selection", () => {
   expect(
-    resolveProjectConfig({}, "/repo").options.validationProviderConfig,
+    resolveProjectConfig({}, "/repo").options.validationProvider,
   ).toBeUndefined();
 });
 
