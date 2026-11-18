@@ -536,4 +536,13 @@ test("the skill and standalone adapter use the same 23 blind questions and verif
   );
   assert.equal(negative.grade.pass, false);
   assert.equal(negative.grade.evidenceCorrect, false);
+  const missing = await runBaseline(
+    async () => ({ answer: null, usage: null }),
+    scenario,
+    repo,
+    sha,
+  );
+  assert.equal(missing.grade.pass, false);
+  assert.equal(missing.grade.verdictCorrect, false);
+  assert(missing.grade.errors.includes("Missing verified source citation"));
 });

@@ -46,8 +46,12 @@ export async function runBaseline(runSkill, scenario, repo, sha) {
   const errors = [];
   const citations = [];
   const read = sourceReader(repo, sha);
-  for (const citation of answer.evidence) {
+  for (const citation of Array.isArray(answer?.evidence)
+    ? answer.evidence
+    : []) {
     try {
+      if (typeof citation?.code !== "string" || !citation.code.trim())
+        throw Error("Missing exact source quote");
       citations.push(
         read({
           ...citation,
@@ -72,11 +76,12 @@ export async function runBaseline(runSkill, scenario, repo, sha) {
     scenario.verdict === "potentially_exploitable"
       ? "exploitable"
       : scenario.verdict;
-  const verdictCorrect = answer.verdict === expected;
-  const versionCorrect = answer.dependency_version === scenario.version;
+  const verdictCorrect = answer?.verdict === expected;
+  const versionCorrect = answer?.dependency_version === scenario.version;
   if (!verdictCorrect) errors.push("Expected " + expected);
   if (!versionCorrect) errors.push("Expected version " + scenario.version);
-  if (!answer.reason?.trim()) errors.push("Missing reason");
+  if (typeof answer?.reason !== "string" || !answer.reason.trim())
+    errors.push("Missing reason");
   return {
     answer,
     usage,
