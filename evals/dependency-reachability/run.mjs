@@ -31,7 +31,7 @@ const usage = `Usage: node run.mjs behavior [--out NEW_DIR]
        node run.mjs benchmark --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs live --cli /path/to/codex-security.mjs [--case CASE] [--model MODEL] [--out NEW_DIR]
 Use --packets DIR to reuse an earlier run's packets/ directory.
-Cases: positive, fixed, unbound, missing-version, mixed-services, mixed-package, or all (default).`;
+Cases: positive, fixed, unbound, missing-version, mixed-services, mixed-package, mixed-evidence, mixed-evidence-no-access, or all (default).`;
 const { positionals, values } = parseArgs({
   allowPositionals: true,
   options: {
@@ -55,6 +55,8 @@ const allCases = [
   "missing-version",
   "mixed-services",
   "mixed-package",
+  "mixed-evidence",
+  "mixed-evidence-no-access",
 ];
 if (
   positionals.length !== 1 ||
@@ -277,6 +279,46 @@ try {
         for (const role of ["sources", "sinks", "stacks"])
           args.push("--" + role, join(fixture.input, role + ".json"));
       }
+      let transcript;
+      if (id.startsWith("mixed-evidence")) {
+        const records = join(answerDir, "records.json");
+        transcript = join(answerDir, "calls.jsonl");
+        const config = join(answerDir, "project.json");
+        await writeFile(transcript, "", { mode: 0o600 });
+        await jsonFile(records, {
+          notes: {
+            release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version 5.0.0.`,
+            ...(id === "mixed-evidence" && {
+              request_record: `An anonymous client sent its own text to POST /preview on service notes at revision ${fixture.sha}, and received the parsed links from its submitted body.`,
+            }),
+          },
+        });
+        await jsonFile(config, {
+          exploitability: {
+            evidence_sources: [
+              {
+                server: "service_records",
+                instructions:
+                  "Use the release and request records to check which package is running in a service and who could reach its parser.",
+              },
+            ],
+          },
+          codex: {
+            mcp_servers: {
+              service_records: {
+                command: process.execPath,
+                args: [
+                  join(import.meta.dirname, "fixtures", "evidence-server.mjs"),
+                  records,
+                  transcript,
+                ],
+                enabled_tools: ["release_record", "request_record"],
+              },
+            },
+          },
+        });
+        args.push("--config", config);
+      }
       if (values.model) args.push("--model", values.model);
       args.push("--json", "--report-file", reportFile);
       assert.equal(git(fixture.repo, "status", "--porcelain"), "");
@@ -294,6 +336,14 @@ try {
         });
         result.elapsedMs = Math.round(performance.now() - start);
         await writeCliLogs(runDir, processResult);
+        const calls = transcript
+          ? (await readFile(transcript, "utf8"))
+              .trim()
+              .split("\n")
+              .filter(Boolean)
+              .map((line) => JSON.parse(line))
+          : undefined;
+        if (calls) await jsonFile(join(runDir, "source-calls.json"), calls);
         if (processResult.code !== 0) {
           result.status = "execution_error";
           result.exitCode = processResult.code;
@@ -312,7 +362,12 @@ try {
             "stdout equals saved report",
           );
           result.grade = mixed
-            ? gradeMixed(report, fixture, id === "mixed-package")
+            ? gradeMixed(
+                report,
+                fixture,
+                id === "mixed-package",
+                calls && { calls, withAccess: id === "mixed-evidence" },
+              )
             : gradeStack(report, fixture);
           result.status = "passed";
         }

@@ -21,7 +21,7 @@ import {
   sha256,
   summaryFixtures,
 } from "./fixtures.mjs";
-import { gradeMixed } from "./grade.mjs";
+import { gradeEvidenceSource, gradeMixed } from "./grade.mjs";
 
 let root;
 before(async () => {
@@ -178,6 +178,93 @@ test("the repository grader binds each service's verdict to its own checkout evi
   const outside = structuredClone(report);
   outside.uses[0].evidence[0].path = "../outside";
   assert.throws(() => gradeMixed(outside, fixture), /fixture checkout/u);
+});
+
+test("the evidence grader checks citations against the stdio server's original replies", async () => {
+  const records = join(root, "records.json");
+  const transcript = join(root, "calls.jsonl");
+  await jsonFile(records, {
+    notes: {
+      release_record: "Build 1 ran in service notes.",
+      request_record: "A guest reached service notes.",
+    },
+  });
+  const queries = [
+    {
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1" },
+      },
+    },
+    { method: "notifications/initialized" },
+    { id: 2, method: "tools/list" },
+    ...["release_record", "request_record"].map((name, i) => ({
+      id: i + 3,
+      method: "tools/call",
+      params: { name, arguments: { service: "notes" } },
+    })),
+  ];
+  const cli = spawnSync(
+    process.execPath,
+    [
+      join(import.meta.dirname, "fixtures", "evidence-server.mjs"),
+      records,
+      transcript,
+    ],
+    {
+      input:
+        queries
+          .map((q) => JSON.stringify({ jsonrpc: "2.0", ...q }))
+          .join("\n") + "\n",
+      encoding: "utf8",
+    },
+  );
+  assert.ifError(cli.error);
+  assert.equal(cli.status, 0, cli.stderr);
+  const replies = cli.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line).result);
+  assert.deepEqual(
+    replies[1].tools.map((t) => t.name),
+    ["release_record", "request_record"],
+  );
+  const calls = (await readFile(transcript, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    calls.map((c) => c.result),
+    replies.slice(2),
+  );
+  const report = { claimEvidence: { receipts: {} } },
+    use = { observations: [], decidingEvidence: [] };
+  for (const [i, c] of calls.entries()) {
+    const key = sha256(JSON.stringify(c));
+    report.claimEvidence.receipts[key] = {
+      server: "service_records",
+      ...structuredClone(c),
+    };
+    use.observations.push({
+      server: "service_records",
+      tool: c.tool,
+      sha256: key,
+      record: c.result.content[0].text,
+      supports: [i === 0 ? "running" : "access"],
+    });
+    use.decidingEvidence.push({ kind: "receipt", receiptId: key });
+  }
+  gradeEvidenceSource(report, use, { calls, withAccess: true });
+  const access = use.observations[1];
+  report.claimEvidence.receipts[access.sha256].result.content[0].text =
+    access.record = "An invented request.";
+  assert.throws(
+    () => gradeEvidenceSource(report, use, { calls, withAccess: true }),
+    /actual request_record response/u,
+  );
 });
 
 test("the optional suite grades a caller's actual route and config in the same assessed use", async () => {

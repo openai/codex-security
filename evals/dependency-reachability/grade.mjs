@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import {
   git,
   precondition,
@@ -325,7 +326,63 @@ export function approvedCitations(report, use, read, sha) {
   });
 }
 
-export function gradeMixed(response, fixture, packageCheck = false) {
+// Compare report citations with replies recorded by the independent MCP process.
+export function gradeEvidenceSource(report, use, { calls, withAccess }) {
+  const expected = { running: "release_record", access: "request_record" };
+  for (const [support, tool] of Object.entries(expected)) {
+    const actual = calls.filter(
+      (c) => c.tool === tool && c.arguments.service === "notes",
+    );
+    assert(actual.length, "investigator requested " + tool + " for notes");
+    if (!withAccess && support === "access") {
+      assert(
+        actual.every((c) =>
+          c.result.content[0].text.includes("No observation for notes."),
+        ),
+      );
+      assert(
+        !use.observations.some((ref) => ref.supports.includes("access")),
+        "missing request record cannot prove access",
+      );
+      continue;
+    }
+    assert(
+      use.observations.some((ref) => {
+        if (
+          !ref.supports.includes(support) ||
+          ref.server !== "service_records" ||
+          ref.tool !== tool ||
+          !ref.record?.trim()
+        )
+          return false;
+        const receipt = report.claimEvidence.receipts[ref.sha256];
+        if (
+          !receipt ||
+          receipt.server !== ref.server ||
+          receipt.tool !== tool ||
+          !use.decidingEvidence.some(
+            (r) => r.kind === "receipt" && r.receiptId === ref.sha256,
+          )
+        )
+          return false;
+        return actual.some(
+          (c) =>
+            isDeepStrictEqual(receipt.arguments, c.arguments) &&
+            isDeepStrictEqual(receipt.result.content, c.result.content) &&
+            c.result.content[0].text.includes(ref.record),
+        );
+      }),
+      "approved use cites the actual " + tool + " response",
+    );
+  }
+}
+
+export function gradeMixed(
+  response,
+  fixture,
+  packageCheck = false,
+  evidenceSource,
+) {
   let report = response;
   if (packageCheck) {
     assert.equal(response.package.name, "linkify-it");
@@ -350,7 +407,11 @@ export function gradeMixed(response, fixture, packageCheck = false) {
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];
   for (const [service, version, verdict] of [
-    ["notes", "5.0.0", "potentially_exploitable"],
+    [
+      "notes",
+      "5.0.0",
+      evidenceSource?.withAccess ? "exploitable" : "potentially_exploitable",
+    ],
     ["reviews", "5.0.1", "ruled_out"],
   ]) {
     const uses = report.uses.filter((use) =>
@@ -361,7 +422,27 @@ export function gradeMixed(response, fixture, packageCheck = false) {
     assert.equal(use.component, "linkify-it");
     assert.equal(use.version, version);
     assert.equal(use.verdict, verdict);
-    assert.equal(use.deployment, "configured");
+    assert.equal(
+      use.deployment,
+      service === "notes" && evidenceSource ? "confirmed" : "configured",
+    );
+    if (service === "notes" && evidenceSource) {
+      const claim = exactClaim(report.claims, use.conclusionClaim);
+      assert.deepEqual(
+        use.observations,
+        claim.payload.use.observations.map(
+          ({ server, tool, sha256, quote, supports }) => ({
+            server,
+            tool,
+            sha256,
+            record: quote,
+            supports,
+          }),
+        ),
+        "runtime citations belong to the independently approved claim",
+      );
+      gradeEvidenceSource(report, use, evidenceSource);
+    }
     assert(use.reason?.trim());
     const cites = approvedCitations(report, use, validate, fixture.sha);
     const lock = service + "/package-lock.json";
@@ -396,7 +477,7 @@ export function gradeMixed(response, fixture, packageCheck = false) {
         has("Dockerfile", "RUN npm ci"),
       "build consumes selected lock",
     );
-    if (verdict === "potentially_exploitable")
+    if (service === "notes")
       assert(
         has("server.mjs", "links.match(await text(request))"),
         "request reaches parser",

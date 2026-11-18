@@ -13,7 +13,11 @@ This suite runs the installed dependency exploitability CLI against two small Gi
 
 The example summary package and CVE-2099-1001 are fictional. The external observer takes a V8 breakpoint inside the actual library during a request, verifies the running checkout and loaded module, and saves the frames in their original order. A fresh, uninstrumented process must produce the same HTTP results with the same requests. The expected answers, probe requests and probe outcomes stay outside the investigator inputs.
 
-The mixed-services project uses the published linkify-it CVE-2026-48801, npm distribution URLs and integrity digests. Each service runs a shared handler using its own lockfile and Docker build argument. The fixture establishes the configured build; it includes no observation of either service running. [Published advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
+The `mixed-evidence` case uses the same checkout as `mixed-services` and configures a read-only stdio MCP server through `exploitability.evidence_sources`. The server returns synthetic observations for the notes service. One lookup identifies the running revision and package, and another records an anonymous client's request to the parser. The expected verdicts are `exploitable` for notes and `ruled_out` for reviews. In `mixed-evidence-no-access`, the server still reports the running build but has no record of a client request. The expected notes verdict becomes `potentially_exploitable`.
+
+The grader checks the cited service, tool, arguments, and exact response against the server's independent transcript in `source-calls.json`. Each response includes a freshly generated record ID so a report from an earlier run cannot stand in for a new lookup.
+
+The mixed-services project uses the published linkify-it CVE-2026-48801, npm distribution URLs and integrity digests. Each service runs a shared handler using its own lockfile and Docker build argument. The checkout establishes the configured build. The two evidence-source cases supply the additional observations through MCP. [Published advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
 
 ## Run
 
@@ -36,6 +40,8 @@ Run all cases through actual CLI sessions or select one with `--case positive`. 
 
 ```sh
 node "$runner" live --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/live"
+node "$runner" live --case mixed-evidence --cli "$CLI" --out "$outputs/evidence"
+node "$runner" live --case mixed-evidence-no-access --cli "$CLI" --out "$outputs/missing-access"
 node "$runner" benchmark --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/benchmark"
 ```
 
