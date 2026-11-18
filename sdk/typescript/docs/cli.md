@@ -63,6 +63,35 @@ When the capture producer identifies the package copy that executed a frame, inc
 
 A missing observation or a gap in the evidence can yield a completed `unknown` assessment. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
 
+### Reviewed repository and package checks
+
+From a Git checkout, use the same opt-in to investigate a published CVE or a package. The CLI freezes the public advisory, finds dependency selections and caller paths at the checked-out commit, and asks a fresh reviewer to approve each exact claim revision. The resulting JSON keeps each supported use and its source citations separate.
+
+```sh
+export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
+cs exploitability check CVE-2019-10744 --json --report-file report.json
+cs exploitability check npm:lodash --progress-events progress.jsonl
+cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
+```
+
+Package checks return one `checks` entry per advisory. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. An unapproved or failed investigation exits with a nonzero status. Progress is best effort. `--report-file` publishes the completed JSON atomically to a new file and preserves any existing destination.
+
+A repository check can ask MCP servers for facts it cannot learn from the checkout. For example, a lockfile can identify the package selected by a build. A deployment inventory can show whether that build is running. In a project file, list the servers under `exploitability.evidence_sources` and describe when the investigator should use each one. Define the connection once under `codex.mcp_servers`. Configure read-only tools for the systems you want the investigator to query.
+
+```yaml
+exploitability:
+  evidence_sources:
+    - server: deployments
+      instructions: Look up the running commit and installed package version for the service under review.
+codex:
+  mcp_servers:
+    deployments:
+      command: /path/to/your/inventory-server
+      enabled_tools: [get_deployment]
+```
+
+Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. You can also set `exploitability.scope.instructions` to specify which callers to investigate. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
+
 ## Updating the CLI
 
 Run `cs update` to update an npm global installation managed by the running

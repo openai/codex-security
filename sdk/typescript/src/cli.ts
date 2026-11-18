@@ -7,6 +7,10 @@ import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
 import {
+  createDependencyEvidenceCapture,
+  selectDependencyEvidenceServers,
+} from "./dependency-evidence-sources.js";
+import {
   providerPreflightCommand,
   restoreProviderProfile,
   withCodexPreflightLock,
@@ -357,6 +361,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  disabledMcpServers,
   resolveMatchingBatch,
   selectedComparisonContext,
   comparisonForScan,
@@ -1397,6 +1402,8 @@ interface SkillCommandOutput {
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
   readonly codexOverrides?: JsonObject;
+  readonly investigationServers?: JsonObject;
+  readonly onExecEvent?: (event: Readonly<Record<string, unknown>>) => void;
   readonly command:
     "validate" | "patch" | "verify-fix" | "exploitability check";
   readonly telemetryCommand?: OperationTelemetryEvent["command"];
@@ -2051,6 +2058,39 @@ async function runCodexSkillProcess(
         expandHome(configuredHome, processEnvironment),
       );
     }
+    if (output?.investigationServers !== undefined) {
+      // Exec ignores user config and repository-local config for these turns.
+      // List system defaults separately because native Codex merges MCP tables.
+      const emptyHome = await mkdtemp(join(tmpdir(), "dependency-mcp-"));
+      try {
+        const inherited = await disabledMcpServers(
+          command,
+          undefined,
+          {
+            ...Object.fromEntries(
+              Object.entries(environment).filter(
+                (entry): entry is [string, string] => entry[1] !== undefined,
+              ),
+            ),
+            CODEX_HOME: emptyHome,
+          },
+          { workingDirectory: NEUTRAL_CODEX_CWD, signal: output.signal },
+        );
+        for (const name of Object.keys(output.investigationServers)) {
+          if (Object.hasOwn(inherited, name))
+            throw new ConfigurationError(
+              `Evidence source ${JSON.stringify(name)} conflicts with a system MCP server. Use a distinct name in the project config.`,
+            );
+        }
+        args = [
+          ...args,
+          "--config",
+          `mcp_servers=${inlineToml({ ...inherited, ...output.investigationServers })}`,
+        ];
+      } finally {
+        await rm(emptyHome, { recursive: true, force: true });
+      }
+    }
     output?.signal?.throwIfAborted();
     const invocation = spawn(
       executablePathForSpawn(command.command),
@@ -2140,6 +2180,7 @@ async function runCodexSkillProcess(
                     onThreadStarted: releaseCredentialHome,
                     input: invocation.stdin!,
                   },
+              output.onExecEvent,
             ),
         new Promise<undefined>((resolve) => {
           forceCaptureCompletion = () => resolve(undefined);
@@ -8220,6 +8261,11 @@ export async function main(
     cli.command(
       createExploitabilityCli({
         currentDirectory: dependencies.currentDirectory,
+        environment: dependencies.environment,
+        stderr: errorOutput,
+        setExitCode(code) {
+          exitCode = code;
+        },
         recordsInput: dependencies.recordsInput ?? process.stdin,
         async withSignal(run) {
           const controller = new AbortController();
@@ -10600,9 +10646,16 @@ async function runDependencyAgent(
       );
   }
   const configured = Object.fromEntries(
-    Object.entries(project?.input.codex ?? {}).filter(([key]) =>
-      modelSettings.includes(key),
-    ),
+    Object.entries(
+      mergeCodexOverrides(
+        request.readOnly
+          ? resolveCodexProfile(
+              await readCodexHomeConfig(dependencies.environment),
+            )
+          : {},
+        project?.input.codex ?? {},
+      ),
+    ).filter(([key]) => modelSettings.includes(key)),
   );
   const overrides = resolveCommandAuthConfig(
     mergeCodexOverrides(configured, explicit),
@@ -10627,6 +10680,17 @@ async function runDependencyAgent(
     },
     network: { enabled: false },
   };
+  const servers = request.onEvidence
+    ? selectDependencyEvidenceServers(
+        project?.input.exploitability?.evidence_sources ?? [],
+        project?.input.codex?.["mcp_servers"],
+      )
+    : {};
+  const captureEvidence = createDependencyEvidenceCapture(servers);
+  const trustKey =
+    process.platform === "win32"
+      ? request.directory.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      : request.directory;
   const settings: JsonObject = {
     ...overrides,
     model: model.model,
@@ -10641,13 +10705,18 @@ async function runDependencyAgent(
       set: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
     },
     project_doc_max_bytes: 0,
-    mcp_servers: {},
+    ...(request.readOnly && {
+      project_root_markers: [],
+      projects: { [trustKey]: { trust_level: "untrusted" } },
+    }),
+    mcp_servers: servers,
     features: { multi_agent: false, multi_agent_v2: false },
   };
   const chunks: string[] = [];
   const status = await dependencies.runCodex(
     [
       "exec",
+      ...(request.readOnly ? ["--ignore-user-config"] : []),
       "--disable",
       "plugins",
       "--ephemeral",
@@ -10672,6 +10741,13 @@ async function runDependencyAgent(
       auth: "auto",
       modelProvider: provider,
       codexOverrides: overrides,
+      ...(request.readOnly && { investigationServers: servers }),
+      ...(request.onEvidence && {
+        onExecEvent(event) {
+          const record = captureEvidence(event);
+          if (record) request.onEvidence?.(record);
+        },
+      }),
       stdout: {
         write(value) {
           chunks.push(String(value));
@@ -11112,6 +11188,7 @@ export async function readSkillCommandOutput(
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
+  onExecEvent?: (event: Readonly<Record<string, unknown>>) => void,
 ): Promise<{
   message?: string;
   error?: string;
@@ -11437,6 +11514,7 @@ export async function readSkillCommandOutput(
       continue;
     }
     if (value["type"] === "item.completed") {
+      onExecEvent?.(value);
       const item = value["item"];
       if (
         isJsonObject(item) &&
