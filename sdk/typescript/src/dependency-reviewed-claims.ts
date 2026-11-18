@@ -27,6 +27,12 @@ import {
 import { dependencyPremiseRefSchema } from "./dependency-review-queue.js";
 import {
   dependencyEvidencePayload,
+  bindReceiptSelections,
+  dependencyReceiptSelectionSchema,
+  selectedReceiptReference,
+  selectedReceiptKey,
+  selectedReceiptValue,
+  type DependencyReceiptSelection,
   selectDependencyEvidenceField,
 } from "./dependency-graph-evidence.js";
 import { isRecord } from "./record.js";
@@ -117,6 +123,7 @@ const proposedUse = z.strictObject({
   version: text.nullable(),
   evidence: z.array(source).min(1),
   observations: z.array(receipt),
+  receiptSelections: z.array(dependencyReceiptSelectionSchema).optional(),
   proof: dependencyUseProofSchema,
   remainingQuestions: z.array(text),
 });
@@ -269,6 +276,10 @@ function containsQuote(record: DependencyEvidenceRecord, quote: string) {
   )
     return true;
   const data = result["structuredContent"] ?? result["structured_content"];
+  return containsJsonQuote(data, quote);
+}
+
+function containsJsonQuote(data: unknown, quote: string) {
   if (data == null) return false;
   // A string value can contain quotes or newlines escaped by its JSON encoding.
   function hasString(value: unknown): boolean {
@@ -534,6 +545,9 @@ export async function verifyProposedUse(
     throw new CodexSecurityError(
       "An assumption that the use is not deployed must identify the caller-supplied boundary.",
     );
+  const selections: DependencyReceiptSelection[] = [
+    ...(use.receiptSelections ?? []),
+  ];
   function originalReference(ref: DependencyReviewReference): boolean {
     if (ref.kind === "source")
       return evidence.some(
@@ -553,6 +567,7 @@ export async function verifyProposedUse(
     )
       return false;
     if (!ref.selection) return true;
+    selections.push({ receiptId: ref.receiptId, ...ref.selection });
     const original = records.find((r) => r.sha256 === ref.receiptId)!;
     const payload = dependencyEvidencePayload(
       original,
@@ -580,6 +595,30 @@ export async function verifyProposedUse(
     checkReferences(attached?.evidence);
   for (const condition of use.openConditions ?? [])
     checkReferences(condition.assignee?.evidence);
+  const recordById = new Map(records.map((r) => [r.sha256, r]));
+  const boundReceipts = bindReceiptSelections(selections, (id) =>
+    recordById.get(id),
+  );
+  const linkedObservations = observations.map((observation) => {
+    const candidates = boundReceipts.filter(
+      (row) => row.receiptId === observation.sha256,
+    );
+    if (!candidates.length) return { ...observation, evidenceKeys: undefined };
+    const evidenceKeys = candidates
+      .filter((row) => {
+        const selected = selectedReceiptValue(
+          recordById.get(row.receiptId)!,
+          row.selection,
+        );
+        return containsJsonQuote(selected, observation.quote);
+      })
+      .map(selectedReceiptKey);
+    if (!evidenceKeys.length)
+      throw new CodexSecurityError(
+        "The quoted observation is outside this use's selected receipt rows.",
+      );
+    return { ...observation, evidenceKeys };
+  });
   const location = verifiedLocation(scope, use, running, covers);
   const names = [location, ...scope.runtimeServices].filter(
     (name) => name !== ".",
@@ -684,7 +723,8 @@ export async function verifyProposedUse(
     ...use,
     selectedCopyExcluded,
     evidence,
-    observations,
+    observations: linkedObservations,
+    ...(boundReceipts.length && { boundReceipts }),
     location,
     component,
     revision,
@@ -729,11 +769,11 @@ export function approveDependencyClaims(
         throw new CodexSecurityError(
           "Independent review does not match the current claim revisions.",
         );
-      const { sourceIds, receiptIds, dependencies } = claimInputs(claim);
+      const { sourceIds, receiptKeys, dependencies } = claimInputs(claim);
       assertReviewedPremises(store, dependencies);
       const allowed = new Set([
         ...sourceIds,
-        ...receiptIds,
+        ...receiptKeys,
         ...dependencies.map(premiseKey),
       ]);
       if (
@@ -754,7 +794,9 @@ export function approveDependencyClaims(
             !use.observations.some(
               (r) =>
                 r.supports.some((s) => s === support) &&
-                decision.evidenceKeys.includes(r.sha256),
+                (r.evidenceKeys ?? [r.sha256]).some((key) =>
+                  decision.evidenceKeys.includes(key),
+                ),
             ),
         )
       )
@@ -786,7 +828,7 @@ export function reportedUse(
   const running = use.observations.some((ref) =>
     ref.supports.includes("running"),
   );
-  const decidingEvidence = [
+  const decidingEvidence: DependencyReviewReference[] = [
     ...use.evidence
       .filter(
         (ref) =>
@@ -800,12 +842,22 @@ export function reportedUse(
         endLine,
       })),
     ...use.observations
-      .filter((ref) => !evidenceKeys || evidenceKeys.includes(ref.sha256))
+      .filter(
+        (ref) =>
+          !ref.evidenceKeys &&
+          (!evidenceKeys || evidenceKeys.includes(ref.sha256)),
+      )
       .map((ref) => ({
         kind: "receipt" as const,
         receiptId: ref.sha256,
         originalPayloadSha256: ref.originalPayloadSha256,
       })),
+    ...(use.boundReceipts ?? [])
+      .filter(
+        (row) =>
+          !evidenceKeys || evidenceKeys.includes(selectedReceiptKey(row)),
+      )
+      .map(selectedReceiptReference),
     ...premiseEvidence,
   ];
   return {
@@ -872,7 +924,11 @@ export function reportedUse(
       ],
     },
     proof: use.proof,
-    decidingEvidence,
+    decidingEvidence: [
+      ...new Map(
+        decidingEvidence.map((ref) => [dependencyRecordHash(ref), ref]),
+      ).values(),
+    ],
     conclusionClaim: reference(claim),
   };
 }

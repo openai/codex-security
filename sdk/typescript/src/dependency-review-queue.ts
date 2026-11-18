@@ -1,3 +1,9 @@
+import {
+  bindReceiptSelections,
+  dependencyReceiptSelectionSchema,
+  selectedReceiptKey,
+  type BoundReceiptSelection,
+} from "./dependency-graph-evidence.js";
 import { z } from "zod";
 import type { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import { dependencyRecordHash } from "./dependency-attempt-store.js";
@@ -36,6 +42,7 @@ const submission = z.strictObject({
   statement: text,
   sources: z.array(sourceRange),
   receiptIds: z.array(text),
+  receiptSelections: z.array(dependencyReceiptSelectionSchema).optional(),
   dependencies: z.array(dependencyPremiseRefSchema),
 });
 export const submitPremisesSchema = z.strictObject({
@@ -47,6 +54,7 @@ export type Premise = {
   statement: string;
   sources: Awaited<ReturnType<typeof readDependencySourceCitation>>[];
   receiptIds: string[];
+  boundReceipts?: BoundReceiptSelection[];
   dependencies: PremiseRef[];
 };
 
@@ -54,11 +62,19 @@ export function claimInputs(claim: Claim) {
   const v = claim.value;
   const sources =
     v.kind === "premise" ? v.sources : v.kind === "use" ? v.use.evidence : [];
-  const receiptIds =
+  const selected =
+    v.kind === "premise"
+      ? (v.boundReceipts ?? [])
+      : v.kind === "use"
+        ? (v.use.boundReceipts ?? [])
+        : [];
+  const wholeReceipts =
     v.kind === "premise"
       ? v.receiptIds
       : v.kind === "use"
-        ? v.use.observations.map((r) => r.sha256)
+        ? v.use.observations
+            .filter((r) => !selected.some((row) => row.receiptId === r.sha256))
+            .map((r) => r.sha256)
         : [];
   const dependencies =
     v.kind === "premise"
@@ -69,7 +85,12 @@ export function claimInputs(claim: Claim) {
   return {
     sources,
     sourceIds: sources.map(dependencyRecordHash),
-    receiptIds,
+    wholeReceiptIds: [...new Set(wholeReceipts)],
+
+    receiptKeys: [
+      ...new Set([...wholeReceipts, ...selected.map(selectedReceiptKey)]),
+    ],
+    selected,
     dependencies,
   };
 }
@@ -205,6 +226,7 @@ export function createPremiseQueue(options: {
             expectedRevision,
             sources,
             receiptIds,
+            receiptSelections,
             dependencies,
             statement,
             scope,
@@ -213,12 +235,21 @@ export function createPremiseQueue(options: {
             throw new CodexSecurityError(
               "A pinned checkout revision is required.",
             );
-          if (!sources.length && !receiptIds.length && !dependencies.length)
+          if (
+            !sources.length &&
+            !receiptIds.length &&
+            !receiptSelections?.length &&
+            !dependencies.length
+          )
             throw new CodexSecurityError(
               "A premise must cite its supporting evidence.",
             );
           if (receiptIds.some((r) => !options.records.has(r)))
             throw new CodexSecurityError("Unknown premise receipt.");
+          const boundReceipts = bindReceiptSelections(
+            receiptSelections ?? [],
+            (id) => options.records.get(id),
+          );
           const verified = await Promise.all(
             sources.map((s) =>
               readDependencySourceCitation(
@@ -238,6 +269,7 @@ export function createPremiseQueue(options: {
               statement,
               sources: verified,
               receiptIds,
+              ...(boundReceipts.length && { boundReceipts }),
               dependencies,
             } satisfies Premise,
           };

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { DependencyEvidenceRecord } from "./dependency-evidence-sources.js";
+import { dependencyRecordHash } from "./dependency-attempt-store.js";
 import { isRecord } from "./record.js";
 
 const path = z.array(z.union([z.string(), z.number().int().nonnegative()]));
@@ -132,6 +133,83 @@ export function dependencyEvidencePayload(
   )
     throw new Error("Expected a JSON text block in the cited receipt.");
   return JSON.parse(item["text"]);
+}
+
+export const dependencyReceiptSelectionSchema = z.strictObject({
+  receiptId: receipt.shape.receiptId,
+  textBlock: block,
+  record: path,
+});
+export type DependencyReceiptSelection = z.infer<
+  typeof dependencyReceiptSelectionSchema
+>;
+
+export function selectedReceiptValue(
+  original: DependencyEvidenceRecord,
+  selection: Omit<DependencyReceiptSelection, "receiptId">,
+) {
+  const value = selectDependencyEvidenceField(
+    dependencyEvidencePayload(original, selection.textBlock),
+    selection.record,
+  );
+  if (value === undefined)
+    throw new Error("Selection does not identify original JSON content.");
+  return value;
+}
+
+/** Bind a pointer to the captured response and origin, independently of its neighbors. */
+export function bindReceiptSelections(
+  selected: readonly DependencyReceiptSelection[],
+  get: (id: string) => DependencyEvidenceRecord | undefined,
+) {
+  const bindings = selected.map(({ receiptId, textBlock, record }) => {
+    const original = get(receiptId);
+    if (!original) throw new Error("Unknown receipt selection: " + receiptId);
+    const selection = { textBlock, record };
+    selectedReceiptValue(original, selection);
+    const parent =
+      "linkedFrom" in original && typeof original.linkedFrom === "string"
+        ? original.linkedFrom
+        : undefined;
+    const origin = {
+      tool: original.tool,
+      arguments: original.arguments,
+      ...(parent && { parentReceiptId: parent }),
+    };
+    const originalPayloadSha256 = dependencyRecordHash(original.result);
+    const key = dependencyRecordHash({
+      server: original.server,
+      origin,
+      payloadSha256: originalPayloadSha256,
+      selection,
+    });
+    return {
+      key,
+      receiptId,
+      server: original.server,
+      origin,
+      originalPayloadSha256,
+      selection,
+    };
+  });
+  return [...new Map(bindings.map((row) => [row.key, row])).values()];
+}
+export type BoundReceiptSelection = ReturnType<
+  typeof bindReceiptSelections
+>[number];
+export const selectedReceiptKey = (row: BoundReceiptSelection) =>
+  "receipt:" + row.key;
+export function selectedReceiptReference({
+  receiptId,
+  originalPayloadSha256,
+  selection,
+}: BoundReceiptSelection) {
+  return {
+    kind: "receipt" as const,
+    receiptId,
+    originalPayloadSha256,
+    selection,
+  };
 }
 
 function incomplete(value: unknown): boolean {

@@ -19,6 +19,8 @@ import type { LinkedDependencyEvidence } from "./dependency-linked-resources.js"
 import { createDependencySourceTools } from "./dependency-source-evidence.js";
 import {
   createDependencyGraphEvidenceTools,
+  dependencyReceiptSelectionSchema,
+  selectedReceiptValue,
   type DependencyEvidenceGraph,
 } from "./dependency-graph-evidence.js";
 import {
@@ -81,6 +83,9 @@ export { investigationServer };
 const text = z.string().min(1);
 const readEvidence = z.strictObject({
   id: text,
+  selection: dependencyReceiptSelectionSchema
+    .omit({ receiptId: true })
+    .optional(),
   path: z
     .array(z.union([z.string(), z.number().int().nonnegative()]))
     .optional(),
@@ -102,7 +107,9 @@ export function evidencePage(
   record: DependencyEvidenceRecord,
   args: z.infer<typeof readEvidence>,
 ) {
-  let value: unknown = record.result;
+  let value: unknown = args.selection
+    ? selectedReceiptValue(record, args.selection)
+    : record.result;
   for (const key of args.path ?? []) {
     if (!value || typeof value !== "object" || !Object.hasOwn(value, key))
       throw new Error("Unknown response selection.");
@@ -112,6 +119,7 @@ export function evidencePage(
     offset = args.offset ?? 0;
   return {
     ...receiptMetadata(record),
+    ...(args.selection && { selection: args.selection }),
     path: args.path ?? [],
     offset,
     text: serialized.slice(offset, offset + pageSize),
@@ -154,9 +162,12 @@ export function boundedEvidence(record: DependencyEvidenceRecord) {
 }
 
 /** Initial context is bounded across the entire evidence set. Both roles can page the full ledger. */
-export function evidencePreviews(records: Iterable<DependencyEvidenceRecord>) {
+export function evidencePreviews(
+  records: Iterable<DependencyEvidenceRecord>,
+  budget = 24_000,
+) {
   const previews = [];
-  let remaining = 24_000 - 2;
+  let remaining = budget - 2;
   for (const record of records) {
     const preview = boundedEvidence(record);
     const bytes =

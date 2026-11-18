@@ -1214,7 +1214,12 @@ test("an investigator tool cannot substitute for a running deployment and proven
     tool: "running",
     arguments: {},
     result: {
-      structuredContent: { workloads: [{ name: "example", message }] },
+      structuredContent: {
+        workloads: [
+          { name: "example", message },
+          { name: "other", message: "a neighboring build" },
+        ],
+      },
     },
   };
   const rec = { ...raw, sha256: dependencyRecordHash(raw) };
@@ -1237,7 +1242,59 @@ test("an investigator tool cannot substitute for a running deployment and proven
   };
   const verify = (u: Proposal["uses"][number]) =>
     verifyProposedUse(f.path, scope, u, signal, true, [rec, records[1]!]);
-  expect((await verify(associated)).services).toEqual(associated.services);
+  const verified = await verify(associated);
+  expect(verified.services).toEqual(associated.services);
+  const store = new DependencyAttemptStore(":memory:");
+  try {
+    const claim = store.recordClaim<Claim["value"]>("use-1", {
+      kind: "use",
+      use: verified,
+    });
+    const keys = verified.observations.flatMap(
+      (row) => row.evidenceKeys ?? [row.sha256],
+    );
+    const decision = {
+      id: claim.id,
+      revision: claim.revision,
+      hash: claim.hash,
+      reason: "Checked the selected facts.",
+      approved: true,
+    };
+    expect(() =>
+      approveDependencyClaims(
+        store,
+        [claim],
+        [{ ...decision, evidenceKeys: [rec.sha256, records[1]!.sha256] }],
+      ),
+    ).toThrow("select the deciding evidence");
+    expect(() =>
+      approveDependencyClaims(
+        store,
+        [claim],
+        [{ ...decision, evidenceKeys: [keys[0]!] }],
+      ),
+    ).toThrow("running build and caller access");
+    approveDependencyClaims(
+      store,
+      [claim],
+      [{ ...decision, evidenceKeys: keys }],
+    );
+    expect(
+      reportedUse(verified, claim, keys).decidingEvidence.filter(
+        (r) => r.kind === "receipt",
+      ),
+    ).toContainEqual(ref);
+  } finally {
+    store.close();
+  }
+  await expect(
+    verify({
+      ...positive,
+      receiptSelections: [
+        { receiptId: rec.sha256, textBlock: null, record: ["workloads", 1] },
+      ],
+    }),
+  ).rejects.toThrow("outside this use's selected receipt rows");
   await expect(
     verify({
       ...associated,
@@ -1247,7 +1304,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
           evidence: [
             {
               ...ref,
-              selection: { textBlock: null, record: ["workloads", 1] },
+              selection: { textBlock: null, record: ["workloads", 2] },
             },
           ],
         },
@@ -1694,4 +1751,271 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       evidenceReferences: [],
     }),
   );
+});
+
+test.each([
+  "omission",
+  "ambiguous",
+  "stale",
+  "malformed",
+  "persistent",
+] as const)(
+  "requires every current decision and limits corrective review (%s)",
+  async (mode) => {
+    await using f = await fixture();
+    const batches: string[][] = [];
+    let coordinators = 0;
+    const run = runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Parser behavior",
+        signal,
+      },
+      {
+        discover: async () => f.discovery,
+        async runAgent(req) {
+          if (req.coordinator) {
+            coordinators++;
+            return JSON.stringify({ uses: [f.use], limitations: [] });
+          }
+          const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          const rows = (
+            packet.claims as (Claim & { availableEvidenceKeys: string[] })[]
+          ).map((c) => ({
+            id: c.id,
+            revision: c.revision,
+            hash: c.hash,
+            approved: true,
+            reason: "Verified the exact claim.",
+            evidenceKeys: c.availableEvidenceKeys,
+          }));
+          batches.push(rows.map((row) => row.id));
+          const use = rows.find((row) => row.id === "use-1")!;
+          if (batches.length === 1 || mode === "persistent") {
+            if (mode === "malformed") return "{";
+            if (mode === "stale")
+              return JSON.stringify({
+                decisions: rows.map((d) =>
+                  d.id === use.id
+                    ? { ...d, revision: d.revision + 1, hash: "f".repeat(64) }
+                    : d,
+                ),
+              });
+            if (mode === "omission")
+              return JSON.stringify({ decisions: [use] });
+            return JSON.stringify({
+              decisions: [use, use, { ...use, id: "unrequested" }],
+            });
+          }
+          const feedback = packet.reviewCorrection;
+          expect(feedback.expected).toEqual(
+            rows.map(({ id, revision, hash }) => ({ id, revision, hash })),
+          );
+          if (mode === "omission") {
+            expect(feedback.problem).toContain("Missing ids");
+            expect(packet.approvedClaims.map((c: Claim) => c.id)).toContain(
+              "use-1",
+            );
+          } else if (mode === "ambiguous") {
+            expect(feedback.problem).toContain('Duplicate id "use-1"');
+            expect(feedback.problem).toContain('Unexpected id "unrequested"');
+            expect(packet.approvedClaims).toEqual([]);
+          } else if (mode === "stale") {
+            expect(feedback.problem).toContain(
+              'Wrong revision or hash for "use-1"',
+            );
+            expect(packet.approvedClaims).toEqual([]);
+          } else {
+            expect(feedback.problem).toContain("JSON object");
+          }
+          return JSON.stringify({ decisions: rows });
+        },
+      },
+    );
+    if (mode === "persistent") {
+      await expect(run).rejects.toThrow(
+        /Duplicate id "use-1".*Missing ids \["coverage"\].*Still awaiting/,
+      );
+    } else {
+      const r = await run;
+      if (!("checks" in r)) throw Error("Expected a reviewed package report.");
+      expect(r.checks[0]!.claims.map((c) => c.id)).toEqual([
+        "use-1",
+        "coverage",
+      ]);
+    }
+    expect(batches).toEqual([
+      ["use-1", "coverage"],
+      mode === "omission" ? ["coverage"] : ["use-1", "coverage"],
+    ]);
+    expect(coordinators).toBe(1);
+  },
+);
+
+test("a reviewed premise retains independently selected rows of the historical multi-record response", async () => {
+  await using f = await fixture();
+  const frames = [
+    { file: "writer.ts", function: "saveImage" },
+    { file: "caller-a.ts", function: "start" },
+    { file: "completely-unrelated", function: "third_row_must_not_escape" },
+  ];
+  const uri = "fixture://profiles/exact";
+  const result = {
+    contents: [
+      {
+        uri,
+        text: JSON.stringify({
+          frames,
+          privateTail: "UNRELATED-GRAPH-PROFILE-BYTES".repeat(1700),
+        }),
+      },
+    ],
+  };
+  const original = {
+    server: "deployed",
+    tool: "mcpServer/resource/read",
+    arguments: { uri },
+    result,
+    linkedFrom: "inventory-1",
+  };
+  const captured = { ...original, sha256: dependencyRecordHash(original) };
+  // These identities are from the original report producer for these exact bytes and origin.
+  const keys = [
+    "receipt:5698a19b50d94f50ac87a36cdb0cffc6079e6fea62e32a7de621199101189ef9",
+    "receipt:6b4a7ad083941eb4ed59d62c3033bdd6d820ded030ebcf392083bb70067a1227",
+  ];
+  const selections = [0, 1, 2].map((i) => ({
+    receiptId: captured.sha256,
+    textBlock: 0,
+    record: ["frames", i],
+  }));
+  const checked = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Review the parser.",
+      signal,
+      evidenceSources: [
+        {
+          server: "deployed",
+          instructions: "Inspect the matching caller and operation.",
+        },
+      ],
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        const tools = await req.investigationTools!();
+        if (req.coordinator) {
+          req.onEvidence!(captured);
+          const claim = {
+            id: "frame",
+            expectedRevision: 0,
+            scope: "caller",
+            statement: "The stack includes the caller and writer.",
+            sources: [],
+            receiptIds: [],
+            dependencies: [],
+          };
+          await expect(
+            tools.call("submit_dependency_claims", {
+              claims: [
+                {
+                  ...claim,
+                  receiptSelections: [
+                    { ...selections[0], record: ["frames", 19] },
+                  ],
+                },
+              ],
+            }),
+          ).rejects.toThrow("Selector does not exist");
+          await tools.call("submit_dependency_claims", {
+            claims: [
+              {
+                ...claim,
+                receiptSelections: [...selections.slice(0, 2), selections[0]],
+              },
+            ],
+          });
+          const [approved] = (await tools.call("query_dependency_claims", {
+            ids: ["premise:frame"],
+            wait: true,
+          })) as {
+            id: string;
+            revision: number;
+            hash: string;
+            state: string;
+          }[];
+          expect(approved!.state).toBe("approved");
+          const { id, revision, hash } = approved!;
+          return JSON.stringify({
+            uses: [{ ...f.use, premises: [{ id, revision, hash }] }],
+            limitations: [],
+          });
+        }
+        expect(req.prompt).not.toContain("third_row_must_not_escape");
+        for (const claim of input.claims)
+          if (claim.id === "premise:frame") {
+            expect(claim.availableEvidenceKeys).toEqual(keys);
+            expect(
+              claim.receiptSelections.map(
+                (row: { result: unknown }) => row.result,
+              ),
+            ).toEqual(frames.slice(0, 2));
+            expect(input.evidence).toEqual([]);
+            expect(
+              await tools.call("read_dependency_evidence", {
+                id: captured.sha256,
+                selection: { textBlock: 0, record: ["frames", 1] },
+              }),
+            ).toMatchObject({ text: JSON.stringify(frames[1]) });
+          }
+        return JSON.stringify({
+          decisions: input.claims.map(
+            (c: {
+              id: string;
+              revision: number;
+              hash: string;
+              availableEvidenceKeys: string[];
+            }) => ({
+              id: c.id,
+              hash: c.hash,
+              revision: c.revision,
+              approved: true,
+              evidenceKeys: c.availableEvidenceKeys,
+              reason: "Verified the caller and writer.",
+            }),
+          ),
+        });
+      },
+    },
+  );
+  if (!("checks" in checked)) throw Error("Expected package result");
+  const report = checked.checks[0]!;
+  expect(
+    report.claims.find((c) => c.id === "premise:frame")!.evidence.receiptIds,
+  ).toEqual(keys);
+  for (const [index, key] of keys.entries()) {
+    const selection = { textBlock: 0, record: ["frames", index] };
+    const ref = {
+      kind: "receipt" as const,
+      receiptId: captured.sha256,
+      originalPayloadSha256:
+        "aef67dc0480fc12d9500fe1377a828a759fde9662a75d2908a65a8d36a6aab08",
+      selection,
+    };
+    expect(report.uses[0]!.decidingEvidence).toContainEqual(ref);
+    expect(report.claimEvidence.receipts[key]).toMatchObject({
+      key: key.slice(8),
+      receiptId: ref.receiptId,
+      originalPayloadSha256: ref.originalPayloadSha256,
+      selection,
+      result: frames[index],
+    });
+  }
+  expect(
+    report.uses[0]!.decidingEvidence.filter((r) => r.kind === "receipt"),
+  ).toHaveLength(2);
 });
