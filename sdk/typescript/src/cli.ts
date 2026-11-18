@@ -10822,11 +10822,11 @@ async function executeDependencyAgent(
       : undefined;
   const linkedEvidence: DependencyResourceEvents | undefined = linked
     ? {
-        async item(event, read) {
+        async item(event, read, invocation) {
           const origin = captureEvidence(event);
           if (!origin) return;
           request.onEvidence?.(origin);
-          await linked(origin, read);
+          await linked(origin, read, invocation);
         },
         usage: request.onUsage,
       }

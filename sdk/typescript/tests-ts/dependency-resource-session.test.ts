@@ -127,11 +127,11 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
     threadSource: "security_validation",
     cyberAccessProgram: "standard",
     linkedEvidence: {
-      async item(event, read) {
+      async item(event, read, invocation) {
         const origin = capture(event);
         if (!origin) return;
         records.push(origin);
-        await linked(origin, read);
+        await linked(origin, read, invocation);
       },
       usage(v) {
         usage.push(v);

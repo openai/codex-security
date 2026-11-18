@@ -31,6 +31,13 @@ const cursorMessage =
 export interface LinkedDependencyEvidence extends DependencyEvidenceRecord {
   linkedFrom: string;
   contentSha256: string[];
+  originThreadId?: string;
+  originCallId?: string;
+}
+
+interface ResourceInvocation {
+  threadId: string;
+  callId: string;
 }
 
 type Link = Record<string, unknown> & { uri: string };
@@ -122,7 +129,11 @@ export function createDependencyLinkedResourceCapture({
   const pending = new Map<string, Promise<void>>();
   const complete = new Set<string>();
 
-  async function follow(origin: DependencyEvidenceRecord, read: ReadResource) {
+  async function follow(
+    origin: DependencyEvidenceRecord,
+    read: ReadResource,
+    invocation?: ResourceInvocation,
+  ) {
     const { server, tool, arguments: args, result } = origin;
     const settings = Object.hasOwn(servers, server)
       ? servers[server]
@@ -298,6 +309,9 @@ export function createDependencyLinkedResourceCapture({
         response["is_error"] === true ||
         (response["server"] !== undefined && response["server"] !== server) ||
         (response["uri"] !== undefined && response["uri"] !== link.uri) ||
+        (invocation &&
+          response["originCallId"] != null &&
+          response["originCallId"] !== invocation.callId) ||
         !Array.isArray(response["contents"]) ||
         !response["contents"].length
       ) {
@@ -379,25 +393,38 @@ export function createDependencyLinkedResourceCapture({
         result: response,
         linkedFrom: parent,
         contentSha256,
+        ...(invocation && {
+          originThreadId: invocation.threadId,
+          originCallId: invocation.callId,
+        }),
       };
       const sha256 = dependencyRecordHash(receipt);
       onEvidence({ ...receipt, sha256 });
       for (const page of pages) advertisements(page, sha256, true);
     }
-    if (queue.size && !diagnostics.size) complete.add(origin.sha256);
+    return queue.size > 0 && !diagnostics.size;
   }
 
-  return async (origin: DependencyEvidenceRecord, read: ReadResource) => {
-    if (complete.has(origin.sha256)) return;
-    let inFlight = pending.get(origin.sha256);
-    if (!inFlight) {
-      inFlight = follow(origin, read);
-      pending.set(origin.sha256, inFlight);
-    }
+  return async (
+    origin: DependencyEvidenceRecord,
+    read: ReadResource,
+    invocation?: ResourceInvocation,
+  ) => {
+    // Identical tool output can advertise a URI whose bytes are scoped to a native call.
+    const key = invocation
+      ? JSON.stringify([origin.sha256, invocation.threadId, invocation.callId])
+      : origin.sha256;
+    if (complete.has(key)) return;
+    const inFlight = pending.get(key);
+    if (inFlight) return inFlight;
+    const task = follow(origin, read, invocation).then((captured) => {
+      if (captured) complete.add(key);
+    });
+    pending.set(key, task);
     try {
-      await inFlight;
+      await task;
     } finally {
-      pending.delete(origin.sha256);
+      pending.delete(key);
     }
   };
 }

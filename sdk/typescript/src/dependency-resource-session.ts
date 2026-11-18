@@ -7,6 +7,7 @@ export interface DependencyResourceEvents {
   item(
     event: Readonly<Record<string, unknown>>,
     read: (server: string, uri: string) => Promise<unknown>,
+    invocation: { threadId: string; callId: string },
   ): Promise<void>;
   usage?(value: ScanTokenUsage): void;
 }
@@ -102,6 +103,7 @@ export function createDependencyResourceSession(
         reject(new Error("The linked resource is unavailable."));
       };
       const timer = setTimeout(fail, 30_000);
+      timer.unref();
       requests.set(id, {
         resolve(value) {
           end();
@@ -159,7 +161,10 @@ export function createDependencyResourceSession(
         ) {
           const callId = item["id"];
           const task = events
-            .item(event, (server, uri) => read(threadId, callId, server, uri))
+            .item(event, (server, uri) => read(threadId, callId, server, uri), {
+              threadId,
+              callId,
+            })
             .catch((error: unknown) => {
               failure ??= error;
             })

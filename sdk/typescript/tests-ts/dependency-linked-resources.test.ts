@@ -430,3 +430,59 @@ test("rejects altered, partial, multipart, binary and malformed graph responses 
     expect(diagnostics[0]).toContain("Coverage is incomplete.");
   }
 });
+
+test("distinguishes native calls for the same origin and URI while debouncing repeated delivery", async () => {
+  const { follow, records, diagnostics } = capture(),
+    first = origin([link(primary)]);
+  const returned = new Map([
+    ["first/call", "earlier snapshot"],
+    ["second/call", "later snapshot"],
+    ["first/another", "earlier snapshot"],
+  ]);
+  const reads: string[] = [];
+  async function run(threadId: string, callId: string) {
+    const invocation = { threadId, callId },
+      key = threadId + "/" + callId;
+    await follow(
+      first,
+      async (server, uri) => {
+        expect([server, uri]).toEqual(["measurements", primary]);
+        reads.push(key);
+        return { contents: [{ uri, text: returned.get(key) }] };
+      },
+      invocation,
+    );
+  }
+  await Promise.all([
+    run("first", "call"),
+    run("second", "call"),
+    run("first", "another"),
+    run("first", "call"),
+  ]);
+  await run("second", "call");
+  expect(reads.sort()).toEqual([...returned.keys()].sort());
+  expect(records).toHaveLength(3);
+  expect(new Set(records.map((r) => r.sha256)).size).toBe(3);
+  for (const { sha256, ...r } of records) {
+    const text = returned.get(r.originThreadId + "/" + r.originCallId)!;
+    expect(r.linkedFrom).toBe(first.sha256);
+    expect(r.result).toEqual({ contents: [{ uri: primary, text }] });
+    expect(r.contentSha256).toEqual([hash("sha256", text)]);
+    expect(sha256).toBe(dependencyRecordHash(r));
+  }
+  expect(diagnostics).toEqual([]);
+});
+
+test("refuses a native resource response attributed to another originating call", async () => {
+  const { follow, records, diagnostics } = capture();
+  await follow(
+    origin([link(primary)]),
+    async () => ({
+      contents: [{ uri: primary, text: "different caller's snapshot" }],
+      originCallId: "unrelated-call",
+    }),
+    { threadId: "reader", callId: "requested-call" },
+  );
+  expect(records).toEqual([]);
+  expect(diagnostics).toHaveLength(1);
+});
