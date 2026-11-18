@@ -17,6 +17,8 @@
 - bump docker/login-action from 4.7.0 to 4.8.0 ([#2642](https://github.com/openai/codex-security/pull/2642))
 - bump napi from 3.16.1 to 3.16.2 in /plugins/codex-security/native ([#2722](https://github.com/openai/codex-security/pull/2722))
 - bump tokenx from 1.6.0 to 2.2.0 in /sdk/typescript ([#2627](https://github.com/openai/codex-security/pull/2627))
+- bump ruff from 0.17.3 to 0.17.4 in /plugins/codex-security ([#2640](https://github.com/openai/codex-security/pull/2640))
+- bump fast-xml-parser from 5.11.1 to 5.12.0 in /github-action ([#2633](https://github.com/openai/codex-security/pull/2633))
 
 </details>
 
