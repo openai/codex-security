@@ -1282,6 +1282,7 @@ test("linked resources remain on the host and the complete preview has a fixed b
   const preview = evidencePreviews([linked, ...originals]);
   expect(preview[0]).toEqual({
     id: linked.sha256,
+    originalPayloadSha256: dependencyRecordHash(raw.result),
     server: linked.server,
     tool: linked.tool,
     linkedFrom: linked.linkedFrom,
@@ -1351,7 +1352,14 @@ test("native investigators share asynchronous reviews, immutable premises and pa
             });
             expect(metadata).toEqual({
               receipts: [
-                { id: receipt.sha256, server: "builds", tool: "observe" },
+                {
+                  id: receipt.sha256,
+                  originalPayloadSha256: dependencyRecordHash(
+                    largeReply.result,
+                  ),
+                  server: "builds",
+                  tool: "observe",
+                },
               ],
               next: null,
             });
@@ -1360,6 +1368,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
               path: ["structuredContent", "component"],
             });
             expect(page).toMatchObject({
+              originalPayloadSha256: dependencyRecordHash(largeReply.result),
               text: '"fixture-parser"',
               next: null,
             });
@@ -1510,4 +1519,179 @@ test("native investigators share asynchronous reviews, immutable premises and pa
     "assessment:app": 1,
     coverage: 1,
   });
+});
+
+test("catalog mappings bind the selected row and keep failed lookups open", async () => {
+  await using f = await fixture();
+  const server = "service-registry",
+    tool = "lookup";
+  const result = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Parser behavior",
+      evidenceSources: [
+        { server, instructions: "Look up an exact checkout path." },
+      ],
+      signal,
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        if (!req.coordinator)
+          return JSON.stringify({
+            decisions: input.claims.map(
+              (c: Claim & { availableEvidenceKeys: string[] }) => ({
+                id: c.id,
+                revision: c.revision,
+                hash: c.hash,
+                reason: "Verified each cited row",
+                approved: true,
+                evidenceKeys: c.availableEvidenceKeys,
+              }),
+            ),
+          });
+        const { call } = await req.investigationTools!();
+        const matched = "app.js",
+          unmapped = "secondary.js",
+          unavailable = "package-lock.json";
+        await call("resolve_codex_security_services", {
+          paths: [matched, unmapped, unavailable],
+        });
+        const lookup = (
+          path: string,
+          services: { id: string; name: string }[],
+        ) => {
+          const reply = {
+            server,
+            tool,
+            arguments: { path },
+            result: { structuredContent: { services } },
+          };
+          const record = { ...reply, sha256: dependencyRecordHash(reply) };
+          req.onEvidence!(record);
+          return record;
+        };
+        const first = lookup(matched, [
+            { id: "worker-7", name: "mail worker" },
+          ]),
+          empty = lookup(unmapped, []);
+        req.onEvidenceFailure!({
+          server,
+          tool,
+          arguments: { path: unavailable },
+        });
+        for (const receipt of [first, empty]) {
+          await call("record_dependency_service_mapping", {
+            path: receipt.arguments.path,
+            lookups: [
+              {
+                receiptId: receipt.sha256,
+                textBlock: null,
+                target: ["path"],
+                records: ["services"],
+                id: ["id"],
+                name: ["name"],
+              },
+            ],
+          });
+        }
+        const query = (node: string) =>
+          call("query_codex_security_graph", { node });
+        expect(await query(unmapped)).toMatchObject({
+          service_lookup: "checked",
+          evidence: expect.arrayContaining([
+            expect.objectContaining({ relation: "no_service_found" }),
+          ]),
+        });
+        expect(await query(unavailable)).toMatchObject({
+          service_lookup: "pending",
+          evidence: [],
+          service_resolution: { pending: 1 },
+        });
+        const evidence = (await query(matched)) as {
+          evidence: {
+            relation: string;
+            from: { name: string; scope: string };
+            source: string;
+            receiptSelections: {
+              receiptId: string;
+              textBlock: number | null;
+              record: (string | number)[];
+            }[];
+          }[];
+        };
+        const edge = evidence.evidence.find((e) => e.relation === "uses")!;
+        const selected = edge.receiptSelections[0]!;
+        const meta = (await call("read_dependency_evidence", {
+          id: selected.receiptId,
+          path: ["structuredContent", ...selected.record],
+        })) as { originalPayloadSha256: string; text: string };
+        expect(JSON.parse(meta.text)).toEqual({
+          id: "worker-7",
+          name: "mail worker",
+        });
+        return JSON.stringify({
+          uses: [
+            {
+              ...f.use,
+              services: [
+                {
+                  id: edge.from.scope,
+                  name: edge.from.name,
+                  source: edge.source,
+                  evidence: [
+                    {
+                      kind: "receipt",
+                      receiptId: selected.receiptId,
+                      originalPayloadSha256: meta.originalPayloadSha256,
+                      selection: {
+                        textBlock: selected.textBlock,
+                        record: selected.record,
+                      },
+                    },
+                  ],
+                },
+              ],
+              observations: [
+                {
+                  server,
+                  tool,
+                  sha256: selected.receiptId,
+                  quote: "mail worker",
+                  supports: ["context"],
+                  reason: "Catalog row identifies this caller.",
+                },
+              ],
+            },
+          ],
+          limitations: [
+            "The catalog failed for package-lock.json. Its mapping remains open.",
+          ],
+        });
+      },
+    },
+  );
+  if (!("checks" in result)) throw Error("Expected a package assessment.");
+  expect(result.checks[0]?.uses[0]?.services).toMatchObject([
+    {
+      id: server + ":worker-7",
+      source: server + "/" + tool + "#worker-7",
+      evidence: [
+        {
+          kind: "receipt",
+          selection: { textBlock: null, record: ["services", 0] },
+        },
+      ],
+    },
+  ]);
+  expect(result.checks[0]?.searches).toContainEqual(
+    expect.objectContaining({
+      source: server,
+      tool,
+      completeness: "error",
+      evidenceReferences: [],
+    }),
+  );
 });

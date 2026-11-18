@@ -111,19 +111,25 @@ export function evidencePage(
   const serialized = JSON.stringify(value),
     offset = args.offset ?? 0;
   return {
-    id: record.sha256,
-    server: record.server,
-    tool: record.tool,
+    ...receiptMetadata(record),
     path: args.path ?? [],
     offset,
     text: serialized.slice(offset, offset + pageSize),
     next: offset + pageSize < serialized.length ? offset + pageSize : null,
   };
 }
+// A result can be paged repeatedly across several review turns.
+const payloadHashes = new WeakMap<DependencyEvidenceRecord, string>();
 function receiptMetadata(record: DependencyEvidenceRecord) {
+  let originalPayloadSha256 = payloadHashes.get(record);
+  if (originalPayloadSha256 === undefined) {
+    originalPayloadSha256 = dependencyRecordHash(record.result);
+    payloadHashes.set(record, originalPayloadSha256);
+  }
   const linked = record as Partial<LinkedDependencyEvidence>;
   return {
     id: record.sha256,
+    originalPayloadSha256,
     server: record.server,
     tool: record.tool,
     ...(linked.linkedFrom && {
@@ -140,6 +146,7 @@ export function boundedEvidence(record: DependencyEvidenceRecord) {
     server: record.server,
     tool: record.tool,
     sha256: record.sha256,
+    originalPayloadSha256: meta.originalPayloadSha256,
     preview: evidencePage(record, { id: record.sha256 }),
     instructions:
       "Use read_dependency_evidence for the original selected value and subsequent pages.",
@@ -342,7 +349,7 @@ export function createInvestigationSession(options: {
     {
       name: "read_dependency_evidence",
       description:
-        "Read up to one page of the immutable original response by receipt ID, optionally selecting a JSON path or a page offset.",
+        "Read a page of the immutable original response by receipt ID, optionally selecting a JSON path or offset. originalPayloadSha256 identifies the complete response across pages.",
       inputSchema: z.toJSONSchema(readEvidence),
       run(raw) {
         const args = readEvidence.parse(raw);
