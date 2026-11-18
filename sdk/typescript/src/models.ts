@@ -14,6 +14,9 @@ export interface ScanManifest {
     warnings?: string[];
     startedAt: string;
     completedAt: string;
+    /**
+     * Equal to completedAt. Readers can recover an omitted seal timestamp after verifying the artifact digests.
+     */
     sealedAt: string;
     target: {
       kind: "git_revision" | "git_worktree" | "git_diff" | "directory_snapshot";

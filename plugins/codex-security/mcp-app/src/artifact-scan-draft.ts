@@ -29,6 +29,7 @@ import coverageDocument from "../../schemas/coverage.schema.json" with { type: "
 import findingsDocument from "../../schemas/findings.schema.json" with { type: "json" };
 import scanManifestDocument from "../../schemas/scan-manifest.schema.json" with { type: "json" };
 import { requireFiniteNumbers } from "./helpers/json.js";
+import { loadSealedContract } from "./sealed-contract.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
@@ -2863,6 +2864,21 @@ export async function getCodexSecurityCompletedScan(
     ),
   ]);
   const scan = requireObject(manifest.scan, "completed scan manifest.scan");
+  if (scan.sealedAt === undefined && scan.status === "completed") {
+    const { contract } = await loadSealedContract(context.root, {
+      expectedScanId: parsed.scanId,
+      pluginRoot: context.pluginRoot,
+    });
+    if (contract.manifest.scan.status !== "completed") {
+      throw new Error("completed scan: expected a completed manifest.");
+    }
+    return {
+      scanId: parsed.scanId,
+      manifest: contract.manifest,
+      findings: contract.findings,
+      review: contract.review,
+    };
+  }
   const reviewState =
     scan.coverageRef === undefined && scan.review !== undefined
       ? reviewStateFromSummary(scan)

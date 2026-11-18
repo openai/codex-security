@@ -155,6 +155,30 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
             VALIDATOR.validate_contract(self.scan_dir)
 
+    def test_recovers_omitted_timestamp_only_for_intact_sealed_artifacts(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        seal = manifest["scan"].pop("sealedAt")
+        self.write_json("scan-manifest.json", manifest)
+        manifest_path = self.scan_dir / "scan-manifest.json"
+        original = manifest_path.read_bytes()
+
+        validated = VALIDATOR.validate_contract(self.scan_dir)
+
+        self.assertEqual(validated["manifest"]["scan"]["sealedAt"], seal)
+        self.assertEqual(validated["findings"], self.read_json("findings.json"))
+        self.assertEqual(manifest_path.read_bytes(), original)
+
+        manifest["scan"]["complete"] = False
+        self.write_json("scan-manifest.json", manifest)
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "incomplete scan"):
+            VALIDATOR.validate_contract(self.scan_dir)
+        manifest_path.write_bytes(original)
+
+        findings_path = self.scan_dir / "findings.json"
+        findings_path.write_bytes(findings_path.read_bytes() + b"\n")
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed artifact changed"):
+            VALIDATOR.validate_contract(self.scan_dir)
+
     def test_finalizer_then_validator_cli_smoke(self) -> None:
         (self.scan_dir / "report.md").unlink()
         scan_dir = self.scan_dir.resolve()

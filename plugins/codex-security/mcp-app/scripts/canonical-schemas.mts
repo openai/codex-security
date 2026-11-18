@@ -194,7 +194,11 @@ const scanManifest = z.looseObject({
       warnings: textList.optional(),
       startedAt: timestamp,
       completedAt: timestamp,
-      sealedAt: timestamp,
+      sealedAt: timestamp
+        .describe(
+          "Equal to completedAt. Readers can recover an omitted seal timestamp after verifying the artifact digests.",
+        )
+        .optional(),
       target,
       scope: z.looseObject({
         includePaths: strings,
