@@ -18,6 +18,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { resolveNpm } from "./package-smoke-npm.mjs";
+import { smokeStackRun } from "./smoke-stack-run.mjs";
 import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const {
@@ -80,6 +81,7 @@ function run(
     cwd,
     env,
     capture = false,
+    input,
     windowsVerbatimArguments = false,
     timeout = PACKAGE_SMOKE_TIMEOUT_MS,
   } = {},
@@ -87,6 +89,7 @@ function run(
   const result = spawnSync(command, args, {
     cwd,
     env,
+    input,
     encoding: "utf8",
     stdio: capture ? "pipe" : "inherit",
     timeout,
@@ -881,6 +884,7 @@ try {
     ],
     { cwd: consumer },
   );
+  await smokeStackRun({ installedRoot, launcher, consumer, run });
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   if (process.platform === "darwin" && process.arch === "arm64") {

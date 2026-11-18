@@ -40,6 +40,29 @@ including file names that begin with a dash.
 - [Use a hosted executor](#hosted-standard-scan) or
   [run bulk scans in containers](#containerized-bulk-scans).
 
+## Experimental dependency investigations
+
+Set `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` to enable the experimental
+`exploitability` command group for an invocation. The group is hidden and unavailable
+by default. Use its help to see the commands available in your installed version.
+
+```sh
+CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability --help
+```
+
+Supply one CVE and the three documents described by the package’s `schemas/dependency-stack-inputs-v1.schema.json`. The stack document identifies the repository and the exact Git commit checked out. A single investigator reads the checkout and uses the same public commands available to external investigators.
+
+```sh
+CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability check CVE-2099-0001 \
+  --sources sources.json --sinks sinks.json --stacks stacks.json --json
+```
+
+An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt. `run tools --state <database>` lists operation schemas. Use `next` and `read-stacks` to select evidence, `record-evidence` and `record-claims` to save it, and `query-claims` to retrieve its exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file.
+
+When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
+
+A missing observation or a gap in the evidence can yield a completed `unknown` assessment. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
+
 ## Updating the CLI
 
 Run `cs update` to update an npm global installation managed by the running
@@ -264,6 +287,27 @@ comparisons, and deduplication preserve that selection. Relative helper paths an
 `auth.cwd` resolve from `CODEX_HOME` (default `~/.codex`). Comparisons and reviews
 also honor the selected command provider in that home's `config.toml`.
 
+For OrcaRouter, save this profile in `$CODEX_HOME/orcarouter.config.toml`
+(default `~/.codex/orcarouter.config.toml`), then run
+`codex-security scan . --codex 'profile="orcarouter"'`. Sign in to the 1Password CLI and
+replace the secret reference below with the one for your router key.
+
+```toml
+model = "orcarouter/fusion"
+model_provider = "orcarouter"
+
+[model_providers.orcarouter]
+name = "OrcaRouter"
+base_url = "https://api.orcarouter.ai/v1"
+wire_api = "responses"
+
+[model_providers.orcarouter.auth]
+command = "op"
+args = ["read", "op://Private/OrcaRouter/credential"]
+```
+
+This profile was tested up to the outgoing Responses request using a local service.
+
 For other providers, set their key and select a model the provider supports:
 
 ```bash
@@ -276,6 +320,88 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
+
+For Opper, save this profile in `$CODEX_HOME/opper.config.toml`
+(default `~/.codex/opper.config.toml`). Opper requires `web_search = "disabled"`.
+
+```toml
+model_provider = "opper"
+model = "anthropic/claude-sonnet-4-6"
+web_search = "disabled"
+
+[model_providers.opper]
+name = "Opper"
+base_url = "https://api.opper.ai/v3/compat"
+wire_api = "responses"
+env_key = "OPPER_API_KEY"
+```
+
+Set `OPPER_API_KEY` in your environment and run
+`codex-security scan . --codex 'profile="opper"'`. Choose a model that supports
+tool calling and streaming. Verification covered profile loading and a request to
+a local Responses endpoint.
+See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
+
+### xAI Responses API through a local gateway
+
+Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
+declarations. A direct scan against xAI can pass `--dry-run` and then fail with
+HTTP 422 on the first model request. CLIProxyAPI's xAI adapter exposes each
+namespace member to xAI as a plain function and restores the namespace when
+Codex receives a tool call. Both connections use the Responses API.
+[Direct xAI provider support](https://github.com/openai/codex-security/issues/2412)
+
+Install CLIProxyAPI v8.0.59 and save this gateway config outside the scanned
+repository in a file readable only by the gateway user. Replace the placeholders
+with a private client key of your choice and your xAI API key.
+[CLIProxyAPI release](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.59)
+
+```yaml
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+access:
+  api-keys: ["<gateway-client-key>"]
+api-keys:
+  xai:
+    - name: scan
+      base-url: "https://api.x.ai/v1"
+      models:
+        - name: "grok-4.7"
+      keys:
+        - api-key: "<xai-api-key>"
+oauth:
+  auth-dir: "~/.cli-proxy-api-xai"
+```
+
+Start the gateway in one shell.
+
+```bash
+cli-proxy-api -config /path/to/private/config.yaml -local-model
+```
+
+In a second shell on the same machine or in the same container, set
+`CODEX_API_KEY` to the client key from `access.api-keys` and run the scan.
+
+```bash
+codex-security scan . --auth api-key --model grok-4.7 --effort low \
+  --codex "model_provider='xai'" \
+  --codex "model_providers.xai.name='xAI'" \
+  --codex "model_providers.xai.base_url='http://127.0.0.1:8317/v1'" \
+  --codex "model_providers.xai.wire_api='responses'" \
+  --codex "model_providers.xai.env_key='CODEX_API_KEY'" \
+  --codex 'features.multi_agent_v2.max_concurrent_threads_per_session=1'
+```
+
+The one-thread setting keeps Standard scans from spawning subagents. Without it,
+the gateway can forward a subagent's `agent_message` on a later request, which
+xAI rejects with HTTP 422. A contributor completed a live Standard scan with
+this setting. Deep Scan workers have separate concurrency settings and remain
+unverified with this gateway.
+
+The SDK has no built-in price for `grok-4.7`, so it rejects `--max-cost` for this
+model before starting a scan.
 
 ### Hugging Face compatibility
 
@@ -508,13 +634,21 @@ callback, questions remain unresolved.
 ```bash
 codex-security scan .
 codex-security scan . --path src --path tests
+codex-security scan . --exclude-path examples/
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
 codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
-`--path` selects files or directories. The scan summary and saved scan details
+`--path` selects files or directories. Repeat `--exclude-path` to exclude literal
+repository-relative files or directories, including all descendants of a directory.
+Exclusions take precedence over `--path`, also apply to diff and Deep scans, and
+default to none. For persistent exclusions, set `scan.exclude_paths` in a selected
+project config. CLI exclusions replace that configured list. Excluded files remain
+readable as context, but findings whose locations are all excluded are removed
+from scan results.
+The scan summary and saved scan details
 show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
@@ -1434,10 +1568,10 @@ Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--post-scan-prompt-file` runs a follow-up even after failure, but not after
 cancellation or a cost stop.
 
-Concurrency defaults to four repositories. `--max-attempts` defaults to one
-attempt per pending repository per invocation. Repeating the command continues
-the campaign, skips completed results, and starts pending attempts. Occupied
-attempt directories stop that repository and suggest `--recover`.
+By default, `bulk-scan` runs up to four repositories concurrently and tries each
+unfinished CSV row once per run. With `--max-attempts 2`, a row that fails
+attempts 1 and 2 gets up to two more attempts (3 and 4) on the next run.
+An occupied attempt directory stops that row and prompts for `--recover`.
 If an ordinary attempt finds its checkout path already occupied, it stops before
 fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
 existing checkout before an ordinary retry.
@@ -1480,7 +1614,7 @@ failed or interrupted attempt:
   revision, preserving old artifacts and checkouts.
 
 Each nonempty committed line in `results.jsonl` must be valid JSON with a string
-task ID and a positive safe integer attempt number. If a line fails these checks,
+task ID from the manifest and a positive safe integer attempt number. For an invalid line,
 the command reports its line number and preserves the ledger. Restore a complete
 ledger backup that includes every committed attempt, or start a separate campaign
 in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
@@ -1634,12 +1768,14 @@ credential and Region selection. Preview and import the report separately
 with `publish findings FILE --provider continuum`. Pass
 `--source-repository-url URL` when the report has no saved repository URL.
 
-For one finding and its generated patches, add `--finding-id FINDING_ID` and
+For one finding, its matching validation evidence, and its generated patches, add `--finding-id FINDING_ID` and
 `--source-root CHECKOUT` with the absolute checkout path. The CLI uses
 `GetEnvironment` to verify that the environment has exactly one Git repository
 and no S3 sources before including unnamed patches. Pass
 `--repository-name AWS_SOURCE_NAME` for other environments to keep patches
-with that exact AWS source name. This mode accepts the same AWS profile and
+with that exact AWS source name. Validation is matched by AWS finding ID. When a
+validation artifact has no per-finding breakdown, the CLI uses `GetCodeIssue` to
+check that the issue covers just the selected finding. This mode accepts the same AWS profile and
 Region overrides and writes the finding-based JSON format for `publish findings`.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
@@ -1950,6 +2086,7 @@ codex-security classify-severity --scan-dir /path/to/completed-scan --json
 ```
 
 For repository-free canonical records, use `classify-severity --records` (optionally with `--runs N`).
+A records host can opt in to the CLI’s structured diagnostic records on its existing JSON-RPC connection. See the [records diagnostic protocol](classify-severity-records.md#cli-diagnostic-records).
 The [records protocol](classify-severity-records.md) accepts immutable Markdown and
 report snapshots and delegates model execution to the host.
 
@@ -2336,6 +2473,7 @@ Use `scans compare BEFORE AFTER` to compare a pair. A cache miss can use the mod
 and save its matching decisions. Pass `--force` to recompute saved matches.
 The older `scans match BEFORE AFTER` spelling is also supported.
 Use `scans match --all` to match completed scans in this repository generation, including linked worktrees.
+The SDK accepts matching plans with inline findings and asks compatible workbenches to send each scan’s findings once.
 Comparisons classify findings as new, persisting, reopened, not observed, resolved,
 or unknown. An absent finding in the later scope is not observed; absence alone
 does not verify remediation. A finding is resolved only after it was explicitly
@@ -2346,11 +2484,12 @@ One comparison ID is compared with the latest completed scan.
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
 
-When a saved Standard scan and a Deep scan have the same recorded target,
-revision, and snapshot digest, matching flags findings that have different
-anchors but share a unique rule, first displayed source range, and optional
-instance. Matching preserves the case of saved paths. Codex can request the
-saved evidence to distinguish separate causes at that site. Automatic matching
+Standard and Deep scans can identify matching candidates in a single target or
+corresponding paths in linked worktrees with the same saved repository
+generation. When the revision and snapshot digest agree, matching flags findings
+with different anchors that share a unique rule, first displayed source range,
+and optional instance. Matching preserves the case of saved paths. Codex can
+request the saved evidence to distinguish separate causes at that site. Automatic matching
 under a cost limit keeps its single comparison call.
 
 Only high-confidence root-cause matches are grouped. Uncertain and related

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import { z } from "zod";
+import type { createSeverityDiagnostics } from "./classify-severity-diagnostics.js";
 import {
   classifySeverityRecords,
   type ClassifySeverityRecordsInput,
@@ -85,6 +86,7 @@ export function runHostRecordsProtocol(
   options: {
     signal?: AbortSignal;
     classificationRuns?: number;
+    diagnostics?: ReturnType<typeof createSeverityDiagnostics>;
   } = {},
 ): Promise<number> {
   return runHostProtocol(
@@ -93,6 +95,7 @@ export function runHostRecordsProtocol(
     {
       label: labels[command],
       requestMethod: "review.run",
+      takeDiagnostics: options.diagnostics?.take,
       run: async (params, execute, signal) => {
         if (command === "dedupe")
           return runRecords(
@@ -115,6 +118,9 @@ export function runHostRecordsProtocol(
           };
         return classifySeverityRecords(params as ClassifySeverityRecordsInput, {
           classificationRuns: options.classificationRuns,
+          ...(options.diagnostics
+            ? { onDiagnostic: options.diagnostics.emit }
+            : {}),
           signal,
           reviewRunner,
         });

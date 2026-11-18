@@ -2791,6 +2791,21 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(coverage["includePaths"], ["src/"])
         self.assertEqual(coverage["excludePaths"], [])
 
+    def test_completion_filters_findings_located_only_in_excluded_paths(self) -> None:
+        binding = self.completion_binding()
+        binding["scope"] = {"includePaths": ["."], "excludePaths": ["src"]}
+        title = self.findings["findings"][0]["title"]
+        self.write_scan()
+
+        manifest, findings, coverage = FINALIZER.finalize_scan(
+            self.scan_dir, completion_binding=binding
+        )
+
+        self.assertEqual(findings["findings"], [])
+        self.assertEqual(manifest["scan"]["scope"]["excludePaths"], ["src"])
+        self.assertEqual(coverage["excludePaths"], ["src"])
+        self.assertNotIn(title, (self.scan_dir / "report.md").read_text())
+
     def test_completion_binding_rejects_sealed_wrong_producer_without_rewriting(self) -> None:
         manifest, _, _ = self.write_sealed_scan()
         binding = self.completion_binding()
