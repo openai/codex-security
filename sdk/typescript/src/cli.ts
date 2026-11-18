@@ -10836,7 +10836,13 @@ async function executeDependencyAgent(
       throw new ConfigurationError(
         "The project MCP server name conflicts with the built-in investigation tools.",
       );
-    servers[investigationServer] = { url: toolsUrl, required: true };
+    // This endpoint is created and authenticated by this process. Its tools are
+    // the CLI's own investigation operations, including writes to the temporary ledger.
+    servers[investigationServer] = {
+      url: toolsUrl,
+      required: true,
+      default_tools_approval_mode: "approve",
+    };
   }
   const trustKey =
     process.platform === "win32"
@@ -10860,6 +10866,8 @@ async function executeDependencyAgent(
     projects: { [trustKey]: { trust_level: "untrusted" } },
     mcp_servers: servers,
     features: {
+      // App tools are discovered independently of the native MCP server table.
+      apps: false,
       multi_agent: false,
       multi_agent_v2: request.coordinator === true,
       ...(request.coordinator && { multi_agent_v2_dynamic_tools: true }),

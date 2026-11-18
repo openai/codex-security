@@ -97,7 +97,13 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
           expect(Object.keys(output?.investigationServers ?? {})).toEqual([
             "dependency_investigation",
           ]);
-          expect(features).toMatchObject({ multi_agent_v2: false });
+          expect(features).toMatchObject({
+            apps: false,
+            multi_agent_v2: false,
+          });
+          expect(
+            output!.investigationServers!["dependency_investigation"],
+          ).toMatchObject({ default_tools_approval_mode: "approve" });
           expect(listed).toContain("read_dependency_evidence");
           expect(listed).not.toContain("submit_dependency_claims");
           expect(payload.evidence).toMatchObject([
@@ -129,9 +135,12 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
         } else {
           expect(output?.investigationServers).toMatchObject({
             builds: server,
-            dependency_investigation: { required: true },
+            dependency_investigation: {
+              required: true,
+              default_tools_approval_mode: "approve",
+            },
           });
-          expect(features).toMatchObject({ multi_agent_v2: true });
+          expect(features).toMatchObject({ apps: false, multi_agent_v2: true });
           expect(
             parseToml(args.find((v) => v.startsWith("agents="))!)["agents"],
           ).toMatchObject({
