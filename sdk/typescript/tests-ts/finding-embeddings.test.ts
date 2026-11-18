@@ -489,3 +489,15 @@ test("rejects malformed vectors instead of misaligning stored findings", async (
     });
   }
 });
+
+test("rejects vectors returned for a different embedding model", async () => {
+  const embedder = new OpenAiFindingEmbedder("synthetic-key", async () =>
+    Response.json({
+      model: "text-embedding-3-small",
+      data: [{ index: 0, embedding: vector() }],
+    }),
+  );
+  await expect(embedder.embed([example])).rejects.toMatchObject({
+    code: "embedding_failed",
+  });
+});
