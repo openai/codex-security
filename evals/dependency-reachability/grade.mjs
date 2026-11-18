@@ -345,6 +345,73 @@ function rangeKey({ path, startLine, endLine }) {
   return JSON.stringify([path, startLine, endLine]);
 }
 
+const evidenceHash = (value) => sha256(JSON.stringify(canonical(value)));
+
+function receiptKey(ref) {
+  return JSON.stringify(canonical(ref));
+}
+
+// Resolve each reviewer-selected receipt against the original captured MCP reply.
+// A selected row proves only its own returned value, even when its siblings look alike.
+function selectedReceipt(table, key) {
+  const row = table[key];
+  assert(row, "original approved receipt");
+  const selected = key.startsWith("receipt:");
+  const id = selected ? row.receiptId : key;
+  const raw = table[id];
+  assert(raw, "original receipt behind selected row");
+  const { sha256: recordedHash, ...payload } = raw;
+  assert.equal(evidenceHash(payload), id, "receipt identity");
+  if (recordedHash !== undefined)
+    assert.equal(recordedHash, id, "recorded receipt identity");
+  const originalPayloadSha256 = evidenceHash(raw.result);
+  const ref = { kind: "receipt", receiptId: id, originalPayloadSha256 };
+  if (!selected) return { ref, value: raw.result };
+  const origin = {
+    tool: raw.tool,
+    arguments: raw.arguments,
+    ...(raw.linkedFrom && { parentReceiptId: raw.linkedFrom }),
+  };
+  const { selection } = row;
+  const { textBlock, record } = selection;
+  assert.deepEqual(row.origin, origin, "original selected row origin");
+  assert.equal(row.server, raw.server, "original row server");
+  assert.equal(
+    row.originalPayloadSha256,
+    originalPayloadSha256,
+    "whole receipt behind selected row",
+  );
+  const claimKey = evidenceHash({
+    server: raw.server,
+    origin,
+    payloadSha256: originalPayloadSha256,
+    selection,
+  });
+  assert.equal(key, "receipt:" + claimKey, "reviewer's selected row key");
+  assert.equal(row.key, claimKey, "retained selected row key");
+  let value;
+  if (textBlock === null) {
+    value = raw.result.structuredContent ?? raw.result.structured_content;
+  } else {
+    assert(
+      Number.isSafeInteger(textBlock) && textBlock >= 0,
+      "valid selected text block",
+    );
+    const block = (raw.result.content ?? raw.result.contents)?.[textBlock];
+    assert(typeof block?.text === "string", "original selected text block");
+    value = JSON.parse(block.text);
+  }
+  for (const field of record) {
+    assert(
+      value != null && Object.hasOwn(value, field),
+      "selected field in original reply",
+    );
+    value = value[field];
+  }
+  assert.deepEqual(value, row.result, "selected value in original reply");
+  return { ref: { ...ref, selection }, value };
+}
+
 function modernDecision(report, conclusion) {
   const selected = new Set([conclusion]);
   const sources = new Map();
@@ -398,19 +465,8 @@ function modernDecision(report, conclusion) {
           claim.evidence.receiptIds?.includes(id),
           "approved receipt reference",
         );
-        const record = report.claimEvidence.receipts[id];
-        assert(record, "original approved receipt");
-        const { server, tool, arguments: args, result } = record;
-        assert.equal(
-          sha256(
-            JSON.stringify(
-              canonical({ server, tool, arguments: args, result }),
-            ),
-          ),
-          id,
-          "receipt identity",
-        );
-        receipts.set(id, sha256(JSON.stringify(canonical(result))));
+        const { ref } = selectedReceipt(report.claimEvidence.receipts, id);
+        receipts.set(receiptKey(ref), ref);
       }
     }
   }
@@ -483,16 +539,9 @@ export function approvedCitations(report, use, read, sha) {
       displayedSources.add(key);
     } else {
       assert.equal(ref.kind, "receipt");
-      assert(
-        selected.receipts.has(ref.receiptId),
-        "receipt selected by the reviewer",
-      );
-      assert.equal(
-        ref.originalPayloadSha256,
-        selected.receipts.get(ref.receiptId),
-        "original receipt payload",
-      );
-      displayedReceipts.add(ref.receiptId);
+      const key = receiptKey(ref);
+      assert(selected.receipts.has(key), "receipt selected by the reviewer");
+      displayedReceipts.add(key);
     }
   }
   assert.deepEqual(
@@ -567,15 +616,21 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
           !receipt ||
           receipt.server !== ref.server ||
           receipt.tool !== tool ||
-          !claim.evidence.receiptIds.includes(ref.sha256) ||
-          !claim.decision.evidenceKeys.includes(ref.sha256) ||
-          !use.decidingEvidence.some(
-            (r) =>
-              r.kind === "receipt" &&
-              r.receiptId === ref.sha256 &&
-              r.originalPayloadSha256 ===
-                sha256(JSON.stringify(canonical(receipt.result))),
-          )
+          !claim.decision.evidenceKeys.some((key) => {
+            if (!claim.evidence.receiptIds.includes(key)) return false;
+            const selected = selectedReceipt(
+              report.claimEvidence.receipts,
+              key,
+            );
+            return (
+              selected.ref.receiptId === ref.sha256 &&
+              use.decidingEvidence.some(
+                (r) => receiptKey(r) === receiptKey(selected.ref),
+              ) &&
+              (!selected.ref.selection ||
+                JSON.stringify(selected.value).includes(ref.quote))
+            );
+          })
         )
           return false;
         return actual.some(

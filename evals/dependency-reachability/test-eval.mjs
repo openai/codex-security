@@ -21,7 +21,11 @@ import {
   sha256,
   summaryFixtures,
 } from "./fixtures.mjs";
-import { gradeEvidenceSource, gradeMixed } from "./grade.mjs";
+import {
+  approvedCitations,
+  gradeEvidenceSource,
+  gradeMixed,
+} from "./grade.mjs";
 
 let root;
 before(async () => {
@@ -339,7 +343,16 @@ test("the evidence grader checks citations against the stdio server's original r
   };
   const report = { claimEvidence: { receipts: {} }, claims: [claim] };
   for (const [i, c] of calls.entries()) {
-    const key = sha256(JSON.stringify(c));
+    const key = sha256(
+      JSON.stringify({
+        arguments: c.arguments,
+        result: {
+          content: c.result.content.map(({ text, type }) => ({ text, type })),
+        },
+        server: "service_records",
+        tool: c.tool,
+      }),
+    );
     report.claimEvidence.receipts[key] = {
       server: "service_records",
       ...structuredClone(c),
@@ -392,7 +405,7 @@ test("the evidence grader checks citations against the stdio server's original r
       "An invented request.";
   assert.throws(
     () => gradeEvidenceSource(report, use, { calls, withAccess: true }),
-    /actual request_record response/u,
+    /actual request_record response|receipt identity/u,
   );
 });
 
@@ -545,4 +558,97 @@ test("the skill and standalone adapter use the same 23 blind questions and verif
   assert.equal(missing.grade.pass, false);
   assert.equal(missing.grade.verdictCorrect, false);
   assert(missing.grade.errors.includes("Missing verified source citation"));
+});
+
+test("a reviewer-selected row verifies its linked reply, origin, exact selection and displayed record", () => {
+  const raw = {
+    server: "catalog",
+    tool: "read_mcp_resource",
+    arguments: { server: "catalog", uri: "fixture:services" },
+    result: {
+      contents: [
+        {
+          uri: "fixture:services",
+          text: '{"services":[{"name":"one"},{"name":"two"}]}',
+        },
+      ],
+    },
+    linkedFrom:
+      "7777777777777777777777777777777777777777777777777777777777777777",
+    originThreadId: "host",
+    originCallId: "fixture-1",
+    contentSha256: [
+      "5575802f2adae1be43d65b482ee44f5568d35c0feecb3024f218076e2588ee4e",
+    ],
+  };
+  const id = "92b85bb735e04dd12e34f0fbdceddaa012963470f37e0808e45c6cdc46c72313",
+    originalPayloadSha256 =
+      "9772b6fced00a9d09e0ceff9832e93e931553aab3af6dde1ed399ff6e1c92de8";
+  const selection = { record: ["services", 1], textBlock: 0 };
+  const origin = {
+    arguments: raw.arguments,
+    parentReceiptId: raw.linkedFrom,
+    tool: raw.tool,
+  };
+  const key = sha256(
+    JSON.stringify({
+      origin,
+      payloadSha256: originalPayloadSha256,
+      selection,
+      server: raw.server,
+    }),
+  );
+  const shown = {
+    kind: "receipt",
+    receiptId: id,
+    originalPayloadSha256,
+    selection,
+  };
+  const chosen = {
+    key,
+    receiptId: id,
+    originalPayloadSha256,
+    server: "catalog",
+    origin,
+    selection,
+    result: { name: "two" },
+  };
+  const conclusionClaim = { id: "use", revision: 1, hash: "1".repeat(64) };
+  const use = {
+    conclusionClaim,
+    location: "sample",
+    component: "sample",
+    version: "1",
+    verdict: "ruled_out",
+    evidence: [],
+    decidingEvidence: [shown],
+  };
+  const selectedKey = "receipt:" + key;
+  const claim = {
+    ...conclusionClaim,
+    payload: { kind: "use", use },
+    state: "approved",
+    decision: { accepted: true, evidenceKeys: [selectedKey] },
+    evidence: { sourceIds: [], receiptIds: [selectedKey] },
+  };
+  const report = {
+    claims: [claim],
+    claimEvidence: {
+      sources: {},
+      receipts: { [id]: { ...raw, sha256: id }, [selectedKey]: chosen },
+    },
+  };
+  const verify = () =>
+    approvedCitations(report, use, () => assert.fail("unexpected source"), "");
+  assert.deepEqual(verify(), []);
+  chosen.result = { name: "one" };
+  assert.throws(verify, /selected value in original reply/);
+  chosen.result = { name: "two" };
+  use.decidingEvidence = [
+    { ...shown, selection: { textBlock: 0, record: ["services", 0] } },
+  ];
+  assert.throws(verify, /receipt selected by the reviewer/);
+  use.decidingEvidence = [shown];
+  report.claimEvidence.receipts[id].originCallId = "different";
+  assert.throws(verify, /receipt identity/);
 });
