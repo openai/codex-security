@@ -105,7 +105,13 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
             output!.investigationServers!["dependency_investigation"],
           ).toMatchObject({ default_tools_approval_mode: "approve" });
           expect(listed).toContain("read_dependency_evidence");
-          expect(listed).not.toContain("submit_dependency_claims");
+          for (const write of [
+            "submit_dependency_claims",
+            "submit_dependency_assessments",
+            "record_codex_security_endpoint",
+            "record_dependency_service_mapping",
+          ])
+            expect(listed).not.toContain(write);
           expect(payload.evidence).toMatchObject([
             { server: "builds", tool: "read_build", arguments: {}, result },
           ]);
@@ -140,6 +146,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
               default_tools_approval_mode: "approve",
             },
           });
+          expect(output!.investigationServers!["builds"]).toEqual(server);
           expect(features).toMatchObject({ apps: false, multi_agent_v2: true });
           expect(
             parseToml(args.find((v) => v.startsWith("agents="))!)["agents"],
