@@ -12490,7 +12490,9 @@ async function executeScan(
         } else {
           stopPresentation();
           try {
-            progress?.stage(`Validating ${findings.length} scan findings`);
+            progress?.stage(
+              `Validating ${formatItemCount(findings.length, "scan finding")}`,
+            );
           } catch {}
           try {
             const scanDirectory = result.scanDir;

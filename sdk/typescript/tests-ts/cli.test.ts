@@ -436,6 +436,27 @@ describe("CLI", () => {
     }
   });
 
+  test("uses the singular when validating one finding", async () => {
+    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const stderr = capture();
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--validate", "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            result: scanResultAt(scanDir, ["high"]),
+            currentDirectory: await realpath(tmpdir()),
+          }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toMatch(/Validating 1 scan finding$/mu);
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     ["ordinary", "validation failed"],
     ["terminal controls", "synthetic\u001b[31m failure\u0007"],
