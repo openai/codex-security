@@ -135,7 +135,7 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
         assert (scan_dir / surface["receiptRefs"][0]).read_text() == f"Synthetic {name} review.\n"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == termination
-    assert isinstance(manifest["scan"]["sealedAt"], str)
+    assert manifest["scan"]["artifacts"]
     sealed = {
         name: (scan_dir / name).read_bytes()
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")

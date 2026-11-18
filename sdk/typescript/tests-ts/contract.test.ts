@@ -1131,49 +1131,37 @@ describe("canonical scan contract", () => {
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
     manifest["scan"]["completedAt"] = value;
-    manifest["scan"]["sealedAt"] = value;
     await writeJson(manifestPath, manifest);
     const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
     if (valid) await expect(loaded).resolves.toBeDefined();
     else await expect(loaded).rejects.toThrow("date-time");
   });
 
-  test("requires completed and sealed timestamps to match exactly", async () => {
+  test("loads current and legacy manifests and keeps the original digest", async () => {
     const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["completedAt"] = "2026-01-01T00:00:01.000400Z";
-    manifest["scan"]["sealedAt"] = "2026-01-01T00:00:01.000400Z";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).resolves.toBeDefined();
-
-    manifest["scan"]["sealedAt"] = "2026-01-01T01:00:01.000400+01:00";
-    await writeJson(manifestPath, manifest);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("Manifest sealedAt must match completedAt.");
-  });
-
-  test("recovers the seal timestamp while preserving the original manifest digest", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    delete manifest["scan"]["sealedAt"];
-    await writeJson(manifestPath, manifest);
-    const original = await readFile(manifestPath);
-
-    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-    expect(loaded.manifest.scan.sealedAt).toBe(manifest["scan"]["completedAt"]);
-    expect(
-      validatedFileDigests.get(loaded.manifest)?.get("scan-manifest.json"),
-    ).toBe(sha256(original));
-    expect(await readFile(manifestPath)).toEqual(original);
-    const path = join(scanDir, "findings.json");
+    const path = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(path);
+    for (const legacyValue of [
+      undefined,
+      "legacy timestamp unrelated to completion",
+    ]) {
+      if (legacyValue === undefined) delete manifest["scan"]["sealedAt"];
+      else manifest["scan"]["sealedAt"] = legacyValue;
+      await writeJson(path, manifest);
+      const original = await readFile(path);
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(loaded.manifest.scan.completedAt).toBe(
+        manifest["scan"]["completedAt"],
+      );
+      expect(
+        validatedFileDigests.get(loaded.manifest)?.get("scan-manifest.json"),
+      ).toBe(sha256(original));
+      expect(await readFile(path)).toEqual(original);
+    }
+    const findings = join(scanDir, "findings.json");
     await writeFile(
-      path,
-      Buffer.concat([await readFile(path), Buffer.from("\n")]),
+      findings,
+      Buffer.concat([await readFile(findings), Buffer.from("\n")]),
     );
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),

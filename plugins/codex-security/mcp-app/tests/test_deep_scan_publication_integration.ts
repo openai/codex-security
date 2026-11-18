@@ -382,7 +382,7 @@ for (const [
       manifest.scan.threatModel.summary,
       reducerLabels?.[1] ?? "dedup-0002",
     );
-    assert.ok(manifest.scan.sealedAt);
+    assert.ok(manifest.scan.artifacts.length);
     assert.deepEqual(JSON.parse(sealed.files["findings.json"]).findings, []);
     assert.equal(manifest.scan.status, "completed");
     assert.equal(sealed.files["coverage.json"], undefined);
@@ -598,7 +598,9 @@ for (const claimed of [false, true]) {
     assert.deepEqual(await snapshot(run), interrupted);
     assertSuccess(await fixture.completeScan());
     const completed = await snapshot(run);
-    assert.ok(JSON.parse(completed.files["scan-manifest.json"]).scan.sealedAt);
+    assert.ok(
+      JSON.parse(completed.files["scan-manifest.json"]).scan.artifacts.length,
+    );
     assert.deepEqual(
       JSON.parse(completed.files["scan-manifest.json"]).scan.review,
       JSON.parse(interrupted.files["scan-manifest.json"]).scan.review,

@@ -5,12 +5,24 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { TestContext } from "node:test";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { ArtifactContext } from "../src/artifact-io.js";
 import { importModule, importSource } from "./import-module.ts";
+const bundledPluginRoot =
+  process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
+  path.resolve(
+    import.meta.dirname,
+    "../../../../sdk/typescript/_bundled_plugin",
+  );
 export const draftApi = await importSource("../src/artifact-scan-draft.ts", {
   absWorkingDir: import.meta.dirname,
+  define: {
+    "import.meta.url": JSON.stringify(
+      pathToFileURL(path.join(bundledPluginRoot, "mcp/server.mjs")).href,
+    ),
+  },
 });
 
 const {

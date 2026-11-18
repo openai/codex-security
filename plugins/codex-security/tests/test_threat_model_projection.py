@@ -66,7 +66,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                 self.write_scan()
                 with self.assertRaises(FINALIZER.ContractError):
                     FINALIZER.finalize_scan(self.scan_dir)
-                self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+                self.assertNotIn("artifacts", self.read_json("scan-manifest.json")["scan"])
 
     def test_provenance_is_plain_text_while_authored_markdown_is_unchanged(self) -> None:
         body = "# Authored [model]\n\nKeep **this** formatting.\n"
@@ -289,7 +289,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
                 FINALIZER.finalize_scan(self.scan_dir)
             self.assertIn("automatic threat model save failed", stderr.getvalue().lower())
             self.assertEqual(destination.read_text(), "unchanged")
-        self.assertIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+        self.assertIn("artifacts", self.read_json("scan-manifest.json")["scan"])
         self.assertIn(b"Queue ownership", FINALIZER.build_threat_model_export(self.scan_dir))
 
     def test_dangling_scan_manifest_does_not_select_an_unrelated_policy_model(self) -> None:

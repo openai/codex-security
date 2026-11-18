@@ -40,7 +40,6 @@ async function savedEvidence() {
     manifest.scan.id = scanId;
     manifest.scan.target.kind = "directory_snapshot";
     manifest.scan.target.targetId = registered["targetId"] as string;
-    Reflect.deleteProperty(manifest.scan, "sealedAt");
     Reflect.deleteProperty(manifest.scan, "artifacts");
     const document = JSON.parse(
       await readFile(join(scanDir, "findings.json"), "utf8"),

@@ -138,7 +138,6 @@ export function fakeResult(
       status: "completed",
       startedAt: "2026-01-01T00:00:00Z",
       completedAt: "2026-01-01T00:00:01Z",
-      sealedAt: "2026-01-01T00:00:01Z",
       target: {
         kind: "directory_snapshot",
         targetId: "id",

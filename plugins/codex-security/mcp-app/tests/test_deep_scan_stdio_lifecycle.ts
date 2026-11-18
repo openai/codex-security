@@ -1054,7 +1054,7 @@ service_tier = "ultrafast"
       const completedScan = resumed.structuredContent;
       const sealedManifest = await readJson(completedScan.manifestPath);
       assert.equal(sealedManifest.scan.status, "completed");
-      assert.ok(sealedManifest.scan.sealedAt);
+      assert.ok(sealedManifest.scan.artifacts.length);
       const report = await readFile(
         path.join(completedScan.scanDir, "report.md"),
         "utf8",
@@ -1467,7 +1467,7 @@ async function testCliDeepScanEngine({
   const unsealed = await readJson(
     path.join(completed.scanDir, "scan-manifest.json"),
   );
-  assert.equal(unsealed.scan.sealedAt, undefined);
+  assert.equal(unsealed.scan.artifacts, undefined);
   await assert.rejects(readFile(path.join(completed.scanDir, "report.md")), {
     code: "ENOENT",
   });
@@ -1518,7 +1518,7 @@ async function testCliDeepScanEngine({
     path.join(completed.scanDir, "scan-manifest.json"),
   );
   assert.equal(manifest.scan.status, "completed");
-  assert.ok(manifest.scan.sealedAt);
+  assert.ok(manifest.scan.artifacts.length);
   assert.deepEqual(manifest.scan.scope.includePaths, paths);
   assert.ok(
     (await readFile(path.join(completed.scanDir, "report.md"), "utf8")).length >

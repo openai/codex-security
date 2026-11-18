@@ -37,7 +37,7 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
         completed_datetime = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
         self.assertGreaterEqual(completed_datetime, before)
         self.assertLessEqual(completed_datetime, datetime.now(timezone.utc))
-        self.assertEqual(manifest["scan"]["sealedAt"], completed_at)
+        self.assertNotIn("sealedAt", manifest["scan"])
 
     def test_headless_finalization_rejects_invalid_authoritative_start(self) -> None:
         self.write_scan()
@@ -46,7 +46,7 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
             with self.assertRaisesRegex(FINALIZER.ContractError, "RFC 3339 timestamp"):
                 FINALIZER.finalize_scan(self.scan_dir)
 
-        self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+        self.assertNotIn("artifacts", self.read_json("scan-manifest.json")["scan"])
 
     def test_preserves_timestamp_text_when_sealing(self) -> None:
         for timestamp in (
@@ -68,7 +68,7 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
 
                 manifest, _, _ = FINALIZER.finalize_scan(self.scan_dir)
 
-                for field in ("startedAt", "completedAt", "sealedAt"):
+                for field in ("startedAt", "completedAt"):
                     self.assertEqual(manifest["scan"][field], timestamp)
                 before = self.scan_file_bytes(*CANONICAL_FILES)
                 FINALIZER.finalize_scan(self.scan_dir)
@@ -91,7 +91,7 @@ class FinalizeScanTimestampsTest(unittest.TestCase):
         for fraction in fractions:
             with self.subTest(fraction=fraction):
                 timestamp = f"2026-10-08t01:00:00.{fraction}z"
-                for field in ("startedAt", "completedAt", "sealedAt"):
+                for field in ("startedAt", "completedAt"):
                     manifest["scan"][field] = timestamp
                 self.write_json("scan-manifest.json", manifest)
                 before = self.scan_file_bytes(*CANONICAL_FILES)

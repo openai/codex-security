@@ -125,7 +125,6 @@ export async function publishFindingsCsvToCloud(
     status: "completed",
     startedAt: timestamp,
     completedAt: timestamp,
-    sealedAt: timestamp,
     target: {
       kind: "directory_snapshot",
       targetId: CSV_TARGET_ID,
@@ -195,7 +194,8 @@ async function publishCloudPayload(
       },
       body: JSON.stringify({
         schemaVersion: "1.0",
-        scan,
+        // The v1 publication endpoint includes this legacy member in its payload identity.
+        scan: { ...scan, sealedAt: scan.completedAt },
         findings,
       }),
       redirect: "error",

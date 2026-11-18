@@ -35,10 +35,6 @@ async function generate() {
         JSON.parse(readFileSync(join(schemas, filename), "utf8")),
       );
       input.title = name;
-      if (name === "ScanManifest") {
-        // The sealed contract reader always exposes this derived timestamp.
-        input.properties.scan.required.push("sealedAt");
-      }
       return compile(input, name, {
         bannerComment: "",
         format: false,

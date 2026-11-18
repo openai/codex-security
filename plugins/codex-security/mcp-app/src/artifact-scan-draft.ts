@@ -2851,69 +2851,18 @@ export async function getCodexSecurityCompletedScan(
     );
   }
 
-  const [manifest, findings] = await Promise.all([
-    readArtifactJsonObject(
-      context,
-      ["scan-manifest.json"],
-      "completed scan manifest",
-    ),
-    readArtifactJsonObject(
-      context,
-      ["findings.json"],
-      "completed scan findings",
-    ),
-  ]);
-  const scan = requireObject(manifest.scan, "completed scan manifest.scan");
-  if (scan.sealedAt === undefined && scan.status === "completed") {
-    const { contract } = await loadSealedContract(context.root, {
-      expectedScanId: parsed.scanId,
-      pluginRoot: context.pluginRoot,
-    });
-    if (contract.manifest.scan.status !== "completed") {
-      throw new Error("completed scan: expected a completed manifest.");
-    }
-    return {
-      scanId: parsed.scanId,
-      manifest: contract.manifest,
-      findings: contract.findings,
-      review: contract.review,
-    };
+  const { contract } = await loadSealedContract(context.root, {
+    expectedScanId: parsed.scanId,
+    pluginRoot: context.pluginRoot,
+  });
+  if (contract.manifest.scan.status !== "completed") {
+    throw new Error("completed scan: expected a completed manifest.");
   }
-  const reviewState =
-    scan.coverageRef === undefined && scan.review !== undefined
-      ? reviewStateFromSummary(scan)
-      : await readArtifactJsonObject(
-          context,
-          ["coverage.json"],
-          "legacy scan review state",
-        );
-  if (
-    scan.id !== parsed.scanId ||
-    scan.status !== "completed" ||
-    typeof scan.sealedAt !== "string" ||
-    !scan.sealedAt ||
-    !Array.isArray(scan.artifacts) ||
-    findings.scanId !== parsed.scanId ||
-    reviewState.scanId !== parsed.scanId
-  ) {
-    throw new Error(
-      "completed scan: canonical documents do not match the sealed workbench scan.",
-    );
-  }
-
-  const review =
-    scan.coverageRef === undefined && scan.review !== undefined
-      ? scan.review
-      : {
-          excludedPaths: (reviewState.explicitExclusions as JsonObject[]).map(
-            (item) => item.pattern,
-          ),
-        };
   return {
     scanId: parsed.scanId,
-    manifest,
-    findings,
-    review: review as JsonObject,
+    manifest: contract.manifest,
+    findings: contract.findings,
+    review: contract.review,
   };
 }
 

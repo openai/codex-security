@@ -388,7 +388,7 @@ test.each(sealedScopes)(
     );
     expect(manifest.scan.scope.includePaths).toEqual(normalized);
     expect(manifest.scan.target.revision).toBe(input.revision);
-    expect(manifest.scan.sealedAt).toBeTruthy();
+    expect(manifest.scan.artifacts.length).toBeGreaterThan(0);
     expect(manifest.scan).toMatchObject({
       scope: { includePaths: normalized },
       mode: normalized[0] === "." ? "repository" : "scoped_path",
@@ -1263,7 +1263,7 @@ test.each(["completed", "acceptance_unknown"] as const)(
         const manifest = await readJson<any>(
           join(terminal.outputDirectory, "scan-manifest.json"),
         );
-        expect(manifest.scan.sealedAt).toBeTruthy();
+        expect(manifest.scan.artifacts.length).toBeGreaterThan(0);
       } else {
         expect(terminal).toHaveProperty("error", execution?.error?.message);
         expect(terminal.artifacts).toEqual([]);

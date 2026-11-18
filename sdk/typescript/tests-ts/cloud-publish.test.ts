@@ -299,6 +299,8 @@ describe("Cloud publication", () => {
         producer: { name: "codex-security-cli" },
         status: "completed",
         startedAt: "1970-01-01T00:00:00.000Z",
+        completedAt: "1970-01-01T00:00:00.000Z",
+        sealedAt: "1970-01-01T00:00:00.000Z",
         target: {
           kind: "directory_snapshot",
           displayName: "findings.csv",
@@ -506,7 +508,7 @@ describe("Cloud publication", () => {
       });
       expect(JSON.parse(String(options!.body))).toEqual({
         schemaVersion: "1.0",
-        scan: manifest.scan,
+        scan: { ...manifest.scan, sealedAt: manifest.scan.completedAt },
         findings: findings.findings,
       });
       expect(JSON.stringify(options)).not.toContain("synthetic-refresh-token");
@@ -523,7 +525,13 @@ describe("Cloud publication", () => {
       findingIds: ["finding-1"],
       findingCount: 1,
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    delete manifest.scan.sealedAt;
+    await writeFile(join(scan, "scan-manifest.json"), JSON.stringify(manifest));
+    await publishScanToCloud(scan, { environment, fetch: fetchMock });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      JSON.parse(await readFile(join(scan, "scan-manifest.json"), "utf8")).scan,
+    ).not.toHaveProperty("sealedAt");
   });
 
   test("accepts opaque Cloud finding IDs that differ from local finding IDs", async () => {

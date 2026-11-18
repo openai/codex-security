@@ -24,11 +24,6 @@
         "warnings": { "$ref": "#/$defs/stringList" },
         "startedAt": { "type": "string", "format": "date-time" },
         "completedAt": { "type": "string", "format": "date-time" },
-        "sealedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Equal to completedAt. Readers can recover an omitted seal timestamp after verifying the artifact digests."
-        },
         "target": {
           "type": "object",
           "properties": {
