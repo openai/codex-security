@@ -2520,7 +2520,7 @@ export class ScanCostTracker {
       }
     }
 
-    const workerReceipts = await readWorkerReceipts(
+    const workerReceipts = await readWorkerReceiptUsage(
       this.#options.workerReceipts,
       this.#workerReceipts,
     );
@@ -3243,7 +3243,46 @@ export class ScanCostTracker {
   }
 }
 
-async function readWorkerReceipts(
+/** @internal */
+export async function* workerUsageReceipts({
+  directory,
+  scanId,
+}: NonNullable<ScanCostTrackerOptions["workerReceipts"]>) {
+  const seen = new Set<string>();
+  const directoryInfo = await lstat(directory);
+  if (
+    !directoryInfo.isDirectory() ||
+    relative(resolve(directory), await realpath(directory)) !== ""
+  )
+    throw new Error(
+      `Worker usage directory must use a canonical directory: ${directory}`,
+    );
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    let receipt: unknown;
+    try {
+      receipt = JSON.parse(await readFile(join(directory, entry.name), "utf8"));
+    } catch (error) {
+      if (isMissingFile(error)) continue;
+      throw error;
+    }
+    if (
+      !isRecord(receipt) ||
+      receipt["schemaVersion"] !== 1 ||
+      receipt["source"] !== "codex_sdk" ||
+      receipt["usageScope"] !== "thread_cumulative" ||
+      receipt["scanId"] !== scanId ||
+      typeof receipt["attemptId"] !== "string" ||
+      entry.name !== `${receipt["attemptId"]}.json` ||
+      seen.has(receipt["attemptId"])
+    )
+      continue;
+    seen.add(receipt["attemptId"]);
+    yield [receipt["attemptId"], receipt] as const;
+  }
+}
+
+async function readWorkerReceiptUsage(
   store: ScanCostTrackerOptions["workerReceipts"],
   retained: Map<string, WorkerReceipt>,
 ): Promise<{
@@ -3261,40 +3300,9 @@ async function readWorkerReceipts(
     errors: [] as unknown[],
   };
   if (store === undefined) return result;
-  const { directory, scanId } = store;
   try {
-    const directoryInfo = await lstat(directory);
-    if (
-      !directoryInfo.isDirectory() ||
-      relative(resolve(directory), await realpath(directory)) !== ""
-    )
-      throw new Error(
-        `Worker usage directory must use a canonical directory: ${directory}`,
-      );
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      let receipt: unknown;
-      try {
-        receipt = JSON.parse(
-          await readFile(join(directory, entry.name), "utf8"),
-        );
-      } catch (error) {
-        if (isMissingFile(error)) continue;
-        throw error;
-      }
-      if (
-        !isRecord(receipt) ||
-        receipt["schemaVersion"] !== 1 ||
-        receipt["source"] !== "codex_sdk" ||
-        receipt["usageScope"] !== "thread_cumulative" ||
-        receipt["scanId"] !== scanId ||
-        typeof receipt["attemptId"] !== "string" ||
-        entry.name !== `${receipt["attemptId"]}.json` ||
-        attempts.has(receipt["attemptId"])
-      )
-        continue;
-      attempts.add(receipt["attemptId"]);
-      retained.set(receipt["attemptId"], {
+    for await (const [attemptId, receipt] of workerUsageReceipts(store)) {
+      retained.set(attemptId, {
         threadId:
           typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
         usage: tokenUsage(receipt["usage"]),

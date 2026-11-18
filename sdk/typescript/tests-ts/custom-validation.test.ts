@@ -19,6 +19,7 @@ import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanSessionEvent } from "../src/cost.js";
 import { progressMarker, writeSession } from "./support/usage-rollout.js";
+import { readRolloutSessionIndex } from "../src/rollout-session-index.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
@@ -1028,50 +1029,36 @@ describe("custom validation", () => {
                         "The validation environment did not start.";
                     }
                     if (scenario === "standard") {
-                      await mkdir(join(codexHome, "sessions"), {
-                        recursive: true,
-                      });
+                      // Keep synthetic events before the exclusive completion cutoff
+                      // even if the validator returns in the same millisecond.
+                      const timestamp = new Date(Date.now() - 1).toISOString();
                       for (const [id, cwd] of [
                         ["thread-1", scanDir],
                         ["validation-thread", join(scanDir, "artifacts")],
-                      ]) {
-                        const records = [
-                          {
-                            type: "session_meta",
-                            payload: {
-                              id,
-                              cwd,
-                              timestamp: "2026-08-21T00:00:00Z",
-                            },
-                          },
-                          {
-                            type: "event_msg",
-                            payload: {
-                              type: "token_count",
-                              info: {
-                                total_token_usage: {
-                                  input_tokens: 10,
-                                  output_tokens: 3,
-                                },
-                              },
-                            },
-                          },
-                          ...(id === "validation-thread"
-                            ? [
-                                {
-                                  type: "event_msg",
-                                  payload: {
-                                    type: "agent_message",
-                                    message: validationActivity,
-                                  },
-                                },
-                              ]
-                            : []),
-                        ];
-                        await writeFile(
-                          join(codexHome, "sessions", `rollout-${id}.jsonl`),
-                          jsonLines(records) + "\n",
+                      ] as const) {
+                        const session = await writeSession(
+                          codexHome,
+                          id,
+                          { input_tokens: 10, output_tokens: 3 },
+                          { cwd, timestamp },
                         );
+                        if (id === "validation-thread") {
+                          const later = new Date(
+                            Date.now() + 60_000,
+                          ).toISOString();
+                          const events = [
+                            [timestamp, "task_started"],
+                            [timestamp, "agent_message", validationActivity],
+                            [timestamp, "task_complete"],
+                            [later, "task_started"],
+                            [later, "agent_message", "later manual validation"],
+                          ].map(([timestamp, type, message]) => ({
+                            type: "event_msg",
+                            timestamp,
+                            payload: { type, message },
+                          }));
+                          await appendFile(session, jsonLines(events) + "\n");
+                        }
                       }
                     }
                     if (progressScenario) {
@@ -1128,7 +1115,10 @@ describe("custom validation", () => {
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"
-            ? { validationPromptFile: workflowFile }
+            ? {
+                validationPromptFile: workflowFile,
+                retainRolloutSessions: true,
+              }
             : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
           ...(progressScenario
@@ -1215,6 +1205,17 @@ describe("custom validation", () => {
             ).toBe(true);
         }
         if (scenario === "standard") {
+          const index = await readRolloutSessionIndex(scanDir, scanId);
+          const segment = index?.sessions.find(
+            (entry) => entry.threadId === "validation-thread",
+          )?.eventSegments?.[0];
+          expect(segment).toBeDefined();
+          const events = await readFile(
+            join(scanDir, "artifacts/rollout-sessions", segment!.path),
+            "utf8",
+          );
+          expect(events).toContain(validationActivity);
+          expect(events).not.toContain("later manual validation");
           const report = await readFile(join(scanDir, "report.md"), "utf8");
           expect(report).toContain(
             "Synthetic counterevidence from validation.",

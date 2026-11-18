@@ -2,6 +2,10 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import {
+  readRolloutSessionIndex,
+  ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+} from "../src/rollout-session-index.js";
 import { ScanResult } from "../src/result.js";
 import type { JsonObject } from "../src/config.js";
 import { dependencies, fakeResult } from "./cli-fixtures.js";
@@ -135,6 +139,77 @@ describe("scan navigation", () => {
     expect(cli.stderr.text()).toContain("No completed scans");
     expect(cli.stderr.text()).toContain("codex-security scans list");
     expect(cli.stderr.text()).toContain("failed or active scans");
+  });
+
+  test("locates the same private session index after success, early failure and history lookup", async () => {
+    const scanDir = await temporaryDirectory("scan-rollout-navigation-");
+    try {
+      const scanId = completedId;
+      const path = join(scanDir, ROLLOUT_SESSION_INDEX_RELATIVE_PATH);
+      await mkdir(join(scanDir, "artifacts", "rollout-sessions"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const index = {
+        schemaVersion: 1 as const,
+        scanId,
+        rootThreadIds: ["coordinator"],
+        sessions: [{ threadId: "coordinator", parentThreadId: null }],
+      };
+      await writeFile(path, JSON.stringify(index), { mode: 0o600 });
+      const result = new ScanResult({ ...fakeResult(), scanDir });
+      result.manifest.scan.id = scanId;
+      result.rolloutSessionIndexPath = path;
+      expect(await result.readRolloutSessionIndex()).toEqual(index);
+      expect(await readRolloutSessionIndex(scanDir, scanId)).toEqual(index);
+      const success = createCliTest(main);
+      expect(
+        await success.runCli(
+          ["scan", "--json"],
+          dependencies({
+            result,
+            onTurn: (_repository, options) =>
+              expect(options.retainRolloutSessions).toBeUndefined(),
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(success.stdout.text()).rolloutSessionIndexPath).toBe(
+        path,
+      );
+      const failed = createCliTest(main);
+      expect(
+        await failed.runCli(
+          ["scan", "--json", "--full-output", "--retain-rollout-sessions"],
+          dependencies({
+            onTurn: (_repository, options) => {
+              expect(options.retainRolloutSessions).toBe(true);
+              options.onScanRegistered?.({ scanId, scanDir, startedAt });
+              throw new Error("fixture failed before producing a manifest");
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(failed.stdout.text())).toMatchObject({
+        ok: false,
+        data: { scanId, scanDir, rolloutSessionIndexPath: path },
+      });
+      const history = createCliTest(main);
+      expect(
+        await history.runCli(
+          ["scans", "show", scanId, "--json"],
+          dependencies({
+            onWorkbench: () => ({
+              scan: { scanId, scanDir, progress: { status: "failed" } },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(history.stdout.text()).rolloutSessionIndexPath).toBe(
+        path,
+      );
+    } finally {
+      await rm(scanDir, { force: true, recursive: true });
+    }
   });
 
   test("completion navigation uses the complete scan ID without changing JSON", async () => {

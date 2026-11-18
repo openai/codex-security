@@ -95,6 +95,7 @@ if (stdin.includes('ARTIFACT_MCP_STARTUP_TIMEOUT')) {
 const resumeIndex = process.argv.indexOf('resume');
 const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeIndex + 1];
 console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
+if (stdin.includes('FIXTURE_WORKER_TURN_ID')) console.log(JSON.stringify({ type: 'turn.started', turn_id: 'fixture-started-turn' }));
 if (stdin.includes('IPC_DIAGNOSTIC_EVENT')) console.log(stdin.split('\\n')[1]);
 if (process.env.FAKE_CODEX_ARTIFACT_EVENT) console.log(process.env.FAKE_CODEX_ARTIFACT_EVENT);
 if (stdin.includes('MALFORMED_COMMAND_EVENT')) {

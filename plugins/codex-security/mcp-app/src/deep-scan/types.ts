@@ -74,6 +74,7 @@ export interface CodexWorkerRequest extends WorkerTelemetryOptions {
   signal: AbortSignal;
   resumeThreadId?: string;
   continuationPrompt?: string;
+  onInputDigest?: (digest: string) => void;
   artifactContext?: CodexWorkerArtifactContext;
   onNonRetryableError?: (error: Error) => void;
 }

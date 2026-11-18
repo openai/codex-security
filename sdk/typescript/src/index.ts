@@ -287,6 +287,11 @@ export type {
   PublishScanResult,
 } from "./publish.js";
 export { ScanResult } from "./result.js";
+export {
+  readRolloutSessionIndex,
+  ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+  type RolloutSessionIndex,
+} from "./rollout-session-index.js";
 export type {
   RepositoryFinding,
   ScanResultOptions,

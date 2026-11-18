@@ -119,6 +119,7 @@ type MultiscanKnowledge = Partial<
 >;
 
 export interface MultiscanOptions extends ScanPromptSettings {
+  retainRolloutSessions?: boolean;
   inputPath: string;
   outputDir: string;
   githubHost?: string;
@@ -707,6 +708,9 @@ async function runCampaign(
               mode: task.mode,
               telemetryContext: { operationId },
               outputDir: scanDir,
+              ...(options.retainRolloutSessions
+                ? { retainRolloutSessions: true }
+                : {}),
               ...(scanPrompt ? { scanPrompt } : {}),
               ...(options.validationPrompt === undefined
                 ? {}
