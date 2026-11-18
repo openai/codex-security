@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { importModule } from "./import-module.ts";
+import { bundledMcpServerUrl, importModule } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
@@ -106,6 +106,7 @@ const {
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
+  define: { "import.meta.url": JSON.stringify(bundledMcpServerUrl) },
   loader: { ".md": "text" },
 })) as FixtureRuntime;
 async function writeReceipt(file: string, contents: string) {

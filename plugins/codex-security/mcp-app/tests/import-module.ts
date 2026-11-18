@@ -6,6 +6,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// Resolve packaged schemas and native bindings when a source fixture runs from a temporary bundle.
+export const bundledMcpServerUrl = pathToFileURL(
+  join(
+    process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT ??
+      fileURLToPath(
+        new URL("../../../../sdk/typescript/_bundled_plugin", import.meta.url),
+      ),
+    "mcp/server.mjs",
+  ),
+).href;
+
 const moduleDirectory = mkdtempSync(
   join(tmpdir(), "codex-security-test-modules-"),
 );
