@@ -164,6 +164,45 @@
       },
       "additionalProperties": false
     },
+    "exploitability": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "object",
+          "properties": {
+            "instructions": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Caller-provided investigation boundaries and assumptions."
+            }
+          },
+          "required": ["instructions"],
+          "additionalProperties": false
+        },
+        "evidence_sources": {
+          "description": "MCP servers the investigator can query during a reviewed dependency check.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Server name in codex.mcp_servers."
+              },
+              "instructions": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "When to use this server and what evidence its tools can provide."
+              }
+            },
+            "required": ["server", "instructions"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "codex": {
       "description": "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply.",
       "type": "object",

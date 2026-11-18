@@ -21,6 +21,7 @@
 - bump fast-xml-parser from 5.11.1 to 5.12.0 in /github-action ([#2633](https://github.com/openai/codex-security/pull/2633))
 - update napi-derive to 3.7.1 in the native plugin ([#2721](https://github.com/openai/codex-security/pull/2721))
 - bump the codex group across 3 directories with 2 updates ([#2723](https://github.com/openai/codex-security/pull/2723))
+- add independently reviewed dependency checks ([#2715](https://github.com/openai/codex-security/pull/2715))
 
 </details>
 
