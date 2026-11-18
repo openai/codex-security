@@ -179,4 +179,69 @@ describe("ArmorCode finding imports", () => {
       },
     });
   });
+
+  test("normalizes repository file paths, empty location arrays, and CVE values without excluding valid rows", () => {
+    const result = normalizeArmorCodeFindings({
+      data: {
+        findings: [
+          {
+            id: 101,
+            title: "Windows SAST path and empty locations envelope",
+            severity: "MEDIUM",
+            locations: [],
+            filePath: "src\\auth\\query.ts",
+            lineNumber: 27,
+            cve: "CVE-2026-0101",
+          },
+          {
+            id: 102,
+            title: "Container runtime configuration",
+            severity: "HIGH",
+            locations: [
+              { path: "/etc/nginx/nginx.conf", line: 14 },
+              { path: "C:\\app\\web.config", line: 9 },
+              { path: "https://app.example/login", line: 1 },
+              { path: "../shared/base.yaml", line: 3 },
+              { path: "deploy/", line: 1 },
+              { path: "./deploy/nginx.yaml", line: 8 },
+            ],
+          },
+          {
+            id: 103,
+            title: "Blank and duplicate advisory entries",
+            severity: "LOW",
+            location: { file: "package.json", line: 4 },
+            cve: ["", "   ", "CVE-2026-0102", "CVE-2026-0102"],
+          },
+        ],
+      },
+    });
+
+    expect(result.excluded).toEqual([]);
+    expect(result.findings).toHaveLength(3);
+    expect(result.findings[0]).toMatchObject({
+      source_finding_id: "101",
+      evidence: {
+        advisory_ids: ["CVE-2026-0101"],
+        locations: [{ path: "src/auth/query.ts", line: 27 }],
+        source_data: {
+          locations: [],
+          filePath: "src\\auth\\query.ts",
+        },
+      },
+    });
+    expect(result.findings[1]).toMatchObject({
+      source_finding_id: "102",
+      evidence: {
+        locations: [{ path: "deploy/nginx.yaml", line: 8 }],
+      },
+    });
+    expect(result.findings[2]).toMatchObject({
+      source_finding_id: "103",
+      evidence: {
+        advisory_ids: ["CVE-2026-0102"],
+        locations: [{ path: "package.json", line: 4 }],
+      },
+    });
+  });
 });

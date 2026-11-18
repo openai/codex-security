@@ -7,7 +7,9 @@ import { isRecord } from "./record.js";
 import {
   normalizeRecords,
   record,
+  repositoryFilePath,
   requiredText,
+  strings,
   text,
 } from "./scanner-import.js";
 
@@ -78,13 +80,14 @@ export function normalizeArmorCodeFindings(
     raw as ArmorCodeFinding[],
     (finding) => {
       const severity = (text(finding["severity"]) ?? "unknown").toLowerCase();
-      const locations = Array.isArray(finding["locations"])
-        ? finding["locations"]
-        : finding["location"]
-          ? [finding["location"]]
-          : text(finding["filePath"])
-            ? [{ path: finding["filePath"], line: finding["lineNumber"] }]
-            : [];
+      const locations =
+        Array.isArray(finding["locations"]) && finding["locations"].length > 0
+          ? finding["locations"]
+          : isRecord(finding["location"])
+            ? [finding["location"]]
+            : text(finding["filePath"])
+              ? [{ path: finding["filePath"], line: finding["lineNumber"] }]
+              : [];
       const description = text(
         finding["description"] ??
           finding["details"] ??
@@ -131,14 +134,16 @@ export function normalizeArmorCodeFindings(
         // ArmorCode's findingUrl remains available in source_data; url points
         // to the originating scanner when ArmorCode provides both links.
         url: text(finding["url"] ?? finding["findingUrl"]),
-        ...(Array.isArray(finding["cve"]) && {
-          advisory_ids: finding["cve"].filter(
-            (value): value is string => typeof value === "string",
+        advisory_ids: [
+          ...new Set(
+            strings(
+              Array.isArray(finding["cve"]) ? finding["cve"] : [finding["cve"]],
+            ),
           ),
-        }),
+        ],
         locations: locations.flatMap((value) => {
           if (!isRecord(value)) return [];
-          const path = text(
+          const path = repositoryFilePath(
             value["path"] ?? value["filePath"] ?? value["file"],
           );
           if (!path) return [];
