@@ -155,6 +155,73 @@ const longMcpTool = {
 
 const webSearchTool = { type: "web_search" };
 
+const customReviewTools = {
+  type: "namespace",
+  name: "review",
+  description: "Review",
+  tools: [
+    {
+      type: "custom",
+      name: "freeform",
+      description: "Freeform tool",
+      format: { type: "text" },
+    },
+  ],
+};
+
+/** A Responses endpoint that streams a flattened custom-tool call. */
+function customStreamingUpstream() {
+  return listen(async (request, response) => {
+    const body = await readNodeJson(request);
+    const tools = Array.isArray(body["tools"]) ? body["tools"] : [];
+    const rejected = (tools as Array<Record<string, unknown>>).find(
+      (tool) => tool["type"] !== "function",
+    );
+    if (rejected) {
+      response.writeHead(422, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          error: {
+            message: `400 Unknown type: ${rejected["type"]}`,
+            type: "invalid_request_error",
+          },
+        }),
+      );
+      return;
+    }
+    const flat = (tools as Array<Record<string, unknown>>).find((tool) =>
+      String(tool["description"] ?? "").startsWith("review.freeform:"),
+    );
+    const name = String(flat?.["name"] ?? "freeform");
+    const call = {
+      type: "function_call",
+      id: "fc_9",
+      call_id: "call_9",
+      name,
+      arguments: JSON.stringify({ input: "freeform payload" }),
+    };
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(
+      `data: ${JSON.stringify({ type: "response.created", response: { id: "resp_9", status: "in_progress", output: [] } })}\n\n`,
+    );
+    response.write(
+      `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { ...call, arguments: "" } })}\n\n`,
+    );
+    response.write(
+      `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_9", delta: '{"input":"freeform ' })}\n\n`,
+    );
+    response.write(
+      `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_9", delta: 'payload"}' })}\n\n`,
+    );
+    response.write(
+      `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: call })}\n\n`,
+    );
+    response.write(
+      `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_9", status: "completed", output: [call] } })}\n\n`,
+    );
+    response.end();
+  });
+}
+
 test("flattens namespace tools and keeps plain function tools byte-identical", () => {
   const { body } = responsesCompatRequest({
     tools: [plainTool, collaborationTools, longMcpTool, webSearchTool],
@@ -466,6 +533,58 @@ test("proxy flattens namespaces and restores the call over streaming SSE", async
     expect(completed["output"]).toEqual([done]);
     // The upstream never saw a namespace tool.
     expect(JSON.stringify(events)).not.toContain("collaboration__spawn_agent");
+  } finally {
+    await adapter.close();
+    await upstream.close();
+  }
+});
+
+test("proxy restores custom tools over streaming SSE without parsing arguments on added", async () => {
+  const upstream = await customStreamingUpstream();
+  const adapter = await startResponsesCompatProxy(`${upstream.url}/v1`);
+  try {
+    const response = await fetch(`${adapter.baseUrl}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "fixture",
+        stream: true,
+        tools: [customReviewTools],
+        input: "Review",
+      }),
+    });
+    expect(response.status).toBe(200);
+    const events = sseEvents(await response.text());
+    expect(events.map((event) => event["type"])).toEqual([
+      "response.created",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.delta",
+      "response.output_item.done",
+      "response.completed",
+    ]);
+    const added = events[1]!["item"] as Record<string, unknown>;
+    expect(added).toEqual({
+      type: "custom_tool_call",
+      id: "fc_9",
+      call_id: "call_9",
+      name: "freeform",
+      namespace: "review",
+      input: "",
+    });
+    const done = events[4]!["item"] as Record<string, unknown>;
+    expect(done).toEqual({
+      type: "custom_tool_call",
+      id: "fc_9",
+      call_id: "call_9",
+      name: "freeform",
+      namespace: "review",
+      input: "freeform payload",
+    });
+    const completed = events[5]!["response"] as Record<string, unknown>;
+    expect(completed["output"]).toEqual([done]);
+    // The upstream never saw a custom tool, and no flat alias leaks out.
+    expect(JSON.stringify(events)).not.toContain("review__freeform");
   } finally {
     await adapter.close();
     await upstream.close();

@@ -210,7 +210,10 @@ export function responsesCompatRequest(request: Record<string, unknown>) {
         : choice;
   }
   if (flattenedTools.length === 0) delete body["tool_choice"];
-  function output(value: Record<string, unknown>): Record<string, unknown> {
+  function output(
+    value: Record<string, unknown>,
+    parseArguments = true,
+  ): Record<string, unknown> {
     if (
       value["type"] !== "function_call" &&
       value["type"] !== "custom_tool_call"
@@ -234,6 +237,10 @@ export function responsesCompatRequest(request: Record<string, unknown>) {
       ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
     };
     if (!tool.custom) return { ...restored, arguments: args };
+    // A stream's added event carries empty arguments; restore the identity
+    // there and parse the input at output_item.done instead.
+    if (!parseArguments)
+      return { ...restored, type: "custom_tool_call", input: "" };
     const parsed = JSON.parse(String(args)) as unknown;
     const freeform = isRecord(parsed) ? parsed["input"] : undefined;
     if (typeof freeform !== "string")
@@ -382,7 +389,10 @@ export async function startResponsesCompatProxy(upstream: string) {
                   event["type"] === "response.output_item.done") &&
                 isRecord(event["item"])
               ) {
-                const restored = translation.output(event["item"]);
+                const restored = translation.output(
+                  event["item"],
+                  event["type"] !== "response.output_item.added",
+                );
                 const item =
                   event["type"] === "response.output_item.added" &&
                   restored["type"] === "custom_tool_call"
