@@ -27,6 +27,8 @@ Use `standard` verification unless the caller explicitly selects `verificationMo
 4. In standard mode, run the original reproducer, focused regression checks, or legitimate-behavior checks only when they can run without modifying the repository. Preserve exact static evidence when runtime checks are unavailable.
 5. Return one result per supplied finding, in the requested order. Treat closed tickets, unrelated passing tests, and the absence of a new scan finding as insufficient proof.
 
+For image dependency findings, use [image patch evidence](../../references/image-patch-evidence.md) to compare the baseline and rebuilt artifacts and include the result alongside the patch.
+
 ## Result Contract
 
 For interactive conversations, use readable Markdown unless the caller requests another format. Give a verdict for each finding, explain the supporting evidence with source references, and identify relevant checks and remaining proof gaps.
