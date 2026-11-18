@@ -28,6 +28,7 @@ import {
 import {
   abortable,
   enclosingGitWorktreeRoot,
+  enclosingGitWorktreeRoots,
   gitMarkerRoot,
   isGitMetadataDirectory,
   gitProtectionRoots,
@@ -49,6 +50,38 @@ const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-targets-");
 
 afterEach(cleanup);
+
+test("credential output exclusions retain an empty outer marker and enclosing worktrees", async () => {
+  const root = await realpath(await temporaryDirectory());
+  const masked = join(root, "masked");
+  const inner = join(masked, "inner");
+  await mkdir(join(masked, ".git"), { recursive: true });
+  for (const repo of [root, inner]) execFileSync("git", ["init", "-q", repo]);
+  const protectedRoots = () =>
+    enclosingGitWorktreeRoots(inner, undefined, {
+      protectEmptyAncestorMarkers: true,
+    });
+  expect((await protectedRoots()).slice(0, 3)).toEqual([inner, masked, root]);
+  await expect(
+    enclosingGitWorktreeRoots(masked, undefined, {
+      protectEmptyAncestorMarkers: true,
+    }),
+  ).rejects.toThrow();
+  await writeFile(join(masked, ".git", "broken"), "fixture");
+  await expect(protectedRoots()).rejects.toThrow();
+});
+
+test("credential output exclusions reject an enclosing bare repository", async () => {
+  const bare = await temporaryDirectory();
+  const inner = join(bare, "inner");
+  execFileSync("git", ["init", "--bare", "-q", bare]);
+  execFileSync("git", ["init", "-q", inner]);
+  await expect(
+    enclosingGitWorktreeRoots(inner, undefined, {
+      protectEmptyAncestorMarkers: true,
+    }),
+  ).rejects.toThrow("inside Git metadata");
+});
 
 test("excluded paths normalize literal directories without requiring them to exist", () => {
   expect(

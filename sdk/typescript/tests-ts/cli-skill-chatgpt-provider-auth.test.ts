@@ -153,6 +153,14 @@ describe("skill authentication at the subprocess boundary", () => {
         storedCredentials: true,
       });
       expect(result.status, result.stderr).toBe(0);
+      if (command === "patch") {
+        expect(result.requests).toContainEqual({
+          id: "patch-account",
+          method: "account/read",
+          params: { refreshToken: false },
+        });
+      }
+
       expect(result.launch.environment).toEqual({});
       expect(parseToml(result.launch.config)["model_providers"]).toEqual({
         gateway: { ...providerConfig, requires_openai_auth: true },

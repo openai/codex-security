@@ -2403,7 +2403,11 @@ describe("skill authentication", () => {
       expect(methods).toEqual([
         "initialize",
         "initialized",
-        ...(usesSessionKey ? ["account/login/start"] : []),
+        ...(usesSessionKey
+          ? ["account/login/start"]
+          : auth === "chatgpt"
+            ? ["account/read"]
+            : []),
         ...(loginFailure && usesSessionKey
           ? []
           : ["config/read", "thread/start"]),

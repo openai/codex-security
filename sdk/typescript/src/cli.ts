@@ -1396,6 +1396,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly onWorkerFailure?: (message: string) => void;
   readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
   readonly directory?: string;
@@ -1433,6 +1434,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
   "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 interface SkillRunOptions {
+  readonly onWorkerFailure?: (message: string) => void;
   readonly signal?: AbortSignal;
   context?: string;
   contextFile?: string;
@@ -1879,6 +1881,7 @@ async function runCodexSkillProcess(
     let apiKey: string | undefined;
     let authentication: ScanAuthentication | null = null;
     let modelProvider: string | undefined;
+    let checkPatchAccount = false;
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
       const ambientConfig =
@@ -1914,7 +1917,9 @@ async function runCodexSkillProcess(
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory, output.signal)),
+          ...(await enclosingGitWorktreeRoots(directory, output.signal, {
+            protectEmptyAncestorMarkers: output.command === "patch",
+          })),
         ];
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
@@ -1981,6 +1986,9 @@ async function runCodexSkillProcess(
           output.auth,
           provider,
         );
+        checkPatchAccount =
+          output.appServer?.threadSource ===
+          CODEX_SECURITY_THREAD_SOURCES.remediation;
         if (output.appServer !== undefined) {
           const controller = new AbortController();
           const signal = output.signal ?? controller.signal;
@@ -2176,6 +2184,7 @@ async function runCodexSkillProcess(
                 : {
                     ...output.appServer,
                     apiKey,
+                    checkPatchAccount,
                     modelProvider,
                     onThreadStarted: releaseCredentialHome,
                     input: invocation.stdin!,
@@ -2219,9 +2228,14 @@ async function runCodexSkillProcess(
         const failure = skillCommandFailure(
           output.command,
           status,
-          events?.error ?? diagnostic,
+          events?.accountDiagnostic
+            ? [events.error, events.accountDiagnostic, diagnostic.trim()]
+                .filter(Boolean)
+                .join("\n")
+            : (events?.error ?? diagnostic),
           authentication,
         );
+        output.onWorkerFailure?.(failure);
         await writeCliOutput(
           output.stderr,
           `codex-security: ${diagnosticLines(failure)}\n`,
@@ -7771,6 +7785,7 @@ export async function main(
             );
           }
           const report = captureOutput();
+          let workerFailure: string | undefined;
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
@@ -7779,6 +7794,9 @@ export async function main(
             errorOutput,
             dependencies,
             {
+              onWorkerFailure: (message) => {
+                workerFailure = message;
+              },
               environment,
               auth: options.auth,
               externalSandbox: options.externalSandbox,
@@ -7801,7 +7819,7 @@ export async function main(
           if (exitCode !== 0) {
             throw new PatchCommandError(
               "PATCH_FAILED",
-              `Patch command exited with status ${exitCode}.`,
+              workerFailure ?? `Patch command exited with status ${exitCode}.`,
             );
           }
           if (files.length === 0) {
@@ -10496,6 +10514,7 @@ async function runFindingPatches(
         void writeCliOutput(stderr, chunk).then(() => callback(), callback);
       },
     });
+    let workerFailure: string | undefined;
     let status: number;
     let changed: boolean;
     let observedTree: string | undefined;
@@ -10511,6 +10530,9 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
+          onWorkerFailure: (message) => {
+            workerFailure = message;
+          },
           directory: selected.repository,
           findings: [finding],
           findingInstructions: instruction?.trim()
@@ -10545,7 +10567,9 @@ async function runFindingPatches(
     });
     let patch: FindingPatch;
     if (status !== 0) {
-      patch = failed(`Patch command exited with status ${status}.`);
+      patch = failed(
+        workerFailure ?? `Patch command exited with status ${status}.`,
+      );
     } else {
       try {
         const reported = JSON.parse(response.text()) as { patches?: unknown };
@@ -11137,6 +11161,7 @@ async function runSkill(
             ]),
       ],
       {
+        onWorkerFailure: options.onWorkerFailure,
         command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
         ...(assess ? { telemetryCommand: "assess-patch-risk" as const } : {}),
         signal: options.signal,
@@ -11177,6 +11202,7 @@ export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
   appServer?: {
     readonly apiKey?: string;
+    readonly checkPatchAccount?: boolean;
     readonly modelProvider?: string;
     readonly onThreadStarted?: () => Promise<void>;
     readonly directory?: string;
@@ -11194,6 +11220,7 @@ export async function readSkillCommandOutput(
   error?: string;
   completed?: boolean;
   sandboxUnavailable?: boolean;
+  accountDiagnostic?: string;
 }> {
   let message: string | undefined;
   let error: string | undefined;
@@ -11201,6 +11228,7 @@ export async function readSkillCommandOutput(
   let turnId: string | undefined;
   let completed = false;
   let sandboxUnavailable = false;
+  let accountDiagnostic: string | undefined;
   let config: JsonObject = {};
   let model: string;
   let provider: string;
@@ -11332,13 +11360,48 @@ export async function readSkillCommandOutput(
             id: value["id"] as string | number,
             error: { code: -32601, message: "Unsupported client request" },
           });
-        } else if (value["error"] !== undefined) {
+        } else if (
+          value["error"] !== undefined &&
+          value["id"] !== "patch-account"
+        ) {
           error = (value["error"] as { message: string }).message;
           sandboxUnavailable = value["id"] === 5;
           appServer.input.end();
-        } else if (value["id"] === 1 || value["id"] === "login") {
+        } else if (
+          value["id"] === 1 ||
+          value["id"] === "login" ||
+          value["id"] === "patch-account"
+        ) {
+          if (value["id"] === "patch-account") {
+            const result = value["result"];
+            const detail = isJsonObject(value["error"])
+              ? value["error"]["message"]
+              : undefined;
+            if (typeof detail === "string") {
+              accountDiagnostic = detail;
+              if (classifyConnectionFailure(detail) === "unauthorized") {
+                error =
+                  "Patch worker authentication failed. Run codex-security login, then retry the same patch command from the selected checkout.";
+                appServer.input.end();
+                continue;
+              }
+            } else if (isJsonObject(result) && result["account"] === null) {
+              accountDiagnostic =
+                "Patch worker could not read its stored account. Check codex-security login status.";
+            }
+            // A workspace lookup can fail while the configured provider still
+            // works. Let the native turn decide unless auth was explicitly denied.
+          }
           if (value["id"] === 1) {
             send({ method: "initialized" });
+            if (appServer.checkPatchAccount) {
+              send({
+                id: "patch-account",
+                method: "account/read",
+                params: { refreshToken: false },
+              });
+              continue;
+            }
             if (appServer.apiKey !== undefined) {
               send({
                 id: "login",
@@ -11540,6 +11603,7 @@ export async function readSkillCommandOutput(
     ...(error === undefined ? {} : { error }),
     ...(appServer === undefined ? {} : { completed }),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
+    ...(accountDiagnostic === undefined ? {} : { accountDiagnostic }),
   };
 }
 
@@ -11572,6 +11636,15 @@ export function skillCommandFailure(
   const classification = classifyConnectionFailure(classificationDetail);
   let advice: string | undefined;
   if (
+    command === "patch" &&
+    authentication?.method === "stored_credentials" &&
+    /\b(?:access token|authentication session) could not be refreshed\b/iu.test(
+      diagnosticDetail,
+    )
+  ) {
+    advice =
+      "Run codex-security login, then retry the same patch command from the selected checkout.";
+  } else if (
     classification === "unauthorized" ||
     /\bauthorizationrequired\b/iu.test(classificationDetail)
   ) {

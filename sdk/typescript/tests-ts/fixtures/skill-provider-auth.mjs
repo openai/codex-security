@@ -32,6 +32,8 @@ if (process.env.SYNTHETIC_SKILL_COMMAND === "validate") {
       send({ id: request.id, result: {} });
     } else if (request.method === "account/login/start") {
       send({ id: request.id, result: { type: "apiKey" } });
+    } else if (request.method === "account/read") {
+      send({ id: request.id, result: { account: { type: "apiKey" } } });
     } else if (request.method === "config/read") {
       send({ id: request.id, result: { layers: [] } });
     } else if (request.method === "experimentalFeature/list") {

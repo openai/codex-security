@@ -7,6 +7,7 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   stat,
@@ -253,6 +254,16 @@ type ReadWorktreeGit = (
   signal?: AbortSignal,
 ) => Promise<string>;
 
+class UnboundGitMarkerError extends InvalidTargetError {
+  constructor(
+    readonly markerRoot: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
@@ -289,8 +300,9 @@ export async function enclosingGitWorktreeRoot(
     throwIfAborted(signal);
     if (strict && error instanceof InvalidTargetError) throw error;
     if (markerRoot !== null) {
-      throw new InvalidTargetError(
-        `Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible. ${errorMessage(error)}`,
+      throw new UnboundGitMarkerError(
+        markerRoot,
+        `Could not determine the Git worktree root for ${join(markerRoot, ".git")}. Check that Git is installed and the checkout is accessible. ${errorMessage(error)}`,
         { cause: error },
       );
     }
@@ -303,7 +315,8 @@ export async function enclosingGitWorktreeRoot(
       canonicalRoot,
     ) !== ""
   ) {
-    throw new InvalidTargetError(
+    throw new UnboundGitMarkerError(
+      markerRoot,
       "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
     );
   }
@@ -315,13 +328,33 @@ export async function enclosingGitWorktreeRoot(
 export async function enclosingGitWorktreeRoots(
   repository: string,
   signal?: AbortSignal,
+  options: { protectEmptyAncestorMarkers?: boolean } = {},
 ): Promise<string[]> {
   const roots: string[] = [];
   let directory = repository;
   for (;;) {
-    const root = await enclosingGitWorktreeRoot(directory, signal, {
-      requireIfPresent: true,
-    });
+    let root;
+    try {
+      root = await enclosingGitWorktreeRoot(directory, signal, {
+        requireIfPresent: true,
+      });
+    } catch (error) {
+      // Keep the entire masked ancestor excluded from credential writes. Only
+      // relax a marker-binding failure after validating the selected checkout.
+      if (
+        !(error instanceof UnboundGitMarkerError) ||
+        !roots.length ||
+        !options.protectEmptyAncestorMarkers
+      )
+        throw error;
+      const marker = join(error.markerRoot, ".git");
+      if (
+        !(await lstat(marker)).isDirectory() ||
+        (await readdir(marker)).length !== 0
+      )
+        throw error;
+      root = error.markerRoot;
+    }
     if (root === null) return roots;
     roots.push(root);
     const parent = dirname(root);
