@@ -62,13 +62,12 @@ class ValidateScanContractTest(ScanFixtureTestCase):
 
     def test_completion_field_rejections(self) -> None:
         manifest = self.read_json("scan-manifest.json")
-        del manifest["scan"]["sealedAt"]
-        del manifest["scan"]["artifacts"]
+        del manifest["scan"]["completedAt"]
         self.write_json("scan-manifest.json", manifest)
-        self.assert_rejection("missing_required_field", "manifest.scan.sealedAt")
-        manifest["scan"]["sealedAt"] = []
+        self.assert_rejection("missing_required_field", "manifest.scan.completedAt")
+        manifest["scan"]["completedAt"] = []
         self.write_json("scan-manifest.json", manifest)
-        self.assert_rejection("invalid_required_field", "manifest.scan.sealedAt")
+        self.assert_rejection("invalid_required_field", "manifest.scan.completedAt")
 
     def test_artifact_rejections(self) -> None:
         path = self.scan_dir / "findings.json"

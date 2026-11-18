@@ -25,10 +25,10 @@ Retention is an explicit consumer decision. Producing a sealed bundle must not s
 
 ## Validation receipts
 
-Run `python scripts/validate_scan_contract.py --scan-dir <scan-dir> --json-errors` from the plugin directory to get one JSON receipt on stdout. A valid bundle exits with code 0 and returns the usual success receipt. A validation failure exits with code 2. A missing seal timestamp produces this receipt.
+Run `python scripts/validate_scan_contract.py --scan-dir <scan-dir> --json-errors` from the plugin directory to get one JSON receipt on stdout. A valid bundle exits with code 0 and returns the usual success receipt. A missing completion timestamp produces this receipt.
 
 ```json
-{"status":"invalid","reason":"missing_required_field","location":"manifest.scan.sealedAt"}
+{"status":"invalid","reason":"missing_required_field","location":"manifest.scan.completedAt"}
 ```
 
 | Reason | Meaning |
