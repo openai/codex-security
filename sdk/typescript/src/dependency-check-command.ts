@@ -1,6 +1,7 @@
 import { Cli, z } from "incur";
 import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
+import { dependencyCheckOutputSchema } from "./dependency-reachability.js";
 import { withDependencyCheckOutput } from "./dependency-check-output.js";
 import {
   DependencyInvestigationBlockedError,
@@ -17,28 +18,13 @@ import { readProjectConfig } from "./project-config.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 
 const text = z.string().trim().min(1);
-const reviewedOutput = z
-  .object({
-    schemaVersion: z.literal(2),
-    uses: z.array(
-      z.object({ location: text, verdict: text, reason: text }).passthrough(),
-    ),
-    limitations: z.array(z.string()),
-  })
-  .passthrough();
 const checkOutput = z.union([
   stackInvestigationReportSchema,
-  reviewedOutput.extend({ cve: text }),
-  z
-    .object({
-      package: z.object({ ecosystem: text, name: text }),
-      checks: z.array(reviewedOutput),
-    })
-    .passthrough(),
+  ...dependencyCheckOutputSchema.options,
 ]);
 
 type Result =
-  | Awaited<ReturnType<typeof runReviewedDependencyCheck>>
+  | z.output<typeof dependencyCheckOutputSchema>
   | Awaited<ReturnType<typeof runLocalStackInvestigation>>;
 function summarize(report: Result): string {
   if ("verdict" in report)
@@ -172,6 +158,12 @@ export function registerDependencyCheck(
           const result = await withDependencyCheckOutput(
             {
               subject: args.subject,
+              checkout: repository,
+              ...("isTTY" in context.stderr &&
+                context.stderr.isTTY === true &&
+                context.environment["TERM"] !== "dumb" && {
+                  display: (line: string) => context.stderr.write(line + "\n"),
+                }),
               signal,
               reportFile:
                 options.reportFile &&
@@ -195,6 +187,7 @@ export function registerDependencyCheck(
                   async investigate(session) {
                     await context.runAgent({
                       directory: session.directory,
+                      stackTarget: session.repo,
                       signal,
                       prompt: await stackInvestigationPrompt(session),
                       ...settings,
@@ -206,12 +199,16 @@ export function registerDependencyCheck(
               const project = config
                 ? await readProjectConfig(config, cwd)
                 : undefined;
-              return runReviewedDependencyCheck(
+              const reviewed = await runReviewedDependencyCheck(
                 {
                   directory: repository,
                   subject: args.subject,
                   vulnDescription: options.vulnDescription,
                   scope: project?.input.exploitability?.scope?.instructions,
+                  excludePaths:
+                    project?.input.exploitability?.scope?.exclude_paths,
+                  sources: project?.input.exploitability?.sources,
+                  sinks: project?.input.exploitability?.sinks,
                   evidenceSources:
                     project?.input.exploitability?.evidence_sources,
                   onProgress: emit,
@@ -220,6 +217,7 @@ export function registerDependencyCheck(
                 },
                 { runAgent: context.runAgent },
               );
+              return dependencyCheckOutputSchema.parse(reviewed);
             },
           );
           return !formatExplicit && format === "toon"

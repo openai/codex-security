@@ -61,6 +61,8 @@ An external caller can freeze the same files with `prepareStackPacket` from `@op
 
 When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
 
+Opening an earlier stack investigation upgrades its SQLite file atomically. Existing claim revisions, evidence and retry keys carry over. An unfinished assessment that requires stronger evidence becomes outstanding again. Older CLI versions cannot write to an upgraded database. A completed report remains immutable. If its evidence fails current verification, start a fresh attempt from the original capture or supply a newly attributed capture.
+
 A missing observation or a gap in the evidence can yield a completed `unknown` assessment. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
 
 ### Reviewed repository and package checks
@@ -76,6 +78,8 @@ cs exploitability check npm:example-parser --vuln-description "Suspected failure
 
 Package checks return one `checks` entry per advisory. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. An unapproved or failed investigation exits with a nonzero status. Progress is best effort. `--report-file` publishes the completed JSON atomically to a new file and preserves any existing destination.
 
+The investigator can delegate source searches while an independent reviewer evaluates proposed uses and the claims they rely on. Investigators share evidence collected during the check. The reviewer selects the citations that support each approved claim. Open a use in the JSON report to see its component, version, verdict, and deciding evidence. The progress stream includes provisional verdicts that can change during review.
+
 A repository check can ask MCP servers for facts it cannot learn from the checkout. For example, a lockfile can identify the package selected by a build. A deployment inventory can show whether that build is running. In a project file, list the servers under `exploitability.evidence_sources` and describe when the investigator should use each one. Define the connection once under `codex.mcp_servers`. Configure read-only tools for the systems you want the investigator to query.
 
 ```yaml
@@ -90,7 +94,9 @@ codex:
       enabled_tools: [get_deployment]
 ```
 
-Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. You can also set `exploitability.scope.instructions` to specify which callers to investigate. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
+Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. Repository checks default to production services, jobs, workers, and the code they deploy or import. Set `exploitability.scope.instructions` to replace that caller scope. Use `exploitability.scope.exclude_paths` for literal checkout-relative files or directories to omit from broad discovery. A nested `SECURITY.md` boundary or an exact source or build lead can bring a path back into the investigation.
+
+Repository checks also accept independent `exploitability.sources` and `exploitability.sinks` lists in the project file. Each endpoint names a `function` and can include its package, symbol, file, and line. Supply a list to describe all endpoints on that side of the scenario, including an empty list when the side has no endpoints. Omit the list to let the investigator discover endpoints. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
 
 ## Updating the CLI
 

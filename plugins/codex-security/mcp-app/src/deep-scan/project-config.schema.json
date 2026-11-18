@@ -167,16 +167,168 @@
     "exploitability": {
       "type": "object",
       "properties": {
+        "sources": {
+          "description": "Complete set of caller-supplied source endpoints for the investigated scenario. An empty list closes this boundary.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function": { "type": "string", "minLength": 1 },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "runtime_selectors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" }
+                }
+              },
+              "package": { "type": "string", "minLength": 1 },
+              "symbol": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "binary": { "type": "string", "minLength": 1 },
+              "line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "location": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "relationships": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "maps_to",
+                        "reaches",
+                        "produces",
+                        "writes_cache",
+                        "creates_async"
+                      ]
+                    },
+                    "endpoint_id": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["kind", "endpoint_id"],
+                  "additionalProperties": false
+                }
+              },
+              "scope": { "type": "string", "minLength": 1 }
+            },
+            "required": ["function"],
+            "additionalProperties": false
+          }
+        },
+        "sinks": {
+          "description": "Complete set of caller-supplied sink endpoints for the investigated scenario. An empty list closes this boundary.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function": { "type": "string", "minLength": 1 },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "runtime_selectors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" }
+                }
+              },
+              "package": { "type": "string", "minLength": 1 },
+              "symbol": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "binary": { "type": "string", "minLength": 1 },
+              "line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "location": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "relationships": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "maps_to",
+                        "reaches",
+                        "produces",
+                        "writes_cache",
+                        "creates_async"
+                      ]
+                    },
+                    "endpoint_id": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["kind", "endpoint_id"],
+                  "additionalProperties": false
+                }
+              },
+              "scope": { "type": "string", "minLength": 1 }
+            },
+            "required": ["function"],
+            "additionalProperties": false
+          }
+        },
         "scope": {
           "type": "object",
           "properties": {
             "instructions": {
+              "description": "Caller-provided investigation boundaries and assumptions.",
               "type": "string",
-              "minLength": 1,
-              "description": "Caller-provided investigation boundaries and assumptions."
+              "minLength": 1
+            },
+            "exclude_paths": {
+              "description": "Literal checkout-relative paths to omit from broad discovery. Exact source or build evidence can reopen a path.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
             }
           },
-          "required": ["instructions"],
           "additionalProperties": false
         },
         "evidence_sources": {
@@ -211,7 +363,7 @@
         "model_reasoning_effort": { "type": "string", "minLength": 1 },
         "model_provider": { "type": "string", "minLength": 1 }
       },
-      "additionalProperties": { "$ref": "#/definitions/__schema0" }
+      "additionalProperties": { "$ref": "#/definitions/__schema1" }
     },
     "limits": {
       "type": "object",
@@ -260,6 +412,20 @@
           "type": "object",
           "propertyNames": { "type": "string" },
           "additionalProperties": { "$ref": "#/definitions/__schema0" }
+        }
+      ]
+    },
+    "__schema1": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/definitions/__schema1" } },
+        {
+          "type": "object",
+          "propertyNames": { "type": "string" },
+          "additionalProperties": { "$ref": "#/definitions/__schema1" }
         }
       ]
     }

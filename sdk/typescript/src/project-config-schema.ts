@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dependencyBoundarySchema } from "./dependency-caller-scope.js";
 import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
@@ -75,13 +76,7 @@ export const ProjectConfigInputSchema = z.strictObject({
     .optional(),
   exploitability: z
     .strictObject({
-      scope: z
-        .strictObject({
-          instructions: nonempty.describe(
-            "Caller-provided investigation boundaries and assumptions.",
-          ),
-        })
-        .optional(),
+      ...dependencyBoundarySchema.shape,
       evidence_sources: z
         .array(
           z.strictObject({

@@ -1,12 +1,34 @@
+import {
+  assertReviewedPremises,
+  claimInputs,
+  premiseKey,
+  type Premise,
+} from "./dependency-review-queue.js";
 import { z } from "zod";
 import {
   DependencyAttemptStore,
   dependencyRecordHash,
   type StoredClaim,
 } from "./dependency-attempt-store.js";
-import { readDependencySourceCitation } from "./dependency-source-identity.js";
+import {
+  dependencyFindingDetailsShape,
+  dependencyPlaceSchema,
+  type DependencyReviewReference,
+} from "./dependency-reachability.js";
+import {
+  dependencyGitCommitSchema,
+  readDependencySourceCitation,
+} from "./dependency-source-identity.js";
 import type { discoverDependencyRepository } from "./dependency-discovery.js";
-import type { DependencyEvidenceRecord } from "./dependency-evidence-sources.js";
+import {
+  investigationServer,
+  type DependencyEvidenceRecord,
+} from "./dependency-evidence-sources.js";
+import { dependencyPremiseRefSchema } from "./dependency-review-queue.js";
+import {
+  dependencyEvidencePayload,
+  selectDependencyEvidenceField,
+} from "./dependency-graph-evidence.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -19,6 +41,11 @@ type Discovery = Awaited<ReturnType<typeof discoverDependencyRepository>>;
 const text = z.string().trim().min(1);
 const source = z.strictObject({
   path: text,
+  commit: dependencyGitCommitSchema
+    .optional()
+    .describe(
+      "Omit to cite the checkout under investigation; use an immutable commit for historical context.",
+    ),
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive(),
   supports: z.array(
@@ -41,12 +68,29 @@ const receipt = z.strictObject({
     .describe(
       "Use the host's response ID if earlier calls returned the same quote.",
     ),
-  supports: z.array(z.enum(["running", "access"])).length(1),
+  supports: z
+    .array(
+      z.enum(["running", "access", "affected_copy", "exclusion", "context"]),
+    )
+    .length(1),
   quote: text,
   reason: text,
 });
 const proposedUse = z.strictObject({
   scope: text,
+  premises: z.array(dependencyPremiseRefSchema).optional(),
+  component: text
+    .optional()
+    .describe(
+      "Actual selected dependency. If this is an embedded or vendored component, cite this caller's selection of its containing artifact and the component name and version inside that artifact.",
+    ),
+  place: dependencyPlaceSchema
+    .partial()
+    .optional()
+    .describe(
+      "Structured deployment scope and dependency selection established by this use's citations.",
+    ),
+  ...dependencyFindingDetailsShape,
   location: text
     .optional()
     .describe(
@@ -77,6 +121,7 @@ const proposedUse = z.strictObject({
   remainingQuestions: z.array(text),
 });
 export const investigationSchema = z.strictObject({
+  outOfScope: z.array(z.strictObject({ scope: text, reason: text })).optional(),
   uses: z.array(proposedUse),
   limitations: z.array(text),
 });
@@ -88,11 +133,16 @@ export const reviewSchema = z.strictObject({
       revision: z.number().int().positive(),
       hash: text,
       approved: z.boolean(),
+      evidenceKeys: z
+        .array(text)
+        .describe(
+          "Choose only the source, receipt or approved premise IDs that decided this claim. Use [] for a coverage-only decision.",
+        ),
       reason: text,
     }),
   ),
 });
-type Decision = z.infer<typeof reviewSchema>["decisions"][number];
+export type Decision = z.infer<typeof reviewSchema>["decisions"][number];
 export type Scope = {
   id: string;
   location: string;
@@ -161,15 +211,34 @@ function containsQuote(record: DependencyEvidenceRecord, quote: string) {
   const result = record.result;
   const content = result["content"];
   if (record.tool === "read_mcp_resource") {
-    // Codex serializes the resource response and request metadata into one text block.
     const args = record.arguments;
-    if (!isRecord(args) || !Array.isArray(content)) return false;
+    if (
+      !isRecord(args) ||
+      args["server"] !== record.server ||
+      typeof args["uri"] !== "string"
+    )
+      return false;
+    const truncated = /…\d+ (?:tokens|chars) truncated…/u;
+    const matchesResource = (entries: unknown) =>
+      Array.isArray(entries) &&
+      entries.some(
+        (item: unknown) =>
+          isRecord(item) &&
+          item["uri"] === args["uri"] &&
+          typeof item["text"] === "string" &&
+          !truncated.test(item["text"]) &&
+          item["text"].includes(quote),
+      );
+    // Native clients deliver contents directly. Codex's built-in tool wraps the
+    // response and request metadata together in a JSON text block.
+    if (matchesResource(result["contents"])) return true;
+    if (!Array.isArray(content)) return false;
     return content.some((block: unknown) => {
       if (
         !isRecord(block) ||
         block["type"] !== "text" ||
         typeof block["text"] !== "string" ||
-        /…\d+ (?:tokens|chars) truncated…/u.test(block["text"])
+        truncated.test(block["text"])
       )
         return false;
       try {
@@ -178,13 +247,7 @@ function containsQuote(record: DependencyEvidenceRecord, quote: string) {
           isRecord(response) &&
           response["server"] === record.server &&
           response["uri"] === args["uri"] &&
-          Array.isArray(response["contents"]) &&
-          response["contents"].some(
-            (item: unknown) =>
-              isRecord(item) &&
-              typeof item["text"] === "string" &&
-              item["text"].includes(quote),
-          )
+          matchesResource(response["contents"])
         );
       } catch {
         return false;
@@ -238,6 +301,43 @@ function mentions(quote: string, value: string, sourcePath = false) {
   ).test(quote);
 }
 
+/** A parent's version elsewhere in an inventory cannot select the embedded copy. */
+function identifiesEmbeddedCopy(
+  excerpt: string,
+  component: string,
+  version: string | null,
+) {
+  if (!version) return mentions(excerpt.toLowerCase(), component.toLowerCase());
+  // Match package declarations and prose naming a version immediately after the
+  // component, including adjacent name/version fields in a structured inventory.
+  const literal = (value: string) =>
+    value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const named = new RegExp(
+    String.raw`(?<![\p{L}\p{N}_.+/-])${literal(component)}["'\s:@=,_-]+(?:["']?(?:upstream[_-]?)?version["'\s:=]+)?v?${literal(version)}(?![\p{L}\p{N}_+~-]|\.[\p{L}\p{N}])`,
+    "iu",
+  );
+  if (named.test(excerpt)) return true;
+  // JSON fields may appear in either order, with other metadata between them.
+  for (const match of excerpt.matchAll(/\{[^{}]*\}/gu)) {
+    try {
+      const entry: unknown = JSON.parse(match[0]);
+      if (
+        isRecord(entry) &&
+        ["name", "component", "package", "library"].some(
+          (key) =>
+            typeof entry[key] === "string" &&
+            entry[key].toLowerCase() === component.toLowerCase(),
+        ) &&
+        entry["version"] === version
+      )
+        return true;
+    } catch {
+      /* Non-JSON build source uses the package declaration above. */
+    }
+  }
+  return false;
+}
+
 function verifiedLocation(
   scope: Scope,
   use: Proposal["uses"][number],
@@ -269,7 +369,7 @@ function verifiedLocation(
   const identity = [
     proposed,
     scope.discovery.revision,
-    scope.component,
+    use.component ?? scope.component,
     use.version,
   ];
   const linked = running.some(
@@ -287,29 +387,88 @@ export async function verifyProposedUse(
   signal: AbortSignal,
   affectedVersion?: boolean,
   records: readonly DependencyEvidenceRecord[] = [],
+  callerScope?: string,
 ) {
   const revision = scope.discovery.revision;
-  if (scope.selectedVersion && use.version !== scope.selectedVersion)
+  const component = use.component ?? scope.component;
+  const embedded = component !== scope.component;
+  if (
+    !embedded &&
+    scope.selectedVersion &&
+    use.version !== scope.selectedVersion
+  )
     throw new CodexSecurityError(
       `The version for ${scope.location} differs from its selected dependency version.`,
     );
   const evidence = await Promise.all(
-    use.evidence.map(async ({ supports, ...range }) => ({
+    use.evidence.map(async ({ supports, commit, ...range }) => ({
       ...(await readDependencySourceCitation(
         directory,
-        revision,
+        commit ?? revision,
         range,
         signal,
       )),
       supports,
     })),
   );
+  if (
+    evidence.some(
+      (ref) =>
+        ref.commit !== revision &&
+        ref.supports.some((fact) => fact !== "context"),
+    )
+  )
+    throw new CodexSecurityError(
+      "Historical citations can explain a change. Cite the selected checkout for facts about its affected copy, use, or exclusion.",
+    );
+  if (embedded) {
+    // A containing distribution and the library in its wheel or binary have
+    // independently selected versions. Bind the nested identity to original
+    // source before letting review decide the caller and advisory relationship.
+    const byPath = new Map<string, string[]>();
+    for (const ref of evidence) {
+      if (ref.commit !== revision) continue;
+      const excerpts = byPath.get(ref.path) ?? [];
+      excerpts.push(ref.excerpt);
+      byPath.set(ref.path, excerpts);
+    }
+    const excerpts = [...byPath.values()].map((lines) => lines.join("\n"));
+    const parents = excerpts.filter((text) => {
+      const name = text.toLowerCase().includes(scope.component.toLowerCase());
+      // A filename can delimit its version with "-" rather than quotes.
+      const version = scope.selectedVersion;
+      return (
+        name &&
+        (!version ||
+          mentions(text, version) ||
+          mentions(text.replaceAll(/[-/@]/gu, " "), version))
+      );
+    });
+    const bound = excerpts.some(
+      (source) =>
+        identifiesEmbeddedCopy(source, component, use.version) &&
+        parents.some(
+          (parent) =>
+            parent === source ||
+            source
+              .match(/\b[a-f0-9]{64}\b/giu)
+              ?.some((digest) => parent.includes(digest)),
+        ),
+    );
+    if (!bound)
+      throw new CodexSecurityError(
+        "Cite the selected parent artifact or build and the embedded dependency and version it contains. Join separate records by their artifact digest.",
+      );
+  }
   const covers = (path: string | undefined, line: number | undefined) =>
     path !== undefined &&
     line !== undefined &&
     evidence.some(
       (ref) =>
-        ref.path === path && ref.startLine <= line && line <= ref.endLine,
+        ref.commit === revision &&
+        ref.path === path &&
+        ref.startLine <= line &&
+        line <= ref.endLine,
     );
   const citesSelection = covers(
     scope.selection?.lockfile,
@@ -328,6 +487,13 @@ export async function verifyProposedUse(
     );
   assertDependencyUseProofCitations(use.proof, evidence, scope.location);
   const observations = use.observations.map((ref) => {
+    if (
+      ref.server === investigationServer &&
+      ref.supports.some((s) => s === "running" || s === "access")
+    )
+      throw new CodexSecurityError(
+        "Local investigation tool results cannot establish that a deployment ran or accepted an external caller.",
+      );
     const matches = records.filter(
       (record) =>
         record.server === ref.server &&
@@ -351,6 +517,69 @@ export async function verifyProposedUse(
       .map((r) => r.quote);
   const running = quotes("running"),
     access = quotes("access");
+  if (use.place?.revision && use.place.revision !== revision)
+    throw new CodexSecurityError(
+      "The reported place revision must agree with the selected checkout.",
+    );
+  if (use.place?.deploymentBasis === "observed" && !running.length)
+    throw new CodexSecurityError(
+      "An observed deployment requires a recorded running observation.",
+    );
+  if (
+    use.place?.deploymentBasis === "assumed_not_deployed" &&
+    (!use.place.deploymentDetail ||
+      !callerScope?.includes(use.place.deploymentDetail) ||
+      running.length)
+  )
+    throw new CodexSecurityError(
+      "An assumption that the use is not deployed must identify the caller-supplied boundary.",
+    );
+  function originalReference(ref: DependencyReviewReference): boolean {
+    if (ref.kind === "source")
+      return evidence.some(
+        (source) =>
+          source.path === ref.path &&
+          source.commit === (ref.commit ?? revision) &&
+          source.startLine <= ref.startLine &&
+          ref.startLine <= ref.endLine &&
+          ref.endLine <= source.endLine,
+      );
+    if (
+      !observations.some(
+        (r) =>
+          r.sha256 === ref.receiptId &&
+          r.originalPayloadSha256 === ref.originalPayloadSha256,
+      )
+    )
+      return false;
+    if (!ref.selection) return true;
+    const original = records.find((r) => r.sha256 === ref.receiptId)!;
+    const payload = dependencyEvidencePayload(
+      original,
+      ref.selection.textBlock,
+    );
+    return (
+      selectDependencyEvidenceField(payload, ref.selection.record) !== undefined
+    );
+  }
+  const checkReferences = (
+    refs: readonly DependencyReviewReference[] | undefined,
+  ) => {
+    if (refs?.some((ref) => !originalReference(ref)))
+      throw new CodexSecurityError(
+        "Reviewed finding details must cite source ranges or recorded receipts belonging to this use.",
+      );
+  };
+  for (const attached of [
+    ...(use.services ?? []),
+    ...(use.inspections ?? []),
+    ...(use.tags ?? []),
+    use.inputSource,
+    use.runtimeContext,
+  ])
+    checkReferences(attached?.evidence);
+  for (const condition of use.openConditions ?? [])
+    checkReferences(condition.assignee?.evidence);
   const location = verifiedLocation(scope, use, running, covers);
   const names = [location, ...scope.runtimeServices].filter(
     (name) => name !== ".",
@@ -358,7 +587,7 @@ export async function verifyProposedUse(
   if (
     running.length &&
     (!use.version ||
-      ![revision, scope.component, use.version].every((id) =>
+      ![revision, component, use.version].every((id) =>
         running.some((q) => mentions(q, id)),
       ) ||
       !running.some((q) => names.some((name) => mentions(q, name))))
@@ -392,9 +621,9 @@ export async function verifyProposedUse(
       throw new CodexSecurityError(
         "An affected use cannot have a disproved necessary condition.",
       );
-    if (affectedVersion === false)
+    if (!embedded && affectedVersion === false)
       throw new CodexSecurityError(
-        `The frozen advisory excludes version ${use.version} of ${scope.component}.`,
+        `The frozen advisory excludes version ${use.version} of ${component}.`,
       );
     if (
       !use.version ||
@@ -420,6 +649,7 @@ export async function verifyProposedUse(
       );
   }
   const selectedCopyExcluded =
+    !embedded &&
     affectedVersion === false &&
     scope.selectedVersion === use.version &&
     citesSelection;
@@ -456,13 +686,14 @@ export async function verifyProposedUse(
     evidence,
     observations,
     location,
-    component: scope.component,
+    component,
     revision,
   };
 }
 
 export type VerifiedUse = Awaited<ReturnType<typeof verifyProposedUse>>;
 type ReviewClaim =
+  | Premise
   | { kind: "use"; use: VerifiedUse }
   | { kind: "coverage"; limitations: string[] };
 export type Claim = StoredClaim<ReviewClaim>;
@@ -478,13 +709,13 @@ export function approveDependencyClaims(
   claims: Claim[],
   decisions: Decision[],
 ) {
-  return store.transaction(() => {
-    const byId = new Map(decisions.map((row) => [row.id, row]));
-    if (decisions.length !== claims.length || byId.size !== claims.length)
-      throw new CodexSecurityError(
-        "Independent review must decide every claim exactly once.",
-      );
-    return claims.map((claim) => {
+  const byId = new Map(decisions.map((row) => [row.id, row]));
+  if (decisions.length !== claims.length || byId.size !== claims.length)
+    throw new CodexSecurityError(
+      "Independent review must decide every claim exactly once.",
+    );
+  const reviewed = store.transaction(() =>
+    claims.map((claim) => {
       const current = store.claim<ReviewClaim>(claim.id),
         decision = byId.get(claim.id);
       if (
@@ -498,33 +729,84 @@ export function approveDependencyClaims(
         throw new CodexSecurityError(
           "Independent review does not match the current claim revisions.",
         );
-      if (!decision.approved)
+      const { sourceIds, receiptIds, dependencies } = claimInputs(claim);
+      assertReviewedPremises(store, dependencies);
+      const allowed = new Set([
+        ...sourceIds,
+        ...receiptIds,
+        ...dependencies.map(premiseKey),
+      ]);
+      if (
+        new Set(decision.evidenceKeys).size !== decision.evidenceKeys.length ||
+        decision.evidenceKeys.some((key) => !allowed.has(key)) ||
+        (decision.approved && allowed.size > 0 && !decision.evidenceKeys.length)
+      )
         throw new DependencyReviewRejection(
-          `Independent review rejected ${claim.id}: ${decision.reason}`,
+          "Reviewer must select the deciding evidence from this claim's original evidence or approved premises: " +
+            claim.id,
+        );
+      const use = claim.value.kind === "use" ? claim.value.use : undefined;
+      if (
+        decision.approved &&
+        use?.verdict === "exploitable" &&
+        ["running", "access"].some(
+          (support) =>
+            !use.observations.some(
+              (r) =>
+                r.supports.some((s) => s === support) &&
+                decision.evidenceKeys.includes(r.sha256),
+            ),
+        )
+      )
+        throw new DependencyReviewRejection(
+          "A positive review must select evidence for the running build and caller access.",
         );
       store.set("dependency-review", claim.id, decision);
       return { ...reference(current), value: current.value, review: decision };
-    });
-  });
+    }),
+  );
+  const rejected = reviewed.filter((c) => !c.review.approved);
+  if (rejected.length)
+    throw new DependencyReviewRejection(
+      rejected
+        .map(
+          (c) => "Independent review rejected " + c.id + ": " + c.review.reason,
+        )
+        .join("\n"),
+    );
+  return reviewed;
 }
 
-export function reportedUse(use: VerifiedUse, claim: Claim) {
+export function reportedUse(
+  use: VerifiedUse,
+  claim: Claim,
+  evidenceKeys?: readonly string[],
+  premiseEvidence: readonly DependencyReviewReference[] = [],
+) {
   const running = use.observations.some((ref) =>
     ref.supports.includes("running"),
   );
   const decidingEvidence = [
-    ...use.evidence.map(({ path, commit, startLine, endLine }) => ({
-      kind: "source" as const,
-      path,
-      commit,
-      startLine,
-      endLine,
-    })),
-    ...use.observations.map((ref) => ({
-      kind: "receipt" as const,
-      receiptId: ref.sha256,
-      originalPayloadSha256: ref.originalPayloadSha256,
-    })),
+    ...use.evidence
+      .filter(
+        (ref) =>
+          !evidenceKeys || evidenceKeys.includes(dependencyRecordHash(ref)),
+      )
+      .map(({ path, commit, startLine, endLine }) => ({
+        kind: "source" as const,
+        path,
+        commit,
+        startLine,
+        endLine,
+      })),
+    ...use.observations
+      .filter((ref) => !evidenceKeys || evidenceKeys.includes(ref.sha256))
+      .map((ref) => ({
+        kind: "receipt" as const,
+        receiptId: ref.sha256,
+        originalPayloadSha256: ref.originalPayloadSha256,
+      })),
+    ...premiseEvidence,
   ];
   return {
     location: use.location,
@@ -534,7 +816,7 @@ export function reportedUse(use: VerifiedUse, claim: Claim) {
     reason: use.reason,
     deployment: running
       ? ("confirmed" as const)
-      : use.configured
+      : use.configured || use.place?.deploymentBasis === "configured"
         ? ("configured" as const)
         : ("unknown" as const),
     evidence: use.evidence.map(
@@ -550,20 +832,25 @@ export function reportedUse(use: VerifiedUse, claim: Claim) {
     ),
     observations: use.observations.map((ref) => ({
       server: ref.server,
-      tool: ref.tool,
-      sha256: ref.sha256,
       record: ref.quote,
-      supports: ref.supports,
+      supports: ref.supports.filter(
+        (s) => s === "running" || s === "access" || s === "affected_copy",
+      ),
     })),
+    ...(use.services && { services: use.services }),
+    ...(use.openConditions && { openConditions: use.openConditions }),
+    ...(use.inspections && { inspections: use.inspections }),
+    ...(use.inputSource && { inputSource: use.inputSource }),
+    ...(use.runtimeContext && { runtimeContext: use.runtimeContext }),
+    ...(use.tags && { tags: use.tags }),
     place: {
       kind: use.placeKind ?? "unknown",
       environment: null,
-      revision: use.revision,
       artifact: null,
       observationWindow: null,
       deploymentBasis: running
         ? ("observed" as const)
-        : use.configured
+        : use.configured || use.place?.deploymentBasis === "configured"
           ? ("configured" as const)
           : ("unknown" as const),
       deploymentDetail: running
@@ -574,7 +861,15 @@ export function reportedUse(use: VerifiedUse, claim: Claim) {
         : null,
       dependencySelection: use.version,
       patch: null,
-      unresolvedQuestions: use.remainingQuestions,
+      ...use.place,
+      ...(running && { deploymentBasis: "observed" as const }),
+      revision: use.revision,
+      unresolvedQuestions: [
+        ...new Set([
+          ...use.remainingQuestions,
+          ...(use.place?.unresolvedQuestions ?? []),
+        ]),
+      ],
     },
     proof: use.proof,
     decidingEvidence,

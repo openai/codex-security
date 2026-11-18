@@ -2,15 +2,21 @@ import { expect, test } from "bun:test";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { main } from "../src/cli.js";
+import { main, runCodexSkillCommand } from "../src/cli.js";
+import { parse as parseToml } from "smol-toml";
 import { prepareStackPacket } from "../src/stack-packet.js";
-import { stackPacketWorkItems } from "../src/dependency-stack-packet.js";
+import {
+  readStackPacket,
+  stackPacketWorkItems,
+} from "../src/dependency-stack-packet.js";
+import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
+import { sqliteDatabaseOpener } from "../src/runtime.js";
 import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
 import {
   executeStackRun,
   readFinalStackReport,
 } from "../src/dependency-stack-run.js";
-import { dependencies } from "./cli-fixtures.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -216,6 +222,124 @@ async function startProof(
   return { inputs, state, call, capture, claims, write, row };
 }
 
+test("a previous stack ledger resumes exact claims and retry receipts and reopens an unattributed fixed copy", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-upgrade-");
+  const files = await sample(dir.path, true);
+  const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
+  const binding = stacks.queries[0].groups[0].observations[0].bindings[0];
+  binding.version = "2.1.0";
+  delete binding.frameIndices;
+  await writeFile(files.stacksPath, JSON.stringify(stacks));
+  const { inputs, write, row, claims, call } = await startProof(
+    dir.path,
+    files,
+  );
+  const { manifest } = await readStackPacket(inputs, files.repo);
+  const queried = (await call("query-claims", { ids: ["caller"] })) as {
+    claims: {
+      contextHash: string;
+      payload: unknown;
+      scope: unknown;
+      evidence: { sources: unknown[]; receipts: unknown[] };
+    }[];
+  };
+  const current = queried.claims[0]!;
+  const record = {
+    ...claims[0]!,
+    scope: current.scope,
+    payload: current.payload,
+    dependencies: [],
+    excerpts: current.evidence.sources,
+    receipts: current.evidence.receipts,
+    contextHash: current.contextHash,
+    state: "recorded",
+  };
+  const fixed = {
+    workItemId: row.workItemId,
+    verdict: "ruled_out",
+    reason: "Deployment selected the fixed version.",
+    supportingClaims: claims,
+    remainingQuestions: [],
+    frameIndices: [0, 1],
+  };
+  const state = join(dir.path, "previous.sqlite");
+  const db = sqliteDatabaseOpener()(state);
+  try {
+    db.exec(`
+      PRAGMA application_id = 0x43534558;
+      PRAGMA user_version = 1;
+      CREATE TABLE attempt_records(kind TEXT, id TEXT, value TEXT, PRIMARY KEY(kind,id));
+      CREATE TABLE claim_revisions(id TEXT, revision INTEGER, hash TEXT, value TEXT, PRIMARY KEY(id,revision));
+    `);
+    const save = (kind: string, id: string, value: unknown) =>
+      db
+        .prepare("INSERT INTO attempt_records VALUES (?, ?, ?)")
+        .all(kind, id, JSON.stringify(value));
+    save("manifest", "active", {
+      inputs,
+      repo: files.repo,
+      manifest,
+      fingerprint: dependencyRecordHash(manifest),
+    });
+    save("claims", "context", {
+      contextHash: current.contextHash,
+      policy: "single_agent",
+    });
+    save("operation", "id:proof", {
+      digest: dependencyRecordHash({
+        name: "record-claims",
+        body: { claims: write.claims },
+      }),
+      result: { claims },
+    });
+    save("stack-assessment", row.workItemId, fixed);
+    save("operation", "id:disposition", {
+      digest: dependencyRecordHash({
+        name: "record-assessments",
+        body: { items: [fixed] },
+      }),
+      result: { workItemId: row.workItemId, verdict: "ruled_out" },
+    });
+    db.prepare("INSERT INTO claim_revisions VALUES (?, ?, ?, ?)").all(
+      record.id,
+      record.revision,
+      record.hash,
+      JSON.stringify(record),
+    );
+  } finally {
+    db.close();
+  }
+  const resume = (command: string, input?: unknown) =>
+    executeStackRun(command, { state, input });
+  expect(await resume("query-claims", { ids: ["caller"] })).toEqual(queried);
+  expect(await resume("record-claims", write)).toEqual({ claims });
+  await expect(
+    resume("record-claims", { ...write, claims: [] }),
+  ).rejects.toThrow(/different request/);
+  await expect(
+    resume("record-assessments", {
+      operationId: "disposition",
+      items: [fixed],
+    }),
+  ).rejects.toThrow(/requires new evidence/);
+  expect(await resume("next")).toMatchObject({
+    workItem: { id: row.workItemId },
+  });
+  await resume("record-assessments", {
+    items: [
+      {
+        ...fixed,
+        verdict: "unknown",
+        reason: "The running copy cannot be attributed to the frame.",
+        remainingQuestions: ["Which copy executed this frame?"],
+      },
+    ],
+  });
+  const final = await resume("finalize");
+  expect(final).toMatchObject({ verdict: "unknown", claims });
+  expect(final).toEqual(await readFinalStackReport(state));
+});
+
 for (const [label, bindSource, separateImage, expectedPositive] of [
   ["source and version in one binding", true, undefined, true],
   ["source not recorded", false, undefined, false],
@@ -412,6 +536,73 @@ for (const version of ["1.5.0", "2.1.0"]) {
   });
 }
 
+test("the stack process gets a private Codex home and can write only its workspace", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-process-");
+  const home = join(dir.path, "user");
+  const work = join(dir.path, "work");
+  const target = join(dir.path, "target");
+  await Promise.all([home, work, target].map((path) => mkdir(path)));
+  git(target, "init", "--quiet");
+  await writeFile(
+    join(home, "config.toml"),
+    [
+      'model_provider = "sample"',
+      "[model_providers.sample]",
+      'name = "Sample"',
+      'base_url = "https://example.invalid"',
+      'env_key = "SAMPLE_PROVIDER_TOKEN"',
+      "[mcp_servers.ambient]",
+      'command = "unused"',
+    ].join("\n"),
+  );
+  const stdout = capture(),
+    stderr = capture();
+  const script = `
+    const fs = require("node:fs"), path = require("node:path");
+    const home = process.env.CODEX_HOME, cfg = path.join(home, "config.toml");
+    const result = {
+      home, inherited: fs.existsSync(cfg) && fs.readFileSync(cfg, "utf8").includes("mcp_servers.ambient"),
+      policy: process.argv.find(a => a.startsWith("permissions.dependency_investigation=")),
+    };
+    console.log(JSON.stringify({type:"item.completed",item:{id:"r",type:"agent_message",text:JSON.stringify(result)}}));
+    console.log(JSON.stringify({type:"turn.completed"}));
+  `;
+  const status = await runCodexSkillCommand(
+    ["-e", script, "--"],
+    {
+      command: "exploitability check",
+      auth: "auto",
+      stackTarget: target,
+      directory: work,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    },
+    { command: process.execPath },
+    {
+      PATH: process.env["PATH"],
+      CODEX_HOME: home,
+      SAMPLE_PROVIDER_TOKEN: "test",
+    },
+  );
+  expect(status, stderr.text()).toBe(0);
+  const observed = JSON.parse(stdout.text());
+  expect(observed.home).not.toBe(home);
+  expect(observed.inherited).toBe(false);
+  expect(parseToml(observed.policy)).toMatchObject({
+    permissions: {
+      dependency_investigation: {
+        network: { enabled: false },
+        filesystem: {
+          ":root": "read",
+          [work]: { ".": "write" },
+          [home]: { ".": "deny" },
+          [observed.home]: { ".": "deny" },
+        },
+      },
+    },
+  });
+});
+
 test("the gated check gives one investigator a usable child CLI and publishes its verified report", async () => {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
@@ -422,6 +613,10 @@ test("the gated check gives one investigator a usable child CLI and publishes it
     async onCodex(argv, out, _env, prompt) {
       calls++;
       expect(argv[0]).toBe("exec");
+      expect(argv).toContain("--ignore-user-config");
+      expect(argv).toContain("mcp_servers={}");
+      expect(out?.investigationServers).toEqual({});
+      expect(argv).toContain('model_provider="sample"');
       expect(argv.some((arg) => arg.includes(gate))).toBe(true);
       const { state, command } = JSON.parse(
         prompt!.split("\n").find((line) => line.startsWith('{"command":'))!,
@@ -463,6 +658,13 @@ test("the gated check gives one investigator a usable child CLI and publishes it
       return 0;
     },
   });
+  const configHome = join(dir.path, "user-config");
+  await mkdir(configHome);
+  await writeFile(
+    join(configHome, "config.toml"),
+    'model_provider="sample"\n[model_providers.sample]\nname="Sample"\nbase_url="https://example.invalid"\nwire_api="responses"\n[mcp_servers.ambient]\ncommand="unused"\n',
+  );
+  d.environment["CODEX_HOME"] = configHome;
   d.environment[gate] = "1";
   const io = createCliTest(main);
   const code = await io.runCli(

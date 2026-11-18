@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { z } from "zod";
+import {
+  dependencyPathExcluded,
+  type DependencyDiscoveryBoundary,
+} from "./dependency-caller-scope.js";
 import type { DependencyPackage } from "./dependency-advisory.js";
 import {
   readNpmManifests,
@@ -159,6 +163,7 @@ export async function discoverDependencyRepository(options: {
   package: DependencyPackage;
   symbols?: readonly string[];
   runtimeReceipts?: readonly RuntimeReceiptInput[];
+  callerBoundary?: DependencyDiscoveryBoundary;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }): Promise<RepositoryDiscovery> {
@@ -196,12 +201,21 @@ export async function discoverDependencyRepository(options: {
     localGit,
   );
   const blobs = new Map<string, string>();
+  const policyPaths = new Set<string>();
   for (const record of tree.split("\0")) {
+    const policy =
+      /^(?:100(?:644|755)|120000) blob [a-f0-9]+\t((?:[\s\S]*\/)?SECURITY\.md)$/u.exec(
+        record,
+      );
+    if (policy) policyPaths.add(policy[1]!);
     const entry = /^100(?:644|755) blob ([a-f0-9]+)\t([\s\S]+)$/u.exec(record);
     if (entry && !entry[2]!.split("/").includes("node_modules"))
       blobs.set(entry[2]!, entry[1]!);
   }
   const paths = new Set(blobs.keys());
+  const inBoundary = (path: string) =>
+    !options.callerBoundary ||
+    !dependencyPathExcluded(path, policyPaths, options.callerBoundary);
   const read = async (path: string) =>
     gitOutput(
       repository,
@@ -250,7 +264,7 @@ export async function discoverDependencyRepository(options: {
       .split("\0")
       .filter((p) => p.startsWith(revision + ":"))
       .map((p) => p.slice(revision.length + 1))
-      .filter((p) => paths.has(p));
+      .filter((p) => paths.has(p) && inBoundary(p));
   } catch (error) {
     signal?.throwIfAborted();
     if (!isRecord(error) || error["code"] !== 1) throw error;
@@ -304,7 +318,7 @@ export async function discoverDependencyRepository(options: {
       if (pkg.ecosystem === "PyPI") {
         const primary = ["requirements.txt", "requirements.lock"]
           .map((base) => posix.join(directory, base))
-          .filter((p) => paths.has(p));
+          .filter((p) => paths.has(p) && inBoundary(p));
         if (
           primary.length ||
           paths.has(posix.join(directory, "pyproject.toml"))
@@ -352,15 +366,18 @@ export async function discoverDependencyRepository(options: {
     ...callers.map((c) => c.path),
     ...sourceLeads,
   ];
+  const matchedPaths = new Set(matches);
   const buildFiles = [...paths]
+    .filter(inBoundary)
     .filter((p) =>
-      /^(?:Dockerfile(?:\..+)?|Containerfile(?:\..+)?|(?:docker-)?compose(?:\..+)?\.ya?ml)$/iu.test(
+      /^(?:Dockerfile(?:\..+)?|Containerfile(?:\..+)?|.+\.(?:Dockerfile|Containerfile)|(?:docker-)?compose(?:\..+)?\.ya?ml)$/iu.test(
         posix.basename(p),
       ),
     )
     .filter((p) => {
       const directory = posix.dirname(p);
       return (
+        matchedPaths.has(p) ||
         directory === "." ||
         evidencePaths.some((source) => source.startsWith(directory + "/"))
       );

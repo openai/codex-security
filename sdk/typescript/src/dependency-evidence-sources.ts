@@ -3,6 +3,8 @@ import { dependencyRecordHash } from "./dependency-attempt-store.js";
 import { ConfigurationError } from "./errors.js";
 import { isRecord } from "./record.js";
 
+export const investigationServer = "dependency_investigation";
+
 export interface DependencyEvidenceSource {
   server: string;
   instructions: string;
@@ -40,8 +42,16 @@ export function selectDependencyEvidenceServers(
   return Object.fromEntries(selected);
 }
 
+export type DependencyEvidenceFailure = Pick<
+  DependencyEvidenceRecord,
+  "server" | "tool" | "arguments"
+>;
+
 /** Remember linked resources only for the lifetime of this investigator run. */
-export function createDependencyEvidenceCapture(servers: JsonObject) {
+export function createDependencyEvidenceCapture(
+  servers: JsonObject,
+  onFailure?: (call: DependencyEvidenceFailure) => void,
+) {
   const links = new Map(
     Object.keys(servers).map((server) => [server, new Set<string>()]),
   );
@@ -56,18 +66,14 @@ export function createDependencyEvidenceCapture(servers: JsonObject) {
     if (
       !isRecord(item) ||
       (item["type"] !== "mcp_tool_call" && item["type"] !== "mcpToolCall") ||
-      item["status"] !== "completed" ||
-      item["error"] != null
+      (item["status"] !== "completed" && item["status"] !== "failed")
     )
       return;
     const { server, tool, result } = item;
     if (
       typeof server !== "string" ||
       typeof tool !== "string" ||
-      !Object.hasOwn(item, "arguments") ||
-      !isRecord(result) ||
-      result["isError"] === true ||
-      result["is_error"] === true
+      !Object.hasOwn(item, "arguments")
     )
       return;
 
@@ -87,8 +93,18 @@ export function createDependencyEvidenceCapture(servers: JsonObject) {
         !linked.has(args["uri"])
       )
         return;
-    } else {
-      if (Array.isArray(allow) && !allow.includes(tool)) return;
+    } else if (Array.isArray(allow) && !allow.includes(tool)) return;
+    if (
+      item["status"] === "failed" ||
+      item["error"] != null ||
+      (isRecord(result) &&
+        (result["isError"] === true || result["is_error"] === true))
+    ) {
+      onFailure?.({ server, tool, arguments: args });
+      return;
+    }
+    if (!isRecord(result)) return;
+    if (tool !== "read_mcp_resource") {
       if (Array.isArray(result["content"]))
         for (const block of result["content"]) {
           if (

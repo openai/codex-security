@@ -18,6 +18,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { ConfigurationError, errorMessage } from "./errors.js";
+import { validateDependencyEndpointConfiguration } from "./dependency-endpoints.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import type { AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
@@ -49,6 +50,7 @@ export interface ProjectConfigSource {
 }
 
 export interface ResolvedProjectConfig {
+  exploitability?: ProjectConfigInput["exploitability"];
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
@@ -264,6 +266,15 @@ function requireProjectConfig(
       `Invalid project configuration${path === undefined ? "" : ` at ${path}`}: ${issues}`,
     );
   }
+  if (value.exploitability) {
+    try {
+      validateDependencyEndpointConfiguration(value.exploitability);
+    } catch (error) {
+      throw new ConfigurationError(
+        `Invalid exploitability configuration${path === undefined ? "" : ` at ${path}`}: ${errorMessage(error)}`,
+      );
+    }
+  }
 }
 
 function outputPath(
@@ -465,6 +476,9 @@ export function resolveScanSettings(
     config: { codexOverrides },
     options: settings,
     sources: resolvedSources,
+    ...(file?.exploitability === undefined
+      ? {}
+      : { exploitability: structuredClone(file.exploitability) }),
     ...(project?.path === undefined
       ? {}
       : { projectConfig: { path: project.path, sources: resolvedSources } }),

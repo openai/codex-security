@@ -5,6 +5,12 @@ import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
+import {
+  createDependencyResourceSession,
+  dependencyResourcePermissionsMatch,
+  type DependencyResourceEvents,
+} from "./dependency-resource-session.js";
+import { createDependencyLinkedResourceCapture } from "./dependency-linked-resources.js";
 import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
 import {
   createDependencyEvidenceCapture,
@@ -247,12 +253,17 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./config.js";
+import {
+  startInvestigationTools,
+  investigationServer,
+} from "./dependency-investigation-session.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import { batchScanBudget } from "./batch-cost.js";
 import {
   formatScanCost,
   formatScanCostTokens,
   formatTokenUsage,
+  tokenUsage,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
@@ -1402,6 +1413,7 @@ interface SkillCommandOutput {
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
   readonly codexOverrides?: JsonObject;
+  readonly stackTarget?: string;
   readonly investigationServers?: JsonObject;
   readonly onExecEvent?: (event: Readonly<Record<string, unknown>>) => void;
   readonly command:
@@ -1413,6 +1425,7 @@ interface SkillCommandOutput {
     readonly directory: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
+    readonly linkedEvidence?: DependencyResourceEvents;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
@@ -1875,6 +1888,7 @@ async function runCodexSkillProcess(
   input?: string,
 ): Promise<number> {
   let releaseCredentialHome: (() => Promise<void>) | undefined;
+  let stackHome: string | undefined;
   try {
     let apiKey: string | undefined;
     let authentication: ScanAuthentication | null = null;
@@ -2030,19 +2044,52 @@ async function runCodexSkillProcess(
           selected = { ...selected, [providerEnvKey]: providerKey };
         }
       }
-      if (output.appServer === undefined) {
+      if (
+        (output.stackTarget || output.appServer?.linkedEvidence) &&
+        releaseCredentialHome === undefined
+      ) {
+        const protectedRoots = [
+          await realpath(output.directory!),
+          ...(await enclosingGitWorktreeRoots(
+            output.stackTarget ?? output.directory!,
+            output.signal,
+          )),
+        ];
+        stackHome = await createIsolatedHome(undefined, (path) =>
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+        );
+        credentialConfig = ambientConfig;
+        selected = { ...selected, CODEX_HOME: stackHome };
+        args = [
+          ...args,
+          "--config",
+          `permissions.dependency_investigation=${inlineToml(
+            dependencyAgentPermissions(
+              output.stackTarget ? output.directory : undefined,
+              [
+                configuredCodexHome(processEnvironment),
+                codexSecurityCredentialHome(processEnvironment),
+                stackHome,
+              ],
+            ),
+          )}`,
+        ];
+      }
+      if (output.appServer === undefined || output.appServer.linkedEvidence) {
         const authConfig =
           credentialConfig ?? (await readCodexHomeConfig(selected));
         args = [
           ...args,
           ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
-            authConfig[key] === undefined
+            authConfig[key] === undefined ||
+            (output.appServer && apiKey && key === "cli_auth_credentials_store")
               ? []
               : ["--config", `${key}=${inlineToml(authConfig[key])}`],
           ),
         ];
       }
-      if (output.appServer === undefined) await releaseCredentialHome?.();
+      if (output.appServer === undefined && !output.stackTarget)
+        await releaseCredentialHome?.();
       processEnvironment = selected;
     }
     const configuredHome =
@@ -2059,8 +2106,8 @@ async function runCodexSkillProcess(
       );
     }
     if (output?.investigationServers !== undefined) {
-      // Exec ignores user config and repository-local config for these turns.
-      // List system defaults separately because native Codex merges MCP tables.
+      // Exec ignores user config. With app-server, inspect its actual private
+      // home too. Disable inherited servers because native Codex merges MCP tables.
       const emptyHome = await mkdtemp(join(tmpdir(), "dependency-mcp-"));
       try {
         const inherited = await disabledMcpServers(
@@ -2072,14 +2119,16 @@ async function runCodexSkillProcess(
                 (entry): entry is [string, string] => entry[1] !== undefined,
               ),
             ),
-            CODEX_HOME: emptyHome,
+            CODEX_HOME: output.appServer?.linkedEvidence
+              ? (environment["CODEX_HOME"] ?? emptyHome)
+              : emptyHome,
           },
           { workingDirectory: NEUTRAL_CODEX_CWD, signal: output.signal },
         );
         for (const name of Object.keys(output.investigationServers)) {
           if (Object.hasOwn(inherited, name))
             throw new ConfigurationError(
-              `Evidence source ${JSON.stringify(name)} conflicts with a system MCP server. Use a distinct name in the project config.`,
+              `Evidence source ${JSON.stringify(name)} conflicts with an inherited MCP server. Use a distinct name in the project config.`,
             );
         }
         args = [
@@ -2097,7 +2146,9 @@ async function runCodexSkillProcess(
       [...args],
       {
         env: environment,
-        cwd: output?.appServer?.directory ?? NEUTRAL_CODEX_CWD,
+        cwd: output?.appServer?.linkedEvidence
+          ? NEUTRAL_CODEX_CWD
+          : (output?.appServer?.directory ?? NEUTRAL_CODEX_CWD),
         stdio:
           output === undefined
             ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
@@ -2273,6 +2324,7 @@ async function runCodexSkillProcess(
     }
   } finally {
     await releaseCredentialHome?.();
+    if (stackHome) await rm(stackHome, { recursive: true, force: true });
   }
 }
 
@@ -10618,11 +10670,46 @@ function captureOutput() {
   };
 }
 
-/** Launch one investigator with its own prompt and the CLI's normal provider/authentication path. */
+function dependencyAgentPermissions(
+  writableDirectory: string | undefined,
+  deniedHomes: string[],
+): JsonObject {
+  return {
+    filesystem: {
+      ":root": "read",
+      ...(writableDirectory && { [writableDirectory]: { ".": "write" } }),
+      ...Object.fromEntries(deniedHomes.map((path) => [path, { ".": "deny" }])),
+    },
+    network: { enabled: false },
+  };
+}
+
+/** Use one host tool session for the coordinator and its native child threads. */
 async function runDependencyAgent(
   request: DependencyAgentRequest,
   dependencies: CliDependencies,
   stderr: Writable,
+): Promise<string> {
+  const bridge = request.investigationTools
+    ? await startInvestigationTools(request.investigationTools)
+    : undefined;
+  try {
+    return await executeDependencyAgent(
+      request,
+      dependencies,
+      stderr,
+      bridge?.url,
+    );
+  } finally {
+    await bridge?.close();
+  }
+}
+
+async function executeDependencyAgent(
+  request: DependencyAgentRequest,
+  dependencies: CliDependencies,
+  stderr: Writable,
+  toolsUrl?: string,
 ): Promise<string> {
   const project = await selectedProjectConfig(request.config, dependencies);
   const explicit = parseCodexOverrides(
@@ -10639,23 +10726,59 @@ async function runDependencyAgent(
     "service_tier",
     "analytics",
   ];
+  // The original investigator CLI accepts the native multi-agent-v2 capacity spelling.
+  let capacity: JsonValue | undefined;
+  const features = explicit["features"];
+  if (
+    request.coordinator !== undefined &&
+    isJsonObject(features) &&
+    Object.keys(features).length === 1
+  ) {
+    const native = features["multi_agent_v2"];
+    if (
+      isJsonObject(native) &&
+      Object.keys(native).length === 1 &&
+      Object.hasOwn(native, "max_concurrent_threads_per_session")
+    ) {
+      capacity = native["max_concurrent_threads_per_session"];
+      delete explicit["features"];
+    }
+  }
   for (const key of Object.keys(explicit)) {
     if (!modelSettings.includes(key))
       throw new CodexSecurityError(
         "Unsupported investigator --codex setting: " + key,
       );
   }
+  const profile = mergeCodexOverrides(
+    resolveCodexProfile(await readCodexHomeConfig(dependencies.environment)),
+    project?.input.codex ?? {},
+  );
+  const agents = profile["agents"];
+  const nativeFeatures = profile["features"];
+  const multiAgent = isJsonObject(nativeFeatures)
+    ? nativeFeatures["multi_agent_v2"]
+    : undefined;
+  const configuredCapacity =
+    (isJsonObject(multiAgent)
+      ? multiAgent["max_concurrent_threads_per_session"]
+      : undefined) ??
+    (isJsonObject(agents)
+      ? agents["max_concurrent_threads_per_session"]
+      : undefined);
+  if (request.coordinator) {
+    capacity ??= configuredCapacity ?? 16;
+    if (
+      typeof capacity !== "number" ||
+      !Number.isSafeInteger(capacity) ||
+      capacity < 1
+    )
+      throw new ConfigurationError(
+        "Investigator capacity must be a positive integer.",
+      );
+  }
   const configured = Object.fromEntries(
-    Object.entries(
-      mergeCodexOverrides(
-        request.readOnly
-          ? resolveCodexProfile(
-              await readCodexHomeConfig(dependencies.environment),
-            )
-          : {},
-        project?.input.codex ?? {},
-      ),
-    ).filter(([key]) => modelSettings.includes(key)),
+    Object.entries(profile).filter(([key]) => modelSettings.includes(key)),
   );
   const overrides = resolveCommandAuthConfig(
     mergeCodexOverrides(configured, explicit),
@@ -10672,21 +10795,49 @@ async function runDependencyAgent(
     configuredCodexHome(dependencies.environment),
     codexSecurityCredentialHome(dependencies.environment),
   ];
-  const permissions: JsonObject = {
-    filesystem: {
-      ":root": "read",
-      ...(!request.readOnly && { [request.directory]: { ".": "write" } }),
-      ...Object.fromEntries(deny.map((path) => [path, { ".": "deny" }])),
-    },
-    network: { enabled: false },
-  };
+  const permissions = dependencyAgentPermissions(
+    request.readOnly ? undefined : request.directory,
+    deny,
+  );
   const servers = request.onEvidence
     ? selectDependencyEvidenceServers(
         project?.input.exploitability?.evidence_sources ?? [],
         project?.input.codex?.["mcp_servers"],
       )
     : {};
-  const captureEvidence = createDependencyEvidenceCapture(servers);
+  const captureEvidence = createDependencyEvidenceCapture(
+    servers,
+    request.onEvidenceFailure,
+  );
+  const linked =
+    request.coordinator && request.onEvidence && Object.keys(servers).length
+      ? createDependencyLinkedResourceCapture({
+          servers: { ...servers },
+          onEvidence: request.onEvidence,
+          onDiagnostic: (message) => {
+            request.onEvidenceDiagnostic?.(message);
+            stderr.write(message + "\n");
+          },
+        })
+      : undefined;
+  const linkedEvidence: DependencyResourceEvents | undefined = linked
+    ? {
+        async item(event, read) {
+          const origin = captureEvidence(event);
+          if (!origin) return;
+          request.onEvidence?.(origin);
+          await linked(origin, read);
+        },
+        usage: request.onUsage,
+      }
+    : undefined;
+  if (toolsUrl) {
+    if (Object.hasOwn(servers, investigationServer))
+      throw new ConfigurationError(
+        "The project MCP server name conflicts with the built-in investigation tools.",
+      );
+    servers[investigationServer] = { url: toolsUrl, required: true };
+  }
   const trustKey =
     process.platform === "win32"
       ? request.directory.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
@@ -10705,34 +10856,50 @@ async function runDependencyAgent(
       set: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
     },
     project_doc_max_bytes: 0,
-    ...(request.readOnly && {
-      project_root_markers: [],
-      projects: { [trustKey]: { trust_level: "untrusted" } },
-    }),
+    project_root_markers: [],
+    projects: { [trustKey]: { trust_level: "untrusted" } },
     mcp_servers: servers,
-    features: { multi_agent: false, multi_agent_v2: false },
+    features: {
+      multi_agent: false,
+      multi_agent_v2: request.coordinator === true,
+      ...(request.coordinator && { multi_agent_v2_dynamic_tools: true }),
+    },
+    ...(request.coordinator && {
+      agents: {
+        max_concurrent_threads_per_session: capacity ?? 16,
+        default_subagent_reasoning_effort:
+          isJsonObject(agents) &&
+          typeof agents["default_subagent_reasoning_effort"] === "string"
+            ? agents["default_subagent_reasoning_effort"]
+            : model.reasoningEffort,
+      },
+      tools: { update_plan: { enabled: true } },
+    }),
   };
   const chunks: string[] = [];
   const status = await dependencies.runCodex(
     [
-      "exec",
-      ...(request.readOnly ? ["--ignore-user-config"] : []),
+      ...(linkedEvidence
+        ? ["app-server", "--stdio"]
+        : [
+            "exec",
+            "--ignore-user-config",
+            "--ephemeral",
+            "--color",
+            "never",
+            "--json",
+            "--thread-source",
+            CODEX_SECURITY_THREAD_SOURCES.validation,
+          ]),
       "--disable",
       "plugins",
-      "--ephemeral",
-      "--color",
-      "never",
-      "--json",
-      "--thread-source",
-      CODEX_SECURITY_THREAD_SOURCES.validation,
       ...Object.entries(settings).flatMap(([key, value]) => [
         "--config",
         key + "=" + inlineToml(value),
       ]),
-      "--skip-git-repo-check",
-      "--cd",
-      request.directory,
-      "-",
+      ...(linkedEvidence
+        ? []
+        : ["--skip-git-repo-check", "--cd", request.directory, "-"]),
     ],
     {
       command: "exploitability check",
@@ -10741,9 +10908,22 @@ async function runDependencyAgent(
       auth: "auto",
       modelProvider: provider,
       codexOverrides: overrides,
-      ...(request.readOnly && { investigationServers: servers }),
-      ...(request.onEvidence && {
+      investigationServers: servers,
+      ...(linkedEvidence && {
+        appServer: {
+          directory: request.directory,
+          prompt: request.prompt,
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
+          linkedEvidence,
+        },
+      }),
+      ...(request.stackTarget && { stackTarget: request.stackTarget }),
+      ...((request.onEvidence || request.onUsage) && {
         onExecEvent(event) {
+          if (event["type"] === "turn.completed") {
+            const usage = tokenUsage(event["usage"]);
+            if (usage) request.onUsage?.(usage);
+          }
           const record = captureEvidence(event);
           if (record) request.onEvidence?.(record);
         },
@@ -10757,7 +10937,7 @@ async function runDependencyAgent(
       stderr,
     },
     dependencies.environment,
-    request.prompt,
+    linkedEvidence ? undefined : request.prompt,
   );
   request.signal.throwIfAborted();
   if (status !== 0)
@@ -11182,6 +11362,7 @@ export async function readSkillCommandOutput(
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
+    readonly linkedEvidence?: DependencyResourceEvents;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
@@ -11218,6 +11399,9 @@ export async function readSkillCommandOutput(
   const send = (request: JsonObject): void => {
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
+  const resources = appServer?.linkedEvidence
+    ? createDependencyResourceSession(appServer.linkedEvidence, send)
+    : undefined;
   const startTurn = (): void => {
     const selected = appServer?.cyberAccessProgram;
     const program =
@@ -11276,8 +11460,16 @@ export async function readSkillCommandOutput(
           : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
-        sandbox: appServer?.sandbox ?? "workspace-write",
-        ...(config["daybreak"] === true ? { daybreakEnabled: true } : {}),
+        ...(resources
+          ? {
+              permissions: "dependency_investigation",
+              ephemeral: true,
+              cwd: appServer.directory!,
+            }
+          : { sandbox: appServer?.sandbox ?? "workspace-write" }),
+        ...(!resources && config["daybreak"] === true
+          ? { daybreakEnabled: true }
+          : {}),
         ...(threadConfig === undefined ? {} : { config: threadConfig }),
       },
     });
@@ -11301,6 +11493,7 @@ export async function readSkillCommandOutput(
     }
     const value = event as Record<string, unknown>;
     if (appServer !== undefined) {
+      if (resources?.receive(value)) continue;
       const params = value["params"];
       if (
         typeof params === "object" &&
@@ -11364,7 +11557,8 @@ export async function readSkillCommandOutput(
               ...(appServer.directory === undefined
                 ? {}
                 : { cwd: appServer.directory }),
-              includeLayers: appServer.sandbox === "read-only",
+              includeLayers:
+                Boolean(resources) || appServer.sandbox === "read-only",
             },
           });
         } else if (value["id"] === 4) {
@@ -11373,7 +11567,7 @@ export async function readSkillCommandOutput(
             isJsonObject(result) && isJsonObject(result["config"])
               ? (result["config"] as JsonObject)
               : {};
-          if (appServer.sandbox !== "read-only") {
+          if (!resources && appServer.sandbox !== "read-only") {
             startThread();
             continue;
           }
@@ -11382,8 +11576,18 @@ export async function readSkillCommandOutput(
               ? result.layers
               : undefined;
           if (!Array.isArray(layers)) {
+            error = resources
+              ? "Codex did not provide the configuration layers required for the investigation."
+              : "Codex did not provide the configuration layers required for read-only verification.";
+            appServer.input.end();
+            continue;
+          }
+          if (
+            resources &&
+            !dependencyResourcePermissionsMatch(config, layers)
+          ) {
             error =
-              "Codex did not provide the configuration layers required for read-only verification.";
+              "Codex did not resolve the requested investigation permission profile.";
             appServer.input.end();
             continue;
           }
@@ -11418,7 +11622,9 @@ export async function readSkillCommandOutput(
             configuredServers.has(server),
           );
           if (conflict !== undefined) {
-            error = `Repository-local MCP server ${JSON.stringify(conflict)} overrides a configured integration; remove the repository override before verifying fixes.`;
+            error = resources
+              ? `Repository-local MCP server ${JSON.stringify(conflict)} conflicts with a selected investigation source.`
+              : `Repository-local MCP server ${JSON.stringify(conflict)} overrides a configured integration; remove the repository override before verifying fixes.`;
             appServer.input.end();
             continue;
           }
@@ -11437,12 +11643,25 @@ export async function readSkillCommandOutput(
         } else if (value["id"] === 2) {
           await appServer.onThreadStarted?.();
           const result = value["result"] as {
-            thread: { id: string };
+            thread: { id: string; ephemeral?: boolean };
+            activePermissionProfile?: { id: string };
             sandbox: JsonObject;
             model: string;
             modelProvider: string;
           };
+          if (
+            resources &&
+            (result.activePermissionProfile?.id !==
+              "dependency_investigation" ||
+              result.thread.ephemeral !== true)
+          ) {
+            error =
+              "Codex did not start the investigation with its requested permission profile.";
+            appServer.input.end();
+            continue;
+          }
           threadId = result.thread.id;
+          resources?.register(threadId);
           model = result.model;
           provider = result.modelProvider;
           if (
@@ -11495,7 +11714,16 @@ export async function readSkillCommandOutput(
           error =
             params.turn.error?.message ?? "Codex did not complete the patch.";
         }
-        appServer.input.end();
+        // Keep reading RPC responses while the final evidence pages arrive.
+        if (resources) {
+          void resources.drain().then(
+            () => appServer.input.end(),
+            () => {
+              error = "Could not retain investigation evidence.";
+              appServer.input.end();
+            },
+          );
+        } else appServer.input.end();
       } else if (value["method"] === "item/completed") {
         const params = value["params"] as {
           threadId: string;
@@ -11513,6 +11741,7 @@ export async function readSkillCommandOutput(
       }
       continue;
     }
+    if (value["type"] === "turn.completed") onExecEvent?.(value);
     if (value["type"] === "item.completed") {
       onExecEvent?.(value);
       const item = value["item"];
@@ -11535,6 +11764,8 @@ export async function readSkillCommandOutput(
       error = value["message"];
     }
   }
+  resources?.close();
+  await resources?.drain();
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),

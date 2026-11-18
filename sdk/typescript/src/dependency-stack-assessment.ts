@@ -564,13 +564,13 @@ function bindCapturedEvidence(row: StackAssessment, work: StackWorkItem) {
   };
 }
 
-export async function prepareStackAssessment(
+export function prepareStackAssessment(
   input: unknown,
   work: StackWorkItem,
   packet: StackPacket,
   claims: StackClaimReader,
   signal?: AbortSignal,
-): Promise<StackAssessment> {
+): StackAssessment {
   signal?.throwIfAborted();
   const row = bindCapturedEvidence(itemInput.parse(input), work);
   if (row.workItemId !== work.id)
