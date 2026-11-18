@@ -72,8 +72,8 @@ importers:
         specifier: 7.2.0
         version: 7.2.0
       tokenx:
-        specifier: 1.6.0
-        version: 1.6.0
+        specifier: 2.2.0
+        version: 2.2.0
       yaml:
         specifier: 2.9.1
         version: 2.9.1
@@ -1018,6 +1018,10 @@ packages:
   tokenx@1.6.0:
     resolution: {integrity: sha512-CKTjk345ajvBAUp5xUI9a5KKN0zU0lBueVHQbCskH1Hp6WkUKsPW2qGCYNs0pxNyfzxfo+IIjdt2W4sMbw/qBw==}
 
+  tokenx@2.2.0:
+    resolution: {integrity: sha512-VdOqWPybBSlPVATvuxkoa8XfrYOPmOUkpp1xesb0LZjmUBmXDVND2lPlm4tiEc5MHP1OlswxCY4s2KXkc5p3JA==}
+    hasBin: true
+
   type-fest@5.10.0:
     resolution: {integrity: sha512-NoSdpq/WEiAg5sjmBkmV/hfxv6HJH4NqPNrqjtSO5CwRmpsDfaf4begxW34KdJykH/l1yHtwBWQkCRdoXO8mPA==}
     engines: {node: '>=20'}
@@ -1746,6 +1750,8 @@ snapshots:
       picomatch: 4.0.7
 
   tokenx@1.6.0: {}
+
+  tokenx@2.2.0: {}
 
   type-fest@5.10.0:
     dependencies:

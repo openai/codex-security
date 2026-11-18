@@ -838,6 +838,40 @@ For an older service deployment, see [migration guidance](findings-service.md#lo
 For records stored in your own system, see
 [SDK records deduplication](dedupe-records.md).
 
+## Repository dependency evidence
+
+The experimental dependency investigator reads source, manifests and lockfiles at
+one Git commit. For npm it can follow a requesting project's installed path in
+a v2 or v3 npm lockfile. For Python it can cite a literal, unconditional version
+pin in a requirements file. Both are build inputs. A deployment needs a separate
+observation that connects the running package to its source revision. Import
+matches and OpenGrep call locations are candidates for review.
+
+A runtime receipt carries a source label and the original UTF-8 payload. The
+investigator hashes these payload bytes. A producer can describe the observation
+with the following fields.
+
+```json
+{
+  "service": "sample-worker",
+  "package": { "ecosystem": "npm", "name": "sample-codec", "version": "1.2.0" },
+  "revision": "1111111111111111111111111111111111111111",
+  "coverage": "partial",
+  "evidence": "One request was sampled on this build.",
+  "access": {
+    "caller": "sample client",
+    "evidence": "The client submitted a request to the preview route."
+  }
+}
+```
+
+Supply the running commit only when it is known. The optional `access` object
+records separate evidence for the named caller. A running-build observation on
+its own leaves caller access unresolved. The accepted coverage values
+are `complete`, `partial` and `unknown` for the reported scope. Unrecognized
+payloads retain their hash and have unknown coverage. An empty sample or
+unavailable source tracer leaves caller reachability unresolved.
+
 ## Containerized bulk scans
 
 Use the scanner image and Compose files to scan a list of repositories with
