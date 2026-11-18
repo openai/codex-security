@@ -838,6 +838,10 @@ with reviewed surfaces, explicit exclusions and deferred work. A saved source
 inventory identifies inputs. Neither that inventory nor session logs establish
 which files the scan reviewed in full.
 
+For a completed scan with a valid artifact digest list, readers use
+`scan.completedAt` when `scan.sealedAt` is absent. Validation leaves the saved
+files intact and still checks the recorded artifact hashes.
+
 For a local plugin scan, ask Codex to open the saved scan and explain its scope,
 exclusions, deferred work, and follow-up questions. CLI history can also locate
 that scan when it uses the same Codex home and state directory on the machine

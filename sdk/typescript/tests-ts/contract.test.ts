@@ -1156,6 +1156,30 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("Manifest sealedAt must match completedAt.");
   });
 
+  test("recovers the seal timestamp while preserving the original manifest digest", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    delete manifest["scan"]["sealedAt"];
+    await writeJson(manifestPath, manifest);
+    const original = await readFile(manifestPath);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.manifest.scan.sealedAt).toBe(manifest["scan"]["completedAt"]);
+    expect(
+      validatedFileDigests.get(loaded.manifest)?.get("scan-manifest.json"),
+    ).toBe(sha256(original));
+    expect(await readFile(manifestPath)).toEqual(original);
+    const path = join(scanDir, "findings.json");
+    await writeFile(
+      path,
+      Buffer.concat([await readFile(path), Buffer.from("\n")]),
+    );
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed");
+  });
+
   test("rejects invalid UTF-8 in JSON documents", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");

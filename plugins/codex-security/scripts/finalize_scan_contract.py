@@ -1966,8 +1966,10 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
         raise ContractError(f"manifest.schemaVersion: expected {SCHEMA_VERSION}")
     scan = _require_dict(manifest, "scan", "manifest")
-    for key in ("id", "startedAt", "completedAt", "sealedAt"):
+    for key in ("id", "startedAt", "completedAt"):
         _require_str(scan, key, "manifest.scan")
+    if "sealedAt" in scan or not scan.get("artifacts"):
+        _require_str(scan, "sealedAt", "manifest.scan")
     if scan.get("status") not in {"completed", "failed", "canceled", "interrupted"}:
         raise ContractError("manifest.scan.status: expected a terminal scan outcome")
     producer = _require_dict(scan, "producer", "manifest.scan")
@@ -2708,7 +2710,13 @@ def _validate_existing_seal(
     artifacts = scan.get("artifacts")
     if sealed_at is None and artifacts is None:
         return
-    if sealed_at != scan.get("completedAt"):
+    if (
+        "sealedAt" not in scan
+        and scan.get("complete") is False
+        and scan.get("status") == "completed"
+    ):
+        raise ContractError("manifest.scan: cannot recover a seal timestamp for an incomplete scan")
+    if "sealedAt" in scan and sealed_at != scan.get("completedAt"):
         raise ContractError("manifest.scan.sealedAt: must match completedAt")
     if not isinstance(artifacts, list) or not artifacts:
         raise ContractError("manifest.scan.artifacts: sealed manifest requires artifact records")
@@ -2725,6 +2733,10 @@ def _validate_existing_seal(
         )
         if actual_sha256 != expected_sha256:
             raise ContractError(f"{context}: sealed artifact changed or is missing")
+    # Older or incomplete envelopes may omit this copy of completedAt. Preserve
+    # the original bytes and expose it only after verifying the recorded seal.
+    if "sealedAt" not in scan:
+        scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
 
 
 def _read_scan_artifacts(
@@ -2760,7 +2772,7 @@ def _read_sealed_scan(
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     scan = _require_dict(manifest, "scan", "manifest")
     _validate_contract_refs(scan)
-    if scan.get("sealedAt") is None or scan.get("artifacts") is None:
+    if not manifest_is_sealed(scan) or scan.get("artifacts") is None:
         raise ContractError(f"manifest.scan: {required_for} requires a sealed scan")
     findings, coverage, findings_bytes = _read_sealed_artifacts(scan_dir, scan)
     _validate_manifest(manifest)

@@ -553,7 +553,16 @@ async function validateSeal(
   signal?: AbortSignal,
 ): Promise<void> {
   const scan = manifest.scan;
-  if (scan.sealedAt !== scan.completedAt) {
+  if (
+    scan.sealedAt === undefined &&
+    scan["complete"] === false &&
+    scan.status === "completed"
+  ) {
+    throw new ContractValidationError(
+      "Cannot recover a seal timestamp for an incomplete scan.",
+    );
+  }
+  if (scan.sealedAt !== undefined && scan.sealedAt !== scan.completedAt) {
     throw new ContractValidationError(
       "Manifest sealedAt must match completedAt.",
     );
@@ -587,6 +596,9 @@ async function validateSeal(
     }
     fileDigests.set(artifact.path, digest);
   }
+  // Keep the digest of the original manifest bytes; the SDK exposes the
+  // canonical seal timestamp after the artifact digests have been verified.
+  scan.sealedAt ??= scan.completedAt;
 
   const requireSealedReference = (reference: unknown, context: string) => {
     throwIfAborted(signal);
