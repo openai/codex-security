@@ -35,7 +35,7 @@ import {
   tenableSourceRepository,
 } from "./tenable-findings.js";
 import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
-import { verifyCrowdStrikeCloudSource } from "./external-findings-local.js";
+import { prepareCrowdStrikeCloudReport } from "./external-findings-local.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -1143,9 +1143,9 @@ async function preparePublicationInput(
     if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   }
   if (typeof supplied !== "function") checkSelection(supplied);
-  const crowdstrikeSource =
+  const crowdstrike =
     options.provider === "crowdstrike" && typeof supplied !== "function"
-      ? await verifyCrowdStrikeCloudSource(
+      ? await prepareCrowdStrikeCloudReport(
           supplied.current,
           declaredUrl,
           readerSources,
@@ -1321,7 +1321,7 @@ async function preparePublicationInput(
   const resolved = deferred ? await supplied(destination) : supplied;
   if (deferred) checkSelection(resolved);
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
-    resolved.current;
+    crowdstrike?.report ?? resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
   const sourceReportsPath = sourcePath(destination);
   const hosted = options.provider === "snyk" || options.provider === "semgrep";
@@ -1803,8 +1803,8 @@ async function preparePublicationInput(
         );
     }
     if (
-      crowdstrikeSource &&
-      catalogKey(crowdstrikeSource.url) !== catalogKey(approvedUrl)
+      crowdstrike &&
+      catalogKey(crowdstrike.source.url) !== catalogKey(approvedUrl)
     )
       throw new CodexSecurityError(
         "CrowdStrike's source repository does not match the selected Cloud repository.",

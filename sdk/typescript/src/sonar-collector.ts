@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
-  boundSonarWorktree,
+  boundGitWorktree,
   sonarRepositoryForRemote,
   sonarCheckoutMatchesSource,
 } from "./external-findings-local.js";
@@ -96,7 +96,7 @@ async function checkoutOrigin(
 ): Promise<string | undefined> {
   try {
     if (
-      !(await boundSonarWorktree(
+      !(await boundGitWorktree(
         options.cwd,
         protectedRoots,
         options.environment,

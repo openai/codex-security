@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   semgrepPlatformFindingBinding,
@@ -499,7 +499,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
 }
 
 /** Use the same executable and configuration boundaries for every Git query proving a binding. */
-export function boundSonarWorktree(
+export function boundGitWorktree(
   repository: string,
   protectedRoots: string | readonly string[],
   environment: NodeJS.ProcessEnv | undefined,
@@ -588,7 +588,7 @@ export async function configuredFetchRemotes(
     );
   if (
     provider === "sonar" &&
-    !(await boundSonarWorktree(
+    !(await boundGitWorktree(
       repository,
       gitProtectedRoots,
       environment,
@@ -978,14 +978,14 @@ async function requireScannerFetchRemote(
     );
 }
 
-/** Bind FCS evidence to the independently identified Git checkout before publishing. */
-export async function verifyCrowdStrikeCloudSource(
+/** Verify the native FCS paths, then project Cloud locations from the Git root. */
+export async function prepareCrowdStrikeCloudReport(
   input: ExternalFindings,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
   checkout: string,
   dependencies: Pick<LocalExternalImportDependencies, "environment" | "signal">,
-): Promise<ExternalSourceRepository> {
+) {
   const context = await localContext(checkout, dependencies);
   const source = await crowdstrikeCheckout(
     input,
@@ -1003,7 +1003,29 @@ export async function verifyCrowdStrikeCloudSource(
     context,
     dependencies.signal,
   );
-  return source;
+  const root = await boundGitWorktree(
+    context.repository,
+    context.options.protectedRoot,
+    context.options.environment,
+    dependencies.signal,
+  );
+  if (!root)
+    throw new CodexSecurityError(
+      "CrowdStrike Cloud imports require a Git worktree for the selected checkout.",
+    );
+  const prefix = relative(root, context.repository).split(sep).join("/");
+  if (!prefix) return { source, report: input };
+  const findings = input.findings.map(({ evidence, ...finding }) => ({
+    ...finding,
+    evidence: {
+      ...evidence,
+      locations: evidence.locations?.map((location) => ({
+        ...location,
+        path: `${prefix}/${location.path}`,
+      })),
+    },
+  }));
+  return { source, report: { ...input, findings } };
 }
 
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
