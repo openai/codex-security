@@ -152,6 +152,7 @@ export async function testLargeScopeTransport({
               targetPath: fixture.root,
               scope: ".",
               includePaths,
+              excludePaths: [`scan-${index}/examples`],
               filePaths: includePaths.filter((_, index) => index % 2 === 0),
               config: {
                 workers: index + 1,
@@ -264,6 +265,8 @@ export async function testLargeScopeTransport({
               invocation.scopeInput.filePaths,
               includePaths.filter((_, index) => index % 2 === 0),
             );
+            assert.deepEqual(invocation.scopeInput.excludePaths, run.excludePaths);
+            assert.deepEqual(JSON.parse(invocation.scanExclusions), run.excludePaths);
             assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
             await assert.rejects(readFile(invocation.scopeInput.file), {
               code: "ENOENT",

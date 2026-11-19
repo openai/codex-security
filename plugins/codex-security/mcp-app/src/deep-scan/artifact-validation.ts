@@ -68,7 +68,7 @@ export function parseScanUnion(input: unknown): ScanUnion {
 
 type DiscoveryArtifactOptions = Pick<
   ArtifactContext,
-  "scope" | "includePaths" | "filePaths"
+  "scope" | "includePaths" | "filePaths" | "excludePaths"
 > & { artifactDir?: string; resultSha256?: string };
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -155,6 +155,7 @@ export async function readDiscoveryAuditDraft(
     scope,
     includePaths,
     filePaths,
+    excludePaths,
   } = options;
   const context: ArtifactContext = {
     root: artifactDir,
@@ -164,6 +165,7 @@ export async function readDiscoveryAuditDraft(
     scope,
     includePaths,
     filePaths,
+    excludePaths,
   };
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const saved = await readJsonObject(resultPath, options.resultSha256);

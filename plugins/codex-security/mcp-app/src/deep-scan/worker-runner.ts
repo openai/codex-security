@@ -109,6 +109,7 @@ export class DeepScanWorkerRunner {
         targetPath: run.targetPath,
         scope: run.scope,
         includePaths: run.includePaths,
+        excludePaths: run.excludePaths,
         userContext: run.userContext,
         severityRubric: run.severityRubric,
         workerLabel,

@@ -85,6 +85,7 @@ export interface CodexSdkWorkerArtifactContext {
   scope?: string;
   scanRoot?: string;
   includePaths?: readonly string[];
+  excludePaths?: readonly string[];
   filePaths?: readonly string[];
   pythonCommand?: string;
 }
@@ -276,6 +277,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           JSON.stringify({
             paths: includePaths,
             filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+            excludePaths:
+              this.modelSettings.artifactContext?.excludePaths ?? [],
           }),
         );
       }
@@ -306,6 +309,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // The preflight file has catalog defaults; the private profile owns routing.
       if (runtimeSettings.nativeProfile !== undefined)
         delete modelConfig.model_providers;
+      childEnv.CODEX_SECURITY_EXCLUDE_PATHS = JSON.stringify(
+        this.modelSettings.artifactContext?.excludePaths ?? [],
+      );
       // Keep one native configuration for the policy check and the worker turn.
       // Worker-owned tool and permission settings take precedence over inheritance.
       const inheritedMetadata = isRecord(modelConfig.responses_api_metadata)

@@ -1,3 +1,4 @@
+export { startDependencyToolServer } from "./src/dependency-trace/host-server.js";
 import { fileURLToPath } from "node:url";
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 export {
@@ -11,6 +12,15 @@ export {
   protectedHostPathResolver,
 } from "./src/helpers/inventory-git.js";
 export { validateTrackingSource } from "./src/helpers/validate-tracking-source.js";
+export async function createDependencyGraphSession(
+  ...args: Parameters<
+    typeof import("./src/dependency-trace/session.js").createDependencyGraphSession
+  >
+) {
+  const { createDependencyGraphSession } =
+    await import("./src/dependency-trace/session.js");
+  return createDependencyGraphSession(...args);
+}
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";

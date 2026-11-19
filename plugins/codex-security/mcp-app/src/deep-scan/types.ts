@@ -57,6 +57,7 @@ export interface DeepScanRunState {
   scope: string;
   includePaths?: string[];
   filePaths?: string[];
+  excludePaths?: string[];
   userContext?: string;
   model?: string;
   reasoningEffort?: string;

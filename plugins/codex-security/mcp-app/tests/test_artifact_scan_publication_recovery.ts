@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, writeFile, readdir, utimes } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { importSource } from "./import-module.ts";
 import {
   draftFixture,
   interruptDraftWrite,
