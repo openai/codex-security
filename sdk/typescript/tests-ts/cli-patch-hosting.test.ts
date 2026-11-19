@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  link,
   mkdir,
   readFile,
   realpath,
@@ -217,22 +218,27 @@ describe("patch change tracking", () => {
     },
   );
 
-  test("push uses the external proxy selected before its alias is retargeted", async () => {
-    const { directory, git, remote } = await publicationRepository();
-    const external = await fixtures.create("patch-proxy-retarget-");
-    const trusted = join(external, "trusted");
-    const alias = join(external, "selected");
-    const marker = join(external, "invocations");
-    const linkType = process.platform === "win32" ? "junction" : "dir";
-    await mkdir(trusted);
-    await symlink(trusted, alias, linkType);
-    const quote = (path: string) =>
-      "'" + path.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
-    // Consume the native protocol's first packet, as a Git daemon would.
-    // Serve the preflight from the bare fixture and stop the push at the proxy.
-    await writeFile(
-      join(trusted, "proxy"),
-      `#!/bin/sh
+  for (const rewritten of [false, true])
+    test(
+      rewritten
+        ? "push rejects an external proxy rewritten through a worktree hard link"
+        : "push uses the external proxy selected before its alias is retargeted",
+      async () => {
+        const { directory, git, remote } = await publicationRepository();
+        const external = await fixtures.create("patch-proxy-retarget-");
+        const trusted = join(external, "trusted");
+        const alias = join(external, "selected");
+        const marker = join(external, "invocations");
+        const linkType = process.platform === "win32" ? "junction" : "dir";
+        await mkdir(trusted);
+        await symlink(trusted, alias, linkType);
+        const quote = (path: string) =>
+          "'" + path.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
+        // Consume the native protocol's first packet, as a Git daemon would.
+        // Serve the preflight from the bare fixture and stop the push at the proxy.
+        await writeFile(
+          join(trusted, "proxy"),
+          `#!/bin/sh
 header=$(dd bs=1 count=4 2>/dev/null) || exit 1
 request=$(dd bs=1 count=$((0x$header - 4)) 2>/dev/null | tr '\\000' ' ')
 case "$request" in
@@ -241,55 +247,74 @@ case "$request" in
 esac
 exit 1
 `,
-      { mode: 0o755 },
-    );
-    await writeFile(
-      join(directory, "proxy"),
-      `#!/bin/sh\necho checkout >> ${quote(marker)}\nexit 1\n`,
-      { mode: 0o755 },
-    );
-    git("add", "proxy");
-    git("commit", "-m", "Add alternate checkout proxy");
-    git("push", "origin", "main");
-    git(
-      "remote",
-      "set-url",
-      "origin",
-      "git://127.0.0.1:1/example/repository.git",
-    );
-    const environment = {
-      GITLAB_HOST: "127.0.0.1:1",
-      GIT_PROXY_COMMAND: join(alias, "proxy"),
-      GIT_CONFIG_GLOBAL: join(external, "gitconfig"),
-      GIT_CONFIG_NOSYSTEM: "1",
-    };
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        environment,
-        onCodex: async (_args, output) => {
-          await unlink(alias);
-          await symlink(directory, alias, linkType);
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          output?.stdout.write("Fixed and verified.");
-          return 0;
-        },
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, {
-                ...options,
-                environment: { ...environment, ...options?.environment },
-              })
-            : "",
+          { mode: 0o755 },
+        );
+        await writeFile(
+          join(directory, "proxy"),
+          `#!/bin/sh\necho checkout >> ${quote(marker)}\nexit 1\n`,
+          { mode: 0o755 },
+        );
+        git("add", "proxy");
+        git("commit", "-m", "Add alternate checkout proxy");
+        const writableLink = join(directory, "writable-proxy");
+        if (rewritten) {
+          await writeFile(
+            join(directory, ".git", "info", "exclude"),
+            "writable-proxy\n",
+          );
+          await link(join(trusted, "proxy"), writableLink);
+        }
+        git("push", "origin", "main");
+        git(
+          "remote",
+          "set-url",
+          "origin",
+          "git://127.0.0.1:1/example/repository.git",
+        );
+        const environment = {
+          GITLAB_HOST: "127.0.0.1:1",
+          GIT_PROXY_COMMAND: join(alias, "proxy"),
+          GIT_CONFIG_GLOBAL: join(external, "gitconfig"),
+          GIT_CONFIG_NOSYSTEM: "1",
+        };
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", "--create-pr", "--json"],
+          {
+            currentDirectory: directory,
+            environment,
+            onCodex: async (_args, output) => {
+              if (rewritten)
+                await writeFile(
+                  writableLink,
+                  await readFile(join(directory, "proxy")),
+                );
+              else {
+                await unlink(alias);
+                await symlink(directory, alias, linkType);
+              }
+              await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+              output?.stdout.write("Fixed and verified.");
+              return 0;
+            },
+            onRepositoryCommand: (command, args, cwd, options) =>
+              command === "git"
+                ? runGitRepositoryCommand(command, args, cwd, {
+                    ...options,
+                    environment: { ...environment, ...options?.environment },
+                  })
+                : "",
+          },
+          { localHosting: false },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(
+          await readFile(marker, "utf8").catch(() => ""),
+          outcome.stderr,
+        ).toBe(rewritten ? "preflight\n" : "preflight\npush\n");
+        if (rewritten)
+          expect(outcome.stderr).toContain("transport executable changed");
       },
-      { localHosting: false },
     );
-    expect(outcome.exitCode, outcome.stderr).toBe(2);
-    expect(await readFile(marker, "utf8").catch(() => ""), outcome.stderr).toBe(
-      "preflight\npush\n",
-    );
-  });
 
   test.each([
     { key: "credential.useHttpPath", source: "local", value: "false" },

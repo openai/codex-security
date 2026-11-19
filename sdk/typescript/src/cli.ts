@@ -12081,10 +12081,16 @@ async function runPatchTransport(
         [root, caller],
         { gitTransportDirectory: directory },
       );
-      proxyBindings.set(
-        command,
-        result.gitTransport?.target ?? result.executable,
-      );
+      const target = result.gitTransport?.target ?? result.executable;
+      if (target) {
+        requireStablePatchTransportTarget(
+          target,
+          dependencies.patchTransportAccess,
+        );
+        await bindPatchTransportFile(target, "executable", dependencies);
+        dependencies.patchTransportAccess?.invocations.set(target, target);
+      }
+      proxyBindings.set(command, target);
     }
     return proxyBindings.get(command)!;
   };
