@@ -23,7 +23,7 @@ import {
 } from "../src/dependency-review-queue";
 import { evidencePreviews } from "../src/dependency-investigation-session";
 import { affectedByFrozenVersion } from "../src/dependency-advisory-version";
-import { readDependencyCheckOutput } from "../src/dependency-reachability";
+import { dependencyCheckOutputSchema } from "../src/dependency-reachability";
 import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
@@ -47,6 +47,19 @@ import {
   discoverDependencyRepository,
   type RepositoryDiscovery,
 } from "../src/dependency-discovery";
+
+function approvedReview(
+  claims: (PremiseRef & { availableEvidenceKeys: string[] })[],
+) {
+  return JSON.stringify({
+    decisions: claims.map((claim) => ({
+      ...reference(claim),
+      approved: true,
+      reason: "Verified.",
+      evidenceKeys: claim.availableEvidenceKeys,
+    })),
+  });
+}
 
 const signal = new AbortController().signal;
 async function fixture(extraFiles: Record<string, string> = {}) {
@@ -139,7 +152,7 @@ async function fixture(extraFiles: Record<string, string> = {}) {
 test("repository investigators share pinned source notes without promoting assertions to reviewed claims", async () => {
   const captured = 'export const selectedMode = "archive";';
   await using f = await fixture({ "modes.js": captured + "\n" });
-  const tool = "record_codex_security_evidence";
+  const tool = "update_codex_security_graph";
   const graph = "query_codex_security_graph";
   const assertion = {
     question: "Which mode is configured?",
@@ -164,90 +177,45 @@ test("repository investigators share pinned source notes without promoting asser
         if (!req.coordinator) {
           const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
           expect(tools.definitions.some((d) => d.name === tool)).toBe(false);
-          await expect(tools.call(tool, input)).rejects.toThrow();
+          await expect(tools.call(tool, { note: input })).rejects.toThrow();
           expect(
-            await tools.call(graph, { evidence: { id: noteId } }),
+            await tools.call(graph, { note: { id: noteId } }),
           ).toMatchObject({
-            source_evidence: {
+            note: {
               id: noteId,
               investigator_assertion: assertion,
               excerpts: [{ ...range, commit: f.revision, text: captured }],
             },
           });
           reviewerRead = true;
-          return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
-                ...reference(c),
-                approved: true,
-                reason: "Reviewed the cited parser source.",
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+          return approvedReview(packet.claims);
         }
         const other = await req.investigationTools!();
-        const graphQuery = other.definitions.find((d) => d.name === graph);
-        expect(JSON.stringify(graphQuery?.inputSchema)).toContain(
-          '"evidence":',
-        );
-        const query = (evidence: unknown) => other.call(graph, { evidence });
+        const query = (note: unknown) => other.call(graph, { note });
         await writeFile(
           join(f.path, "modes.js"),
           "export const selectedMode = null;\n",
         );
-        const written = (await tools.call(tool, input)) as {
-          source_evidence: { id: string };
+        const written = (await tools.call(tool, { note: input })) as {
+          note: { id: string };
         };
-        noteId = written.source_evidence.id;
-        const focusedKeys = [
-          "service_resolution",
-          "source_evidence",
-          "source_evidence_count",
-        ];
-        expect(Object.keys(written).sort()).toEqual(focusedKeys);
-        expect(written).toMatchObject({ source_evidence_count: 1 });
-        expect(written.source_evidence).toEqual({
-          id: expect.stringMatching(/^source-evidence-[0-9a-f]{64}$/u),
-        });
-        expect(await other.call(tool, input)).toEqual(written);
+        noteId = written.note.id;
+        expect(await other.call(tool, { note: input })).toEqual(written);
         for (const bad of [
           { ...range, commit: "0".repeat(40) },
           { ...range, path: "../outside.js" },
         ]) {
           await expect(
             tools.call(tool, {
-              ...input,
-              claim: "Unverified.",
-              evidence: [range, bad],
+              note: { ...input, claim: "Unverified.", evidence: [range, bad] },
             }),
           ).rejects.toThrow();
         }
-        const list = {
-          source_evidence_count: 1,
-          source_evidence: [{ id: noteId, ...assertion }],
-        };
-        const listing = await query({});
-        expect(Object.keys(listing as object).sort()).toEqual(focusedKeys);
-        expect(listing).toMatchObject(list);
-        expect(await query({ search: "selectedMode" })).toMatchObject(list);
-        expect(await query({ id: noteId, search: "missing" })).toMatchObject({
-          source_evidence: null,
-          source_evidence_count: 1,
-        });
-        const summary = await other.call(graph, {});
-        expect(summary).toMatchObject({ source_evidence_count: 1 });
-        expect(summary).not.toHaveProperty("source_evidence");
-        expect(
-          await other.call("list_dependency_evidence", { tool: graph }),
-        ).toMatchObject({
-          receipts: [
-            {
-              originalPayloadSha256: dependencyRecordHash({
-                structuredContent: summary,
-              }),
-            },
-          ],
+        const listing = { notes: [{ id: noteId, ...assertion }] };
+        expect(await query({})).toMatchObject(listing);
+        expect(await query({ search: "selectedMode" })).toMatchObject(listing);
+        expect(await query({ id: noteId, search: "missing" })).toEqual({
+          note: null,
         });
         expect(await other.call("query_dependency_claims", {})).toEqual([]);
         await expect(
@@ -332,8 +300,8 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
                   ],
                 });
               } else if (late === "roster") {
-                await call("record_codex_security_source_work", {
-                  work: {
+                await call("update_codex_security_graph", {
+                  sourceWork: {
                     operation: "append_roster_page",
                     id: "remaining-imports",
                     owner: "search",
@@ -383,16 +351,7 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
             ++coverageReviews === 1
           )
             await arrive();
-          return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                ...reference(c),
-                approved: true,
-                reason: "Checked the cited evidence and remaining callers.",
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+          return approvedReview(packet.claims);
         },
       },
     );
@@ -427,7 +386,7 @@ test.each(["incomplete", "complete"] as const)(
   async (completion) => {
     await using f = await fixture();
     const paths = ["app.js", "package-lock.json", "secondary.js"];
-    const tool = "record_codex_security_source_work";
+    const tool = "update_codex_security_graph";
     let reviewedLimitations: string[] = [];
     const result = await runReviewedDependencyCheck(
       {
@@ -454,19 +413,10 @@ test.each(["incomplete", "complete"] as const)(
                 },
               });
             }
-            return JSON.stringify({
-              decisions: packet.claims.map(
-                (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
-                  ...reference(c),
-                  approved: true,
-                  reason: "Reviewed the caller and remaining source coverage.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                }),
-              ),
-            });
+            return approvedReview(packet.claims);
           }
           const other = await req.investigationTools!();
-          const record = (work: unknown) => call(tool, { work });
+          const record = (sourceWork: unknown) => call(tool, { sourceWork });
           const query = (sourceWork: unknown) =>
             other.call("query_codex_security_graph", { sourceWork });
           const roster = {
@@ -487,7 +437,6 @@ test.each(["incomplete", "complete"] as const)(
               },
             ],
           });
-          const partition = { partitionId: "first", owner: "reader" };
           const view = {
             rosterId: "imports",
             page: { view: "unassigned", limit: 2 },
@@ -506,7 +455,7 @@ test.each(["incomplete", "complete"] as const)(
           await record({
             operation: "assign_partition",
             id: "first",
-            owner: partition.owner,
+            owner: "reader",
             rosterId: "imports",
             paths: paths.slice(0, 2),
           });
@@ -515,44 +464,17 @@ test.each(["incomplete", "complete"] as const)(
           );
           await record({
             operation: "record_examined",
-            ...partition,
-            expectedRevision: 1,
+            partitionId: "first",
             paths: [paths[0]],
-          });
-          await record({
-            operation: "offer_handoff",
-            ...partition,
-            expectedRevision: 2,
-            recipient: "second-reader",
-            newPartitionId: "second",
-            paths: [paths[1]],
-          });
-          await expect(
-            other.call(tool, {
-              work: {
-                operation: "accept_handoff",
-                partitionId: "first",
-                recipient: "second-reader",
-                expectedRevision: 2,
-              },
-            }),
-          ).rejects.toThrow("revision changed");
-          await other.call(tool, {
-            work: {
-              operation: "accept_handoff",
-              partitionId: "first",
-              recipient: "second-reader",
-              expectedRevision: 3,
-            },
           });
           expect(
             await query({
-              partitionId: "second",
+              partitionId: "first",
               page: { view: "remaining", limit: 10 },
             }),
           ).toMatchObject({
             source_work: {
-              owner: "second-reader",
+              owner: "reader",
               page: { items: [paths[1]] },
             },
           });
@@ -572,16 +494,14 @@ test.each(["incomplete", "complete"] as const)(
               owner: "search",
               paths: [paths[2]],
             });
-            for (const [partitionId, owner, path] of [
-              ["second", "second-reader", paths[1]],
-              ["last", "search", paths[2]],
+            for (const [partitionId, path] of [
+              ["first", paths[1]],
+              ["last", paths[2]],
             ])
               await other.call(tool, {
-                work: {
+                sourceWork: {
                   operation: "record_examined",
                   partitionId,
-                  owner,
-                  expectedRevision: 1,
                   paths: [path],
                 },
               });
@@ -602,7 +522,7 @@ test.each(["incomplete", "complete"] as const)(
       expect(limitation).toContain("Remaining import search timed out.");
       expect(limitation).toContain('unassigned files ["secondary.js"]');
       expect(limitation).toContain(
-        'partition "second" has unexamined files ["package-lock.json"]',
+        'partition "first" has unexamined files ["package-lock.json"]',
       );
       expect(limitation).toContain("checkout-search");
     }
@@ -641,18 +561,7 @@ test("package checks freeze each advisory independently and verify exact source 
           "parse(request.body)",
         );
         expect(input.claims[0].payload.use.evidence[0].commit).toBe(f.revision);
-        return JSON.stringify({
-          decisions: input.claims.map(
-            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
-              evidenceKeys: claim.availableEvidenceKeys,
-              id: claim.id,
-              hash: claim.hash,
-              revision: claim.revision,
-              approved: true,
-              reason: "Checked the selected source and scope.",
-            }),
-          ),
-        });
+        return approvedReview(input.claims);
       },
     },
   );
@@ -817,7 +726,7 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
     reason: "No adapter manifest or selected version was found.",
   };
   const handoff = "Determine which adapter implementation this caller selects.";
-  const result = readDependencyCheckOutput(
+  const result = dependencyCheckOutputSchema.parse(
     await runReviewedDependencyCheck(
       { directory: f.path, subject: cve, signal },
       {
@@ -851,16 +760,7 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
         async runAgent(req) {
           const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
           if (!req.coordinator) {
-            return JSON.stringify({
-              decisions: packet.claims.map(
-                (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
-                  ...reference(c),
-                  approved: true,
-                  reason: "Checked the cited source and outstanding caller.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                }),
-              ),
-            });
+            return approvedReview(packet.claims);
           }
           const submit = (outOfScope: { scope: string; reason: string }[]) =>
             req.onCoordinatorAnswer!(
@@ -1201,18 +1101,7 @@ test.each(["corrected", "exhausted"] as const)(
         async runAgent(req) {
           if (!req.coordinator) {
             const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-            return JSON.stringify({
-              decisions: input.claims.map(
-                (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                  id: c.id,
-                  revision: c.revision,
-                  hash: c.hash,
-                  approved: true,
-                  reason: "Verified the cited code.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                }),
-              ),
-            });
+            return approvedReview(input.claims);
           }
           coordinatorStarts++;
           // A persistent transport requests only the correction for its next turn.
@@ -1320,18 +1209,7 @@ test("bind discovered owners to their own source and retain uncovered callers", 
         expect(limitations).toContain(
           "Unassessed caller in notes: secondary.js:2.",
         );
-        return JSON.stringify({
-          decisions: input.claims.map(
-            (c: Claim & { availableEvidenceKeys: string[] }) => ({
-              evidenceKeys: c.availableEvidenceKeys,
-              id: c.id,
-              revision: c.revision,
-              hash: c.hash,
-              approved: true,
-              reason: "Checked the pins and outstanding caller.",
-            }),
-          ),
-        });
+        return approvedReview(input.claims);
       },
     },
   );
@@ -1394,7 +1272,7 @@ function deploymentFor(
   return { records, positive };
 }
 
-test("the investigator cites live replies and a separate reviewer sees their originals", async () => {
+test("the reviewer corrects an omitted direct access citation without repeating the investigation", async () => {
   await using f = await fixture();
   const { records, positive } = deploymentFor(f, "example");
   const original = records[0]!;
@@ -1409,6 +1287,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
     },
   };
   records[0] = { ...structured, sha256: dependencyRecordHash(structured) };
+  let reviews = 0;
   const result = await runReviewedDependencyCheck(
     {
       directory: f.path,
@@ -1429,19 +1308,20 @@ test("the investigator cites live replies and a separate reviewer sees their ori
         if (input.claims) {
           expect(onEvidence).toBeUndefined();
           expect(input.evidence).toEqual(records);
-          return JSON.stringify({
-            decisions: input.claims.map(
-              (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                evidenceKeys: c.availableEvidenceKeys,
-                id: c.id,
-                hash: c.hash,
-                revision: c.revision,
-                approved: true,
-                reason: "Checked the original replies and source.",
-              }),
-            ),
-          });
+          expect(input.claims[0].payload.use.findingEvidence).toEqual([
+            { field: "running build", keys: [records[0]!.sha256] },
+            { field: "caller access", keys: [records[1]!.sha256] },
+          ]);
+          if (++reviews === 1) {
+            const reply = JSON.parse(approvedReview(input.claims));
+            reply.decisions[0].evidenceKeys = [records[0]!.sha256];
+            return JSON.stringify(reply);
+          }
+          expect(input.reviewCorrection.problem).toContain("caller access");
+          expect(input.claims).toHaveLength(1);
+          return approvedReview(input.claims);
         }
+        expect(reviews).toBe(0);
         expect(input.evidenceSources[0].server).toBe("deployments");
         if (!onEvidence) throw new Error("Missing evidence collector");
         for (const record of records) onEvidence(record);
@@ -1451,6 +1331,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
   );
   if (!("checks" in result)) throw new Error("Missing package report");
   const check = result.checks[0]!;
+  expect(reviews).toBe(2);
   expect(check.uses[0]!.verdict).toBe("exploitable");
   expect<unknown>(check.uses[0]!.observations).toEqual(
     positive.observations.map((ref) => ({
@@ -1464,7 +1345,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
       (r) => r.receiptId,
     ),
   ).toEqual(records.map((r) => r.sha256));
-  expect<unknown>(readDependencyCheckOutput(result)).toEqual(result);
+  expect<unknown>(dependencyCheckOutputSchema.parse(result)).toEqual(result);
   expect(check.claimEvidence.receipts[records[0]!.sha256]).toEqual(records[0]!);
 });
 
@@ -1475,6 +1356,15 @@ test("only unambiguous returned facts can bind a selected copy and independent c
   const verify = (use: Proposal["uses"][number], evidence = records) =>
     verifyProposedUse(f.path, scope, use, signal, true, evidence);
   const [running, access] = asserted.observations;
+  const releaseOnly = await verify({
+    ...f.use,
+    place: { deploymentBasis: "observed" },
+    observations: [running!, { ...access!, supports: ["context"] }],
+    remainingQuestions: ["Who can reach this service?"],
+  });
+  expect(releaseOnly.findingEvidence).toEqual([
+    { field: "running build", keys: [records[0]!.sha256] },
+  ]);
   await expect(
     verify({
       ...asserted,
@@ -1673,22 +1563,9 @@ test("a failed model invocation retains prior results and identifies unattempted
         runAgent: async ({ prompt }) => {
           const input = JSON.parse(prompt.split("\n\n").at(-1)!);
           if (input.issue.id === ids[1]) throw Error("Model unavailable.");
-          return JSON.stringify(
-            input.claims
-              ? {
-                  decisions: input.claims.map(
-                    (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                      evidenceKeys: c.availableEvidenceKeys,
-                      id: c.id,
-                      hash: c.hash,
-                      revision: c.revision,
-                      approved: true,
-                      reason: "Verified.",
-                    }),
-                  ),
-                }
-              : { uses: [f.use], limitations: [] },
-          );
+          return input.claims
+            ? approvedReview(input.claims)
+            : JSON.stringify({ uses: [f.use], limitations: [] });
         },
       },
     );
@@ -2077,7 +1954,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
         [claim],
         [{ ...decision, evidenceKeys: [keys[0]!] }],
       ),
-    ).toThrow("running build and caller access");
+    ).toThrow("caller access");
     expect(() =>
       approveDependencyClaims(
         store,
@@ -2214,7 +2091,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
           ) {
             expect(input.evidence[0].result).toBeUndefined();
             expect(input.evidence[0].preview.next).toBe(4000);
-            const metadata = await call("list_dependency_evidence", {
+            const metadata = await call("read_dependency_evidence", {
               server: "builds",
               tool: "observe",
             });
@@ -2441,6 +2318,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
 });
 
 test("catalog mappings bind the selected row and keep failed lookups open", async () => {
+  const unavailable = "package-lock.json";
   await using f = await fixture();
   const server = "service-registry",
     tool = "lookup";
@@ -2458,26 +2336,10 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       discover: async () => f.discovery,
       async runAgent(req) {
         const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-        if (!req.coordinator)
-          return JSON.stringify({
-            decisions: input.claims.map(
-              (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                id: c.id,
-                revision: c.revision,
-                hash: c.hash,
-                reason: "Verified each cited row",
-                approved: true,
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+        if (!req.coordinator) return approvedReview(input.claims);
         const { call } = await req.investigationTools!();
         const matched = "app.js",
-          unmapped = "secondary.js",
-          unavailable = "package-lock.json";
-        await call("resolve_codex_security_services", {
-          paths: [matched, unmapped, unavailable],
-        });
+          unmapped = "secondary.js";
         const lookup = (
           path: string,
           services: { id: string; name: string }[],
@@ -2492,30 +2354,41 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
           req.onEvidence!(record);
           return record;
         };
-        const first = lookup(matched, [
-            { id: "worker-7", name: "mail worker" },
-          ]),
-          empty = lookup(unmapped, []);
         req.onEvidenceFailure!({
           server,
           tool,
           arguments: { path: unavailable },
         });
-        for (const receipt of [first, empty]) {
-          await call("record_dependency_service_mapping", {
-            path: receipt.arguments.path,
-            lookups: [
-              {
-                receiptId: receipt.sha256,
-                textBlock: null,
-                target: ["path"],
-                records: ["services"],
-                id: ["id"],
-                name: ["name"],
-              },
-            ],
+        const failed = (await call("read_dependency_evidence", {
+          server,
+          tool,
+        })) as { receipts: { id: string }[] };
+        const first = lookup(matched, [
+            { id: "worker-7", name: "mail worker" },
+          ]),
+          empty = lookup(unmapped, []);
+        const resolve = (path: string, ...ids: string[]) =>
+          call("resolve_codex_security_services", {
+            path,
+            lookups: ids.map((receiptId) => ({
+              receiptId,
+              textBlock: null,
+              target: ["path"],
+              records: ["services"],
+              id: ["id"],
+              name: ["name"],
+            })),
           });
-        }
+        const before = await call("query_codex_security_graph", {});
+        await expect(
+          resolve(unavailable, failed.receipts[0]!.id),
+        ).rejects.toThrow("Unknown evidence receipt");
+        await expect(
+          resolve(matched, first.sha256, empty.sha256),
+        ).rejects.toThrow(/file or its project/);
+        expect(await call("query_codex_security_graph", {})).toEqual(before);
+        await resolve(matched, first.sha256);
+        await resolve(unmapped, empty.sha256);
         const query = (node: string) =>
           call("query_codex_security_graph", { node });
         expect(await query(unmapped)).toMatchObject({
@@ -2525,9 +2398,8 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
           ]),
         });
         expect(await query(unavailable)).toMatchObject({
-          service_lookup: "pending",
-          evidence: [],
-          service_resolution: { pending: 1 },
+          matches: [],
+          service_resolution: { checked: 2 },
         });
         const evidence = (await query(matched)) as {
           evidence: {
@@ -2586,7 +2458,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
             },
           ],
           limitations: [
-            "The catalog failed for package-lock.json. Its mapping remains open.",
+            `The catalog failed for ${unavailable}. Its mapping remains open.`,
           ],
         });
       },
@@ -2615,7 +2487,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
   ).toMatchObject({
     server,
     tool,
-    arguments: { path: "package-lock.json" },
+    arguments: { path: unavailable },
     result: { structuredContent: { status: "failed" } },
   });
 });
@@ -2877,23 +2749,7 @@ test("a reviewed premise retains independently selected rows of the historical m
               }),
             ).toMatchObject({ text: JSON.stringify(frames[1]) });
           }
-        return JSON.stringify({
-          decisions: input.claims.map(
-            (c: {
-              id: string;
-              revision: number;
-              hash: string;
-              availableEvidenceKeys: string[];
-            }) => ({
-              id: c.id,
-              hash: c.hash,
-              revision: c.revision,
-              approved: true,
-              evidenceKeys: c.availableEvidenceKeys,
-              reason: "Verified the caller and writer.",
-            }),
-          ),
-        });
+        return approvedReview(input.claims);
       },
     },
   );
@@ -3434,7 +3290,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
         },
       },
     );
-    const result = readDependencyCheckOutput(checked);
+    const result = dependencyCheckOutputSchema.parse(checked);
     if (!("checks" in result)) throw Error("Expected a package check.");
     const report = result.checks[0]!;
     const accepted = outcome === "approved";
@@ -3511,7 +3367,6 @@ test("independently verifies candidate dispositions and publishes their selected
     originalPayloadSha256: dependencyRecordHash(original.result),
     selection,
   };
-  let incompleteReview = true;
   const handoff = {
     verified: "Requests reach the parser dispatch.",
     missing: "Which backend does the running worker select?",
@@ -3572,8 +3427,7 @@ test("independently verifies candidate dispositions and publishes their selected
               }) => {
                 if (c.id === "disposition:handoff") {
                   expect(c.availableEvidenceKeys.length).toBe(3);
-                  if (incompleteReview) {
-                    incompleteReview = false;
+                  if (c.revision === 1) {
                     return {
                       id: c.id,
                       revision: c.revision,
@@ -3709,7 +3563,7 @@ test("independently verifies candidate dispositions and publishes their selected
       },
     },
   );
-  const report = readDependencyCheckOutput(checked);
+  const report = dependencyCheckOutputSchema.parse(checked);
   expect<unknown>(report).toEqual(checked);
   if (!("checks" in report)) throw new Error("Expected a package check.");
   const result = report.checks[0]!;
@@ -3817,24 +3671,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
       }),
       async runAgent(req) {
         const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-        if (!req.coordinator)
-          return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: {
-                id: string;
-                revision: number;
-                hash: string;
-                availableEvidenceKeys: string[];
-              }) => ({
-                id: c.id,
-                revision: c.revision,
-                hash: c.hash,
-                reason: "Reviewed the source and the ownership.",
-                approved: true,
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+        if (!req.coordinator) return approvedReview(packet.claims);
         const trace = (relation: string, source: string) => ({
           relation,
           from: { kind: "file", name: source },
@@ -3909,7 +3746,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
       },
     },
   );
-  const report = readDependencyCheckOutput(checked);
+  const report = dependencyCheckOutputSchema.parse(checked);
   if (!("checks" in report)) throw new Error("Expected package report");
   const coverage = report.checks[0]!.coverage!;
   expect(coverage.find((c) => c.conclusionClaim)).toMatchObject({
@@ -4023,16 +3860,7 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
           return JSON.stringify({ uses: [], limitations: [] });
         }
         const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-        return JSON.stringify({
-          decisions: packet.claims.map(
-            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
-              ...reference(claim),
-              approved: true,
-              reason: "Verified the search scope.",
-              evidenceKeys: claim.availableEvidenceKeys,
-            }),
-          ),
-        });
+        return approvedReview(packet.claims);
       },
     },
   );

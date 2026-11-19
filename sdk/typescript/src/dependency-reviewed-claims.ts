@@ -91,7 +91,7 @@ const proposedUse = z.strictObject({
   component: text
     .optional()
     .describe(
-      "Actual selected dependency. If this is an embedded or vendored component, cite this caller's selection of its containing artifact and the component name and version inside that artifact.",
+      "Omit for the scoped dependency itself. For an embedded or vendored library, give its exact name here and its version in the version field. Cite the selected parent artifact and the library it contains.",
     ),
   place: dependencyPlaceSchema
     .partial()
@@ -878,7 +878,7 @@ export async function verifyProposedUse(
     );
     if (!bound)
       throw new CodexSecurityError(
-        "Cite the selected parent artifact or build and the embedded dependency and version it contains. Join separate records by their artifact digest.",
+        `For ${scope.component} itself, omit component and set version separately. For an embedded dependency, give its exact name and cite the selected parent artifact or build and the library version it contains. Join separate records by their artifact digest.`,
       );
   }
   const covers = (path: string | undefined, line: number | undefined) =>
@@ -990,6 +990,16 @@ export async function verifyProposedUse(
         "An exploitable use needs cited attacker control, all advisory conditions met, and observations of this running workload and caller access.",
       );
   }
+  for (const support of ["running", "access"] as const) {
+    const keys = linkedObservations.flatMap((r) =>
+      r.supports.includes(support) ? (r.evidenceKeys ?? [r.sha256]) : [],
+    );
+    if (keys.length)
+      findingEvidence.push({
+        field: support === "running" ? "running build" : "caller access",
+        keys,
+      });
+  }
   const selectedCopyExcluded =
     !embedded &&
     affectedVersion === false &&
@@ -1072,6 +1082,26 @@ export function approvedUse(store: DependencyAttemptStore, ref: PremiseRef) {
   };
 }
 
+export function findingSelectionProblem(
+  { id, value }: Claim,
+  decision: Decision,
+) {
+  if (!decision.approved) return;
+  const finding =
+    value.kind === "use"
+      ? value.use
+      : value.kind === "disposition"
+        ? value.disposition
+        : undefined;
+  const missing = finding?.findingEvidence
+    ?.filter(
+      ({ keys }) => !keys.some((key) => decision.evidenceKeys.includes(key)),
+    )
+    .map(({ field }) => field);
+  if (missing?.length)
+    return `Approval of ${id} requires evidence for ${missing.join(", ")}. Select a key from each findingEvidence entry or reject the claim.`;
+}
+
 /** Commit approvals only if every decision still names the exact current claim. */
 export function approveDependencyClaims(
   store: DependencyAttemptStore,
@@ -1121,36 +1151,8 @@ export function approveDependencyClaims(
           "Reviewer must select the deciding evidence from this claim's original evidence or approved premises: " +
             claim.id,
         );
-      const use = claim.value.kind === "use" ? claim.value.use : undefined;
-      const finding =
-        claim.value.kind === "disposition" ? claim.value.disposition : use;
-      const unselected = finding?.findingEvidence?.find(
-        (binding) =>
-          !binding.keys.some((key) => decision.evidenceKeys.includes(key)),
-      );
-      if (decision.approved && unselected)
-        throw new DependencyReviewRejection(
-          "The reviewer must select the original evidence or approved premise for " +
-            unselected.field +
-            ".",
-        );
-      if (
-        decision.approved &&
-        use?.verdict === "exploitable" &&
-        ["running", "access"].some(
-          (support) =>
-            !use.observations.some(
-              (r) =>
-                r.supports.some((s) => s === support) &&
-                (r.evidenceKeys ?? [r.sha256]).some((key) =>
-                  decision.evidenceKeys.includes(key),
-                ),
-            ),
-        )
-      )
-        throw new DependencyReviewRejection(
-          "A positive review must select evidence for the running build and caller access.",
-        );
+      const problem = findingSelectionProblem(claim, decision);
+      if (problem) throw new DependencyReviewRejection(problem);
       store.set("dependency-review", claim.id, decision);
       if (
         decision.approved &&

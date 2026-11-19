@@ -61,19 +61,7 @@ export class DependencyAttemptStore {
   >();
   private depth = 0;
 
-  constructor(
-    path: string,
-    {
-      create = true,
-      migrateStackAttempt,
-    }: {
-      create?: boolean;
-      migrateStackAttempt?: (
-        db: RuntimeDatabase,
-        store: DependencyAttemptStore,
-      ) => void;
-    } = {},
-  ) {
+  constructor(path: string, { create = true }: { create?: boolean } = {}) {
     let empty = true;
     if (path !== ":memory:") {
       path = resolve(path);
@@ -98,16 +86,12 @@ export class DependencyAttemptStore {
         const app = this.rows("PRAGMA application_id")[0]?.["application_id"];
         const version = this.rows("PRAGMA user_version")[0]?.["user_version"];
         if (app === applicationId && version === schemaVersion) return;
-        // The original v1 stack ledger used a different application identifier.
-        const migrate =
-          app === 0x43534558 && version === 1 && migrateStackAttempt;
         if (
-          !migrate &&
-          (!create ||
-            !empty ||
-            app !== 0 ||
-            version !== 0 ||
-            this.rows("SELECT 1 FROM sqlite_schema LIMIT 1").length)
+          !create ||
+          !empty ||
+          app !== 0 ||
+          version !== 0 ||
+          this.rows("SELECT 1 FROM sqlite_schema LIMIT 1").length
         )
           throw new CodexSecurityError(
             "Unrecognized investigation database or schema version.",
@@ -120,7 +104,6 @@ export class DependencyAttemptStore {
           PRAGMA application_id = ${applicationId};
           PRAGMA user_version = ${schemaVersion};
         `);
-        if (migrate) migrate(this.db, this);
       });
     } catch (error) {
       this.close();
@@ -229,23 +212,7 @@ export class DependencyAttemptStore {
       "SELECT digest, result FROM operations WHERE id = ?",
       operationId,
     )[0];
-    if (!receipt) {
-      // The earlier stack format hashed the same request under different field names.
-      const legacy = this.get<{
-        digest: string;
-        result: T;
-        rejection?: string;
-      }>("stack-v1-operation", operationId);
-      if (!legacy) return;
-      if (
-        legacy.digest !== dependencyRecordHash({ name: command, body: input })
-      )
-        throw new CodexSecurityError(
-          "Operation ID already belongs to a different request.",
-        );
-      if (legacy.rejection) throw new CodexSecurityError(legacy.rejection);
-      return { result: legacy.result };
-    }
+    if (!receipt) return;
     if (receipt["digest"] !== dependencyRecordHash({ command, input }))
       throw new CodexSecurityError(
         "Operation ID already belongs to a different request.",

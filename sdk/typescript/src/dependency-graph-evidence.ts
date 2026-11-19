@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { safeRelativePath } from "./contract-values.js";
 import type { DependencyEvidenceRecord } from "./dependency-evidence-sources.js";
 import { dependencyRecordHash } from "./dependency-attempt-store.js";
 import { isRecord } from "./record.js";
@@ -19,16 +20,24 @@ const receipt = z.object({
     "Use null for structured content or the index of a returned JSON text block.",
   ),
 });
-const serviceInput = z.object({
+const resolveServices = "resolve_codex_security_services";
+const projectInput = z.strictObject({
+  project: z
+    .string()
+    .min(1)
+    .describe("Checkout-relative project directory or build file."),
+});
+const serviceInput = z.strictObject({
   path: z
     .string()
     .min(1)
-    .describe("A pending checkout path from resolve_codex_security_services."),
+    .describe("Checkout-relative file whose services you looked up."),
+  project: projectInput.shape.project.optional(),
   lookups: z
     .array(
       receipt.extend({
         target: path.describe(
-          "Field in the original tool arguments that names the pending file or its project.",
+          "Field in the original tool arguments that names the file or its consuming project.",
         ),
         records: path.describe(
           "Field in the returned JSON containing the complete array of service records for this lookup.",
@@ -80,25 +89,27 @@ type Service = {
   source: string;
   receiptSelections: ReceiptSelection[];
 };
-type Request = { path: string; project?: string };
 
 export interface DependencyEvidenceGraph {
-  pendingCatalogRequests(): Request[];
-  recordCatalogResolutions(
-    answers: readonly {
-      path: string;
-      services: Service[];
-      receiptSelections: ReceiptSelection[];
-      source: string;
-    }[],
-    requests: readonly Request[],
-  ): unknown;
+  tools: { name: string; description: string; inputSchema: object }[];
+  call(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>>;
+  recordCatalogResolution(answer: {
+    path: string;
+    project?: string;
+    services: Service[];
+    receiptSelections: ReceiptSelection[];
+    source: string;
+  }): Record<string, unknown>;
   recordObservations(
     rows: z.infer<typeof dependencyGraphEvidenceDocument>["observations"],
     receiptId: string,
     prefix: FieldPath,
     textBlock: number | null,
-  ): unknown;
+  ): Record<string, unknown>;
 }
 
 export function selectDependencyEvidenceField(
@@ -239,27 +250,53 @@ function incomplete(value: unknown): boolean {
 /** The model supplies selectors; service identities and sampled frames are read from original replies. */
 export function createDependencyGraphEvidenceTools(
   graph: DependencyEvidenceGraph,
-  getRecord: (id: string) => DependencyEvidenceRecord | undefined,
+  getRecord?: (id: string) => DependencyEvidenceRecord | undefined,
+  signal?: AbortSignal,
 ) {
+  const tools = graph.tools
+    .filter((tool) => tool.name !== resolveServices)
+    .map((tool) => ({
+      ...tool,
+      run: (input: unknown) => graph.call(tool.name, input, signal),
+    }));
+  const local = {
+    name: resolveServices,
+    description:
+      "Pass project alone to find local configuration lines that mention its literal path. Use a path below the checkout root, such as apps/mail. For a root project, use its build file (for example, package.json) instead of '.'.",
+    inputSchema: z.toJSONSchema(projectInput),
+    run: (input: unknown) =>
+      graph.call(resolveServices, projectInput.parse(input), signal),
+  };
+  if (!getRecord) return [...tools, local];
+
   function record(id: string) {
-    const found = getRecord(id);
+    const found = getRecord?.(id);
     if (!found || found.sha256 !== id)
       throw new Error("Unknown evidence receipt.");
     return found;
   }
+  const catalogSchema = z.toJSONSchema(serviceInput);
   return [
+    ...tools,
     {
-      name: "record_dependency_service_mapping",
+      name: resolveServices,
       description:
-        "Apply successful catalog lookups to a pending file. Cite every matching service from the selected array; an explicit empty result records lookup coverage for that target only. Disclose incomplete or unsuccessful lookups separately.",
-      inputSchema: z.toJSONSchema(serviceInput),
-      run(input: unknown) {
+        "After querying a catalog, pass path and lookups to link the file to every service in the cited replies. If you queried a verified consuming project, include project. A complete empty result covers only that lookup. " +
+        local.description,
+      inputSchema: {
+        type: "object",
+        properties: catalogSchema.properties,
+        anyOf: [local.inputSchema, catalogSchema],
+      },
+      async run(input: unknown) {
+        if (isRecord(input) && !("path" in input || "lookups" in input))
+          return local.run(input);
         const args = serviceInput.parse(input);
-        const request = graph
-          .pendingCatalogRequests()
-          .find((r) => r.path === args.path);
-        if (!request)
-          throw new Error("Expected a pending service question for this path.");
+        const file = safeRelativePath(args.path, "Service question");
+        const project =
+          args.project === undefined
+            ? undefined
+            : safeRelativePath(args.project, "Service project", true);
         const services = new Map<string, Service>();
         const selections: ReceiptSelection[] = [];
         const sources = new Set<string>();
@@ -271,10 +308,10 @@ export function createDependencyGraphEvidenceTools(
           );
           if (
             typeof target !== "string" ||
-            (target !== request.path && target !== request.project)
+            (target !== file && target !== project)
           )
             throw new Error(
-              "Catalog arguments must identify the pending path or its project.",
+              "Catalog arguments must identify the file or its project.",
             );
           const original = dependencyEvidencePayload(rec, lookup.textBlock);
           let rows = original;
@@ -327,17 +364,13 @@ export function createDependencyGraphEvidenceTools(
             services.set(scope, service);
           }
         }
-        return graph.recordCatalogResolutions(
-          [
-            {
-              path: args.path,
-              services: [...services.values()],
-              source: [...sources].join(", "),
-              receiptSelections: selections,
-            },
-          ],
-          [request],
-        );
+        return graph.recordCatalogResolution({
+          path: file,
+          ...(project !== undefined && { project }),
+          services: [...services.values()],
+          source: [...sources].join(", "),
+          receiptSelections: selections,
+        });
       },
     },
     {

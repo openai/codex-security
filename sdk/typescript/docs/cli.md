@@ -101,8 +101,6 @@ Live or supplemented reports can include `effectiveInputDigest`, a hash of the v
 
 When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
 
-Opening an earlier stack investigation upgrades its SQLite file atomically. Existing claim revisions, evidence and retry keys carry over. An unfinished assessment that requires stronger evidence becomes outstanding again. Older CLI versions cannot write to an upgraded database. A completed report remains immutable. If its evidence fails current verification, start a fresh attempt from the original capture or supply a newly attributed capture.
-
 A missing observation or a gap in the evidence can yield a completed `unknown` assessment. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
 
 ### Reviewed repository and package checks
@@ -128,7 +126,7 @@ For repository checks, the coordinator runs at high reasoning effort. Investigat
 
 The host includes every current approved assessment submitted during the investigation. The coordinator’s final `uses` array adds findings that have yet to be submitted and can be empty. To revise a submitted assessment, the coordinator uses its ID and current revision. Assessments for distinct call sites, package copies, or deployments can share a scope and location.
 
-Investigators share provisional source notes with `record_codex_security_evidence`. Each note pairs an investigator’s question and assertion with excerpts the host reads from the pinned Git revision. Use `query_codex_security_graph({evidence:{search}})` to find notes and `{evidence:{id}}` to read the saved lines. Citing those lines in a submitted claim starts independent review.
+Investigators use `update_codex_security_graph` to share a source note (`note`) or track files in a delegated search (`sourceWork`). A note can identify a newly discovered caller or sink and cite lines from the pinned Git revision. Other investigators can find it with `query_codex_security_graph({note:{search}})` and read the excerpts with `{note:{id}}`. Submitting a claim based on those lines starts independent review.
 
 Before creating an assessment, investigators query the existing uses. They submit new evidence for the same caller, copy and deployment under its existing ID. To withdraw a superseded use, an investigator submits a disposition under that ID with the latest `expectedRevision`, the approved use’s exact `{id, revision, hash}` in `replacesUse`, and evidence for the change. The reviewer receives the prior finding, its proof and the proposed reason. The original stays in effect while its evidence remains current, until a replacement passes review. An approved disposition’s `conclusionClaim` points to its current report entry. The claim payload’s `replacesUse` records the earlier revision in the investigation ledger.
 

@@ -2,20 +2,20 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./config.js";
 import { createDependencySourceWorklist } from "./dependency-source-worklist.js";
+import {
+  dependencySourceNoteQuerySchema,
+  dependencySourceNoteSchema,
+} from "./dependency-stack-evidence.js";
+import { isRecord } from "./record.js";
 
 const label = z.string().trim().min(1);
 const paths = z.array(z.string().min(1));
-const owned = {
-  partitionId: label,
-  owner: label,
-  expectedRevision: z.number().int().positive(),
-};
 const mutationSchema = z.discriminatedUnion("operation", [
   z.strictObject({
     operation: z.literal("append_roster_page"),
     id: label,
     owner: label,
-    expectedRevision: owned.expectedRevision.optional(),
+    expectedRevision: z.number().int().positive().optional(),
     paths,
     declaredComplete: z.boolean(),
     search: label,
@@ -34,29 +34,10 @@ const mutationSchema = z.discriminatedUnion("operation", [
   }),
   z.strictObject({
     operation: z.literal("record_examined"),
-    ...owned,
-    paths: paths.min(1),
-  }),
-  z.strictObject({
-    operation: z.literal("offer_handoff"),
-    ...owned,
-    recipient: label,
-    newPartitionId: label,
-    paths: paths.min(1),
-  }),
-  z.strictObject({
-    operation: z.literal("accept_handoff"),
     partitionId: label,
-    recipient: label,
-    expectedRevision: owned.expectedRevision,
-  }),
-  z.strictObject({
-    operation: z.literal("cancel_handoff"),
-    ...owned,
+    paths: paths.min(1),
   }),
 ]);
-
-const toolInputSchema = z.strictObject({ work: mutationSchema });
 
 const page = {
   limit: z.number().int().positive(),
@@ -65,7 +46,7 @@ const page = {
     .optional(),
 };
 
-export const sourceWorkQuerySchema = z.union([
+const sourceWorkQuerySchema = z.union([
   z.strictObject({}),
   z.strictObject({
     rosterId: label,
@@ -81,23 +62,11 @@ export const sourceWorkQuerySchema = z.union([
     page: z
       .strictObject({
         ...page,
-        view: z.enum(["paths", "remaining", "handoffPaths"]),
+        view: z.enum(["paths", "remaining"]),
       })
       .optional(),
   }),
 ]);
-
-export const sourceWorkTool = {
-  name: "record_codex_security_source_work",
-  description:
-    "Retain exact already-discovered paths for the native investigation plan. Pass the operation under work. " +
-    "Append each search page from stored results, with its search, source references, " +
-    "remaining gap IDs and declared completion. Resolve an existing gap by ID with a source reference. Assign discovered files to primary partitions, " +
-    "record examined paths, or offer and accept an exact subset handoff. Owner labels are plan " +
-    "identifiers. A handoff keeps the original owner until the recipient accepts its revision. " +
-    "File ownership and examination describe source work and do not establish a use verdict.",
-  inputSchema: z.toJSONSchema(toolInputSchema) as JsonObject,
-};
 
 function pageOf(
   values: readonly JsonValue[],
@@ -134,8 +103,8 @@ export function createDependencySourceWorkTools() {
   return {
     coverage: { generation: work.generation, limitations: work.limitations },
 
-    mutate(args: unknown): JsonObject {
-      const { work: input } = toolInputSchema.parse(args);
+    update(args: unknown): JsonObject {
+      const input = mutationSchema.parse(args);
       switch (input.operation) {
         case "append_roster_page": {
           const { expectedRevision, resolutions, ...rosterPage } = input;
@@ -149,12 +118,6 @@ export function createDependencySourceWorkTools() {
           return work.createPartition(input);
         case "record_examined":
           return work.recordExamined(input);
-        case "offer_handoff":
-          return work.offerHandoff(input);
-        case "accept_handoff":
-          return work.acceptHandoff(input);
-        case "cancel_handoff":
-          return work.cancelHandoff(input);
       }
     },
 
@@ -181,13 +144,10 @@ export function createDependencySourceWorkTools() {
         };
       }
       if ("partitionId" in input) {
-        const {
-          paths,
-          remaining,
-          handoffPaths = [],
-          ...summary
-        } = work.readPartition(input.partitionId);
-        const entries = { paths, remaining, handoffPaths };
+        const { paths, remaining, ...summary } = work.readPartition(
+          input.partitionId,
+        );
+        const entries = { paths, remaining };
         return {
           ...summary,
           ...(input.page && {
@@ -203,4 +163,74 @@ export function createDependencySourceWorkTools() {
       return work.summary();
     },
   };
+}
+
+type Tool = {
+  name: string;
+  description: string;
+  inputSchema: object;
+  run(input: unknown): unknown;
+};
+
+const graphActions = {
+  query: {
+    name: "query_codex_security_graph",
+    description:
+      "Pass note or sourceWork as the only argument when querying shared research. Use note:{search} to find notes, note:{} to list them, or note:{id} to read pinned excerpts. Use sourceWork:{} for coverage counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for paths and gaps.",
+    fields: {
+      note: dependencySourceNoteQuerySchema,
+      sourceWork: sourceWorkQuerySchema,
+    },
+  },
+  update: {
+    name: "update_codex_security_graph",
+    description:
+      "Pass exactly one of note or sourceWork. A note shares a question, scope and assertion with exact line ranges from the pinned checkout. Use sourceWork to record search results, resolve gaps, assign files or mark paths examined. For append_roster_page, omit expectedRevision on the first page and supply the current roster revision on later pages. Set declaredComplete to true when no gaps remain across all pages, and false when any gap remains open.",
+    fields: { note: dependencySourceNoteSchema, sourceWork: mutationSchema },
+  },
+};
+
+export function withInvestigationGraphTools(
+  tools: Tool[],
+  sourceWork: ReturnType<typeof createDependencySourceWorkTools>,
+  readOnly: boolean,
+  notes: {
+    query(input: unknown): unknown;
+    update(input: unknown): unknown;
+  },
+): Tool[] {
+  function graphTool(action: keyof typeof graphActions, base?: Tool): Tool {
+    const { name, description, fields } = graphActions[action];
+    const { properties } = z.toJSONSchema(z.strictObject(fields).partial());
+    const baseSchema = base?.inputSchema as { properties?: object } | undefined;
+    return {
+      name,
+      description: base ? base.description + " " + description : description,
+      inputSchema: {
+        type: "object",
+        properties: { ...baseSchema?.properties, ...properties },
+        additionalProperties: false,
+        ...(!base && { minProperties: 1, maxProperties: 1 }),
+      },
+      run(input) {
+        if (isRecord(input)) {
+          const note = Object.hasOwn(input, "note");
+          const work = Object.hasOwn(input, "sourceWork");
+          if (!note && !work && base) return base.run(input);
+          if (Object.keys(input).length === 1) {
+            if (note) return notes[action](input["note"]);
+            if (work)
+              return { source_work: sourceWork[action](input["sourceWork"]) };
+          }
+        }
+        throw new Error("Supply exactly one of note or sourceWork.");
+      },
+    };
+  }
+
+  const base = tools.find((tool) => tool.name === graphActions.query.name);
+  const result = tools.filter((tool) => tool !== base);
+  result.push(graphTool("query", base));
+  if (!readOnly) result.push(graphTool("update"));
+  return result;
 }

@@ -1,16 +1,12 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { createHash, hash } from "node:crypto";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
 import { portableRelativePath } from "./contract-values.js";
 import {
-  evidenceDigest,
-  evidenceHash,
-  evidenceKey,
-  readSavedEvidence,
-  saveEvidence,
-} from "./dependency-evidence-store.js";
+  type DependencyAttemptStore,
+  dependencyRecordHash,
+} from "./dependency-attempt-store.js";
 import {
   dependencyGitCommitSchema,
   readDependencyGitSource,
@@ -50,6 +46,7 @@ const requestSchema = z.discriminatedUnion("kind", [
   githubAdvisory,
   npm,
 ]);
+const digest = z.string().regex(/^[0-9a-f]{64}$/u);
 const savedSchema = z.strictObject({
   request: requestSchema,
   url: z.url().optional(),
@@ -60,19 +57,19 @@ const savedSchema = z.strictObject({
     })
     .optional(),
   archiveIntegrity: z.string().optional(),
-  sha256: z.string().regex(evidenceDigest),
+  sha256: digest,
   capturedAt: z.iso.datetime(),
   source: z.string(),
 });
 const rangeSchema = z.strictObject({
-  sourceId: z.string().regex(evidenceDigest),
+  sourceId: digest,
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive(),
 });
 const excerptSchema = z.union([
   rangeSchema,
   z.strictObject({
-    sourceId: z.string().regex(evidenceDigest),
+    sourceId: digest,
     search: z.string().min(1),
   }),
 ]);
@@ -216,7 +213,7 @@ const releaseSchema = z.object({
 });
 
 interface SourceOptions {
-  directory: string;
+  store: DependencyAttemptStore;
   repository: string;
   recordExcerpt(excerpt: JsonObject): string;
   /** Host transport for the explicitly authorized public-source tools. */
@@ -226,8 +223,7 @@ interface SourceOptions {
 }
 
 export function createDependencySourceTools(options: SourceOptions) {
-  const { fetcher } = options;
-  const signal = options.signal;
+  const { fetcher, signal, store } = options;
   const pending = new Map<
     string,
     Promise<{
@@ -235,35 +231,35 @@ export function createDependencySourceTools(options: SourceOptions) {
       artifact: z.infer<typeof savedSchema>;
     }>
   >();
-  const requests = join(options.directory, "requests");
 
-  async function read(sourceId: string) {
-    const saved = await readSavedEvidence(
-      join(options.directory, `${sourceId}.json`),
-    );
+  function read(sourceId: string) {
+    const saved = store.get("source-artifact", sourceId);
     if (saved === undefined) return;
-    const artifact = savedSchema.parse(JSON.parse(saved));
+    const artifact = savedSchema.parse(saved);
     if (
-      evidenceKey(artifact) !== sourceId ||
-      evidenceHash(artifact.source) !== artifact.sha256
+      dependencyRecordHash(artifact) !== sourceId ||
+      hash("sha256", artifact.source) !== artifact.sha256
     )
       throw new Error(`Saved source evidence changed: ${sourceId}`);
     return artifact;
+  }
+
+  function cached(requestId: string) {
+    const savedId = store.get("source-request", requestId);
+    if (savedId === undefined) return;
+    const sourceId = digest.parse(savedId);
+    const artifact = read(sourceId);
+    if (!artifact || dependencyRecordHash(artifact.request) !== requestId)
+      throw new Error("Saved source reference does not match the request.");
+    return { sourceId, artifact };
   }
 
   async function capture(
     request: z.infer<typeof requestSchema>,
     requestId: string,
   ) {
-    const savedId = await readSavedEvidence(join(requests, requestId));
-    if (savedId !== undefined) {
-      if (!evidenceDigest.test(savedId))
-        throw new Error("Invalid saved source reference.");
-      const artifact = await read(savedId);
-      if (!artifact || evidenceKey(artifact.request) !== requestId)
-        throw new Error("Saved source reference does not match the request.");
-      return { sourceId: savedId, artifact };
-    }
+    const saved = cached(requestId);
+    if (saved) return saved;
     let url: string | undefined;
     let git: z.infer<typeof savedSchema>["git"];
     let archiveIntegrity: string | undefined;
@@ -348,19 +344,19 @@ export function createDependencySourceTools(options: SourceOptions) {
       ...(url && { url }),
       ...(git && { git }),
       ...(archiveIntegrity && { archiveIntegrity }),
-      sha256: evidenceHash(bytes),
+      sha256: hash("sha256", bytes),
       capturedAt: new Date().toISOString(),
       source,
     };
-    const sourceId = evidenceKey(artifact);
+    const sourceId = dependencyRecordHash(artifact);
     signal?.throwIfAborted();
-    await saveEvidence(
-      options.directory,
-      `${sourceId}.json`,
-      JSON.stringify(artifact),
-    );
-    await saveEvidence(requests, requestId, sourceId);
-    return { sourceId, artifact };
+    return store.transaction(() => {
+      const saved = cached(requestId);
+      if (saved) return saved;
+      store.set("source-artifact", sourceId, artifact);
+      store.set("source-request", requestId, sourceId);
+      return { sourceId, artifact };
+    });
   }
 
   async function fetchSource(input: unknown): Promise<JsonObject> {
@@ -368,7 +364,7 @@ export function createDependencySourceTools(options: SourceOptions) {
     const request = requestSchema.parse(input);
     if (request.kind !== "github_advisory")
       request.path = portableRelativePath(request.path, "Source path");
-    const requestId = evidenceKey(request);
+    const requestId = dependencyRecordHash(request);
     let task = pending.get(requestId);
     if (!task) {
       task = capture(request, requestId);
@@ -389,7 +385,7 @@ export function createDependencySourceTools(options: SourceOptions) {
     signal?.throwIfAborted();
     const request = excerptSchema.parse(input);
     const { sourceId } = request;
-    const artifact = await read(sourceId);
+    const artifact = read(sourceId);
     if (!artifact) throw new Error(`Unknown source evidence: ${sourceId}`);
     const { source, ...origin } = artifact;
     const lines = source.match(/[^\n]*\n|[^\n]+$/gu) ?? [];

@@ -21,7 +21,7 @@ for (const scenario of [
   "invalid-answer",
   "wrong-thread",
 ]) {
-  test("persistent investigation process lifecycle: " + scenario, async () => {
+  test("resumable investigation process lifecycle: " + scenario, async () => {
     await using repo = await scopedTemporaryDirectory(
       "native-recovery-repository-",
     );
@@ -45,7 +45,7 @@ for (const scenario of [
           directory: repo.path,
           prompt: "Original investigator assignment.",
           threadSource: "security_validation",
-          persistentCoordinator: true,
+          resumableCoordinator: true,
           cyberAccessProgram: "standard",
           linkedEvidence: {
             async item(e) {
@@ -143,7 +143,7 @@ for (const fails of [false, true]) {
             directory: repo.path,
             prompt: "Original investigator assignment.",
             threadSource: "security_validation",
-            persistentCoordinator: true,
+            resumableCoordinator: true,
             cyberAccessProgram: "standard",
             linkedEvidence: {
               async item() {},

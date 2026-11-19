@@ -16,71 +16,6 @@ import type {
 import { applicationRoot, buildServer } from "./build-server.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
-test("host-only service coverage reads current lookup counts", async (t) => {
-  const temps = createTemporaryDirectories(true);
-  t.after(() => temps.cleanup());
-  const checkout = await temps.create("dependency-coverage-checkout-");
-  const runtime = await temps.create("dependency-coverage-session-");
-  const bundle = join(runtime, "session.cjs");
-  await buildServer(bundle, {
-    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
-  });
-  const { createDependencyGraphSession } = (
-    (await import(pathToFileURL(bundle).href)) as {
-      default: typeof import("../src/dependency-trace/session.ts");
-    }
-  ).default;
-  const session = await createDependencyGraphSession(checkout, true);
-  t.after(() => session.close());
-  const coverage = () => session.serviceResolutionCoverage();
-  assert.equal(
-    session.tools.some(({ name }) => name === "serviceResolutionCoverage"),
-    false,
-  );
-  assert.deepEqual(coverage(), {
-    catalog_configured: true,
-    revision: 0,
-    pending: 0,
-    checked: 0,
-    unresolved: 0,
-  });
-  await session.call("resolve_codex_security_services", {
-    paths: ["checked.ts", "unresolved.ts"],
-    project: "fixture",
-  });
-  const pending = coverage();
-  assert.equal(pending.pending, 2);
-  session.recordCatalogResolutions([
-    { path: "checked.ts", services: [] },
-    {
-      path: "unresolved.ts",
-      status: "unresolved",
-      reason: "No matching record.",
-    },
-  ]);
-  const settled = coverage();
-  assert.ok(settled.revision > pending.revision);
-  assert.deepEqual(settled, {
-    catalog_configured: true,
-    revision: settled.revision,
-    pending: 0,
-    checked: 1,
-    unresolved: 1,
-  });
-  const full = await session.call("query_codex_security_graph", {});
-  assert.deepEqual(full.service_resolution, {
-    ...settled,
-    paths: [],
-    unresolved_paths: [
-      {
-        path: "unresolved.ts",
-        reason: "No matching record.",
-        source: "configured service catalog",
-      },
-    ],
-  });
-});
-
 test("operator discovery exclusions preserve nested policy and exact caller follow-ups", async (t) => {
   for (const command of ["rg", "opengrep"]) {
     try {
@@ -230,7 +165,7 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
     locations(await trace(production, { files: ["examples/worker.py"] })),
     ["examples/worker.py"],
   );
-  production.includeDiscoveryFile("tests/test_named.py");
+  await trace(production, { files: ["tests/test_named.py"] });
   assert.deepEqual(
     locations(await trace(production, broad)),
     [
@@ -271,7 +206,7 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
     locations(await trace(scoped, { files: ["examples/demo.py"] })),
     ["examples/demo.py"],
   );
-  scoped.includeDiscoveryFile("examples/worker.py");
+  await trace(scoped, { files: ["examples/worker.py"] });
   assert.deepEqual(locations(await trace(scoped, broad)), allFiles);
 });
 
@@ -360,7 +295,6 @@ test("filtered directory discovery registers OpenGrep hits without selecting fil
     { scheduled: 2, completed: 2, files: 18 },
   );
   assert.equal(result.service_resolution.pending, 0);
-  assert.deepEqual(session.pendingCatalogRequests(), []);
   const graph = await session.call("query_codex_security_graph", {});
   assert.equal(graph.code_paths_found, 18);
 
@@ -428,7 +362,6 @@ test("filtered directory discovery registers OpenGrep hits without selecting fil
       evidence: [{ source: "overflow/sparse.py", lines: [4] }],
     },
   );
-  assert.deepEqual(session.pendingCatalogRequests(), []);
 
   // Append inside the existing real-session source batch test.
   await mkdir(join(checkout, "wide"));
@@ -800,9 +733,11 @@ test("only host catalog results settle requested service lookups", async (t) => 
     },
   ]);
   const reason = "No catalog record for this manifest.";
-  session.recordCatalogResolutions([
-    { path: "package.json", status: "unresolved", reason },
-  ]);
+  session.recordCatalogResolution({
+    path: "package.json",
+    status: "unresolved",
+    reason,
+  });
   const unresolved = await session.call(query, { node: "package.json" });
   assert.equal(unresolved.service_lookup, "unresolved");
   assert.deepEqual(unresolved.evidence, []);
@@ -819,42 +754,42 @@ test("only host catalog results settle requested service lookups", async (t) => 
     "src/main.js",
     "lib/standalone.js",
   ]);
-  assert.deepEqual(session.pendingCatalogRequests(args), [
-    { path: "src/main.js", project: "." },
-    { path: "lib/standalone.js", project: "." },
-  ]);
-  assert.deepEqual(session.pendingCatalogRequests(), [
-    { path: "src/main.js", project: "." },
-    { path: "lib/standalone.js", project: "." },
-  ]);
   await assert.rejects(
     session.call(resolve, { ...args, resolutions: [{ path: "src/main.js" }] }),
     /Unrecognized key/u,
   );
 
-  const resolved = session.recordCatalogResolutions([
-    {
-      path: "src/main.js",
-      services: [
-        {
-          name: "portal",
-          scope: "production",
-          source: "catalog:service/portal",
-        },
-        {
-          name: "preview",
-          scope: "staging",
-          source: "catalog:service/preview",
-        },
-      ],
-    },
-    { path: "lib/standalone.js", services: [], source: "catalog:lookup/empty" },
-  ]);
+  const lookup = {
+    path: "lib/standalone.js",
+    services: [],
+    source: "catalog:lookup/empty",
+  };
+  // A file-only miss cannot settle a pending question about a specific project.
+  const pending = session.recordCatalogResolution(lookup);
+  assert.deepEqual(
+    pending.service_resolution.paths,
+    queued.service_resolution.paths,
+  );
+  session.recordCatalogResolution({
+    path: "src/main.js",
+    project: ".",
+    services: [
+      {
+        name: "portal",
+        scope: "production",
+        source: "catalog:service/portal",
+      },
+      {
+        name: "preview",
+        scope: "staging",
+        source: "catalog:service/preview",
+      },
+    ],
+  });
+  const resolved = session.recordCatalogResolution({ ...lookup, project: "." });
   assert.equal(resolved.services_found, 2);
   assert.equal(resolved.service_resolution.pending, 0);
   assert.equal(resolved.service_resolution.checked, 2);
-  assert.deepEqual(session.pendingCatalogRequests(args), []);
-  assert.deepEqual(session.pendingCatalogRequests(), []);
   const file = await session.call(query, { node: "src/main.js" });
   assert.deepEqual(
     (file.evidence as { source: string; relation?: string }[])

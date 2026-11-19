@@ -1,7 +1,6 @@
 import { posix } from "node:path";
 import { z } from "zod";
 import { safeRelativePath } from "./contract-values.js";
-import type { JsonObject } from "./config.js";
 
 const text = z.string().min(1);
 const selector = z
@@ -82,14 +81,6 @@ export type DependencyEndpointConfiguration = z.input<
   typeof dependencyBoundarySchema
 >;
 export type DependencyRuntimeSelector = z.input<typeof selector>;
-export type DependencyRuntimeScope = JsonObject & {
-  cluster: string;
-  service: string;
-  window: { start: string; end: string };
-  container?: string;
-  image_name?: string;
-  image_tag?: string;
-};
 
 export const defaultDependencyCallerScope =
   "Assess production services, jobs (including distributed job executors), workers, scheduled or background workloads, and code they deploy or import at runtime. Independent test runners and CI or build surfaces are outside this scope unless the production runtime invokes them.";

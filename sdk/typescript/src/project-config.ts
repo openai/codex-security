@@ -18,7 +18,6 @@ import {
   type JsonObject,
 } from "./config.js";
 import { ConfigurationError, errorMessage } from "./errors.js";
-import { validateDependencyEndpointConfiguration } from "./dependency-endpoints.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
 import type { AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
@@ -265,15 +264,6 @@ function requireProjectConfig(
     throw new ConfigurationError(
       `Invalid project configuration${path === undefined ? "" : ` at ${path}`}: ${issues}`,
     );
-  }
-  if (value.exploitability) {
-    try {
-      validateDependencyEndpointConfiguration(value.exploitability);
-    } catch (error) {
-      throw new ConfigurationError(
-        `Invalid exploitability configuration${path === undefined ? "" : ` at ${path}`}: ${errorMessage(error)}`,
-      );
-    }
   }
 }
 

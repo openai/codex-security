@@ -1416,7 +1416,7 @@ interface SkillCommandOutput {
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly linkedEvidence?: DependencyResourceEvents;
-    readonly persistentCoordinator?: boolean;
+    readonly resumableCoordinator?: boolean;
     readonly onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"];
     readonly onAccessProgram?: DependencyAgentRequest["onAccessProgram"];
     readonly sandbox?: "read-only" | "workspace-write";
@@ -2134,7 +2134,7 @@ async function runCodexSkillProcess(
       }
     }
     const recovery: DependencyCoordinatorRecovery | undefined = output
-      ?.appServer?.persistentCoordinator
+      ?.appServer?.resumableCoordinator
       ? {
           sent: false,
           terminalError: false,
@@ -11008,7 +11008,7 @@ async function executeDependencyAgent(
           prompt: request.prompt,
           threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
           linkedEvidence,
-          persistentCoordinator: true,
+          resumableCoordinator: true,
           onCoordinatorAnswer: request.onCoordinatorAnswer,
           onAccessProgram: request.onAccessProgram,
         },
@@ -11464,7 +11464,7 @@ export async function readSkillCommandOutput(
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly linkedEvidence?: DependencyResourceEvents;
-    readonly persistentCoordinator?: boolean;
+    readonly resumableCoordinator?: boolean;
     readonly onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"];
     readonly onAccessProgram?: DependencyAgentRequest["onAccessProgram"];
     readonly recovery?: DependencyCoordinatorRecovery;
@@ -11629,12 +11629,12 @@ export async function readSkillCommandOutput(
                 }),
               ...(resumeId
                 ? {}
-                : { ephemeral: !appServer.persistentCoordinator }),
+                : { ephemeral: !appServer.resumableCoordinator }),
               cwd: appServer.directory!,
             }
           : { sandbox: appServer?.sandbox ?? "workspace-write" }),
         ...(!resumeId &&
-        (!resources || appServer.persistentCoordinator) &&
+        (!resources || appServer.resumableCoordinator) &&
         config["daybreak"] === true
           ? { daybreakEnabled: true }
           : {}),
@@ -11822,7 +11822,7 @@ export async function readSkillCommandOutput(
             resources &&
             (result.activePermissionProfile?.id !==
               "dependency_investigation" ||
-              result.thread.ephemeral !== !appServer.persistentCoordinator ||
+              result.thread.ephemeral !== !appServer.resumableCoordinator ||
               (resumeId && result.thread.id !== resumeId))
           ) {
             error =

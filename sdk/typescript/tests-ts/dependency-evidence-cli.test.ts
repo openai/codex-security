@@ -5,7 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
-import { readDependencyCheckOutput } from "../src/dependency-reachability.js";
+import { dependencyCheckOutputSchema } from "../src/dependency-reachability.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -176,8 +176,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
           for (const write of [
             "submit_dependency_claims",
             "submit_dependency_assessments",
-            "record_codex_security_endpoint",
-            "record_dependency_service_mapping",
+            "update_codex_security_graph",
+            "resolve_codex_security_services",
           ])
             expect(listed).not.toContain(write);
           expect(payload.evidence).toMatchObject([
@@ -348,7 +348,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   expect(status, stderr.text() + stdout.text()).toBe(0);
   expect(reviewed).toBe(true);
-  const report = readDependencyCheckOutput(JSON.parse(stdout.text()));
+  const report = dependencyCheckOutputSchema.parse(JSON.parse(stdout.text()));
   expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(
     JSON.parse(stdout.text()),
   );
@@ -448,7 +448,7 @@ test("a coordinator reports its selected access program and preserves redirected
       },
       async onCodex(_args, output, _env, prompt) {
         if (output?.appServer) {
-          expect(output.appServer.persistentCoordinator).toBe(true);
+          expect(output.appServer.resumableCoordinator).toBe(true);
           output.appServer.onAccessProgram?.("standard");
         }
         const packet = JSON.parse(

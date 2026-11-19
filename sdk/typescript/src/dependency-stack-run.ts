@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
-import type { DependencyAttemptStore } from "./dependency-attempt-store.js";
+import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   createDependencyClaims,
   dependencyClaimHash,
@@ -14,7 +14,6 @@ import {
   type BoundDependencyInventoryReceipt,
   type DependencyInventoryReceiptSelection,
 } from "./dependency-stack-evidence.js";
-import { openStackAttempt } from "./dependency-stack-migration.js";
 import { readDependencyClaimExcerpts } from "./dependency-stack-evidence.js";
 import {
   dependencySourceNoteSchema,
@@ -180,7 +179,7 @@ async function initialize(
 ) {
   if (!repo) throw new CodexSecurityError("run init requires --repo.");
   if (!inputs) {
-    const store = openStackAttempt(state, true);
+    const store = new DependencyAttemptStore(state);
     try {
       return await initializeLive(store, repo, input, signal);
     } finally {
@@ -195,7 +194,7 @@ async function initialize(
   const repoPath = await realpath(repo);
   const { manifest } = await readStackPacket(inputPath, repoPath, signal);
   const fingerprint = dependencyClaimHash(manifest);
-  const store = openStackAttempt(state, true);
+  const store = new DependencyAttemptStore(state);
   try {
     return store.transaction(() => {
       if (!store.get("manifest", "active"))
@@ -423,9 +422,8 @@ function nextItem(items: WorkItem[], assessments: StackAssessment[]) {
   return items.find((item) => !complete.has(item.id));
 }
 
-function openClaims(store: DependencyAttemptStore, packet: StackPacket) {
-  const { manifest } = packet;
-  const ledger = createDependencyClaims(
+function openClaims(store: DependencyAttemptStore, { manifest }: StackPacket) {
+  return createDependencyClaims(
     {
       inputDigest: manifest.inputDigest,
       cve: manifest.cve,
@@ -433,66 +431,6 @@ function openClaims(store: DependencyAttemptStore, packet: StackPacket) {
     },
     store,
   );
-  if (store.get("stack-migration", "pending"))
-    importPreviousAssessments(store, packet, ledger);
-  return ledger;
-}
-
-/** Retain valid progress and reopen decisions whose original evidence no longer suffices. */
-function importPreviousAssessments(
-  store: DependencyAttemptStore,
-  packet: StackPacket,
-  ledger: Ledger,
-) {
-  const items = new Map(
-    stackPacketWorkItems(packet).map((item) => [item.id, item]),
-  );
-  store.transaction(() => {
-    if (!store.get("stack-migration", "pending")) return;
-    const rejected = new Map<string, string>();
-    for (const row of store.values<StackAssessment>("stack-v1-assessment")) {
-      const item = items.get(row.workItemId);
-      if (!item)
-        throw new CodexSecurityError(
-          "Original assessment has an unknown work item.",
-        );
-      try {
-        const verified = prepareStackAssessment(row, item, packet, ledger);
-        store.set("stack-assessment", item.id, verified);
-      } catch (error) {
-        if (!(
-          error instanceof CodexSecurityError || error instanceof z.ZodError
-        ))
-          throw error;
-        rejected.set(item.id, error.message);
-        // A final report remains immutable and is reverified by run finalize.
-        if (store.get("report", "final"))
-          store.set("stack-assessment", item.id, row);
-      }
-    }
-    if (rejected.size) {
-      if (store.get("report", "final"))
-        store.set(
-          "stack-migration",
-          "final-rejection",
-          [...rejected.values()].join(" "),
-        );
-      for (const id of store.keys("stack-v1-operation")) {
-        const op = store.get<{
-          digest: string;
-          result: { workItemId?: string };
-        }>("stack-v1-operation", id)!;
-        const reason =
-          op.result.workItemId && rejected.get(op.result.workItemId);
-        if (reason)
-          store.set("stack-v1-operation", id, {
-            ...op,
-            rejection: "Original assessment requires new evidence: " + reason,
-          });
-      }
-    }
-    store.set("stack-migration", "pending", false);
-  });
 }
 
 async function verifyFinal(
@@ -505,13 +443,6 @@ async function verifyFinal(
   version?: string,
 ): Promise<StackInvestigationReport> {
   const saved = store.get("report", "final");
-  const rejection = store.get<string>("stack-migration", "final-rejection");
-  if (rejection)
-    throw new CodexSecurityError(
-      "The original finalized report cannot be verified with the current proof requirements. " +
-        rejection +
-        " Start a fresh attempt to reassess this capture.",
-    );
   if (requireSaved && !saved)
     throw new CodexSecurityError(
       "The investigator did not finalize the report.",
@@ -622,7 +553,7 @@ export async function readFinalStackReport(
   state: string,
   expected?: { packet: StackPacket; repository: string; signal?: AbortSignal },
 ): Promise<StackInvestigationReport> {
-  const store = openStackAttempt(state);
+  const store = new DependencyAttemptStore(state, { create: false });
   try {
     const live = getLiveRun(store);
     if (live && expected)
@@ -687,7 +618,7 @@ export async function executeStackRun(
       options.input,
       signal,
     );
-  const store = openStackAttempt(state);
+  const store = new DependencyAttemptStore(state, { create: false });
   try {
     const live = getLiveRun(store);
     const location = live ? undefined : runLocation(store);

@@ -5,11 +5,7 @@ import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
 import { prepareStackPacket } from "../src/stack-packet.js";
-import {
-  readStackPacket,
-  stackPacketWorkItems,
-} from "../src/dependency-stack-packet.js";
-import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
+import { stackPacketWorkItems } from "../src/dependency-stack-packet.js";
 import { sqliteDatabaseOpener } from "../src/runtime.js";
 import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
 import {
@@ -266,126 +262,6 @@ test("an unchanged finalized packet with a legacy read-stacks receipt retains it
   expect(JSON.stringify(await readFinalStackReport(state))).toBe(originalBytes);
   expect(JSON.stringify(await call("finalize"))).toBe(originalBytes);
   expect(savedBytes()).toBe(saved);
-});
-
-test("a previous stack ledger resumes exact claims and retry receipts and reopens an unattributed fixed copy", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-upgrade-");
-  const files = await sample(dir.path, true);
-  const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
-  const binding = stacks.queries[0].groups[0].observations[0].bindings[0];
-  binding.version = "2.1.0";
-  delete binding.frameIndices;
-  await writeFile(files.stacksPath, JSON.stringify(stacks));
-  const { inputs, write, row, claims, call } = await startProof(
-    dir.path,
-    files,
-  );
-  const { manifest } = await readStackPacket(inputs, files.repo);
-  const queried = (await call("query-claims", { ids: ["caller"] })) as {
-    claims: {
-      contextHash: string;
-      payload: unknown;
-      scope: unknown;
-      evidence: { sources: unknown[]; receipts: unknown[] };
-    }[];
-  };
-  const current = queried.claims[0]!;
-  const record = {
-    ...claims[0]!,
-    scope: current.scope,
-    payload: current.payload,
-    dependencies: [],
-    excerpts: current.evidence.sources,
-    receipts: current.evidence.receipts,
-    contextHash: current.contextHash,
-    state: "recorded",
-  };
-  const fixed = {
-    workItemId: row.workItemId,
-    verdict: "ruled_out",
-    reason: "Deployment selected the fixed version.",
-    supportingClaims: claims,
-    remainingQuestions: [],
-    frameIndices: [0, 1],
-  };
-  const state = join(dir.path, "previous.sqlite");
-  const db = sqliteDatabaseOpener()(state);
-  try {
-    db.exec(`
-      PRAGMA application_id = 0x43534558;
-      PRAGMA user_version = 1;
-      CREATE TABLE attempt_records(kind TEXT, id TEXT, value TEXT, PRIMARY KEY(kind,id));
-      CREATE TABLE claim_revisions(id TEXT, revision INTEGER, hash TEXT, value TEXT, PRIMARY KEY(id,revision));
-    `);
-    const save = (kind: string, id: string, value: unknown) =>
-      db
-        .prepare("INSERT INTO attempt_records VALUES (?, ?, ?)")
-        .all(kind, id, JSON.stringify(value));
-    save("manifest", "active", {
-      inputs,
-      repo: files.repo,
-      manifest,
-      fingerprint: dependencyRecordHash(manifest),
-    });
-    // This synthetic old ledger was populated using the current capture origin.
-    save("stack-protocol", "capture-origin", "next");
-    save("claims", "context", {
-      contextHash: current.contextHash,
-      policy: "single_agent",
-    });
-    save("operation", "id:proof", {
-      digest: dependencyRecordHash({
-        name: "record-claims",
-        body: { claims: write.claims },
-      }),
-      result: { claims },
-    });
-    save("stack-assessment", row.workItemId, fixed);
-    save("operation", "id:disposition", {
-      digest: dependencyRecordHash({
-        name: "record-assessments",
-        body: { items: [fixed] },
-      }),
-      result: { workItemId: row.workItemId, verdict: "ruled_out" },
-    });
-    db.prepare("INSERT INTO claim_revisions VALUES (?, ?, ?, ?)").all(
-      record.id,
-      record.revision,
-      record.hash,
-      JSON.stringify(record),
-    );
-  } finally {
-    db.close();
-  }
-  const resume = (command: string, input?: unknown) =>
-    executeStackRun(command, { state, input });
-  expect(await resume("query-claims", { ids: ["caller"] })).toEqual(queried);
-  expect(await resume("record-claims", write)).toEqual({ claims });
-  await expect(
-    resume("record-claims", { ...write, claims: [] }),
-  ).rejects.toThrow(/different request/);
-  await expect(
-    resume("record-assessments", {
-      operationId: "disposition",
-      items: [fixed],
-    }),
-  ).rejects.toThrow(/requires new evidence/);
-  expect(await resume("next")).toMatchObject({
-    workItem: { id: row.workItemId },
-  });
-  await resume("record-assessments", {
-    items: [
-      {
-        ...fixed,
-        verdict: "unknown",
-        reason: "The running copy cannot be attributed to the frame.",
-        remainingQuestions: ["Which copy executed this frame?"],
-      },
-    ],
-  });
-  const final = await resume("finalize");
-  expect(final).toMatchObject({ verdict: "unknown", claims });
-  expect(final).toEqual(await readFinalStackReport(state));
 });
 
 for (const [label, bindSource, separateImage, expectedPositive] of [

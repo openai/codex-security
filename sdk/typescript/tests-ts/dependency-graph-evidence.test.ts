@@ -5,10 +5,11 @@ import {
 } from "../src/dependency-graph-evidence.js";
 import type { DependencyEvidenceRecord } from "../src/dependency-evidence-sources.js";
 
-function tools(entries: DependencyEvidenceRecord[]) {
+function tools(entries?: DependencyEvidenceRecord[]) {
   const graph: DependencyEvidenceGraph = {
-    pendingCatalogRequests: () => [{ path: "jobs/send.js", project: "jobs" }],
-    recordCatalogResolutions: (answers) => answers,
+    tools: [],
+    call: async (name, input) => ({ name, input }),
+    recordCatalogResolution: (answer) => answer,
     recordObservations: (observations, id, path, block) => ({
       observations,
       id,
@@ -17,13 +18,23 @@ function tools(entries: DependencyEvidenceRecord[]) {
     }),
   };
   return Object.fromEntries(
-    createDependencyGraphEvidenceTools(graph, (id) =>
-      entries.find((r) => r.sha256 === id),
+    createDependencyGraphEvidenceTools(
+      graph,
+      entries && ((id) => entries.find((r) => r.sha256 === id)),
     ).map((tool) => [tool.name, tool.run]),
   );
 }
 
-test("binds returned service IDs and empty scoped lookups to the pending consumer", () => {
+const resolve = "resolve_codex_security_services";
+
+test("without external sources the investigator can still search local project references", async () => {
+  const local = tools();
+  expect(local["ingest_dependency_graph_evidence"]).toBeUndefined();
+  const input = { project: "jobs" };
+  expect(await local[resolve]!(input)).toEqual({ name: resolve, input });
+});
+
+test("binds returned service IDs and empty scoped lookups to the consumer", async () => {
   const original = {
     sha256: "receipt",
     server: "service-registry",
@@ -42,6 +53,7 @@ test("binds returned service IDs and empty scoped lookups to the pending consume
   };
   const input = {
     path: "jobs/send.js",
+    project: "jobs",
     lookups: [
       {
         receiptId: "receipt",
@@ -53,49 +65,48 @@ test("binds returned service IDs and empty scoped lookups to the pending consume
       },
     ],
   };
-  const run = (r: DependencyEvidenceRecord) =>
-    tools([r])["record_dependency_service_mapping"]!(input);
-  expect(run(original)).toMatchObject([
-    {
-      path: "jobs/send.js",
-      services: [
-        {
-          scope: "service-registry:93",
-          name: "mailer",
-          receiptSelections: [
-            {
-              receiptId: "receipt",
-              textBlock: null,
-              record: ["data", "services", 0],
-            },
-          ],
-        },
-        { scope: "service-registry:22", name: "nightly" },
-      ],
-    },
-  ]);
+  const run = (r: DependencyEvidenceRecord) => tools([r])[resolve]!(input);
+  expect(await run(original)).toMatchObject({
+    path: "jobs/send.js",
+    project: "jobs",
+    services: [
+      {
+        scope: "service-registry:93",
+        name: "mailer",
+        receiptSelections: [
+          {
+            receiptId: "receipt",
+            textBlock: null,
+            record: ["data", "services", 0],
+          },
+        ],
+      },
+      { scope: "service-registry:22", name: "nightly" },
+    ],
+  });
   expect(
-    run({
+    await run({
       ...original,
       result: { structuredContent: { data: { services: [] } } },
     }),
-  ).toMatchObject([
-    { services: [], receiptSelections: [{ record: ["data", "services"] }] },
-  ]);
-  expect(() => run({ ...original, arguments: { project: "other" } })).toThrow(
-    /pending path/,
-  );
-  expect(() =>
+  ).toMatchObject({
+    services: [],
+    receiptSelections: [{ record: ["data", "services"] }],
+  });
+  await expect(
+    run({ ...original, arguments: { project: "other" } }),
+  ).rejects.toThrow(/file or its project/);
+  await expect(
     run({
       ...original,
       result: {
         structuredContent: { data: { services: [], truncated: true } },
       },
     }),
-  ).toThrow(/incomplete/);
-  expect(() =>
+  ).rejects.toThrow(/incomplete/);
+  await expect(
     run({ ...original, result: { structuredContent: { data: {} } } }),
-  ).toThrow(/Selector/);
+  ).rejects.toThrow(/Selector/);
 });
 
 test("keeps the exact text block and offset path of the original sampled resource", () => {

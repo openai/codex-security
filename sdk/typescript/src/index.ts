@@ -47,7 +47,6 @@ export type {
 } from "./project-config-schema.js";
 export type {
   DependencyEndpointConfiguration,
-  DependencyRuntimeScope,
   DependencyRuntimeSelector,
 } from "./dependency-caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
