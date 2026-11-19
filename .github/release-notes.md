@@ -28,6 +28,7 @@
 - bump node from \`bc0a2af\` to \`5df7998\` ([#2752](https://github.com/openai/codex-security/pull/2752))
 - bump taiki-e/install-action in / ([#2753](https://github.com/openai/codex-security/pull/2753))
 - bump @linear/sdk from 101.1.0 to 102.0.0 in /sdk/typescript ([#2755](https://github.com/openai/codex-security/pull/2755))
+- update linkify-it to 5.0.2 in the reviews eval fixture ([#2758](https://github.com/openai/codex-security/pull/2758))
 
 </details>
 

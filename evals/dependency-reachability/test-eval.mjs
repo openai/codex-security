@@ -17,6 +17,7 @@ import {
   git,
   jsonFile,
   mixedFixture,
+  mixedServiceVersions,
   reviewedCve,
   sha256,
   summaryFixtures,
@@ -139,10 +140,11 @@ test("the repository grader binds each service's verdict to its own checkout evi
     uses: [],
     claimEvidence: { sources: {} },
   };
-  for (const [service, version, verdict] of [
-    ["notes", "5.0.0", "potentially_exploitable"],
-    ["reviews", "5.0.1", "ruled_out"],
+  for (const [service, verdict] of [
+    ["notes", "potentially_exploitable"],
+    ["reviews", "ruled_out"],
   ]) {
+    const version = mixedServiceVersions[service];
     const ref = { id: service, revision: 1, hash: sha256(service) };
     report.uses.push({
       location: service,
@@ -304,6 +306,14 @@ test("the repository grader binds each service's verdict to its own checkout evi
   assert.throws(
     () => gradeMixed(wrongService, fixture),
     /reported ranges match approved/u,
+  );
+  wrongService.claims[1] = approvedUseClaim(
+    wrongService.uses[1],
+    wrongService.claimEvidence.sources,
+  );
+  assert.throws(
+    () => gradeMixed(wrongService, fixture),
+    /installed version evidence for reviews/u,
   );
   const outside = structuredClone(report);
   outside.uses[0].evidence[0].path = "../outside";
