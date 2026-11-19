@@ -1,11 +1,22 @@
 [
   [
+    "-- Move each branch's preview receipts by name before repairing earlier histories.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations JOIN history USING (name)",
+    "WHERE version BETWEEN 73 AND 77 AND destination BETWEEN 79 AND 87;"
+  ],
+  [
     "SELECT 'error' AS operation,",
-    "    'Unsupported workbench migration 73: expected ' || quote(json_extract(migration.value, '$.name'))",
+    "    'Unsupported workbench migration 87: expected ' || quote(json_extract(migration.value, '$.name'))",
     "    || ', found ' || quote(receipt.name) || '. Open this database with the build that created it.' AS value",
     "FROM schema_migrations AS receipt JOIN json_each(:history) AS migration",
     "    ON receipt.version = json_extract(migration.value, '$.version')",
-    "WHERE receipt.version = 73 AND receipt.name != json_extract(migration.value, '$.name');"
+    "WHERE receipt.version = 87 AND receipt.name != json_extract(migration.value, '$.name');"
   ],
   [
     "WITH input AS (SELECT :history AS history),",

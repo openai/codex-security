@@ -590,7 +590,7 @@
     ]
   },
   {
-    "version": 73,
+    "version": 87,
     "name": "Standard scan reviewed finding updates",
     "statements": [
       "CREATE TABLE scan_finding_updates (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    cursor INTEGER NOT NULL,\n    finding_id TEXT NOT NULL,\n    candidate_id TEXT,\n    kind TEXT NOT NULL,\n    preview_json TEXT NOT NULL,\n    fields_json TEXT NOT NULL,\n    changed_json TEXT,\n    PRIMARY KEY (scan_id, cursor)\n) WITHOUT ROWID;",
