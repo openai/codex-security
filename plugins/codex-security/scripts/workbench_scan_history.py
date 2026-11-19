@@ -27,7 +27,7 @@ from report_projection import SEVERITY_ORDER
 from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_source_scopes import public_scan_recipe
+from workbench_source_scopes import public_scan_recipe, saved_tree_scopes
 from workbench_target import (
     clean_worktree_content_digest,
     require_remediation_target,
@@ -818,17 +818,30 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
-    # A commit identifies the checked contents only for committed diffs and clean worktrees.
     after_revision = (
         after["target_revision"]
-        if after["diff_target_kind"] in {"commit", "range"}
-        or after["target_snapshot_digest"] == clean_worktree_content_digest()
+        if saved_tree_scopes(after) is not None
+        and (
+            after["diff_target_kind"] in {"commit", "range"}
+            or after["target_snapshot_digest"] == clean_worktree_content_digest()
+        )
         else None
     )
     deferred_paths = [
         path for task in after_coverage.get("deferred", []) for path in task.get("paths", [])
     ]
     before_findings = _scan_findings(connection, before["id"])
+    before_paths: dict[str, set[str]] = {key: set() for key in before_findings}
+    for occurrence_id, path in connection.execute(
+        """
+        SELECT occurrences.id, COALESCE(locations.relative_path, '')
+        FROM finding_occurrences AS occurrences
+        LEFT JOIN finding_locations AS locations ON locations.occurrence_id = occurrences.id
+        WHERE occurrences.scan_id = ?
+        """,
+        (before["id"],),
+    ):
+        before_paths[occurrence_id].add(path)
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
@@ -889,17 +902,19 @@ def compare_scans(
             scan_covers_path(
                 after,
                 target_id=after["target_id"],
-                path=row["relative_path"],
+                path=path,
                 coverage=after_coverage,
             )
             for row in previous_rows
+            for path in before_paths[row["id"]]
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
         elif any(
-            _path_matches(row["relative_path"], path)
+            _path_within(path, scope)
             for row in previous_rows
-            for path in deferred_paths
+            for path in before_paths[row["id"]]
+            for scope in deferred_paths
         ):
             status = "not_observed"
             item["reason"] = "Review of the affected path was deferred in the later scan."

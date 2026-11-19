@@ -187,7 +187,7 @@ def create_cli_scan(
     repository: Path,
     *,
     complete: bool = True,
-    follow_up: bool = False,
+    deferred_path: str | None = None,
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
@@ -271,12 +271,12 @@ def create_cli_scan(
                 additional["title"] += f" ({index})"
                 findings["findings"].append(additional)
         findings_path.write_text(json.dumps(findings))
-    if follow_up:
+    if deferred_path:
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
-            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
+            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": [deferred_path]}
         ]
         coverage_path.write_text(json.dumps(coverage))
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
@@ -319,7 +319,11 @@ def test_get_scan_reads_legacy_sealed_history_coverage_without_writes(
 ) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
     scan = create_cli_scan(
-        state_dir, tmp_path / "results", repository, finding=finding, follow_up=follow_up
+        state_dir,
+        tmp_path / "results",
+        repository,
+        finding=finding,
+        deferred_path="src/extract.py" if follow_up else None,
     )
     scan_dir = Path(scan["scanDir"])
     artifacts = {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()}
@@ -1081,7 +1085,11 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
 def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: Path) -> None:
     state, root, repo = tmp_path / "state", tmp_path / "results", tmp_path / "repository"
     original_revision = initialize_git_repository(repo)
-    before = create_cli_scan(state, root, repo, target_revision=original_revision)
+    primary = {"role": "expected_control", "path": "README.md", "startLine": 1}
+    secondary = {"role": "concrete_implementation", "path": "pages/i.ts", "startLine": 2}
+    before = create_cli_scan(
+        state, root, repo, target_revision=original_revision, locations=[primary, secondary]
+    )
     unchanged = create_cli_scan(state, root, repo, target_revision=original_revision, finding=False)
     (repo / "README.md").write_text("updated fixture\n")
     subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=repo, check=True)
@@ -1091,8 +1099,16 @@ def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: 
         state, root, repo, target_revision=revision, finding=False, paths=["README.md"]
     )
     deferred = create_cli_scan(
-        state, root, repo, target_revision=revision, finding=False, follow_up=True
+        state, root, repo, target_revision=revision, finding=False, deferred_path="pages"
     )
+    unrelated = create_cli_scan(
+        state, root, repo, target_revision=revision, finding=False, deferred_path="pages/[id].ts"
+    )
+    subprocess.run(["git", "replace", revision, original_revision], cwd=repo, check=True)
+    subprocess.run(["git", "reset", "--hard", revision], cwd=repo, check=True)
+    replacement = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
+    subprocess.run(["git", "replace", "-d", revision], cwd=repo, check=True)
+    subprocess.run(["git", "reset", "--hard", revision], cwd=repo, check=True)
     (repo / "README.md").write_text("local edit\n")
     dirty = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
     row = compare_scan_pair(state, before, corrected)["findings"][0]
@@ -1114,10 +1130,13 @@ def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: 
         (corrected, "resolved"),
         (excluded, "unknown"),
         (deferred, "not_observed"),
+        (unrelated, "resolved"),
+        (replacement, "not_observed"),
         (dirty, "not_observed"),
     ):
         result = compare_scan_pair(state, before, later)
         finding = result["findings"][0]
+        assert finding["path"] == primary["path"]
         assert finding["status"] == status
         assert finding["beforeTriage"] == [
             {
@@ -2151,7 +2170,7 @@ def test_cli_scan_comparison_distinguishes_absence_from_out_of_scope(tmp_path: P
     root = tmp_path / "results"
     original = create_cli_scan(state_dir, root, repository, paths=["src"])
     partial = create_cli_scan(
-        state_dir, root, repository, finding=False, follow_up=True, paths=["src"]
+        state_dir, root, repository, finding=False, deferred_path="src/extract.py", paths=["src"]
     )
     other_scope = create_cli_scan(state_dir, root, repository, finding=False, paths=["tests"])
     deep = create_cli_scan(state_dir, root, repository, mode="deep")

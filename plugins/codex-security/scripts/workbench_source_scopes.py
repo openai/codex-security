@@ -276,6 +276,28 @@ def capture_source_scopes(
     return result
 
 
+def saved_tree_scopes(scan: sqlite3.Row) -> tuple[str, list[Any]] | None:
+    """Read the revision's tree binding recorded when the scan started."""
+    saved = scan["source_scopes_json"] if "source_scopes_json" in scan.keys() else None
+    if saved is None:
+        return None
+    try:
+        metadata = json.loads(saved)
+    except ValueError:
+        return None
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("version") != 1
+        or metadata.get("revision") != scan["target_revision"]
+    ):
+        return None
+    tree = metadata.get("targetTree")
+    records = metadata.get("scopes")
+    if isinstance(tree, str) and OBJECT_ID.fullmatch(tree) and isinstance(records, list):
+        return tree, records
+    return None
+
+
 def load_source_scopes(
     scan: sqlite3.Row, target: Path, requested: list[str]
 ) -> tuple[Path, str, list[dict[str, str]]] | None:
@@ -292,21 +314,10 @@ def load_source_scopes(
     saved = scan["source_scopes_json"] if "source_scopes_json" in scan.keys() else None
     paths = {PurePosixPath(path).as_posix() for path in requested}
     if saved is not None:
-        metadata = json.loads(saved)
-        if (
-            not isinstance(metadata, dict)
-            or metadata.get("version") != 1
-            or metadata.get("revision") != scan["target_revision"]
-        ):
+        binding = saved_tree_scopes(scan)
+        if binding is None:
             return None
-        tree = metadata.get("targetTree")
-        records = metadata.get("scopes")
-        if (
-            not isinstance(tree, str)
-            or not OBJECT_ID.fullmatch(tree)
-            or not isinstance(records, list)
-        ):
-            return None
+        tree, records = binding
         scopes = [
             record
             for record in records
