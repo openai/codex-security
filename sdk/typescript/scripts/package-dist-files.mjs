@@ -1,5 +1,6 @@
 const distModules = [
   "api",
+  "dependency-stack-advisory",
   "dependency-stack-assessment",
   "dependency-stack-claims",
   "dependency-stack-cli",
