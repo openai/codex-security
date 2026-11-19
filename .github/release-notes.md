@@ -26,6 +26,7 @@
 - hillclimb dependency investigation eval & speed ([#2737](https://github.com/openai/codex-security/pull/2737))
 - record the Canvas 1.1.1 source and emoji license for Wolfi ([#2734](https://github.com/openai/codex-security/pull/2734))
 - bump node from \`bc0a2af\` to \`5df7998\` ([#2752](https://github.com/openai/codex-security/pull/2752))
+- bump taiki-e/install-action in / ([#2753](https://github.com/openai/codex-security/pull/2753))
 
 </details>
 
