@@ -1,44 +1,47 @@
 import { Cli, z } from "incur";
 import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
-import { withDependencyCheckOutput } from "./dependency-check-output.js";
 import {
+  dependencyCheckOutputSchema,
+  dependencyPackageCheckOutputSchema,
+} from "./dependency-reachability.js";
+import { dependencyScopedBlockedSchema } from "./dependency-blocked-schema.js";
+import {
+  withDependencyCheckOutput,
   DependencyInvestigationBlockedError,
-  runReviewedDependencyCheck,
-} from "./dependency-reviewed-check.js";
+} from "./dependency-check-output.js";
 import type { DependencyCliContext } from "./dependency-stack-cli.js";
 import { stackInvestigationReportSchema } from "./dependency-stack-assessment.js";
-import {
-  runLocalStackInvestigation,
-  stackInvestigationPrompt,
-} from "./dependency-stack-launcher.js";
+import type { runLocalStackInvestigation } from "./dependency-stack-launcher.js";
 import { CodexSecurityError } from "./errors.js";
 import { readProjectConfig } from "./project-config.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 
 const text = z.string().trim().min(1);
-const reviewedOutput = z
+const blocked = z
   .object({
-    schemaVersion: z.literal(2),
-    uses: z.array(
-      z.object({ location: text, verdict: text, reason: text }).passthrough(),
-    ),
-    limitations: z.array(z.string()),
+    status: z.literal("blocked"),
+    code: z.literal("INVESTIGATION_BLOCKED"),
+    reason: text,
   })
   .passthrough();
-const checkOutput = z.union([
-  stackInvestigationReportSchema,
-  reviewedOutput.extend({ cve: text }),
-  z
-    .object({
-      package: z.object({ ecosystem: text, name: text }),
-      checks: z.array(reviewedOutput),
-    })
-    .passthrough(),
-]);
+const advisoryId = { advisoryId: z.string().nullable() };
+const blockedPackage = dependencyPackageCheckOutputSchema
+  .extend({
+    ...blocked.shape,
+    checks: z.array(
+      z.union([
+        dependencyPackageCheckOutputSchema.shape.checks.element,
+        dependencyScopedBlockedSchema.safeExtend(advisoryId),
+        blocked.extend(advisoryId),
+      ]),
+    ),
+    pendingAdvisories: z.array(z.string().nullable()).optional(),
+  })
+  .passthrough();
 
 type Result =
-  | Awaited<ReturnType<typeof runReviewedDependencyCheck>>
+  | z.output<typeof dependencyCheckOutputSchema>
   | Awaited<ReturnType<typeof runLocalStackInvestigation>>;
 function summarize(report: Result): string {
   if ("verdict" in report)
@@ -116,14 +119,11 @@ export function registerDependencyCheck(
         .describe("Save the completed JSON report to a new file."),
     }),
     output: z.union([
-      checkOutput,
-      z
-        .object({
-          status: z.literal("blocked"),
-          code: z.literal("INVESTIGATION_BLOCKED"),
-          reason: text,
-        })
-        .passthrough(),
+      ...dependencyCheckOutputSchema.options,
+      stackInvestigationReportSchema,
+      dependencyScopedBlockedSchema,
+      blockedPackage,
+      blocked,
       z.string(),
     ]),
     async run({ args, options, format, formatExplicit }) {
@@ -172,6 +172,8 @@ export function registerDependencyCheck(
           const result = await withDependencyCheckOutput(
             {
               subject: args.subject,
+              checkout: repository,
+              display: (line) => context.stderr.write(line + "\n"),
               signal,
               reportFile:
                 options.reportFile &&
@@ -184,6 +186,8 @@ export function registerDependencyCheck(
             },
             async (emit) => {
               if (sources && sinks && stacks) {
+                const { runLocalStackInvestigation, stackInvestigationPrompt } =
+                  await import("./dependency-stack-launcher.js");
                 emit("investigation");
                 return runLocalStackInvestigation({
                   cve: args.subject.toUpperCase(),
@@ -195,6 +199,7 @@ export function registerDependencyCheck(
                   async investigate(session) {
                     await context.runAgent({
                       directory: session.directory,
+                      stackTarget: session.repo,
                       signal,
                       prompt: await stackInvestigationPrompt(session),
                       ...settings,
@@ -206,12 +211,18 @@ export function registerDependencyCheck(
               const project = config
                 ? await readProjectConfig(config, cwd)
                 : undefined;
-              return runReviewedDependencyCheck(
+              const { runReviewedDependencyCheck } =
+                await import("./dependency-reviewed-check.js");
+              const reviewed = await runReviewedDependencyCheck(
                 {
                   directory: repository,
                   subject: args.subject,
                   vulnDescription: options.vulnDescription,
                   scope: project?.input.exploitability?.scope?.instructions,
+                  excludePaths:
+                    project?.input.exploitability?.scope?.exclude_paths,
+                  sources: project?.input.exploitability?.sources,
+                  sinks: project?.input.exploitability?.sinks,
                   evidenceSources:
                     project?.input.exploitability?.evidence_sources,
                   onProgress: emit,
@@ -220,6 +231,7 @@ export function registerDependencyCheck(
                 },
                 { runAgent: context.runAgent },
               );
+              return dependencyCheckOutputSchema.parse(reviewed);
             },
           );
           return !formatExplicit && format === "toon"
