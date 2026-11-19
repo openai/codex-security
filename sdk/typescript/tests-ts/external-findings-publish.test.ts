@@ -1758,18 +1758,21 @@ test("selected CrowdStrike findings use the saved checkout and validate the Clou
   );
 });
 
-test("CrowdStrike Cloud locations include the scanned Git subdirectory for file, normalized and stored findings", async () => {
+test("CrowdStrike Cloud locations and identities use the Git root across entrypoints", async () => {
   const detection = { ...crowdstrikeRule.detections[0]!, file: "main.tf" };
+  const reportFor = (file: string) => ({
+    ...crowdstrikeReport,
+    rule_detections: [
+      { ...crowdstrikeRule, detections: [{ ...detection, file }] },
+    ],
+  });
   const {
     f: cloud,
     deps: privateDeps,
     inbox,
     uploads,
   } = await privateUploadFixture(
-    {
-      ...crowdstrikeReport,
-      rule_detections: [{ ...crowdstrikeRule, detections: [detection] }],
-    },
+    reportFor(detection.file),
     "crowdstrike",
     exampleRepository,
   );
@@ -1799,15 +1802,23 @@ test("CrowdStrike Cloud locations include the scanned Git subdirectory for file,
   );
   await imported.import();
   const [row] = await listLocalExternalFindings({ repository: checkout }, deps);
-  const { groups } = await local.prepare({
+  const selection = {
     repository: checkout,
     findings: [{ id: row!.id, version: row!.version }],
-  });
+  };
+  const { groups, excluded } = await local.prepare(selection);
+  expect(excluded).toEqual([]);
+  const path = "infra/network files/main.tf";
+  const rootReport = join(cloud.root, "root.json");
+  await writeFile(rootReport, JSON.stringify(reportFor(path)));
+  const root = await readCrowdStrikeFindings(rootReport, exampleRepository);
+  const publishedId = root.findings[0]!.source_finding_id;
+  expect(row!.sourceFindingId).toBe(input.findings[0]!.source_finding_id);
+  expect(row!.sourceFindingId).not.toBe(publishedId);
   for (const preview of [raw.preview, normalized.preview, groups[0]!.preview]) {
+    expect(preview.findings[0]!.source_finding_id).toBe(publishedId);
     const evidence = preview.findings[0]!.evidence;
-    expect(evidence.locations).toEqual([
-      { path: "infra/network files/main.tf", line: detection.line },
-    ]);
+    expect(evidence.locations).toEqual([{ path, line: detection.line }]);
     expect(evidence.source_data).toEqual(
       input.findings[0]!.evidence.source_data,
     );
@@ -1816,26 +1827,59 @@ test("CrowdStrike Cloud locations include the scanned Git subdirectory for file,
   expect(row!.evidence.locations?.[0]?.path).toBe("main.tf");
   expect(cloud.posts).toHaveLength(0);
   await groups[0]!.publish(groups[0]!.reviewId);
-  expect(
-    cloud.reports.get(row!.sourceFindingId)?.evidence.locations?.[0]?.path,
-  ).toBe("infra/network files/main.tf");
+  const sibling = join(local.repository, "sibling");
+  await mkdir(sibling);
+  await writeFile(join(sibling, detection.file), "");
+  const other = await prepareExternalPublication(cloud.file, settings, {
+    ...deps,
+    sourceCheckout: sibling,
+  });
+  expect((await other.publish()).counts.created).toBe(1);
+  expect(cloud.reports.size).toBe(2);
+  expect(cloud.reports.get(publishedId)?.evidence.locations?.[0]?.path).toBe(
+    path,
+  );
+  const fromRoot = await prepareExternalPublication(rootReport, settings, {
+    ...deps,
+    sourceCheckout: local.repository,
+  });
+  expect(fromRoot.preview.requests[0]!.items[0]).toMatchObject({
+    source_finding_id: publishedId,
+    expected_version: 1,
+  });
 
   cloud.state.catalogHeaders = {
     [scopeHeader]: "workspace",
     [providerHeader]: "crowdstrike",
   };
   inbox.interruptUpload = false;
-  const workspace = await prepareExternalPublication(cloud.file, settings, {
+  const {
+    groups: [workspace],
+  } = await prepareStoredFindingsPublication(selection, options, {
     ...deps,
     fetch: privateDeps.fetch,
   });
-  expect((await workspace.publish()).privateJob?.status).toBe("completed");
-  expect(JSON.parse(uploads[0]!.bytes).findings[0].evidence).toMatchObject({
-    locations: [
-      { path: "infra/network files/main.tf", start_line: detection.line },
-    ],
-    source_data: input.findings[0]!.evidence.source_data,
+  expect(
+    (await workspace!.publish(workspace!.reviewId)).privateJob?.status,
+  ).toBe("completed");
+  expect(JSON.parse(uploads[0]!.bytes).findings[0]).toMatchObject({
+    source_finding_id: publishedId,
+    evidence: {
+      locations: [{ path, start_line: detection.line }],
+      source_data: input.findings[0]!.evidence.source_data,
+    },
   });
+  const receipts = await listLocalFindingPublications(
+    { repository: checkout },
+    deps,
+  );
+  for (const outcome of ["created", "private_job"])
+    expect(receipts).toContainEqual(
+      expect.objectContaining({
+        ...selection.findings[0],
+        outcome,
+      }),
+    );
 });
 
 test("stored Tenable publication verifies the catalog and publishes the selected local version", async () => {

@@ -82,6 +82,41 @@ function detectionPath(detection: NativeRecord, scan: string | undefined) {
   return path;
 }
 
+function detectionId(
+  rule: NativeRecord,
+  detection: NativeRecord,
+  file: string,
+) {
+  return stableId("crowdstrike", [
+    requiredText(rule["rule_uuid"], "CrowdStrike rule_uuid"),
+    file,
+    positive(detection["line"]),
+    detection["resource_type"] ?? null,
+    detection["resource_name"] ?? null,
+    detection["reason"] ?? null,
+    detection["module_path"] ?? null,
+  ]);
+}
+
+/** Project the single location checked by crowdstrikeCheckout into the Cloud namespace. */
+export function rebaseCrowdStrikeFinding(
+  { evidence, ...finding }: ExternalFindings["findings"][number],
+  prefix: string,
+) {
+  const data = evidence.source_data!;
+  const location = evidence.locations![0]!;
+  const path = `${prefix}/${location.path}`;
+  return {
+    ...finding,
+    source_finding_id: detectionId(
+      record(data["rule"], "CrowdStrike rule"),
+      record(data["detection"], "CrowdStrike detection"),
+      path,
+    ),
+    evidence: { ...evidence, locations: [{ ...location, path }] },
+  };
+}
+
 // A detection in a registry or Git module names the calling file, but its line
 // is inside the module. FCS states the call line only in module_remediation.
 // FCS writes the file, module source and calling file in one form, so compare them as written.
@@ -285,15 +320,7 @@ export async function readCrowdStrikeFindings(
       );
     },
     ({ rule, detection }) =>
-      stableId("crowdstrike", [
-        requiredText(rule["rule_uuid"], "CrowdStrike rule_uuid"),
-        detectionPath(detection, scan),
-        positive(detection["line"]),
-        detection["resource_type"] ?? null,
-        detection["resource_name"] ?? null,
-        detection["reason"] ?? null,
-        detection["module_path"] ?? null,
-      ]),
+      detectionId(rule, detection, detectionPath(detection, scan)),
     "local",
     {
       report: {

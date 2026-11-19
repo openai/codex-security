@@ -297,6 +297,8 @@ type RecordPublicationReceipts = (
 export interface WorkbenchPublication {
   checkout: string;
   findings: readonly { id: string; version: number }[];
+  /** Original IDs by projected Cloud ID, for local exclusions and receipts. */
+  localSourceIds: Map<string, string>;
   record: RecordPublicationReceipts;
 }
 
@@ -376,6 +378,7 @@ function repositorySelection(
   report: ExternalFindings,
   severities: readonly string[] | undefined,
   sourcePositions: PublicationSelection["sourcePositions"],
+  localSourceIds?: ReadonlyMap<string, string>,
 ): ExternalFindings {
   const findings = repositoryFindings(report, severities);
   if (findings.length === report.findings.length) return report;
@@ -384,7 +387,7 @@ function repositorySelection(
   function exclude(position: number, id: string | null, severity: string) {
     excluded.push({
       position,
-      source_finding_id: id,
+      source_finding_id: id && (localSourceIds?.get(id) ?? id),
       reason: `The repository publisher does not accept severity ${JSON.stringify(severity)}. A local import or an available private inbox can retain this finding.`,
     });
   }
@@ -1058,7 +1061,8 @@ async function preparePublicationInput(
   declaredUrl?: string,
   fileRepositories?: () => readonly ExternalSourceRepository[],
 ): Promise<PreparedExternalPublication> {
-  const record = workbench !== "preview" && workbench?.record;
+  const stored = workbench === "preview" ? undefined : workbench;
+  const record = stored?.record;
   function withReceipts(
     scope: ExternalPublicationPreview,
     prepared: {
@@ -1149,14 +1153,13 @@ async function preparePublicationInput(
           supplied.current,
           declaredUrl,
           readerSources,
-          (workbench && workbench !== "preview"
-            ? workbench.checkout
-            : undefined) ??
-            dependencies.sourceCheckout ??
-            process.cwd(),
+          stored?.checkout ?? dependencies.sourceCheckout ?? process.cwd(),
           dependencies,
+          stored?.localSourceIds,
         )
       : undefined;
+  if (crowdstrike?.localSourceIds)
+    validatePublicationFindings(crowdstrike.report);
   progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
@@ -1470,7 +1473,12 @@ async function preparePublicationInput(
   const severities = saved ? saved.repositorySeverities : repositorySeverities;
   const direct = usePrivateImport
     ? parsed
-    : repositorySelection(parsed, severities, resolved.sourcePositions);
+    : repositorySelection(
+        parsed,
+        severities,
+        resolved.sourcePositions,
+        crowdstrike?.localSourceIds,
+      );
   const submittedIds = new Set(
     direct.findings.map((row) => row.source_finding_id),
   );

@@ -118,6 +118,7 @@ function cloudSelection(
 function receiptRecorder(
   rows: StoredExternalFinding[],
   dependencies: Dependencies,
+  localId: (cloudId: string) => string,
 ): WorkbenchPublication["record"] {
   const repository = rows[0]!.repository;
   const pins = new Map(
@@ -135,7 +136,7 @@ function receiptRecorder(
     if (privateJobId) {
       for (const finding of findings)
         entries.push({
-          ...pins.get(finding.source_finding_id)!,
+          ...pins.get(localId(finding.source_finding_id))!,
           receiptId: privateJobId,
           outcome: "private_job",
         });
@@ -144,7 +145,7 @@ function receiptRecorder(
       const batch = new Map(
         requests[index]!.items.map((item) => [
           item.client_id,
-          pins.get(item.source_finding_id)!,
+          pins.get(localId(item.source_finding_id))!,
         ]),
       );
       for (const item of receipt.results)
@@ -224,6 +225,8 @@ export async function prepareStoredFindingsPublication(
       continue;
     }
     const findings = rows.map(({ id, version }) => ({ id, version }));
+    const localSourceIds = new Map<string, string>();
+    const localId = (id: string) => localSourceIds.get(id) ?? id;
     let prepared: PreparedExternalPublication;
     try {
       prepared = await prepareSource(
@@ -233,7 +236,8 @@ export async function prepareStoredFindingsPublication(
         {
           checkout: repository,
           findings,
-          record: receiptRecorder(rows, dependencies),
+          localSourceIds,
+          record: receiptRecorder(rows, dependencies, localId),
         },
         importId === undefined ? undefined : stored,
       );
@@ -243,11 +247,11 @@ export async function prepareStoredFindingsPublication(
         externalImportDisposition(error.selection) === "failed"
       )
         throw error;
-      appendExclusions(rows, error.selection);
+      appendExclusions(rows, error.selection, localId);
       continue;
     }
     const { preview } = prepared;
-    appendExclusions(rows, preview);
+    appendExclusions(rows, preview, localId);
     const first = groups[0]?.preview;
     if (
       first &&
@@ -279,9 +283,10 @@ export async function prepareStoredFindingsPublication(
   function appendExclusions(
     rows: StoredExternalFinding[],
     projected: ExternalFindings,
+    localId: (cloudId: string) => string,
   ) {
     const accepted = new Set(
-      projected.findings.map((f) => f.source_finding_id),
+      projected.findings.map((f) => localId(f.source_finding_id)),
     );
     const reasons = new Map(
       projected.excluded.map((f) => [f.source_finding_id, f.reason]),

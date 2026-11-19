@@ -59,6 +59,7 @@ import {
 import {
   crowdstrikeCheckout,
   crowdstrikeReportFormat,
+  rebaseCrowdStrikeFinding,
 } from "./crowdstrike-findings.js";
 import {
   guardianFindingRepository,
@@ -978,13 +979,14 @@ async function requireScannerFetchRemote(
     );
 }
 
-/** Verify the native FCS paths, then project Cloud locations from the Git root. */
+/** Verify the native FCS paths, then project Cloud locations and IDs from the Git root. */
 export async function prepareCrowdStrikeCloudReport(
   input: ExternalFindings,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
   checkout: string,
   dependencies: Pick<LocalExternalImportDependencies, "environment" | "signal">,
+  localSourceIds = new Map<string, string>(),
 ) {
   const context = await localContext(checkout, dependencies);
   const source = await crowdstrikeCheckout(
@@ -1015,17 +1017,12 @@ export async function prepareCrowdStrikeCloudReport(
     );
   const prefix = relative(root, context.repository).split(sep).join("/");
   if (!prefix) return { source, report: input };
-  const findings = input.findings.map(({ evidence, ...finding }) => ({
-    ...finding,
-    evidence: {
-      ...evidence,
-      locations: evidence.locations?.map((location) => ({
-        ...location,
-        path: `${prefix}/${location.path}`,
-      })),
-    },
-  }));
-  return { source, report: { ...input, findings } };
+  const findings = input.findings.map((finding) => {
+    const projected = rebaseCrowdStrikeFinding(finding, prefix);
+    localSourceIds.set(projected.source_finding_id, finding.source_finding_id);
+    return projected;
+  });
+  return { source, report: { ...input, findings }, localSourceIds };
 }
 
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
