@@ -22,6 +22,7 @@
 - update napi-derive to 3.7.1 in the native plugin ([#2721](https://github.com/openai/codex-security/pull/2721))
 - bump the codex group across 3 directories with 2 updates ([#2723](https://github.com/openai/codex-security/pull/2723))
 - add independently reviewed dependency checks ([#2715](https://github.com/openai/codex-security/pull/2715))
+- add JSON error details for scan validation failures ([#2730](https://github.com/openai/codex-security/pull/2730))
 
 </details>
 
