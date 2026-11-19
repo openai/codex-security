@@ -1,6 +1,5 @@
-import { constants } from "node:fs";
-import { mkdir, open, readFile, writeFile } from "node:fs/promises";
-import { requireRegularFile } from "./deep-scan/artifacts.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { replaceArtifactText } from "./artifact-io.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readProjectConfig } from "../../../../sdk/typescript/src/project-config.js";
@@ -66,24 +65,6 @@ export async function bindValidationProviderConfiguration(
   });
 }
 
-async function readSupplementalArtifact(
-  path: string,
-  scanDir: string,
-): Promise<string> {
-  await requireRegularFile(path, scanDir, true);
-  const handle = await open(
-    path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK,
-  );
-  try {
-    if (!(await handle.stat()).isFile())
-      throw new Error("Validation artifact must be a regular file.");
-    return await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
-}
-
 /** Run only after the workbench has sealed the scan. Its artifacts stay unchanged. */
 export async function validateCompletedScan(
   scan: JsonObject,
@@ -104,25 +85,29 @@ export async function validateCompletedScan(
     const repositoryPath = String(scan.targetPath);
     const reportPath = join(scanDir, "validation.md");
     const recordsPath = join(scanDir, "validation.json");
-    // Completed results survive host restart and must not cause another submission.
+    // Only protected host state can establish that this provider already ran.
+    const cachePath = `${configurationPath(scan.scanId)}.result`;
+    let cached;
     try {
-      const saved = JSON.parse(
-        await readSupplementalArtifact(recordsPath, scanDir),
-      );
-      const report = await readSupplementalArtifact(reportPath, scanDir);
-      return {
-        status: "complete",
-        provider: configuration.provider,
-        findings: saved.findings,
-        reportPath,
-        recordsPath,
-        report,
-        summary:
-          (saved.summary ?? saved.items.map(itemConclusion).join("\n")) ||
-          report,
-      };
+      cached = JSON.parse(await readFile(cachePath, "utf8"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (cached) {
+      if (
+        JSON.stringify(cached.configuration) !==
+          JSON.stringify(configuration) ||
+        cached.repositoryPath !== repositoryPath
+      )
+        throw new Error(
+          "Saved validation does not match this scan's provider configuration.",
+        );
+      await replaceArtifactText(reportPath, cached.result.report);
+      await replaceArtifactText(
+        recordsPath,
+        JSON.stringify(cached.records, null, 2) + "\n",
+      );
+      return { ...cached.result, reportPath, recordsPath };
     }
     const provider: ValidationProvider = resolveProvider(configuration);
     const { findings }: { findings: Record<string, unknown>[] } = JSON.parse(
@@ -160,24 +145,15 @@ export async function validateCompletedScan(
           `## ${findings[index].occurrenceId ?? findings[index].id ?? `item-${index + 1}`}\n\nDisposition: ${assessment.disposition}\n\n${assessment.report}\n`,
       )
       .join("\n---\n\n");
-    await writeFile(reportPath, report, { flag: "wx", mode: 0o600 });
-    await writeFile(
-      recordsPath,
-      JSON.stringify(
-        {
-          schemaVersion: 1,
-          findings: findings.length,
-          summary,
-          items: assessments.flatMap((assessment) =>
-            assessment.record ? [assessment.record] : [],
-          ),
-        },
-        null,
-        2,
-      ) + "\n",
-      { flag: "wx", mode: 0o600 },
-    );
-    return {
+    const records = {
+      schemaVersion: 1,
+      findings: findings.length,
+      summary,
+      items: assessments.flatMap((assessment) =>
+        assessment.record ? [assessment.record] : [],
+      ),
+    };
+    const result = {
       status: "complete",
       provider: provider.name,
       findings: findings.length,
@@ -186,6 +162,21 @@ export async function validateCompletedScan(
       report,
       summary,
     };
+    await writeFile(
+      cachePath,
+      JSON.stringify({ configuration, repositoryPath, records, result }),
+      {
+        flag: "wx",
+        mode: 0o600,
+      },
+    );
+    // These model-writable files are projections, never authoritative cache input.
+    await replaceArtifactText(reportPath, report);
+    await replaceArtifactText(
+      recordsPath,
+      JSON.stringify(records, null, 2) + "\n",
+    );
+    return result;
   } catch (error) {
     // An unavailable supplemental provider must not turn a sealed scan into a failure.
     return {

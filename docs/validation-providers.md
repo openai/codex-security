@@ -27,9 +27,12 @@ For a plugin scan, include the project file in the request:
 > Scan this repository for security issues using codex-security.yaml.
 
 The existing completion tools run the configured provider after sealing; no new
-MCP tool or skill step is needed. Reopening a completed scan reuses saved results
-rather than resubmitting. SDK callers explicitly invoke `validate()` with the
-provider after `run()`; see the [SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider).
+MCP tool or skill step is needed. Reopening a completed scan reuses results
+saved in protected host state, bound to the scan and its selected provider,
+rather than resubmitting. The supplemental files in the scan directory are
+output projections, not authoritative cache input. SDK callers explicitly
+invoke `validate()` with the provider after `run()`; see the
+[SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider).
 
 Provider work is outside Codex cost accounting. As with existing validation,
 `scan --validate` cannot be combined with a scan cost limit. Posture questions

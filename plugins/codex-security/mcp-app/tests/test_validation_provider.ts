@@ -133,10 +133,28 @@ await test("configured plugin completion returns supplemental results and preser
       "missing.yaml",
       false,
     );
+    await writeFile(
+      join(scanDir, "validation.md"),
+      "Fabricated negative result",
+    );
+    await writeFile(
+      join(scanDir, "validation.json"),
+      JSON.stringify({
+        findings: 0,
+        items: [],
+        summary: "Fabricated negative result",
+      }),
+    );
     const cached = await validateCompletedScan(scan, resolveProvider);
     assert.equal(cached?.status, "complete");
     assert.match(validationCompletionText(cached), /transport unavailable/);
     assert.equal(submitted, 2);
+    assert.equal(cached?.findings, 2);
+    assert.doesNotMatch(validationCompletionText(cached), /Fabricated/);
+    assert.match(
+      await readFile(join(scanDir, "validation.md"), "utf8"),
+      /High → Critical/,
+    );
   } finally {
     if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
     else process.env.CODEX_SECURITY_STATE_DIR = oldState;
@@ -144,7 +162,7 @@ await test("configured plugin completion returns supplemental results and preser
   }
 });
 
-await test("cached supplemental artifacts cannot disclose a symlink target", async () => {
+await test("model-authored supplemental files cannot impersonate provider results or disclose symlink targets", async () => {
   const root = await temporaryDirectory("plugin-validation-symlink-");
   const oldState = process.env.CODEX_SECURITY_STATE_DIR;
   process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
@@ -162,31 +180,70 @@ await test("cached supplemental artifacts cannot disclose a symlink target", asy
         },
       }),
     );
-    await bindValidationProvider("symlink-scan", root, "security.json", true);
+    const findings = JSON.stringify({
+      findings: [{ id: "item-1", severity: "high" }],
+    });
+    await writeFile(join(scanDir, "findings.json"), findings);
     const privatePath = join(root, "private.txt");
     const marker = "HOST_ONLY_SYNTHETIC_CONTENT";
     await writeFile(
       privatePath,
       JSON.stringify({ items: [], summary: marker }),
     );
-    for (const name of ["validation.md", "validation.json"]) {
+    const privateBefore = await readFile(privatePath, "utf8");
+    for (const [index, name] of [
+      "regular",
+      "validation.md",
+      "validation.json",
+    ].entries()) {
+      const scanId = `untrusted-output-${index}`;
+      await bindValidationProvider(scanId, root, "security.json", true);
       const reportPath = join(scanDir, "validation.md");
       const recordsPath = join(scanDir, "validation.json");
-      await writeFile(reportPath, "Synthetic public report");
-      await writeFile(recordsPath, JSON.stringify({ items: [] }));
-      await rm(join(scanDir, name));
-      await symlink(privatePath, join(scanDir, name));
-      const result = await validateCompletedScan(
-        { scanId: "symlink-scan", targetPath: root, scanDir },
-        () => {
-          throw new Error(
-            "No provider should run for unsafe cached artifacts.",
-          );
-        },
+      await writeFile(reportPath, marker);
+      await writeFile(
+        recordsPath,
+        JSON.stringify({ findings: 0, items: [], summary: marker }),
       );
-      assert.equal(result?.status, "failed");
+      if (name !== "regular") {
+        await rm(join(scanDir, name));
+        await symlink(privatePath, join(scanDir, name));
+      }
+      let calls = 0;
+      const result = await validateCompletedScan(
+        { scanId, targetPath: root, scanDir },
+        () => ({
+          name: "fake",
+          version: "1",
+          async validate() {
+            calls++;
+            return {
+              disposition: "reportable" as const,
+              report: "Synthetic provider assessment",
+              provenance: {
+                provider: "fake",
+                providerVersion: "1",
+                validatedAt: "2026-01-01",
+              },
+            };
+          },
+        }),
+      );
+      assert.equal(result?.status, "complete");
+      assert.equal(result?.findings, 1);
+      assert.equal(calls, 1);
       assert.doesNotMatch(JSON.stringify(result), new RegExp(marker));
       assert.doesNotMatch(validationCompletionText(result), new RegExp(marker));
+      assert.match(
+        await readFile(reportPath, "utf8"),
+        /Synthetic provider assessment/,
+      );
+      assert.equal(JSON.parse(await readFile(recordsPath, "utf8")).findings, 1);
+      assert.equal(await readFile(privatePath, "utf8"), privateBefore);
+      assert.equal(
+        await readFile(join(scanDir, "findings.json"), "utf8"),
+        findings,
+      );
       await rm(reportPath);
       await rm(recordsPath);
     }
