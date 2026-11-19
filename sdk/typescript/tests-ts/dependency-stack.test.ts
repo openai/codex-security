@@ -250,6 +250,7 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
       reviewPolicy: "single_agent",
       coverage: { total: 1, assessed: 1 },
     });
+    expect(report).not.toHaveProperty("coverage.noIndexedMatch");
     expect(report).toEqual(await readFinalStackReport(state));
     await expect(
       call("record-evidence", {
@@ -617,6 +618,98 @@ test("an explicitly dated observation outside the requested window stays an unre
     verdict: "unknown",
     coverage: { scopeConflicts: [work!.id] },
   });
+});
+
+test("an indexed miss stays unknown and other capture groups can be assessed", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-indexed-miss-");
+  const files = await sample(dir.path, true);
+  const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
+  const [observed] = stacks.queries[0].groups;
+  const indexedMiss = {
+    id: "empty-index",
+    status: "no_indexed_match",
+    truncated: false,
+    observations: [],
+  };
+  stacks.queries[0].groups = [indexedMiss, observed];
+  await writeFile(files.stacksPath, JSON.stringify(stacks));
+
+  const inputs = join(dir.path, "inputs");
+  const state = join(dir.path, "run.sqlite");
+  const packet = await prepareStackPacket({
+    cve,
+    ...files,
+    repository: files.repo,
+    inputsDir: inputs,
+    toolRevision: "test",
+  });
+  const [miss, call] = stackPacketWorkItems(packet);
+  expect(miss).toMatchObject({ status: "no_indexed_match", observation: null });
+  await executeStackRun("init", { state, repo: files.repo, inputs });
+  expect(await executeStackRun("next", { state })).toMatchObject({
+    workItem: { id: miss!.id, status: "no_indexed_match" },
+  });
+
+  await expect(
+    executeStackRun("record-assessments", {
+      state,
+      input: {
+        items: [
+          {
+            workItemId: miss!.id,
+            verdict: "ruled_out",
+            reason: "The index returned no stacks.",
+          },
+        ],
+      },
+    }),
+  ).rejects.toThrow(/requires a scoped unknown assessment/);
+
+  await executeStackRun("record-assessments", {
+    state,
+    input: {
+      items: [
+        {
+          workItemId: miss!.id,
+          verdict: "unknown",
+          reason: "The index returned no stacks for this scope.",
+          remainingQuestions: ["Do profiles cover the requested window?"],
+        },
+      ],
+    },
+  });
+  expect(await executeStackRun("next", { state })).toMatchObject({
+    workItem: { id: call!.id, status: "observed" },
+  });
+  await executeStackRun("record-assessments", {
+    state,
+    input: {
+      items: [
+        {
+          workItemId: call!.id,
+          verdict: "unknown",
+          reason: "The captured call has an unverified prerequisite.",
+          remainingQuestions: ["Was the decoder input caller-controlled?"],
+        },
+      ],
+    },
+  });
+  const report = await executeStackRun("finalize", { state });
+  expect(report).toMatchObject({
+    verdict: "unknown",
+    assessments: [
+      { status: "no_indexed_match", verdict: "unknown", observation: null },
+      { status: "observed", observation: { id: "call" } },
+    ],
+    coverage: {
+      assessed: 2,
+      observed: 1,
+      noMatch: [],
+      noCoverage: [],
+      noIndexedMatch: [miss!.id],
+    },
+  });
+  expect(report).toEqual(await readFinalStackReport(state));
 });
 
 test("claim identity and finalized reports retain every own key in opaque JSON evidence", async () => {
