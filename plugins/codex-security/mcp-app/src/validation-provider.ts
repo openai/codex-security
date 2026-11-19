@@ -1,4 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { requireRegularFile } from "./deep-scan/artifacts.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readProjectConfig } from "../../../../sdk/typescript/src/project-config.js";
@@ -45,7 +47,16 @@ export async function bindValidationProvider(
   if (!created || projectConfigPath === undefined) return;
   const project = await readProjectConfig(projectConfigPath, repositoryPath);
   const configuration = project.input.scan?.validation;
-  if (configuration === undefined) return;
+  await bindValidationProviderConfiguration(scanId, configuration, created);
+}
+
+/** Bind the host-owned setup snapshot without rereading a changed project file. */
+export async function bindValidationProviderConfiguration(
+  scanId: string,
+  configuration: ValidationProviderConfiguration | undefined,
+  created: boolean,
+): Promise<void> {
+  if (!created || configuration === undefined) return;
   validationProviderFromConfiguration(configuration);
   const path = configurationPath(scanId);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -53,6 +64,24 @@ export async function bindValidationProvider(
     flag: "wx",
     mode: 0o600,
   });
+}
+
+async function readSupplementalArtifact(
+  path: string,
+  scanDir: string,
+): Promise<string> {
+  await requireRegularFile(path, scanDir, true);
+  const handle = await open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK,
+  );
+  try {
+    if (!(await handle.stat()).isFile())
+      throw new Error("Validation artifact must be a regular file.");
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Run only after the workbench has sealed the scan. Its artifacts stay unchanged. */
@@ -77,8 +106,10 @@ export async function validateCompletedScan(
     const recordsPath = join(scanDir, "validation.json");
     // Completed results survive host restart and must not cause another submission.
     try {
-      const saved = JSON.parse(await readFile(recordsPath, "utf8"));
-      const report = await readFile(reportPath, "utf8");
+      const saved = JSON.parse(
+        await readSupplementalArtifact(recordsPath, scanDir),
+      );
+      const report = await readSupplementalArtifact(reportPath, scanDir);
       return {
         status: "complete",
         provider: configuration.provider,

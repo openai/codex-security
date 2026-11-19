@@ -5,11 +5,13 @@ import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
 import { DEEP_SCAN_SETTINGS, hoursConflict } from "../deep-scan-settings.js";
 import schema from "./project-config.schema.json";
+import type { ValidationProviderConfiguration } from "../../../../../sdk/typescript/src/validation-provider.js";
 
 let validate: ValidateFunction | undefined;
 export interface DeepScanProjectConfig {
   path: string;
   settings: Partial<Record<(typeof DEEP_SCAN_SETTINGS)[number][0], number>>;
+  validation?: ValidationProviderConfiguration;
 }
 
 /** Read only an explicitly selected file; repository configuration is never discovered. */
@@ -59,6 +61,7 @@ export async function readDeepScanProjectConfig(
   const input = value as {
     scan?: {
       mode?: string;
+      validation?: ValidationProviderConfiguration;
       max_time_minutes?: number;
       deep?: Record<(typeof DEEP_SCAN_SETTINGS)[number][2], number>;
     };
@@ -102,5 +105,9 @@ export async function readDeepScanProjectConfig(
     }
     settings.maxTimeHours = hours;
   }
-  return { path, settings };
+  return {
+    path,
+    settings,
+    ...(input.scan?.validation && { validation: input.scan.validation }),
+  };
 }

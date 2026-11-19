@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter } from "node:path";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -130,6 +137,123 @@ await test("configured plugin completion returns supplemental results and preser
     assert.equal(cached?.status, "complete");
     assert.match(validationCompletionText(cached), /transport unavailable/);
     assert.equal(submitted, 2);
+  } finally {
+    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+await test("cached supplemental artifacts cannot disclose a symlink target", async () => {
+  const root = await temporaryDirectory("plugin-validation-symlink-");
+  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  try {
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir);
+    await writeFile(
+      join(root, "security.json"),
+      JSON.stringify({
+        scan: {
+          validation: {
+            provider: "continuum",
+            continuum: { environment_id: "synthetic-environment" },
+          },
+        },
+      }),
+    );
+    await bindValidationProvider("symlink-scan", root, "security.json", true);
+    const privatePath = join(root, "private.txt");
+    const marker = "HOST_ONLY_SYNTHETIC_CONTENT";
+    await writeFile(
+      privatePath,
+      JSON.stringify({ items: [], summary: marker }),
+    );
+    for (const name of ["validation.md", "validation.json"]) {
+      const reportPath = join(scanDir, "validation.md");
+      const recordsPath = join(scanDir, "validation.json");
+      await writeFile(reportPath, "Synthetic public report");
+      await writeFile(recordsPath, JSON.stringify({ items: [] }));
+      await rm(join(scanDir, name));
+      await symlink(privatePath, join(scanDir, name));
+      const result = await validateCompletedScan(
+        { scanId: "symlink-scan", targetPath: root, scanDir },
+        () => {
+          throw new Error(
+            "No provider should run for unsafe cached artifacts.",
+          );
+        },
+      );
+      assert.equal(result?.status, "failed");
+      assert.doesNotMatch(JSON.stringify(result), new RegExp(marker));
+      assert.doesNotMatch(validationCompletionText(result), new RegExp(marker));
+      await rm(reportPath);
+      await rm(recordsPath);
+    }
+  } finally {
+    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+await test("app-backed Deep Scan binds the saved setup provider without a project path", async () => {
+  const { WorkbenchDeepScanStore } = await importSource(
+    join(import.meta.dirname, "../src/deep-scan/store.ts"),
+  );
+  const root = await temporaryDirectory("plugin-validation-snapshot-");
+  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  try {
+    const configuration = {
+      provider: "continuum",
+      continuum: { environment_id: "snapshot-environment" },
+    };
+    const store = new WorkbenchDeepScanStore(async () => ({
+      startDisposition: "created",
+      validationProviderConfiguration: configuration,
+      deepScan: {
+        scanId: "snapshot-scan",
+        status: "running",
+        targetPath: root,
+        scope: ".",
+        scanDir: root,
+        dispatchedCount: 0,
+        noNewStreak: 0,
+        config: {
+          workers: 1,
+          subagents: 0,
+          stopAfterNoNew: 1,
+          maxDiscoveryRuns: 1,
+        },
+      },
+    }));
+    await store.begin({
+      scanId: "snapshot-scan",
+      threadId: "snapshot-owner",
+      scanRoot: root,
+    });
+    await writeFile(
+      join(root, "findings.json"),
+      JSON.stringify({ findings: [] }),
+    );
+    let resolved = false;
+    const result = await validateCompletedScan(
+      { scanId: "snapshot-scan", targetPath: root, scanDir: root },
+      (saved) => {
+        assert.deepEqual(saved, configuration);
+        resolved = true;
+        return {
+          name: "fake",
+          version: "1",
+          async validate() {
+            throw new Error("No findings");
+          },
+        };
+      },
+    );
+    assert.equal(resolved, true);
+    assert.equal(result?.status, "complete");
   } finally {
     if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
     else process.env.CODEX_SECURITY_STATE_DIR = oldState;
