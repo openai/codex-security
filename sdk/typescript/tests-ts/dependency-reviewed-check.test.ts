@@ -1356,6 +1356,15 @@ test("only unambiguous returned facts can bind a selected copy and independent c
   const verify = (use: Proposal["uses"][number], evidence = records) =>
     verifyProposedUse(f.path, scope, use, signal, true, evidence);
   const [running, access] = asserted.observations;
+  const releaseOnly = await verify({
+    ...f.use,
+    place: { deploymentBasis: "observed" },
+    observations: [running!, { ...access!, supports: ["context"] }],
+    remainingQuestions: ["Who can reach this service?"],
+  });
+  expect(releaseOnly.findingEvidence).toEqual([
+    { field: "running build", keys: [records[0]!.sha256] },
+  ]);
   await expect(
     verify({
       ...asserted,

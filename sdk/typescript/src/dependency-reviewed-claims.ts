@@ -989,12 +989,15 @@ export async function verifyProposedUse(
       throw new CodexSecurityError(
         "An exploitable use needs cited attacker control, all advisory conditions met, and observations of this running workload and caller access.",
       );
-    for (const support of ["running", "access"] as const)
+  }
+  for (const support of ["running", "access"] as const) {
+    const keys = linkedObservations.flatMap((r) =>
+      r.supports.includes(support) ? (r.evidenceKeys ?? [r.sha256]) : [],
+    );
+    if (keys.length)
       findingEvidence.push({
         field: support === "running" ? "running build" : "caller access",
-        keys: linkedObservations.flatMap((r) =>
-          r.supports.includes(support) ? (r.evidenceKeys ?? [r.sha256]) : [],
-        ),
+        keys,
       });
   }
   const selectedCopyExcluded =
