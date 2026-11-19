@@ -7,12 +7,8 @@ settings:
 overrides:
   glob@13: 14.0.3
   minimatch@10: 11.0.2
-  '@azure/identity@>=4.13.2 <=4.13.3>@azure/msal-node': 7.1.0
-  promptfoo@0.124.1>@hono/node-server: 2.1.5
-  '@openai/codex': 0.170.0
-  '@openai/codex-sdk': 0.170.0
-  ibm-cloud-sdk-core@5.6.0>axios: 1.20.0
-  get-uri@8.0.1>basic-ftp: 6.2.1
+  promptfoo@0.125.1>@hono/node-server: 2.1.8
+  get-uri@8.0.1>basic-ftp: 6.2.6
 
 importers:
 
@@ -23,7 +19,7 @@ importers:
         version: 0.170.0
       promptfoo:
         specifier: 0.125.1
-        version: 0.125.1(@openai/codex-sdk@0.170.0)(@types/json-schema@7.0.15)(@types/node@25.9.1)(jks-js@1.1.7)
+        version: 0.125.1(@openai/codex-sdk@0.170.0)(@types/json-schema@7.0.15)(@types/node@25.9.1)
     devDependencies:
       yaml:
         specifier: 2.9.1
@@ -244,8 +240,8 @@ packages:
     resolution: {integrity: sha512-T2AOp0AhDdZ3imQyy3d8AnRMdPFwibKKcmKttWxLBKeiJKmE9p7RFrBpdbswpJ1d3cPdO5kvcYDuKajUFqwraA==}
     engines: {node: '>=22.0.0'}
 
-  '@hono/node-server@2.1.5':
-    resolution: {integrity: sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q==}
+  '@hono/node-server@2.1.8':
+    resolution: {integrity: sha512-jdf7FHh6A1lzjpHHQUgxsg2GeER2vMetnAOfeActzcoli6jamlK+NAwL6Dsr5Fl3BS3tYUQzCdtZjU8Qxv7bEA==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4 || ^5.0.0-0
@@ -704,9 +700,6 @@ packages:
   asap@2.0.6:
     resolution: {integrity: sha512-BSHWgDSAiKs50o2Re8ppvp3seVHXSRM44cdSsT9FfNEUUZLOGWVCsiWaRPWM1Znn+mqZ1OfVZ3z3DWEzSp7hRA==}
 
-  asn1@0.2.6:
-    resolution: {integrity: sha512-ix/FxPn0MDjeyJ7i/yoHGFt/EX6LyNbxSEhPPXODPL+KB0VPk86UYfL0lMdy+KCnv+fmvIzySwaK5COwqVbWTQ==}
-
   ast-types@0.13.4:
     resolution: {integrity: sha512-x1FCFnFifvYDDzTaLII71vG5uvDwgtmDTEVWAxrgeiR8VjMONcCXJx7E+USjDtHlwFmt9MysbqgF9b9Vjr6w+w==}
     engines: {node: '>=4'}
@@ -721,8 +714,8 @@ packages:
   base64-js@1.5.1:
     resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
 
-  basic-ftp@6.2.1:
-    resolution: {integrity: sha512-bK67isD+lKq46AU8vNtjvMaT2ZqAOAmNCbxUHlFBRD4k15NWxyEjmaKtZPlgce58So4BNTjITGQOVTjL9y0ECA==}
+  basic-ftp@6.2.6:
+    resolution: {integrity: sha512-0EjZCaodOz6yiokv2JA1VyKGNdGxULZ+GGlPgG9tm4d+T/bHtX1hUch8CumDneBfpIbiSdn7TaCGwpM+gwsOlw==}
     engines: {node: '>=10.0.0'}
 
   bignumber.js@9.3.1:
@@ -1290,8 +1283,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.13.13:
-    resolution: {integrity: sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA==}
+  hono@4.13.18:
+    resolution: {integrity: sha512-H9q/E1XizaWstJxUW881dmLxEj+t/TrGGnyxINkm4+sK0qUwsMtFdo2BWI9Vs3cIS19MU6b6iCijoUoEf4f3DA==}
     engines: {node: '>=16.9.0'}
 
   hookified@1.15.1:
@@ -1371,9 +1364,6 @@ packages:
   javascript-natural-sort@0.7.1:
     resolution: {integrity: sha512-nO6jcEfZWQXDhOiBtG2KvKyEptz7RVbpGP4vTD2hLBdmNQSsCiicO2Ioinv6UI4y9ukqnBpy+XZ9H6uLNgJTlw==}
 
-  jks-js@1.1.7:
-    resolution: {integrity: sha512-BeiDRKsAi1NwEwgx2JB/9/0tar5BNGIv+foGm1G5GgiyR35s/iUnfd/BWqYd16mLDD8qTaAVBrIcOOuVqXJZNQ==}
-
   jose@6.2.11:
     resolution: {integrity: sha512-A5NPn7g8EAzGU3IzRs+Yiq8K5n3ypYS75M5+KKiVHdUexfpWK1kP4ZMq7QnTGDoMj6TJ1dtcEJjW60yZDXS4hg==}
 
@@ -1383,10 +1373,6 @@ packages:
   js-rouge@3.2.1:
     resolution: {integrity: sha512-rr9vSk+0+IFJyQi8ts4Im9sSs2k8RY5tLKVpreq5Qib2j/N5jsk5qJLMTbDU8DbPZUVV7mqjUumV+vgrUnouzw==}
     engines: {node: '>=18.0.0'}
-
-  js-yaml@5.4.2:
-    resolution: {integrity: sha512-m+aqu+LwO1O6sIopafj8HUVl5aawITwZQe/yHpMCKjaWBaA/d07B/QdMb3529REftiU+RMMHL3Vlsw3hON7vWg==}
-    hasBin: true
 
   js-yaml@5.4.3:
     resolution: {integrity: sha512-yzzNtgczwgoVHNigCyKTXcQJU4Y8t/ikU4UxXW0BvrLfHTGWZhsNcOT2s/a7vn81/4KqVnNmHjaUEPlvWnNwVw==}
@@ -1539,16 +1525,6 @@ packages:
     resolution: {integrity: sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
 
-  node-forge@1.4.3:
-    resolution: {integrity: sha512-P6wzfh6t70avmV8FrVEAd/36sOPJQ+hkaJVX1Laap9J/77m7M0eyozDvc8SwnDf4P7MP94gwbAAo0rg3YVXT+g==}
-    engines: {node: '>= 6.13.0'}
-
-  node-int64@0.4.0:
-    resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
-
-  node-rsa@1.1.1:
-    resolution: {integrity: sha512-Jd4cvbJMryN21r5HgxQOpMEqv+ooke/korixNNK3mGqfGJmy0M77WDDzo/05969+OkMy3XW1UuZsSmW9KQm7Fw==}
-
   nunjucks@3.2.4:
     resolution: {integrity: sha512-26XRV6BhkgK0VOxfbU5cQI+ICFUtMLixv1noZn1tGU38kQH5A5nmmbk/O45xdyBhD1esk47nKrY0mvQpZIhRjQ==}
     engines: {node: '>= 6.9.0'}
@@ -1678,7 +1654,7 @@ packages:
       '@ibm-cloud/watsonx-ai': '*'
       '@langfuse/client': '*'
       '@openai/agents': '*'
-      '@openai/codex-sdk': 0.170.0
+      '@openai/codex-sdk': '*'
       '@openai/codex-security': ^0.2.0
       '@slack/web-api': '*'
       ibm-cloud-sdk-core: '*'
@@ -2049,7 +2025,6 @@ packages:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 ignoredOptionalDependencies:
-  - '@anthropic-ai/claude-agent-sdk'
   - '@aws-sdk/*'
   - '@aws/bedrock-token-generator'
   - '@azure/*'
@@ -2091,7 +2066,7 @@ snapshots:
   '@apidevtools/json-schema-ref-parser@16.0.7(@types/json-schema@7.0.15)':
     dependencies:
       '@types/json-schema': 7.0.15
-      js-yaml: 5.4.2
+      js-yaml: 5.4.3
 
   '@babel/runtime@7.29.7': {}
 
@@ -2203,9 +2178,9 @@ snapshots:
       - supports-color
     optional: true
 
-  '@hono/node-server@2.1.5(hono@4.13.13)':
+  '@hono/node-server@2.1.8(hono@4.13.18)':
     dependencies:
-      hono: 4.13.13
+      hono: 4.13.18
 
   '@inquirer/ansi@2.0.10': {}
 
@@ -2358,7 +2333,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 2.1.5(hono@4.13.13)
+      '@hono/node-server': 2.1.8(hono@4.13.18)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -2368,7 +2343,7 @@ snapshots:
       eventsource-parser: 3.1.1
       express: 5.2.1
       express-rate-limit: 8.7.0(express@5.2.1)
-      hono: 4.13.13
+      hono: 4.13.18
       jose: 6.2.11
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -2638,11 +2613,6 @@ snapshots:
 
   asap@2.0.6: {}
 
-  asn1@0.2.6:
-    dependencies:
-      safer-buffer: 2.1.2
-    optional: true
-
   ast-types@0.13.4:
     dependencies:
       tslib: 2.8.1
@@ -2654,7 +2624,7 @@ snapshots:
   base64-js@1.5.1:
     optional: true
 
-  basic-ftp@6.2.1: {}
+  basic-ftp@6.2.6: {}
 
   bignumber.js@9.3.1: {}
 
@@ -3170,7 +3140,7 @@ snapshots:
 
   get-uri@8.0.1:
     dependencies:
-      basic-ftp: 6.2.1
+      basic-ftp: 6.2.6
       data-uri-to-buffer: 8.0.0
       debug: 4.4.3
     transitivePeerDependencies:
@@ -3235,7 +3205,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.13.13: {}
+  hono@4.13.18: {}
 
   hookified@1.15.1: {}
 
@@ -3311,23 +3281,12 @@ snapshots:
 
   javascript-natural-sort@0.7.1: {}
 
-  jks-js@1.1.7:
-    dependencies:
-      node-forge: 1.4.3
-      node-int64: 0.4.0
-      node-rsa: 1.1.1
-    optional: true
-
   jose@6.2.11:
     optional: true
 
   js-base64@3.9.3: {}
 
   js-rouge@3.2.1: {}
-
-  js-yaml@5.4.2:
-    dependencies:
-      argparse: 2.0.1
 
   js-yaml@5.4.3:
     dependencies:
@@ -3484,17 +3443,6 @@ snapshots:
       fetch-blob: 3.2.0
       formdata-polyfill: 4.0.10
 
-  node-forge@1.4.3:
-    optional: true
-
-  node-int64@0.4.0:
-    optional: true
-
-  node-rsa@1.1.1:
-    dependencies:
-      asn1: 0.2.6
-    optional: true
-
   nunjucks@3.2.4(chokidar@5.0.0):
     dependencies:
       a-sync-waterfall: 1.0.1
@@ -3601,11 +3549,11 @@ snapshots:
 
   promise-limit@2.7.0: {}
 
-  promptfoo@0.125.1(@openai/codex-sdk@0.170.0)(@types/json-schema@7.0.15)(@types/node@25.9.1)(jks-js@1.1.7):
+  promptfoo@0.125.1(@openai/codex-sdk@0.170.0)(@types/json-schema@7.0.15)(@types/node@25.9.1):
     dependencies:
       '@anthropic-ai/sdk': 0.133.0(zod@4.6.7)
       '@apidevtools/json-schema-ref-parser': 16.0.7(@types/json-schema@7.0.15)
-      '@hono/node-server': 2.1.5(hono@4.13.13)
+      '@hono/node-server': 2.1.8(hono@4.13.18)
       '@inquirer/checkbox': 5.2.8(@types/node@25.9.1)
       '@inquirer/confirm': 6.3.5(@types/node@25.9.1)
       '@inquirer/core': 12.0.6(@types/node@25.9.1)
@@ -3687,8 +3635,7 @@ snapshots:
       '@openai/codex-sdk': 0.170.0
       '@smithy/node-http-handler': 4.12.1
       google-auth-library: 11.3.4
-      hono: 4.13.13
-      jks-js: 1.1.7
+      hono: 4.13.18
       pem: 1.14.8
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
