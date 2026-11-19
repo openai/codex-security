@@ -176,8 +176,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
           for (const write of [
             "submit_dependency_claims",
             "submit_dependency_assessments",
-            "record_codex_security_endpoint",
-            "record_dependency_service_mapping",
+            "update_codex_security_graph",
+            "resolve_codex_security_services",
           ])
             expect(listed).not.toContain(write);
           expect(payload.evidence).toMatchObject([

@@ -19,7 +19,7 @@ import {
 export const dependencyAbortTool = {
   name: "abort_codex_security_investigation",
   description:
-    "Coordinator only. End this advisory when required data is unavailable across a material scope. Cite current original lookup selections or a required server's failed startup receipt. Use list_dependency_evidence and read_dependency_evidence for those IDs. Preserve independent findings. One missing lookup or an optional startup failure is a limitation.",
+    "Coordinator only. End this advisory when required data is unavailable across a material scope. Cite current original lookup selections or a required server's failed startup receipt. Use read_dependency_evidence to find those receipts. Preserve independent findings. One missing lookup or an optional startup failure is a limitation.",
   inputSchema: z.toJSONSchema(dependencyAbortInputSchema),
 };
 export type DependencyStartupStatus =

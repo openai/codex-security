@@ -139,7 +139,7 @@ async function fixture(extraFiles: Record<string, string> = {}) {
 test("repository investigators share pinned source notes without promoting assertions to reviewed claims", async () => {
   const captured = 'export const selectedMode = "archive";';
   await using f = await fixture({ "modes.js": captured + "\n" });
-  const tool = "record_codex_security_evidence";
+  const tool = "update_codex_security_graph";
   const graph = "query_codex_security_graph";
   const assertion = {
     question: "Which mode is configured?",
@@ -164,11 +164,11 @@ test("repository investigators share pinned source notes without promoting asser
         if (!req.coordinator) {
           const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
           expect(tools.definitions.some((d) => d.name === tool)).toBe(false);
-          await expect(tools.call(tool, input)).rejects.toThrow();
+          await expect(tools.call(tool, { note: input })).rejects.toThrow();
           expect(
-            await tools.call(graph, { evidence: { id: noteId } }),
+            await tools.call(graph, { note: { id: noteId } }),
           ).toMatchObject({
-            source_evidence: {
+            note: {
               id: noteId,
               investigator_assertion: assertion,
               excerpts: [{ ...range, commit: f.revision, text: captured }],
@@ -187,67 +187,31 @@ test("repository investigators share pinned source notes without promoting asser
           });
         }
         const other = await req.investigationTools!();
-        const graphQuery = other.definitions.find((d) => d.name === graph);
-        expect(JSON.stringify(graphQuery?.inputSchema)).toContain(
-          '"evidence":',
-        );
-        const query = (evidence: unknown) => other.call(graph, { evidence });
+        const query = (note: unknown) => other.call(graph, { note });
         await writeFile(
           join(f.path, "modes.js"),
           "export const selectedMode = null;\n",
         );
-        const written = (await tools.call(tool, input)) as {
-          source_evidence: { id: string };
+        const written = (await tools.call(tool, { note: input })) as {
+          note: { id: string };
         };
-        noteId = written.source_evidence.id;
-        const focusedKeys = [
-          "service_resolution",
-          "source_evidence",
-          "source_evidence_count",
-        ];
-        expect(Object.keys(written).sort()).toEqual(focusedKeys);
-        expect(written).toMatchObject({ source_evidence_count: 1 });
-        expect(written.source_evidence).toEqual({
-          id: expect.stringMatching(/^source-evidence-[0-9a-f]{64}$/u),
-        });
-        expect(await other.call(tool, input)).toEqual(written);
+        noteId = written.note.id;
+        expect(await other.call(tool, { note: input })).toEqual(written);
         for (const bad of [
           { ...range, commit: "0".repeat(40) },
           { ...range, path: "../outside.js" },
         ]) {
           await expect(
             tools.call(tool, {
-              ...input,
-              claim: "Unverified.",
-              evidence: [range, bad],
+              note: { ...input, claim: "Unverified.", evidence: [range, bad] },
             }),
           ).rejects.toThrow();
         }
-        const list = {
-          source_evidence_count: 1,
-          source_evidence: [{ id: noteId, ...assertion }],
-        };
-        const listing = await query({});
-        expect(Object.keys(listing as object).sort()).toEqual(focusedKeys);
-        expect(listing).toMatchObject(list);
-        expect(await query({ search: "selectedMode" })).toMatchObject(list);
-        expect(await query({ id: noteId, search: "missing" })).toMatchObject({
-          source_evidence: null,
-          source_evidence_count: 1,
-        });
-        const summary = await other.call(graph, {});
-        expect(summary).toMatchObject({ source_evidence_count: 1 });
-        expect(summary).not.toHaveProperty("source_evidence");
-        expect(
-          await other.call("list_dependency_evidence", { tool: graph }),
-        ).toMatchObject({
-          receipts: [
-            {
-              originalPayloadSha256: dependencyRecordHash({
-                structuredContent: summary,
-              }),
-            },
-          ],
+        const listing = { notes: [{ id: noteId, ...assertion }] };
+        expect(await query({})).toMatchObject(listing);
+        expect(await query({ search: "selectedMode" })).toMatchObject(listing);
+        expect(await query({ id: noteId, search: "missing" })).toEqual({
+          note: null,
         });
         expect(await other.call("query_dependency_claims", {})).toEqual([]);
         await expect(
@@ -332,8 +296,8 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
                   ],
                 });
               } else if (late === "roster") {
-                await call("record_codex_security_source_work", {
-                  work: {
+                await call("update_codex_security_graph", {
+                  sourceWork: {
                     operation: "append_roster_page",
                     id: "remaining-imports",
                     owner: "search",
@@ -427,7 +391,7 @@ test.each(["incomplete", "complete"] as const)(
   async (completion) => {
     await using f = await fixture();
     const paths = ["app.js", "package-lock.json", "secondary.js"];
-    const tool = "record_codex_security_source_work";
+    const tool = "update_codex_security_graph";
     let reviewedLimitations: string[] = [];
     const result = await runReviewedDependencyCheck(
       {
@@ -466,7 +430,7 @@ test.each(["incomplete", "complete"] as const)(
             });
           }
           const other = await req.investigationTools!();
-          const record = (work: unknown) => call(tool, { work });
+          const record = (sourceWork: unknown) => call(tool, { sourceWork });
           const query = (sourceWork: unknown) =>
             other.call("query_codex_security_graph", { sourceWork });
           const roster = {
@@ -487,7 +451,6 @@ test.each(["incomplete", "complete"] as const)(
               },
             ],
           });
-          const partition = { partitionId: "first", owner: "reader" };
           const view = {
             rosterId: "imports",
             page: { view: "unassigned", limit: 2 },
@@ -506,7 +469,7 @@ test.each(["incomplete", "complete"] as const)(
           await record({
             operation: "assign_partition",
             id: "first",
-            owner: partition.owner,
+            owner: "reader",
             rosterId: "imports",
             paths: paths.slice(0, 2),
           });
@@ -515,44 +478,17 @@ test.each(["incomplete", "complete"] as const)(
           );
           await record({
             operation: "record_examined",
-            ...partition,
-            expectedRevision: 1,
+            partitionId: "first",
             paths: [paths[0]],
-          });
-          await record({
-            operation: "offer_handoff",
-            ...partition,
-            expectedRevision: 2,
-            recipient: "second-reader",
-            newPartitionId: "second",
-            paths: [paths[1]],
-          });
-          await expect(
-            other.call(tool, {
-              work: {
-                operation: "accept_handoff",
-                partitionId: "first",
-                recipient: "second-reader",
-                expectedRevision: 2,
-              },
-            }),
-          ).rejects.toThrow("revision changed");
-          await other.call(tool, {
-            work: {
-              operation: "accept_handoff",
-              partitionId: "first",
-              recipient: "second-reader",
-              expectedRevision: 3,
-            },
           });
           expect(
             await query({
-              partitionId: "second",
+              partitionId: "first",
               page: { view: "remaining", limit: 10 },
             }),
           ).toMatchObject({
             source_work: {
-              owner: "second-reader",
+              owner: "reader",
               page: { items: [paths[1]] },
             },
           });
@@ -572,16 +508,14 @@ test.each(["incomplete", "complete"] as const)(
               owner: "search",
               paths: [paths[2]],
             });
-            for (const [partitionId, owner, path] of [
-              ["second", "second-reader", paths[1]],
-              ["last", "search", paths[2]],
+            for (const [partitionId, path] of [
+              ["first", paths[1]],
+              ["last", paths[2]],
             ])
               await other.call(tool, {
-                work: {
+                sourceWork: {
                   operation: "record_examined",
                   partitionId,
-                  owner,
-                  expectedRevision: 1,
                   paths: [path],
                 },
               });
@@ -602,7 +536,7 @@ test.each(["incomplete", "complete"] as const)(
       expect(limitation).toContain("Remaining import search timed out.");
       expect(limitation).toContain('unassigned files ["secondary.js"]');
       expect(limitation).toContain(
-        'partition "second" has unexamined files ["package-lock.json"]',
+        'partition "first" has unexamined files ["package-lock.json"]',
       );
       expect(limitation).toContain("checkout-search");
     }
@@ -2214,7 +2148,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
           ) {
             expect(input.evidence[0].result).toBeUndefined();
             expect(input.evidence[0].preview.next).toBe(4000);
-            const metadata = await call("list_dependency_evidence", {
+            const metadata = await call("read_dependency_evidence", {
               server: "builds",
               tool: "observe",
             });
@@ -2441,7 +2375,10 @@ test("native investigators share asynchronous reviews, immutable premises and pa
 });
 
 test("catalog mappings bind the selected row and keep failed lookups open", async () => {
-  await using f = await fixture();
+  const unavailable = "package.json";
+  await using f = await fixture({
+    [unavailable]: '{"dependencies":{"fixture-parser":"1.0.0"}}',
+  });
   const server = "service-registry",
     tool = "lookup";
   const result = await runReviewedDependencyCheck(
@@ -2473,10 +2410,12 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
           });
         const { call } = await req.investigationTools!();
         const matched = "app.js",
-          unmapped = "secondary.js",
-          unavailable = "package-lock.json";
-        await call("resolve_codex_security_services", {
-          paths: [matched, unmapped, unavailable],
+          unmapped = "secondary.js";
+        await call("trace_codex_security_code", {
+          package: "fixture-parser",
+          files: [unavailable],
+          max_hops: 0,
+          time_budget_ms: 5000,
         });
         const lookup = (
           path: string,
@@ -2501,21 +2440,25 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
           tool,
           arguments: { path: unavailable },
         });
-        for (const receipt of [first, empty]) {
-          await call("record_dependency_service_mapping", {
-            path: receipt.arguments.path,
-            lookups: [
-              {
-                receiptId: receipt.sha256,
-                textBlock: null,
-                target: ["path"],
-                records: ["services"],
-                id: ["id"],
-                name: ["name"],
-              },
-            ],
+        const resolve = (path: string, ...ids: string[]) =>
+          call("resolve_codex_security_services", {
+            path,
+            lookups: ids.map((receiptId) => ({
+              receiptId,
+              textBlock: null,
+              target: ["path"],
+              records: ["services"],
+              id: ["id"],
+              name: ["name"],
+            })),
           });
-        }
+        const before = await call("query_codex_security_graph", {});
+        await expect(
+          resolve(matched, first.sha256, empty.sha256),
+        ).rejects.toThrow(/file or its project/);
+        expect(await call("query_codex_security_graph", {})).toEqual(before);
+        await resolve(matched, first.sha256);
+        await resolve(unmapped, empty.sha256);
         const query = (node: string) =>
           call("query_codex_security_graph", { node });
         expect(await query(unmapped)).toMatchObject({
@@ -2526,7 +2469,6 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
         });
         expect(await query(unavailable)).toMatchObject({
           service_lookup: "pending",
-          evidence: [],
           service_resolution: { pending: 1 },
         });
         const evidence = (await query(matched)) as {
@@ -2586,7 +2528,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
             },
           ],
           limitations: [
-            "The catalog failed for package-lock.json. Its mapping remains open.",
+            "The catalog failed for package.json. Its mapping remains open.",
           ],
         });
       },
@@ -2615,7 +2557,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
   ).toMatchObject({
     server,
     tool,
-    arguments: { path: "package-lock.json" },
+    arguments: { path: unavailable },
     result: { structuredContent: { status: "failed" } },
   });
 });

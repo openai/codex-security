@@ -1,9 +1,5 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import {
-  withInvestigationGraphTools,
-  type DependencyEndpointGraph,
-} from "./dependency-endpoints.js";
 import { z } from "zod";
 import { bundledPluginRoot } from "./runtime.js";
 import {
@@ -24,7 +20,10 @@ import {
   type DependencyEvidenceRecord,
 } from "./dependency-evidence-sources.js";
 import type { LinkedDependencyEvidence } from "./dependency-linked-resources.js";
-import { createDependencySourceWorkTools } from "./dependency-source-work-tools.js";
+import {
+  createDependencySourceWorkTools,
+  withInvestigationGraphTools,
+} from "./dependency-source-work-tools.js";
 import { createDependencySourceTools } from "./dependency-source-evidence.js";
 import {
   createDependencyGraphEvidenceTools,
@@ -40,13 +39,6 @@ import {
 type Definition = { name: string; description: string; inputSchema: object };
 type Tool = Definition & { run(input: unknown): unknown };
 interface Graph extends DependencyEvidenceGraph {
-  tools: Definition[];
-  serviceResolutionCoverage?(): Record<string, unknown>;
-  call(
-    name: string,
-    args: unknown,
-    signal: AbortSignal,
-  ): Promise<Record<string, unknown>>;
   boundTraceResponse(result: Record<string, unknown>): Record<string, unknown>;
   close(): Promise<void> | void;
 }
@@ -91,21 +83,24 @@ export async function startInvestigationTools(
 
 export { investigationServer };
 const text = z.string().min(1);
-const readEvidence = z.strictObject({
-  id: text,
-  selection: dependencyReceiptSelectionSchema
-    .omit({ receiptId: true })
-    .optional(),
-  path: z
-    .array(z.union([z.string(), z.number().int().nonnegative()]))
-    .optional(),
-  offset: z.number().int().nonnegative().optional(),
-});
-const listEvidence = z.strictObject({
-  server: text.optional(),
-  tool: text.optional(),
-  offset: z.number().int().nonnegative().optional(),
-});
+const readEvidence = z
+  .strictObject({
+    id: text.optional(),
+    server: text.optional(),
+    tool: text.optional(),
+    selection: dependencyReceiptSelectionSchema
+      .omit({ receiptId: true })
+      .optional(),
+    path: z
+      .array(z.union([z.string(), z.number().int().nonnegative()]))
+      .optional(),
+    offset: z.number().int().nonnegative().optional(),
+  })
+  .refine(
+    ({ id, server, tool, selection, path }) =>
+      id ? !server && !tool : !selection && !path,
+    "Use server or tool to filter the receipt list. Supply an id to use selection or path.",
+  );
 const queryClaims = z.strictObject({
   ids: z.array(text).optional(),
   wait: z.boolean().optional(),
@@ -318,7 +313,6 @@ export function createInvestigationSession(options: {
   signal: AbortSignal;
   productionDiscovery: boolean;
   excludedSourcePaths?: readonly string[];
-  endpoints: DependencyEndpointGraph;
   submitAssessments: Tool;
   evidenceSources: boolean;
   queue: ReturnType<typeof createPremiseQueue>;
@@ -352,25 +346,12 @@ export function createInvestigationSession(options: {
       ),
     ));
   }
-  async function noteReply(source_evidence: unknown) {
-    const source_evidence_count = options.store.size("source-note");
-    const g = await openGraph();
-    const coverage = g.serviceResolutionCoverage
-      ? g.serviceResolutionCoverage()
-      : (await g.call("query_codex_security_graph", {}, options.signal))[
-          "service_resolution"
-        ];
-    const {
-      paths: _paths,
-      unresolved_paths: _unresolved,
-      ...service_resolution
-    } = isRecord(coverage) ? coverage : {};
-    return { source_evidence, source_evidence_count, service_resolution };
-  }
   const sourceNotes = {
-    query: (raw: unknown) =>
-      noteReply(queryDependencySourceNotes(options.store, raw)),
-    async record(raw: unknown) {
+    query(raw: unknown) {
+      const note = queryDependencySourceNotes(options.store, raw);
+      return Array.isArray(note) ? { notes: note } : { note };
+    },
+    async update(raw: unknown) {
       if (!options.revision)
         throw new Error(
           "A pinned Git revision is required to record a source note.",
@@ -380,7 +361,7 @@ export function createInvestigationSession(options: {
         signal: options.signal,
       });
       options.signal.throwIfAborted();
-      return noteReply(saveDependencySourceNote(options.store, note));
+      return { note: saveDependencySourceNote(options.store, note) };
     },
   };
   const remember = (
@@ -409,12 +390,14 @@ export function createInvestigationSession(options: {
   }
   const readers: Tool[] = [
     {
-      name: "list_dependency_evidence",
+      name: "read_dependency_evidence",
       description:
-        "List receipt IDs, server and tool, including the parent receipt and content hashes for linked resources. Use next as the offset for the next page.",
-      inputSchema: z.toJSONSchema(listEvidence),
+        "List captured receipts, optionally filtering by server or tool. Supply an id to read its original response, optionally narrowing it with selection or path. Use next as the offset for the next page. originalPayloadSha256 identifies the complete response.",
+      inputSchema: z.toJSONSchema(readEvidence),
       run(raw) {
-        const { server, tool, offset = 0 } = listEvidence.parse(raw);
+        const args = readEvidence.parse(raw);
+        if (args.id) return evidencePage(resolveRecord(args.id), args);
+        const { server, tool, offset = 0 } = args;
         const page: ReturnType<typeof receiptMetadata>[] = [];
         const pageLength = 40;
         let count = 0;
@@ -430,16 +413,6 @@ export function createInvestigationSession(options: {
           }
         }
         return { receipts: page, next: null };
-      },
-    },
-    {
-      name: "read_dependency_evidence",
-      description:
-        "Read a page of the immutable original response by receipt ID, optionally selecting a JSON path or offset. originalPayloadSha256 identifies the complete response across pages.",
-      inputSchema: z.toJSONSchema(readEvidence),
-      run(raw) {
-        const args = readEvidence.parse(raw);
-        return evidencePage(resolveRecord(args.id), args);
       },
     },
     {
@@ -481,6 +454,15 @@ export function createInvestigationSession(options: {
       );
       if (!readOnly) {
         const g = await openGraph();
+        const externalRecord = (id: string) => {
+          const r = records.get(id);
+          return r && r.server !== investigationServer ? r : undefined;
+        };
+        const graphTools = createDependencyGraphEvidenceTools(
+          g,
+          options.evidenceSources ? externalRecord : undefined,
+          options.signal,
+        );
         tools.push(
           options.submitAssessments,
           {
@@ -508,22 +490,13 @@ export function createInvestigationSession(options: {
               }
             },
           })),
-          ...createDependencyGraphEvidenceTools(g, (id) => {
-            const r = records.get(id);
-            return r && r.server !== investigationServer ? r : undefined;
-          }),
-          ...g.tools.map((def) => ({
+          ...graphTools.map((def) => ({
             ...def,
             async run(input: unknown) {
               const startedAt = new Date().toISOString();
               let response: Record<string, unknown>;
               try {
-                response = await g.call(def.name, input, options.signal);
-                if (def.name === "query_codex_security_graph")
-                  response = {
-                    ...response,
-                    source_evidence_count: options.store.size("source-note"),
-                  };
+                response = await def.run(input);
               } catch (error) {
                 options.onSearch(
                   auditSearch(def.name, input, startedAt, {}, undefined, error),
@@ -545,7 +518,6 @@ export function createInvestigationSession(options: {
       }
       const exposed = withInvestigationGraphTools(
         tools,
-        options.endpoints,
         sourceWork,
         readOnly,
         sourceNotes,

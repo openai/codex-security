@@ -540,7 +540,7 @@ test("a validated block stops the advisory even when the investigator returns a 
         calls++;
         req.onEvidenceStartup!("builds", "failed", true, "Unreachable");
         const tools = await req.investigationTools!();
-        const page = (await tools.call("list_dependency_evidence", {
+        const page = (await tools.call("read_dependency_evidence", {
           server: "builds",
         })) as { receipts: { id: string }[] };
         const id = page.receipts[0]!.id;

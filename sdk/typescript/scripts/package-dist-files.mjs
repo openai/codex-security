@@ -45,8 +45,6 @@ const distModules = [
   "dependency-reachability",
   "dependency-review-queue",
   "dependency-source-evidence",
-  "dependency-stack-migration",
-  "dependency-endpoints",
   "dependency-blocked-evidence",
   "dependency-blocked-schema",
   "dependency-receipt-selection",

@@ -113,10 +113,12 @@ function reference({ id, revision, hash }: DependencyClaimReference) {
   return { id, revision, hash };
 }
 
-export function stackClaimContent(
-  contextHash: string,
-  record: PreparedDependencyClaim,
+/** Include the origin of every capture selection in the claim's immutable identity. */
+export function createDependencyClaims(
+  context: unknown,
+  store: DependencyAttemptStore,
 ) {
+  const contextHash = dependencyClaimHash(context);
   function sorted<T>(values: T[]) {
     return [...values].sort((a, b) => {
       const left = canonicalJson(a),
@@ -124,34 +126,27 @@ export function stackClaimContent(
       return left < right ? -1 : left > right ? 1 : 0;
     });
   }
-
-  return {
-    contextHash,
-    id: record.id,
-    scope: record.scope,
-    payload: record.payload,
-    dependencies: sorted(record.dependencies.map(reference)),
-    excerpts: sorted(record.excerpts),
-    receipts: sorted(
-      record.receipts.map(
-        ({ server, originalPayloadSha256, origin, selection }) => ({
-          server,
-          originalPayloadSha256,
-          origin,
-          selection,
-        }),
+  function content(record: PreparedDependencyClaim) {
+    return {
+      contextHash,
+      id: record.id,
+      scope: record.scope,
+      payload: record.payload,
+      dependencies: sorted(record.dependencies.map(reference)),
+      excerpts: sorted(record.excerpts),
+      receipts: sorted(
+        record.receipts.map(
+          ({ server, originalPayloadSha256, origin, selection }) => ({
+            server,
+            originalPayloadSha256,
+            origin,
+            selection,
+          }),
+        ),
       ),
-    ),
-  };
-}
-
-/** Include the origin of every capture selection in the claim's immutable identity. */
-export function createDependencyClaims(
-  context: unknown,
-  store: DependencyAttemptStore,
-) {
-  const contextHash = dependencyClaimHash(context);
-  type Value = ReturnType<typeof stackClaimContent>;
+    };
+  }
+  type Value = ReturnType<typeof content>;
   function get(
     ref: DependencyClaimReference,
   ): DependencyClaimRecord | undefined {
@@ -194,7 +189,7 @@ export function createDependencyClaims(
     preview: (claim: PreparedDependencyClaim, revision: number) => ({
       id: claim.id,
       revision,
-      hash: dependencyClaimHash(stackClaimContent(contextHash, claim)),
+      hash: dependencyClaimHash(content(claim)),
     }),
     propose(claim: PreparedDependencyClaim, expectedRevision?: number) {
       for (const ref of claim.dependencies) {
@@ -205,7 +200,7 @@ export function createDependencyClaims(
       }
       const saved = store.recordClaim(
         claim.id,
-        stackClaimContent(contextHash, claim),
+        content(claim),
         expectedRevision,
       );
       store.set("stack-claim-receipts", saved.hash, claim.receipts);

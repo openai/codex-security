@@ -91,7 +91,7 @@ const proposedUse = z.strictObject({
   component: text
     .optional()
     .describe(
-      "Actual selected dependency. If this is an embedded or vendored component, cite this caller's selection of its containing artifact and the component name and version inside that artifact.",
+      "Omit for the scoped dependency itself. For an embedded or vendored library, give its exact name here and its version in the version field. Cite the selected parent artifact and the library it contains.",
     ),
   place: dependencyPlaceSchema
     .partial()
@@ -878,7 +878,7 @@ export async function verifyProposedUse(
     );
     if (!bound)
       throw new CodexSecurityError(
-        "Cite the selected parent artifact or build and the embedded dependency and version it contains. Join separate records by their artifact digest.",
+        `For ${scope.component} itself, omit component and set version separately. For an embedded dependency, give its exact name and cite the selected parent artifact or build and the library version it contains. Join separate records by their artifact digest.`,
       );
   }
   const covers = (path: string | undefined, line: number | undefined) =>

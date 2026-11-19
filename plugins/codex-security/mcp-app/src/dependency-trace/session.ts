@@ -113,15 +113,6 @@ export async function createDependencyGraphSession(
     includeDiscoveryFile(path: string) {
       sourceScope?.includeExactFile(path);
     },
-    // Used by host replies that only need counts, without querying the graph.
-    serviceResolutionCoverage() {
-      const {
-        paths: _paths,
-        unresolved_paths: _unresolvedPaths,
-        ...coverage
-      } = serviceResolution();
-      return coverage;
-    },
     tools: Object.entries(dependencyGraphTools).map(
       ([name, { description, schema }]) => ({
         name,
