@@ -2108,6 +2108,242 @@ test("keeps an overflowed native response total unavailable", async () => {
   }
 });
 
+test.each([
+  [
+    "native unsafe individual count",
+    {
+      type: "token_usage_record",
+      payload: {
+        thread_id: scanThreadId,
+        response_id: "unsafe-individual-count",
+        usage: {
+          input_tokens: Number.MAX_SAFE_INTEGER + 1,
+          output_tokens: 0,
+        },
+      },
+    },
+  ],
+  [
+    "native response",
+    {
+      type: "token_usage_record",
+      payload: {
+        thread_id: scanThreadId,
+        response_id: "overflowed-response",
+        usage: {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 2,
+        },
+      },
+    },
+  ],
+  [
+    "native thread total",
+    {
+      type: "token_usage_record",
+      payload: {
+        thread_id: scanThreadId,
+        response_id: "overflowed-thread-total",
+        usage: { input_tokens: 1, output_tokens: 1 },
+        thread_token_usage: {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 2,
+        },
+      },
+    },
+  ],
+  [
+    "native thread total beside malformed response usage",
+    {
+      type: "token_usage_record",
+      payload: {
+        thread_id: scanThreadId,
+        response_id: "malformed-response-overflowed-total",
+        usage: null,
+        thread_token_usage: {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 2,
+        },
+      },
+    },
+  ],
+  [
+    "legacy thread total",
+    legacyUsageRecord({
+      input_tokens: Number.MAX_SAFE_INTEGER,
+      output_tokens: 2,
+    }),
+  ],
+])(
+  "rejects an overflowed %s after earlier measured usage",
+  async (_, record) => {
+    const home = await codexHome();
+    const path = await writeSession(home, scanThreadId, {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = costTracker(home, { maxCostUsd: 1 });
+    tracker.start(scanThreadId);
+    try {
+      const before = await tracker.refresh();
+      expect(before.usage).toMatchObject({ total_tokens: 110 });
+      await appendFile(path, jsonLines([record]) + "\n");
+      const after = await tracker.refresh();
+      expect(after.usage).toBeNull();
+      expect(after.cost).toBeNull();
+      expect(after.measurement).toMatchObject({
+        coverage: "unavailable",
+        warnings: ["token_usage_overflow"],
+      });
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test("ignores an unused unsafe legacy cache field in a valid native total", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, scanThreadId, {
+    input_tokens: 100,
+    output_tokens: 10,
+  });
+  const tracker = costTracker(home, { maxCostUsd: 1 });
+  tracker.start(scanThreadId);
+  try {
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "token_usage_record",
+          payload: {
+            thread_id: scanThreadId,
+            response_id: "valid-canonical-cache-write",
+            usage: { input_tokens: 1, output_tokens: 1 },
+            thread_token_usage: {
+              input_tokens: 120,
+              output_tokens: 10,
+              cache_write_input_tokens: 0,
+              cache_write_tokens: Number.MAX_SAFE_INTEGER + 1,
+            },
+          },
+        },
+      ]) + "\n",
+    );
+    const snapshot = await tracker.refresh();
+    expect(snapshot.usage).toMatchObject({ total_tokens: 130 });
+    expect(snapshot.measurement.warnings).toBeUndefined();
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test("rejects an exponent-overflowed JSON token count after earlier usage", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, scanThreadId, {
+    input_tokens: 100,
+    output_tokens: 10,
+  });
+  const tracker = costTracker(home, { maxCostUsd: 1 });
+  tracker.start(scanThreadId);
+  try {
+    expect((await tracker.refresh()).usage).toMatchObject({
+      total_tokens: 110,
+    });
+    // JSON.parse accepts 1e309 as Infinity; JSON.stringify would write null.
+    await appendFile(
+      path,
+      `{"type":"token_usage_record","payload":{"thread_id":"${scanThreadId}","response_id":"exponent-overflow","usage":{"input_tokens":1e309,"output_tokens":0}}}\n`,
+    );
+    const snapshot = await tracker.refresh();
+    expect(snapshot.usage).toBeNull();
+    expect(snapshot.cost).toBeNull();
+    expect(snapshot.measurement).toMatchObject({
+      coverage: "unavailable",
+      warnings: ["token_usage_overflow"],
+    });
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test("keeps active thread overflow unavailable after an older archived copy", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, scanThreadId, {
+    input_tokens: 0,
+    output_tokens: 0,
+  });
+  const archive = join(home, "archived_sessions");
+  await filesystem.mkdir(archive);
+  await writeFile(
+    join(archive, "rollout-old.jsonl"),
+    await filesystem.readFile(path),
+  );
+  await appendFile(
+    path,
+    jsonLines([
+      nativeUsageRecord(scanThreadId, "first", {
+        input_tokens: Number.MAX_SAFE_INTEGER,
+        output_tokens: 0,
+      }),
+      nativeUsageRecord(
+        scanThreadId,
+        "second",
+        { input_tokens: 0, output_tokens: 2 },
+        { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 },
+      ),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home, { maxCostUsd: 1 });
+  tracker.start(scanThreadId);
+  try {
+    for (let refresh = 0; refresh < 2; refresh += 1) {
+      const snapshot = await tracker.refresh();
+      expect(snapshot.usage).toBeNull();
+      expect(snapshot.cost).toBeNull();
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "unavailable",
+        warnings: ["token_usage_overflow"],
+      });
+    }
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test("keeps an overflowed inherited baseline unavailable for the child", async () => {
+  const home = await codexHome();
+  await writeSession(home, scanThreadId, {
+    input_tokens: 0,
+    output_tokens: 0,
+  });
+  const child = await writeSession(
+    home,
+    childUuid7Thread,
+    { input_tokens: 0, output_tokens: 0 },
+    { parent: scanThreadId },
+  );
+  const rollout = ownershipRollout([lowerUuid7Turn]);
+  rollout[3] = legacyUsageRecord({
+    input_tokens: Number.MAX_SAFE_INTEGER,
+    output_tokens: 2,
+  });
+  await writeFile(child, jsonLines(rollout) + "\n");
+  const tracker = costTracker(home, { maxCostUsd: 1 });
+  tracker.start(scanThreadId);
+  try {
+    const snapshot = await tracker.refresh();
+    expect(snapshot.usage).toBeNull();
+    expect(snapshot.cost).toBeNull();
+    expect(snapshot.measurement).toMatchObject({
+      coverage: "partial",
+      missingThreadCount: 1,
+      warnings: ["token_usage_overflow"],
+    });
+  } finally {
+    await tracker.stop();
+  }
+});
+
 test("keeps a multi-thread overflow unavailable after a later worker", async () => {
   const home = await codexHome();
   await writeSession(home, scanThreadId, {
