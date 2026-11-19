@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  withEndpointTools,
+  withInvestigationGraphTools,
   type DependencyEndpointGraph,
 } from "./dependency-endpoints.js";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import {
   type DependencyEvidenceRecord,
 } from "./dependency-evidence-sources.js";
 import type { LinkedDependencyEvidence } from "./dependency-linked-resources.js";
+import { createDependencySourceWorkTools } from "./dependency-source-work-tools.js";
 import { createDependencySourceTools } from "./dependency-source-evidence.js";
 import {
   createDependencyGraphEvidenceTools,
@@ -325,6 +326,7 @@ export function createInvestigationSession(options: {
     | undefined;
 }) {
   const { queue, records } = options;
+  const sourceWork = createDependencySourceWorkTools();
   let graph: Promise<Graph> | undefined;
   const remember = (
     tool: string,
@@ -411,6 +413,7 @@ export function createInvestigationSession(options: {
     },
   });
   return {
+    sourceWorkCoverage: sourceWork.coverage,
     async tools(readOnly: boolean): Promise<InvestigationTools> {
       const tools = readers.map((tool) =>
         readOnly && tool.name === "query_dependency_claims"
@@ -491,7 +494,12 @@ export function createInvestigationSession(options: {
           })),
         );
       }
-      const exposed = withEndpointTools(tools, options.endpoints, readOnly);
+      const exposed = withInvestigationGraphTools(
+        tools,
+        options.endpoints,
+        sourceWork,
+        readOnly,
+      );
       return {
         definitions: exposed.map(({ run: _, ...def }) => def),
         async call(name, args) {

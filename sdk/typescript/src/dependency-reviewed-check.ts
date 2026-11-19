@@ -143,6 +143,7 @@ const investigateInstructions = [
 ].join("\n");
 const coordinationInstructions = [
   "You coordinate the investigation. Use the native plan and parallel investigator tools for independent applications or evidence questions. Give each investigator its bounded question and the pinned scope. Wait for investigators before returning the final report.",
+  "For repository searches split across investigators, record the exact matched paths and source references as roster pages with record_codex_security_source_work. Assign each file to a partition and pass its ID to the investigator. Investigators read their paths through query_codex_security_graph({sourceWork:{partitionId,page:{view:'remaining',limit:50}}}), follow nextCursor, record examined paths, and offer or acknowledge exact handoffs. Preserve failed or partial searches as named roster gaps until a source reference resolves them. Read sourceWork:{} before finalizing to account for remaining work.",
   "Use trace_codex_security_code to find real callers with checkout-relative paths, exact advisory terms and a language-appropriate structural rule; inspect the actual configured operation and input. Treat matches as leads. Use source_only for exploratory traces. Query the shared graph before duplicating work. For missing upstream evidence fetch the exact dependency source and read a cited immutable excerpt.",
   "Call each configured evidence MCP normally. The host reads linked resources from the responding server. Use list_dependency_evidence to find receipt IDs and their linked resources, read_dependency_evidence for an exact response page, and ingest_dependency_graph_evidence to ingest sampled witnesses off-model. Review bounded witness details with query_codex_security_graph.",
   "When the requested scope asks which applications run the code, follow each matched source file through its importers to the configured launch command or entrypoint. Check each distinct consuming project, including launch files outside the package. A runnable package, a similarly named directory, or a CI launcher alone does not establish a production application. Keep the source verdict independent of deployment and access.",
@@ -1321,7 +1322,10 @@ async function investigateIssue(
         return { feedback: feedback(errorMessage(error)) };
       }
       const { additionalUses, limitations, coverage } = draft;
-      for (const gap of evidenceLimitations)
+      for (const gap of [
+        ...evidenceLimitations,
+        ...session!.sourceWorkCoverage.limitations(),
+      ])
         if (!limitations.includes(gap)) limitations.push(gap);
       if (
         options.evidenceSources?.length &&

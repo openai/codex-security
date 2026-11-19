@@ -13,6 +13,11 @@ import {
   type DependencyRuntimeScope,
   type DependencyRuntimeSelector,
 } from "./dependency-caller-scope.js";
+import {
+  sourceWorkQuerySchema,
+  sourceWorkTool,
+  type createDependencySourceWorkTools,
+} from "./dependency-source-work-tools.js";
 import { isRecord } from "./record.js";
 import { compareTimestamps } from "./timestamps.js";
 
@@ -354,31 +359,28 @@ type InvestigatorTool = {
   run: (input: unknown) => unknown;
 };
 
-/** Endpoint queries share the source graph tool. Lookup never changes the caller's supplied boundary. */
-export function withEndpointTools(
+const graphSelection = z.union([
+  z.strictObject({ endpoints: dependencyEndpointQuerySchema }),
+  z.strictObject({ sourceWork: sourceWorkQuerySchema }),
+]);
+
+/** Share graph queries across investigator and reviewer sessions without granting reviewers mutation tools. */
+export function withInvestigationGraphTools(
   tools: InvestigatorTool[],
   endpoints: DependencyEndpointGraph,
+  sourceWork: ReturnType<typeof createDependencySourceWorkTools>,
   readOnly = false,
 ): InvestigatorTool[] {
-  const schema = z.toJSONSchema(dependencyEndpointQuerySchema);
   const query = {
     name: "query_codex_security_graph",
     description:
-      "Query recorded source, sink, or intermediate endpoints by passing endpoints:{}.",
-    inputSchema: {
-      type: "object",
-      properties: { endpoints: schema },
-      required: ["endpoints"],
-      additionalProperties: false,
-    },
+      "Query endpoints with endpoints:{}. Use sourceWork:{} for source census counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for exact paths, gaps and handoffs.",
+    inputSchema: { ...z.toJSONSchema(graphSelection), type: "object" },
     run(input: unknown) {
-      return {
-        endpoints: endpoints.query(
-          z
-            .strictObject({ endpoints: dependencyEndpointQuerySchema })
-            .parse(input).endpoints,
-        ),
-      };
+      const selection = graphSelection.parse(input);
+      return "sourceWork" in selection
+        ? { source_work: sourceWork.query(selection.sourceWork) }
+        : { endpoints: endpoints.query(selection.endpoints) };
     },
   };
   const result = tools.map((tool) => {
@@ -391,7 +393,11 @@ export function withEndpointTools(
         anyOf: [tool.inputSchema, query.inputSchema],
       },
       run(input: unknown) {
-        if (isRecord(input) && Object.hasOwn(input, "endpoints"))
+        if (
+          isRecord(input) &&
+          (Object.hasOwn(input, "endpoints") ||
+            Object.hasOwn(input, "sourceWork"))
+        )
           return query.run(input);
         return tool.run(input);
       },
@@ -399,9 +405,12 @@ export function withEndpointTools(
   });
   if (!result.some((tool) => tool.name === query.name)) result.push(query);
   if (!readOnly)
-    result.push({
-      ...dependencyEndpointTool,
-      run: (input) => endpoints.record(input),
-    });
+    result.push(
+      { ...dependencyEndpointTool, run: (input) => endpoints.record(input) },
+      {
+        ...sourceWorkTool,
+        run: (input) => ({ source_work: sourceWork.mutate(input) }),
+      },
+    );
   return result;
 }

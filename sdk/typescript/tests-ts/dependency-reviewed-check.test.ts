@@ -254,6 +254,193 @@ for (const late of ["assessment", "candidate"] as const) {
   });
 }
 
+test.each(["incomplete", "complete"] as const)(
+  "source-work partitions share checkpoints and report %s coverage",
+  async (completion) => {
+    await using f = await fixture();
+    const paths = ["app.js", "package-lock.json", "secondary.js"];
+    const tool = "record_codex_security_source_work";
+    let reviewedLimitations: string[] = [];
+    const result = await runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Parser issue",
+        signal,
+      },
+      {
+        discover: async () => f.discovery,
+        async runAgent(req) {
+          const { call, definitions } = await req.investigationTools!();
+          if (!req.coordinator) {
+            const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+            for (const claim of packet.claims) {
+              if (claim.payload.kind !== "coverage") continue;
+              reviewedLimitations = claim.payload.limitations;
+              expect(definitions.some((d) => d.name === tool)).toBe(false);
+              expect(
+                await call("query_codex_security_graph", { sourceWork: {} }),
+              ).toMatchObject({
+                source_work: {
+                  remainingFileCount: completion === "complete" ? 0 : 1,
+                },
+              });
+            }
+            return JSON.stringify({
+              decisions: packet.claims.map(
+                (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
+                  ...reference(c),
+                  approved: true,
+                  reason: "Reviewed the caller and remaining source coverage.",
+                  evidenceKeys: c.availableEvidenceKeys,
+                }),
+              ),
+            });
+          }
+          const other = await req.investigationTools!();
+          const record = (work: unknown) => call(tool, { work });
+          const query = (sourceWork: unknown) =>
+            other.call("query_codex_security_graph", { sourceWork });
+          const roster = {
+            operation: "append_roster_page",
+            id: "imports",
+            owner: "search",
+            search: "Parser references",
+            sourceRefs: ["checkout-search"],
+          };
+          await record({
+            ...roster,
+            paths,
+            declaredComplete: false,
+            gaps: [
+              {
+                id: "late-page",
+                description: "Remaining import search timed out.",
+              },
+            ],
+          });
+          const partition = { partitionId: "first", owner: "reader" };
+          const view = {
+            rosterId: "imports",
+            page: { view: "unassigned", limit: 2 },
+          };
+          const first = (await query(view)) as {
+            source_work: { page: { items: string[]; nextCursor: unknown } };
+          };
+          expect(first.source_work.page.items).toEqual(paths.slice(0, 2));
+          const next = {
+            ...view,
+            page: { ...view.page, cursor: first.source_work.page.nextCursor },
+          };
+          expect(await query(next)).toMatchObject({
+            source_work: { page: { items: paths.slice(2), nextCursor: null } },
+          });
+          await record({
+            operation: "assign_partition",
+            id: "first",
+            owner: partition.owner,
+            rosterId: "imports",
+            paths: paths.slice(0, 2),
+          });
+          await expect(query(next)).rejects.toThrow(
+            "changed since this cursor",
+          );
+          await record({
+            operation: "record_examined",
+            ...partition,
+            expectedRevision: 1,
+            paths: [paths[0]],
+          });
+          await record({
+            operation: "offer_handoff",
+            ...partition,
+            expectedRevision: 2,
+            recipient: "second-reader",
+            newPartitionId: "second",
+            paths: [paths[1]],
+          });
+          await expect(
+            other.call(tool, {
+              work: {
+                operation: "accept_handoff",
+                partitionId: "first",
+                recipient: "second-reader",
+                expectedRevision: 2,
+              },
+            }),
+          ).rejects.toThrow("revision changed");
+          await other.call(tool, {
+            work: {
+              operation: "accept_handoff",
+              partitionId: "first",
+              recipient: "second-reader",
+              expectedRevision: 3,
+            },
+          });
+          expect(
+            await query({
+              partitionId: "second",
+              page: { view: "remaining", limit: 10 },
+            }),
+          ).toMatchObject({
+            source_work: {
+              owner: "second-reader",
+              page: { items: [paths[1]] },
+            },
+          });
+          if (completion === "complete") {
+            await record({
+              ...roster,
+              expectedRevision: 1,
+              declaredComplete: true,
+              paths: [],
+              gaps: [],
+              resolutions: [{ id: "late-page", sourceRef: "retried-search" }],
+            });
+            await record({
+              operation: "assign_partition",
+              id: "last",
+              rosterId: "imports",
+              owner: "search",
+              paths: [paths[2]],
+            });
+            for (const [partitionId, owner, path] of [
+              ["second", "second-reader", paths[1]],
+              ["last", "search", paths[2]],
+            ])
+              await other.call(tool, {
+                work: {
+                  operation: "record_examined",
+                  partitionId,
+                  owner,
+                  expectedRevision: 1,
+                  paths: [path],
+                },
+              });
+          }
+          return JSON.stringify({ uses: [f.use], limitations: [] });
+        },
+      },
+    );
+    if (!("checks" in result)) throw Error("Expected package report.");
+    const report = result.checks[0]!;
+    expect(report.uses[0]!.verdict).toBe(f.use.verdict);
+    expect(report.limitations).toEqual(reviewedLimitations);
+    if (completion === "complete") expect(reviewedLimitations).toEqual([]);
+    else {
+      const limitation = reviewedLimitations.find((line) =>
+        line.includes('roster "imports"'),
+      )!;
+      expect(limitation).toContain("Remaining import search timed out.");
+      expect(limitation).toContain('unassigned files ["secondary.js"]');
+      expect(limitation).toContain(
+        'partition "second" has unexamined files ["package-lock.json"]',
+      );
+      expect(limitation).toContain("checkout-search");
+    }
+  },
+);
+
 test("package checks freeze each advisory independently and verify exact source and review references", async () => {
   await using f = await fixture();
   const events: {

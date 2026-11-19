@@ -1,10 +1,11 @@
+import { createDependencySourceWorkTools } from "../src/dependency-source-work-tools.js";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   openDependencyEndpoints,
-  withEndpointTools,
+  withInvestigationGraphTools,
 } from "../src/dependency-endpoints.js";
 import type { DependencyEndpointConfiguration } from "../src/dependency-caller-scope.js";
 import { resolveProjectConfig } from "../src/project-config.js";
@@ -204,7 +205,8 @@ test("querying supplied endpoints and recording a discovery through the shared g
   const graph = await openDependencyEndpoints({
     configuration: { sources: [source], sinks: [] },
   });
-  const tools = withEndpointTools(
+  const sourceWork = createDependencySourceWorkTools();
+  const tools = withInvestigationGraphTools(
     [
       {
         name: "query_codex_security_graph",
@@ -214,6 +216,7 @@ test("querying supplied endpoints and recording a discovery through the shared g
       },
     ],
     graph,
+    sourceWork,
   );
   const query = tools.find((t) => t.name === "query_codex_security_graph")!;
   expect(await query.run({ endpoints: { role: "source" } })).toMatchObject({
@@ -224,9 +227,9 @@ test("querying supplied endpoints and recording a discovery through the shared g
     .find((t) => t.name === "record_codex_security_endpoint")!
     .run({ endpoint: { role: "sink", function: "read", id: "new" } });
   expect(graph.isBoundaryEndpoint("new", "sink")).toBe(false);
-  expect(withEndpointTools([], graph, true).map((t) => t.name)).toEqual([
-    "query_codex_security_graph",
-  ]);
+  expect(
+    withInvestigationGraphTools([], graph, sourceWork, true).map((t) => t.name),
+  ).toEqual(["query_codex_security_graph"]);
   expect(() =>
     resolveProjectConfig({
       exploitability: { sources: [source], sinks: [source] },
