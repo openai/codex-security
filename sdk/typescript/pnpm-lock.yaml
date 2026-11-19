@@ -48,8 +48,8 @@ importers:
         specifier: 8.0.0
         version: 8.0.0(@types/react@19.3.0)(react@19.3.1)
       papaparse:
-        specifier: 5.7.0
-        version: 5.7.0
+        specifier: 5.7.1
+        version: 5.7.1
       pdfjs-dist:
         specifier: 6.5.438
         version: 6.5.438
@@ -121,8 +121,8 @@ importers:
         specifier: 2.2.3
         version: 2.2.3
       prettier:
-        specifier: 3.9.10
-        version: 3.9.10
+        specifier: 3.10.1
+        version: 3.10.1
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -910,8 +910,8 @@ packages:
     resolution: {integrity: sha512-kbpaSSGJTWdAY5KPVeMOKXSrPtr8C8C7wodJbcsd51jRnmD+GZu8Y0VoU6Dm5Z4vWr0Ig/1NKuWRKf7j5aaYSg==}
     engines: {node: '>=6'}
 
-  papaparse@5.7.0:
-    resolution: {integrity: sha512-qBGxg/7Q3Kl9Wfhrz2Z74UnvnHTXLNG6jmKJFeBvP2+y4lV7So+7SR62+Zd47JvdrCkX+nDcnr0ObPzek/+6RA==}
+  papaparse@5.7.1:
+    resolution: {integrity: sha512-qOR+UDWv6D3hMxnWWOk0ZpBdCkd+kw5Yh7aXOaNSQU8A+73EA2bhW7EiUix/hY0yulUi5FRvt7PpYSI2VDvY0g==}
 
   patch-console@2.0.0:
     resolution: {integrity: sha512-0YNdUceMdaQwoKce1gatDScmMo5pu/tfABfnzEqeG0gtTmd7mh/WcwgUjtAeOU7N8nFFlbQBnFK2gXW5fGvmMA==}
@@ -931,8 +931,8 @@ packages:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
 
-  prettier@3.9.10:
-    resolution: {integrity: sha512-skGHTH1Yb9QvaTC4hWnRTzEYtCpApF0UMBPz+t/0ZPzP8ihefo/btKd+QA7pUE0fEwA1SbS/NmhyEcstdXOIdA==}
+  prettier@3.10.1:
+    resolution: {integrity: sha512-70vp3ZUYoPlFbF9uiTdXHUUCGEIp7d4+6p+8DYbkm2jP7x/3i/paXVF6dopSI3zd/CEitrZN1rc4i85xWmmXlg==}
     engines: {node: '>=14'}
     hasBin: true
 
@@ -1649,7 +1649,7 @@ snapshots:
       js-yaml: 5.4.1
       lodash: 4.18.1
       minimist: 1.2.8
-      prettier: 3.9.10
+      prettier: 3.10.1
       tinyglobby: 0.2.17
 
   json-schema-traverse@1.0.0: {}
@@ -1672,7 +1672,7 @@ snapshots:
     dependencies:
       mimic-fn: 2.1.0
 
-  papaparse@5.7.0: {}
+  papaparse@5.7.1: {}
 
   patch-console@2.0.0: {}
 
@@ -1686,7 +1686,7 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  prettier@3.9.10: {}
+  prettier@3.10.1: {}
 
   pure-rand@8.4.2: {}
 
