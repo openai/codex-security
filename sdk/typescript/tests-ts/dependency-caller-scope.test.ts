@@ -8,59 +8,25 @@ import {
   dependencyPathExcluded,
 } from "../src/dependency-caller-scope.js";
 import type { DependencyRuntimeSelector } from "../src/index.js";
-import { ProjectConfigInputSchema } from "../src/project-config-schema.js";
+import { resolveProjectConfig } from "../src/project-config.js";
 import { runReviewedDependencyCheck } from "../src/dependency-reviewed-check.js";
 
-test("endpoint boundaries distinguish omitted and explicitly empty and retain producer selector metadata", () => {
-  for (const boundary of [
-    { sources: [] },
-    { sinks: [] },
-    {
-      scope: { exclude_paths: ["examples"] },
-      sources: [
-        {
-          function: "receive",
-          runtime_selectors: [{ name: "start", extra: "raw" }],
-        },
-      ],
-    },
-  ]) {
-    expect(
-      ProjectConfigInputSchema.parse({ exploitability: boundary })
-        .exploitability,
-    ).toEqual(boundary);
-  }
-});
-
-test("runtime selectors type and validate known fields while retaining additional provider metadata", () => {
-  const parse = (selector: unknown) =>
-    ProjectConfigInputSchema.safeParse({
-      exploitability: {
-        sources: [{ function: "decode", runtime_selectors: [selector] }],
-      },
-    });
+test("project configuration preserves supplied boundaries and runtime selector metadata", () => {
   const selector: DependencyRuntimeSelector = {
     name: "decode",
     location: "codec.c",
-    binary: "libcodec",
     line: 8,
+    binary: "libcodec",
     provider_detail: { resource: 3 },
   };
-  const parsed = parse(selector);
-  expect(parsed.success).toBe(true);
-  if (!parsed.success) throw parsed.error;
-  const actual: DependencyRuntimeSelector =
-    parsed.data.exploitability!.sources![0]!.runtime_selectors![0]!;
-  expect(actual).toEqual(selector);
-  expect(actual.line?.toFixed()).toBe("8");
-  expect(actual.binary?.toUpperCase()).toBe("LIBCODEC");
-  for (const invalid of [
-    { name: "decode", line: 8 },
-    { name: "decode", location: "codec.c", line: "8" },
-    { name: "decode", location: "codec.c", line: 0 },
-    { name: "decode", binary: 8 },
-  ])
-    expect(parse(invalid).success).toBe(false);
+  for (const boundary of [
+    { sources: [] },
+    { sinks: [{ function: "decode", runtime_selectors: [selector] }] },
+  ]) {
+    expect(
+      resolveProjectConfig({ exploitability: boundary }).exploitability,
+    ).toEqual(boundary);
+  }
 });
 
 test("broad production and explicit exclusions reopen paths with their own SECURITY.md", () => {

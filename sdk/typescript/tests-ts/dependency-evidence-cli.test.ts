@@ -5,7 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
-import { readDependencyCheckOutput } from "../src/dependency-reachability.js";
+import { dependencyCheckOutputSchema } from "../src/dependency-reachability.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -348,7 +348,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   expect(status, stderr.text() + stdout.text()).toBe(0);
   expect(reviewed).toBe(true);
-  const report = readDependencyCheckOutput(JSON.parse(stdout.text()));
+  const report = dependencyCheckOutputSchema.parse(JSON.parse(stdout.text()));
   expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(
     JSON.parse(stdout.text()),
   );

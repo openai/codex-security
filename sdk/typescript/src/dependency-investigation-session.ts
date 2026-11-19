@@ -306,7 +306,6 @@ function auditSearch(
 }
 
 export function createInvestigationSession(options: {
-  directory: string;
   repository: string;
   store: DependencyAttemptStore;
   revision: string | undefined;
@@ -424,7 +423,7 @@ export function createInvestigationSession(options: {
     },
   ];
   const sourceTools = createDependencySourceTools({
-    directory: options.directory,
+    store: options.store,
     repository: options.repository,
     signal: options.signal,
     fetcher: fetch,

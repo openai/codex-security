@@ -754,20 +754,6 @@ export class EvidenceGraph {
       : question.status;
   }
 
-  isServicePending(path: string) {
-    return this.lookupState(path) === "pending";
-  }
-
-  pendingServicePaths() {
-    return [...this.questions.keys()].filter((path) =>
-      this.isServicePending(path),
-    );
-  }
-
-  serviceProject(path: string) {
-    return this.questions.get(path)?.project;
-  }
-
   serviceResolution() {
     let pending = 0;
     let checked = 0;

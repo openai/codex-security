@@ -5,6 +5,7 @@ import {
   type GraphCandidates,
 } from "./dependency-graph-candidates.js";
 import {
+  dependencyReceiptSelectionSchema,
   selectedReceiptKey,
   selectedReceiptReference,
   selectedReceiptValue,
@@ -30,9 +31,10 @@ import {
   assertReviewedPremises,
   type PremiseRef,
 } from "./dependency-review-queue.js";
-import type {
-  DependencySearch,
-  DependencyReviewReference,
+import {
+  dependencyFindingDetailsShape,
+  type DependencySearch,
+  type DependencyReviewReference,
 } from "./dependency-reachability.js";
 import {
   DependencyInvestigationBlockedError,
@@ -113,7 +115,6 @@ type AgentSettings = {
 export type ReviewedAgent = (
   request: DependencyAgentRequest & { readOnly: true },
 ) => Promise<string>;
-export type ReviewPhase = "advisory" | "discovery" | "investigation" | "review";
 type Dependencies = {
   runAgent: ReviewedAgent;
   lookupCve?: typeof lookupDependencyAdvisory;
@@ -1084,14 +1085,12 @@ async function investigateIssue(
       id: z.string().trim().min(1),
       expectedRevision: z.number().int().nonnegative(),
     };
+    const use = investigationSchema.shape.uses.element;
     const assessmentInput = z.strictObject({
       assessments: z
         .array(
           z.union([
-            z.strictObject({
-              ...identity,
-              use: investigationSchema.shape.uses.element,
-            }),
+            z.strictObject({ ...identity, use }),
             z.strictObject({
               ...identity,
               disposition: proposedDisposition,
@@ -1111,8 +1110,26 @@ async function investigateIssue(
       submitAssessments: {
         name: "submit_dependency_assessments",
         description:
-          "Queue {assessments:[{id,expectedRevision,use}]} for independent review. Nest each finding under use or disposition. Check query_dependency_claims for the same caller, selected copy and deployment before creating an ID at revision 0. Revise its existing ID at the latest revision for new evidence. To withdraw an approved use, submit its exact reference in replacesUse and cite evidence for the disposition.",
-        inputSchema: z.toJSONSchema(assessmentInput),
+          "Queue a use or disposition for independent review. Optional fields shared with the final response follow its uses schema. Check query_dependency_claims for the same caller, copy and deployment. Set expectedRevision to 0 for a new ID or its latest revision for a correction. To withdraw an approved use, submit its exact reference in replacesUse and cite evidence for the disposition.",
+        // Codex collapses oversized MCP schemas to unknown array items. Reuse
+        // citation types and leave optional metadata details in the prompt's
+        // uses schema. Validate the full assessmentInput on submission.
+        inputSchema: z.toJSONSchema(assessmentInput, {
+          metadata: z
+            .registry<{ id: string }>()
+            .add(use.shape.evidence.element, { id: "source" })
+            .add(use.shape.observations.element, { id: "observation" })
+            .add(dependencyPremiseRefSchema, { id: "claim" })
+            .add(dependencyReceiptSelectionSchema, { id: "selection" }),
+          override({ zodSchema, jsonSchema }) {
+            if (zodSchema !== use && zodSchema !== proposedDisposition) return;
+            for (const key of [
+              "place",
+              ...Object.keys(dependencyFindingDetailsShape),
+            ])
+              jsonSchema.properties![key] = {};
+          },
+        }),
         async run(args: unknown) {
           const { assessments } = assessmentInput.parse(args);
           const prepared = await Promise.all(
@@ -1188,7 +1205,6 @@ async function investigateIssue(
           return queue!.enqueue(claims);
         },
       },
-      directory: temporary,
       repository: directory,
       signal,
       productionDiscovery: options.scope === undefined,

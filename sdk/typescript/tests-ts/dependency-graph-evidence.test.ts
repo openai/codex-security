@@ -9,7 +9,7 @@ function tools(entries?: DependencyEvidenceRecord[]) {
   const graph: DependencyEvidenceGraph = {
     tools: [],
     call: async (name, input) => ({ name, input }),
-    recordCatalogResolutions: (answers) => ({ answers }),
+    recordCatalogResolution: (answer) => answer,
     recordObservations: (observations, id, path, block) => ({
       observations,
       id,
@@ -65,35 +65,34 @@ test("binds returned service IDs and empty scoped lookups to the consumer", asyn
       },
     ],
   };
-  const run = async (r: DependencyEvidenceRecord) =>
-    (await tools([r])[resolve]!(input))["answers"];
-  expect(await run(original)).toMatchObject([
-    {
-      path: "jobs/send.js",
-      services: [
-        {
-          scope: "service-registry:93",
-          name: "mailer",
-          receiptSelections: [
-            {
-              receiptId: "receipt",
-              textBlock: null,
-              record: ["data", "services", 0],
-            },
-          ],
-        },
-        { scope: "service-registry:22", name: "nightly" },
-      ],
-    },
-  ]);
+  const run = (r: DependencyEvidenceRecord) => tools([r])[resolve]!(input);
+  expect(await run(original)).toMatchObject({
+    path: "jobs/send.js",
+    project: "jobs",
+    services: [
+      {
+        scope: "service-registry:93",
+        name: "mailer",
+        receiptSelections: [
+          {
+            receiptId: "receipt",
+            textBlock: null,
+            record: ["data", "services", 0],
+          },
+        ],
+      },
+      { scope: "service-registry:22", name: "nightly" },
+    ],
+  });
   expect(
     await run({
       ...original,
       result: { structuredContent: { data: { services: [] } } },
     }),
-  ).toMatchObject([
-    { services: [], receiptSelections: [{ record: ["data", "services"] }] },
-  ]);
+  ).toMatchObject({
+    services: [],
+    receiptSelections: [{ record: ["data", "services"] }],
+  });
   await expect(
     run({ ...original, arguments: { project: "other" } }),
   ).rejects.toThrow(/file or its project/);

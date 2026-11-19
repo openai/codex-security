@@ -1,32 +1,5 @@
 import { createDependencyVerdictProgress } from "../src/dependency-verdict-progress";
 import { expect, test } from "bun:test";
-import { z } from "zod";
-import {
-  dependencyCheckOutputSchema,
-  readDependencyCheckOutput,
-} from "../src/dependency-reachability";
-
-test("keeps saved reports without advisory details valid and exposes the optional field", () => {
-  const saved = {
-    cve: "CVE-2000-1234",
-    status: "unknown",
-    uses: [],
-    limitations: [],
-    advisories: [],
-    usage: null,
-  };
-  expect(dependencyCheckOutputSchema.safeParse(saved).success).toBe(false);
-  const { status: _status, ...report } = saved;
-  expect(readDependencyCheckOutput(saved)).toEqual({
-    ...report,
-    schemaVersion: 2,
-    assumptions: [],
-    searches: [],
-  });
-  expect(JSON.stringify(z.toJSONSchema(dependencyCheckOutputSchema))).toContain(
-    '"advisoryDetails"',
-  );
-});
 
 test("removes invalidated approvals before a coalesced verdict update", () => {
   const output: Record<string, unknown>[] = [];

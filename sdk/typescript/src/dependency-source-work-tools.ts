@@ -176,7 +176,7 @@ const graphActions = {
   query: {
     name: "query_codex_security_graph",
     description:
-      "Use note:{search} to find shared source notes, note:{} to list them, or note:{id} to read pinned excerpts. Use sourceWork:{} for coverage counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for exact paths and gaps.",
+      "Pass note or sourceWork as the only argument when querying shared research. Use note:{search} to find notes, note:{} to list them, or note:{id} to read pinned excerpts. Use sourceWork:{} for coverage counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for paths and gaps.",
     fields: {
       note: dependencySourceNoteQuerySchema,
       sourceWork: sourceWorkQuerySchema,
@@ -185,7 +185,7 @@ const graphActions = {
   update: {
     name: "update_codex_security_graph",
     description:
-      "Use note to share a question, scope and assertion with exact line ranges from the pinned checkout. Reopen it by ID with query_codex_security_graph. Use sourceWork to append a page of search results with source references and gaps, resolve a gap by ID, assign files to a partition, or mark paths examined.",
+      "Pass exactly one of note or sourceWork. A note shares a question, scope and assertion with exact line ranges from the pinned checkout. Reopen it by ID with query_codex_security_graph. Use sourceWork to append a page of search results with source references and gaps, resolve a gap by ID, assign files to a partition, or mark paths examined.",
     fields: { note: dependencySourceNoteSchema, sourceWork: mutationSchema },
   },
 };
@@ -210,19 +210,19 @@ export function withInvestigationGraphTools(
         type: "object",
         properties: { ...baseSchema?.properties, ...properties },
         additionalProperties: false,
-        anyOf: [
-          ...(baseSchema ? [baseSchema] : []),
-          { required: ["note"], maxProperties: 1 },
-          { required: ["sourceWork"], maxProperties: 1 },
-        ],
+        ...(!base && { minProperties: 1, maxProperties: 1 }),
       },
       run(input) {
-        if (isRecord(input) && Object.keys(input).length === 1) {
-          if (Object.hasOwn(input, "note")) return notes[action](input["note"]);
-          if (Object.hasOwn(input, "sourceWork"))
-            return { source_work: sourceWork[action](input["sourceWork"]) };
+        if (isRecord(input)) {
+          const note = Object.hasOwn(input, "note");
+          const work = Object.hasOwn(input, "sourceWork");
+          if (!note && !work && base) return base.run(input);
+          if (Object.keys(input).length === 1) {
+            if (note) return notes[action](input["note"]);
+            if (work)
+              return { source_work: sourceWork[action](input["sourceWork"]) };
+          }
         }
-        if (base) return base.run(input);
         throw new Error("Supply exactly one of note or sourceWork.");
       },
     };

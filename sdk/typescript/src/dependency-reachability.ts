@@ -5,7 +5,6 @@ import { dependencyUseSchema } from "./dependency-stack-use.js";
 import { stackJsonValue } from "./dependency-stack-evidence.js";
 
 const identity = z.string().trim().min(1);
-const verdict = dependencyUseSchema.shape.verdict;
 const inventoryFact = z.enum(["affected_copy", "running", "access"]);
 // The first independently reviewed reports included only the server, quoted record and facts.
 // Some saved reports additionally identified the receipt here. Keep those records readable.
@@ -273,14 +272,6 @@ export const dependencyCoverageHandoffSchema = z.strictObject({
   verified: findingText,
   missing: findingText,
 });
-export type DependencyFindingDetails = {
-  services?: z.infer<typeof serviceAssociation>[];
-  openConditions?: z.infer<typeof openCondition>[];
-  inspections?: z.infer<typeof inspection>[];
-  inputSource?: z.infer<typeof inputSource>;
-  runtimeContext?: z.infer<typeof runtimeContext>;
-  tags?: z.infer<typeof findingTag>[];
-};
 export { dependencyPlaceSchema };
 
 const reportUseSchema = dependencyUseSchema.safeExtend({
@@ -420,61 +411,3 @@ export const dependencyCheckOutputSchema = z.union([
   dependencyReachabilityReportSchema,
   dependencyPackageCheckOutputSchema,
 ]);
-
-// Saved v1 reports are readable without publishing their checkout-wide verdict.
-const legacyCheck = reviewedDependencyCheckSchema
-  .omit({ schemaVersion: true, assumptions: true, searches: true })
-  .extend({ status: verdict, uses: z.array(reportUseSchema) });
-const legacyReport = z.union([
-  legacyCheck.extend({ cve: z.string() }),
-  z.object({
-    package: z.object({ ecosystem: z.string(), name: z.string() }),
-    vulnDescription: z.string().optional(),
-    checks: z.array(legacyCheck.extend({ advisoryId: z.string().nullable() })),
-  }),
-]);
-
-export function withReviewedPlace(
-  use: z.infer<typeof reportUseSchema>,
-  decidingEvidence: DependencyReviewReference[],
-): ReviewedDependencyUse {
-  return {
-    ...use,
-    place: use.place ?? {
-      kind: "unknown",
-      environment: null,
-      revision: null,
-      artifact: null,
-      observationWindow: null,
-      deploymentBasis:
-        use.deployment === "confirmed" ? "observed" : use.deployment,
-      deploymentDetail: null,
-      dependencySelection: null,
-      patch: null,
-      unresolvedQuestions: use.verdict === "unknown" ? [use.reason] : [],
-    },
-    decidingEvidence,
-  };
-}
-
-export function readDependencyCheckOutput(
-  value: unknown,
-): z.infer<typeof dependencyCheckOutputSchema> {
-  const current = dependencyCheckOutputSchema.safeParse(value);
-  if (current.success) return current.data;
-  const saved = legacyReport.safeParse(value);
-  if (!saved.success) throw current.error;
-  function convert<T extends z.infer<typeof legacyCheck>>(check: T) {
-    const { status: _status, uses, ...rest } = check;
-    return {
-      ...rest,
-      schemaVersion: 2 as const,
-      uses: uses.map((use) => withReviewedPlace(use, [])),
-      assumptions: [],
-      searches: [],
-    };
-  }
-  return "cve" in saved.data
-    ? convert(saved.data)
-    : { ...saved.data, checks: saved.data.checks.map(convert) };
-}

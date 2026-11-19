@@ -89,7 +89,6 @@ type Service = {
   source: string;
   receiptSelections: ReceiptSelection[];
 };
-type Request = { path: string; project?: string };
 
 export interface DependencyEvidenceGraph {
   tools: { name: string; description: string; inputSchema: object }[];
@@ -98,15 +97,13 @@ export interface DependencyEvidenceGraph {
     args: unknown,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>>;
-  recordCatalogResolutions(
-    answers: readonly {
-      path: string;
-      services: Service[];
-      receiptSelections: ReceiptSelection[];
-      source: string;
-    }[],
-    requests: readonly Request[],
-  ): Record<string, unknown>;
+  recordCatalogResolution(answer: {
+    path: string;
+    project?: string;
+    services: Service[];
+    receiptSelections: ReceiptSelection[];
+    source: string;
+  }): Record<string, unknown>;
   recordObservations(
     rows: z.infer<typeof dependencyGraphEvidenceDocument>["observations"],
     receiptId: string,
@@ -367,24 +364,13 @@ export function createDependencyGraphEvidenceTools(
             services.set(scope, service);
           }
         }
-        // Queue only after checking every receipt. Each answer carries its own
-        // context, even when investigators look up the same file concurrently.
-        const request = {
+        return graph.recordCatalogResolution({
           path: file,
           ...(project !== undefined && { project }),
-        };
-        await graph.call(resolveServices, { paths: [file], project }, signal);
-        return graph.recordCatalogResolutions(
-          [
-            {
-              path: file,
-              services: [...services.values()],
-              source: [...sources].join(", "),
-              receiptSelections: selections,
-            },
-          ],
-          [request],
-        );
+          services: [...services.values()],
+          source: [...sources].join(", "),
+          receiptSelections: selections,
+        });
       },
     },
     {

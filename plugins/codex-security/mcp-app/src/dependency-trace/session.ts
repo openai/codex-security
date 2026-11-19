@@ -5,7 +5,7 @@ import { createDiscoveryScope } from "./discovery-scope.js";
 import {
   EvidenceGraph,
   boundGraphResponse,
-  type CatalogReceiptSelection,
+  type ServiceResolution,
 } from "./graph.js";
 import { findProjectReferences, localProvider } from "./provider.js";
 import { boundTraceResponse, traceResponse } from "./response.js";
@@ -34,24 +34,6 @@ export const dependencyGraphTools = {
     schema: graphQuerySchema,
   },
 };
-
-interface ResolvedCatalogResolution {
-  path: string;
-  status?: undefined;
-  services: readonly {
-    name: string;
-    scope: string;
-    source: string;
-    receiptSelections?: CatalogReceiptSelection[];
-  }[];
-  receiptSelections?: CatalogReceiptSelection[];
-  source?: string;
-  reason?: string;
-}
-
-type CatalogResolution =
-  | ResolvedCatalogResolution
-  | { path: string; status: "unresolved"; reason: string; source?: string };
 
 function catalogInput(args: unknown) {
   const { paths, project } = serviceInputSchema.parse(args);
@@ -110,9 +92,6 @@ export async function createDependencyGraphSession(
 
   return {
     boundTraceResponse,
-    includeDiscoveryFile(path: string) {
-      sourceScope?.includeExactFile(path);
-    },
     tools: Object.entries(dependencyGraphTools).map(
       ([name, { description, schema }]) => ({
         name,
@@ -161,46 +140,19 @@ export async function createDependencyGraphSession(
           throw new Error(`Unknown dependency graph tool ${name}.`);
       }
     },
-    pendingCatalogRequests(args?: unknown) {
-      if (!catalogConfigured) return [];
-      const input = args === undefined ? undefined : catalogInput(args);
-      const pending = input
-        ? [...new Set(input.paths)].filter((path) =>
-            graph.isServicePending(path),
-          )
-        : graph.pendingServicePaths();
-      return pending.map((path) => {
-        const project = input?.project ?? graph.serviceProject(path);
-        return { path, ...(project === undefined ? {} : { project }) };
-      });
-    },
-    // The CLI's catalog resolver owns this entry point. The model sees only call().
-    recordCatalogResolutions(
-      answers: readonly CatalogResolution[],
-      requests?: readonly { path: string; project?: string }[],
-    ) {
+    // The SDK verifies catalog receipts before passing an answer to the graph.
+    recordCatalogResolution(answer: ServiceResolution) {
       if (!catalogConfigured)
         throw new Error("Service catalogs are unavailable.");
-      const contexts =
-        requests === undefined
-          ? undefined
-          : new Map(requests.map(({ path, project }) => [path, project]));
-      graph.resolveServices(
-        answers.map((answer) => {
-          const path = safeRelativePath(answer.path, "Service question");
-          if (contexts !== undefined && !contexts.has(path))
-            throw new Error(`No dispatched service question for ${path}.`);
-          const project =
-            contexts === undefined
-              ? graph.serviceProject(path)
-              : contexts.get(path);
-          return {
-            ...answer,
-            path,
-            ...(project === undefined ? {} : { project }),
-          };
-        }),
-      );
+      const { paths, project } = catalogInput({
+        paths: [answer.path],
+        project: answer.project,
+      });
+      const path = paths![0]!;
+      graph.requestServices([path], project, true);
+      graph.resolveServices([
+        { ...answer, path, ...(project !== undefined && { project }) },
+      ]);
       return boundGraphResponse(reply(graph.query()));
     },
     // The host reads observation receipts off-model and owns graph ingestion.

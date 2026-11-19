@@ -23,7 +23,7 @@ import {
 } from "../src/dependency-review-queue";
 import { evidencePreviews } from "../src/dependency-investigation-session";
 import { affectedByFrozenVersion } from "../src/dependency-advisory-version";
-import { readDependencyCheckOutput } from "../src/dependency-reachability";
+import { dependencyCheckOutputSchema } from "../src/dependency-reachability";
 import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
@@ -47,6 +47,19 @@ import {
   discoverDependencyRepository,
   type RepositoryDiscovery,
 } from "../src/dependency-discovery";
+
+function approvedReview(
+  claims: (PremiseRef & { availableEvidenceKeys: string[] })[],
+) {
+  return JSON.stringify({
+    decisions: claims.map((claim) => ({
+      ...reference(claim),
+      approved: true,
+      reason: "Verified.",
+      evidenceKeys: claim.availableEvidenceKeys,
+    })),
+  });
+}
 
 const signal = new AbortController().signal;
 async function fixture(extraFiles: Record<string, string> = {}) {
@@ -175,16 +188,7 @@ test("repository investigators share pinned source notes without promoting asser
             },
           });
           reviewerRead = true;
-          return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
-                ...reference(c),
-                approved: true,
-                reason: "Reviewed the cited parser source.",
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+          return approvedReview(packet.claims);
         }
         const other = await req.investigationTools!();
         const query = (note: unknown) => other.call(graph, { note });
@@ -347,16 +351,7 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
             ++coverageReviews === 1
           )
             await arrive();
-          return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                ...reference(c),
-                approved: true,
-                reason: "Checked the cited evidence and remaining callers.",
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+          return approvedReview(packet.claims);
         },
       },
     );
@@ -418,16 +413,7 @@ test.each(["incomplete", "complete"] as const)(
                 },
               });
             }
-            return JSON.stringify({
-              decisions: packet.claims.map(
-                (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
-                  ...reference(c),
-                  approved: true,
-                  reason: "Reviewed the caller and remaining source coverage.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                }),
-              ),
-            });
+            return approvedReview(packet.claims);
           }
           const other = await req.investigationTools!();
           const record = (sourceWork: unknown) => call(tool, { sourceWork });
@@ -575,18 +561,7 @@ test("package checks freeze each advisory independently and verify exact source 
           "parse(request.body)",
         );
         expect(input.claims[0].payload.use.evidence[0].commit).toBe(f.revision);
-        return JSON.stringify({
-          decisions: input.claims.map(
-            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
-              evidenceKeys: claim.availableEvidenceKeys,
-              id: claim.id,
-              hash: claim.hash,
-              revision: claim.revision,
-              approved: true,
-              reason: "Checked the selected source and scope.",
-            }),
-          ),
-        });
+        return approvedReview(input.claims);
       },
     },
   );
@@ -751,7 +726,7 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
     reason: "No adapter manifest or selected version was found.",
   };
   const handoff = "Determine which adapter implementation this caller selects.";
-  const result = readDependencyCheckOutput(
+  const result = dependencyCheckOutputSchema.parse(
     await runReviewedDependencyCheck(
       { directory: f.path, subject: cve, signal },
       {
@@ -785,16 +760,7 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
         async runAgent(req) {
           const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
           if (!req.coordinator) {
-            return JSON.stringify({
-              decisions: packet.claims.map(
-                (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
-                  ...reference(c),
-                  approved: true,
-                  reason: "Checked the cited source and outstanding caller.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                }),
-              ),
-            });
+            return approvedReview(packet.claims);
           }
           const submit = (outOfScope: { scope: string; reason: string }[]) =>
             req.onCoordinatorAnswer!(
@@ -1135,18 +1101,7 @@ test.each(["corrected", "exhausted"] as const)(
         async runAgent(req) {
           if (!req.coordinator) {
             const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-            return JSON.stringify({
-              decisions: input.claims.map(
-                (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                  id: c.id,
-                  revision: c.revision,
-                  hash: c.hash,
-                  approved: true,
-                  reason: "Verified the cited code.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                }),
-              ),
-            });
+            return approvedReview(input.claims);
           }
           coordinatorStarts++;
           // A persistent transport requests only the correction for its next turn.
@@ -1254,18 +1209,7 @@ test("bind discovered owners to their own source and retain uncovered callers", 
         expect(limitations).toContain(
           "Unassessed caller in notes: secondary.js:2.",
         );
-        return JSON.stringify({
-          decisions: input.claims.map(
-            (c: Claim & { availableEvidenceKeys: string[] }) => ({
-              evidenceKeys: c.availableEvidenceKeys,
-              id: c.id,
-              revision: c.revision,
-              hash: c.hash,
-              approved: true,
-              reason: "Checked the pins and outstanding caller.",
-            }),
-          ),
-        });
+        return approvedReview(input.claims);
       },
     },
   );
@@ -1363,18 +1307,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
         if (input.claims) {
           expect(onEvidence).toBeUndefined();
           expect(input.evidence).toEqual(records);
-          return JSON.stringify({
-            decisions: input.claims.map(
-              (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                evidenceKeys: c.availableEvidenceKeys,
-                id: c.id,
-                hash: c.hash,
-                revision: c.revision,
-                approved: true,
-                reason: "Checked the original replies and source.",
-              }),
-            ),
-          });
+          return approvedReview(input.claims);
         }
         expect(input.evidenceSources[0].server).toBe("deployments");
         if (!onEvidence) throw new Error("Missing evidence collector");
@@ -1398,7 +1331,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
       (r) => r.receiptId,
     ),
   ).toEqual(records.map((r) => r.sha256));
-  expect<unknown>(readDependencyCheckOutput(result)).toEqual(result);
+  expect<unknown>(dependencyCheckOutputSchema.parse(result)).toEqual(result);
   expect(check.claimEvidence.receipts[records[0]!.sha256]).toEqual(records[0]!);
 });
 
@@ -1607,22 +1540,9 @@ test("a failed model invocation retains prior results and identifies unattempted
         runAgent: async ({ prompt }) => {
           const input = JSON.parse(prompt.split("\n\n").at(-1)!);
           if (input.issue.id === ids[1]) throw Error("Model unavailable.");
-          return JSON.stringify(
-            input.claims
-              ? {
-                  decisions: input.claims.map(
-                    (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                      evidenceKeys: c.availableEvidenceKeys,
-                      id: c.id,
-                      hash: c.hash,
-                      revision: c.revision,
-                      approved: true,
-                      reason: "Verified.",
-                    }),
-                  ),
-                }
-              : { uses: [f.use], limitations: [] },
-          );
+          return input.claims
+            ? approvedReview(input.claims)
+            : JSON.stringify({ uses: [f.use], limitations: [] });
         },
       },
     );
@@ -2395,19 +2315,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       discover: async () => f.discovery,
       async runAgent(req) {
         const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-        if (!req.coordinator)
-          return JSON.stringify({
-            decisions: input.claims.map(
-              (c: Claim & { availableEvidenceKeys: string[] }) => ({
-                id: c.id,
-                revision: c.revision,
-                hash: c.hash,
-                reason: "Verified each cited row",
-                approved: true,
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+        if (!req.coordinator) return approvedReview(input.claims);
         const { call } = await req.investigationTools!();
         const matched = "app.js",
           unmapped = "secondary.js";
@@ -2819,23 +2727,7 @@ test("a reviewed premise retains independently selected rows of the historical m
               }),
             ).toMatchObject({ text: JSON.stringify(frames[1]) });
           }
-        return JSON.stringify({
-          decisions: input.claims.map(
-            (c: {
-              id: string;
-              revision: number;
-              hash: string;
-              availableEvidenceKeys: string[];
-            }) => ({
-              id: c.id,
-              hash: c.hash,
-              revision: c.revision,
-              approved: true,
-              evidenceKeys: c.availableEvidenceKeys,
-              reason: "Verified the caller and writer.",
-            }),
-          ),
-        });
+        return approvedReview(input.claims);
       },
     },
   );
@@ -3376,7 +3268,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
         },
       },
     );
-    const result = readDependencyCheckOutput(checked);
+    const result = dependencyCheckOutputSchema.parse(checked);
     if (!("checks" in result)) throw Error("Expected a package check.");
     const report = result.checks[0]!;
     const accepted = outcome === "approved";
@@ -3651,7 +3543,7 @@ test("independently verifies candidate dispositions and publishes their selected
       },
     },
   );
-  const report = readDependencyCheckOutput(checked);
+  const report = dependencyCheckOutputSchema.parse(checked);
   expect<unknown>(report).toEqual(checked);
   if (!("checks" in report)) throw new Error("Expected a package check.");
   const result = report.checks[0]!;
@@ -3759,24 +3651,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
       }),
       async runAgent(req) {
         const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-        if (!req.coordinator)
-          return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: {
-                id: string;
-                revision: number;
-                hash: string;
-                availableEvidenceKeys: string[];
-              }) => ({
-                id: c.id,
-                revision: c.revision,
-                hash: c.hash,
-                reason: "Reviewed the source and the ownership.",
-                approved: true,
-                evidenceKeys: c.availableEvidenceKeys,
-              }),
-            ),
-          });
+        if (!req.coordinator) return approvedReview(packet.claims);
         const trace = (relation: string, source: string) => ({
           relation,
           from: { kind: "file", name: source },
@@ -3851,7 +3726,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
       },
     },
   );
-  const report = readDependencyCheckOutput(checked);
+  const report = dependencyCheckOutputSchema.parse(checked);
   if (!("checks" in report)) throw new Error("Expected package report");
   const coverage = report.checks[0]!.coverage!;
   expect(coverage.find((c) => c.conclusionClaim)).toMatchObject({
@@ -3965,16 +3840,7 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
           return JSON.stringify({ uses: [], limitations: [] });
         }
         const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-        return JSON.stringify({
-          decisions: packet.claims.map(
-            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
-              ...reference(claim),
-              approved: true,
-              reason: "Verified the search scope.",
-              evidenceKeys: claim.availableEvidenceKeys,
-            }),
-          ),
-        });
+        return approvedReview(packet.claims);
       },
     },
   );

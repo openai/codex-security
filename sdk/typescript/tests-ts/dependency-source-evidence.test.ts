@@ -1,12 +1,19 @@
-import { expect, test } from "bun:test";
+import { expect, onTestFinished, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonObject } from "../src/config.js";
+import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
 import { createDependencySourceTools } from "../src/dependency-source-evidence.js";
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+
+function attemptStore() {
+  const store = new DependencyAttemptStore(":memory:");
+  onTestFinished(() => store.close());
+  return store;
+}
 
 type Options = Parameters<typeof createDependencySourceTools>[0];
 function sourceTools(options: Options) {
@@ -23,7 +30,7 @@ test("captures a pinned public source or advisory once and binds only actual lin
   const captures: JsonObject[] = [];
   const calls: string[] = [];
   const options: Options = {
-    directory: join(temp.path, "sources"),
+    store: attemptStore(),
     repository: temp.path,
     async fetcher(url, init) {
       calls.push(url);
@@ -82,9 +89,14 @@ test("captures a pinned public source or advisory once and binds only actual lin
     tools.fetch({ ...request, path: "../private" }),
   ).rejects.toThrow();
   await expect(tools.fetch({ ...request, commit: "main" })).rejects.toThrow();
-  const filename = join(options.directory, String(sourceId) + ".json");
-  const saved = JSON.parse(await readFile(filename, "utf8"));
-  await writeFile(filename, JSON.stringify({ ...saved, source: "changed" }));
+  const saved = options.store.get<JsonObject>(
+    "source-artifact",
+    String(sourceId),
+  );
+  options.store.set("source-artifact", String(sourceId), {
+    ...saved,
+    source: "changed",
+  });
   await expect(reopened.read({ sourceId, search: "changed" })).rejects.toThrow(
     "Saved source evidence changed",
   );
@@ -108,7 +120,6 @@ test("captures a pinned public source or advisory once and binds only actual lin
 
 test("reads a historical Git tree without following later worktree changes or using the network", async () => {
   await using repo = await scopedTemporaryDirectory("dependency-checkout-");
-  await using capture = await scopedTemporaryDirectory("dependency-upstream-");
   git(repo.path, "init", "-q");
   await writeFile(
     join(repo.path, "decoder.js"),
@@ -122,7 +133,7 @@ test("reads a historical Git tree without following later worktree changes or us
   git(repo.path, "commit", "-qam", "Updated source");
   const current = git(repo.path, "rev-parse", "HEAD");
   const tools = sourceTools({
-    directory: capture.path,
+    store: attemptStore(),
     repository: repo.path,
     async fetcher() {
       throw new Error("Unexpected remote request");
@@ -174,9 +185,9 @@ test("checks the release identity, registry origin and archive digest before rea
     version: request.version,
     dist: { tarball, integrity },
   };
-  function open(name: string, release: unknown) {
+  function open(release: unknown) {
     return sourceTools({
-      directory: join(temp.path, name),
+      store: attemptStore(),
       repository: temp.path,
       python,
       recordExcerpt: () => "npm-receipt",
@@ -187,7 +198,7 @@ test("checks the release identity, registry origin and archive digest before rea
       },
     });
   }
-  const good = open("good", metadata);
+  const good = open(metadata);
   const { sourceId } = await good.fetch(request);
   expect(await good.read({ sourceId, startLine: 1, endLine: 1 })).toMatchObject(
     {
@@ -199,16 +210,16 @@ test("checks the release identity, registry origin and archive digest before rea
     },
   );
   await expect(
-    open("mismatch", { ...metadata, version: "9.9.9" }).fetch(request),
+    open({ ...metadata, version: "9.9.9" }).fetch(request),
   ).rejects.toThrow("does not match");
   await expect(
-    open("wrong-origin", {
+    open({
       ...metadata,
       dist: { integrity, tarball: "https://example.com/other.tgz" },
     }).fetch(request),
   ).rejects.toThrow("must come from the npm registry");
   await expect(
-    open("wrong-digest", {
+    open({
       ...metadata,
       dist: {
         tarball,

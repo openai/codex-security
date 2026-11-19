@@ -37,7 +37,6 @@ const distModules = [
   "codeowners",
   "dependency-advisory-version",
   "dependency-caller-scope",
-  "dependency-evidence-store",
   "dependency-investigation-session",
   "dependency-linked-resources",
   "dependency-resource-session",
