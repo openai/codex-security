@@ -17,14 +17,20 @@ import { cases } from "./upstream/cases.mjs";
 import { gradeSnapshot, validateSnapshot } from "./upstream/grade.mjs";
 
 const usage = `Usage: node upstream.mjs --cache DIR [--suite mailparser|pillow|backstage] [--case ID]
-       (--prepare-only | --cli PATH | --grade-existing RESULTS_DIR) [--model MODEL] [--out NEW_DIR]
+       (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
+       For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter.
 Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE`;
+const separator = process.argv.indexOf("--", 2);
+const adapter = separator < 0 ? [] : process.argv.slice(separator + 1);
 const { values } = parseArgs({
+  args: process.argv.slice(2, separator < 0 ? undefined : separator),
   options: {
     cache: { type: "string" },
     suite: { type: "string" },
     case: { type: "string" },
     cli: { type: "string" },
+    jobs: { type: "string", default: "1" },
+    "skill-baseline": { type: "boolean" },
     out: { type: "string" },
     model: { type: "string" },
     "prepare-only": { type: "boolean" },
@@ -36,10 +42,19 @@ if (values.help) {
   console.log(usage + "\nCases: " + cases.map((c) => c.id).join(", "));
   process.exit(0);
 }
+const jobs = Number(values.jobs);
 if (
+  !Number.isSafeInteger(jobs) ||
+  jobs < 1 ||
+  (separator >= 0 &&
+    (!adapter.length || !values["skill-baseline"] || values.model)) ||
   !values.cache ||
-  [values["prepare-only"], values.cli, values["grade-existing"]].filter(Boolean)
-    .length !== 1
+  [
+    values["prepare-only"],
+    values.cli,
+    values["skill-baseline"],
+    values["grade-existing"],
+  ].filter(Boolean).length !== 1
 )
   throw Error(usage);
 const selected = cases.filter(
@@ -61,9 +76,9 @@ for (const signal of ["SIGINT", "SIGTERM"])
     abort.abort();
   });
 const results = [];
+let saved = Promise.resolve();
 console.log("Results: " + out);
-for (const scenario of selected) {
-  if (abort.signal.aborted) break;
+async function runCase(scenario, runSkill) {
   const scratch = await mkdtemp(join(tmpdir(), "upstream-eval-"));
   const dest = join(out, scenario.id);
   await mkdir(dest, { mode: 0o700 });
@@ -105,6 +120,26 @@ for (const scenario of selected) {
       const report = JSON.parse(await readFile(original, "utf8"));
       result.grade = gradeSnapshot(report, scenario, repo, sha);
       result.status = result.grade.pass ? "passed" : "grade_error";
+    }
+    if (runSkill) {
+      result.status = "execution_error";
+      const { runBaseline } = await import("./upstream/skill-baseline.mjs");
+      const start = performance.now();
+      const { answer, grade, usage, promptSha256 } = await runBaseline(
+        runSkill,
+        scenario,
+        repo,
+        sha,
+      );
+      result.elapsedMs = Math.round(performance.now() - start);
+      Object.assign(result, {
+        grade,
+        usage,
+        promptSha256,
+        evaluator: adapter.length ? "adapter" : "attack-path-analysis",
+      });
+      await jsonFile(join(dest, "answer.json"), answer);
+      result.status = grade.pass ? "passed" : "grade_error";
     }
     if (cli) {
       const config = join(scratch, "scope.json");
@@ -152,11 +187,46 @@ for (const scenario of selected) {
   }
   console.log(scenario.id + ": " + result.status);
   results.push(result);
-  await writeFile(
-    join(out, "results.json"),
-    JSON.stringify({ model: values.model ?? null, results }, null, 2) + "\n",
-    { mode: 0o600 },
+  saved = saved.then(() =>
+    writeFile(
+      join(out, "results.json"),
+      JSON.stringify(
+        {
+          model: values.model ?? null,
+          results: selected.flatMap((c) =>
+            results.filter((r) => r.id === c.id),
+          ),
+        },
+        null,
+        2,
+      ) + "\n",
+      { mode: 0o600 },
+    ),
   );
+  await saved;
+}
+async function runSelected(runSkill) {
+  const queue = selected.values();
+  async function worker() {
+    for (const scenario of queue) {
+      if (abort.signal.aborted) return;
+      await runCase(scenario, runSkill);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(jobs, selected.length) }, worker),
+  );
+}
+if (adapter.length) {
+  const { runAdapter } = await import("./upstream/adapter.mjs");
+  await runSelected((repo, prompt) =>
+    runAdapter(adapter, repo, prompt, abort.signal),
+  );
+} else if (values["skill-baseline"]) {
+  const { withModel } = await import("./model.mts");
+  await withModel(values.model, (state) => runSelected(state.run));
+} else {
+  await runSelected();
 }
 if (
   results.length !== selected.length ||
