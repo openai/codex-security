@@ -23,6 +23,7 @@ from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench.storage import (
     archive_source_directory,
+    archived_path,
     create_private_temporary_directory,
     relocate_scan_artifact,
     same_directory_spelling,
@@ -289,16 +290,8 @@ def archive_scan(
                 scan_dir.mkdir(mode=0o700)
                 scan_dir.chmod(0o700)
         if previous_scan is not None:
-            # Preserve the spelling under which the old run validated its artifact paths.
             source = Path(previous_scan["scan_dir"])
-            archive = next(
-                (
-                    path
-                    for path in scan_directory_spellings(archived_scan_dir)
-                    if same_directory_spelling(path.parent, source.parent)
-                ),
-                archived_scan_dir,
-            )
+            archive = archived_path(archived_scan_dir, source, Path())
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
                 (str(archive), timestamp, previous_scan["id"]),

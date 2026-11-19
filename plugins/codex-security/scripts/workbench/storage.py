@@ -124,8 +124,20 @@ def require_worker_path(path: Path, scan_dir: Path) -> None:
         raise ValueError("Worker artifact does not belong to the scan directory.")
 
 
+def archived_path(archive: Path, path: Path, relative: Path) -> Path:
+    """Keep extended access after archive growth, preserving namespace-specific filenames."""
+    if str(archive).startswith("\\\\?\\") and all(
+        _ordinary_windows_name(name) for name in relative.parts
+    ):
+        return archive / relative
+    for spelling in scan_directory_spellings(archive):
+        if Path(spelling.anchor) == Path(path.anchor):
+            return spelling / relative
+    return archive / relative
+
+
 def relocate_scan_artifact(scan_dir: Path, archive: Path, value: str | None) -> str | None:
-    """Keep the original file's Windows namespace when moving it into the archive."""
+    """Relocate an artifact while keeping its stored path readable."""
     if value is None:
         return None
     path = Path(value)
@@ -133,10 +145,7 @@ def relocate_scan_artifact(scan_dir: Path, archive: Path, value: str | None) -> 
         relative = scan_relative_path(path, scan_dir)
     except ValueError:
         return value
-    for spelling in scan_directory_spellings(archive):
-        if Path(spelling.anchor) == Path(path.anchor):
-            return str(spelling / relative)
-    return str(archive / relative)
+    return str(archived_path(archive, path, relative))
 
 
 def short_archive_prefix(original_name: str) -> str:

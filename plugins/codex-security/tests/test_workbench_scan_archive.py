@@ -637,6 +637,39 @@ def test_archive_follows_the_owner_across_windows_spellings(
 
 
 @pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires long Win32 archive paths")
+def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(tmp_path):
+    extended = load_script("windows_scan_local_files")._extended_path
+    state, repo = tmp_path / "state", tmp_path / "repo"
+    repo.mkdir()
+    units = len(str(tmp_path).encode("utf-16-le")) // 2
+    output = tmp_path / ("s" * max(1, 242 - units - 1))
+    output.mkdir()
+    scan_id = register_scan(state, repo, output)["scanId"]
+    fail_scan(state, scan_id, "Stopped")
+    report = output / "report.md"
+    report.write_text("Previous report")
+    database = state / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO scan_artifacts VALUES (?, 'markdownReport', ?, 'before')",
+            (scan_id, str(report)),
+        )
+
+    current = register_scan(state, repo, Path(extended(output)), "--archive-existing")
+    archived = Path(current["archivedScanDir"])
+    with sqlite3.connect(database) as connection:
+        root, artifact = connection.execute(
+            "SELECT scan_dir, path FROM scans JOIN scan_artifacts ON scan_id = scans.id "
+            "WHERE scans.id = ?",
+            (scan_id,),
+        ).fetchone()
+    assert root == extended(archived)
+    assert artifact == str(Path(root) / report.name)
+    assert Path(artifact).read_text() == "Previous report"
+
+
+@pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 archive aliases")
 def test_archive_does_not_move_state_or_checkout_via_an_extended_output(tmp_path):
     _extended_path = load_script("windows_scan_local_files")._extended_path
@@ -729,6 +762,13 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
             )
 
     archive = ordinary.with_name("run.previous-test")
+    extended_archive = extended.with_name(archive.name)
+    assert storage.relocate_scan_artifact(ordinary, extended_archive, str(normal)) == str(
+        extended_archive / normal.name
+    )
+    assert storage.relocate_scan_artifact(
+        ordinary, extended_archive, str(ordinary / literal.name)
+    ) == str(archive / literal.name)
     for recorded_root, supplied in ((ordinary, literal), (extended, normal)):
         scan = {"scan_dir": str(recorded_root)}
         saved = deep.deep_scan_path(scan, str(supplied), "Worker result", kind="file")
