@@ -1051,7 +1051,10 @@ test("recorded additive migrations restore missing columns and configured error 
   for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60, 61])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
-      .run(version, workbenchMigrations.find((item) => item.version === version)!.name);
+      .run(
+        version,
+        workbenchMigrations.find((item) => item.version === version)!.name,
+      );
   applyMigrations(database);
   const launch = database
     .prepare(
