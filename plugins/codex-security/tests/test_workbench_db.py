@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import workbench_test_support
 from workbench_test_support import (
     BUDGET_COST,
     SCRIPT,
@@ -195,7 +194,7 @@ def test_completion_rejects_unknown_protocol_before_mutation(
     workbench_api, monkeypatch, tmp_path, operation, protocol
 ):
     script = str(workbench_api["__file__"])
-    monkeypatch.setattr(workbench_test_support, "SCRIPT", script)
+    monkeypatch.setattr("workbench_test_support.SCRIPT", script)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
     state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
     environment = {**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)}
@@ -287,7 +286,7 @@ api["main"]()
 def test_completed_replay_checks_protocol_before_cost_or_digest_writes(
     workbench_api, monkeypatch, tmp_path, protocol, legacy_digest
 ):
-    monkeypatch.setattr(workbench_test_support, "SCRIPT", workbench_api["__file__"])
+    monkeypatch.setattr("workbench_test_support.SCRIPT", workbench_api["__file__"])
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
     state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
     complete_budget_scan(state_dir, scan_id)
@@ -344,7 +343,7 @@ def test_completed_replay_checks_protocol_before_cost_or_digest_writes(
 def test_budget_completion_checks_continuation_before_draft_writes(
     workbench_api, monkeypatch, tmp_path, terminal, continuation
 ):
-    monkeypatch.setattr(workbench_test_support, "SCRIPT", workbench_api["__file__"])
+    monkeypatch.setattr("workbench_test_support.SCRIPT", workbench_api["__file__"])
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
     state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, terminal=terminal)
     database = state_dir / "workbench.sqlite3"

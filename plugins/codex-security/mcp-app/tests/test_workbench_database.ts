@@ -79,7 +79,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      workbenchMigrations[version - 1].name,
+      workbenchMigrations.find((item) => item.version === version)!.name,
     );
 }
 
@@ -1051,7 +1051,10 @@ test("recorded additive migrations restore missing columns and configured error 
   for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60, 61])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
-      .run(version, workbenchMigrations[version - 1].name);
+      .run(
+        version,
+        workbenchMigrations.find((item) => item.version === version)!.name,
+      );
   applyMigrations(database);
   const launch = database
     .prepare(
@@ -1420,7 +1423,7 @@ for (const opener of ["Python", "Node"]) {
       .run(selected);
     const upgraded = migrationHistory(database);
     assert.deepEqual(precursorReceipts.all(), receipts);
-    assertMigrationNames(database, 73, 75, 76);
+    assertMigrationNames(database, 82, 83, 84, 85);
 
     await open();
     assert.deepEqual(migrationHistory(database), upgraded);

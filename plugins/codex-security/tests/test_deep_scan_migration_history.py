@@ -14,14 +14,14 @@ from test_workbench_setup_and_migrations import (
 
 
 @pytest.mark.cross_platform
-@pytest.mark.parametrize("preview_offset", [0, 3, 4])
-def test_durable_recovery_preview_preserves_receipts_and_saved_input(preview_offset: int) -> None:
+@pytest.mark.parametrize("first_preview", [63, 64, 67, 73])
+def test_durable_recovery_preview_preserves_receipts_and_saved_input(first_preview: int) -> None:
     preview = tuple(
-        (version - 6 - preview_offset, name, sql)
+        (version - 82 + first_preview, name, sql)
         for version, name, sql in SCHEMA.MIGRATIONS
-        if 73 <= version <= 76
+        if 82 <= version <= 85
     )
-    db, migrate = create_historical_database(67 - preview_offset)
+    db, migrate = create_historical_database(first_preview)
     with closing(db):
         timestamp = "2026-10-01T00:00:00Z"
         apply_historical_migrations(db, preview, timestamp)
@@ -42,9 +42,9 @@ def test_durable_recovery_preview_preserves_receipts_and_saved_input(preview_off
             assert [
                 tuple(row)
                 for row in db.execute(
-                    "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 73 ORDER BY version"
+                    "SELECT version, name, applied_at FROM schema_migrations WHERE version BETWEEN 82 AND 85 ORDER BY version"
                 )
-            ] == [(version + 6 + preview_offset, name, timestamp) for version, name, _ in preview]
+            ] == [(version + 82 - first_preview, name, timestamp) for version, name, _ in preview]
             assert tuple(
                 db.execute(
                     "SELECT finalization_input_json, usage_owner_json, execution_settings_json, worker_usage_gap "

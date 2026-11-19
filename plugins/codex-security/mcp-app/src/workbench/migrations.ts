@@ -229,6 +229,9 @@ export function applyMigrations(
         for (const statement of migration(6).statements)
           applyRepairStatement(database, statement.replaceAll("\n", " "));
       } else if (item.version === 16) backfill = repairStableTargets(database);
+      // Earlier readers created these objects under other previews’ receipts.
+      else if (item.version >= 82 && item.version <= 85)
+        repairSchema(database, item.version);
       else if (applied.has(item.version)) {
         if (
           [

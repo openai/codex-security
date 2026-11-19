@@ -120,10 +120,10 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
-    (73, "retain deep scan attempts and exact merge inputs"),
-    (74, "persist selected deep scan finalization input"),
-    (75, "bind original deep scan parent usage turn"),
-    (76, "bind original deep scan execution settings"),
+    (82, "retain deep scan attempts and exact merge inputs"),
+    (83, "persist selected deep scan finalization input"),
+    (84, "bind original deep scan parent usage turn"),
+    (85, "bind original deep scan execution settings"),
 ]
 
 
