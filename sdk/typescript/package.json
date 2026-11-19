@@ -116,7 +116,7 @@
     "saxes": "6.0.0",
     "semver": "7.8.6",
     "smol-toml": "1.9.1",
-    "string-width": "8.3.0",
+    "string-width": "9.0.0",
     "strip-ansi": "7.2.0",
     "tokenx": "2.2.0",
     "yaml": "2.9.1",
