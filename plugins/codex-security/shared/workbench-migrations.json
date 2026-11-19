@@ -590,7 +590,7 @@
     ]
   },
   {
-    "version": 73,
+    "version": 81,
     "name": "retain native investigation time allowances",
     "statements": ["ALTER TABLE scans ADD COLUMN investigation_policy TEXT;"]
   }

@@ -120,7 +120,7 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
-    (73, "retain native investigation time allowances"),
+    (81, "retain native investigation time allowances"),
 ]
 
 
@@ -1582,7 +1582,7 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
 
 @pytest.mark.cross_platform
-@pytest.mark.parametrize("preview_slot", [63, 64, 67, None])
+@pytest.mark.parametrize("preview_slot", [63, 64, 67, 73, None])
 def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration(
     preview_slot: int | None,
 ) -> None:
@@ -1599,7 +1599,7 @@ def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration(
         insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
         migrate(db)
         allowance = db.execute(
-            "SELECT name, applied_at FROM schema_migrations WHERE version = 73"
+            "SELECT name, applied_at FROM schema_migrations WHERE version = 81"
         ).fetchone()
         assert allowance["name"] == "retain native investigation time allowances"
         if preview_slot is not None:
