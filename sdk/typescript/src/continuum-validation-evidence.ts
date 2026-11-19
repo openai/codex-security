@@ -1,5 +1,24 @@
 import { isRecord } from "./record.js";
 
+export function singleFindingValidationIssue(
+  issue: unknown,
+  issueId: unknown,
+  finding: { scope: string; id: string },
+) {
+  if (!isRecord(issue) || typeof issueId !== "string") return null;
+  const arn = `${finding.scope}/code-issues/${issueId}`;
+  const ids = issue["findingIds"];
+  if (
+    issue["issueArn"] !== arn ||
+    issue["issueId"] !== issueId ||
+    !Array.isArray(ids) ||
+    ids.length !== 1 ||
+    ids[0] !== finding.id
+  )
+    return null;
+  return { issueArn: arn, issueId, findingIds: [finding.id] };
+}
+
 /** Project a bundled proof to the submitted finding, never another finding's proof. */
 export function selectFindingValidationArtifact(
   artifact: Record<string, unknown>,

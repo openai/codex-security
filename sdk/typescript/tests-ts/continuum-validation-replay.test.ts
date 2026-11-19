@@ -22,7 +22,9 @@ const finding: Record<string, unknown> & { severity: { level: string } } = {
 function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
   return async (operation, args) => {
     if (operation === "create-code-finding")
-      return { findingId: "fake-submission" };
+      return {
+        findingId: (Object.values(fixture.findings)[0] as any).findingId,
+      };
     if (operation === "get-code-finding")
       return { ...(Object.values(fixture.findings)[0] as object) };
     if (operation === "get-code-issue") return structuredClone(fixture.issue);
@@ -34,11 +36,14 @@ function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
   };
 }
 function provider(launcher = transport()) {
+  let elapsed = 0;
   return new ContinuumValidationProvider({
     environmentId: recorded.environmentId,
     launcher,
-    now: () => new Date("2026-11-06T15:20:00Z"),
-    delay: async () => {},
+    now: () => new Date(Date.parse("2026-11-06T15:20:00Z") + elapsed),
+    delay: async (ms) => {
+      elapsed += ms;
+    },
   });
 }
 function reachability(fixture: typeof recorded) {
@@ -56,7 +61,7 @@ describe("recorded shape, anonymised replay", () => {
       repositoryPath: "/not-used",
     });
     expect(result.report).toContain(
-      "Codex: high, exposure unknown → Continuum: critical, internet-exposed (basis GRAPH)",
+      "Codex: high, exposure unknown → Continuum: critical, reachable from attacker (basis GRAPH)",
     );
     expect(result.report).toContain("likelihood HIGH × impact HIGH");
     expect(result.report).toContain(
@@ -105,7 +110,9 @@ describe("explicitly fake outcome variations", () => {
       repositoryPath: "/not-used",
     });
     expect(result.record?.severityAfter).toBe("low");
-    expect(result.report).toContain("not internet-exposed (basis GRAPH)");
+    expect(result.report).toContain(
+      "not reachable from attacker (basis GRAPH)",
+    );
     expect(result.report).toContain("lower priority");
     expect(finding.severity.level).toBe("high");
   });
@@ -141,12 +148,16 @@ describe("explicitly fake outcome variations", () => {
     },
   );
 
-  test("UNKNOWN never becomes not exposed", async () => {
+  test.each([
+    "No complete deployment reachability answer was returned.",
+    "NOT_EXPOSED cannot be established because the deployment graph is unavailable.",
+    "It is not reachable only if a barrier exists; the graph cannot confirm one.",
+  ])("UNKNOWN never becomes not exposed from prose: %s", async (reason) => {
     const fake = structuredClone(recorded);
     Object.assign(reachability(fake), {
       value: "UNKNOWN",
       basis: "INFERRED",
-      reason: "No complete deployment reachability answer was returned.",
+      reason,
     });
     const result = await provider(transport(fake)).validate(finding, {
       repositoryPath: "/not-used",
@@ -177,7 +188,12 @@ describe("explicitly fake outcome variations", () => {
         if (op === "create-code-finding") {
           const id = JSON.parse(args[1]!).ocsfDocument.finding_info.uid;
           if (id === "rejected") throw new Error("Fake submission rejected");
-          return { findingId: id };
+          return {
+            findingId:
+              id === finding["occurrenceId"]
+                ? (Object.values(recorded.findings)[0] as any).findingId
+                : id,
+          };
         }
         if (op === "get-code-finding" && args.at(-1) === "waiting")
           return { status: "SUBMITTED" };

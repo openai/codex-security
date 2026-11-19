@@ -27,8 +27,20 @@ function fakeAws(link = "createdIssueId") {
     calls.push(operation);
     if (operation === "create-code-finding") return { findingId: "finding-1" };
     if (operation === "get-code-finding")
-      return { status: "CONFIRMED", [link]: "issue-1" };
-    if (operation === "get-code-issue") return { severity: "HIGH" };
+      return {
+        status: "CONFIRMED",
+        [link]: "issue-1",
+        findingArn:
+          "arn:aws:continuum:us-east-1:123456789012:environments/environment-1/code-findings/finding-1",
+      };
+    if (operation === "get-code-issue")
+      return {
+        severity: "HIGH",
+        issueId: "issue-1",
+        findingIds: ["finding-1"],
+        issueArn:
+          "arn:aws:continuum:us-east-1:123456789012:environments/environment-1/code-issues/issue-1",
+      };
     if (operation === "list-code-issue-artifacts")
       return {
         items: [{ artifactId: args.at(-1), createdAt: "2026-11-13T00:00:00Z" }],
@@ -74,11 +86,14 @@ function fakeAws(link = "createdIssueId") {
 }
 
 function provider(launcher: ContinuumAwsLauncher) {
+  let elapsed = 0;
   return new ContinuumValidationProvider({
     environmentId: "environment-1",
     launcher,
-    now: () => new Date("2026-11-13T00:00:00Z"),
-    delay: async () => {},
+    now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
+    delay: async (ms) => {
+      elapsed += ms;
+    },
   });
 }
 
@@ -238,7 +253,12 @@ describe("Continuum validation provider", () => {
           polled.push(id);
           if (id !== "item-5") return { status: "SUBMITTED" };
         }
-        return aws.launcher(op, args, signal);
+        const response = await aws.launcher(op, args, signal);
+        if (op === "get-code-finding")
+          response["findingArn"] =
+            "arn:aws:continuum:us-east-1:123456789012:environments/environment-1/code-findings/item-5";
+        if (op === "get-code-issue") response["findingIds"] = ["item-5"];
+        return response;
       },
     });
     const result = await p.validateBatch(
@@ -268,6 +288,74 @@ describe("Continuum validation provider", () => {
     expect(result.record?.freshness.stale).toBe(true);
     expect(result.report).toContain("possibly stale");
     expect(result.report).not.toContain("current at submission");
+  });
+
+  test.each(["multiple findings", "another sole finding", "wrong issue ARN"])(
+    "rejects issue-wide proof with %s",
+    async (scenario) => {
+      const aws = fakeAws("duplicateOfIssueId");
+      let elapsed = 0;
+      const p = new ContinuumValidationProvider({
+        environmentId: "environment-1",
+        waitMinutes: 0.1,
+        now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
+        delay: async (ms) => {
+          elapsed += ms;
+        },
+        launcher: async (op, args, signal) => {
+          const response = await aws.launcher(op, args, signal);
+          if (op === "get-code-issue") {
+            if (scenario === "multiple findings")
+              response["findingIds"] = ["finding-1", "another-finding"];
+            if (scenario === "another sole finding")
+              response["findingIds"] = ["another-finding"];
+            if (scenario === "wrong issue ARN")
+              response["issueArn"] =
+                "arn:aws:continuum:us-east-1:123456789012:environments/other-environment/code-issues/issue-1";
+          }
+          return response;
+        },
+      });
+      const result = await p.validate(finding, { repositoryPath: "/repo" });
+      expect(result.record?.verdict).toBe("UNAVAILABLE");
+      expect(result.record?.severityAfter).toBe("high");
+    },
+  );
+
+  test("uses the newest available artifact that actually contains the submitted finding", async () => {
+    const aws = fakeAws("mergedIntoIssueId");
+    const fetched: string[] = [];
+    const result = await provider(async (op, args, signal) => {
+      if (
+        op === "list-code-issue-artifacts" &&
+        args.at(-1) === "VALIDATION_EVIDENCE"
+      )
+        return {
+          items: [
+            { artifactId: "new-validation", createdAt: "2026-11-14T00:00:00Z" },
+            {
+              artifactId: "older-validation",
+              createdAt: "2026-11-13T00:00:00Z",
+            },
+          ],
+        };
+      const response = await aws.launcher(op, args, signal);
+      if (op === "get-code-issue-artifact" && args.at(-1) !== "EVIDENCE") {
+        fetched.push(args.at(-1)!);
+        (response["body"] as any).validationEvidence.perFindingResults = [
+          {
+            findingId:
+              args.at(-1) === "new-validation"
+                ? "another-finding"
+                : "finding-1",
+            exploitable: "NOT_EXPLOITABLE",
+          },
+        ];
+      }
+      return response;
+    }).validate(finding, { repositoryPath: "/repo" });
+    expect(fetched).toEqual(["new-validation", "older-validation"]);
+    expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
   });
 
   test("retries throttling within the same deadline", async () => {

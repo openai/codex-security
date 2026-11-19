@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prepareContinuumAws } from "./continuum-aws.js";
-import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
+import {
+  selectFindingValidationArtifact,
+  singleFindingValidationIssue,
+} from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
 import {
   type ValidationProvider,
@@ -305,6 +308,18 @@ function basisLabel(value: unknown): "GRAPH" | "CODE" | "INFERRED" {
   return "INFERRED";
 }
 
+function attackerReachability(
+  artifact: Record<string, unknown>,
+): boolean | undefined {
+  const likelihood = evidenceRows(artifact).find(
+    (row) => row["dimension"] === "LIKELIHOOD_ASSESSMENT",
+  );
+  const value = object(
+    object(likelihood?.["preconditions"])["reachableFromAttacker"],
+  )["value"];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function evidenceSignal(artifact: Record<string, unknown>): string {
   const body = object(artifact["body"]);
   const prevalidation = object(body["prevalidationSignals"]);
@@ -347,9 +362,7 @@ function evidenceSignal(artifact: Record<string, unknown>): string {
   );
   const caution =
     basis === "GRAPH" &&
-    /not.?reachable|unreachable|barrier/iu.test(
-      `${preferred["dimension"]} ${preferred["conclusion"]}`,
-    ) &&
+    attackerReachability(artifact) === false &&
     /empty|degraded|unavailable|not returned/iu.test(graphState)
       ? " Caution: this not-reachable conclusion comes from an empty or degraded graph."
       : "";
@@ -720,13 +733,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
             const items = Array.isArray(listed["items"])
               ? listed["items"].map(object)
               : [];
-            const selected = items.sort((a, b) =>
+            items.sort((a, b) =>
               String(b["createdAt"] ?? "").localeCompare(
                 String(a["createdAt"] ?? ""),
               ),
-            )[0];
-            const artifactId = text(selected?.["artifactId"]);
-            if (artifactId) {
+            );
+            for (const candidate of items) {
+              const artifactId = text(candidate["artifactId"]);
+              if (!artifactId) continue;
               const artifact = await this.#call(
                 launch,
                 "get-code-issue-artifact",
@@ -743,12 +757,34 @@ export class ContinuumValidationProvider implements ValidationProvider {
                 delay,
                 now,
               );
-              if (kind === "EVIDENCE") likelihoodArtifact = artifact;
-              else
-                validationArtifact = selectFindingValidationArtifact(
-                  artifact,
-                  findingId,
-                )?.artifact;
+              if (kind === "EVIDENCE") {
+                likelihoodArtifact = artifact;
+                break;
+              }
+              const selected = selectFindingValidationArtifact(
+                artifact,
+                findingId,
+              );
+              if (!selected) continue;
+              if (selected.scope === "issue") {
+                const arn = text(current["findingArn"]);
+                const suffix = `/code-findings/${findingId}`;
+                const scope = arn?.endsWith(suffix)
+                  ? arn.slice(0, -suffix.length)
+                  : undefined;
+                if (
+                  !scope?.endsWith(
+                    `:environments/${this.#options.environmentId}`,
+                  ) ||
+                  !singleFindingValidationIssue(issue, issueId, {
+                    scope,
+                    id: findingId,
+                  })
+                )
+                  continue;
+              }
+              validationArtifact = selected.artifact;
+              break;
             }
           }
         }
@@ -814,6 +850,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
             reason: `${name}: ${safeText(String(object(raw)["value"]), 80)} — ${safeText(object(raw)["reason"], 180)}`,
           })),
         ),
+        attackerReachability(likelihoodArtifact),
       );
     } catch (error) {
       return unavailableAssessment(
@@ -840,6 +877,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       basis: "GRAPH" | "CODE" | "INFERRED";
       reason: string;
     }> = [],
+    reachableFromAttacker?: boolean,
   ): ValidationProviderAssessment {
     const base = (
       this.#options.consoleBaseUrl ??
@@ -850,13 +888,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
       : undefined;
     const title = safeText(finding["title"], 160);
     const summary = safeText(finding["summary"], 300);
-    const exposure = /reachableFromAttacker: true/iu.test(signal)
-      ? /EXPOSED|internet|public/iu.test(signal)
-        ? "internet-exposed"
-        : "reachable from attacker"
-      : /NOT_EXPOSED/iu.test(signal)
-        ? "not internet-exposed"
-        : "exposure unknown";
+    const exposure =
+      reachableFromAttacker === true
+        ? "reachable from attacker"
+        : reachableFromAttacker === false
+          ? "not reachable from attacker"
+          : "exposure unknown";
     const report = [
       `Codex: ${severityLevel(finding)}, exposure unknown → Continuum: ${match === "different_flaw" || match === "unknown" ? `${severityLevel(finding)} (Codex retained)` : severity.toLowerCase()}, ${exposure} (basis ${basisLabel(signal.split("—")[0])}).`,
       "",
@@ -872,7 +909,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       "",
       reason,
       "",
-      ...(/not.?reachable|unreachable|barrier|NOT_EXPOSED/iu.test(signal)
+      ...(reachableFromAttacker === false
         ? [
             "This issue may be real but not reachable in the observed deployment; consider lower priority without changing its truth state.",
             "",

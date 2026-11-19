@@ -13,8 +13,14 @@ import {
 } from "./external-import-contract.js";
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
-import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
-export { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
+import {
+  selectFindingValidationArtifact,
+  singleFindingValidationIssue,
+} from "./continuum-validation-evidence.js";
+export {
+  selectFindingValidationArtifact,
+  singleFindingValidationIssue,
+} from "./continuum-validation-evidence.js";
 import {
   array,
   awsTimestampSeconds,
@@ -465,25 +471,6 @@ function issueEvidenceDescriptor(artifact: Record<string, unknown>) {
     ...(artifact["mediaType"] != null && { mediaType: artifact["mediaType"] }),
     ...(artifact["producer"] != null && { producer: artifact["producer"] }),
   };
-}
-
-export function singleFindingValidationIssue(
-  issue: unknown,
-  issueId: unknown,
-  finding: ReturnType<typeof findingIdentity>,
-) {
-  if (!isRecord(issue) || typeof issueId !== "string") return null;
-  const arn = `${finding.scope}/code-issues/${issueId}`;
-  const ids = issue["findingIds"];
-  if (
-    issue["issueArn"] !== arn ||
-    issue["issueId"] !== issueId ||
-    !Array.isArray(ids) ||
-    ids.length !== 1 ||
-    ids[0] !== finding.id
-  )
-    return null;
-  return { issueArn: arn, issueId, findingIds: [finding.id] };
 }
 
 function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
