@@ -250,6 +250,7 @@ test("Dependency, Standard and triage eval changes require deterministic eval co
       "evals/dependency-reachability/grade.mjs",
       "evals/dependency-reachability/fixtures/mixed-services/notes/package-lock.json",
     ],
+    ["evals/package-application-mapping/run.mjs"],
     [
       "evals/standard-time-budget/fixtures.mts",
       "evals/standard-time-budget/test_production.mts",

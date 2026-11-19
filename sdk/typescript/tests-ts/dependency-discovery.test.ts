@@ -206,3 +206,48 @@ test("Python pins and module aliases require scoped source evidence", async () =
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+test("reports a nested build-only package in the active caller boundary", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "dependency-docker-build-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  try {
+    for (const directory of [
+      "services/renderer",
+      "tests/fixtures",
+      "tests/owned",
+    ]) {
+      await mkdir(join(repo, directory), { recursive: true });
+      await writeFile(
+        join(repo, directory, "Dockerfile"),
+        "FROM scratch\nRUN apt-get install -y libwebp7\n",
+      );
+    }
+    await writeFile(
+      join(repo, "tests/owned/SECURITY.md"),
+      "This renderer is deployed.\n",
+    );
+    git("init", "--quiet");
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-qm",
+      "renderer builds",
+    );
+    const result = await discoverDependencyRepository({
+      repository: repo,
+      package: { ecosystem: "Debian", name: "libwebp7" },
+      callerBoundary: { productionOnly: true, excludePaths: [] },
+    });
+    expect(result.buildFiles.sort()).toEqual([
+      "services/renderer/Dockerfile",
+      "tests/owned/Dockerfile",
+    ]);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});

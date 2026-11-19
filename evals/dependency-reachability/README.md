@@ -75,3 +75,23 @@ node evals/dependency-reachability/upstream.mjs --cache "$cache" --case task-par
 To regrade saved CLI reports, pass `--grade-existing RESULTS_DIR` instead of `--cli PATH`. This re-creates the pinned Git source and preserves the original report bytes.
 
 With no selector, the upstream runner evaluates all 23 cases sequentially. `--help` lists their IDs. `--prepare-only` verifies materialization and every required evidence group against the generated Git commit. A live case checks one assessed location's identity, expected version, deciding source citations, caller-specific conditions and claim approval. Alternatives within an evidence group are equivalent. All groups must be supported by the same assessed use. The expected distribution is nine `potentially_exploitable`, twelve `ruled_out` and two `unknown`. It describes the rubric; actual per-case scores and execution failures are recorded when the suite runs.
+
+### Compare investigator and skill runs
+
+Use the same cache, model, and case IDs for both CLI builds. Each case has an isolated checkout. `sourceSha` identifies the complete staged checkout, including the synthetic application. The output includes execution failures and full-rubric grades. The grader requires a captured checkout trace of the target dependency and validates the scope, timestamps, outcome and completeness of its search audit.
+
+```sh
+runner=evals/dependency-reachability/upstream.mjs
+node "$runner" --cache "$CACHE" --cli "$OLD_CLI" --model "$MODEL" --jobs 3 --out "$OUT/original"
+node "$runner" --cache "$CACHE" --cli "$NEW_CLI" --model "$MODEL" --jobs 3 --out "$OUT/candidate"
+```
+
+To run the standalone attack-path skill baseline, build the SDK and install its eval dependencies, then run the following command. It uses each case’s historical caller question, the production skill, an isolated Codex home, and an offline read-only checkout. The baseline answer contains a version, verdict, reason and exact source quotations. Its grader checks the submitted quotes against the pinned Git blobs. The saved prompt digest and checkout SHA identify the inputs. Reviewed CLI grades use the separate per-use evidence rubric.
+
+```sh
+node --experimental-strip-types "$runner" --cache "$CACHE" --skill-baseline --model "$MODEL" --jobs 3 --out "$OUT/skill"
+```
+
+The [application mapping suite](../package-application-mapping/README.md) exercises launcher selection and catalog evidence on five further fixtures.
+
+To compare a local adapter with the skill, run the same `--skill-baseline` command and append `-- COMMAND [ARG...]`. The process receives the question on stdin in the staged checkout and returns the same JSON answer on stdout.
