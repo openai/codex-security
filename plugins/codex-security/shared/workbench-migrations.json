@@ -590,7 +590,7 @@
     ]
   },
   {
-    "version": 74,
+    "version": 79,
     "name": "retain the last observed phase of stopped Standard scans",
     "statements": [
       "ALTER TABLE scan_progress ADD COLUMN last_observed_phase_json TEXT;"

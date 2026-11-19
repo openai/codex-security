@@ -120,7 +120,7 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
-    (74, "retain the last observed phase of stopped Standard scans"),
+    (79, "retain the last observed phase of stopped Standard scans"),
 ]
 
 
@@ -2139,11 +2139,13 @@ def read_migrated_workspace_twice(state_dir: Path, workspace_id: str) -> dict[st
         ),
     ],
 )
-def test_saved_phase_on_another_version_74_preview(tmp_path, name, statement):
+@pytest.mark.parametrize("already_added", [False, True])
+def test_saved_phase_on_another_version_74_preview(tmp_path, name, statement, already_added):
     state_dir, _, scan_id, database = start_migration_scan(tmp_path)
     with sqlite3.connect(database) as connection:
-        connection.execute("ALTER TABLE scan_progress DROP COLUMN last_observed_phase_json")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 74")
+        if not already_added:
+            connection.execute("ALTER TABLE scan_progress DROP COLUMN last_observed_phase_json")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 79")
         apply_historical_migrations(connection, ((74, name, statement),), "preview-time")
 
     for _ in range(2):
