@@ -1,5 +1,10 @@
+import type { InvestigationToolFactory } from "./dependency-investigation-session.js";
+import type { ScanTokenUsage } from "./cost-model.js";
 import { registerDependencyCheck } from "./dependency-check-command.js";
-import type { DependencyEvidenceRecord } from "./dependency-evidence-sources.js";
+import type {
+  DependencyEvidenceRecord,
+  DependencyEvidenceFailure,
+} from "./dependency-evidence-sources.js";
 import { Cli, z } from "incur";
 import { resolveConfigPath } from "./config-path.js";
 import { CodexSecurityError } from "./errors.js";
@@ -13,8 +18,26 @@ export interface DependencyAgentRequest {
   effort?: string;
   codex?: string[];
   config?: string;
+  stackTarget?: string;
   readOnly?: boolean;
+  coordinator?: boolean;
+  onCoordinatorAnswer?: (answer: string) => Promise<string | undefined>;
+  investigationTools?: InvestigationToolFactory;
+  onAccessProgram?: (program: string | undefined) => void;
+  onUsage?: (usage: ScanTokenUsage) => void;
   onEvidence?: (record: DependencyEvidenceRecord) => void;
+  onEvidenceFailure?: (
+    call: DependencyEvidenceFailure,
+    result?: Record<string, unknown>,
+  ) => void;
+  onEvidenceStartup?: (
+    server: string,
+    status: import("./dependency-blocked-evidence.js").DependencyStartupStatus,
+    required: boolean,
+    error: unknown,
+  ) => void;
+  abortInvestigation?: (args: unknown, thread: string) => unknown;
+  onEvidenceDiagnostic?: (message: string) => void;
 }
 
 export interface DependencyCliContext {
