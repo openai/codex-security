@@ -124,7 +124,7 @@ export function selectDependencyEvidenceField(
 }
 
 export function dependencyEvidencePayload(
-  record: DependencyEvidenceRecord,
+  record: Pick<DependencyEvidenceRecord, "result">,
   index: number | null,
 ): unknown {
   const result = record.result;
@@ -211,7 +211,7 @@ export function selectedReceiptReference({
   };
 }
 
-function incomplete(value: unknown): boolean {
+export function partialDependencyResponse(value: unknown): boolean {
   return (
     isRecord(value) &&
     (value["truncated"] === true ||
@@ -220,13 +220,19 @@ function incomplete(value: unknown): boolean {
       value["has_more"] === true ||
       value["complete"] === false ||
       value["coverage"] === "partial" ||
-      value["coverage"] === "unknown" ||
       Boolean(
         value["next_page_token"] ??
         value["nextPageToken"] ??
         value["nextCursor"] ??
         value["next_cursor"],
       ))
+  );
+}
+
+function incomplete(value: unknown): boolean {
+  return (
+    partialDependencyResponse(value) ||
+    (isRecord(value) && value["coverage"] === "unknown")
   );
 }
 

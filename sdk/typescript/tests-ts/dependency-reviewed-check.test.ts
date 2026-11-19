@@ -39,6 +39,7 @@ import {
   runReviewedDependencyCheck,
 } from "../src/dependency-reviewed-check";
 import {
+  createDependencyEvidenceCapture,
   investigationServer,
   type DependencyEvidenceRecord,
 } from "../src/dependency-evidence-sources";
@@ -3775,4 +3776,159 @@ test("accounts for native graph candidate lines in their pinned package and pres
       .flatMap((c) => c.evidence.map((s) => s.path))
       .sort(),
   ).toEqual(["app.js", "package.json", "remaining.js"]);
+});
+
+test("reports the scope and outcome of original evidence lookups across MCP response formats", async () => {
+  await using f = await fixture();
+  const args = {
+    selector: { environment: "prod", name: "release\nitem" },
+    path: "a".repeat(5000),
+    token: "opaque argument",
+  };
+  const noMatch = { status: "not_found", coverage: { complete: true } };
+  const text = (value: unknown) => ({
+    type: "text",
+    text: JSON.stringify(value),
+  });
+  const inputs = [
+    {
+      tool: "lookup",
+      reply: { structuredContent: noMatch },
+      result: "no_match",
+      completeness: "complete",
+    },
+    {
+      tool: "lookup_samples",
+      reply: {
+        structured_content: {
+          content: [
+            text({ data: { outcome: "matched", result_complete: true } }),
+            text({ metadata: { has_more: true } }),
+          ],
+        },
+      },
+      result: "matches",
+      completeness: "partial",
+    },
+    {
+      tool: "lookup_empty",
+      reply: { content: [] },
+      result: "unknown",
+      completeness: "unknown",
+    },
+    {
+      tool: "lookup_unstructured",
+      reply: { content: [text({ rows: [] })] },
+      result: "returned",
+      completeness: "unknown",
+    },
+    {
+      tool: "lookup_cutoff",
+      reply: { content: [{ type: "text", text: "…13 chars truncated…" }] },
+      result: "returned",
+      completeness: "partial",
+    },
+    {
+      tool: "lookup_failed",
+      reply: { isError: true },
+      result: "unknown",
+      completeness: "error",
+    },
+  ];
+  const result = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Parser input.",
+      signal,
+      evidenceSources: [
+        { server: "inventory", instructions: "Look up deployed copies." },
+        { server: "offline", instructions: "Look up release records." },
+      ],
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        if (req.coordinator) {
+          req.onEvidenceStartup!(
+            "offline",
+            "failed",
+            false,
+            "Connection refused",
+          );
+          const capture = createDependencyEvidenceCapture(
+            { inventory: {} },
+            req.onEvidenceFailure,
+          );
+          for (const { tool, reply } of inputs) {
+            const evidence = capture({
+              type: "item.completed",
+              item: {
+                type: "mcp_tool_call",
+                status: "completed",
+                server: "inventory",
+                tool,
+                arguments: args,
+                result: reply,
+              },
+            });
+            if (evidence) req.onEvidence!(evidence);
+          }
+          return JSON.stringify({ uses: [], limitations: [] });
+        }
+        const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        return JSON.stringify({
+          decisions: packet.claims.map(
+            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
+              ...reference(claim),
+              approved: true,
+              reason: "Verified the search scope.",
+              evidenceKeys: claim.availableEvidenceKeys,
+            }),
+          ),
+        });
+      },
+    },
+  );
+  if (!("checks" in result)) throw Error("Expected a package check");
+  const check = result.checks[0]!;
+  const offline = check.searches.find((row) => row.source === "offline")!;
+  expect([offline.result, offline.completeness]).toEqual([
+    "not_run",
+    "unavailable",
+  ]);
+  expect(
+    check.claimEvidence.receipts[offline.evidenceReferences[0]!],
+  ).toMatchObject({
+    server: "offline",
+    tool: "mcp_server_startup",
+    result: {
+      structuredContent: { status: "failed", error: "Connection refused" },
+    },
+  });
+  for (const input of inputs) {
+    const row = check.searches.find((entry) => entry.tool === input.tool)!;
+    expect(row.scope).toEqual([
+      "environment=prod",
+      "name=release\\u000aitem",
+      "Request SHA-256 " + dependencyRecordHash(args),
+    ]);
+    expect([row.result, row.completeness]).toEqual([
+      input.result,
+      input.completeness,
+    ]);
+    const original = {
+      server: "inventory",
+      tool: input.tool,
+      arguments: args,
+      result: input.reply,
+      ...(input.result === "unknown" &&
+        input.completeness === "error" && { hostStatus: "failed" }),
+    };
+    expect(row.evidenceReferences).toEqual([dependencyRecordHash(original)]);
+    expect(check.claimEvidence.receipts[row.evidenceReferences[0]!]).toEqual({
+      ...original,
+      sha256: dependencyRecordHash(original),
+    });
+  }
 });

@@ -131,7 +131,7 @@ export function createDependencyBlockEvidence(
   ) {
     if (!selected.has(server)) return;
     startupFailures.delete(server);
-    if (status !== "failed" || !required) return;
+    if (status !== "failed" && status !== "cancelled") return;
     const raw = {
       server,
       tool: "mcp_server_startup",
@@ -142,7 +142,8 @@ export function createDependencyBlockEvidence(
     const record = { ...raw, sha256: dependencyRecordHash(raw) };
     failures.set(record.sha256, record);
 
-    startupFailures.set(server, record.sha256);
+    if (status === "failed" && required)
+      startupFailures.set(server, record.sha256);
     return record.sha256;
   }
   function verify(

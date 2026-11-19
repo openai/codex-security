@@ -312,9 +312,11 @@ test("a provider declaration is bound to the genuine scoped and current response
 });
 test("the native coordinator owns the current failed required startup and only the active root turn can block", async () => {
   const { block, result } = fixture();
-  expect(
-    block.startup("builds", "failed", false, "Optional source"),
-  ).toBeUndefined();
+  const optional = block.startup("builds", "failed", false, "Optional source")!;
+  expect(optional).toBeTruthy();
+  expect(() => block.verify(startupRequest(optional), "root", [])).toThrow(
+    "current failed startup",
+  );
   const sent: Record<string, unknown>[] = [];
   let selected: string | undefined;
   const session = createDependencyResourceSession(

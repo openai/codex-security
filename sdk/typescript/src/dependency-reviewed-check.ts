@@ -10,6 +10,10 @@ import {
   selectedReceiptValue,
   type BoundReceiptSelection,
 } from "./dependency-graph-evidence.js";
+import {
+  dependencyLookupScope,
+  dependencyLookupSearch,
+} from "./dependency-search-audit.js";
 import { createDependencyBlockEvidence } from "./dependency-blocked-evidence.js";
 import { openDependencyEndpoints } from "./dependency-endpoints.js";
 import {
@@ -725,33 +729,7 @@ async function investigateIssue(
       store.set("mcp-evidence", record.sha256, record);
       records.set(record.sha256, record);
       if (record.server === investigationServer) return;
-      const payload = record.result["structuredContent"];
-      const metadata = isRecord(payload) ? payload : {};
-      const partial =
-        metadata["partial"] === true ||
-        metadata["truncated"] === true ||
-        metadata["complete"] === false ||
-        Boolean(metadata["nextCursor"]);
-      const empty =
-        payload === undefined &&
-        [record.result["content"], record.result["contents"]].every(
-          (blocks) => !Array.isArray(blocks) || blocks.length === 0,
-        );
-      searches.push({
-        source: record.server,
-        tool: record.tool,
-        scope: ["Request SHA-256 " + dependencyRecordHash(record.arguments)],
-        startedAt: null,
-        finishedAt: new Date().toISOString(),
-        result: empty ? "unknown" : "returned",
-        completeness: partial
-          ? "partial"
-          : metadata["complete"] === true
-            ? "complete"
-            : "unknown",
-        details: empty ? ["The server returned no payload."] : [],
-        evidenceReferences: [record.sha256],
-      });
+      searches.push(dependencyLookupSearch(record));
     };
     let usage: ScanTokenUsage | null = null;
     let lastAccessProgram: string | undefined;
@@ -807,7 +785,20 @@ async function investigateIssue(
               return error.outcome;
             },
             onEvidenceStartup: (server, status, required, err) => {
-              if (!signal.aborted) block.startup(server, status, required, err);
+              if (signal.aborted) return;
+              const receiptId = block.startup(server, status, required, err);
+              if (receiptId)
+                searches.push({
+                  source: server,
+                  tool: "MCP startup",
+                  scope: [],
+                  startedAt: null,
+                  finishedAt: new Date().toISOString(),
+                  result: "not_run",
+                  completeness: "unavailable",
+                  details: ["The configured server could not start."],
+                  evidenceReferences: [receiptId],
+                });
             },
             onEvidenceFailure({ server, tool, arguments: args }, response) {
               if (signal.aborted) return;
@@ -825,7 +816,7 @@ async function investigateIssue(
               searches.push({
                 source: server,
                 tool,
-                scope: ["Request SHA-256 " + dependencyRecordHash(args)],
+                scope: dependencyLookupScope(args),
                 startedAt: null,
                 finishedAt: new Date().toISOString(),
                 result: "unknown",
