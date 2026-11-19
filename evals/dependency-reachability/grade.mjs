@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 import {
   git,
+  mixedServiceVersions,
   precondition,
   reviewedCve,
   sha256,
@@ -703,14 +704,14 @@ export function gradeMixed(
   const validate = sourceReader(fixture.repo, fixture.sha);
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];
-  for (const [service, version, verdict] of [
+  for (const [service, verdict] of [
     [
       "notes",
-      "5.0.0",
       evidenceSource?.withAccess ? "exploitable" : "potentially_exploitable",
     ],
-    ["reviews", "5.0.1", "ruled_out"],
+    ["reviews", "ruled_out"],
   ]) {
+    const version = mixedServiceVersions[service];
     const uses = report.uses.filter((use) =>
       use.location.split(/[^\w-]+/u).includes(service),
     );
