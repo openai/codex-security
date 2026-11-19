@@ -24,6 +24,7 @@
 - add independently reviewed dependency checks ([#2715](https://github.com/openai/codex-security/pull/2715))
 - add JSON error details for scan validation failures ([#2730](https://github.com/openai/codex-security/pull/2730))
 - hillclimb dependency investigation eval & speed ([#2737](https://github.com/openai/codex-security/pull/2737))
+- record the Canvas 1.1.1 source and emoji license for Wolfi ([#2734](https://github.com/openai/codex-security/pull/2734))
 
 </details>
 
