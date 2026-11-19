@@ -63,6 +63,36 @@ When the capture producer identifies the package copy that executed a frame, inc
 
 A missing observation or a gap in the evidence can yield a completed `unknown` assessment. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
 
+### Choose a report format
+
+Run `check` for a terminal summary. Add `--format html` to save a
+self-contained `exploitability_report_<timestamp>.html` in the current
+directory. The timestamp uses UTC, for example `20261119T213045123Z`.
+The terminal shows the summary and the path to the file. To choose
+a different destination, add `--report-file path/to/review.html`. Set
+`CVE_ID` to the advisory you want to check in your checkout.
+
+```sh
+export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
+cs exploitability check "$CVE_ID" --format html
+```
+
+Open the file in a browser. The header identifies the repository and commit
+assessed when those were recorded. Select a call site to read its verdict and
+the advisory conditions, then step through the path to see the code at each
+recorded line. **Expand all** shows the excerpts together. **Focus** opens
+the path across the workspace. For a sampled stack, the viewer shows gaps
+where the report omitted frames and identifies frames without matching source.
+
+For a stack investigation, use
+`cs exploitability run finalize --state investigation.sqlite --format html`.
+Each stack assessment applies to its captured workload and observation window.
+
+For text output, use `--format md` to print Markdown or `--json` to print
+the structured result. With these formats or the default terminal summary,
+`--report-file` saves the underlying JSON. A finding marked **Requires
+more information** corresponds to `unknown` in JSON.
+
 ### Reviewed repository and package checks
 
 From a Git checkout, use the same opt-in to investigate a published CVE or a package. The CLI freezes the public advisory, finds dependency selections and caller paths at the checked-out commit, and asks a fresh reviewer to approve each exact claim revision. The resulting JSON keeps each supported use and its source citations separate.
@@ -74,7 +104,7 @@ cs exploitability check npm:lodash --progress-events progress.jsonl
 cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
 ```
 
-Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed JSON atomically to a new file and preserves any existing destination.
+Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed report atomically to a new file and preserves any existing destination.
 
 The investigator can delegate source searches while an independent reviewer evaluates proposed uses and the claims they rely on. Investigators share evidence collected during the check. The reviewer selects the citations that support each approved claim. A deciding MCP citation can identify a single JSON value. Its `receiptId` identifies the captured response, `originalPayloadSha256` identifies its contents, and `selection.record` gives the key and index path. A null `selection.textBlock` selects structured content. A numeric value selects a JSON text block by index. Whole-response citations omit `selection`. Open a use in the JSON report to see its component, version, verdict, and deciding evidence. The progress stream includes provisional verdicts that can change during review.
 
@@ -89,6 +119,14 @@ The host includes every current approved assessment submitted during the investi
 Investigators use `update_codex_security_graph` to share a source note (`note`) or track files in a delegated search (`sourceWork`). A note can identify a newly discovered caller or sink and cite lines from the pinned Git revision. Other investigators can find it with `query_codex_security_graph({note:{search}})` and read the excerpts with `{note:{id}}`. Submitting a claim based on those lines starts independent review.
 
 Before creating an assessment, investigators query the existing uses. They submit new evidence for the same caller, copy and deployment under its existing ID. To withdraw a superseded use, an investigator submits a disposition under that ID with the latest `expectedRevision`, the approved use’s exact `{id, revision, hash}` in `replacesUse`, and evidence for the change. The reviewer receives the prior finding, its proof and the proposed reason. The original stays in effect while its evidence remains current, until a replacement passes review. An approved disposition’s `conclusionClaim` points to its current report entry. The claim payload’s `replacesUse` records the earlier revision in the investigation ledger.
+
+A repository use or disposition may include an ordered `trace` of cited
+source and handoff steps. Each step names the input or call, its file and
+line, and optionally the exact expression carrying the input. A gap names
+the missing link. The terminal function, call site, and optional argument
+live in `proof.sink` on a use. The reviewer checks these against the pinned
+source. Older reports can still show just the sink. The viewer never turns
+a location label into a call chain.
 
 When the investigation finds a caller but cannot establish which dependency operation it reaches, it can submit an unresolved coverage disposition. Its handoff records what the investigator verified and what evidence is still needed. A dismissal identifies the observed candidate and explains the evidence for excluding it. Each approved disposition in `coverage` links to its own reviewed claim revision, deciding source ranges or original receipt rows, and any selected supporting claims. Source tracing can add candidate lines after initial discovery. The host verifies their source against the checked-out Git revision and resolves the owning package before adding them to coverage. Other unassessed callers retain their own coverage gaps.
 
