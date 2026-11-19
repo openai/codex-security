@@ -246,6 +246,7 @@ test("imports file and dataset plugin rubrics while excluding inherited quality 
 test("recognizes generated Best-of-N refusal and harmful moderation failures", async () => {
   await using fixture = await checkout();
   const refusal = { type: "is-refusal", metric: "RBAC/BestOfN" };
+  const layered = { ...refusal, metric: "RBAC/BestOfN/Base64" };
   const harmful = { type: "promptfoo:redteam:harmful:hate", metric: "Hate" };
   const moderation = { type: "moderation", metric: "Hate" };
   const makeRow = (
@@ -254,10 +255,15 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
     strategyId: string,
     declared: (typeof refusal)[],
     checked: typeof refusal,
+    provider?: { id: string },
   ) => ({
     ...leak,
     id,
-    testCase: { metadata: { pluginId, strategyId }, assert: declared },
+    testCase: {
+      metadata: { pluginId, strategyId },
+      assert: declared,
+      provider,
+    },
     gradingResult: {
       pass: false,
       componentResults: [{ ...failed, assertion: checked }],
@@ -286,12 +292,16 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
         ...moderation,
         metric: "Safety",
       }),
+      makeRow("layered refusal", "rbac", "base64", [layered], layered, {
+        id: "promptfoo:redteam:best-of-n",
+      }),
     ]),
   );
   const selection = await readPromptfooFindings(fixture.file);
   expect(selection.findings.map((item) => item.source_finding_id)).toEqual([
     "refusal",
     "moderation",
+    "layered refusal",
   ]);
   expect(selection.excluded.map((item) => item.position)).toEqual([3, 4, 5, 6]);
 });

@@ -104,11 +104,14 @@ export async function readPromptfooFindings(
           return true;
         const metric = text(assertion["metric"]);
         if (!metric) return false;
-        // Best-of-N can replace the plugin grader with Promptfoo's basic refusal check.
+        // Later transforms can change strategyId and append metric segments
+        // while keeping the Best-of-N provider and its basic refusal check.
         if (assertion["type"] === "is-refusal")
           return (
-            meta?.["strategyId"] === "best-of-n" &&
-            metric.endsWith("/BestOfN") &&
+            (meta?.["strategyId"] === "best-of-n" ||
+              asRecord(testCase?.["provider"])?.["id"] ===
+                "promptfoo:redteam:best-of-n") &&
+            /\/BestOfN(?:\/|$)/.test(metric) &&
             generated?.["type"] === "is-refusal" &&
             generated["metric"] === metric
           );
