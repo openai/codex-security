@@ -91,6 +91,11 @@
             }
           ]
         },
+        "exclude_paths": {
+          "description": "Literal files or directories relative to the selected repository. Exclusions take precedence over inclusions.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "knowledge_base": {
           "description": "Context files or directories, relative to this file. An empty list selects no additional context.",
           "type": "array",
@@ -155,6 +160,45 @@
             }
           },
           "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "exploitability": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "object",
+          "properties": {
+            "instructions": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Caller-provided investigation boundaries and assumptions."
+            }
+          },
+          "required": ["instructions"],
+          "additionalProperties": false
+        },
+        "evidence_sources": {
+          "description": "MCP servers the investigator can query during a reviewed dependency check.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Server name in codex.mcp_servers."
+              },
+              "instructions": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "When to use this server and what evidence its tools can provide."
+              }
+            },
+            "required": ["server", "instructions"],
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

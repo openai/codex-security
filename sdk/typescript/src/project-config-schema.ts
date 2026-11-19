@@ -45,6 +45,9 @@ export const ProjectConfigInputSchema = z.strictObject({
       scope: ProjectScopeSchema.optional().describe(
         "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
       ),
+      exclude_paths: ScanSettingsSchema.shape.excludePaths.describe(
+        "Literal files or directories relative to the selected repository. Exclusions take precedence over inclusions.",
+      ),
       knowledge_base: ScanSettingsSchema.shape.knowledgeBasePaths.describe(
         "Context files or directories, relative to this file. An empty list selects no additional context.",
       ),
@@ -67,6 +70,33 @@ export const ProjectConfigInputSchema = z.strictObject({
         .optional()
         .describe(
           "Deep defaults; a valid block may be retained while standard mode is selected.",
+        ),
+    })
+    .optional(),
+  exploitability: z
+    .strictObject({
+      scope: z
+        .strictObject({
+          instructions: nonempty.describe(
+            "Caller-provided investigation boundaries and assumptions.",
+          ),
+        })
+        .optional(),
+      evidence_sources: z
+        .array(
+          z.strictObject({
+            server: nonempty.describe("Server name in codex.mcp_servers."),
+            instructions: z
+              .string()
+              .regex(/\S/u)
+              .describe(
+                "When to use this server and what evidence its tools can provide.",
+              ),
+          }),
+        )
+        .optional()
+        .describe(
+          "MCP servers the investigator can query during a reviewed dependency check.",
         ),
     })
     .optional(),
