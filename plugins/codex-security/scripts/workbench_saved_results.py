@@ -1261,6 +1261,18 @@ def stopped_phase_observation(scan: sqlite3.Row, args: argparse.Namespace) -> st
     return None
 
 
+def fill_missing_stopped_phase(
+    connection: sqlite3.Connection, scan: sqlite3.Row, args: argparse.Namespace
+) -> None:
+    observation = stopped_phase_observation(scan, args)
+    if observation is not None:
+        connection.execute(
+            "UPDATE scan_progress SET last_observed_phase_json = ? "
+            "WHERE scan_id = ? AND last_observed_phase_json IS NULL",
+            (observation, scan["id"]),
+        )
+
+
 def touch_scan_progress(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -1311,6 +1323,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             error_message="Scan failure is owned by another continuation.",
         )
         if scan["status"] == "failed":
+            fill_missing_stopped_phase(connection, scan, args)
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return db.scan_context(connection, scan["id"])
@@ -1362,6 +1375,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         scan = db.require_scan(connection, scan_id)
         require_cancel_owner(db, connection, scan, thread_id)
         if scan["canceled_at"] is not None:
+            fill_missing_stopped_phase(connection, scan, args)
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return {

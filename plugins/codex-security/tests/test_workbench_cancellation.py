@@ -124,12 +124,20 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
 
 
 @pytest.mark.parametrize("stop", ["fail-scan", "cancel-scan"])
-def test_stop_retains_observation_separately_from_committed_progress(tmp_path: Path, stop: str):
+@pytest.mark.parametrize("coordinator_first", [False, True])
+def test_stop_retains_observation_separately_from_committed_progress(
+    tmp_path: Path, stop: str, coordinator_first: bool
+):
     state_dir, _, scan_id, _ = empty_target_scan(tmp_path)
     before = get_scan(state_dir, scan_id)["scan"]["progress"]
     assert "lastObservedPhase" not in before
     extra = ["--message", "Fixture interruption"] if stop == "fail-scan" else []
     observed_at = before["updatedAt"]
+    if coordinator_first:
+        scan_command(state_dir, stop, scan_id, *extra)
+        stopped = get_scan(state_dir, scan_id)["scan"]
+        if stop == "fail-scan":
+            extra = ["--message", "Cleanup interruption"]
     for phase in ("discovery", "reporting"):
         scan_command(
             state_dir,
@@ -142,6 +150,12 @@ def test_stop_retains_observation_separately_from_committed_progress(tmp_path: P
             observed_at,
         )
     detail = get_scan(state_dir, scan_id)["scan"]
+    if coordinator_first:
+        assert detail["lifecycle"] == stopped["lifecycle"]
+        assert detail["progress"] == {
+            **stopped["progress"],
+            "lastObservedPhase": {"phase": "discovery", "observedAt": observed_at},
+        }
     summary = run_workbench(state_dir, "list-scans")["scans"][0]
     compact = get_scan(state_dir, scan_id, "--progress-only")["scan"]
     for entry in (detail, summary, compact):

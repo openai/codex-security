@@ -4492,7 +4492,14 @@ if __name__ == "__main__":
     },
   );
 
-  test.each(["failure", "cancellation", "tool output only", "legacy plugin"])(
+  test.each([
+    "failure",
+    "cancellation",
+    "tool output only",
+    "legacy plugin",
+    "poll first",
+    "stale live report",
+  ])(
     "saves only an accepted coordinator phase at its observation time on stop (%s)",
     async (scenario) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
@@ -4508,11 +4515,33 @@ if __name__ == "__main__":
       const controller = new AbortController();
       const observedAt = "2026-01-02T12:00:00.000Z";
       let now = Date.parse(observedAt) - 60_000;
+      const pollFirst = ["poll first", "stale live report"].includes(scenario);
+      const polled = Promise.withResolvers<void>();
+      const review = progressMarker("validation", 1, 8);
+      const stale = progressMarker("discovery", 1, 8);
       async function* events(): AsyncGenerator<ThreadEvent> {
-        if (scenario !== "tool output only") {
+        if (pollFirst) {
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          const messages = [stale, review].map((text) => ({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: { type: "AgentMessage", content: [{ type: "Text", text }] },
+            },
+          }));
+          await appendFile(rollout, jsonLines(messages) + "\n");
+          yield { type: "thread.started", thread_id: "thread-1" };
+          await polled.promise;
+          yield liveMessage("older", stale);
+        } else if (scenario !== "tool output only") {
           yield liveMessage("inventory", progressMarker("discovery", 0, 8));
+        }
+        if (
+          scenario !== "tool output only" &&
+          scenario !== "stale live report"
+        ) {
           now = Date.parse(observedAt);
-          yield liveMessage("review", progressMarker("validation", 1, 8));
+          yield liveMessage("review", review);
         }
         now += 60_000;
         // A source read can quote a valid marker. A coordinator claim beyond
@@ -4537,13 +4566,33 @@ if __name__ == "__main__":
           return registerEightFileScan(options, args, input);
         },
       });
-      await expect(
-        client.run(repository, { signal: controller.signal }),
-      ).rejects.toThrow();
+      const phases: string[] = [];
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await expect(
+          client.run(repository, {
+            signal: controller.signal,
+            onProgress: ({ phase }) => {
+              phases.push(phase);
+              if (phase === "validation") polled.resolve();
+            },
+          }),
+        ).rejects.toThrow();
+      } finally {
+        clearInterval(keepAlive);
+      }
+      if (pollFirst)
+        expect(phases.filter((phase) => phase === "validation")).toHaveLength(
+          1,
+        );
       expect(stopped?.[0]).toBe(
         scenario === "cancellation" ? "cancel-scan" : "fail-scan",
       );
-      if (scenario === "legacy plugin" || scenario === "tool output only") {
+      if (
+        ["legacy plugin", "tool output only", "stale live report"].includes(
+          scenario,
+        )
+      ) {
         expect(stopped).not.toContain("--observed-phase");
         expect(stopped).not.toContain("--phase-observed-at");
       } else {

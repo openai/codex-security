@@ -2687,11 +2687,9 @@ export class CodexSecurity {
       ): void => {
         const liveEvent =
           source?.reconciled === true ? undefined : source?.event;
-        if (
-          liveEvent !== undefined &&
-          !tracker.recordParentProgress(progress, liveEvent)
-        )
-          return;
+        const accepted =
+          liveEvent === undefined ||
+          tracker.recordParentProgress(progress, liveEvent);
         const inventory =
           source?.inventory === true ||
           (progress.phase === "discovery" &&
@@ -2704,30 +2702,31 @@ export class CodexSecurity {
           (source?.inventory !== true &&
             progress.filesCompleted < reviewedFileCount)
         ) {
-          if (liveEvent !== undefined) tracker.deferParentInventory(liveEvent);
+          if (accepted && liveEvent !== undefined)
+            tracker.deferParentInventory(liveEvent);
           return;
         }
+        const item = liveEvent?.["item"];
+        if (
+          trackStoppedPhase &&
+          liveEvent !== undefined &&
+          isRecord(item) &&
+          item["type"] === "agent_message" &&
+          (accepted || tracker.matchesCurrentParentProgress(liveEvent))
+        ) {
+          observedPhase = {
+            phase: progress.phase,
+            observedAt: new Date(now()).toISOString(),
+          };
+        }
+        if (!accepted) return;
         if (inventory) {
           scopeFileCount = filesTotal;
           tracker.setExpectedFilesTotal(filesTotal);
         }
         reviewedFileCount = progress.filesCompleted;
-        if (liveEvent !== undefined) {
+        if (liveEvent !== undefined)
           tracker.acceptParentProgress(progress, liveEvent);
-          // Command output may quote a progress marker from source. Only save
-          // a phase that the coordinator itself reported during this turn.
-          const item = liveEvent["item"];
-          if (
-            trackStoppedPhase &&
-            isRecord(item) &&
-            item["type"] === "agent_message"
-          ) {
-            observedPhase = {
-              phase: progress.phase,
-              observedAt: new Date(now()).toISOString(),
-            };
-          }
-        }
         if (
           source !== undefined ||
           mode === "deep" ||
