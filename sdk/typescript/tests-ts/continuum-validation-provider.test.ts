@@ -259,7 +259,8 @@ describe("Continuum validation provider", () => {
     const aws = fakeAws();
     const result = await provider(async (op, args, signal) => {
       const response = await aws.launcher(op, args, signal);
-      if (op === "get-code-issue") response["updatedAt"] = "2026-11-13T00:00:00Z";
+      if (op === "get-code-issue")
+        response["updatedAt"] = "2026-11-13T00:00:00Z";
       if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
         response["createdAt"] = "2025-11-13T00:00:00Z";
       return response;
