@@ -2092,3 +2092,145 @@ test("a reviewed premise retains independently selected rows of the historical m
     report.uses[0]!.decidingEvidence.filter((r) => r.kind === "receipt"),
   ).toHaveLength(2);
 });
+
+test.each(["ledger", "additional", "invalid"] as const)(
+  "final correction preserves distinct approved deployments and checks new uses (%s)",
+  async (mode) => {
+    await using f = await fixture({
+      Dockerfile:
+        'FROM scratch\nCOPY . /app\nWORKDIR /app\nCMD ["node", "app.js"]\n',
+    });
+    const source = {
+      kind: "source" as const,
+      path: "Dockerfile",
+      commit: f.revision,
+      startLine: 2,
+      endLine: 4,
+    };
+    function deployment(
+      workload: string,
+      startLine = 2,
+    ): Proposal["uses"][number] {
+      return {
+        ...f.use,
+        place: { workload, deploymentBasis: "configured" },
+        evidence: [
+          ...f.use.evidence,
+          {
+            path: "Dockerfile",
+            startLine: 2,
+            endLine: 4,
+            supports: ["context"],
+          },
+        ],
+        runtimeContext: {
+          launch: { command: "node app.js", basis: "configured" },
+          evidence: [{ ...source, startLine }],
+        },
+      };
+    }
+    const submitted = ["first-job", "second-job"];
+    const reviewCounts = new Map<string, number>();
+    let rounds = 0;
+    const result = runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Parser behavior",
+        signal,
+      },
+      {
+        discover: async () => f.discovery,
+        async runAgent(req) {
+          const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          if (!req.coordinator) {
+            return JSON.stringify({
+              decisions: input.claims.map(
+                (c: Claim & { availableEvidenceKeys: string[] }) => {
+                  reviewCounts.set(c.id, (reviewCounts.get(c.id) ?? 0) + 1);
+                  return {
+                    id: c.id,
+                    revision: c.revision,
+                    hash: c.hash,
+                    evidenceKeys: c.availableEvidenceKeys,
+                    reason: "Checked source and workload.",
+                    approved: true,
+                  };
+                },
+              ),
+            });
+          }
+          rounds++;
+          if (rounds === 1) {
+            const { call } = await req.investigationTools!();
+            await call("submit_dependency_assessments", {
+              assessments: submitted.map((id) => ({
+                id,
+                expectedRevision: 0,
+                use: deployment(id),
+              })),
+            });
+            const approved = (await call("query_dependency_claims", {
+              ids: submitted.map((id) => "assessment:" + id),
+              wait: true,
+            })) as { state: string }[];
+            expect(approved.map((c) => c.state)).toEqual([
+              "approved",
+              "approved",
+            ]);
+          } else {
+            expect(input.feedback.reason).toContain("Final uses[0]");
+            expect(input.feedback.reason).toContain(
+              "runtimeContext.evidence[0]",
+            );
+            expect(input.feedback.reason).toContain(
+              "Bound ranges for this path at this revision: 2-4.",
+            );
+            expect(input.feedback.approvedAssessments).toMatchObject({
+              total: 2,
+              truncated: false,
+              items: submitted.map((id) => ({
+                id: "assessment:" + id,
+                revision: 1,
+                scope: f.use.scope,
+                location: f.use.location,
+                workload: id,
+              })),
+            });
+            expect(input.feedback.recovery).toContain("return uses: []");
+            if (mode === "ledger")
+              return JSON.stringify({ uses: [], limitations: [] });
+            if (mode === "additional")
+              return JSON.stringify({
+                uses: [deployment("third-job")],
+                limitations: [],
+              });
+          }
+          // The same location can refer to the existing use, a new caller, or another deployment.
+          const attempted = mode === "ledger" ? submitted[0]! : "third-job";
+          return JSON.stringify({
+            uses: [deployment(attempted, 1)],
+            limitations: [],
+          });
+        },
+      },
+    );
+    if (mode === "invalid") {
+      await expect(result).rejects.toThrow("Unbound finding evidence");
+      expect(rounds).toBe(3);
+    } else {
+      const report = await result;
+      if (!("checks" in report)) throw Error("Expected package report.");
+      const uses = report.checks[0]!.uses;
+      expect(uses.map((u) => u.place.workload)).toEqual(
+        mode === "additional" ? [...submitted, "third-job"] : submitted,
+      );
+      expect(uses.slice(0, 2).map((u) => u.conclusionClaim.id)).toEqual(
+        submitted.map((id) => "assessment:" + id),
+      );
+      expect(rounds).toBe(2);
+    }
+    for (const id of submitted)
+      expect(reviewCounts.get("assessment:" + id)).toBe(1);
+  },
+);

@@ -134,6 +134,7 @@ const coordinationInstructions = [
   "Attach each confirmed association to the relevant use.services using the graph's service scope as id, its name and its cited source. For every association cite the original catalog row with its receiptId, originalPayloadSha256 from list_dependency_evidence, and selection {textBlock,record}. Bind the same selector with use.receiptSelections or cite an exact approved premise whose reviewer selected it. Observations can also cite a matching returned quote with context support. Keep the caller's exact launch or import range and the vulnerable operation's range on this use.",
   "For a claim decided by one JSON record, submit receiptSelections containing receiptId, textBlock (null for structured content or the JSON text-block index), and record (its key/index path). Include only the rows establishing this use or premise. A full receipt ID is available for evidence that genuinely concerns the entire reply.",
   "Submit completed uses early with submit_dependency_assessments so an independent reviewer can check them while other leads are investigated. Poll or wait with query_dependency_claims. Correct rejected uses at the returned revision; the host retains approved submissions for final coverage.",
+  "The host publishes all current, approved submissions directly from its ledger. In the final JSON put only additional, unsubmitted findings in uses. Return uses: [] when every intended use has been approved through submit_dependency_assessments. Query an assessment by its exact ID to inspect it. To change a queued use, submit a correction under the same ID at its current revision and wait for review. Keep separate call sites, package copies or deployments even when their scope and location match.",
   "While investigations continue, use submit_dependency_claims to queue useful propositions with Git source ranges, actual receipt IDs and exact previously approved premises. Any investigator may query or wait for the independent review with query_dependency_claims. Include exact approved premise references in uses that rely on them, and correct rejected premises. Finalize each use only with its own verified caller and selected copy. For returned runtime evidence, use the external source from the coordinator when child calls are not visible. Never infer caller access from a tool's presence or a trace hit.",
 ].join("\n");
 const reviewInstructions = [
@@ -287,18 +288,26 @@ async function prepareDraft(
       "Investigation omitted a discovered dependency scope. Explain each out-of-scope manifest against the supplied boundary.",
     );
   const inline = await Promise.all(
-    proposal.uses.map((use) =>
-      verifyScopedUse(
-        use,
-        directory,
-        signal,
-        scopes,
-        advisories,
-        records,
-        boundary.scope,
-        decidingPremiseEvidence,
-      ),
-    ),
+    proposal.uses.map(async (use, index) => {
+      try {
+        return await verifyScopedUse(
+          use,
+          directory,
+          signal,
+          scopes,
+          advisories,
+          records,
+          boundary.scope,
+          decidingPremiseEvidence,
+        );
+      } catch (error) {
+        signal.throwIfAborted();
+        throw new CodexSecurityError(
+          `Final uses[${index}] in scope ${use.scope}: ${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
+    }),
   );
   const uses = [
     ...new Map(
@@ -915,6 +924,41 @@ async function investigateIssue(
       },
     });
 
+    const queuedAssessments = () =>
+      store
+        .claims<Claim["value"]>()
+        .filter(
+          (c) => c.id.startsWith("assessment:") && c.value.kind === "use",
+        );
+    function approvedAssessmentSummary() {
+      const items = [];
+      let total = 0,
+        remainingBytes = 8000;
+      const approvals = new Map<string, Decision | undefined>();
+      for (const c of queuedAssessments()) {
+        if (c.value.kind !== "use" || !currentApproval(store, c, approvals))
+          continue;
+        total++;
+        const { scope, location, component, version, proof, place } =
+          c.value.use;
+        const summary = {
+          id: c.id,
+          revision: c.revision,
+          scope,
+          location,
+          component,
+          version,
+          ...(proof.sink && { sink: proof.sink }),
+          ...(place?.workload && { workload: place.workload }),
+          ...(place?.environment && { environment: place.environment }),
+        };
+        const bytes = Buffer.byteLength(JSON.stringify(summary)) + 1;
+        if (bytes > remainingBytes) continue;
+        items.push(summary);
+        remainingBytes -= bytes;
+      }
+      return { total, items, truncated: items.length < total };
+    }
     let feedback: { previousProposal: string; reason: string } | undefined;
     // Give a rejected submission a chance to correct its citations or narrow its conclusion.
     // Model/transport errors propagate directly; only a completed response can be revised.
@@ -928,7 +972,12 @@ async function investigateIssue(
           JSON.stringify({
             ...input,
             ...(feedback && {
-              feedback,
+              feedback: {
+                ...feedback,
+                approvedAssessments: approvedAssessmentSummary(),
+                recovery:
+                  "The host already includes all current approved assessments. Omit an unchanged submitted use from final uses. Inspect a queued assessment with query_dependency_claims({ids:[id]}) and revise it through submit_dependency_assessments if needed. For a genuinely new use, correct the cited evidence and include it or submit it separately. If every intended use is already approved, return uses: [] with the final limitations and exclusions.",
+              },
               evidence: evidencePreviews(records.values()),
             }),
           }),
@@ -937,11 +986,7 @@ async function investigateIssue(
       );
       await queue.drain();
       let draft;
-      const submitted = store
-        .claims<Claim["value"]>()
-        .filter(
-          (c) => c.id.startsWith("assessment:") && c.value.kind === "use",
-        );
+      const submitted = queuedAssessments();
       try {
         for (const c of submitted)
           if (!currentApproval(store, c))

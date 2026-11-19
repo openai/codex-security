@@ -128,7 +128,11 @@ const proposedUse = z.strictObject({
 });
 export const investigationSchema = z.strictObject({
   outOfScope: z.array(z.strictObject({ scope: text, reason: text })).optional(),
-  uses: z.array(proposedUse),
+  uses: z
+    .array(proposedUse)
+    .describe(
+      "Enter only additional uses not already queued with submit_dependency_assessments. The host publishes the current approved submissions. Return [] when all intended uses are already submitted and approved.",
+    ),
   limitations: z.array(text),
 });
 export type Proposal = z.infer<typeof investigationSchema>;
@@ -647,14 +651,31 @@ export async function verifyProposedUse(
     const keys = candidates
       .filter((c) => coversReference(c.ref, ref, revision))
       .map((c) => c.key);
-    if (!keys.length)
+    if (!keys.length) {
+      const ranges = new Set<string>();
+      if (ref.kind === "source")
+        for (const { ref: bound } of candidates)
+          if (
+            bound.kind === "source" &&
+            bound.path === ref.path &&
+            (bound.commit ?? revision) === (ref.commit ?? revision)
+          )
+            ranges.add(bound.startLine + "-" + bound.endLine);
+      const allowed = ranges.size
+        ? " Bound ranges for this path at this revision: " +
+          [...ranges].slice(0, 8).join(", ") +
+          (ranges.size > 8 ? " (additional ranges omitted)." : ".")
+        : "";
       throw new CodexSecurityError(
         "Unbound finding evidence at " +
           field +
           ": " +
           JSON.stringify(ref) +
-          ". Cite a contained range at its Git revision, the exact selected original receipt and payload hash, or an approved premise that selected that evidence.",
+          "." +
+          allowed +
+          " Cite a contained range at its Git revision, the exact selected original receipt and payload hash, or an approved premise that selected that evidence.",
       );
+    }
     return { field, keys: [...new Set(keys)] };
   });
   const linkedObservations = observations.map((observation) => {
