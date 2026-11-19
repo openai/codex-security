@@ -4,6 +4,8 @@
     "WITH history AS (",
     "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
     "    FROM json_each(:history)",
+    "    -- The writer owns this migration. Vacate its older slots without running its backfill.",
+    "    UNION SELECT 86, 'preserve original deep scan discovery context'",
     ")",
     "SELECT 'sql' AS operation,",
     "    CASE WHEN EXISTS (SELECT 1 FROM schema_migrations AS newer",

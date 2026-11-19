@@ -13,6 +13,40 @@ from test_workbench_setup_and_migrations import (
 )
 
 
+@pytest.mark.parametrize("version", [48, 50, 77])
+def test_reader_relocates_writer_context_before_repairing_its_own_history(version: int) -> None:
+    name = "preserve original deep scan discovery context"
+    timestamp = "2026-10-01T00:00:00Z"
+    db, migrate = create_historical_database(min(version, 73))
+    with closing(db):
+        apply_historical_migrations(
+            db,
+            (
+                (
+                    version,
+                    name,
+                    "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;",
+                ),
+            ),
+            timestamp,
+        )
+        for _ in range(2):
+            migrate(db)
+            assert [
+                tuple(row)
+                for row in db.execute(
+                    "SELECT version, name FROM schema_migrations ORDER BY version"
+                )
+            ] == [*EXPECTED_MIGRATIONS, (86, name)]
+            assert (
+                db.execute(
+                    "SELECT applied_at FROM schema_migrations WHERE version = 86"
+                ).fetchone()[0]
+                == timestamp
+            )
+            assert db.execute("SELECT discovery_user_context FROM deep_scan_runs").fetchall() == []
+
+
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("first_preview", [63, 64, 67, 73])
 def test_durable_recovery_preview_preserves_receipts_and_saved_input(first_preview: int) -> None:
