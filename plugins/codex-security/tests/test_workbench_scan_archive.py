@@ -762,13 +762,14 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
             )
 
     archive = ordinary.with_name("run.previous-test")
-    extended_archive = extended.with_name(archive.name)
+    long_name = "s" * (260 - len(str(ordinary.parent)) - 1)
+    extended_archive = extended.with_name(long_name)
     assert storage.relocate_scan_artifact(ordinary, extended_archive, str(normal)) == str(
         extended_archive / normal.name
     )
     assert storage.relocate_scan_artifact(
         ordinary, extended_archive, str(ordinary / literal.name)
-    ) == str(archive / literal.name)
+    ) == str(ordinary.with_name(long_name) / literal.name)
     for recorded_root, supplied in ((ordinary, literal), (extended, normal)):
         scan = {"scan_dir": str(recorded_root)}
         saved = deep.deep_scan_path(scan, str(supplied), "Worker result", kind="file")

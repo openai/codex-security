@@ -126,14 +126,19 @@ def require_worker_path(path: Path, scan_dir: Path) -> None:
 
 def archived_path(archive: Path, path: Path, relative: Path) -> Path:
     """Keep extended access after archive growth, preserving namespace-specific filenames."""
-    if str(archive).startswith("\\\\?\\") and all(
-        _ordinary_windows_name(name) for name in relative.parts
-    ):
-        return archive / relative
     for spelling in scan_directory_spellings(archive):
         if Path(spelling.anchor) == Path(path.anchor):
-            return spelling / relative
-    return archive / relative
+            archive = spelling
+            break
+    relocated = archive / relative
+    if (
+        os.name == "nt"
+        and len(str(relocated).encode("utf-16-le", errors="surrogatepass")) // 2 >= 260
+    ):
+        for candidate in scan_directory_spellings(relocated):
+            if str(candidate).startswith("\\\\?\\"):
+                return candidate
+    return relocated
 
 
 def relocate_scan_artifact(scan_dir: Path, archive: Path, value: str | None) -> str | None:
