@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
+import { effectiveStackSinks } from "./dependency-stack-advisory.js";
 import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   createDependencyClaims,
@@ -490,6 +491,7 @@ export async function executeStackRun(
             coverage: summarizeStackCoverage(packet, assessments()),
           };
         const observation = item.observation;
+        const sinks = effectiveStackSinks(packet);
         return {
           workItem: {
             ...item,
@@ -508,11 +510,18 @@ export async function executeStackRun(
           target: manifest.target,
           cve: manifest.cve,
           advisory: manifest.advisory,
+          ...(manifest.triggerAnalysis && {
+            triggerAnalysis: manifest.triggerAnalysis,
+          }),
+          ...(manifest.advisoryDetails && {
+            advisoryDetails: manifest.advisoryDetails,
+          }),
+          ...(manifest.advisoryLookupError && {
+            advisoryLookupError: manifest.advisoryLookupError,
+          }),
           sources: packet.sources.sources,
-          sinks: packet.sinks.sinks,
-          openQuestions: packet.sinks.sinks.flatMap(
-            (sink) => sink.preconditions,
-          ),
+          sinks,
+          openQuestions: sinks.flatMap((sink) => sink.preconditions),
         };
       }
       case "read-stacks": {

@@ -13,11 +13,13 @@ import {
 } from "./dependency-stack-use.js";
 import {
   sampledStacksSchema,
+  stackManifestSchema,
   stackPacketWorkItems,
   stackSinkMatches,
   type StackPacket,
   type StackWorkItem,
 } from "./dependency-stack-packet.js";
+import { effectiveStackSinks } from "./dependency-stack-advisory.js";
 import { comparePythonReleases } from "./dependency-advisory-version.js";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import {
@@ -143,6 +145,9 @@ export const stackInvestigationReportSchema = z.strictObject({
   schemaVersion: z.literal("codex-security.pipeline-stacks.report/v1"),
   reviewPolicy: z.literal("single_agent"),
   cve: text,
+  advisoryDetails: stackManifestSchema.shape.advisoryDetails,
+  advisoryLookupError: stackManifestSchema.shape.advisoryLookupError,
+  triggerAnalysis: stackManifestSchema.shape.triggerAnalysis,
   runId: text,
   attemptId: text,
   inputDigest: digest,
@@ -373,8 +378,9 @@ function assessProof(
     cited: hasBindingEvidence(index),
   }));
   // Packet decoding checks each catalog ID and its original sampled frame.
+  const sinks = effectiveStackSinks(packet);
   const matches = mapped.map(({ sinkId, rawIndex }) => {
-    const sink = packet.sinks.sinks.find((s) => s.id === sinkId)!;
+    const sink = sinks.find((s) => s.id === sinkId)!;
     const copies = bindingEvidence.filter(
       ({ binding }) =>
         binding.package === sink.package &&
@@ -691,6 +697,15 @@ export function finalizeStackReport(
     toolRevision,
     target,
     cve,
+    ...(packet.manifest.advisoryDetails && {
+      advisoryDetails: packet.manifest.advisoryDetails,
+    }),
+    ...(packet.manifest.advisoryLookupError && {
+      advisoryLookupError: packet.manifest.advisoryLookupError,
+    }),
+    ...(packet.manifest.triggerAnalysis && {
+      triggerAnalysis: packet.manifest.triggerAnalysis,
+    }),
     verdict: aggregateDependencyVerdict(paths, {
       unresolved: !!(
         coverage.truncated.length ||

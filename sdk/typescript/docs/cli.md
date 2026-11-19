@@ -50,12 +50,27 @@ by default. Use its help to see the commands available in your installed version
 CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability --help
 ```
 
-Supply one CVE and the three documents described by the package’s `schemas/dependency-stack-inputs-v1.schema.json`. The stack document identifies the repository and the exact Git commit checked out. A single investigator reads the checkout and uses the same public commands available to external investigators.
+Supply one CVE and the three documents described by the package’s `schemas/dependency-stack-inputs-v1.schema.json`. Run the check in the repository at the exact Git commit identified by the stacks.
 
 ```sh
 CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability check CVE-2099-0001 \
-  --sources sources.json --sinks sinks.json --stacks stacks.json --json
+  --sources sources.json --sinks sinks.json --stacks stacks.json --report-file report.json
 ```
+
+The CLI looks up the CVE using the same OSV and alias resolution as a repository check. Before inspecting callers, it makes one model call to identify necessary trigger conditions for the supplied sinks. Each derived condition cites an exact passage in a resolved advisory. A single investigator then checks the supplied and derived conditions against the captured calls and the pinned source. The validator uses those same conditions for each verdict. The public lookup uses the CVE and associated advisory identifiers. The stack data stays out of the lookup.
+
+Open `report.json` to see the public records, their hashes and available revisions in `advisoryDetails`, and the per-sink conditions and supporting quotes in `triggerAnalysis`. If the public lookup fails, the CLI records `advisoryLookupError` and proceeds with the catalog advisory and its original preconditions. If the trigger analysis fails validation, the check stops before investigating callers.
+
+To reuse a successful analysis with the same catalog and capture, copy both fields from the report to a new sink document.
+
+```sh
+jq -e --slurpfile r report.json '
+  select($r[0].advisoryDetails and $r[0].triggerAnalysis)
+  | . + ($r[0] | {advisoryDetails, triggerAnalysis})
+' sinks.json > sinks-replay.json
+```
+
+Pass `--sinks sinks-replay.json` and choose a new report filename. The CLI validates the supplied records and quotes, skips the public lookup and trigger extraction, and runs the caller investigation with your configured model. Treat a supplied snapshot as evidence from its producer. The hashes verify its contents against the saved hashes. Supplying only `advisoryDetails` skips the lookup and runs trigger extraction on those records.
 
 An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt. `run tools --state <database>` lists operation schemas. Use `next` and `read-stacks` to select evidence, `record-evidence` and `record-claims` to save it, and `query-claims` to retrieve its exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file.
 

@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexSecurityError } from "./errors.js";
-import { prepareStackPacket } from "./dependency-stack-packet.js";
+import type { DependencyProgressSink } from "./dependency-check-output.js";
+import { analyzeStackAdvisory } from "./dependency-stack-advisory.js";
+import type { DependencyCliContext } from "./dependency-stack-cli.js";
+import { prepareStackCheckPacket } from "./dependency-stack-packet.js";
 import {
   executeStackRun,
   readFinalStackReport,
@@ -29,7 +32,7 @@ const instructionsPath = join(
   "dependency-stack-investigation.md",
 );
 
-export interface StackInvestigationSession {
+interface StackInvestigationSession {
   directory: string;
   inputs: string;
   repo: string;
@@ -85,7 +88,8 @@ export async function runLocalStackInvestigation(options: {
   stacksPath: string;
   repository: string;
   signal: AbortSignal;
-  investigate: (session: StackInvestigationSession) => Promise<number>;
+  runAgent: DependencyCliContext["runAgent"];
+  emit: DependencyProgressSink;
 }) {
   const temporaryRoot = await realpath(tmpdir());
   requireOutputOutsideRepository(options.repository, temporaryRoot, "runtime");
@@ -95,33 +99,55 @@ export async function runLocalStackInvestigation(options: {
     await mkdir(directory, { mode: 0o700 });
     const inputs = join(scratch, "inputs");
     const state = join(directory, "run.sqlite");
-    const packet = await prepareStackPacket({
-      cve: options.cve,
-      sourcesPath: options.sourcesPath,
-      sinksPath: options.sinksPath,
-      stacksPath: options.stacksPath,
-      inputsDir: inputs,
-      repository: options.repository,
-      toolRevision: await toolRevision(options.signal),
-      signal: options.signal,
-    });
+    const agent = { stackTarget: options.repository, signal: options.signal };
+    const packet = await prepareStackCheckPacket(
+      {
+        cve: options.cve,
+        sourcesPath: options.sourcesPath,
+        sinksPath: options.sinksPath,
+        stacksPath: options.stacksPath,
+        inputsDir: inputs,
+        repository: options.repository,
+        toolRevision: await toolRevision(options.signal),
+        signal: options.signal,
+      },
+      {
+        emit: options.emit,
+        async analyze({ cve, sinks }, advisoryDetails) {
+          options.emit("stage", cve, { stage: "advisory_analysis" });
+          const analysisDirectory = join(scratch, "advisory");
+          await mkdir(analysisDirectory, { mode: 0o700 });
+          return analyzeStackAdvisory(
+            { cve, sinks, advisoryDetails },
+            (prompt) =>
+              options.runAgent({
+                ...agent,
+                directory: analysisDirectory,
+                readOnly: true,
+                prompt,
+              }),
+          );
+        },
+      },
+    );
     await executeStackRun("init", {
       state,
       inputs,
       repo: options.repository,
       signal: options.signal,
     });
-    const status = await options.investigate({
+    options.emit("investigation");
+    await options.runAgent({
+      ...agent,
       directory,
-      inputs,
-      repo: options.repository,
-      state,
+      prompt: await stackInvestigationPrompt({
+        directory,
+        inputs,
+        repo: options.repository,
+        state,
+      }),
     });
     options.signal.throwIfAborted();
-    if (status !== 0)
-      throw new CodexSecurityError(
-        `Stack investigator exited with status ${status}.`,
-      );
     const result = await readFinalStackReport(state, {
       packet,
       repository: options.repository,
@@ -146,9 +172,7 @@ export async function runLocalStackInvestigation(options: {
   }
 }
 
-export async function stackInvestigationPrompt(
-  session: StackInvestigationSession,
-) {
+async function stackInvestigationPrompt(session: StackInvestigationSession) {
   const instructions = await readFile(instructionsPath, "utf8");
   return [
     instructions,

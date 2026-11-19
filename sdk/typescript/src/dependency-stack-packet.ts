@@ -2,6 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
+import {
+  frozenDependencyAdvisorySchema,
+  lookupDependencyAdvisory,
+  type FrozenDependencyAdvisory,
+} from "./dependency-advisory.js";
+import type { DependencyProgressSink } from "./dependency-check-output.js";
+import { errorMessage } from "./errors.js";
+import {
+  stackTriggerAnalysisSchema,
+  validateStackTriggerAnalysis,
+} from "./dependency-stack-advisory.js";
 import { stackJsonValue } from "./dependency-stack-evidence.js";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import { readRegularInputFileBytes } from "./prompt-files.js";
@@ -46,10 +57,18 @@ export const stackSourcesSchema = z.strictObject({
   provenance: provenance.optional(),
 });
 
+// Optional replay fields. The catalog's advisory, version ranges and selectors
+// remain intact regardless of what the public lookup or trigger review finds.
+const frozenFields = {
+  advisoryDetails: z.array(frozenDependencyAdvisorySchema).min(1).optional(),
+  triggerAnalysis: stackTriggerAnalysisSchema.optional(),
+};
+
 export const stackSinksSchema = z.strictObject({
   format: z.literal("codex-security.stack-sinks/v1"),
   cve: cveId,
   advisory,
+  ...frozenFields,
   sinks: z
     .array(
       endpoint.extend({
@@ -262,6 +281,8 @@ const manifestContent = z.strictObject({
   format: z.literal("codex-security.stack-manifest/v1"),
   cve: cveId,
   advisory,
+  ...frozenFields,
+  advisoryLookupError: text.optional(),
   target,
   toolRevision: text,
   files: z.strictObject({ sources: file, sinks: file, stacks: file }),
@@ -503,19 +524,111 @@ async function decodeFiles(
   return { sources, sinks, stacks };
 }
 
+type AdvisorySnapshot = Pick<
+  StackManifest,
+  "advisoryDetails" | "advisoryLookupError" | "triggerAnalysis"
+>;
+
+function validateSnapshot(
+  sinks: StackPacket["sinks"],
+  snapshot: AdvisorySnapshot,
+) {
+  const { advisoryDetails, triggerAnalysis, advisoryLookupError } = snapshot;
+  if (advisoryDetails) {
+    if (advisoryLookupError)
+      throw new Error("Cannot supply advisory records and a failed lookup.");
+    uniqueIds(advisoryDetails, "advisory");
+    for (const record of advisoryDetails)
+      if (record.id !== sinks.cve && !record.aliases?.includes(sinks.cve))
+        throw new Error(
+          `Advisory ${record.id} does not identify ${sinks.cve}.`,
+        );
+  }
+  if (triggerAnalysis) {
+    if (!advisoryDetails)
+      throw new Error("Trigger analysis requires the frozen advisory records.");
+    validateStackTriggerAnalysis(
+      { cve: sinks.cve, sinks: sinks.sinks, advisoryDetails },
+      triggerAnalysis,
+    );
+  }
+}
+
+interface StackAdvisoryHost {
+  analyze(
+    sinks: StackPacket["sinks"],
+    advisoryDetails: FrozenDependencyAdvisory[],
+  ): Promise<NonNullable<StackManifest["triggerAnalysis"]>>;
+  emit?: DependencyProgressSink;
+  lookupCve?: typeof lookupDependencyAdvisory;
+}
+
+async function resolveSnapshot(
+  sinks: StackPacket["sinks"],
+  host: StackAdvisoryHost,
+  signal?: AbortSignal,
+): Promise<AdvisorySnapshot> {
+  const { cve, triggerAnalysis } = sinks;
+  let { advisoryDetails } = sinks;
+  if (!advisoryDetails) {
+    host.emit?.("advisory", cve, { stage: "osv" });
+    try {
+      // Only the CVE identifier leaves the host. Never follow a catalog URL,
+      // or include source code, workload metadata or sampled frames in lookup.
+      const issue = await (host.lookupCve ?? lookupDependencyAdvisory)(
+        cve,
+        signal,
+      );
+      advisoryDetails = issue.advisories;
+    } catch (error) {
+      signal?.throwIfAborted();
+      const advisoryLookupError = errorMessage(error);
+      host.emit?.("advisory_lookup_failed", cve, {
+        error: advisoryLookupError,
+      });
+      return { advisoryLookupError };
+    }
+  }
+  signal?.throwIfAborted();
+  host.emit?.("advisories_loaded", cve, { count: advisoryDetails.length });
+  return {
+    advisoryDetails,
+    triggerAnalysis:
+      triggerAnalysis ?? (await host.analyze(sinks, advisoryDetails)),
+  };
+}
+
 function manifestFields(
   packet: Omit<StackPacket, "manifest">,
   toolRevision: string,
   files: StackManifest["files"],
+  snapshot: AdvisorySnapshot,
 ) {
-  return manifestContent.parse({
+  validateSnapshot(packet.sinks, snapshot);
+  const fields = manifestContent.parse({
     format: "codex-security.stack-manifest/v1",
     cve: packet.sinks.cve,
     advisory: packet.sinks.advisory,
+    ...(snapshot.advisoryDetails && {
+      advisoryDetails: snapshot.advisoryDetails,
+    }),
+    ...(snapshot.advisoryLookupError && {
+      advisoryLookupError: snapshot.advisoryLookupError,
+    }),
+    ...(snapshot.triggerAnalysis && {
+      triggerAnalysis: snapshot.triggerAnalysis,
+    }),
     target: packet.stacks.target,
     toolRevision,
     files,
   });
+  for (const field of ["advisoryDetails", "triggerAnalysis"] as const)
+    if (
+      packet.sinks[field] &&
+      canonicalJson(fields[field]) !== canonicalJson(packet.sinks[field])
+    )
+      throw new Error(`Frozen ${field} does not match the supplied sinks.`);
+  return fields;
 }
 
 export async function prepareStackPacket(options: {
@@ -530,6 +643,15 @@ export async function prepareStackPacket(options: {
   attemptId?: string;
   signal?: AbortSignal;
 }): Promise<StackPacket> {
+  // The public packet API and run init must remain usable without any model
+  // or network access. Only high-level checks opt in to fresh resolution.
+  return prepareStackCheckPacket(options);
+}
+
+export async function prepareStackCheckPacket(
+  options: Parameters<typeof prepareStackPacket>[0],
+  host?: StackAdvisoryHost,
+): Promise<StackPacket> {
   const bytes = await loadFiles(
     {
       sources: options.sourcesPath,
@@ -544,11 +666,29 @@ export async function prepareStackPacket(options: {
     options.repository,
     options.signal,
   );
-  const fields = manifestFields(documents, options.toolRevision, {
+  options.signal?.throwIfAborted();
+  const files = {
     sources: fileIdentity(bytes.sources),
     sinks: fileIdentity(bytes.sinks),
     stacks: fileIdentity(bytes.stacks),
-  });
+  };
+  // Verify that the supplied snapshot survives manifest parsing before any
+  // lookup or analysis. Reopening the packet performs the same comparison.
+  let fields = manifestFields(
+    documents,
+    options.toolRevision,
+    files,
+    documents.sinks,
+  );
+  if (host) {
+    const snapshot = await resolveSnapshot(
+      documents.sinks,
+      host,
+      options.signal,
+    );
+    options.signal?.throwIfAborted();
+    fields = manifestFields(documents, options.toolRevision, files, snapshot);
+  }
   const manifest = stackManifestSchema.parse({
     ...fields,
     inputDigest: hash(canonicalJson(fields)),
@@ -608,6 +748,7 @@ export async function readStackPacket(
     documents,
     manifest.toolRevision,
     manifest.files,
+    manifest,
   );
   if (
     manifest.inputDigest !== hash(canonicalJson(fields)) ||
