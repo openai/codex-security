@@ -1276,7 +1276,8 @@ async function investigateIssue(
         records.size +
         block.failures.size +
         searches.length +
-        evidenceLimitations.size
+        evidenceLimitations.size +
+        session!.sourceWorkCoverage.generation()
       );
     }
     const reviewQueue = queue;

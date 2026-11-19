@@ -135,7 +135,7 @@ async function fixture(extraFiles: Record<string, string> = {}) {
   };
 }
 
-for (const late of ["assessment", "candidate"] as const) {
+for (const late of ["assessment", "candidate", "roster"] as const) {
   test(`rechecks coverage when a new ${late} arrives during final review`, async () => {
     await using f = await fixture({
       "package.json":
@@ -183,6 +183,19 @@ for (const late of ["assessment", "candidate"] as const) {
                   assessments: [
                     { id: "late-use", expectedRevision: 0, use: f.use },
                   ],
+                });
+              } else if (late === "roster") {
+                await call("record_codex_security_source_work", {
+                  work: {
+                    operation: "append_roster_page",
+                    id: "remaining-imports",
+                    owner: "search",
+                    paths: ["secondary.js"],
+                    declaredComplete: true,
+                    search: "References to the parser",
+                    sourceRefs: ["import-search"],
+                    gaps: [],
+                  },
                 });
               } else {
                 const record = {
@@ -243,6 +256,14 @@ for (const late of ["assessment", "candidate"] as const) {
       expect(report.uses.map((u) => u.conclusionClaim.id)).toEqual([
         "assessment:late-use",
       ]);
+    else if (late === "roster")
+      expect(
+        report.limitations.some(
+          (reason) =>
+            reason.includes("remaining-imports") &&
+            reason.includes("unassigned"),
+        ),
+      ).toBe(true);
     else
       expect(
         report.coverage?.some(
