@@ -31,6 +31,7 @@
 - update linkify-it to 5.0.2 in the reviews eval fixture ([#2758](https://github.com/openai/codex-security/pull/2758))
 - update Papa Parse and Prettier and check Node engine compatibility ([#2754](https://github.com/openai/codex-security/pull/2754))
 - bump string-width from 8.3.0 to 9.0.0 in /sdk/typescript ([#2756](https://github.com/openai/codex-security/pull/2756))
+- bump promptfoo from 0.124.1 to 0.125.1 in /evals/triage-finding ([#2335](https://github.com/openai/codex-security/pull/2335))
 
 </details>
 
