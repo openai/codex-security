@@ -2318,10 +2318,8 @@ test("native investigators share asynchronous reviews, immutable premises and pa
 });
 
 test("catalog mappings bind the selected row and keep failed lookups open", async () => {
-  const unavailable = "package.json";
-  await using f = await fixture({
-    [unavailable]: '{"dependencies":{"fixture-parser":"1.0.0"}}',
-  });
+  const unavailable = "package-lock.json";
+  await using f = await fixture();
   const server = "service-registry",
     tool = "lookup";
   const result = await runReviewedDependencyCheck(
@@ -2342,12 +2340,6 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
         const { call } = await req.investigationTools!();
         const matched = "app.js",
           unmapped = "secondary.js";
-        await call("trace_codex_security_code", {
-          package: "fixture-parser",
-          files: [unavailable],
-          max_hops: 0,
-          time_budget_ms: 5000,
-        });
         const lookup = (
           path: string,
           services: { id: string; name: string }[],
@@ -2362,15 +2354,19 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
           req.onEvidence!(record);
           return record;
         };
-        const first = lookup(matched, [
-            { id: "worker-7", name: "mail worker" },
-          ]),
-          empty = lookup(unmapped, []);
         req.onEvidenceFailure!({
           server,
           tool,
           arguments: { path: unavailable },
         });
+        const failed = (await call("read_dependency_evidence", {
+          server,
+          tool,
+        })) as { receipts: { id: string }[] };
+        const first = lookup(matched, [
+            { id: "worker-7", name: "mail worker" },
+          ]),
+          empty = lookup(unmapped, []);
         const resolve = (path: string, ...ids: string[]) =>
           call("resolve_codex_security_services", {
             path,
@@ -2384,6 +2380,9 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
             })),
           });
         const before = await call("query_codex_security_graph", {});
+        await expect(
+          resolve(unavailable, failed.receipts[0]!.id),
+        ).rejects.toThrow("Unknown evidence receipt");
         await expect(
           resolve(matched, first.sha256, empty.sha256),
         ).rejects.toThrow(/file or its project/);
@@ -2399,8 +2398,8 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
           ]),
         });
         expect(await query(unavailable)).toMatchObject({
-          service_lookup: "pending",
-          service_resolution: { pending: 1 },
+          matches: [],
+          service_resolution: { checked: 2 },
         });
         const evidence = (await query(matched)) as {
           evidence: {
@@ -2459,7 +2458,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
             },
           ],
           limitations: [
-            "The catalog failed for package.json. Its mapping remains open.",
+            `The catalog failed for ${unavailable}. Its mapping remains open.`,
           ],
         });
       },
