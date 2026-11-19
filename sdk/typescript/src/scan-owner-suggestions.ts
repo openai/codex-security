@@ -1,4 +1,5 @@
 import { join, relative, sep } from "node:path";
+import { hash } from "node:crypto";
 import type { ScanResult } from "./result.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { ReadOnlyCodexOptions } from "./scan-comparison.js";
@@ -19,7 +20,10 @@ export async function writeScanOwnerSuggestions(
   repository: string,
   result: ScanResult,
   writer: ScanArtifactRestorer,
-  options: SuggestOwnersOptions & Pick<ReadOnlyCodexOptions, "auth">,
+  options: SuggestOwnersOptions &
+    Pick<ReadOnlyCodexOptions, "auth"> & {
+      onReportWritten?: (sha256: string) => void;
+    },
   _surface: "sdk" | "cli" = "sdk",
 ): Promise<string> {
   const target = result.manifest.scan.target;
@@ -56,9 +60,8 @@ export async function writeScanOwnerSuggestions(
   );
   if (report.revision !== revision)
     throw new Error("Owner report revision does not match the completed scan.");
-  await writer.restore(
-    OWNER_SUGGESTIONS_ARTIFACT,
-    Buffer.from(`${JSON.stringify(report)}\n`),
-  );
+  const contents = Buffer.from(`${JSON.stringify(report)}\n`);
+  await writer.restore(OWNER_SUGGESTIONS_ARTIFACT, contents);
+  options.onReportWritten?.(hash("sha256", contents));
   return join(result.scanDir, OWNER_SUGGESTIONS_ARTIFACT);
 }

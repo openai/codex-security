@@ -102,8 +102,9 @@ Preparation errors throw before execution. Execution and finalization return a
 `canceled`, or `acceptance_unknown`. The receipt retains the executor's outcome, session
 identity, usage, message and structured error even if artifact finalization
 fails. The CLI returns `completed` after the sealed bundle passes validation,
-including a check for a nonempty `report.md`. Repeated invocations are separate
-scans; the host decides whether a new invocation is allowed.
+including a check for a nonempty `report.md`, and is ready at `bundleDirectory`.
+Repeated invocations are separate scans; the host decides whether a new invocation
+is allowed.
 
 Temporary runtime cleanup failures preserve the terminal receipt, including
 its execution outcome, session identity, usage, and validated artifacts. They
@@ -171,8 +172,8 @@ the same state. This includes:
   helpers, skills, and MCP server.
 - The whole `stateDirectory`, including the registered workbench database,
   journals, and scan inputs; a live database file alone is not a consistent copy.
-- `outputDirectory`, where the executor records its draft and the CLI later
-  writes the validated manifest, findings and report.
+- `outputDirectory`, where the executor records its draft and the CLI stages the
+  workbench results.
 - The temporary files named by `CODEX_SECURITY_CONFIG_PATH` and, for path scans,
   `CODEX_SECURITY_TARGET_PATHS_FILE` in `runtime.environment`. These are required
   by preflight and scope binding, even though they can live outside the state
@@ -312,12 +313,9 @@ must not be presented as missing paths.
 The terminal run result includes `version: 2`, `status`, frozen
 identity/revision/normalized scope, output directory, scan ID when registered,
 plugin version when known, `provenance` (CLI/plugin/build identity), optional `execution`,
-and `artifacts`. Each artifact is `{path, sha256, bytes}` over its exact bytes.
-Receipts cover canonical outputs, sealed supplemental files, and preserved
-source files bound by the manifest. Coverage limitations remain diagnostics in
-completed scans; required-output failures return `failed`, and unvalidated files
-never receive artifact receipts. `acceptance_unknown`, failed
-and canceled results are not accepted completed scans.
-
-The host can use the artifact receipts to verify files after copying them to
-another location.
+and `artifacts`. A successful result also includes `bundleDirectory`, the `bundle`
+child of `outputDirectory`. Transfer that directory as a unit. It contains the
+validated manifest, findings, review data, reports, and referenced evidence.
+Drafts and recovery checkpoints stay in the workbench directory. Each artifact
+receipt is `{path, sha256, bytes}` relative to `bundleDirectory`. Required-output
+failures use the existing `failed` result with no bundle reference.

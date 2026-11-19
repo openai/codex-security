@@ -39,6 +39,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from validate_scan_contract import publish_scan_bundle
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
@@ -108,11 +109,37 @@ def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
     return fields
 
 
+def publish_completed_bundle(
+    db: Any, connection: sqlite3.Connection, scan_id: str, expected: dict[str, str]
+) -> dict[str, Any]:
+    """Publish hosted output after the executor and optional enrichment have finished."""
+    scan_id = db.require_uuid(scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        scan = db.require_scan(connection, scan_id)
+        if scan["status"] != "complete":
+            raise SystemExit("Only a completed scan can publish its bundle.")
+        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        db.require_recorded_manifest_digest(scan, scan_dir)
+        manifest = db.read_json_object(scan_dir / db.ARTIFACTS["manifest"])
+        binding = db.workbench_completion_binding(scan, scan["completed_at"], manifest)
+        validated = db.validate_completed_bundle(scan, scan_dir, binding)
+        for path, key in (("scan-manifest.json", "manifestSha256"), ("report.md", "reportSha256")):
+            if validated[key] != expected.get(path):
+                raise ContractError(
+                    f"The sealed file {path} changed before the hosted receipt was created."
+                )
+        return publish_scan_bundle(
+            validated, owner_suggestions_digest=expected.get("owner-suggestions.json")
+        )
+
+
 def refresh_completed_scan(
     db: Any,
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     cost_json: str | None,
+    *,
+    publish_bundle: bool = False,
 ) -> dict[str, Any]:
     warnings = json.loads(scan["completion_warnings_json"])
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -132,6 +159,11 @@ def refresh_completed_scan(
         raise SystemExit(str(exc)) from exc
     db.verify_manifest_binding(scan, manifest)
     manifest_digest = db.published_manifest_digest(scan_dir, manifest)
+    bundle = (
+        {"bundleDirectory": publish_scan_bundle(validated)["bundleDirectory"]}
+        if publish_bundle
+        else {}
+    )
     db.pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
     if cost_json is not None and scan["recipe_json"] is not None:
         db.scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
@@ -143,6 +175,7 @@ def refresh_completed_scan(
             )
     return {
         **db.scan_context(connection, scan["id"]),
+        **bundle,
         "publicationDigests": {
             "scan-manifest.json": manifest_digest.removeprefix("sha256:"),
             "report.md": validated["reportSha256"],

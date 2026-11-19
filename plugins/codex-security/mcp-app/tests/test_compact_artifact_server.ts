@@ -44,6 +44,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -204,6 +205,7 @@ try {
         "completion rejects the empty report even with a matching seal",
       );
       assert.equal(result.structuredContent, undefined);
+      assert.ok(!(await readdir(scanDir)).includes("bundle"));
     } finally {
       await client.close();
     }
@@ -765,12 +767,21 @@ async function testSemanticScanDraftCompletion(
     };
     const explicitCollisionDeferredId = "explicit-adapter-review";
     const candidateCollisionDeferredId = "candidate-adapter-review";
+    const evidenceFile = "artifacts/validation.txt";
+    const evidenceContents = "Synthetic validation evidence.\n";
+    await mkdir(path.join(scanDirectory, "artifacts"), { recursive: true });
+    await writeFile(path.join(scanDirectory, evidenceFile), evidenceContents);
+    await writeFile(
+      path.join(scanDirectory, "artifacts", "scratch.txt"),
+      "scratch\n",
+    );
     const reviewState = {
       surfaces: [
         {
           id: "surface_sql-execution",
           label: "SQL execution",
           disposition: "reported",
+          receiptRefs: [evidenceFile],
           notes:
             "Reviewed the execution helper and its unparameterized SQL sink.",
         },
@@ -1063,12 +1074,29 @@ async function testSemanticScanDraftCompletion(
     });
 
     const completed = requireSuccessfulTool<
-      ScanResult & { completed: boolean }
+      ScanResult & { completed: boolean; bundleDirectory: string }
     >(
       await call("complete_codex_security_scan", { scanId, handoffClaimToken }),
       `${runtimeLabel}: finalize the accepted draft exactly once`,
     );
     assert.equal(completed.completed, true);
+    assert.equal(completed.bundleDirectory, path.join(scanDirectory, "bundle"));
+    assert.equal(
+      await readFile(
+        path.join(completed.bundleDirectory, evidenceFile),
+        "utf8",
+      ),
+      evidenceContents,
+    );
+    assert.deepEqual(
+      await readdir(path.join(completed.bundleDirectory, "artifacts")),
+      ["validation.txt"],
+    );
+    const bundleEntries = await readdir(completed.bundleDirectory);
+    assert.ok(bundleEntries.includes("report.md"));
+    assert.ok(bundleEntries.includes("exports"));
+    assert.ok(!bundleEntries.includes("checkpoints"));
+    assert.ok(!bundleEntries.includes("checkpoint-head.json"));
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
 

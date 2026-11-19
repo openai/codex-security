@@ -54,7 +54,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
-from validate_scan_contract import validate_contract
+from validate_scan_contract import publish_scan_bundle, validate_contract
 from windows_scan_local_files import pin_replay_metadata
 from workbench import handoff
 from workbench.storage import (
@@ -1097,6 +1097,7 @@ def complete_scan(
             args.claim_token,
             cost_json,
             prepare_only=prepare_only,
+            publish_bundle=getattr(args, "publish_bundle", False),
             thread_id=getattr(args, "thread_id", None),
             turn_id=getattr(args, "turn_id", None),
             model_thread_id=getattr(args, "model_thread_id", None),
@@ -1305,6 +1306,7 @@ def complete_scan_locked(
     cost_json: str | None,
     *,
     prepare_only: bool = False,
+    publish_bundle: bool = False,
     thread_id: str | None = None,
     turn_id: str | None = None,
     model_thread_id: str | None = None,
@@ -1320,7 +1322,7 @@ def complete_scan_locked(
     )
     if scan["status"] == "complete":
         return saved_results.refresh_completed_scan(
-            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json, publish_bundle=publish_bundle
         )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
@@ -1486,6 +1488,11 @@ def complete_scan_locked(
         "scan-manifest.json": manifest_digest.removeprefix("sha256:"),
         "report.md": validated["reportSha256"],
     }
+    bundle = (
+        {"bundleDirectory": publish_scan_bundle(validated)["bundleDirectory"]}
+        if publish_bundle
+        else {}
+    )
     measured_usage = scan_usage.collect_scan_usage_safely(
         connection,
         scan,
@@ -1525,6 +1532,7 @@ def complete_scan_locked(
             return {
                 **scan_context(connection, scan["id"]),
                 "publicationDigests": publication_digests,
+                **bundle,
             }
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         if scan["scan_dir"] != str(scan_dir):
@@ -1579,6 +1587,7 @@ def complete_scan_locked(
     context = scan_context(connection, scan["id"])
     context["targetWarnings"] = target_warnings
     context["publicationDigests"] = publication_digests
+    context.update(bundle)
     return context
 
 
@@ -3502,6 +3511,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+            )
+        elif args.command == "publish-scan-bundle":
+            result = saved_results.publish_completed_bundle(
+                _WORKBENCH_DB_CONTEXT, connection, args.scan_id, json.load(sys.stdin)
             )
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(

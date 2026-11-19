@@ -4109,7 +4109,7 @@ export class CodexSecurity {
       };
       if (options.ownerSuggestions) {
         try {
-          const { writeScanOwnerSuggestions } =
+          const { OWNER_SUGGESTIONS_ARTIFACT, writeScanOwnerSuggestions } =
             await import("./scan-owner-suggestions.js");
           const writer = await prepareArtifactRestorer(
             workbenchOptions,
@@ -4124,6 +4124,17 @@ export class CodexSecurity {
               auth: options.auth,
               reasoningEffort: scanModelConfiguration(session.sessionConfig)
                 .reasoningEffort,
+              onReportWritten:
+                this.#dependencies.hostedScan === undefined
+                  ? undefined
+                  : (sha256) =>
+                      validatedFileDigests.set(
+                        result.manifest,
+                        new Map(validatedFileDigests.get(result.manifest)).set(
+                          OWNER_SUGGESTIONS_ARTIFACT,
+                          sha256,
+                        ),
+                      ),
             },
             this.#surface,
           );
