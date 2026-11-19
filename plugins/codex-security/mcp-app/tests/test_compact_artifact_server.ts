@@ -1,5 +1,5 @@
 import { fixturePython } from "./support/python.ts";
-import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
+import { readJson, snapshotScanDraft } from "./support/json.ts";
 import { workerDraft, finding } from "./scan-draft-fixture.ts";
 import { gitText } from "../scripts/git.mjs";
 import { temporaryDirectory } from "./support/temporary-directories.ts";

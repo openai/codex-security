@@ -29,6 +29,7 @@ from workbench_constants import (
     FINDINGS_PAGE_MAX,
 )
 from workbench_scan_history import read_history_seal
+from workbench_source_scopes import requested_exclude_paths
 from workbench_validation import bounded_output_text
 
 _FINAL_FEED_WARNING = (
@@ -210,7 +211,8 @@ def record_deep_iteration_updates(connection, scan, run, result_path, requested_
         if draft.get("complete") is False:
             return
         scope = requested_finding_scope(scan)
-        findings = [f for f in draft["findings"] if finding_within_scope(f, scope)]
+        exclusions = requested_exclude_paths(scan)
+        findings = [f for f in draft["findings"] if finding_within_scope(f, scope, exclusions)]
         # The terminal publisher allocates identities after filtering the union.
         _ensure_finding_identities(findings, deep=True)
         manifest = {

@@ -287,63 +287,63 @@ def scan_before_finding_updates(tmp_path):
     state, _, scan_id, _ = empty_target_scan(tmp_path)
     with sqlite3.connect(state / "workbench.sqlite3") as db:
         db.execute("DROP TABLE scan_finding_updates")
-        db.execute("DELETE FROM schema_migrations WHERE version = 73")
+        db.execute("DELETE FROM schema_migrations WHERE version = 87")
     return state, scan_id
 
 
-@pytest.mark.parametrize(
-    ("name", "statement"),
-    [
-        (
-            "preserve finding decision append chronology",
-            "ALTER TABLE finding_decisions ADD COLUMN decision_sequence INTEGER NOT NULL DEFAULT 0",
-        ),
-        (
-            "retain deep scan attempts and exact merge inputs",
-            "ALTER TABLE deep_scan_dedup_inputs ADD COLUMN attempt INTEGER",
-        ),
-    ],
-)
-def test_finding_updates_reject_conflicting_migration_73_without_changes(
-    scan_before_finding_updates, name, statement
-):
-    state, scan_id = scan_before_finding_updates
+def test_finding_updates_move_original_journal_receipt(tmp_path):
+    state, _, scan_id, _ = empty_target_scan(tmp_path)
     database = state / "workbench.sqlite3"
     with sqlite3.connect(database) as db:
-        db.execute(statement)
-        db.execute("INSERT INTO schema_migrations VALUES (73, ?, 'preview-time')", (name,))
+        db.execute(
+            "UPDATE schema_migrations SET version = 73, applied_at = 'preview-time' WHERE version = 87"
+        )
+    assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
+    with sqlite3.connect(database) as db:
+        assert db.execute(
+            "SELECT version, applied_at FROM schema_migrations WHERE name = ?",
+            ("Standard scan reviewed finding updates",),
+        ).fetchall() == [(87, "preview-time")]
+
+
+def test_finding_updates_reject_conflicting_migration_without_changes(scan_before_finding_updates):
+    state, scan_id = scan_before_finding_updates
+    database = state / "workbench.sqlite3"
+    name = "unrecognized preview"
+    with sqlite3.connect(database) as db:
+        db.execute("INSERT INTO schema_migrations VALUES (87, ?, 'preview-time')", (name,))
         before = list(db.iterdump())
 
     failure = scan_command(state, "list-finding-updates", scan_id, check=False)
     assert failure["returncode"] != 0
-    assert "Unsupported workbench migration 73" in failure["stderr"]
+    assert "Unsupported workbench migration 87" in failure["stderr"]
     assert name in failure["stderr"]
     assert "Standard scan reviewed finding updates" in failure["stderr"]
     with sqlite3.connect(database) as db:
         assert list(db.iterdump()) == before
 
 
-@pytest.mark.parametrize("has_later_phase_migration", [False, True])
-def test_finding_updates_upgrade_without_a_migration_73_receipt(
-    scan_before_finding_updates, has_later_phase_migration
+@pytest.mark.parametrize("has_history_preview", [False, True])
+def test_finding_updates_upgrade_without_a_journal_receipt(
+    scan_before_finding_updates, has_history_preview
 ):
     state, scan_id = scan_before_finding_updates
     database = state / "workbench.sqlite3"
-    if has_later_phase_migration:
+    if has_history_preview:
         with sqlite3.connect(database) as db:
-            db.execute("ALTER TABLE scan_progress ADD COLUMN last_observed_phase_json TEXT")
+            db.execute("ALTER TABLE finding_decisions ADD COLUMN decision_sequence INTEGER")
             db.execute(
-                "INSERT INTO schema_migrations VALUES (74, ?, 'preview-time')",
-                ("retain the last observed phase of stopped Standard scans",),
+                "INSERT INTO schema_migrations VALUES (73, ?, 'preview-time')",
+                ("preserve finding decision append chronology",),
             )
 
     for _ in range(2):
         assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
     with sqlite3.connect(database) as db:
-        assert db.execute("SELECT name FROM schema_migrations WHERE version = 73").fetchone() == (
+        assert db.execute("SELECT name FROM schema_migrations WHERE version = 87").fetchone() == (
             "Standard scan reviewed finding updates",
         )
-        if has_later_phase_migration:
+        if has_history_preview:
             assert db.execute(
-                "SELECT applied_at FROM schema_migrations WHERE version = 74"
+                "SELECT applied_at FROM schema_migrations WHERE version = 73"
             ).fetchone() == ("preview-time",)

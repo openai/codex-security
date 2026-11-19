@@ -7,18 +7,27 @@ import {
   statSync,
 } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import * as codexSdk from "@openai/codex-sdk";
 import type { ApiProvider, ProviderOptions } from "promptfoo";
 import {
   bundledCodexSdkEnvironment,
   resolveBundledCodexExecutable,
 } from "../../../sdk/typescript/dist/codex-sdk-environment.js";
 
+const evalSdk = {
+  module: codexSdk,
+  entryPoint: fileURLToPath(import.meta.resolve("@openai/codex-sdk")),
+};
+
 type CodexProvider = ApiProvider & {
+  codexSdk?: typeof evalSdk;
   getCodexInstanceForTurn(
     environment: NodeJS.ProcessEnv,
     config: ProviderOptions["config"],
     apiKey: string | undefined,
     cleanupGeneration: number,
+    abortSignal?: AbortSignal,
   ): Promise<{
     activeInstance: { exec: { executablePath: string; pathDirs: string[] } };
   }>;
@@ -83,8 +92,6 @@ function usesTriageRuntime(provider: CodexProvider) {
   );
 }
 
-// Promptfoo 0.124.1 exposes these private methods after per-case rendering and
-// SDK selection. Keep the native loader, authentication, and lifecycle intact.
 export function initializeProvider(provider: CodexProvider) {
   for (let target = provider; target; target = Object.getPrototypeOf(target)) {
     if (wrappedProviders.has(target)) return;
@@ -92,19 +99,14 @@ export function initializeProvider(provider: CodexProvider) {
   const getInstance = provider.getCodexInstanceForTurn;
   provider.getCodexInstanceForTurn = async function (
     this: CodexProvider,
-    environment,
-    config,
-    apiKey,
-    cleanupGeneration,
+    ...args
   ) {
-    const instance = await getInstance.call(
-      this,
-      environment,
-      config,
-      apiKey,
-      cleanupGeneration,
-    );
+    // Promptfoo 0.125.1's peer loader accepts only ^0.156.1. Supply the
+    // scanner's pinned SDK and its entry point for the native CLI version probe.
+    this.codexSdk ??= evalSdk;
+    const instance = await getInstance.apply(this, args);
     if (!usesTriageRuntime(this)) return instance;
+    const [environment, config] = args;
     // The pinned provider exposes its selected SDK executor before creating
     // thread options. Extend this call's config without changing selection
     // or the SDK's bundled-tool PATH handling.

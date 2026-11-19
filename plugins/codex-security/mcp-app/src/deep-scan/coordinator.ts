@@ -713,6 +713,7 @@ export class DeepScanCoordinator {
       result.findings,
       this.state.includePaths ?? [this.state.scope],
       this.state.filePaths,
+      this.state.excludePaths,
     );
   }
 

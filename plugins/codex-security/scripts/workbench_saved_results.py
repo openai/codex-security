@@ -1188,12 +1188,15 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             try:
                 with connection:
                     visible = findings
-                    if scan["mode"] == "deep":
-                        scope = db.requested_finding_scope(scan)
+                    scope = db.requested_finding_scope(scan) if scan["mode"] == "deep" else None
+                    exclusions = db.requested_exclude_paths(scan)
+                    if scope is not None or exclusions:
                         visible = {
                             **findings,
                             "findings": [
-                                f for f in findings["findings"] if finding_within_scope(f, scope)
+                                f
+                                for f in findings["findings"]
+                                if finding_within_scope(f, scope, exclusions)
                             ],
                         }
                     record_finding_updates(

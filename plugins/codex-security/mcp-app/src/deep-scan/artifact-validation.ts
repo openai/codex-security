@@ -101,7 +101,7 @@ export async function validateDiscoveryArtifacts(
   expectedScanId: string,
   boundScope: Pick<
     ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
+    "scope" | "includePaths" | "filePaths" | "excludePaths"
   > = {},
   admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
@@ -115,6 +115,7 @@ export async function validateDiscoveryArtifacts(
     scope: boundScope.scope,
     includePaths: boundScope.includePaths,
     filePaths: boundScope.filePaths,
+    excludePaths: boundScope.excludePaths,
   };
   const stored = await readJsonObject(resultPath);
   await retainRecordedReceiptOwnership(context, stored);
