@@ -739,6 +739,7 @@ describe("CodexSecurity orchestration", () => {
       },
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
+      configuredParentSessionThreadLimit: 9,
     });
     await expect(
       client.preflight(repository, { outputDir: join(repository, "scan") }),
@@ -796,6 +797,9 @@ describe("CodexSecurity orchestration", () => {
     const { client, prepareRuntime } = localClient(
       {
         codexOverrides: {
+          features: {
+            multi_agent_v2: { max_concurrent_threads_per_session: 1 },
+          },
           model: "configured-model",
           model_reasoning_effort: "high",
         },
@@ -804,6 +808,7 @@ describe("CodexSecurity orchestration", () => {
     );
 
     await expect(client.preflight(repository)).resolves.toMatchObject({
+      configuredParentSessionThreadLimit: 1,
       model: "configured-model",
       reasoningEffort: "high",
     });
@@ -1038,6 +1043,49 @@ describe("CodexSecurity orchestration", () => {
         /model|reasoning effort/u,
       );
       await client.close();
+    }
+  });
+
+  test("omits a parent thread limit supplied through literal dotted SDK keys", async () => {
+    const { repository } = await repositoryDirectories();
+    const overrides: JsonObject[] = [
+      { "features.multi_agent_v2": { max_concurrent_threads_per_session: 4 } },
+      { "features.multi_agent_v2.max_concurrent_threads_per_session": 0 },
+      {
+        profile: "review",
+        profiles: {
+          review: {
+            features: {
+              "multi_agent_v2.max_concurrent_threads_per_session": 4,
+            },
+          },
+        },
+      },
+    ];
+    for (const codexOverrides of overrides) {
+      await using client = new TestClient({ codexOverrides }, {});
+      expect(await client.preflight(repository)).not.toHaveProperty(
+        "configuredParentSessionThreadLimit",
+      );
+    }
+  });
+
+  test("rejects an invalid configured thread limit during scan preflight", async () => {
+    const { repository } = await repositoryDirectories();
+    for (const limit of [0, -1, 1.5]) {
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: limit },
+            },
+          },
+        },
+        {},
+      );
+      await expect(client.preflight(repository)).rejects.toThrow(
+        "max_concurrent_threads_per_session must be a positive integer",
+      );
     }
   });
 

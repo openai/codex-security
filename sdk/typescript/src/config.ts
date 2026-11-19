@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -146,6 +147,36 @@ export function scanModelConfiguration(
     );
   }
   return { model, reasoningEffort };
+}
+
+/** Configured thread limit for a parent Codex session, including its root thread. */
+export function configuredParentSessionThreadLimit(
+  config: JsonObject,
+): number | undefined {
+  const resolved = resolveCodexProfile(config);
+  const features = resolved["features"];
+  if (!isObject(features)) return undefined;
+  // The SDK flattens config keys for native overrides. A literal dotted key
+  // can target the same limit as the nested table with different precedence.
+  if (
+    Object.hasOwn(resolved, "features.multi_agent_v2") ||
+    Object.hasOwn(
+      resolved,
+      "features.multi_agent_v2.max_concurrent_threads_per_session",
+    ) ||
+    Object.hasOwn(features, "multi_agent_v2.max_concurrent_threads_per_session")
+  )
+    return undefined;
+  const multiAgent = features["multi_agent_v2"];
+  if (!isObject(multiAgent)) return undefined;
+  const capacity = multiAgent["max_concurrent_threads_per_session"];
+  if (capacity === undefined) return undefined;
+  if (!isSafeNonNegativeInteger(capacity) || capacity === 0) {
+    throw new ConfigurationError(
+      "features.multi_agent_v2.max_concurrent_threads_per_session must be a positive integer.",
+    );
+  }
+  return capacity;
 }
 
 export function scanModel(config: Readonly<JsonObject>): unknown {

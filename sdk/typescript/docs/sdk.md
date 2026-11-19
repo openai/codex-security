@@ -311,7 +311,12 @@ console.log(plan);
 ```
 
 `preflight()` checks local inputs without starting Codex or using the network. The returned `stateDirectory` identifies the checked storage root, including when the final scan directory will be allocated automatically.
-It does not verify credentials, model access, Python, or the plugin. The CLI
+The optional `configuredParentSessionThreadLimit` counts the parent Codex
+session's root and delegated threads. Each Deep Scan discovery worker runs in
+its own session with a separate limit derived from `subagents`.
+Use nested objects in `codexOverrides` for this setting. Preflight omits the
+field when literal dotted SDK keys overlap the nested thread limit.
+Preflight does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 Neither preflight starts a Deep Scan worker or executes a command under its
 generated permissions, so neither qualifies the worker sandbox. See [Deep Scan
