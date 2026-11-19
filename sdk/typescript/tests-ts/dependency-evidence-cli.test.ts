@@ -448,7 +448,7 @@ test("a coordinator reports its selected access program and preserves redirected
       },
       async onCodex(_args, output, _env, prompt) {
         if (output?.appServer) {
-          expect(output.appServer.persistentCoordinator).toBe(true);
+          expect(output.appServer.resumableCoordinator).toBe(true);
           output.appServer.onAccessProgram?.("standard");
         }
         const packet = JSON.parse(
