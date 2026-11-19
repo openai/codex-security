@@ -19,6 +19,10 @@ import {
   type createDependencySourceWorkTools,
 } from "./dependency-source-work-tools.js";
 import { isRecord } from "./record.js";
+import {
+  dependencySourceNoteSchema,
+  dependencySourceNoteQuerySchema,
+} from "./dependency-stack-evidence.js";
 import { compareTimestamps } from "./timestamps.js";
 
 const text = z.string().min(1);
@@ -370,14 +374,37 @@ export function withInvestigationGraphTools(
   endpoints: DependencyEndpointGraph,
   sourceWork: ReturnType<typeof createDependencySourceWorkTools>,
   readOnly = false,
+  notes?: {
+    query(input: unknown): Promise<unknown>;
+    record(input: unknown): Promise<unknown>;
+  },
 ): InvestigatorTool[] {
+  const selectionSchema = notes
+    ? z.union([
+        graphSelection,
+        z.strictObject({ evidence: dependencySourceNoteQuerySchema }),
+      ])
+    : graphSelection;
+  const properties = notes && {
+    endpoints: z.toJSONSchema(dependencyEndpointQuerySchema),
+    sourceWork: z.toJSONSchema(sourceWorkQuerySchema),
+    evidence: z.toJSONSchema(dependencySourceNoteQuerySchema),
+  };
   const query = {
     name: "query_codex_security_graph",
     description:
-      "Query endpoints with endpoints:{}. Use sourceWork:{} for source census counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for exact paths, gaps and handoffs.",
-    inputSchema: { ...z.toJSONSchema(graphSelection), type: "object" },
+      "Query endpoints with endpoints:{}. Use sourceWork:{} for source census counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for exact paths, gaps and handoffs." +
+      (notes
+        ? " Use evidence:{} to list unreviewed source notes, evidence:{id} for original excerpts, or evidence:{search} to search assertions and excerpts."
+        : ""),
+    inputSchema: {
+      ...z.toJSONSchema(selectionSchema),
+      type: "object",
+      ...(properties && { properties }),
+    },
     run(input: unknown) {
-      const selection = graphSelection.parse(input);
+      const selection = selectionSchema.parse(input);
+      if ("evidence" in selection) return notes!.query(selection.evidence);
       return "sourceWork" in selection
         ? { source_work: sourceWork.query(selection.sourceWork) }
         : { endpoints: endpoints.query(selection.endpoints) };
@@ -391,12 +418,21 @@ export function withInvestigationGraphTools(
       inputSchema: {
         type: "object",
         anyOf: [tool.inputSchema, query.inputSchema],
+        ...(properties && {
+          properties: {
+            ...(isRecord(tool.inputSchema) &&
+              isRecord(tool.inputSchema["properties"]) &&
+              tool.inputSchema["properties"]),
+            ...properties,
+          },
+        }),
       },
       run(input: unknown) {
         if (
           isRecord(input) &&
           (Object.hasOwn(input, "endpoints") ||
-            Object.hasOwn(input, "sourceWork"))
+            Object.hasOwn(input, "sourceWork") ||
+            (notes && Object.hasOwn(input, "evidence")))
         )
           return query.run(input);
         return tool.run(input);
@@ -404,6 +440,14 @@ export function withInvestigationGraphTools(
     };
   });
   if (!result.some((tool) => tool.name === query.name)) result.push(query);
+  if (notes && !readOnly)
+    result.push({
+      name: "record_codex_security_evidence",
+      description:
+        "Share an unreviewed investigator assertion with source excerpts from this investigation's pinned Git revision. Supply the question, scope, claim and exact source ranges. Use the returned ID to reopen the note.",
+      inputSchema: z.toJSONSchema(dependencySourceNoteSchema),
+      run: notes.record,
+    });
   if (!readOnly)
     result.push(
       { ...dependencyEndpointTool, run: (input) => endpoints.record(input) },

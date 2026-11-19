@@ -147,6 +147,7 @@ const investigateInstructions = [
 ].join("\n");
 const coordinationInstructions = [
   "You coordinate the investigation. Use the native plan and parallel investigator tools for independent applications or evidence questions. Give each investigator its bounded question and the pinned scope. Wait for investigators before returning the final report.",
+  "Share source research with record_codex_security_evidence. Include the question, scope, assertion and exact checkout-relative line ranges. Investigators can find notes with query_codex_security_graph({evidence:{search}}) and reopen the frozen excerpts with evidence:{id}. Verify the excerpts before submitting a premise or use for independent review.",
   "For repository searches split across investigators, record the exact matched paths and source references as roster pages with record_codex_security_source_work. Assign each file to a partition and pass its ID to the investigator. Investigators read their paths through query_codex_security_graph({sourceWork:{partitionId,page:{view:'remaining',limit:50}}}), follow nextCursor, record examined paths, and offer or acknowledge exact handoffs. Preserve failed or partial searches as named roster gaps until a source reference resolves them. Read sourceWork:{} before finalizing to account for remaining work.",
   "Use trace_codex_security_code to find real callers with checkout-relative paths, exact advisory terms and a language-appropriate structural rule; inspect the actual configured operation and input. Treat matches as leads. Use source_only for exploratory traces. Query the shared graph before duplicating work. For missing upstream evidence fetch the exact dependency source and read a cited immutable excerpt.",
   "Call each configured evidence MCP normally. The host reads linked resources from the responding server. Use list_dependency_evidence to find receipt IDs and their linked resources, read_dependency_evidence for an exact response page, and ingest_dependency_graph_evidence to ingest sampled witnesses off-model. Review bounded witness details with query_codex_security_graph.",
@@ -1113,6 +1114,8 @@ async function investigateIssue(
         .min(1),
     });
     session = createInvestigationSession({
+      store,
+      revision,
       submitAssessments: {
         name: "submit_dependency_assessments",
         description:

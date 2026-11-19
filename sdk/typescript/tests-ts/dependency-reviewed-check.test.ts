@@ -136,6 +136,152 @@ async function fixture(extraFiles: Record<string, string> = {}) {
   };
 }
 
+test("repository investigators share pinned source notes without promoting assertions to reviewed claims", async () => {
+  const captured = 'export const selectedMode = "archive";';
+  await using f = await fixture({ "modes.js": captured + "\n" });
+  const tool = "record_codex_security_evidence";
+  const graph = "query_codex_security_graph";
+  const assertion = {
+    question: "Which mode is configured?",
+    scope: "parser",
+    claim: "The checkout selects an archive mode.",
+  };
+  const range = { path: "modes.js", startLine: 1, endLine: 1 };
+  const input = { ...assertion, evidence: [range] };
+  let noteId = "";
+  let reviewerRead = false;
+  const result = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Parser issue",
+      signal,
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        const tools = await req.investigationTools!();
+        if (!req.coordinator) {
+          const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          expect(tools.definitions.some((d) => d.name === tool)).toBe(false);
+          await expect(tools.call(tool, input)).rejects.toThrow();
+          expect(
+            await tools.call(graph, { evidence: { id: noteId } }),
+          ).toMatchObject({
+            source_evidence: {
+              id: noteId,
+              investigator_assertion: assertion,
+              excerpts: [{ ...range, commit: f.revision, text: captured }],
+            },
+          });
+          reviewerRead = true;
+          return JSON.stringify({
+            decisions: packet.claims.map(
+              (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
+                ...reference(c),
+                approved: true,
+                reason: "Reviewed the cited parser source.",
+                evidenceKeys: c.availableEvidenceKeys,
+              }),
+            ),
+          });
+        }
+        const other = await req.investigationTools!();
+        const graphQuery = other.definitions.find((d) => d.name === graph);
+        expect(JSON.stringify(graphQuery?.inputSchema)).toContain(
+          '"evidence":',
+        );
+        const query = (evidence: unknown) => other.call(graph, { evidence });
+        await writeFile(
+          join(f.path, "modes.js"),
+          "export const selectedMode = null;\n",
+        );
+        const written = (await tools.call(tool, input)) as {
+          source_evidence: { id: string };
+        };
+        noteId = written.source_evidence.id;
+        const focusedKeys = [
+          "service_resolution",
+          "source_evidence",
+          "source_evidence_count",
+        ];
+        expect(Object.keys(written).sort()).toEqual(focusedKeys);
+        expect(written).toMatchObject({ source_evidence_count: 1 });
+        expect(written.source_evidence).toEqual({
+          id: expect.stringMatching(/^source-evidence-[0-9a-f]{64}$/u),
+        });
+        expect(await other.call(tool, input)).toEqual(written);
+        for (const bad of [
+          { ...range, commit: "0".repeat(40) },
+          { ...range, path: "../outside.js" },
+        ]) {
+          await expect(
+            tools.call(tool, {
+              ...input,
+              claim: "Unverified.",
+              evidence: [range, bad],
+            }),
+          ).rejects.toThrow();
+        }
+        const list = {
+          source_evidence_count: 1,
+          source_evidence: [{ id: noteId, ...assertion }],
+        };
+        const listing = await query({});
+        expect(Object.keys(listing as object).sort()).toEqual(focusedKeys);
+        expect(listing).toMatchObject(list);
+        expect(await query({ search: "selectedMode" })).toMatchObject(list);
+        expect(await query({ id: noteId, search: "missing" })).toMatchObject({
+          source_evidence: null,
+          source_evidence_count: 1,
+        });
+        const summary = await other.call(graph, {});
+        expect(summary).toMatchObject({ source_evidence_count: 1 });
+        expect(summary).not.toHaveProperty("source_evidence");
+        expect(
+          await other.call("list_dependency_evidence", { tool: graph }),
+        ).toMatchObject({
+          receipts: [
+            {
+              originalPayloadSha256: dependencyRecordHash({
+                structuredContent: summary,
+              }),
+            },
+          ],
+        });
+        expect(await other.call("query_dependency_claims", {})).toEqual([]);
+        await expect(
+          other.call("submit_dependency_assessments", {
+            assessments: [
+              {
+                id: "unsupported",
+                expectedRevision: 0,
+                use: {
+                  ...f.use,
+                  premises: [
+                    {
+                      id: noteId,
+                      revision: 1,
+                      hash: noteId.slice("source-evidence-".length),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        ).rejects.toThrow("currently approved premise");
+        return JSON.stringify({ uses: [f.use], limitations: [] });
+      },
+    },
+  );
+  if (!("checks" in result)) throw Error("Expected a package check.");
+  expect(reviewerRead).toBe(true);
+  expect(result.checks[0]!.claims.map((c) => c.id).sort()).toEqual([
+    "coverage",
+    "use-1",
+  ]);
+});
+
 for (const late of ["assessment", "candidate", "roster"] as const) {
   test(`rechecks coverage when a new ${late} arrives during final review`, async () => {
     await using f = await fixture({

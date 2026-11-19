@@ -205,6 +205,14 @@ export class DependencyAttemptStore {
     ).map((row) => String(row["id"]));
   }
 
+  size(kind: string): number {
+    return Number(
+      this.rows("SELECT COUNT(*) AS n FROM records WHERE kind = ?", kind)[0]![
+        "n"
+      ],
+    );
+  }
+
   values<T>(kind: string): T[] {
     return this.rows(
       "SELECT value FROM records WHERE kind = ? ORDER BY rowid",

@@ -69,6 +69,10 @@ export const dependencySourceNoteSchema = z.strictObject({
     )
     .min(1),
 });
+export const dependencySourceNoteQuerySchema = z.strictObject({
+  id: z.string().trim().min(1).optional(),
+  search: z.string().trim().min(1).optional(),
+});
 
 interface Range {
   path: string;
@@ -142,7 +146,7 @@ export async function prepareDependencySourceNote(
   input: unknown,
   options: {
     targetSha: string;
-    logicalRepository: string;
+    logicalRepository?: string;
     signal?: AbortSignal;
   },
 ) {
@@ -163,7 +167,9 @@ export async function prepareDependencySourceNote(
     warnings,
   );
   const note = {
-    repository: options.logicalRepository,
+    ...(options.logicalRepository !== undefined && {
+      repository: options.logicalRepository,
+    }),
     investigator_assertion: { question, scope, claim },
     excerpts,
   };
@@ -195,4 +201,25 @@ export function saveDependencySourceNote(
 ) {
   store.set("source-note", saved.note.id, saved.note);
   return saved.acknowledgement;
+}
+
+export function queryDependencySourceNotes(
+  store: DependencyAttemptStore,
+  raw: unknown,
+) {
+  const { id, search } = dependencySourceNoteQuerySchema.parse(raw);
+  type Note = Awaited<ReturnType<typeof prepareDependencySourceNote>>["note"];
+  const matches = (note: Note) =>
+    search === undefined || JSON.stringify(note).includes(search);
+  if (id !== undefined) {
+    const note = store.get<Note>("source-note", id);
+    return note && matches(note) ? note : null;
+  }
+  return store
+    .values<Note>("source-note")
+    .filter(matches)
+    .map(({ id, investigator_assertion }) => ({
+      id,
+      ...investigator_assertion,
+    }));
 }

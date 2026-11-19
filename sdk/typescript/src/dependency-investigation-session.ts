@@ -6,7 +6,15 @@ import {
 } from "./dependency-endpoints.js";
 import { z } from "zod";
 import { bundledPluginRoot } from "./runtime.js";
-import { dependencyRecordHash } from "./dependency-attempt-store.js";
+import {
+  dependencyRecordHash,
+  type DependencyAttemptStore,
+} from "./dependency-attempt-store.js";
+import {
+  prepareDependencySourceNote,
+  queryDependencySourceNotes,
+  saveDependencySourceNote,
+} from "./dependency-stack-evidence.js";
 import type { DependencySearch } from "./dependency-reachability.js";
 import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
@@ -33,6 +41,7 @@ type Definition = { name: string; description: string; inputSchema: object };
 type Tool = Definition & { run(input: unknown): unknown };
 interface Graph extends DependencyEvidenceGraph {
   tools: Definition[];
+  serviceResolutionCoverage?(): Record<string, unknown>;
   call(
     name: string,
     args: unknown,
@@ -304,6 +313,8 @@ function auditSearch(
 export function createInvestigationSession(options: {
   directory: string;
   repository: string;
+  store: DependencyAttemptStore;
+  revision: string | undefined;
   signal: AbortSignal;
   productionDiscovery: boolean;
   excludedSourcePaths?: readonly string[];
@@ -328,6 +339,50 @@ export function createInvestigationSession(options: {
   const { queue, records } = options;
   const sourceWork = createDependencySourceWorkTools();
   let graph: Promise<Graph> | undefined;
+  function openGraph() {
+    return (graph ??= helpers().then((h) =>
+      h.createDependencyGraphSession(
+        options.repository,
+        options.evidenceSources,
+        {
+          productionDiscovery: options.productionDiscovery,
+          fullTraceReply: true,
+          excludedSourcePaths: options.excludedSourcePaths,
+        },
+      ),
+    ));
+  }
+  async function noteReply(source_evidence: unknown) {
+    const source_evidence_count = options.store.size("source-note");
+    const g = await openGraph();
+    const coverage = g.serviceResolutionCoverage
+      ? g.serviceResolutionCoverage()
+      : (await g.call("query_codex_security_graph", {}, options.signal))[
+          "service_resolution"
+        ];
+    const {
+      paths: _paths,
+      unresolved_paths: _unresolved,
+      ...service_resolution
+    } = isRecord(coverage) ? coverage : {};
+    return { source_evidence, source_evidence_count, service_resolution };
+  }
+  const sourceNotes = {
+    query: (raw: unknown) =>
+      noteReply(queryDependencySourceNotes(options.store, raw)),
+    async record(raw: unknown) {
+      if (!options.revision)
+        throw new Error(
+          "A pinned Git revision is required to record a source note.",
+        );
+      const note = await prepareDependencySourceNote(options.repository, raw, {
+        targetSha: options.revision,
+        signal: options.signal,
+      });
+      options.signal.throwIfAborted();
+      return noteReply(saveDependencySourceNote(options.store, note));
+    },
+  };
   const remember = (
     tool: string,
     args: unknown,
@@ -425,18 +480,7 @@ export function createInvestigationSession(options: {
           : tool,
       );
       if (!readOnly) {
-        graph ??= helpers().then((h) =>
-          h.createDependencyGraphSession(
-            options.repository,
-            options.evidenceSources,
-            {
-              productionDiscovery: options.productionDiscovery,
-              fullTraceReply: true,
-              excludedSourcePaths: options.excludedSourcePaths,
-            },
-          ),
-        );
-        const g = await graph;
+        const g = await openGraph();
         tools.push(
           options.submitAssessments,
           {
@@ -475,6 +519,11 @@ export function createInvestigationSession(options: {
               let response: Record<string, unknown>;
               try {
                 response = await g.call(def.name, input, options.signal);
+                if (def.name === "query_codex_security_graph")
+                  response = {
+                    ...response,
+                    source_evidence_count: options.store.size("source-note"),
+                  };
               } catch (error) {
                 options.onSearch(
                   auditSearch(def.name, input, startedAt, {}, undefined, error),
@@ -499,6 +548,7 @@ export function createInvestigationSession(options: {
         options.endpoints,
         sourceWork,
         readOnly,
+        sourceNotes,
       );
       return {
         definitions: exposed.map(({ run: _, ...def }) => def),
