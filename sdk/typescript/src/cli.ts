@@ -758,7 +758,7 @@ function fitProgressLine(line: string, width: number): string {
   let ellipsisIndex = 0;
   let used = 0;
   for (const { index, segment } of graphemes.segment(plain)) {
-    used += stringWidth(segment.toWellFormed());
+    used += stringWidth(segment);
     if (used > width)
       return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
     if (used < width) ellipsisIndex = index + segment.length;
