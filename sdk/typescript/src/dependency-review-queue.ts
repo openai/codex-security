@@ -107,24 +107,39 @@ export function currentApproval(
   if (cache.has(key)) return cache.get(key);
   // An unresolved cycle cannot establish an independent premise.
   cache.set(key, undefined);
-  const current = store.claim<Claim["value"]>(ref.id);
-  const decision = store.get<Decision>("dependency-review", ref.id);
+  const latest = store.claim<Claim["value"]>(ref.id);
+  const historical = latest?.revision !== ref.revision;
+  const decision = historical
+    ? ref.id.startsWith("assessment:") &&
+      store.get<Decision>("retained-use", ref.id)
+    : store.get<Decision>("dependency-review", ref.id);
   if (
-    !current ||
-    current.revision !== ref.revision ||
-    current.hash !== ref.hash ||
-    !decision?.approved ||
+    !decision ||
+    !decision.approved ||
     decision.revision !== ref.revision ||
     decision.hash !== ref.hash
   )
     return;
+  const current = historical
+    ? store.claim<Claim["value"]>(ref.id, ref.revision)
+    : latest;
   if (
+    current?.hash === ref.hash &&
     claimInputs(current).dependencies.every((dep) =>
       currentApproval(store, dep, cache),
     )
   ) {
     cache.set(key, decision);
     return decision;
+  }
+}
+
+/** A replacement in review cannot withdraw a still-supported approved use. */
+export function retainedUse(store: DependencyAttemptStore, id: string) {
+  const previous =
+    id.startsWith("assessment:") && store.get<Decision>("retained-use", id);
+  if (previous && currentApproval(store, previous)) {
+    return store.claim<Claim["value"]>(id, previous.revision);
   }
 }
 
@@ -204,6 +219,7 @@ export function createPremiseQueue(options: {
     const key = premiseKey(c);
     const decision = currentApproval(store, c);
     const reviewed = store.get<Decision>("dependency-review", c.id);
+    const previous = !decision && retainedUse(store, c.id);
     const stale =
       !decision &&
       reviewed?.approved &&
@@ -212,6 +228,7 @@ export function createPremiseQueue(options: {
     return {
       ...ref(c),
       payload: c.value,
+      ...(previous && { retainedUse: ref(previous) }),
       state: decision
         ? "approved"
         : failures.has(key)

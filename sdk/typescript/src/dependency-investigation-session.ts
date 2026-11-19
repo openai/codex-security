@@ -388,7 +388,7 @@ export function createInvestigationSession(options: {
     {
       name: "query_dependency_claims",
       description:
-        "Look up independently reviewed premises, immutable references and corrections. Set wait=true to wait for outstanding reviews.",
+        "Find queued uses, candidate dispositions and premises with their exact references, evidence and review state. Check existing uses before assigning an assessment ID. A retainedUse identifies the approved finding still in effect during a withdrawal. Set wait=true to wait for outstanding reviews.",
       inputSchema: z.toJSONSchema(queryClaims),
       run: (raw) => queue.query(raw),
     },

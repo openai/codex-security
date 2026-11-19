@@ -28,6 +28,7 @@ import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
   reviewScopes,
+  reference,
   reportedUse,
   verifyProposedUse,
   type Claim,
@@ -2539,6 +2540,297 @@ test("a correction in a live review batch preserves its independent sibling appr
     "premise:derived",
   ]);
 });
+
+test.each(["approved", "rejected", "racing", "changed premise"] as const)(
+  "an explicit disposition replacement preserves reviewed assessment identities (%s)",
+  async (outcome) => {
+    await using f = await fixture();
+    const caller = { path: "app.js", line: 2 };
+    const other = structuredClone(f.use);
+    const otherCaller = { path: "secondary.js", line: 2 };
+    other.location = "secondary";
+    other.proof.sink!.callSite = otherCaller;
+    other.proof.conditions[0]!.citations = [otherCaller];
+    other.evidence[0]!.path = otherCaller.path;
+    const disposition = {
+      scope: f.use.scope,
+      location: f.use.location,
+      kind: "dismissed",
+      reason:
+        "The same caller and selected copy are reported by assessment:primary.",
+      locations: outcome === "approved" ? [] : [caller],
+      evidence: [
+        { path: caller.path, startLine: 1, endLine: 2, supports: ["context"] },
+      ],
+      observations: [],
+    };
+    const target = "assessment:duplicate";
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let original!: PremiseRef, latest!: PremiseRef;
+    let corrected: PremiseRef | undefined;
+    let coverageRefs: PremiseRef[] = [];
+    const reviewedReplacements: number[] = [];
+    const checked = await runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Parser issue",
+        signal,
+      },
+      {
+        discover: async () => ({
+          ...f.discovery,
+          callers: [caller, otherCaller],
+        }),
+        async runAgent(req) {
+          const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          if (!req.coordinator) {
+            for (const c of packet.claims) {
+              if (c.id === "coverage")
+                coverageRefs = packet.approvedClaims.map(reference);
+              if (c.id !== target || c.payload.kind !== "disposition") continue;
+              if (c.revision === 2) {
+                started.resolve();
+                await release.promise;
+              }
+              expect(c.previousUse).toMatchObject({
+                ...original,
+                payload: {
+                  kind: "use",
+                  use: {
+                    scope: f.use.scope,
+                    location: f.use.location,
+                    proof: f.use.proof,
+                  },
+                },
+                decision: { approved: true, evidenceKeys: expect.any(Array) },
+              });
+              expect(c.payload.disposition).toMatchObject({
+                reason: expect.stringContaining("same caller"),
+                evidence: [
+                  expect.objectContaining({
+                    path: caller.path,
+                    commit: f.revision,
+                  }),
+                ],
+              });
+              const { call } = await req.investigationTools!();
+              expect(
+                await call("query_dependency_claims", {
+                  ids: ["assessment:primary"],
+                }),
+              ).toMatchObject([
+                {
+                  state: "approved",
+                  payload: { kind: "use", use: { proof: f.use.proof } },
+                },
+              ]);
+              reviewedReplacements.push(c.revision);
+            }
+            return JSON.stringify({
+              decisions: packet.claims.map(
+                (
+                  c: PremiseRef & {
+                    payload: Claim["value"];
+                    availableEvidenceKeys: string[];
+                  },
+                ) => ({
+                  ...reference(c),
+                  approved:
+                    c.id !== target ||
+                    c.payload.kind !== "disposition" ||
+                    (c.revision === 2 &&
+                      (outcome === "approved" || outcome === "racing")),
+                  reason: "Checked the caller, selected copy and cited source.",
+                  evidenceKeys: c.availableEvidenceKeys,
+                }),
+              ),
+            });
+          }
+          if (packet.feedback) throw Error(packet.feedback.reason);
+          const { call } = await req.investigationTools!();
+          const submit = (assessments: unknown[]) =>
+            call("submit_dependency_assessments", { assessments });
+          const query = async (wait: boolean) => {
+            const [claim] = (await call("query_dependency_claims", {
+              ids: [target],
+              wait,
+            })) as (PremiseRef & { state: string; retainedUse?: PremiseRef })[];
+            return claim!;
+          };
+          async function revisePremise(expectedRevision: number) {
+            await call("submit_dependency_claims", {
+              claims: [
+                {
+                  id: "lock",
+                  expectedRevision,
+                  scope: f.use.scope,
+                  statement: expectedRevision
+                    ? "The lock records version 1.0.0."
+                    : "The checkout contains a lock.",
+                  sources: [
+                    { path: "package-lock.json", startLine: 1, endLine: 1 },
+                  ],
+                  dependencies: [],
+                  receiptIds: [],
+                },
+              ],
+            });
+            const [premise] = (await call("query_dependency_claims", {
+              ids: ["premise:lock"],
+              wait: true,
+            })) as PremiseRef[];
+            return { ...f.use, premises: [reference(premise!)] };
+          }
+          const duplicate =
+            outcome === "changed premise" ? await revisePremise(0) : f.use;
+          await submit([
+            { id: "primary", expectedRevision: 0, use: f.use },
+            { id: "duplicate", expectedRevision: 0, use: duplicate },
+            { id: "other", expectedRevision: 0, use: other },
+          ]);
+          const approved = await query(true);
+          expect(approved.state).toBe("approved");
+          original = reference(approved);
+          const proposal = {
+            id: "duplicate",
+            expectedRevision: 1,
+            replacesUse: original,
+            disposition,
+          };
+          await expect(
+            submit([
+              {
+                ...proposal,
+                replacesUse: { ...original, hash: "0".repeat(64) },
+              },
+            ]),
+          ).rejects.toThrow();
+          await expect(
+            submit([
+              {
+                ...proposal,
+                replacesUse: { ...original, id: "assessment:primary" },
+              },
+            ]),
+          ).rejects.toThrow();
+          await submit([proposal]);
+          try {
+            await started.promise;
+            const pending = await query(false);
+            expect(pending).toMatchObject({
+              id: target,
+              revision: 2,
+              state: "pending",
+              retainedUse: original,
+            });
+            expect(pending.hash).not.toBe(original.hash);
+            await expect(submit([proposal])).rejects.toThrow();
+            if (outcome === "racing") {
+              await submit([
+                {
+                  ...proposal,
+                  expectedRevision: 2,
+                  disposition: {
+                    ...disposition,
+                    reason: disposition.reason + " Recheck the binding.",
+                  },
+                },
+              ]);
+            }
+          } finally {
+            release.resolve();
+          }
+          const settled = await query(true);
+          latest = reference(settled);
+          expect(latest.revision).toBe(outcome === "racing" ? 3 : 2);
+          if (outcome === "approved") {
+            expect(settled.state).toBe("approved");
+            expect(settled.retainedUse).toBeUndefined();
+            expect(
+              await submit([
+                { ...proposal, expectedRevision: latest.revision },
+              ]),
+            ).toMatchObject([{ ...latest, state: "approved" }]);
+            // An existing client can use the same short name in the separate disposition namespace.
+            await submit([
+              {
+                id: "duplicate",
+                expectedRevision: 0,
+                disposition: {
+                  ...disposition,
+                  kind: "unresolved",
+                  locations: [],
+                  reason: "Deployment remains unknown.",
+                },
+              },
+            ]);
+          } else {
+            expect(settled).toMatchObject({
+              state: "rejected",
+              retainedUse: original,
+            });
+            if (outcome === "changed premise") {
+              const use = await revisePremise(1);
+              expect((await query(false)).retainedUse).toBeUndefined();
+              await submit([{ id: "duplicate", expectedRevision: 2, use }]);
+              const repaired = await query(true);
+              expect(repaired).toMatchObject({
+                revision: 3,
+                state: "approved",
+              });
+              corrected = reference(repaired);
+            }
+          }
+          return JSON.stringify({ uses: [], limitations: [] });
+        },
+      },
+    );
+    const result = readDependencyCheckOutput(checked);
+    if (!("checks" in result)) throw Error("Expected a package check.");
+    const report = result.checks[0]!;
+    const accepted = outcome === "approved";
+    const authoritative = accepted ? latest : (corrected ?? original);
+    expect(reviewedReplacements).toEqual(outcome === "racing" ? [2, 3] : [2]);
+    expect(coverageRefs.filter((c) => c.id === target)).toEqual([
+      authoritative,
+    ]);
+    expect(
+      report.claims?.filter((c) => c.id === target).map(reference),
+    ).toEqual([authoritative]);
+    expect(report.uses.map((u) => u.conclusionClaim?.id).sort()).toEqual(
+      (accepted
+        ? ["assessment:primary", "assessment:other"]
+        : ["assessment:primary", "assessment:other", target]
+      ).sort(),
+    );
+    expect(
+      report.uses.find((u) => u.location === "secondary")?.proof?.sink
+        ?.callSite,
+    ).toEqual(otherCaller);
+    expect(
+      report.uses
+        .filter((u) => u.conclusionClaim?.id === target)
+        .map((u) => u.conclusionClaim),
+    ).toEqual(accepted ? [] : [authoritative]);
+    const replacement = report.coverage?.filter(
+      (d) => d.conclusionClaim?.id === target,
+    );
+    if (accepted) {
+      expect(replacement).toMatchObject([
+        {
+          kind: "dismissed",
+          conclusionClaim: latest,
+          reason: disposition.reason,
+        },
+      ]);
+      expect(report.coverage?.map((d) => d.conclusionClaim?.id)).toContain(
+        "disposition:duplicate",
+      );
+    } else expect(replacement).toEqual([]);
+  },
+);
 
 test("independently verifies candidate dispositions and publishes their selected evidence and handoffs", async () => {
   await using f = await fixture({

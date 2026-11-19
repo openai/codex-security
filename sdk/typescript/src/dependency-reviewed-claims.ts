@@ -2,6 +2,7 @@ import type { GraphCandidates } from "./dependency-graph-candidates.js";
 import {
   assertReviewedPremises,
   claimInputs,
+  currentApproval,
   premiseKey,
   type Premise,
   type PremiseRef,
@@ -674,6 +675,7 @@ export async function verifyProposedDisposition(
   records: readonly DependencyEvidenceRecord[],
   callerScope: string | undefined,
   decidingPremiseEvidence: DecidingPremiseEvidence,
+  replacesUse?: PremiseRef,
 ) {
   const scope = scopes.find((s) => s.id === input.scope);
   if (!scope)
@@ -701,7 +703,11 @@ export async function verifyProposedDisposition(
     throw new CodexSecurityError(
       "A test-only dismissal requires an explicit caller scope and an observed caller.",
     );
-  if (input.kind === "dismissed" && !input.locations.length)
+  if (
+    input.kind === "dismissed" &&
+    !input.locations.length &&
+    (!replacesUse || input.classification)
+  )
     throw new CodexSecurityError(
       "A dismissal must identify an observed dependency candidate.",
     );
@@ -1021,7 +1027,11 @@ export type VerifiedUse = Awaited<ReturnType<typeof verifyProposedUse>>;
 type ReviewClaim =
   | Premise
   | { kind: "use"; use: VerifiedUse }
-  | { kind: "disposition"; disposition: VerifiedDisposition }
+  | {
+      kind: "disposition";
+      disposition: VerifiedDisposition;
+      replacesUse?: PremiseRef;
+    }
   | { kind: "coverage"; limitations: string[] };
 export type Claim = StoredClaim<ReviewClaim>;
 export function reference(claim: Pick<Claim, "id" | "revision" | "hash">) {
@@ -1029,6 +1039,26 @@ export function reference(claim: Pick<Claim, "id" | "revision" | "hash">) {
 }
 
 export class DependencyReviewRejection extends CodexSecurityError {}
+
+export function approvedUse(store: DependencyAttemptStore, ref: PremiseRef) {
+  const decision = currentApproval(store, ref);
+  const previous = decision && store.claim<ReviewClaim>(ref.id, ref.revision);
+  if (
+    !decision ||
+    !previous ||
+    previous.value.kind !== "use" ||
+    !ref.id.startsWith("assessment:")
+  )
+    throw new DependencyReviewRejection(
+      "A replacement requires the exact, currently approved use revision: " +
+        ref.id,
+    );
+  return {
+    ...reference(previous),
+    payload: previous.value,
+    decision,
+  };
+}
 
 /** Commit approvals only if every decision still names the exact current claim. */
 export function approveDependencyClaims(
@@ -1058,6 +1088,13 @@ export function approveDependencyClaims(
         );
       const { sourceIds, receiptKeys, dependencies } = claimInputs(claim);
       assertReviewedPremises(store, dependencies);
+      if (
+        decision.approved &&
+        claim.value.kind === "disposition" &&
+        claim.value.replacesUse &&
+        !currentApproval(store, claim)
+      )
+        approvedUse(store, claim.value.replacesUse);
       const allowed = new Set([
         ...sourceIds,
         ...receiptKeys,
@@ -1103,6 +1140,12 @@ export function approveDependencyClaims(
           "A positive review must select evidence for the running build and caller access.",
         );
       store.set("dependency-review", claim.id, decision);
+      if (
+        decision.approved &&
+        claim.id.startsWith("assessment:") &&
+        store.get<Decision>("retained-use", claim.id)
+      )
+        store.set("retained-use", claim.id, null);
       return { ...reference(current), value: current.value, review: decision };
     }),
   );
