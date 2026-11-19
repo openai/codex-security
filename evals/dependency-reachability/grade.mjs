@@ -412,7 +412,7 @@ function selectedReceipt(table, key) {
   return { ref: { ...ref, selection }, value };
 }
 
-function modernDecision(report, conclusion) {
+function modernDecision(report, conclusion, supportingClaims) {
   const selected = new Set([conclusion]);
   const sources = new Map();
   const receipts = new Map();
@@ -426,6 +426,17 @@ function modernDecision(report, conclusion) {
     const refs = new Map(
       (claim.dependencies ?? []).map((ref) => [keyFor(ref), ref]),
     );
+    if (supportingClaims !== undefined) {
+      const dependencies =
+        claim.payload.kind === "use"
+          ? claim.payload.use.premises
+          : claim.payload.dependencies;
+      assert.deepEqual(
+        [...refs.keys()].sort(),
+        (dependencies ?? []).map(keyFor).sort(),
+        "premise references belong to the approved payload",
+      );
+    }
     const proposed =
       claim.payload?.kind === "use"
         ? claim.payload.use.evidence
@@ -470,6 +481,20 @@ function modernDecision(report, conclusion) {
       }
     }
   }
+  if (supportingClaims !== undefined) {
+    assert(
+      Array.isArray(supportingClaims),
+      "supporting claims are exact references",
+    );
+    assert.deepEqual(
+      supportingClaims.map(keyFor).sort(),
+      [...selected]
+        .filter((c) => c !== conclusion)
+        .map(keyFor)
+        .sort(),
+      "display every reviewer-selected premise",
+    );
+  }
   return { sources, receipts };
 }
 
@@ -490,7 +515,8 @@ export function approvedCitations(report, use, read, sha) {
   assert(Array.isArray(approvedUse.evidence), "approved source evidence");
   const legacy = claim.application && legacySources(report, claim);
   const reviewed = new Map();
-  const selected = !legacy && modernDecision(report, claim);
+  const selected =
+    !legacy && modernDecision(report, claim, use.supportingClaims);
   for (const source of approvedUse.evidence) {
     let commit = source.commit ?? approvedUse.place?.revision;
     if (!commit && legacy) {
@@ -509,6 +535,9 @@ export function approvedCitations(report, use, read, sha) {
   }
   for (const source of legacy?.premises ?? [])
     reviewed.set(rangeKey(source), source);
+  if (selected && use.supportingClaims !== undefined) {
+    for (const [key, source] of selected.sources) reviewed.set(key, source);
+  }
   const displayed = use.evidence.map(rangeKey);
   assert.deepEqual(
     [...new Set(displayed)].sort(),

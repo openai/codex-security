@@ -50,7 +50,10 @@ export type DependencyEvidenceFailure = Pick<
 /** Remember linked resources only for the lifetime of this investigator run. */
 export function createDependencyEvidenceCapture(
   servers: JsonObject,
-  onFailure?: (call: DependencyEvidenceFailure) => void,
+  onFailure?: (
+    call: DependencyEvidenceFailure,
+    result: Record<string, unknown>,
+  ) => void,
 ) {
   const links = new Map(
     Object.keys(servers).map((server) => [server, new Set<string>()]),
@@ -100,7 +103,17 @@ export function createDependencyEvidenceCapture(
       (isRecord(result) &&
         (result["isError"] === true || result["is_error"] === true))
     ) {
-      onFailure?.({ server, tool, arguments: args });
+      onFailure?.(
+        { server, tool, arguments: args },
+        isRecord(result)
+          ? result
+          : {
+              structuredContent: {
+                status: "failed",
+                error: item["error"] ?? null,
+              },
+            },
+      );
       return;
     }
     if (!isRecord(result)) return;

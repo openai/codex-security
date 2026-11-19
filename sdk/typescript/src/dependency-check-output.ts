@@ -10,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
+import type { DependencyBlockDetails } from "./dependency-blocked-schema.js";
 import type { DependencyPackage } from "./dependency-advisory.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 import { isRecord } from "./record.js";
@@ -22,12 +23,13 @@ export type BlockedCheck = {
 };
 export class DependencyInvestigationBlockedError extends CodexSecurityError {
   constructor(
-    readonly outcome: BlockedCheck & {
-      cve?: string;
-      package?: DependencyPackage;
-      checks?: unknown[];
-      pendingAdvisories?: (string | null)[];
-    },
+    readonly outcome: BlockedCheck &
+      Partial<DependencyBlockDetails> & {
+        cve?: string;
+        package?: DependencyPackage;
+        checks?: unknown[];
+        pendingAdvisories?: (string | null)[];
+      },
     cause: unknown,
   ) {
     super(`Dependency investigation blocked: ${outcome.reason}`, { cause });
@@ -47,6 +49,115 @@ export type DependencyProgressSink = (
   subject?: string,
   details?: Record<string, unknown>,
 ) => void;
+
+const stages: Record<string, string> = {
+  osv: "Looking up advisories in OSV",
+  advisory_lookup: "Looking up advisories",
+  supplied_advisory: "Using the supplied vulnerability description",
+  investigate: "Starting source investigation",
+  review: "Reviewing evidence",
+};
+const activities: Record<string, string> = {
+  opengrep: "Searching with OpenGrep",
+  trace: "Tracing source call paths",
+  source_search: "Searching source",
+  source_read: "Reading source",
+  upstream: "Fetching upstream source",
+  catalog: "Looking up services in the catalog",
+  runtime: "Checking runtime inventory",
+  profiles: "Checking runtime stacks",
+};
+const verdictNames: Record<string, string> = {
+  exploitable: "exploitable",
+  potentially_exploitable: "potentially exploitable",
+  ruled_out: "ruled out",
+  unknown: "requires more information",
+};
+
+function pathList(value: unknown) {
+  if (!Array.isArray(value)) return "";
+  const paths = [
+    ...new Set(value.filter((p): p is string => typeof p === "string")),
+  ];
+  return [
+    ...paths.slice(0, 3),
+    ...(paths.length > 3 ? [`+${paths.length - 3} more`] : []),
+  ].join(", ");
+}
+
+function progressLine(type: string, fields: Record<string, unknown>) {
+  switch (type) {
+    case "started":
+      return "Preparing the checkout";
+    case "stage":
+      return stages[String(fields["stage"])];
+    case "advisories_loaded":
+      return `Loaded ${fields["count"]} advisory records`;
+    case "access_program":
+      return fields["program"] === "unconfirmed"
+        ? "Turn access program unconfirmed"
+        : `Turn access program · ${fields["program"]}`;
+    case "advisory_summary":
+      return `Advisory · ${fields["summary"]}`;
+    case "proposed_sink":
+      return [
+        "Proposed sink",
+        fields["function"],
+        fields["path"] &&
+          `${fields["path"]}${fields["line"] ? ":" + fields["line"] : ""}`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    case "activity_started": {
+      const scope = isRecord(fields["scope"]) ? fields["scope"] : {};
+      return [
+        activities[String(fields["activity"])],
+        scope["upstream"] ?? pathList(scope["files"] ?? scope["directories"]),
+        scope["symbol"],
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    case "activity_finished": {
+      const paths = pathList(fields["searchedPaths"]);
+      if (paths)
+        return `${fields["outcome"] === "partial" ? "Partial search" : "Searched"} · ${paths}`;
+      if (fields["outcome"] === "failed")
+        return `${activities[String(fields["activity"])]} failed`;
+      return;
+    }
+    case "reviewed":
+      return [
+        verdictNames[String(fields["verdict"])],
+        fields["location"],
+        fields["scope"],
+        fields["reason"],
+        fields["previousVerdict"] &&
+          `previously ${verdictNames[String(fields["previousVerdict"])]}`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    case "reviewed_group":
+      return `${verdictNames[String(fields["verdict"])]} · ${fields["callsites"]} reviewed calls · ${fields["location"]}`;
+    case "report_ready": {
+      const counts = Object.entries(
+        isRecord(fields["verdicts"]) ? fields["verdicts"] : {},
+      ).filter(([, n]) => typeof n === "number" && n > 0);
+      return [
+        "Investigation summary",
+        ...counts.map(([key, n]) => `${n} ${verdictNames[key]}`),
+        !counts.length && "0 reviewed uses",
+        fields["limitations"] && `${fields["limitations"]} limitations`,
+        fields["path"] && `Report saved · ${fields["path"]}`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    case "finished":
+      if (fields["outcome"] !== "completed")
+        return `Investigation ${fields["outcome"]}`;
+  }
+}
 
 function reportSummary(report: unknown) {
   const verdicts = {
@@ -136,27 +247,12 @@ export async function withDependencyCheckOutput<T>(
     subject: string,
     details?: Record<string, unknown>,
   ) {
-    if (
-      options.display &&
-      ![
-        "activity_finished",
-        "finished",
-        "advisory",
-        "discovery",
-        "investigation",
-        "review",
-      ].includes(type)
-    ) {
+    if (options.display) {
       // Optional terminal progress must not change whether the report is saved.
       try {
-        const label =
-          details?.["summary"] ??
-          details?.["reason"] ??
-          details?.["function"] ??
-          details?.["activity"] ??
-          details?.["stage"] ??
-          type;
-        options.display(formatSecurityPolicyText(`${subject} · ${label}`));
+        const label = progressLine(type, details ?? {});
+        if (label)
+          options.display(formatSecurityPolicyText(`${subject} · ${label}`));
       } catch {}
     }
     if (fd === undefined || failedProgress) return;

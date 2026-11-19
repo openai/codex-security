@@ -1,3 +1,4 @@
+import type { GraphCandidates } from "./dependency-graph-candidates.js";
 import {
   assertReviewedPremises,
   claimInputs,
@@ -13,6 +14,7 @@ import {
 } from "./dependency-attempt-store.js";
 import {
   dependencyFindingDetailsShape,
+  dependencyCoverageDispositionSchema,
   dependencyPlaceSchema,
   type DependencyReviewReference,
 } from "./dependency-reachability.js";
@@ -126,12 +128,35 @@ const proposedUse = z.strictObject({
   proof: dependencyUseProofSchema,
   remainingQuestions: z.array(text),
 });
+export const proposedDisposition = dependencyCoverageDispositionSchema
+  .omit({
+    evidence: true,
+    observations: true,
+    decidingEvidence: true,
+    conclusionClaim: true,
+    supportingClaims: true,
+    locations: true,
+  })
+  .extend({
+    scope: text,
+    evidence: z.array(source),
+    observations: z.array(receipt),
+    receiptSelections: proposedUse.shape.receiptSelections,
+    premises: proposedUse.shape.premises,
+    locations: z
+      .array(z.strictObject({ path: text, line: z.number().int().positive() }))
+      .describe(
+        "Exact observed caller or dependency selection lines this disposition addresses. An unresolved source handoff may have no registered candidate.",
+      ),
+  });
+type FindingInput =
+  z.infer<typeof proposedUse> | z.infer<typeof proposedDisposition>;
 export const investigationSchema = z.strictObject({
   outOfScope: z.array(z.strictObject({ scope: text, reason: text })).optional(),
   uses: z
     .array(proposedUse)
     .describe(
-      "Enter only additional uses not already queued with submit_dependency_assessments. The host publishes the current approved submissions. Return [] when all intended uses are already submitted and approved.",
+      "Enter only additional uses not already queued with submit_dependency_assessments. The host publishes the current approved submissions. Return [] when all intended uses are already submitted and approved. Queue each unresolved or dismissed candidate as a disposition through submit_dependency_assessments.",
     ),
   limitations: z.array(text),
 });
@@ -421,27 +446,12 @@ function coversReference(
   );
 }
 
-export async function verifyProposedUse(
+async function readFindingSources(
   directory: string,
-  scope: Scope,
-  use: Proposal["uses"][number],
+  revision: string,
+  use: FindingInput,
   signal: AbortSignal,
-  affectedVersion?: boolean,
-  records: readonly DependencyEvidenceRecord[] = [],
-  callerScope?: string,
-  decidingPremiseEvidence?: DecidingPremiseEvidence,
 ) {
-  const revision = scope.discovery.revision;
-  const component = use.component ?? scope.component;
-  const embedded = component !== scope.component;
-  if (
-    !embedded &&
-    scope.selectedVersion &&
-    use.version !== scope.selectedVersion
-  )
-    throw new CodexSecurityError(
-      `The version for ${scope.location} differs from its selected dependency version.`,
-    );
   const evidence = await Promise.all(
     use.evidence.map(async ({ supports, commit, ...range }) => ({
       ...(await readDependencySourceCitation(
@@ -463,71 +473,17 @@ export async function verifyProposedUse(
     throw new CodexSecurityError(
       "Historical citations can explain a change. Cite the selected checkout for facts about its affected copy, use, or exclusion.",
     );
-  if (embedded) {
-    // A containing distribution and the library in its wheel or binary have
-    // independently selected versions. Bind the nested identity to original
-    // source before letting review decide the caller and advisory relationship.
-    const byPath = new Map<string, string[]>();
-    for (const ref of evidence) {
-      if (ref.commit !== revision) continue;
-      const excerpts = byPath.get(ref.path) ?? [];
-      excerpts.push(ref.excerpt);
-      byPath.set(ref.path, excerpts);
-    }
-    const excerpts = [...byPath.values()].map((lines) => lines.join("\n"));
-    const parents = excerpts.filter((text) => {
-      const name = text.toLowerCase().includes(scope.component.toLowerCase());
-      // A filename can delimit its version with "-" rather than quotes.
-      const version = scope.selectedVersion;
-      return (
-        name &&
-        (!version ||
-          mentions(text, version) ||
-          mentions(text.replaceAll(/[-/@]/gu, " "), version))
-      );
-    });
-    const bound = excerpts.some(
-      (source) =>
-        identifiesEmbeddedCopy(source, component, use.version) &&
-        parents.some(
-          (parent) =>
-            parent === source ||
-            source
-              .match(/\b[a-f0-9]{64}\b/giu)
-              ?.some((digest) => parent.includes(digest)),
-        ),
-    );
-    if (!bound)
-      throw new CodexSecurityError(
-        "Cite the selected parent artifact or build and the embedded dependency and version it contains. Join separate records by their artifact digest.",
-      );
-  }
-  const covers = (path: string | undefined, line: number | undefined) =>
-    path !== undefined &&
-    line !== undefined &&
-    evidence.some(
-      (ref) =>
-        ref.commit === revision &&
-        ref.path === path &&
-        ref.startLine <= line &&
-        line <= ref.endLine,
-    );
-  const citesSelection = covers(
-    scope.selection?.lockfile,
-    scope.selection?.line,
-  );
-  if (
-    scope.manifest &&
-    !covers(scope.manifest, scope.manifestLine) &&
-    !citesSelection &&
-    !scope.discovery.callers.some(
-      (c) => c.manifest === scope.manifest && covers(c.path, c.line),
-    )
-  )
-    throw new CodexSecurityError(
-      `Cite the dependency selection or caller for this scope: ${scope.location}`,
-    );
-  assertDependencyUseProofCitations(use.proof, evidence, scope.location);
+  return evidence;
+}
+
+function bindFindingEvidence(
+  use: FindingInput,
+  revision: string,
+  evidence: Awaited<ReturnType<typeof readFindingSources>>,
+  records: readonly DependencyEvidenceRecord[],
+  callerScope?: string,
+  decidingPremiseEvidence?: DecidingPremiseEvidence,
+) {
   const observations = use.observations.map((ref) => {
     if (
       ref.server === investigationServer &&
@@ -698,6 +654,256 @@ export async function verifyProposedUse(
       );
     return { ...observation, evidenceKeys };
   });
+  return {
+    observations,
+    linkedObservations,
+    boundReceipts,
+    findingEvidence,
+    running,
+    access,
+  };
+}
+
+type DispositionInput = z.infer<typeof proposedDisposition>;
+export async function verifyProposedDisposition(
+  input: DispositionInput,
+  graphCandidates: GraphCandidates,
+  directory: string,
+  signal: AbortSignal,
+  scopes: Scope[],
+  records: readonly DependencyEvidenceRecord[],
+  callerScope: string | undefined,
+  decidingPremiseEvidence: DecidingPremiseEvidence,
+) {
+  const scope = scopes.find((s) => s.id === input.scope);
+  if (!scope)
+    throw new CodexSecurityError("Unknown dependency scope: " + input.scope);
+  const revision = scope.discovery.revision;
+  const evidence = await readFindingSources(directory, revision, input, signal);
+  if (
+    !evidence.length &&
+    !input.observations.length &&
+    !input.receiptSelections?.length &&
+    !input.premises?.length
+  )
+    throw new CodexSecurityError(
+      "A coverage disposition requires original source, recorded evidence, or a current approved premise.",
+    );
+  const bound = bindFindingEvidence(
+    input,
+    revision,
+    evidence,
+    records,
+    callerScope,
+    decidingPremiseEvidence,
+  );
+  if (input.classification && (input.kind !== "dismissed" || !callerScope))
+    throw new CodexSecurityError(
+      "A test-only dismissal requires an explicit caller scope and an observed caller.",
+    );
+  if (input.kind === "dismissed" && !input.locations.length)
+    throw new CodexSecurityError(
+      "A dismissal must identify an observed dependency candidate.",
+    );
+  const locations = input.locations.map(({ path, line }) => {
+    const graphed =
+      graphCandidates
+        .get(scope.id)
+        ?.filter((c) => c.path === path && c.line === line) ?? [];
+    const caller =
+      graphed.some((c) => c.kind === "caller") ||
+      scope.discovery.callers.some(
+        (c) =>
+          c.manifest === scope.manifest && c.path === path && c.line === line,
+      );
+    const selected =
+      graphed.some((c) => c.kind === "dependency") ||
+      (scope.manifest === path && scope.manifestLine === line) ||
+      (scope.selection?.lockfile === path && scope.selection.line === line);
+    if (!caller && (!selected || input.classification))
+      throw new CodexSecurityError(
+        `Unknown candidate for this disposition in scope ${scope.id}: ${path}:${line}.`,
+      );
+    const keys = evidence
+      .filter(
+        (e) =>
+          e.commit === revision &&
+          e.path === path &&
+          e.startLine <= line &&
+          line <= e.endLine,
+      )
+      .map(dependencyRecordHash);
+    for (const premise of input.premises ?? [])
+      if (
+        decidingPremiseEvidence(premise).some((ref) =>
+          coversReference(
+            ref,
+            {
+              kind: "source",
+              path,
+              startLine: line,
+              endLine: line,
+              commit: revision,
+            },
+            revision,
+          ),
+        )
+      )
+        keys.push(premiseKey(premise));
+    if (!keys.length)
+      throw new CodexSecurityError(
+        `Cite the checked-out source for disposition candidate ${path}:${line}.`,
+      );
+    bound.findingEvidence.push({ field: `candidate ${path}:${line}`, keys });
+    return {
+      path,
+      line,
+      candidateId:
+        "candidate-" + dependencyRecordHash([scope.id, revision, path, line]),
+    };
+  });
+  const location = input.location ?? scope.location;
+  if (
+    bound.running.length &&
+    !bound.running.some(
+      (q) =>
+        mentions(q, revision) &&
+        [location, scope.location, input.place?.workload].some(
+          (name) => name && name !== "." && mentions(q, name),
+        ),
+    )
+  )
+    throw new CodexSecurityError(
+      "An observation of a running place must identify this disposition's revision and workload.",
+    );
+  if (
+    bound.access.length &&
+    !bound.access.some((q) =>
+      [location, scope.location, input.place?.workload].some(
+        (name) => name && name !== "." && mentions(q, name),
+      ),
+    )
+  )
+    throw new CodexSecurityError(
+      "A caller access observation must identify this disposition's workload.",
+    );
+  return {
+    ...input,
+    location,
+    locations,
+    revision,
+    evidence,
+    observations: bound.linkedObservations,
+    boundReceipts: bound.boundReceipts,
+    findingEvidence: bound.findingEvidence,
+  };
+}
+export type VerifiedDisposition = Awaited<
+  ReturnType<typeof verifyProposedDisposition>
+>;
+
+export async function verifyProposedUse(
+  directory: string,
+  scope: Scope,
+  use: Proposal["uses"][number],
+  signal: AbortSignal,
+  affectedVersion?: boolean,
+  records: readonly DependencyEvidenceRecord[] = [],
+  callerScope?: string,
+  decidingPremiseEvidence?: DecidingPremiseEvidence,
+) {
+  const revision = scope.discovery.revision;
+  const component = use.component ?? scope.component;
+  const embedded = component !== scope.component;
+  if (
+    !embedded &&
+    scope.selectedVersion &&
+    use.version !== scope.selectedVersion
+  )
+    throw new CodexSecurityError(
+      `The version for ${scope.location} differs from its selected dependency version.`,
+    );
+  const evidence = await readFindingSources(directory, revision, use, signal);
+  if (embedded) {
+    // A containing distribution and the library in its wheel or binary have
+    // independently selected versions. Bind the nested identity to original
+    // source before letting review decide the caller and advisory relationship.
+    const byPath = new Map<string, string[]>();
+    for (const ref of evidence) {
+      if (ref.commit !== revision) continue;
+      const excerpts = byPath.get(ref.path) ?? [];
+      excerpts.push(ref.excerpt);
+      byPath.set(ref.path, excerpts);
+    }
+    const excerpts = [...byPath.values()].map((lines) => lines.join("\n"));
+    const parents = excerpts.filter((text) => {
+      const name = text.toLowerCase().includes(scope.component.toLowerCase());
+      // A filename can delimit its version with "-" rather than quotes.
+      const version = scope.selectedVersion;
+      return (
+        name &&
+        (!version ||
+          mentions(text, version) ||
+          mentions(text.replaceAll(/[-/@]/gu, " "), version))
+      );
+    });
+    const bound = excerpts.some(
+      (source) =>
+        identifiesEmbeddedCopy(source, component, use.version) &&
+        parents.some(
+          (parent) =>
+            parent === source ||
+            source
+              .match(/\b[a-f0-9]{64}\b/giu)
+              ?.some((digest) => parent.includes(digest)),
+        ),
+    );
+    if (!bound)
+      throw new CodexSecurityError(
+        "Cite the selected parent artifact or build and the embedded dependency and version it contains. Join separate records by their artifact digest.",
+      );
+  }
+  const covers = (path: string | undefined, line: number | undefined) =>
+    path !== undefined &&
+    line !== undefined &&
+    evidence.some(
+      (ref) =>
+        ref.commit === revision &&
+        ref.path === path &&
+        ref.startLine <= line &&
+        line <= ref.endLine,
+    );
+  const citesSelection = covers(
+    scope.selection?.lockfile,
+    scope.selection?.line,
+  );
+  if (
+    scope.manifest &&
+    !covers(scope.manifest, scope.manifestLine) &&
+    !citesSelection &&
+    !scope.discovery.callers.some(
+      (c) => c.manifest === scope.manifest && covers(c.path, c.line),
+    )
+  )
+    throw new CodexSecurityError(
+      `Cite the dependency selection or caller for this scope: ${scope.location}`,
+    );
+  assertDependencyUseProofCitations(use.proof, evidence, scope.location);
+  const {
+    observations,
+    linkedObservations,
+    boundReceipts,
+    findingEvidence,
+    running,
+    access,
+  } = bindFindingEvidence(
+    use,
+    revision,
+    evidence,
+    records,
+    callerScope,
+    decidingPremiseEvidence,
+  );
   const location = verifiedLocation(scope, use, running, covers);
   const names = [location, ...scope.runtimeServices].filter(
     (name) => name !== ".",
@@ -815,6 +1021,7 @@ export type VerifiedUse = Awaited<ReturnType<typeof verifyProposedUse>>;
 type ReviewClaim =
   | Premise
   | { kind: "use"; use: VerifiedUse }
+  | { kind: "disposition"; disposition: VerifiedDisposition }
   | { kind: "coverage"; limitations: string[] };
 export type Claim = StoredClaim<ReviewClaim>;
 export function reference(claim: Pick<Claim, "id" | "revision" | "hash">) {
@@ -866,7 +1073,9 @@ export function approveDependencyClaims(
             claim.id,
         );
       const use = claim.value.kind === "use" ? claim.value.use : undefined;
-      const unselected = use?.findingEvidence?.find(
+      const finding =
+        claim.value.kind === "disposition" ? claim.value.disposition : use;
+      const unselected = finding?.findingEvidence?.find(
         (binding) =>
           !binding.keys.some((key) => decision.evidenceKeys.includes(key)),
       );
@@ -909,15 +1118,11 @@ export function approveDependencyClaims(
   return reviewed;
 }
 
-export function reportedUse(
-  use: VerifiedUse,
-  claim: Claim,
-  evidenceKeys?: readonly string[],
-  premiseEvidence: readonly DependencyReviewReference[] = [],
+function publishedFindingEvidence(
+  use: VerifiedUse | VerifiedDisposition,
+  evidenceKeys: readonly string[] | undefined,
+  premiseEvidence: readonly DependencyReviewReference[],
 ) {
-  const running = use.observations.some((ref) =>
-    ref.supports.includes("running"),
-  );
   const decidingEvidence: DependencyReviewReference[] = [
     ...use.evidence
       .filter(
@@ -952,6 +1157,107 @@ export function reportedUse(
       premiseEvidence.map((ref) => [dependencyRecordHash(ref), ref]),
     ).values(),
   ];
+  const evidence = use.evidence.map(
+    ({ path, commit, startLine, endLine, supports }) => ({
+      path,
+      commit,
+      startLine,
+      endLine,
+      supports: supports.filter(
+        (s) => s === "affected_copy" || s === "affected_use",
+      ),
+    }),
+  );
+  const key = (ref: (typeof evidence)[number]) =>
+    JSON.stringify([ref.path, ref.commit, ref.startLine, ref.endLine]);
+  const ranges = new Set(evidence.map(key));
+  for (const ref of premiseEvidence) {
+    if (ref.kind !== "source") continue;
+    const range = {
+      path: ref.path,
+      commit: ref.commit ?? use.revision,
+      startLine: ref.startLine,
+      endLine: ref.endLine,
+      supports: [],
+    };
+    const rangeKey = key(range);
+    if (!ranges.has(rangeKey)) {
+      evidence.push(range);
+      ranges.add(rangeKey);
+    }
+  }
+  return {
+    evidence,
+    observations: use.observations.map((ref) => ({
+      server: ref.server,
+      record: ref.quote,
+      supports: ref.supports.filter(
+        (s) => s === "running" || s === "access" || s === "affected_copy",
+      ),
+    })),
+    decidingEvidence: [
+      ...new Map(
+        decidingEvidence.map((ref) => [dependencyRecordHash(ref), ref]),
+      ).values(),
+    ],
+  };
+}
+export function reportedDisposition(
+  disposition: VerifiedDisposition,
+  claim: Claim,
+  evidenceKeys: readonly string[],
+  selected: { evidence: DependencyReviewReference[]; claims: PremiseRef[] },
+) {
+  const {
+    kind,
+    reason,
+    location,
+    locations,
+    place,
+    handoff,
+    classification,
+    services,
+    openConditions,
+    inspections,
+    inputSource,
+    runtimeContext,
+    tags,
+  } = disposition;
+  return {
+    kind,
+    reason,
+    location,
+    ...(locations.length && { locations }),
+    ...(place && { place }),
+    ...(handoff && { handoff }),
+    ...(classification && { classification }),
+    ...(services && { services }),
+    ...(openConditions && { openConditions }),
+    ...(inspections && { inspections }),
+    ...(inputSource && { inputSource }),
+    ...(runtimeContext && { runtimeContext }),
+    ...(tags && { tags }),
+    ...publishedFindingEvidence(disposition, evidenceKeys, selected.evidence),
+    conclusionClaim: reference(claim),
+    ...(selected.claims.length && { supportingClaims: selected.claims }),
+  };
+}
+
+export function reportedUse(
+  use: VerifiedUse,
+  claim: Claim,
+  evidenceKeys?: readonly string[],
+  premiseEvidence: readonly DependencyReviewReference[] = [],
+  supportingClaims: readonly PremiseRef[] = [],
+) {
+  const running = use.observations.some((ref) =>
+    ref.supports.includes("running"),
+  );
+  const published = publishedFindingEvidence(
+    use,
+    evidenceKeys,
+    premiseEvidence,
+  );
   return {
     location: use.location,
     component: use.component,
@@ -963,24 +1269,7 @@ export function reportedUse(
       : use.configured || use.place?.deploymentBasis === "configured"
         ? ("configured" as const)
         : ("unknown" as const),
-    evidence: use.evidence.map(
-      ({ path, commit, startLine, endLine, supports }) => ({
-        path,
-        commit,
-        startLine,
-        endLine,
-        supports: supports.filter(
-          (s) => s === "affected_copy" || s === "affected_use",
-        ),
-      }),
-    ),
-    observations: use.observations.map((ref) => ({
-      server: ref.server,
-      record: ref.quote,
-      supports: ref.supports.filter(
-        (s) => s === "running" || s === "access" || s === "affected_copy",
-      ),
-    })),
+    ...published,
     ...(use.services && { services: use.services }),
     ...(use.openConditions && { openConditions: use.openConditions }),
     ...(use.inspections && { inspections: use.inspections }),
@@ -1016,11 +1305,7 @@ export function reportedUse(
       ],
     },
     proof: use.proof,
-    decidingEvidence: [
-      ...new Map(
-        decidingEvidence.map((ref) => [dependencyRecordHash(ref), ref]),
-      ).values(),
-    ],
     conclusionClaim: reference(claim),
+    ...(supportingClaims.length && { supportingClaims: [...supportingClaims] }),
   };
 }

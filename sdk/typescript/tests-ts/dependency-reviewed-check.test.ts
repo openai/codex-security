@@ -535,6 +535,74 @@ test("host feedback repairs a bad citation and an independent rejection requires
   expect([investigations, reviews]).toEqual([3, 2]);
 });
 
+test.each(["corrected", "exhausted"] as const)(
+  "the same coordinator can correct an invalid final submission (%s)",
+  async (mode) => {
+    await using f = await fixture();
+    let coordinatorStarts = 0;
+    let submissions = 0;
+    const result = runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Parser input",
+        signal,
+      },
+      {
+        discover: async () => f.discovery,
+        async runAgent(req) {
+          if (!req.coordinator) {
+            const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+            return JSON.stringify({
+              decisions: input.claims.map(
+                (c: Claim & { availableEvidenceKeys: string[] }) => ({
+                  id: c.id,
+                  revision: c.revision,
+                  hash: c.hash,
+                  approved: true,
+                  reason: "Verified the cited code.",
+                  evidenceKeys: c.availableEvidenceKeys,
+                }),
+              ),
+            });
+          }
+          coordinatorStarts++;
+          // A persistent transport requests only the correction for its next turn.
+          for (;;) {
+            submissions++;
+            const use = structuredClone(f.use);
+            if (mode === "exhausted" || submissions < 4)
+              use.proof.sink!.callSite.line = 3;
+            const answer = JSON.stringify({ uses: [use], limitations: [] });
+            const next = await req.onCoordinatorAnswer!(answer);
+            if (next === undefined) return answer;
+            const correction = JSON.parse(next);
+            expect(Object.keys(correction)).toEqual(["feedback"]);
+            expect(correction.feedback.reason).toContain(
+              "outside the citations",
+            );
+            expect(correction.feedback).not.toHaveProperty("previousProposal");
+            if (submissions >= 10)
+              throw Error("An eleventh submission was requested");
+          }
+        },
+      },
+    );
+    if (mode === "corrected") {
+      const report = await result;
+      if (!("checks" in report)) throw Error("Expected package report");
+      expect(report.checks[0]!.uses[0]!.verdict).toBe(
+        "potentially_exploitable",
+      );
+      expect(submissions).toBe(4);
+    } else {
+      await expect(result).rejects.toThrow("outside the citations");
+      expect(submissions).toBe(10);
+    }
+    expect(coordinatorStarts).toBe(1);
+  },
+);
+
 test("aliases of the same output cannot leave progress at the report destination", async () => {
   await using f = await fixture();
   const target = join(f.path, "actual"),
@@ -945,7 +1013,7 @@ test("a reviewed exclusion cannot contradict the cited advisory conditions", asy
   ).toBe("ruled_out");
 });
 
-test("a blocked package retains prior independently approved results and identifies unattempted advisories", async () => {
+test("a failed model invocation retains prior results and identifies unattempted advisories", async () => {
   await using f = await fixture();
   const ids = ["CVE-2099-0001", "CVE-2099-0002", "CVE-2099-0003"];
   try {
@@ -988,6 +1056,67 @@ test("a blocked package retains prior independently approved results and identif
       ],
       pendingAdvisories: [ids[2]],
     });
+  }
+});
+
+test("a package continues with independent advisories after a scoped block or exhausted review", async () => {
+  await using f = await fixture();
+  const ids = ["issue-a", "issue-b", "issue-c", "issue-d"];
+  const scoped = {
+    status: "blocked" as const,
+    code: "INVESTIGATION_BLOCKED" as const,
+    reason: "Required records for the selected release are unavailable.",
+    affectedScope: "worker",
+    evidenceReferences: ["record-1"],
+  };
+  const result = runReviewedDependencyCheck(
+    { directory: f.path, subject: "npm:fixture-parser", signal },
+    {
+      discover: async () => f.discovery,
+      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+      runAgent: async ({ prompt }) => {
+        const input = JSON.parse(prompt.split("\n\n").at(-1)!);
+        if (input.issue.id === ids[1])
+          throw new DependencyInvestigationBlockedError(scoped, undefined);
+        if (!input.claims)
+          return JSON.stringify({ uses: [f.use], limitations: [] });
+        return JSON.stringify({
+          decisions: input.claims.map(
+            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
+              id: claim.id,
+              revision: claim.revision,
+              hash: claim.hash,
+              evidenceKeys: claim.availableEvidenceKeys,
+              approved: input.issue.id !== ids[2],
+              reason:
+                input.issue.id === ids[2]
+                  ? "No proof for this release."
+                  : "Verified.",
+            }),
+          ),
+        });
+      },
+    },
+  );
+  try {
+    await result;
+    throw Error("Expected a partial package outcome.");
+  } catch (error) {
+    if (!(error instanceof DependencyInvestigationBlockedError)) throw error;
+    expect(error.outcome).toMatchObject({
+      status: "blocked",
+      checks: [
+        { advisoryId: ids[0], schemaVersion: 2 },
+        { advisoryId: ids[1], ...scoped },
+        {
+          advisoryId: ids[2],
+          status: "blocked",
+          reason: expect.stringContaining("No proof for this release."),
+        },
+        { advisoryId: ids[3], schemaVersion: 2 },
+      ],
+    });
+    expect(error.outcome.pendingAdvisories).toBeUndefined();
   }
 });
 
@@ -1550,12 +1679,34 @@ test("native investigators share asynchronous reviews, immutable premises and pa
             ],
           }),
         ).rejects.toThrow("currently approved premise");
+        await other("submit_dependency_claims", {
+          claims: [
+            {
+              id: "consumer",
+              expectedRevision: 0,
+              scope: "secondary.js",
+              statement: "The second caller imports the same dependency.",
+              sources: [{ path: "secondary.js", startLine: 1, endLine: 1 }],
+              receiptIds: [],
+              dependencies: [premise],
+            },
+          ],
+        });
+        const [consumer] = (await other("query_dependency_claims", {
+          ids: ["premise:consumer"],
+          wait: true,
+        })) as State[];
+        const consumerRef = {
+          id: consumer!.id,
+          revision: consumer!.revision,
+          hash: consumer!.hash,
+        };
         await other("submit_dependency_assessments", {
           assessments: [
             {
               id: "app",
               expectedRevision: 0,
-              use: { ...f.use, premises: [premise] },
+              use: { ...f.use, premises: [consumerRef] },
             },
           ],
         });
@@ -1576,10 +1727,19 @@ test("native investigators share asynchronous reviews, immutable premises and pa
     completeness: "partial",
     evidenceReferences: [receipt.sha256],
   });
-  expect(check.searches.find((row) => row.tool === "labels")).toMatchObject({
+  const failedLookup = check.searches.find((row) => row.tool === "labels")!;
+  expect(failedLookup).toMatchObject({
     result: "unknown",
     completeness: "error",
-    evidenceReferences: [],
+  });
+  expect(failedLookup.evidenceReferences).toHaveLength(1);
+  expect(
+    check.claimEvidence.receipts[failedLookup.evidenceReferences[0]!],
+  ).toMatchObject({
+    server: "builds",
+    tool: "labels",
+    arguments: {},
+    result: { structuredContent: { status: "failed" } },
   });
   const traces = check.searches.filter(
     (search) => search.tool === "trace_codex_security_code",
@@ -1595,7 +1755,26 @@ test("native investigators share asynchronous reviews, immutable premises and pa
   expect(use.conclusionClaim.id).toBe("assessment:app");
   expect(
     check.claims.find((c) => c.id === "assessment:app")!.dependencies[0]!.id,
-  ).toBe("premise:version");
+  ).toBe("premise:consumer");
+  const selected = ["premise:consumer", "premise:version"].map((id) => {
+    const claim = check.claims.find((c) => c.id === id)!;
+    return { id, revision: claim.revision, hash: claim.hash };
+  });
+  expect(use.supportingClaims).toEqual(selected);
+  expect(use.evidence).toContainEqual({
+    path: "secondary.js",
+    commit: f.revision,
+    startLine: 1,
+    endLine: 1,
+    supports: [],
+  });
+  expect(use.evidence).not.toContainEqual({
+    path: "app.js",
+    commit: f.revision,
+    startLine: 1,
+    endLine: 1,
+    supports: [],
+  });
   expect(
     check.claims.find((c) => c.id === "premise:version")!.decision.evidenceKeys,
   ).toEqual([receipt.sha256]);
@@ -1607,6 +1786,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
   expect(check.claimEvidence.receipts[receipt.sha256]).toEqual(receipt);
   expect(Object.fromEntries(counts)).toEqual({
     "premise:version": 1,
+    "premise:consumer": 1,
     "assessment:app": 1,
     coverage: 1,
   });
@@ -1777,14 +1957,19 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       ],
     },
   ]);
-  expect(result.checks[0]?.searches).toContainEqual(
-    expect.objectContaining({
-      source: server,
-      tool,
-      completeness: "error",
-      evidenceReferences: [],
-    }),
-  );
+  const check = result.checks[0]!;
+  const failedLookup = check.searches.find(
+    (r) => r.source === server && r.tool === tool && r.completeness === "error",
+  )!;
+  expect(failedLookup.evidenceReferences).toHaveLength(1);
+  expect(
+    check.claimEvidence.receipts[failedLookup.evidenceReferences[0]!],
+  ).toMatchObject({
+    server,
+    tool,
+    arguments: { path: "package-lock.json" },
+    result: { structuredContent: { status: "failed" } },
+  });
 });
 
 test.each([
@@ -2093,7 +2278,7 @@ test("a reviewed premise retains independently selected rows of the historical m
   ).toHaveLength(2);
 });
 
-test.each(["ledger", "additional", "invalid"] as const)(
+test.each(["ledger", "identical", "additional", "invalid"] as const)(
   "final correction preserves distinct approved deployments and checks new uses (%s)",
   async (mode) => {
     await using f = await fixture({
@@ -2130,6 +2315,7 @@ test.each(["ledger", "additional", "invalid"] as const)(
       };
     }
     const submitted = ["first-job", "second-job"];
+    const workload = (id: string) => (mode === "identical" ? "shared-job" : id);
     const reviewCounts = new Map<string, number>();
     let rounds = 0;
     const result = runReviewedDependencyCheck(
@@ -2167,7 +2353,7 @@ test.each(["ledger", "additional", "invalid"] as const)(
               assessments: submitted.map((id) => ({
                 id,
                 expectedRevision: 0,
-                use: deployment(id),
+                use: deployment(workload(id)),
               })),
             });
             const approved = (await call("query_dependency_claims", {
@@ -2194,12 +2380,17 @@ test.each(["ledger", "additional", "invalid"] as const)(
                 revision: 1,
                 scope: f.use.scope,
                 location: f.use.location,
-                workload: id,
+                workload: workload(id),
               })),
             });
             expect(input.feedback.recovery).toContain("return uses: []");
             if (mode === "ledger")
               return JSON.stringify({ uses: [], limitations: [] });
+            if (mode === "identical")
+              return JSON.stringify({
+                uses: [deployment("shared-job")],
+                limitations: [],
+              });
             if (mode === "additional")
               return JSON.stringify({
                 uses: [deployment("third-job")],
@@ -2223,7 +2414,9 @@ test.each(["ledger", "additional", "invalid"] as const)(
       if (!("checks" in report)) throw Error("Expected package report.");
       const uses = report.checks[0]!.uses;
       expect(uses.map((u) => u.place.workload)).toEqual(
-        mode === "additional" ? [...submitted, "third-job"] : submitted,
+        mode === "additional"
+          ? [...submitted, "third-job"]
+          : submitted.map(workload),
       );
       expect(uses.slice(0, 2).map((u) => u.conclusionClaim.id)).toEqual(
         submitted.map((id) => "assessment:" + id),
@@ -2234,3 +2427,545 @@ test.each(["ledger", "additional", "invalid"] as const)(
       expect(reviewCounts.get("assessment:" + id)).toBe(1);
   },
 );
+
+test("a correction in a live review batch preserves its independent sibling approval", async () => {
+  await using f = await fixture();
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const seen: string[][] = [];
+  const previous = new Map<string, string[]>();
+  await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Parser issue",
+      signal,
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        if (!req.coordinator) {
+          const rows = input.claims as (PremiseRef & {
+            availableEvidenceKeys: string[];
+          })[];
+          seen.push(rows.map(premiseKey));
+          for (const c of rows) {
+            previous.set(
+              c.id + "/" + c.revision,
+              input.approvedClaims.map((ref: PremiseRef) => ref.id).sort(),
+            );
+          }
+          if (rows.some((c) => c.id === "premise:before" && c.revision === 1)) {
+            started.resolve();
+            await release.promise;
+          }
+          return JSON.stringify({
+            decisions: rows.map((c) => ({
+              id: c.id,
+              revision: c.revision,
+              hash: c.hash,
+              evidenceKeys: c.availableEvidenceKeys,
+              approved: true,
+              reason: "Verified",
+            })),
+          });
+        }
+        const { call } = await req.investigationTools!();
+        const submit = (id: string, expectedRevision = 0) => ({
+          id,
+          expectedRevision,
+          scope: "parser",
+          statement: id + expectedRevision,
+          sources: [{ path: "app.js", startLine: 1, endLine: 1 }],
+          dependencies: [],
+          receiptIds: [],
+        });
+        await call("submit_dependency_claims", {
+          claims: [submit("before"), submit("sibling")],
+        });
+        await started.promise;
+        try {
+          await call("submit_dependency_claims", {
+            claims: [submit("before", 1)],
+          });
+        } finally {
+          release.resolve();
+        }
+        const claims = (await call("query_dependency_claims", {
+          wait: true,
+        })) as (PremiseRef & { state: string })[];
+        expect(claims.map((c) => [c.id, c.revision, c.state])).toEqual([
+          ["premise:before", 2, "approved"],
+          ["premise:sibling", 1, "approved"],
+        ]);
+        expect(seen).toHaveLength(2);
+        expect(seen[0]).toHaveLength(2);
+        expect(seen[1]).toHaveLength(1);
+        const ref = ({ id, revision, hash }: PremiseRef) => ({
+          id,
+          revision,
+          hash,
+        });
+        await call("submit_dependency_claims", {
+          claims: [{ ...submit("derived"), dependencies: [ref(claims[0]!)] }],
+        });
+        const derived = (await call("query_dependency_claims", {
+          ids: ["premise:derived"],
+          wait: true,
+        })) as PremiseRef[];
+        await call("submit_dependency_assessments", {
+          assessments: [
+            {
+              id: "selected",
+              expectedRevision: 0,
+              use: { ...f.use, premises: [ref(derived[0]!)] },
+            },
+          ],
+        });
+        return JSON.stringify({ uses: [], limitations: [] });
+      },
+    },
+  );
+  expect(previous.get("premise:before/2")).toEqual([]);
+  expect(previous.get("premise:derived/1")).toEqual(["premise:before"]);
+  expect(previous.get("assessment:selected/1")).toEqual([
+    "premise:before",
+    "premise:derived",
+  ]);
+  expect(previous.get("coverage/1")).toEqual([
+    "assessment:selected",
+    "premise:before",
+    "premise:derived",
+  ]);
+});
+
+test("independently verifies candidate dispositions and publishes their selected evidence and handoffs", async () => {
+  await using f = await fixture({
+    "parser.test.js": "import parse from 'fixture-parser';\nparse('sample');\n",
+  });
+  const caller = { path: "app.js", line: 2 };
+  const demo = { path: "parser.test.js", line: 2 };
+  const other = { path: "secondary.js", line: 2 };
+  const source = (c: typeof caller) => ({
+    path: c.path,
+    startLine: c.line,
+    endLine: c.line,
+    supports: ["context"],
+  });
+  const original = {
+    server: "catalog",
+    tool: "lookup",
+    arguments: { project: "example" },
+    result: {
+      structuredContent: { rows: [{ id: "worker" }, { id: "unrelated" }] },
+    },
+  };
+  const receipt = { ...original, sha256: dependencyRecordHash(original) };
+  const selection = { textBlock: null, record: ["rows", 0] };
+  const bound = {
+    kind: "receipt",
+    receiptId: receipt.sha256,
+    originalPayloadSha256: dependencyRecordHash(original.result),
+    selection,
+  };
+  let incompleteReview = true;
+  const handoff = {
+    verified: "Requests reach the parser dispatch.",
+    missing: "Which backend does the running worker select?",
+  };
+  const place = {
+    kind: "job",
+    revision: f.revision,
+    environment: null,
+    artifact: null,
+    observationWindow: null,
+    deploymentBasis: "configured",
+    deploymentDetail: "The worker is configured.",
+    dependencySelection: null,
+    patch: null,
+    unresolvedQuestions: [handoff.missing],
+  };
+  const input = {
+    kind: "unresolved",
+    scope: "1.1",
+    reason: handoff.missing,
+    handoff,
+    place,
+    location: "worker",
+    locations: [caller],
+    evidence: [source(caller)],
+    observations: [],
+    receiptSelections: [{ receiptId: receipt.sha256, ...selection }],
+    services: [
+      { id: "worker", name: "Worker", source: "catalog", evidence: [bound] },
+    ],
+  };
+  const checked = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Review the parser.",
+      scope: "Investigate production workloads.",
+      signal,
+      evidenceSources: [
+        { server: "catalog", instructions: "Identify the deployed consumer." },
+      ],
+    },
+    {
+      discover: async () => ({
+        ...f.discovery,
+        callers: [caller, demo, other],
+      }),
+      async runAgent(req) {
+        const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        const { call } = await req.investigationTools!();
+        if (!req.coordinator)
+          return JSON.stringify({
+            decisions: packet.claims.map(
+              (c: {
+                id: string;
+                revision: number;
+                hash: string;
+                availableEvidenceKeys: string[];
+              }) => {
+                if (c.id === "disposition:handoff") {
+                  expect(c.availableEvidenceKeys.length).toBe(3);
+                  if (incompleteReview) {
+                    incompleteReview = false;
+                    return {
+                      id: c.id,
+                      revision: c.revision,
+                      hash: c.hash,
+                      approved: true,
+                      reason: "The catalog row was checked.",
+                      evidenceKeys: c.availableEvidenceKeys.filter((key) =>
+                        key.startsWith("receipt:"),
+                      ),
+                    };
+                  }
+                }
+                return {
+                  id: c.id,
+                  revision: c.revision,
+                  hash: c.hash,
+                  approved: true,
+                  reason:
+                    "Verified this candidate, checkout and original catalog row.",
+                  evidenceKeys: c.availableEvidenceKeys,
+                };
+              },
+            ),
+          });
+        req.onEvidence!(receipt);
+        const submit = (id: string, disposition: unknown) =>
+          call("submit_dependency_assessments", {
+            assessments: [{ id, expectedRevision: 0, disposition }],
+          });
+        await expect(
+          submit("unknown-candidate", {
+            ...input,
+            locations: [{ path: "app.js", line: 99 }],
+          }),
+        ).rejects.toThrow("Unknown candidate");
+        await expect(
+          submit("fake-source", { ...input, evidence: [source(other)] }),
+        ).rejects.toThrow("Cite the checked-out source");
+        await expect(
+          submit("fake-row", {
+            ...input,
+            services: [
+              {
+                ...input.services[0],
+                evidence: [
+                  {
+                    ...bound,
+                    selection: { textBlock: null, record: ["rows", 1] },
+                  },
+                ],
+              },
+            ],
+          }),
+        ).rejects.toThrow("Unbound finding evidence");
+        await expect(
+          submit("fake-claim", {
+            ...input,
+            conclusionClaim: { id: "invented", revision: 1, hash: "fake" },
+          }),
+        ).rejects.toThrow();
+        await expect(
+          submit("no-candidate", {
+            ...input,
+            kind: "dismissed",
+            locations: [],
+          }),
+        ).rejects.toThrow("observed dependency candidate");
+        await call("submit_dependency_claims", {
+          claims: [
+            {
+              id: "lock",
+              expectedRevision: 0,
+              scope: "worker",
+              statement: "The fixture contains a lock.",
+              sources: [
+                { path: "package-lock.json", startLine: 1, endLine: 1 },
+              ],
+              receiptIds: [],
+              dependencies: [],
+            },
+          ],
+        });
+        const [premise] = (await call("query_dependency_claims", {
+          ids: ["premise:lock"],
+          wait: true,
+        })) as { id: string; revision: number; hash: string; state: string }[];
+        expect(premise!.state).toBe("approved");
+        const { id, revision, hash } = premise!;
+        const candidate = { ...input, premises: [{ id, revision, hash }] };
+        await submit("handoff", candidate);
+        const [rejected] = (await call("query_dependency_claims", {
+          ids: ["disposition:handoff"],
+          wait: true,
+        })) as { state: string; reason: string }[];
+        expect(rejected).toMatchObject({ state: "rejected" });
+        expect(rejected!.reason).toContain("candidate app.js:2");
+        await call("submit_dependency_assessments", {
+          assessments: [
+            {
+              id: "handoff",
+              expectedRevision: 1,
+              disposition: {
+                ...candidate,
+                reason:
+                  "The source establishes dispatch but does not identify the production backend.",
+              },
+            },
+          ],
+        });
+        await submit("test", {
+          kind: "dismissed",
+          scope: "1.1",
+          classification: "test_only_outside_scope",
+          reason: "The test fixture invokes the parser only in tests.",
+          locations: [demo],
+          evidence: [source(demo)],
+          observations: [],
+        });
+        return JSON.stringify({ uses: [], limitations: [] });
+      },
+    },
+  );
+  const report = readDependencyCheckOutput(checked);
+  expect<unknown>(report).toEqual(checked);
+  if (!("checks" in report)) throw new Error("Expected a package check.");
+  const result = report.checks[0]!;
+  const rows = result.coverage!;
+  const gap = rows.find(
+    (row) => row.conclusionClaim?.id === "disposition:handoff",
+  )!;
+  const dismissal = rows.find(
+    (row) => row.conclusionClaim?.id === "disposition:test",
+  )!;
+  expect(gap).toMatchObject({
+    kind: "unresolved",
+    conclusionClaim: { revision: 2 },
+    location: "worker",
+    handoff,
+    place,
+    services: input.services,
+    locations: [{ ...caller, candidateId: expect.any(String) }],
+    supportingClaims: [{ id: "premise:lock" }],
+  });
+  expect(dismissal).toMatchObject({
+    kind: "dismissed",
+    classification: "test_only_outside_scope",
+    locations: [demo],
+  });
+  expect(gap.decidingEvidence).toEqual(
+    expect.arrayContaining([
+      bound,
+      {
+        kind: "source",
+        path: "app.js",
+        commit: f.revision,
+        startLine: 2,
+        endLine: 2,
+      },
+      {
+        kind: "source",
+        path: "package-lock.json",
+        commit: f.revision,
+        startLine: 1,
+        endLine: 1,
+      },
+    ]),
+  );
+  for (const row of [gap, dismissal])
+    expect(result.claims).toContainEqual(
+      expect.objectContaining({ ...row.conclusionClaim, state: "approved" }),
+    );
+  expect(rows.filter((row) => !row.conclusionClaim)).toMatchObject([
+    {
+      kind: "unresolved",
+      evidence: [{ path: other.path, startLine: other.line }],
+    },
+  ]);
+  expect(result.uses).toEqual([]);
+});
+
+test("accounts for native graph candidate lines in their pinned package and preserves other candidate gaps", async () => {
+  await using f = await fixture({
+    "package.json": '{"dependencies":{"fixture-parser":"1.0.0"}}\n',
+    "new.js": "factory();\n",
+    "remaining.js": "flow();\n",
+    "dirty.js": "old();\n",
+  });
+  await mkdir(join(f.path, "nested"));
+  await writeFile(join(f.path, "nested", "package.json"), '{"name":"other"}\n');
+  await writeFile(join(f.path, "nested", "other.js"), "call();\n");
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", f.path, ...args], { encoding: "utf8" }).trim();
+  git("add", "nested");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-qm",
+    "nested",
+  );
+  const revision = git("rev-parse", "HEAD");
+  await writeFile(join(f.path, "dirty.js"), "different();\n");
+  const checked = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Check parser call paths.",
+      signal,
+      evidenceSources: [
+        { server: "catalog", instructions: "Check deployments." },
+      ],
+    },
+    {
+      discover: async () => ({
+        ...f.discovery,
+        revision,
+        manifests: [
+          {
+            path: "package.json",
+            project: ".",
+            name: "project",
+            requested: "1.0.0",
+            line: 1,
+          },
+        ],
+      }),
+      async runAgent(req) {
+        const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        if (!req.coordinator)
+          return JSON.stringify({
+            decisions: packet.claims.map(
+              (c: {
+                id: string;
+                revision: number;
+                hash: string;
+                availableEvidenceKeys: string[];
+              }) => ({
+                id: c.id,
+                revision: c.revision,
+                hash: c.hash,
+                reason: "Reviewed the source and the ownership.",
+                approved: true,
+                evidenceKeys: c.availableEvidenceKeys,
+              }),
+            ),
+          });
+        const trace = (relation: string, source: string) => ({
+          relation,
+          from: { kind: "file", name: source },
+          evidence: [{ source, lines: [1] }],
+        });
+        const paths = (relation: string, source: string) => ({
+          relation,
+          source,
+          line: 1,
+        });
+        const capture = (
+          server: string,
+          tool: string,
+          data: Record<string, unknown>,
+        ) => {
+          const v = {
+            server,
+            tool,
+            arguments: {},
+            result: { structuredContent: data },
+          };
+          req.onEvidence!({ ...v, sha256: dependencyRecordHash(v) });
+        };
+        capture(investigationServer, "trace_codex_security_code", {
+          trace: [
+            trace("candidate_call", "new.js"),
+            trace("candidate_flow", "remaining.js"),
+            trace("candidate_call", "dirty.js"),
+            trace("candidate_call", "nested/other.js"),
+          ],
+        });
+        capture(investigationServer, "query_codex_security_graph", {
+          paths: [
+            paths("candidate_call", "new.js"),
+            { ...paths("candidate_flow", "new.js"), line: 444 },
+            paths("observed", "secondary.js"),
+          ],
+          evidence: [
+            {
+              ...paths("depends_on", "package.json"),
+              to: { kind: "package", name: "fixture-parser" },
+            },
+          ],
+        });
+        capture("catalog", "query_codex_security_graph", {
+          paths: [paths("candidate_call", "secondary.js")],
+        });
+        const { call } = await req.investigationTools!();
+        const submit = (path: string) =>
+          call("submit_dependency_assessments", {
+            assessments: [
+              {
+                id: "reviewed",
+                expectedRevision: 0,
+                disposition: {
+                  kind: "dismissed",
+                  scope: "1.1",
+                  reason: "This factory operation is unrelated.",
+                  locations: [{ path, line: 1 }],
+                  evidence: [
+                    { path, startLine: 1, endLine: 1, supports: ["context"] },
+                  ],
+                  observations: [],
+                },
+              },
+            ],
+          });
+        for (const path of ["nested/other.js", "dirty.js", "secondary.js"])
+          await expect(submit(path)).rejects.toThrow("Unknown candidate");
+        await submit("new.js");
+        return JSON.stringify({ uses: [], limitations: [] });
+      },
+    },
+  );
+  const report = readDependencyCheckOutput(checked);
+  if (!("checks" in report)) throw new Error("Expected package report");
+  const coverage = report.checks[0]!.coverage!;
+  expect(coverage.find((c) => c.conclusionClaim)).toMatchObject({
+    kind: "dismissed",
+    locations: [{ path: "new.js", line: 1 }],
+  });
+  expect(
+    coverage
+      .filter((c) => c.kind === "unresolved")
+      .flatMap((c) => c.evidence.map((s) => s.path))
+      .sort(),
+  ).toEqual(["app.js", "package.json", "remaining.js"]);
+});

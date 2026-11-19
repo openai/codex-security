@@ -1,9 +1,16 @@
 import {
+  dependencyGraphCandidates,
+  observedDependencyCandidates,
+  type DependencyGraphCandidate,
+  type GraphCandidates,
+} from "./dependency-graph-candidates.js";
+import {
   selectedReceiptKey,
   selectedReceiptReference,
   selectedReceiptValue,
   type BoundReceiptSelection,
 } from "./dependency-graph-evidence.js";
+import { createDependencyBlockEvidence } from "./dependency-blocked-evidence.js";
 import { openDependencyEndpoints } from "./dependency-endpoints.js";
 import {
   createInvestigationSession,
@@ -16,6 +23,7 @@ import {
   currentApproval,
   premiseKey,
   assertReviewedPremises,
+  type PremiseRef,
 } from "./dependency-review-queue.js";
 import type {
   DependencySearch,
@@ -39,7 +47,8 @@ import type { ScanTokenUsage } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
+import { relativePathIsOutside } from "./targets.js";
 import { z } from "zod";
 import {
   defaultDependencyCallerScope,
@@ -68,6 +77,10 @@ import {
   investigationSchema,
   reference,
   reportedUse,
+  proposedDisposition,
+  verifyProposedDisposition,
+  reportedDisposition,
+  type VerifiedDisposition,
   reviewSchema,
   reviewScopes,
   verifyProposedUse,
@@ -133,6 +146,8 @@ const coordinationInstructions = [
   "For requested application mappings, read query_codex_security_graph({}) for existing mappings and service_resolution. When a configured evidence source provides a catalog, call resolve_codex_security_services({paths:[matchedFile],project:consumingProject}) to open the file's lookup. Query the catalog for that exact file or the verified consuming project. Apply its original replies with record_dependency_service_mapping, supplying the pending path, receipt IDs, the queried target field, and the result-array, name and stable-ID selectors. Record every returned service and each distinct consuming project. A successful complete empty array settles only that scoped lookup. On a missing catalog, failed call, partial reply or missing project binding, keep the gap with its path, attempted check and missing fact. Never turn that gap into an empty lookup. After the last mapping change, query_codex_security_graph({node: matchedFile}) for each matched source file. Reconcile pending paths against the available catalog before returning.",
   "Attach each confirmed association to the relevant use.services using the graph's service scope as id, its name and its cited source. For every association cite the original catalog row with its receiptId, originalPayloadSha256 from list_dependency_evidence, and selection {textBlock,record}. Bind the same selector with use.receiptSelections or cite an exact approved premise whose reviewer selected it. Observations can also cite a matching returned quote with context support. Keep the caller's exact launch or import range and the vulnerable operation's range on this use.",
   "For a claim decided by one JSON record, submit receiptSelections containing receiptId, textBlock (null for structured content or the JSON text-block index), and record (its key/index path). Include only the rows establishing this use or premise. A full receipt ID is available for evidence that genuinely concerns the entire reply.",
+  "Only the coordinator can call abort_codex_security_investigation. Use it for widespread loss of data required for this advisory, after retaining independent reviewed findings. List the host receipts with list_dependency_evidence. Cite distinct actual scoped missing records, an exact provider statement of unavailability, or the current failed startup receipt of a required server. Keep isolated failures, optional sources and absent archived calls as limitations.",
+  "For an observed candidate that cannot be bound to this operation, queue a separate disposition with submit_dependency_assessments. Use its scope and exact observed locations. An unresolved handoff records what is verified and what is missing. A dismissal requires deciding evidence for each candidate. Include source ranges, original receipt rows, and any approved premises. A disposition is coverage, not a verdict about a bound use.",
   "Submit completed uses early with submit_dependency_assessments so an independent reviewer can check them while other leads are investigated. Poll or wait with query_dependency_claims. Correct rejected uses at the returned revision; the host retains approved submissions for final coverage.",
   "The host publishes all current, approved submissions directly from its ledger. In the final JSON put only additional, unsubmitted findings in uses. Return uses: [] when every intended use has been approved through submit_dependency_assessments. Query an assessment by its exact ID to inspect it. To change a queued use, submit a correction under the same ID at its current revision and wait for review. Keep separate call sites, package copies or deployments even when their scope and location match.",
   "While investigations continue, use submit_dependency_claims to queue useful propositions with Git source ranges, actual receipt IDs and exact previously approved premises. Any investigator may query or wait for the independent review with query_dependency_claims. Include exact approved premise references in uses that rely on them, and correct rejected premises. Finalize each use only with its own verified caller and selected copy. For returned runtime evidence, use the external source from the coordinator when child calls are not visible. Never infer caller access from a tool's presence or a trace hit.",
@@ -244,6 +259,8 @@ async function prepareDraft(
   records: readonly DependencyEvidenceRecord[],
   boundary: Pick<ReviewedCheckOptions, "scope" | "sources" | "sinks">,
   submitted: readonly VerifiedUse[],
+  dispositions: readonly VerifiedDisposition[],
+  graphCandidates: GraphCandidates,
   decidingPremiseEvidence: DecidingPremiseEvidence,
 ) {
   const proposal = decode(raw, investigationSchema);
@@ -266,6 +283,18 @@ async function prepareDraft(
   const scopeIds = new Set(
     [...submitted, ...proposal.uses].map((u) => u.scope),
   );
+  const accounted = new Set<string>();
+  for (const disposition of dispositions) {
+    if (disposition.locations.length) scopeIds.add(disposition.scope);
+    for (const loc of disposition.locations) {
+      const key = JSON.stringify([disposition.scope, loc.path, loc.line]);
+      if (accounted.has(key))
+        throw new CodexSecurityError(
+          "Conflicting dispositions for " + loc.path + ":" + loc.line,
+        );
+      accounted.add(key);
+    }
+  }
   const omitted = scopes.filter((s) => s.manifest && !scopeIds.has(s.id));
   const exclusions = new Map(
     (proposal.outOfScope ?? []).map(({ scope, reason }) => [scope, reason]),
@@ -309,11 +338,16 @@ async function prepareDraft(
       }
     }),
   );
-  const uses = [
-    ...new Map(
-      [...submitted, ...inline].map((use) => [dependencyRecordHash(use), use]),
-    ).values(),
-  ];
+  // The ledger identifies approved assessments by ID. Use content equality only
+  // to recognize an inline finding that the coordinator has already supplied.
+  const seen = new Set(submitted.map(dependencyRecordHash));
+  const additionalUses = inline.filter((use) => {
+    const hash = dependencyRecordHash(use);
+    if (seen.has(hash)) return false;
+    seen.add(hash);
+    return true;
+  });
+  const uses = [...submitted, ...additionalUses];
   // The review sees the original searches alongside the subsequent investigation.
   // Their preliminary gaps stay in the search history even when later evidence resolves them.
   const limitations = [...new Set(proposal.limitations)];
@@ -329,8 +363,16 @@ async function prepareDraft(
   const unresolved = scopes
     .filter((scope) => !exclusions.has(scope.id))
     .flatMap((scope) =>
-      scope.discovery.callers.flatMap((c) => {
-        if (c.manifest && c.manifest !== scope.manifest) return [];
+      [
+        ...new Map(
+          [
+            ...scope.discovery.callers.filter(
+              (c) => !c.manifest || c.manifest === scope.manifest,
+            ),
+            ...(graphCandidates.get(scope.id) ?? []),
+          ].map((c) => [JSON.stringify([c.path, c.line]), c]),
+        ).values(),
+      ].flatMap((c) => {
         const covered = uses.some(
           (u) =>
             u.scope === scope.id &&
@@ -342,7 +384,11 @@ async function prepareDraft(
                   ref.endLine >= c.line,
               )),
         );
-        if (covered) return [];
+        if (
+          covered ||
+          accounted.has(JSON.stringify([scope.id, c.path, c.line]))
+        )
+          return [];
         const reason = `Unassessed caller in ${scope.location}: ${c.path}:${c.line}.`;
         return [
           {
@@ -379,11 +425,31 @@ async function prepareDraft(
     observations: [],
   }));
   const coverage = [...dismissed, ...unresolved];
-  limitations.push(...unresolved.map((c) => c.reason));
-  return { uses, limitations, coverage };
+  limitations.push(
+    ...unresolved.map((c) => c.reason),
+    ...dispositions.filter((c) => c.kind === "unresolved").map((c) => c.reason),
+  );
+  return { additionalUses, limitations, coverage };
 }
-function createActivityProgress(emit?: DependencyProgressSink) {
+function createActivityProgress(
+  directory: string,
+  emit?: DependencyProgressSink,
+) {
   let nextId = 0;
+  function checkoutPaths(values: unknown): string[] {
+    if (!Array.isArray(values)) return [];
+    return [
+      ...new Set(
+        values.flatMap((value) => {
+          if (typeof value !== "string" || !value.trim()) return [];
+          const path = relative(directory, resolve(directory, value));
+          return relativePathIsOutside(path)
+            ? []
+            : [path.split(sep).join("/") || "."];
+        }),
+      ),
+    ];
+  }
   return (subject: string, name: string, input: unknown) => {
     if (!emit) return;
     const args = isRecord(input) ? input : {};
@@ -403,13 +469,17 @@ function createActivityProgress(emit?: DependencyProgressSink) {
         args["kind"] === "git" ? "source_read" : "upstream",
     };
     if (!Object.hasOwn(activities, name)) return;
+    const paths = checkoutPaths(args["paths"]);
+    const files = checkoutPaths([
+      ...(Array.isArray(args["files"]) ? args["files"] : []),
+      args["path"],
+    ]);
     const scope = {
-      ...(Array.isArray(args["paths"]) &&
+      ...(paths.length > 0 &&
         (name === "trace_codex_security_code"
-          ? { directories: args["paths"] }
-          : { files: args["paths"] })),
-      ...(Array.isArray(args["files"]) && { files: args["files"] }),
-      ...(typeof args["path"] === "string" && { files: [args["path"]] }),
+          ? { directories: paths }
+          : { files: paths })),
+      ...(files.length > 0 && { files }),
       ...(typeof args["symbol"] === "string" && { symbol: args["symbol"] }),
       ...(name === "fetch_dependency_source" && {
         upstream: args["repository"] ?? args["name"] ?? args["kind"],
@@ -421,8 +491,14 @@ function createActivityProgress(emit?: DependencyProgressSink) {
       ...(Object.keys(scope).length && { scope }),
     };
     emit("activity_started", subject, activity);
-    return (outcome: "returned" | "partial" | "failed") =>
-      emit("activity_finished", subject, { ...activity, outcome });
+    return (outcome: "returned" | "partial" | "failed", searched?: unknown) => {
+      const searchedPaths = checkoutPaths(searched);
+      emit("activity_finished", subject, {
+        ...activity,
+        outcome,
+        ...(searchedPaths.length && { searchedPaths }),
+      });
+    };
   };
 }
 
@@ -434,7 +510,9 @@ async function investigateIssue(
   temporary: string,
   activity: ReturnType<typeof createActivityProgress>,
 ) {
-  const { directory, signal } = options,
+  const controller = new AbortController();
+  const signal = AbortSignal.any([options.signal, controller.signal]);
+  const { directory } = options,
     subject = issue.id ?? pkg!.name,
     startedAt = new Date().toISOString();
   options.onProgress?.("discovery", subject);
@@ -527,6 +605,14 @@ async function investigateIssue(
     discoveries,
     scopes: scopes.map(({ discovery, ...scope }) => scope),
   };
+  const assumptions = [input.callerScope];
+  for (const [label, value] of [
+    ["Operator-supplied complete source boundary", input.sources],
+    ["Operator-supplied complete sink boundary", input.sinks],
+    ["Paths excluded from broad discovery", input.excludedSourcePaths],
+  ] as const)
+    if (value !== undefined)
+      assumptions.push(label + ": " + JSON.stringify(value));
   const contextHash = dependencyRecordHash(input);
   const store = new DependencyAttemptStore(
     join(temporary, `${randomUUID()}.sqlite`),
@@ -538,16 +624,31 @@ async function investigateIssue(
     // Each advisory has its own evidence ledger. Corrections can cite earlier calls
     // in this investigation; separate package checks cannot borrow their records.
     const records = new Map<string, DependencyEvidenceRecord>();
+    const block = createDependencyBlockEvidence(
+      new Set(options.evidenceSources?.map((s) => s.server)),
+      records,
+    );
+    const observedCandidates = new Map<string, DependencyGraphCandidate>();
+    let graphLineSnapshot: Promise<GraphCandidates> | undefined;
+    const graphCandidates = () =>
+      (graphLineSnapshot ??= dependencyGraphCandidates(
+        scopes,
+        [...observedCandidates.values()],
+        directory,
+        signal,
+      ));
     const evidenceLimitations = new Set<string>();
     const searches: DependencySearch[] = [];
-    const decidingPremiseEvidence: DecidingPremiseEvidence = (ref) => {
-      assertReviewedPremises(store, [ref]);
+    function selectedPremises(refs: PremiseRef[]) {
+      assertReviewedPremises(store, refs);
       const result: DependencyReviewReference[] = [];
+      const claims: PremiseRef[] = [];
       const visited = new Set<string>();
       function select(row: Claim) {
         const key = premiseKey(row);
         if (visited.has(key)) return;
         visited.add(key);
+        claims.push(reference(row));
         const selected = new Set(currentApproval(store, row)!.evidenceKeys);
         const {
           sources,
@@ -582,10 +683,24 @@ async function investigateIssue(
           if (selected.has(premiseKey(dep)))
             select(store.claim<Claim["value"]>(dep.id, dep.revision)!);
       }
-      select(store.claim<Claim["value"]>(ref.id, ref.revision)!);
-      return result;
-    };
+      for (const ref of refs)
+        select(store.claim<Claim["value"]>(ref.id, ref.revision)!);
+      return { claims, evidence: result };
+    }
+    const decidingPremiseEvidence: DecidingPremiseEvidence = (ref) =>
+      selectedPremises([ref]).evidence;
     const recordEvidence = (record: DependencyEvidenceRecord) => {
+      signal.throwIfAborted();
+      block.observe(record);
+      if (!records.has(record.sha256)) {
+        for (const candidate of observedDependencyCandidates(record)) {
+          const key = JSON.stringify(candidate);
+          if (!observedCandidates.has(key)) {
+            observedCandidates.set(key, candidate);
+            graphLineSnapshot = undefined;
+          }
+        }
+      }
       store.set("mcp-evidence", record.sha256, record);
       records.set(record.sha256, record);
       if (record.server === investigationServer) return;
@@ -618,21 +733,67 @@ async function investigateIssue(
       });
     };
     let usage: ScanTokenUsage | null = null;
-    const run = (prompt: string, coordinator = false) =>
+    let lastAccessProgram: string | undefined;
+    const run = (
+      prompt: string,
+      coordinator = false,
+      onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"],
+    ) =>
       dependencies.runAgent({
         directory,
         signal,
         prompt,
         readOnly: true,
         coordinator,
+        ...(onCoordinatorAnswer && { onCoordinatorAnswer }),
         investigationTools: () => session!.tools(!coordinator),
+        ...(coordinator &&
+          options.onProgress && {
+            onAccessProgram(selected: string | undefined) {
+              const program =
+                selected?.replace(
+                  /[A-Z]/gu,
+                  (letter) => "_" + letter.toLowerCase(),
+                ) ?? "unconfirmed";
+              if (lastAccessProgram === program) return;
+              lastAccessProgram = program;
+              options.onProgress?.("access_program", subject, { program });
+            },
+          }),
         onUsage(value) {
           usage = addTokenUsage(usage, value);
         },
         ...(coordinator &&
           options.evidenceSources?.length && {
             onEvidence: recordEvidence,
-            onEvidenceFailure({ server, tool, arguments: args }) {
+            abortInvestigation(args, thread) {
+              signal.throwIfAborted();
+              const revisions = queuedAssessments().map((c) => ({
+                id: c.id,
+                revision: c.revision,
+                status: queue!.status(c).state,
+              }));
+              const details = block.verify(args, thread, revisions);
+              const error = new DependencyInvestigationBlockedError(
+                {
+                  ...details,
+                  status: "blocked",
+                  code: "INVESTIGATION_BLOCKED",
+                },
+                undefined,
+              );
+              controller.abort(error);
+              return error.outcome;
+            },
+            onEvidenceStartup: (server, status, required, err) => {
+              if (!signal.aborted) block.startup(server, status, required, err);
+            },
+            onEvidenceFailure({ server, tool, arguments: args }, response) {
+              if (signal.aborted) return;
+              const receiptId = block.failed(
+                { server, tool, arguments: args },
+                response ?? { structuredContent: { status: "failed" } },
+              );
               const reason =
                 "The configured evidence tool " +
                 server +
@@ -649,7 +810,7 @@ async function investigateIssue(
                 result: "unknown",
                 completeness: "error",
                 details: [reason],
-                evidenceReferences: [],
+                evidenceReferences: receiptId ? [receiptId] : [],
               });
             },
             onEvidenceDiagnostic: (message: string) => {
@@ -661,13 +822,23 @@ async function investigateIssue(
         config: options.config,
         codex: options.codex,
       });
-    const review = async (claims: Claim[]) => {
-      const pending = claims.filter(
-        (c) => c.value.kind === "coverage" || !currentApproval(store, c),
-      );
+    const review = async (
+      claims: Claim[],
+      rejectQueued?: (claim: Claim, reason: string) => void,
+    ) => {
+      const pending = claims.filter((c) => {
+        if (c.value.kind !== "coverage" && currentApproval(store, c))
+          return false;
+        try {
+          assertReviewedPremises(store, claimInputs(c).dependencies);
+        } catch (error) {
+          if (!rejectQueued) throw error;
+          rejectQueued(c, errorMessage(error));
+          return false;
+        }
+        return true;
+      });
       if (!pending.length) return;
-      for (const c of pending)
-        assertReviewedPremises(store, claimInputs(c).dependencies);
       const selectedValue = (row: BoundReceiptSelection) =>
         selectedReceiptValue(records.get(row.receiptId)!, row.selection);
       const requestReview = (outstanding: Claim[], problem?: string) => {
@@ -711,13 +882,28 @@ async function investigateIssue(
             dependencies,
           };
         });
-        const previous = store
-          .claims<Claim["value"]>()
-          .filter(
-            (c) =>
-              !outstanding.some((row) => row.id === c.id) &&
-              currentApproval(store, c),
-          );
+        const reviewsCoverage = outstanding.some(
+          (c) => c.value.kind === "coverage",
+        );
+        const reviewedAssessments = reviewsCoverage
+          ? store
+              .claims<Claim["value"]>()
+              .filter(
+                (c) =>
+                  c.value.kind !== "premise" &&
+                  c.value.kind !== "coverage" &&
+                  !outstanding.some((row) => row.id === c.id) &&
+                  currentApproval(store, c),
+              )
+          : [];
+        const previous = [
+          ...reviewedAssessments,
+          ...queue!.approved(
+            [...outstanding, ...reviewedAssessments].flatMap(
+              (c) => claimInputs(c).dependencies,
+            ),
+          ),
+        ];
         const receiptIds = new Set(
           outstanding.flatMap((c) => claimInputs(c).wholeReceiptIds),
         );
@@ -750,7 +936,7 @@ async function investigateIssue(
               evidence: evidencePreviews(
                 [
                   ...[...receiptIds].map((id) => records.get(id)!),
-                  ...(outstanding.some((c) => c.value.kind === "coverage")
+                  ...(reviewsCoverage
                     ? [...records.values()].filter(
                         (r) =>
                           r.server !== investigationServer &&
@@ -769,6 +955,23 @@ async function investigateIssue(
       const retained: Decision[] = [];
       let outstanding = pending;
       let problem: string | undefined;
+      function applyDecisions(targets: Claim[], decisions: Decision[]) {
+        if (!rejectQueued)
+          return approveDependencyClaims(store, targets, decisions);
+        const byId = new Map(
+          decisions.map((decision) => [decision.id, decision]),
+        );
+        for (const target of targets) {
+          // A concurrent correction can invalidate this claim or its premises while
+          // the reviewer runs. Retain the other independently validated decisions.
+          try {
+            approveDependencyClaims(store, [target], [byId.get(target.id)!]);
+          } catch (error) {
+            signal.throwIfAborted();
+            rejectQueued(target, errorMessage(error));
+          }
+        }
+      }
       try {
         // One corrective reviewer turn can repair its envelope without rerunning the investigation.
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -780,16 +983,12 @@ async function investigateIssue(
             if (!reply.missing.length) {
               // Recheck the full batch at its current revisions, including decisions retained
               // across the awaited repair. The report cannot finalize a partial batch.
-              approveDependencyClaims(store, pending, [
-                ...retained,
-                ...reply.decisions,
-              ]);
+              applyDecisions(pending, [...retained, ...reply.decisions]);
               return;
             }
             if (reply.decisions.length) {
               const returned = new Set(reply.decisions.map((d) => d.id));
-              approveDependencyClaims(
-                store,
+              applyDecisions(
                 outstanding.filter((c) => returned.has(c.id)),
                 reply.decisions,
               );
@@ -859,14 +1058,20 @@ async function investigateIssue(
         scope: options.scope ? { instructions: options.scope } : undefined,
       },
     });
+    const identity = {
+      id: z.string().trim().min(1),
+      expectedRevision: z.number().int().nonnegative(),
+    };
     const assessmentInput = z.strictObject({
       assessments: z
         .array(
-          z.strictObject({
-            id: z.string().trim().min(1),
-            expectedRevision: z.number().int().nonnegative(),
-            use: investigationSchema.shape.uses.element,
-          }),
+          z.union([
+            z.strictObject({
+              ...identity,
+              use: investigationSchema.shape.uses.element,
+            }),
+            z.strictObject({ ...identity, disposition: proposedDisposition }),
+          ]),
         )
         .min(1),
     });
@@ -874,33 +1079,54 @@ async function investigateIssue(
       submitAssessments: {
         name: "submit_dependency_assessments",
         description:
-          "Queue one or more verified uses for independent review while investigators continue. Use a stable id and revision 0 for a new use. Corrections require the last revision. The host includes every queued assessment in the final report.",
+          "Queue verified uses or separate unresolved/dismissed candidate dispositions for independent review while investigators continue. Use a stable id and revision 0 for a new use. Corrections require the last revision. The host includes every queued assessment in the final report.",
         inputSchema: z.toJSONSchema(assessmentInput),
         async run(args: unknown) {
           const { assessments } = assessmentInput.parse(args);
           const prepared = await Promise.all(
-            assessments.map(async (a) => ({
-              ...a,
-              use: await verifyScopedUse(
-                a.use,
-                directory,
-                signal,
-                scopes,
-                issue.advisories,
-                [...records.values()],
-                options.scope,
-                decidingPremiseEvidence,
-              ),
-            })),
+            assessments.map(async (a) => {
+              const value: Claim["value"] =
+                "use" in a
+                  ? {
+                      kind: "use",
+                      use: await verifyScopedUse(
+                        a.use,
+                        directory,
+                        signal,
+                        scopes,
+                        issue.advisories,
+                        [...records.values()],
+                        options.scope,
+                        decidingPremiseEvidence,
+                      ),
+                    }
+                  : {
+                      kind: "disposition",
+                      disposition: await verifyProposedDisposition(
+                        a.disposition,
+                        await graphCandidates(),
+                        directory,
+                        signal,
+                        scopes,
+                        [...records.values()],
+                        options.scope,
+                        decidingPremiseEvidence,
+                      ),
+                    };
+              const id =
+                value.kind === "use"
+                  ? "assessment:" + a.id.replace(/^assessment:/u, "")
+                  : "disposition:" + a.id.replace(/^disposition:/u, "");
+              return { id, expectedRevision: a.expectedRevision, value };
+            }),
           );
+          signal.throwIfAborted();
           const claims = store.transaction(() =>
-            prepared.map((a) => {
-              assertReviewedPremises(store, a.use.premises ?? []);
-              return store.recordClaim(
-                "assessment:" + a.id.replace(/^assessment:/u, ""),
-                { kind: "use" as const, use: a.use },
-                a.expectedRevision,
-              );
+            prepared.map(({ id, expectedRevision, value }) => {
+              const finding =
+                value.kind === "use" ? value.use : value.disposition;
+              assertReviewedPremises(store, finding.premises ?? []);
+              return store.recordClaim(id, value, expectedRevision);
             }),
           );
           return queue!.enqueue(claims);
@@ -914,6 +1140,7 @@ async function investigateIssue(
       excludedSourcePaths: callerBoundary.excludePaths,
       evidenceSources: Boolean(options.evidenceSources?.length),
       records,
+      failureRecords: block.failures,
       record: recordEvidence,
       queue,
       onSearch(search) {
@@ -930,6 +1157,10 @@ async function investigateIssue(
         .filter(
           (c) => c.id.startsWith("assessment:") && c.value.kind === "use",
         );
+    const queuedDispositions = () =>
+      store
+        .claims<Claim["value"]>()
+        .filter((c) => c.value.kind === "disposition");
     function approvedAssessmentSummary() {
       const items = [];
       let total = 0,
@@ -959,36 +1190,24 @@ async function investigateIssue(
       }
       return { total, items, truncated: items.length < total };
     }
-    let feedback: { previousProposal: string; reason: string } | undefined;
-    // Give a rejected submission a chance to correct its citations or narrow its conclusion.
-    // Model/transport errors propagate directly; only a completed response can be revised.
-    const correctionLimit = 2;
-    for (let round = 0; ; round++) {
-      options.onProgress?.("investigation", subject);
-      const raw = await run(
-        [
-          investigateInstructions + "\n" + coordinationInstructions,
-          JSON.stringify(z.toJSONSchema(investigationSchema)),
-          JSON.stringify({
-            ...input,
-            ...(feedback && {
-              feedback: {
-                ...feedback,
-                approvedAssessments: approvedAssessmentSummary(),
-                recovery:
-                  "The host already includes all current approved assessments. Omit an unchanged submitted use from final uses. Inspect a queued assessment with query_dependency_claims({ids:[id]}) and revise it through submit_dependency_assessments if needed. For a genuinely new use, correct the cited evidence and include it or submit it separately. If every intended use is already approved, return uses: [] with the final limitations and exclusions.",
-              },
-              evidence: evidencePreviews(records.values()),
-            }),
-          }),
-        ].join("\n\n"),
-        true,
-      );
-      await queue.drain();
+    function feedback(reason: string) {
+      return {
+        reason,
+        approvedAssessments: approvedAssessmentSummary(),
+        recovery:
+          "The host already includes all current approved assessments. Omit an unchanged submitted use from final uses. Inspect a queued assessment with query_dependency_claims({ids:[id]}) and revise it through submit_dependency_assessments if needed. For a genuinely new use, correct the cited evidence and include it or submit it separately. If every intended use is already approved, return uses: [] with the final limitations and exclusions.",
+      };
+    }
+    const reviewQueue = queue;
+    async function submit(raw: string, canCorrect: boolean) {
+      signal.throwIfAborted();
+      await reviewQueue.drain();
+      signal.throwIfAborted();
       let draft;
       const submitted = queuedAssessments();
+      const dispositions = queuedDispositions();
       try {
-        for (const c of submitted)
+        for (const c of [...submitted, ...dispositions])
           if (!currentApproval(store, c))
             throw new DependencyReviewRejection(
               "Resolve the independent review for " +
@@ -1006,17 +1225,20 @@ async function investigateIssue(
           submitted.flatMap((c) =>
             c.value.kind === "use" ? [c.value.use] : [],
           ),
+          dispositions.flatMap((c) =>
+            c.value.kind === "disposition" ? [c.value.disposition] : [],
+          ),
+          await graphCandidates(),
           decidingPremiseEvidence,
         );
-        for (const use of draft.uses)
+        for (const use of draft.additionalUses)
           assertReviewedPremises(store, use.premises ?? []);
       } catch (error) {
         signal.throwIfAborted();
-        if (round >= correctionLimit) throw error;
-        feedback = { previousProposal: raw, reason: errorMessage(error) };
-        continue;
+        if (!canCorrect) throw error;
+        return { feedback: feedback(errorMessage(error)) };
       }
-      const { uses, limitations, coverage } = draft;
+      const { additionalUses, limitations, coverage } = draft;
       for (const gap of evidenceLimitations)
         if (!limitations.includes(gap)) limitations.push(gap);
       if (
@@ -1030,22 +1252,20 @@ async function investigateIssue(
       const record = (id: string, value: Claim["value"]) =>
         store.recordClaim(id, value, store.claim(id)?.revision ?? 0);
       const claims: Claim[] = store.transaction(() => [
-        ...uses.map(
-          (use, i) =>
-            submitted.find(
-              (c) =>
-                c.value.kind === "use" &&
-                dependencyRecordHash(c.value.use) === dependencyRecordHash(use),
-            ) ?? record(`use-${i + 1}`, { kind: "use", use }),
+        ...submitted,
+        ...dispositions,
+        ...additionalUses.map((use, i) =>
+          record(`use-${submitted.length + i + 1}`, { kind: "use", use }),
         ),
         record("coverage", { kind: "coverage", limitations }),
       ]);
       try {
         await review(claims);
-        const premises = queue.approved(
+        signal.throwIfAborted();
+        const premises = reviewQueue.approved(
           claims.flatMap((c) => claimInputs(c).dependencies),
         );
-        return store.transaction(() => {
+        const report = store.transaction(() => {
           const approved = [...premises, ...claims].map((claim) => {
             const decision = currentApproval(store, claim);
             if (!decision)
@@ -1056,22 +1276,23 @@ async function investigateIssue(
           });
           const check = {
             schemaVersion: 2 as const,
-            uses: approved.flatMap((claim) =>
-              claim.value.kind === "use"
-                ? [
-                    reportedUse(
-                      claim.value.use,
-                      claim,
-                      claim.review.evidenceKeys,
-                      (claim.value.use.premises ?? [])
-                        .filter((ref) =>
-                          claim.review.evidenceKeys.includes(premiseKey(ref)),
-                        )
-                        .flatMap(decidingPremiseEvidence),
-                    ),
-                  ]
-                : [],
-            ),
+            uses: approved.flatMap((claim) => {
+              if (claim.value.kind !== "use") return [];
+              const selected = selectedPremises(
+                (claim.value.use.premises ?? []).filter((ref) =>
+                  claim.review.evidenceKeys.includes(premiseKey(ref)),
+                ),
+              );
+              return [
+                reportedUse(
+                  claim.value.use,
+                  claim,
+                  claim.review.evidenceKeys,
+                  selected.evidence,
+                  selected.claims,
+                ),
+              ];
+            }),
             claims: approved.map((claim) => {
               const use =
                 claim.value.kind === "use" ? claim.value.use : undefined;
@@ -1084,7 +1305,11 @@ async function investigateIssue(
                 payload: claim.value,
                 scope: {
                   revision: revision ?? null,
-                  location: use?.location ?? null,
+                  location:
+                    use?.location ??
+                    (claim.value.kind === "disposition"
+                      ? claim.value.disposition.location
+                      : null),
                   subject,
                 },
                 dependencies,
@@ -1115,6 +1340,7 @@ async function investigateIssue(
               ),
               receipts: Object.fromEntries([
                 ...records,
+                ...block.failures,
                 ...approved.flatMap((c) =>
                   claimInputs(c)
                     .selected.filter((row) =>
@@ -1133,9 +1359,28 @@ async function investigateIssue(
                 ),
               ]),
             },
-            assumptions: options.scope ? [options.scope] : [],
+            assumptions: [assumptions.join("\n")],
             limitations,
-            coverage,
+            coverage: [
+              ...coverage,
+              ...approved.flatMap((claim) => {
+                if (claim.value.kind !== "disposition") return [];
+                const disposition = claim.value.disposition;
+                const selected = selectedPremises(
+                  (disposition.premises ?? []).filter((ref) =>
+                    claim.review.evidenceKeys.includes(premiseKey(ref)),
+                  ),
+                );
+                return [
+                  reportedDisposition(
+                    disposition,
+                    claim,
+                    claim.review.evidenceKeys,
+                    selected,
+                  ),
+                ];
+              }),
+            ],
             searches: [
               ...discoveries.map((d) => ({
                 source: "repository",
@@ -1172,15 +1417,62 @@ async function investigateIssue(
           store.set("dependency-report", "final", check);
           return check;
         });
+        return { report };
       } catch (error) {
-        if (
-          !(error instanceof DependencyReviewRejection) ||
-          round >= correctionLimit
-        )
+        if (!(error instanceof DependencyReviewRejection) || !canCorrect)
           throw error;
-        feedback = { previousProposal: raw, reason: error.message };
+        return { feedback: feedback(error.message) };
       }
     }
+    const instructions = [
+      investigateInstructions + "\n" + coordinationInstructions,
+      JSON.stringify(z.toJSONSchema(investigationSchema)),
+    ];
+    let sameThreadSubmissions = 0;
+    let finalReport: Awaited<ReturnType<typeof submit>>["report"];
+    options.onProgress?.("investigation", subject);
+    let raw = await run(
+      [...instructions, JSON.stringify(input)].join("\n\n"),
+      true,
+      async (answer) => {
+        // Only completed submissions enter this callback. A refusal or transport
+        // failure propagates from the launcher without submitting another prompt.
+        const result = await submit(answer, ++sameThreadSubmissions < 10);
+        if (result.report) {
+          finalReport = result.report;
+          return;
+        }
+        options.onProgress?.("investigation", subject);
+        return JSON.stringify({ feedback: result.feedback });
+      },
+    );
+    if (sameThreadSubmissions) {
+      if (finalReport) return finalReport;
+      throw new CodexSecurityError(
+        "The coordinator exited before correcting its final submission.",
+      );
+    }
+    // A one-shot agent adapter cannot continue a thread. Preserve its shorter
+    // correction allowance and include the prior answer in each fresh request.
+    for (let attempt = 1; ; attempt++) {
+      const result = await submit(raw, attempt < 3);
+      if (result.report) return result.report;
+      options.onProgress?.("investigation", subject);
+      raw = await run(
+        [
+          ...instructions,
+          JSON.stringify({
+            ...input,
+            feedback: { ...result.feedback, previousProposal: raw },
+            evidence: evidencePreviews(records.values()),
+          }),
+        ].join("\n\n"),
+        true,
+      );
+    }
+  } catch (error) {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    throw error;
   } finally {
     try {
       await queue?.drain();
@@ -1206,7 +1498,10 @@ export async function runReviewedDependencyCheck(
     throw new CodexSecurityError(
       "--vuln-description requires an ecosystem-qualified package.",
     );
-  const activity = createActivityProgress(options.onProgress);
+  const activity = createActivityProgress(
+    options.directory,
+    options.onProgress,
+  );
   options.onProgress?.("advisory", cve ?? subject, {
     stage:
       options.vulnDescription !== undefined
@@ -1238,11 +1533,9 @@ export async function runReviewedDependencyCheck(
     });
   const temporary = await mkdtemp(join(tmpdir(), "dependency-review-"));
   try {
-    const checks: Array<
-      Awaited<ReturnType<typeof investigateIssue>> & {
-        advisoryId: string | null;
-      }
-    > = [];
+    type AdvisoryCheck =
+      Awaited<ReturnType<typeof investigateIssue>> | BlockedCheck;
+    const checks: Array<AdvisoryCheck & { advisoryId: string | null }> = [];
     for (const [index, issue] of issues.entries()) {
       signal.throwIfAborted();
       try {
@@ -1261,32 +1554,55 @@ export async function runReviewedDependencyCheck(
         checks.push({ ...report, advisoryId: issue.id });
       } catch (error) {
         signal.throwIfAborted();
-        const blocked: BlockedCheck = {
-          status: "blocked",
-          code: "INVESTIGATION_BLOCKED",
-          reason: errorMessage(error),
-        };
-        throw new DependencyInvestigationBlockedError(
-          cve
-            ? { ...blocked, cve }
+        const blocked: BlockedCheck =
+          error instanceof DependencyInvestigationBlockedError
+            ? error.outcome
             : {
-                ...blocked,
-                package: pkg!,
-                checks: [...checks, { ...blocked, advisoryId: issue.id }],
-                pendingAdvisories: issues
-                  .slice(index + 1)
-                  .map((item) => item.id),
-              },
-          error,
-        );
+                status: "blocked",
+                code: "INVESTIGATION_BLOCKED",
+                reason: errorMessage(error),
+              };
+        if (cve)
+          throw new DependencyInvestigationBlockedError(
+            { ...blocked, cve },
+            error,
+          );
+        checks.push({ ...blocked, advisoryId: issue.id });
+        // A scoped block or rejected assessment applies only to this advisory's
+        // ledger. A failed model invocation or other operational error stops the run.
+        if (
+          !(error instanceof DependencyInvestigationBlockedError) &&
+          !(error instanceof DependencyReviewRejection)
+        )
+          throw new DependencyInvestigationBlockedError(
+            {
+              ...blocked,
+              package: pkg!,
+              checks,
+              pendingAdvisories: issues.slice(index + 1).map((item) => item.id),
+            },
+            error,
+          );
       }
     }
+    const blockedChecks = checks.filter((check) => "status" in check);
+    if (blockedChecks.length)
+      throw new DependencyInvestigationBlockedError(
+        {
+          status: "blocked",
+          code: "INVESTIGATION_BLOCKED",
+          reason: blockedChecks.map((check) => check.reason).join("\n"),
+          package: pkg!,
+          checks,
+        },
+        undefined,
+      );
     return {
       package: pkg!,
       ...(options.vulnDescription !== undefined && {
         vulnDescription: options.vulnDescription,
       }),
-      checks,
+      checks: checks.filter((check) => "schemaVersion" in check),
     };
   } finally {
     await rm(temporary, { recursive: true, force: true });

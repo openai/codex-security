@@ -1,13 +1,56 @@
 import { parse as parseToml } from "smol-toml";
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
 import { readDependencyCheckOutput } from "../src/dependency-reachability.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+
+test("command schema exposes complete and blocked reports as direct output alternatives", async () => {
+  const stdout = capture(),
+    stderr = capture();
+  expect(
+    await main(
+      ["exploitability", "check", "--schema", "--json"],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+      }),
+    ),
+    stderr.text(),
+  ).toBe(0);
+  const { anyOf } = JSON.parse(stdout.text()).output;
+  const variant = (...required: string[]) =>
+    anyOf.find((branch: { required?: string[] }) =>
+      required.every((field) => branch.required?.includes(field)),
+    );
+  expect(variant("cve", "uses")).toBeDefined();
+  expect(variant("checks", "package")).toBeDefined();
+  expect(variant("runId", "assessments")).toBeDefined();
+  expect(
+    variant("status", "code", "affectedScope", "retainedEvidence"),
+  ).toBeDefined();
+  const packageCheck = variant("status", "code", "checks", "package");
+  expect(packageCheck.properties.checks.items.anyOf).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        required: expect.arrayContaining(["uses", "advisoryId"]),
+      }),
+      expect.objectContaining({
+        required: expect.arrayContaining([
+          "status",
+          "retainedEvidence",
+          "advisoryId",
+        ]),
+      }),
+    ]),
+  );
+});
 
 test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
@@ -40,7 +83,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       codex: {
         agents: {
           max_concurrent_threads_per_session: 7,
-          default_subagent_reasoning_effort: "high",
+          default_subagent_reasoning_effort: "xhigh",
         },
         mcp_servers: { builds: server, unused: { command: "unselected" } },
       },
@@ -56,6 +99,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   let reviewed = false;
   const stdout = capture();
   const stderr = capture();
+  const reportPath = join(repo.path, "report.json");
+  const eventsPath = join(repo.path, "progress.jsonl");
   const status = await main(
     [
       "exploitability",
@@ -65,9 +110,15 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       config,
       "--codex",
       "features.multi_agent_v2.max_concurrent_threads_per_session=49",
+      "--codex",
+      'model_reasoning_effort="medium"',
       "--vuln-description",
       "A parser issue",
       "--json",
+      "--report-file",
+      reportPath,
+      "--progress-events",
+      eventsPath,
     ],
     stdout.stream,
     stderr.stream,
@@ -81,6 +132,11 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
         const features = parseToml(
           args.find((v) => v.startsWith("features="))!,
         )["features"];
+        expect(
+          parseToml(args.find((v) => v.startsWith("model_reasoning_effort="))!)[
+            "model_reasoning_effort"
+          ],
+        ).toBe(payload.claims ? "low" : "high");
         const endpoint = output!.investigationServers![
           "dependency_investigation"
         ] as { url: string };
@@ -150,6 +206,35 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
           );
           reviewed = true;
         } else {
+          const requests: { method?: string; params?: object }[] = [];
+          await readSkillCommandOutput(
+            (async function* () {
+              yield JSON.stringify({
+                id: 2,
+                result: {
+                  thread: { id: "investigator", ephemeral: true },
+                  activePermissionProfile: { id: "dependency_investigation" },
+                  model: "fixture",
+                  modelProvider: "fixture",
+                  sandbox: {},
+                },
+              }) + "\n";
+            })(),
+            {
+              ...output!.appServer!,
+              linkedEvidence: undefined,
+              cyberAccessProgram: "standard",
+              input: new Writable({
+                write(chunk, _encoding, done) {
+                  requests.push(JSON.parse(chunk.toString()));
+                  done();
+                },
+              }),
+            },
+          );
+          expect(
+            requests.find((r) => r.method === "turn/start")?.params,
+          ).toMatchObject({ cyberAccessProgram: "standard" });
           expect(output?.investigationServers).toMatchObject({
             builds: server,
             dependency_investigation: {
@@ -163,7 +248,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
             parseToml(args.find((v) => v.startsWith("agents="))!)["agents"],
           ).toMatchObject({
             max_concurrent_threads_per_session: 49,
-            default_subagent_reasoning_effort: "high",
+            default_subagent_reasoning_effort: "xhigh",
           });
           expect(listed).toContain("trace_codex_security_code");
           expect(listed).toContain("submit_dependency_assessments");
@@ -177,7 +262,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
               "trace_codex_security_code",
               {
                 package: "sample",
-                files: ["caller.js"],
+                paths: ["."],
+                source_terms: ["decode"],
                 symbol: "decode",
                 max_hops: 0,
                 time_budget_ms: 1000,
@@ -258,9 +344,45 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       },
     }),
   );
-  expect(status, stderr.text() || stdout.text()).toBe(0);
+  expect(status, stderr.text() + stdout.text()).toBe(0);
   expect(reviewed).toBe(true);
   const report = readDependencyCheckOutput(JSON.parse(stdout.text()));
+  expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(
+    JSON.parse(stdout.text()),
+  );
+  const events = (await readFile(eventsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(events.filter((e) => e.type === "access_program")).toEqual([
+    expect.objectContaining({
+      schemaVersion: 1,
+      subject: "sample",
+      program: "standard",
+    }),
+  ]);
+  expect(
+    events.find(
+      (e) => e.type === "activity_finished" && e.searchedPaths?.includes("."),
+    ),
+  ).toMatchObject({ activity: "trace", outcome: "partial" });
+  expect(events.find((e) => e.type === "report_ready")).toMatchObject({
+    path: reportPath,
+    verdicts: { unknown: 0 },
+  });
+  expect(events.at(-1)).toMatchObject({
+    type: "finished",
+    outcome: "completed",
+  });
+  expect(stderr.text()).toContain(
+    "Using the supplied vulnerability description",
+  );
+  expect(stderr.text()).toContain("Tracing source call paths");
+  expect(stderr.text()).toContain("Reviewing evidence");
+  expect(stderr.text()).toContain("Turn access program · standard");
+  expect(stderr.text()).toContain("0 reviewed uses");
+  expect(stderr.text()).toContain(`Report saved · ${reportPath}`);
+  expect(stderr.text()).not.toContain("\u001b");
   if (!("checks" in report)) throw new Error("Expected a package report.");
   const check = report.checks[0]!;
   const receipts = check.claimEvidence!.receipts;
@@ -270,4 +392,97 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     input_tokens: 12,
     output_tokens: 6,
   });
+});
+
+test("a coordinator reports its selected access program and preserves redirected JSON output", async () => {
+  await using repo = await scopedTemporaryDirectory("dependency-progress-");
+  execFileSync("git", ["init", "-q"], { cwd: repo.path });
+  await writeFile(
+    join(repo.path, "package.json"),
+    JSON.stringify({ name: "fixture", version: "1.0.0" }),
+  );
+  execFileSync("git", ["add", "package.json"], { cwd: repo.path });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    ],
+    { cwd: repo.path },
+  );
+  const stdout = capture(false),
+    stderr = capture(false);
+  const eventsPath = join(repo.path, "events.jsonl");
+  const status = await main(
+    [
+      "exploitability",
+      "check",
+      "npm:sample",
+      "--vuln-description",
+      "Supplied condition",
+      "--progress-events",
+      eventsPath,
+      "--json",
+    ],
+    stdout.stream,
+    stderr.stream,
+    dependencies({
+      currentDirectory: repo.path,
+      environment: {
+        CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+        TERM: "dumb",
+      },
+      async onCodex(_args, output, _env, prompt) {
+        if (output?.appServer) {
+          expect(output.appServer.persistentCoordinator).toBe(true);
+          output.appServer.onAccessProgram?.("standard");
+        }
+        const packet = JSON.parse(
+          (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
+        );
+        output!.stdout.write(
+          JSON.stringify(
+            packet.claims
+              ? {
+                  decisions: packet.claims.map(
+                    ({
+                      id,
+                      revision,
+                      hash,
+                    }: {
+                      id: string;
+                      revision: number;
+                      hash: string;
+                    }) => ({
+                      id,
+                      revision,
+                      hash,
+                      approved: true,
+                      evidenceKeys: [],
+                      reason: "The package is absent.",
+                    }),
+                  ),
+                }
+              : { uses: [], limitations: ["No applicable package was found."] },
+          ),
+        );
+        return 0;
+      },
+    }),
+  );
+  expect(status, stdout.text()).toBe(0);
+  expect(JSON.parse(stdout.text()).checks).toHaveLength(1);
+  expect(stderr.text()).toContain("Turn access program · standard");
+  const events = (await readFile(eventsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(events.filter((e) => e.type === "access_program")).toMatchObject([
+    { program: "standard", subject: "sample" },
+  ]);
 });

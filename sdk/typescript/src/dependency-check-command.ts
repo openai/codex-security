@@ -1,7 +1,11 @@
 import { Cli, z } from "incur";
 import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
-import { dependencyCheckOutputSchema } from "./dependency-reachability.js";
+import {
+  dependencyCheckOutputSchema,
+  dependencyPackageCheckOutputSchema,
+} from "./dependency-reachability.js";
+import { dependencyScopedBlockedSchema } from "./dependency-blocked-schema.js";
 import {
   withDependencyCheckOutput,
   DependencyInvestigationBlockedError,
@@ -14,10 +18,27 @@ import { readProjectConfig } from "./project-config.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 
 const text = z.string().trim().min(1);
-const checkOutput = z.union([
-  stackInvestigationReportSchema,
-  ...dependencyCheckOutputSchema.options,
-]);
+const blocked = z
+  .object({
+    status: z.literal("blocked"),
+    code: z.literal("INVESTIGATION_BLOCKED"),
+    reason: text,
+  })
+  .passthrough();
+const advisoryId = { advisoryId: z.string().nullable() };
+const blockedPackage = dependencyPackageCheckOutputSchema
+  .extend({
+    ...blocked.shape,
+    checks: z.array(
+      z.union([
+        dependencyPackageCheckOutputSchema.shape.checks.element,
+        dependencyScopedBlockedSchema.safeExtend(advisoryId),
+        blocked.extend(advisoryId),
+      ]),
+    ),
+    pendingAdvisories: z.array(z.string().nullable()).optional(),
+  })
+  .passthrough();
 
 type Result =
   | z.output<typeof dependencyCheckOutputSchema>
@@ -98,14 +119,11 @@ export function registerDependencyCheck(
         .describe("Save the completed JSON report to a new file."),
     }),
     output: z.union([
-      checkOutput,
-      z
-        .object({
-          status: z.literal("blocked"),
-          code: z.literal("INVESTIGATION_BLOCKED"),
-          reason: text,
-        })
-        .passthrough(),
+      ...dependencyCheckOutputSchema.options,
+      stackInvestigationReportSchema,
+      dependencyScopedBlockedSchema,
+      blockedPackage,
+      blocked,
       z.string(),
     ]),
     async run({ args, options, format, formatExplicit }) {
@@ -155,11 +173,7 @@ export function registerDependencyCheck(
             {
               subject: args.subject,
               checkout: repository,
-              ...("isTTY" in context.stderr &&
-                context.stderr.isTTY === true &&
-                context.environment["TERM"] !== "dumb" && {
-                  display: (line: string) => context.stderr.write(line + "\n"),
-                }),
+              display: (line) => context.stderr.write(line + "\n"),
               signal,
               reportFile:
                 options.reportFile &&

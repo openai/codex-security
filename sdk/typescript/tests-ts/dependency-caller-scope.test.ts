@@ -3,7 +3,11 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dependencyPathExcluded } from "../src/dependency-caller-scope.js";
+import {
+  defaultDependencyCallerScope,
+  dependencyPathExcluded,
+} from "../src/dependency-caller-scope.js";
+import type { DependencyRuntimeSelector } from "../src/index.js";
 import { ProjectConfigInputSchema } from "../src/project-config-schema.js";
 import { runReviewedDependencyCheck } from "../src/dependency-reviewed-check.js";
 
@@ -26,6 +30,37 @@ test("endpoint boundaries distinguish omitted and explicitly empty and retain pr
         .exploitability,
     ).toEqual(boundary);
   }
+});
+
+test("runtime selectors type and validate known fields while retaining additional provider metadata", () => {
+  const parse = (selector: unknown) =>
+    ProjectConfigInputSchema.safeParse({
+      exploitability: {
+        sources: [{ function: "decode", runtime_selectors: [selector] }],
+      },
+    });
+  const selector: DependencyRuntimeSelector = {
+    name: "decode",
+    location: "codec.c",
+    binary: "libcodec",
+    line: 8,
+    provider_detail: { resource: 3 },
+  };
+  const parsed = parse(selector);
+  expect(parsed.success).toBe(true);
+  if (!parsed.success) throw parsed.error;
+  const actual: DependencyRuntimeSelector =
+    parsed.data.exploitability!.sources![0]!.runtime_selectors![0]!;
+  expect(actual).toEqual(selector);
+  expect(actual.line?.toFixed()).toBe("8");
+  expect(actual.binary?.toUpperCase()).toBe("LIBCODEC");
+  for (const invalid of [
+    { name: "decode", line: 8 },
+    { name: "decode", location: "codec.c", line: "8" },
+    { name: "decode", location: "codec.c", line: 0 },
+    { name: "decode", binary: 8 },
+  ])
+    expect(parse(invalid).success).toBe(false);
 });
 
 test("broad production and explicit exclusions reopen paths with their own SECURITY.md", () => {
@@ -85,6 +120,11 @@ test("a production-only investigation can close a checkout with a test-only mani
           subject: "npm:fixture-parser",
           vulnDescription: "A caller must pass untrusted data to parse.",
           scope,
+          ...(scope && {
+            sources: [],
+            sinks: [{ function: "parse" }],
+            excludePaths: ["examples"],
+          }),
           directory,
           signal: new AbortController().signal,
         },
@@ -123,9 +163,18 @@ test("a production-only investigation can close a checkout with a test-only mani
       expect(reviewed).toBe(true);
       if (!("checks" in result)) throw new Error("Expected package report");
       expect(result.checks[0]!.uses).toHaveLength(0);
-      if (scope)
+      if (scope) {
+        const [boundary] = result.checks[0]!.assumptions;
+        expect(boundary).toContain(scope);
+        expect(boundary).toContain("source boundary: []");
+        expect(boundary).toContain('sink boundary: [{"function":"parse"}]');
+        expect(boundary).toContain('broad discovery: ["examples"]');
         expect(result.checks[0]!.coverage).toMatchObject([
           { kind: "dismissed", location: "tests" },
+        ]);
+      } else
+        expect(result.checks[0]!.assumptions).toEqual([
+          defaultDependencyCallerScope,
         ]);
     }
   } finally {

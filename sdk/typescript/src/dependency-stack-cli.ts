@@ -21,10 +21,22 @@ export interface DependencyAgentRequest {
   stackTarget?: string;
   readOnly?: boolean;
   coordinator?: boolean;
+  onCoordinatorAnswer?: (answer: string) => Promise<string | undefined>;
   investigationTools?: InvestigationToolFactory;
+  onAccessProgram?: (program: string | undefined) => void;
   onUsage?: (usage: ScanTokenUsage) => void;
   onEvidence?: (record: DependencyEvidenceRecord) => void;
-  onEvidenceFailure?: (call: DependencyEvidenceFailure) => void;
+  onEvidenceFailure?: (
+    call: DependencyEvidenceFailure,
+    result?: Record<string, unknown>,
+  ) => void;
+  onEvidenceStartup?: (
+    server: string,
+    status: import("./dependency-blocked-evidence.js").DependencyStartupStatus,
+    required: boolean,
+    error: unknown,
+  ) => void;
+  abortInvestigation?: (args: unknown, thread: string) => unknown;
   onEvidenceDiagnostic?: (message: string) => void;
 }
 

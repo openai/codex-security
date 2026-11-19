@@ -193,10 +193,22 @@
                 "items": {
                   "type": "object",
                   "properties": {
-                    "name": { "type": "string", "minLength": 1 }
+                    "name": { "type": "string", "minLength": 1 },
+                    "location": { "type": "string", "minLength": 1 },
+                    "binary": { "type": "string", "minLength": 1 },
+                    "line": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
                   },
                   "required": ["name"],
-                  "additionalProperties": { "$ref": "#/definitions/__schema0" }
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
+                  "if": { "properties": { "line": {} }, "required": ["line"] },
+                  "then": {
+                    "properties": { "location": {} },
+                    "required": ["location"]
+                  }
                 }
               },
               "package": { "type": "string", "minLength": 1 },
@@ -267,10 +279,22 @@
                 "items": {
                   "type": "object",
                   "properties": {
-                    "name": { "type": "string", "minLength": 1 }
+                    "name": { "type": "string", "minLength": 1 },
+                    "location": { "type": "string", "minLength": 1 },
+                    "binary": { "type": "string", "minLength": 1 },
+                    "line": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
                   },
                   "required": ["name"],
-                  "additionalProperties": { "$ref": "#/definitions/__schema0" }
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
+                  "if": { "properties": { "line": {} }, "required": ["line"] },
+                  "then": {
+                    "properties": { "location": {} },
+                    "required": ["location"]
+                  }
                 }
               },
               "package": { "type": "string", "minLength": 1 },

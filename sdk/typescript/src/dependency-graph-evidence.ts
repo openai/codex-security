@@ -3,8 +3,16 @@ import type { DependencyEvidenceRecord } from "./dependency-evidence-sources.js"
 import { dependencyRecordHash } from "./dependency-attempt-store.js";
 import { isRecord } from "./record.js";
 
-const path = z.array(z.union([z.string(), z.number().int().nonnegative()]));
-const block = z.number().int().nonnegative().nullable();
+import {
+  dependencyReceiptSelectionSchema,
+  type DependencyReceiptSelection,
+} from "./dependency-receipt-selection.js";
+export {
+  dependencyReceiptSelectionSchema,
+  type DependencyReceiptSelection,
+} from "./dependency-receipt-selection.js";
+const { record: path, textBlock: block } =
+  dependencyReceiptSelectionSchema.shape;
 const receipt = z.object({
   receiptId: z.string().min(1),
   textBlock: block.describe(
@@ -134,15 +142,6 @@ export function dependencyEvidencePayload(
     throw new Error("Expected a JSON text block in the cited receipt.");
   return JSON.parse(item["text"]);
 }
-
-export const dependencyReceiptSelectionSchema = z.strictObject({
-  receiptId: receipt.shape.receiptId,
-  textBlock: block,
-  record: path,
-});
-export type DependencyReceiptSelection = z.infer<
-  typeof dependencyReceiptSelectionSchema
->;
 
 export function selectedReceiptValue(
   original: DependencyEvidenceRecord,

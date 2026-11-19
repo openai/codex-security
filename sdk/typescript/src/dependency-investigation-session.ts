@@ -311,12 +311,18 @@ export function createInvestigationSession(options: {
   evidenceSources: boolean;
   queue: ReturnType<typeof createPremiseQueue>;
   records: ReadonlyMap<string, DependencyEvidenceRecord>;
+  failureRecords?: ReadonlyMap<string, DependencyEvidenceRecord>;
   record: (r: DependencyEvidenceRecord) => void;
   onSearch: (value: DependencySearch) => void;
   onToolStart?: (
     name: string,
     args: unknown,
-  ) => ((outcome: "returned" | "partial" | "failed") => void) | undefined;
+  ) =>
+    | ((
+        outcome: "returned" | "partial" | "failed",
+        searchedPaths?: unknown,
+      ) => void)
+    | undefined;
 }) {
   const { queue, records } = options;
   let graph: Promise<Graph> | undefined;
@@ -340,7 +346,7 @@ export function createInvestigationSession(options: {
     return record.sha256;
   };
   function resolveRecord(id: string) {
-    const record = records.get(id);
+    const record = records.get(id) ?? options.failureRecords?.get(id);
     if (!record) throw new Error("Unknown evidence ID: " + id);
     return record;
   }
@@ -355,13 +361,16 @@ export function createInvestigationSession(options: {
         const page: ReturnType<typeof receiptMetadata>[] = [];
         const pageLength = 40;
         let count = 0;
-        for (const r of records.values()) {
-          if ((server && r.server !== server) || (tool && r.tool !== tool))
-            continue;
-          if (count++ < offset) continue;
-          if (page.length === pageLength)
-            return { receipts: page, next: offset + pageLength };
-          page.push(receiptMetadata(r));
+        for (const ledger of [records, options.failureRecords]) {
+          if (!ledger) continue;
+          for (const r of ledger.values()) {
+            if ((server && r.server !== server) || (tool && r.tool !== tool))
+              continue;
+            if (count++ < offset) continue;
+            if (page.length === pageLength)
+              return { receipts: page, next: offset + pageLength };
+            page.push(receiptMetadata(r));
+          }
         }
         return { receipts: page, next: null };
       },
@@ -486,6 +495,7 @@ export function createInvestigationSession(options: {
       return {
         definitions: exposed.map(({ run: _, ...def }) => def),
         async call(name, args) {
+          options.signal.throwIfAborted();
           const t = exposed.find((t) => t.name === name);
           if (!t) throw new Error("Unknown investigation tool: " + name);
           const finished = options.onToolStart?.(name, args);
@@ -498,6 +508,7 @@ export function createInvestigationSession(options: {
               isRecord(coverage) && coverage["complete"] === false
                 ? "partial"
                 : "returned",
+              isRecord(coverage) ? coverage["searched_paths"] : undefined,
             );
             return response;
           } catch (error) {

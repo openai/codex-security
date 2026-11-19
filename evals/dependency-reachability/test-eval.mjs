@@ -201,6 +201,52 @@ test("the repository grader binds each service's verdict to its own checkout evi
   premise.claims.push(dep);
   premise.uses[0].decidingEvidence.push({ kind: "source", ...source });
   assert.equal(gradeMixed(premise, fixture).outcomes.length, 2);
+  const flattened = structuredClone(premise);
+  const rootClaim = flattened.claims[0];
+  rootClaim.payload.use.premises = [ref];
+  const childRef = { id: "premise:entry", revision: 1, hash: sha256("entry") };
+  const child = structuredClone(dep);
+  Object.assign(child, childRef);
+  const extra = citation("server.mjs", "createServer(async");
+  const extraId = sha256(JSON.stringify(extra, Object.keys(extra).sort()));
+  flattened.claimEvidence.sources[extraId] = extra;
+  child.payload.sources = [extra];
+  child.evidence.sourceIds = [extraId];
+  child.decision.evidenceKeys = [extraId];
+  flattened.claims.push(child);
+  const parent = flattened.claims.find((c) => c.id === ref.id);
+  parent.dependencies = parent.payload.dependencies = [childRef];
+  parent.decision.evidenceKeys.push(
+    "claim:" + JSON.stringify([childRef.id, childRef.revision, childRef.hash]),
+  );
+  const view = flattened.uses[0];
+  view.supportingClaims = [ref, childRef];
+  view.decidingEvidence.push({ kind: "source", ...extra });
+  assert.throws(() => gradeMixed(flattened, fixture), /reported ranges match/u);
+  view.evidence.push(extra);
+  assert.equal(gradeMixed(flattened, fixture).outcomes.length, 2);
+  view.evidence.push(citation("server.mjs", "response.writeHead(404)"));
+  assert.throws(() => gradeMixed(flattened, fixture), /reported ranges match/u);
+  view.evidence.pop();
+  view.supportingClaims.pop();
+  assert.throws(
+    () => gradeMixed(flattened, fixture),
+    /every reviewer-selected premise/u,
+  );
+  view.supportingClaims.push({ ...childRef, revision: 2 });
+  assert.throws(
+    () => gradeMixed(flattened, fixture),
+    /every reviewer-selected premise/u,
+  );
+  view.supportingClaims = [ref, childRef];
+  parent.payload.dependencies = [];
+  assert.throws(() => gradeMixed(flattened, fixture), /approved payload/u);
+  parent.payload.dependencies = [childRef];
+  parent.decision.evidenceKeys.pop();
+  assert.throws(
+    () => gradeMixed(flattened, fixture),
+    /every reviewer-selected premise/u,
+  );
   dep.state = "rejected";
   assert.throws(() => gradeMixed(premise, fixture), /approved premise/u);
   const compact = structuredClone(report);

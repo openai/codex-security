@@ -4,7 +4,22 @@ import { safeRelativePath } from "./contract-values.js";
 import type { JsonObject } from "./config.js";
 
 const text = z.string().min(1);
-const selector = z.object({ name: text }).catchall(z.json());
+const selector = z
+  .object({
+    name: text,
+    location: text.optional(),
+    binary: text.optional(),
+    line: z.int().positive().optional(),
+  })
+  .catchall(z.json())
+  .refine(
+    ({ line, location }) => line === undefined || location !== undefined,
+    "Runtime selector line requires a location.",
+  )
+  .meta({
+    if: { properties: { line: {} }, required: ["line"] },
+    then: { properties: { location: {} }, required: ["location"] },
+  });
 export const dependencyEndpointInputSchema = z.strictObject({
   id: text.optional(),
   function: text,

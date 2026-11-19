@@ -22,6 +22,9 @@ export type PremiseRef = z.infer<typeof dependencyPremiseRefSchema>;
 export const premiseKey = ({ id, revision, hash }: PremiseRef) =>
   "claim:" + JSON.stringify([id, revision, hash]);
 
+const REVIEW_BATCH_SIZE = 100;
+const MAX_REVIEW_BATCHES = 16;
+
 const sourceRange = z.strictObject({
   path: text,
   startLine: z.number().int().positive(),
@@ -60,28 +63,27 @@ export type Premise = {
 
 export function claimInputs(claim: Claim) {
   const v = claim.value;
-  const sources =
-    v.kind === "premise" ? v.sources : v.kind === "use" ? v.use.evidence : [];
+  const finding =
+    v.kind === "use"
+      ? v.use
+      : v.kind === "disposition"
+        ? v.disposition
+        : undefined;
+  const sources = v.kind === "premise" ? v.sources : (finding?.evidence ?? []);
   const selected =
     v.kind === "premise"
       ? (v.boundReceipts ?? [])
-      : v.kind === "use"
-        ? (v.use.boundReceipts ?? [])
-        : [];
+      : (finding?.boundReceipts ?? []);
   const wholeReceipts =
     v.kind === "premise"
       ? v.receiptIds
-      : v.kind === "use"
-        ? v.use.observations
+      : finding
+        ? finding.observations
             .filter((r) => !selected.some((row) => row.receiptId === r.sha256))
             .map((r) => r.sha256)
         : [];
   const dependencies =
-    v.kind === "premise"
-      ? v.dependencies
-      : v.kind === "use"
-        ? (v.use.premises ?? [])
-        : [];
+    v.kind === "premise" ? v.dependencies : (finding?.premises ?? []);
   return {
     sources,
     sourceIds: sources.map(dependencyRecordHash),
@@ -146,35 +148,57 @@ export function createPremiseQueue(options: {
   revision: string | undefined;
   signal: AbortSignal;
   records: ReadonlyMap<string, DependencyEvidenceRecord>;
-  review: (claims: Claim[]) => Promise<void>;
+  review: (
+    claims: Claim[],
+    reject: (claim: Claim, reason: string) => void,
+  ) => Promise<void>;
 }) {
   const { store, directory, signal } = options;
   const pending = new Map<string, Claim>();
   const failures = new Map<string, string>();
-  let active: Promise<void> | undefined;
+  const running = new Map<string, string>();
+  const batches = new Set<Promise<void>>();
+  let scheduled: NodeJS.Immediate | undefined;
   const ref = (c: Claim) => ({ id: c.id, revision: c.revision, hash: c.hash });
   function schedule() {
-    if (active) return;
-    active = Promise.resolve()
-      .then(async () => {
-        while (pending.size) {
-          const batch = [...pending.values()];
-          pending.clear();
-          try {
-            await options.review(batch);
-          } catch (error) {
-            for (const c of batch)
-              failures.set(premiseKey(c), errorMessage(error));
-          }
-        }
-      })
-      .finally(() => {
-        active = undefined;
-        if (pending.size) schedule();
-      });
+    if (scheduled) clearImmediate(scheduled);
+    scheduled = undefined;
+    while (pending.size && batches.size < MAX_REVIEW_BATCHES) {
+      const batch: Claim[] = [];
+      for (const [id, claim] of pending) {
+        // A correction replaces a queued revision or follows its in-flight review.
+        if (running.has(id)) continue;
+        pending.delete(id);
+        running.set(id, premiseKey(claim));
+        batch.push(claim);
+        if (batch.length === REVIEW_BATCH_SIZE) break;
+      }
+      if (!batch.length) return;
+      const task = Promise.resolve()
+        .then(() =>
+          options.review(batch, (claim, reason) =>
+            failures.set(premiseKey(claim), reason),
+          ),
+        )
+        .catch((error: unknown) => {
+          for (const c of batch)
+            failures.set(premiseKey(c), errorMessage(error));
+        })
+        .finally(() => {
+          batches.delete(task);
+          for (const c of batch) running.delete(c.id);
+          schedule();
+        });
+      batches.add(task);
+    }
   }
-  async function drain() {
-    while (active) await active;
+  async function drain(ids?: string[]) {
+    schedule();
+    while (
+      batches.size &&
+      (!ids || ids.some((id) => pending.has(id) || running.has(id)))
+    )
+      await Promise.race(batches);
   }
   function status(c: Claim) {
     const key = premiseKey(c);
@@ -206,17 +230,19 @@ export function createPremiseQueue(options: {
   function enqueue(stored: Claim[]) {
     for (const c of stored) {
       const key = premiseKey(c);
-      if (!currentApproval(store, c)) {
+      if (running.get(c.id) !== key && !currentApproval(store, c)) {
         failures.delete(key);
-        pending.set(key, c);
+        pending.set(c.id, c);
       }
     }
-    schedule();
+    // Independent submissions arriving in the same turn may share a reviewer.
+    scheduled ??= setImmediate(schedule);
     return stored.map(status);
   }
   return {
     drain,
     enqueue,
+    status,
     async submit(input: unknown) {
       const { claims } = submitPremisesSchema.parse(input);
       const values = await Promise.all(
@@ -293,12 +319,14 @@ export function createPremiseQueue(options: {
           wait: z.boolean().optional(),
         })
         .parse(input);
-      if (wait) await drain();
+      if (wait) await drain(ids);
       return store
         .claims<Claim["value"]>()
         .filter(
           (c) =>
-            (c.value.kind === "premise" || c.id.startsWith("assessment:")) &&
+            (c.value.kind === "premise" ||
+              c.value.kind === "disposition" ||
+              c.id.startsWith("assessment:")) &&
             (!ids || ids.includes(c.id)),
         )
         .map(status);
