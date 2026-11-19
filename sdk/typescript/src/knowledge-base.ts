@@ -433,7 +433,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         else if (type === "end") finishField(true);
       } else if (localName === "br" || localName === "cr") append("\n");
       else if (localName === "tabs") tabStops = true;
-      else if (localName === "tab" && !tabStops) append("\t");
+      else if ((localName === "tab" && !tabStops) || localName === "ptab")
+        append("\t");
       else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, attributes, isSelfClosing }) => {
