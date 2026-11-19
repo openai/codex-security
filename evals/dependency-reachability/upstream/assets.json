@@ -1,0 +1,70 @@
+{
+  "python-pillow/Pillow@6e28ed1f36d0eb74053af54e1eddc9c29db698cd": {
+    "url": "https://codeload.github.com/python-pillow/Pillow/tar.gz/6e28ed1f36d0eb74053af54e1eddc9c29db698cd",
+    "sha256": "30258586b272d999e07e9169d09d0b0ef2546346a93d79877fd498be169ed799"
+  },
+  "python-pillow/pillow-wheels@b2eed6e689596fefacf5bcbec10193a23ba5df12:config.sh": {
+    "url": "https://raw.githubusercontent.com/python-pillow/pillow-wheels/b2eed6e689596fefacf5bcbec10193a23ba5df12/config.sh",
+    "sha256": "628beedcb35e8959d4a1f7201939d00246c6d16fe7bfb7840eea64b5ea371765"
+  },
+  "python-pillow/Pillow@e34d346f10c0b1c814661e662a3e0c1ef084cf1c": {
+    "url": "https://codeload.github.com/python-pillow/Pillow/tar.gz/e34d346f10c0b1c814661e662a3e0c1ef084cf1c",
+    "sha256": "34d04eae2f2983faef9371c21472c65ec39f2dea99bf8445c6a0fe5691088dc8"
+  },
+  "python-pillow/pillow-wheels@deb384b86e39beec75bd0b52027faf784fb17625:config.sh": {
+    "url": "https://raw.githubusercontent.com/python-pillow/pillow-wheels/deb384b86e39beec75bd0b52027faf784fb17625/config.sh",
+    "sha256": "b91a1bd916f4e2a4b1ab447c791a9382f8328b447104c1521d845e4137e09928"
+  },
+  "nodemailer/mailparser@bb325f156d35c28d78a18c7f61c0f2a54a2b7854": {
+    "url": "https://codeload.github.com/nodemailer/mailparser/tar.gz/bb325f156d35c28d78a18c7f61c0f2a54a2b7854",
+    "sha256": "9656631ae023ebb78cb94ac169b0b51b1bb8a3af1b9aa690241b3afa7a645e32"
+  },
+  "nodemailer/mailparser@3e1e0291d7757501d334d19fe6553a78b45cc1eb": {
+    "url": "https://codeload.github.com/nodemailer/mailparser/tar.gz/3e1e0291d7757501d334d19fe6553a78b45cc1eb",
+    "sha256": "2621c8943f87b2a300d9ac2b7368e61c8442377871056f7ddd0bafe1dfff36f8"
+  },
+  "nodemailer/nodemailer@4175e4baf92ffc4e20791a11fc0886025228a2ac:package.json": {
+    "url": "https://raw.githubusercontent.com/nodemailer/nodemailer/4175e4baf92ffc4e20791a11fc0886025228a2ac/package.json",
+    "sha256": "30cbe5b049362dafd56fd07d7f1c7c896ab8a75fb9b9d31d369e25efbc1a5072"
+  },
+  "nodemailer/nodemailer@4175e4baf92ffc4e20791a11fc0886025228a2ac:lib/addressparser/index.js": {
+    "url": "https://raw.githubusercontent.com/nodemailer/nodemailer/4175e4baf92ffc4e20791a11fc0886025228a2ac/lib/addressparser/index.js",
+    "sha256": "34fb536bf883d09a6d87390591c42ebf5d1c40a02704e0d9db36f213a9eb08fe"
+  },
+  "nodemailer/nodemailer@3d17dbec49ab3e3f0e13e62871e5534be5b99994:lib/addressparser/index.js": {
+    "url": "https://raw.githubusercontent.com/nodemailer/nodemailer/3d17dbec49ab3e3f0e13e62871e5534be5b99994/lib/addressparser/index.js",
+    "sha256": "cb9e4e77b7909991ac696e960040d1f5650921ec1644ed7aa82d5d5f7aaa8f13"
+  },
+  "backstage/backstage@99d7a6f42d71e86578c89c0669a3d962088ed8ae": {
+    "url": "https://codeload.github.com/backstage/backstage/tar.gz/99d7a6f42d71e86578c89c0669a3d962088ed8ae",
+    "sha256": "60b46adcc7184342d7e937c3818015d6fd3cff1fb8c80618cc37533f9e53e126"
+  },
+  "nodemailer/nodemailer@4175e4baf92ffc4e20791a11fc0886025228a2ac:lib/qp/index.js": {
+    "url": "https://raw.githubusercontent.com/nodemailer/nodemailer/4175e4baf92ffc4e20791a11fc0886025228a2ac/lib/qp/index.js",
+    "sha256": "86dfbdaa8984ef97974d9a29c066b08d56ef771af7cb291c0f771f34978c5e23"
+  },
+  "alpinelinux/aports@985238ce5b8f999edccd3c4ba83fba636db51272:main/libwebp/APKBUILD": {
+    "url": "https://raw.githubusercontent.com/alpinelinux/aports/985238ce5b8f999edccd3c4ba83fba636db51272/main/libwebp/APKBUILD",
+    "sha256": "c5e7ff8473a5d9e5e6fc3e5bbd73af7fa2067b6f3ebe5eb2f901a03d94bc7e1e"
+  },
+  "alpinelinux/aports@29a91ff19585ca3eebd4bf53d275f600a093a73d:main/libwebp/APKBUILD": {
+    "url": "https://raw.githubusercontent.com/alpinelinux/aports/29a91ff19585ca3eebd4bf53d275f600a093a73d/main/libwebp/APKBUILD",
+    "sha256": "efdd11cda9fb9a87ddcb12cf7f0b7816e90fd6e9250200c5636e67d558a914c1"
+  },
+  "alpinelinux/aports@29a91ff19585ca3eebd4bf53d275f600a093a73d:main/libwebp/CVE-2023-4863.patch": {
+    "url": "https://raw.githubusercontent.com/alpinelinux/aports/29a91ff19585ca3eebd4bf53d275f600a093a73d/main/libwebp/CVE-2023-4863.patch",
+    "sha256": "2d2ad9f0bdc460195211a9eab71e78bac49586c09060dbd1104ecfc5a35db05a"
+  },
+  "alpinelinux/aports@29a91ff19585ca3eebd4bf53d275f600a093a73d:community/py3-pillow/APKBUILD": {
+    "url": "https://raw.githubusercontent.com/alpinelinux/aports/29a91ff19585ca3eebd4bf53d275f600a093a73d/community/py3-pillow/APKBUILD",
+    "sha256": "ba4f7fc9d1c847d64b62cb6545dc087666bbbb651d4a47b5cc49484ccd72258b"
+  },
+  "@zone-eu/mailsplit@5.4.7": {
+    "url": "https://registry.npmjs.org/@zone-eu/mailsplit/-/mailsplit-5.4.7.tgz",
+    "sha256": "bde3026379d9c758ed0b30aff53ce0e1d604d24d70415fe7f1edaa6884139212"
+  },
+  "libmime@5.3.7": {
+    "url": "https://registry.npmjs.org/libmime/-/libmime-5.3.7.tgz",
+    "sha256": "083a9eaa0265c5ef8cb316d0ffb41a4ab60165c39b5d4f196825a2e4c804443a"
+  }
+}

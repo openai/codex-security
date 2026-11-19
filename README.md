@@ -75,6 +75,9 @@ Choose a scope and scan mode:
 # Scan selected paths.
 cs scan . --path src --path tests
 
+# Exclude a directory from the scan.
+cs scan . --exclude-path examples/
+
 # Scan committed changes from a base revision to HEAD.
 cs scan . --diff origin/main
 
@@ -236,3 +239,10 @@ for examples.
 - [Examples](examples/README.md)
 
 To report a vulnerability privately, follow the [security policy](SECURITY.md).
+
+## Citation
+
+Use **Cite this repository** on GitHub to copy an APA or BibTeX citation, or
+download [CITATION.cff](CITATION.cff). Match the citation’s version to
+`codex-security --version` and use the publication date from that version’s
+`npm-vX.Y.Z` entry in [GitHub Releases](https://github.com/openai/codex-security/releases).
