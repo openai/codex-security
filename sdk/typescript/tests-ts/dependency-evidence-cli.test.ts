@@ -96,6 +96,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   const result = { content: [{ type: "text", text: "Build unavailable." }] };
   const wireReceipts = new Map<string, Record<string, unknown>>();
+  let traceSearchedPaths: string[] | undefined;
   let reviewed = false;
   const stdout = capture();
   const stderr = capture();
@@ -299,6 +300,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
             ) {
               expect(value.coverage.complete).toBe(false);
               expect(value.coverage.partial.length).toBeGreaterThan(0);
+              traceSearchedPaths = value.coverage.searched_paths;
             }
             const original = {
               server: "dependency_investigation",
@@ -361,11 +363,18 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       program: "standard",
     }),
   ]);
-  expect(
-    events.find(
-      (e) => e.type === "activity_finished" && e.searchedPaths?.includes("."),
-    ),
-  ).toMatchObject({ activity: "trace", outcome: "partial" });
+  const trace = events.find(
+    (e) =>
+      e.type === "activity_finished" &&
+      e.activity === "trace" &&
+      e.scope?.symbol === "decode",
+  );
+  expect(trace).toMatchObject({
+    outcome: "partial",
+    scope: { directories: ["."] },
+  });
+  // The requested directory is only reported as searched if a search completed.
+  expect(trace.searchedPaths ?? []).toEqual(traceSearchedPaths);
   expect(events.find((e) => e.type === "report_ready")).toMatchObject({
     path: reportPath,
     verdicts: { unknown: 0 },
