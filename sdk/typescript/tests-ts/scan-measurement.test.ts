@@ -71,3 +71,20 @@ test("disjoint stage measurements retain the union of known coverage scopes", ()
     ),
   ).not.toHaveProperty("coverageScope");
 });
+
+test("an unsafe stage sum remains unavailable after another stage", () => {
+  const stages = [
+    { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 },
+    { input_tokens: 0, output_tokens: 2 },
+    { input_tokens: 0, output_tokens: 1 },
+  ].map((value) => measurementFromUsage(value, "synthetic-unpriced-model"));
+  const combined = combineMeasurements(stages, "synthetic-unpriced-model");
+  expect(combined).toMatchObject({
+    usage: null,
+    cost: null,
+    coverage: "unavailable",
+    threadCount: 3,
+    missingThreadCount: 0,
+    warnings: ["token_usage_overflow"],
+  });
+});

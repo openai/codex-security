@@ -399,6 +399,7 @@ function createSessionUsage(observeUsage: boolean) {
       ? new Map<string, ScanAccountRateLimit>()
       : null,
     responseUsage: null as ScanTokenUsage | null,
+    responseUsageOverflow: false,
     responseIds: new Set<string>(),
     eventPosition: 0,
     calls: new Map<string, ScanActivity>(),
@@ -2445,7 +2446,8 @@ export class ScanCostTracker {
       this.#options.readBudgetUsage ||
       this.#receipts.size > 0 ||
       this.#snapshot.measurement.usage !== null ||
-      this.#snapshot.measurement.missingThreadCount > 0
+      this.#snapshot.measurement.missingThreadCount > 0 ||
+      this.#snapshot.measurement.warnings?.includes("token_usage_overflow")
     )
       return this.#snapshot;
     const cost = estimateScanCost(
@@ -2595,6 +2597,7 @@ export class ScanCostTracker {
     // SDK totals retain measured usage when a rollout is unavailable.
     // Native rollouts also establish descendant coverage.
     const incomplete = new Set(workerReceipts.usages.keys());
+    let sessionUsageOverflow = false;
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -2651,26 +2654,32 @@ export class ScanCostTracker {
           collectionErrors.push(error);
         }
       }
-      const receipt = usages.get(threadId);
-      if (
-        session.usage !== null &&
-        session.usage.total_tokens >=
-          (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
-      )
-        incomplete.delete(threadId);
-      // A discovered thread without a receipt has unknown usage, not zero.
-      // Retain it so a parent-only subtotal cannot appear to be complete.
-      if (receipt === undefined) usages.set(threadId, null);
-      if (
-        session.usage !== null &&
-        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
-          // Worker receipts retain field presence; the SDK may default to zero.
-          (session.usage.total_tokens === receipt?.total_tokens &&
-            (receipt.cache_write_input_tokens_reported === false ||
-              (receipt === this.#receipts.get(threadId) &&
-                receipt.cache_write_input_tokens === 0))))
-      ) {
-        usages.set(threadId, session.usage);
+      if (session.responseUsageOverflow) {
+        sessionUsageOverflow = true;
+        usages.set(threadId, null);
+        incomplete.add(threadId);
+      } else {
+        const receipt = usages.get(threadId);
+        if (
+          session.usage !== null &&
+          session.usage.total_tokens >=
+            (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
+        )
+          incomplete.delete(threadId);
+        // A discovered thread without a receipt has unknown usage, not zero.
+        // Retain it so a parent-only subtotal cannot appear to be complete.
+        if (receipt === undefined) usages.set(threadId, null);
+        if (
+          session.usage !== null &&
+          (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+            // Worker receipts retain field presence; the SDK may default to zero.
+            (session.usage.total_tokens === receipt?.total_tokens &&
+              (receipt.cache_write_input_tokens_reported === false ||
+                (receipt === this.#receipts.get(threadId) &&
+                  receipt.cache_write_input_tokens === 0))))
+        ) {
+          usages.set(threadId, session.usage);
+        }
       }
       if (!observe) continue;
       let worker: number | undefined;
@@ -2788,6 +2797,7 @@ export class ScanCostTracker {
       this.#reportedSessionPositions.set(eventStream, reported);
     }
     let usage: ScanTokenUsage | null = null;
+    let usageOverflow = false;
     let missingThreadCount = workerReceipts.unknownAttempts;
     let threadCount = 0;
     for (const [threadId, value] of usages) {
@@ -2797,7 +2807,10 @@ export class ScanCostTracker {
       }
       threadCount += 1;
       if (incomplete.has(threadId)) missingThreadCount += 1;
-      usage = addTokenUsage(usage, value);
+      if (!usageOverflow) {
+        usage = addTokenUsage(usage, value);
+        if (usage === null) usageOverflow = true;
+      }
     }
     if (collectionErrors.length > 0)
       missingThreadCount = Math.max(1, missingThreadCount);
@@ -2810,6 +2823,9 @@ export class ScanCostTracker {
         threadCount,
         missingThreadCount,
         {
+          ...(usageOverflow || sessionUsageOverflow
+            ? { warnings: ["token_usage_overflow"] }
+            : {}),
           coverageScope:
             collectionErrors.length === 0
               ? [
@@ -3483,7 +3499,13 @@ function readSessionEvent(
     const usage = tokenUsage(payload["usage"]);
     if (usage === null) return;
     session.responseIds.add(responseId);
+    if (session.responseUsageOverflow) return;
     session.responseUsage = addTokenUsage(session.responseUsage, usage);
+    if (session.responseUsage === null) {
+      session.responseUsageOverflow = true;
+      session.usage = null;
+      return;
+    }
     // Native thread totals include compaction and any earlier turns. They are
     // scoped to thread_id, unlike inherited legacy token_count snapshots.
     const total = tokenUsage(payload["thread_token_usage"]);
@@ -4105,9 +4127,9 @@ function sessionProgressUpdates(
 export function addTokenUsage(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
-): ScanTokenUsage {
+): ScanTokenUsage | null {
   if (previous === null) return next;
-  return {
+  return tokenUsage({
     input_tokens: previous.input_tokens + next.input_tokens,
     cached_input_tokens:
       previous.cached_input_tokens + next.cached_input_tokens,
@@ -4120,8 +4142,7 @@ export function addTokenUsage(
     output_tokens: previous.output_tokens + next.output_tokens,
     reasoning_output_tokens:
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
-    total_tokens: previous.total_tokens + next.total_tokens,
-  };
+  });
 }
 
 function subtractTokenUsage(

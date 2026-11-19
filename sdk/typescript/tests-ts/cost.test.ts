@@ -2065,6 +2065,88 @@ function legacyUsageRecord(usage: Record<string, number>) {
   };
 }
 
+test("keeps an overflowed native response total unavailable", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, scanThreadId, {
+    input_tokens: 0,
+    output_tokens: 0,
+  });
+  const tracker = costTracker(home);
+  tracker.start(scanThreadId);
+  try {
+    await appendFile(
+      path,
+      jsonLines([
+        nativeUsageRecord(scanThreadId, "first", {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 0,
+        }),
+        nativeUsageRecord(
+          scanThreadId,
+          "second",
+          { input_tokens: 0, output_tokens: 2 },
+          { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 },
+        ),
+        nativeUsageRecord(
+          scanThreadId,
+          "third",
+          { input_tokens: 0, output_tokens: 1 },
+          { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 },
+        ),
+        legacyUsageRecord({ input_tokens: 1, output_tokens: 0 }),
+      ]) + "\n",
+    );
+    const snapshot = await tracker.refresh();
+    expect(snapshot.usage).toBeNull();
+    expect(snapshot.cost).toBeNull();
+    expect(snapshot.measurement).toMatchObject({
+      coverage: "unavailable",
+      warnings: ["token_usage_overflow"],
+    });
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test("keeps a multi-thread overflow unavailable after a later worker", async () => {
+  const home = await codexHome();
+  await writeSession(home, scanThreadId, {
+    input_tokens: Number.MAX_SAFE_INTEGER,
+    output_tokens: 0,
+  });
+  await writeSession(
+    home,
+    "overflow-worker",
+    { input_tokens: 0, output_tokens: 2 },
+    { parent: scanThreadId },
+  );
+  const tracker = costTracker(home, { maxCostUsd: 1 });
+  tracker.start(scanThreadId);
+  try {
+    const first = await tracker.refresh();
+    expect(first.usage).toBeNull();
+    expect(first.cost).toBeNull();
+    expect(first.measurement).toMatchObject({
+      coverage: "unavailable",
+      warnings: ["token_usage_overflow"],
+    });
+    await writeSession(
+      home,
+      "later-worker",
+      { input_tokens: 0, output_tokens: 1 },
+      { parent: scanThreadId },
+    );
+    const second = await tracker.refresh();
+    expect(second.usage).toBeNull();
+    expect(second.cost).toBeNull();
+    expect(second.measurement.warnings).toEqual(["token_usage_overflow"]);
+    const stopped = await tracker.stop({ input_tokens: 1, output_tokens: 1 });
+    expect(stopped.usage).toBeNull();
+  } finally {
+    await tracker.stop();
+  }
+});
+
 test.each([
   [
     "prefers the spawned parent over legacy parent fields",

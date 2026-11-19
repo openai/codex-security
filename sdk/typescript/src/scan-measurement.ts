@@ -29,11 +29,18 @@ export function combineMeasurements(
   pricingContext?: ScanPricingContext,
 ): ScanUsageMeasurement {
   let usage: ScanTokenUsage | null = null;
+  let usageOverflow = false;
   for (const value of values) {
-    if (value.usage !== null) usage = addTokenUsage(usage, value.usage);
+    if (value.usage !== null && !usageOverflow) {
+      usage = addTokenUsage(usage, value.usage);
+      if (usage === null) usageOverflow = true;
+    }
   }
   const warnings = [
-    ...new Set(values.flatMap((value) => value.warnings ?? [])),
+    ...new Set([
+      ...values.flatMap((value) => value.warnings ?? []),
+      ...(usageOverflow ? ["token_usage_overflow"] : []),
+    ]),
   ].sort();
   return {
     ...measurementFromUsage(usage, model, pricingContext),
