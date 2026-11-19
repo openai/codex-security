@@ -2939,6 +2939,8 @@ commands must be prohibited.
 The default is `standard`, which retains the existing verification checks.
 Static results identify the evidence and state that runtime checks were not
 performed; material proof gaps can still block verification.
+If you also pass `--assess-patch-risk`, the separate risk assessment can run
+focused local tests after static patch verification.
 
 ```bash
 codex-security patch finding.md --verification-mode static
