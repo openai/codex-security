@@ -84,7 +84,6 @@ def test_git_inventory_failure_is_reported_with_its_diagnostic(
     check_targets(tmp_path, ["selected", "selected.py"], ["selected.py"])
 
 
-@pytest.mark.cross_platform
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="requires POSIX permissions")
 def test_unreadable_git_metadata_does_not_supply_ignored_content(tmp_path, check_targets):
     subprocess.run(["git", "-C", tmp_path, "init", "-q"], check=True)
