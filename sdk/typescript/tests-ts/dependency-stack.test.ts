@@ -146,6 +146,7 @@ async function sample(
 async function startProof(
   root: string,
   files: Awaited<ReturnType<typeof sample>>,
+  legacyCapture = false,
 ) {
   const inputs = join(root, "packet"),
     state = join(root, "attempt.sqlite");
@@ -157,15 +158,26 @@ async function startProof(
     toolRevision: "test",
   });
   await executeStackRun("init", { state, repo: files.repo, inputs });
+  if (legacyCapture) {
+    // Packet-backed attempts created before run next supplied captures had no
+    // protocol record; their claim receipts identify the read-stacks command.
+    const db = sqliteDatabaseOpener()(state);
+    try {
+      db.exec(
+        "DELETE FROM records WHERE kind = 'stack-protocol' AND id = 'capture-origin'",
+      );
+    } finally {
+      db.close();
+    }
+  }
   const call = (command: string, input?: unknown) =>
     executeStackRun(command, { state, input });
-  const { workItem, receiptId } = (await call("next")) as {
-    workItem: { id: string };
+  const { workItem, receiptId, rootFirstRawIndices } = (await call("next")) as {
+    workItem: { id: string; observation: { bindings?: unknown[] } };
     receiptId: string;
+    rootFirstRawIndices: number[];
   };
-  const capture = (await call("read-stacks", { workItemId: workItem.id })) as {
-    observation: { bindings?: unknown[] };
-  };
+  const capture = { ...workItem, receiptId, rootFirstRawIndices };
   const write = {
     operationId: "proof",
     claims: [
@@ -221,6 +233,40 @@ async function startProof(
   };
   return { inputs, state, call, capture, claims, write, row };
 }
+
+test("an unchanged finalized packet with a legacy read-stacks receipt retains its report bytes", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-legacy-final-");
+  const files = await sample(dir.path, true);
+  const { state, call, claims, row } = await startProof(dir.path, files, true);
+  const queried = (await call("query-claims", { ids: ["caller"] })) as {
+    claims: { evidence: { receipts: { origin: { tool: string } }[] } }[];
+  };
+  expect(queried.claims[0]!.evidence.receipts[0]!.origin.tool).toBe(
+    "read-stacks",
+  );
+  await call("record-assessments", { items: [row] });
+  const original = await call("finalize");
+  expect(original).toMatchObject({ claims });
+  expect(original).not.toHaveProperty("effectiveInputDigest");
+  const originalBytes = JSON.stringify(original);
+  const savedBytes = () => {
+    const db = sqliteDatabaseOpener()(state);
+    try {
+      const [row] = db
+        .prepare(
+          "SELECT value FROM records WHERE kind = 'report' AND id = 'final'",
+        )
+        .all() as { value: string }[];
+      return row!.value;
+    } finally {
+      db.close();
+    }
+  };
+  const saved = savedBytes();
+  expect(JSON.stringify(await readFinalStackReport(state))).toBe(originalBytes);
+  expect(JSON.stringify(await call("finalize"))).toBe(originalBytes);
+  expect(savedBytes()).toBe(saved);
+});
 
 test("a previous stack ledger resumes exact claims and retry receipts and reopens an unattributed fixed copy", async () => {
   await using dir = await scopedTemporaryDirectory("stack-upgrade-");
@@ -281,6 +327,8 @@ test("a previous stack ledger resumes exact claims and retry receipts and reopen
       manifest,
       fingerprint: dependencyRecordHash(manifest),
     });
+    // This synthetic old ledger was populated using the current capture origin.
+    save("stack-protocol", "capture-origin", "next");
     save("claims", "context", {
       contextHash: current.contextHash,
       policy: "single_agent",

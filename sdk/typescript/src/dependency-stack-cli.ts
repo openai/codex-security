@@ -67,10 +67,16 @@ export function createExploitabilityCli(context: DependencyCliContext) {
     const options =
       tool.name === "init"
         ? pathOptions.extend({
-            inputs: flag.describe(
-              "Directory containing the prepared input packet.",
-            ),
+            inputs: flag
+              .optional()
+              .describe("Directory containing the prepared input packet."),
             repo: flag.describe("Target Git checkout."),
+            jsonStdin: z
+              .boolean()
+              .optional()
+              .describe(
+                "Read optional investigation metadata from standard input.",
+              ),
           })
         : tool.inputSchema
           ? pathOptions.extend({
@@ -88,15 +94,15 @@ export function createExploitabilityCli(context: DependencyCliContext) {
         return context.withSignal(async (signal) => {
           const dir = context.currentDirectory();
           let input: unknown;
-          if (tool.inputSchema) {
-            if (!("jsonStdin" in opts && opts.jsonStdin))
-              throw new CodexSecurityError(
-                "Use --json-stdin to provide input for " + tool.name + ".",
-              );
+          if ("jsonStdin" in opts && opts.jsonStdin) {
             const chunks: Buffer[] = [];
             for await (const data of context.recordsInput)
               chunks.push(Buffer.from(data));
             input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          } else if (tool.inputSchema && tool.name !== "init") {
+            throw new CodexSecurityError(
+              "Use --json-stdin to provide input for " + tool.name + ".",
+            );
           }
           return executeStackRun(tool.name, {
             state: resolveConfigPath(dir, opts.state),

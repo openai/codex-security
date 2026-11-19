@@ -39,35 +39,56 @@ import {
 } from "./dependency-stack-packet.js";
 import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
+import {
+  prepareRuntimeEvidence,
+  runtimeEvidenceInputSchema,
+  saveRuntimeEvidence,
+  selectRuntimeReceipt,
+} from "./dependency-stack-runtime-receipts.js";
+import {
+  getLiveRun,
+  initializeLive,
+  liveInitInputSchema,
+  liveMetadataGaps,
+  overlayPacket,
+  recordObservations,
+  recordObservationsInputSchema,
+  supplementalReceipt,
+} from "./dependency-stack-live.js";
 
 const id = z.string().min(1);
-const stackReadSchema = z.strictObject({ workItemId: id });
+const recordEvidenceSchema = z.union([
+  dependencySourceNoteSchema,
+  runtimeEvidenceInputSchema,
+]);
 const descriptors = [
   {
     name: "init",
     description:
-      "Verify the packet and target checkout, then create or reopen this attempt.",
+      "Create or reopen an investigation from a checkout, optionally importing a prepared packet or updating interactive metadata.",
+    schema: liveInitInputSchema,
   },
   {
     name: "next",
     description:
-      "Read the next observation or coverage gap and the frozen advisory.",
+      "Read the next observation or coverage gap, its original frames and capture receipt.",
   },
   {
     name: "tools",
     description: "List available commands and their JSON input schemas.",
   },
   {
-    name: "read-stacks",
-    description:
-      "Read an item's captured frames with their original indices and its receipt ID.",
-    schema: stackReadSchema,
-  },
-  {
     name: "record-evidence",
     description:
-      "Save a source note from the pinned repository and return its reference.",
-    schema: dependencySourceNoteSchema,
+      "Save pinned source evidence or import an original runtime result and return its reference.",
+    schema: recordEvidenceSchema,
+    mutation: true,
+  },
+  {
+    name: "record-observations",
+    description:
+      "Append scoped query observations or coverage gaps to the investigation worklist.",
+    schema: recordObservationsInputSchema,
     mutation: true,
   },
   {
@@ -111,14 +132,22 @@ export const stackRunTools = descriptors.map(
     if (!("schema" in entry) || !entry.schema) return { name, description };
     const inputSchema = z.toJSONSchema(entry.schema) as JsonObject;
     if ("mutation" in entry && entry.mutation) {
-      inputSchema["properties"] = {
-        ...(inputSchema["properties"] as JsonObject),
-        operationId: {
-          type: "string",
-          minLength: 1,
-          description: "Optional retry key, unique within this attempt.",
-        },
+      const addRetryKey = (schema: JsonObject) => {
+        if (Array.isArray(schema["anyOf"])) {
+          for (const branch of schema["anyOf"])
+            if (isRecord(branch)) addRetryKey(branch as JsonObject);
+        } else {
+          schema["properties"] = {
+            ...(schema["properties"] as JsonObject),
+            operationId: {
+              type: "string",
+              minLength: 1,
+              description: "Optional retry key, unique within this attempt.",
+            },
+          };
+        }
       };
+      addRetryKey(inputSchema);
     }
     return { name, description, inputSchema };
   },
@@ -146,10 +175,22 @@ async function initialize(
   state: string,
   inputs?: string,
   repo?: string,
+  input?: unknown,
   signal?: AbortSignal,
 ) {
-  if (!inputs || !repo)
-    throw new CodexSecurityError("run init requires --inputs and --repo.");
+  if (!repo) throw new CodexSecurityError("run init requires --repo.");
+  if (!inputs) {
+    const store = openStackAttempt(state, true);
+    try {
+      return await initializeLive(store, repo, input, signal);
+    } finally {
+      store.close();
+    }
+  }
+  if (input !== undefined)
+    throw new CodexSecurityError(
+      "Packet initialization cannot also supply interactive metadata.",
+    );
   const inputPath = await realpath(inputs);
   const repoPath = await realpath(repo);
   const { manifest } = await readStackPacket(inputPath, repoPath, signal);
@@ -157,6 +198,8 @@ async function initialize(
   const store = openStackAttempt(state, true);
   try {
     return store.transaction(() => {
+      if (!store.get("manifest", "active"))
+        store.set("stack-protocol", "capture-origin", "next");
       store.bindIdentity(manifest);
       store.set("manifest", "active", {
         inputs: inputPath,
@@ -202,12 +245,12 @@ function captureId(packet: StackPacket, item: WorkItem) {
 function selectReceipt(
   packet: StackPacket,
   items: Map<string, WorkItem>,
+  store: DependencyAttemptStore,
   receiptId: string,
   selection?: DependencyInventoryReceiptSelection,
 ): BoundDependencyInventoryReceipt {
   const item = items.get(receiptId);
-  if (!item)
-    throw new CodexSecurityError("Unknown capture receipt: " + receiptId);
+  if (!item) return selectRuntimeReceipt(store, receiptId, selection);
   if (selection && selection.textBlock !== null) {
     throw new CodexSecurityError(
       "A captured stack is structured data. Use textBlock: null.",
@@ -216,18 +259,26 @@ function selectReceipt(
   const result = selection ? inventoryJsonField(item, selection.record) : item;
   if (result === undefined)
     throw new CodexSecurityError("The selected capture record does not exist.");
+  const supplemental = supplementalReceipt(store, item);
   return {
     receiptId,
     key: dependencyClaimHash([receiptId, selection?.record ?? null]),
-    server: "stack-packet",
-    originalPayloadSha256: packet.manifest.files.stacks.sha256,
+    server: supplemental ? "stack-observation" : "stack-packet",
+    originalPayloadSha256:
+      supplemental?.sha256 ?? packet.manifest.files.stacks.sha256,
     origin: {
-      tool: "read-stacks",
+      tool: supplemental
+        ? "next"
+        : (store.get<string>("stack-protocol", "capture-origin") ??
+          "read-stacks"),
       arguments: {
         inputDigest: packet.manifest.inputDigest,
         workItemId: item.id,
         queryId: item.queryId,
         groupId: item.groupId,
+        ...(supplemental?.receiptId && {
+          sourceReceiptId: supplemental.receiptId,
+        }),
       },
     },
     ...(selection && {
@@ -242,6 +293,7 @@ async function prepareClaims(
   packet: StackPacket,
   workItems: WorkItem[],
   repository: string,
+  store: DependencyAttemptStore,
   signal?: AbortSignal,
 ) {
   const claims: {
@@ -271,12 +323,30 @@ async function prepareClaims(
     );
     const receipts = [
       ...(row.receiptIds ?? []).map((ref) =>
-        selectReceipt(packet, receiptsById, ref),
+        selectReceipt(packet, receiptsById, store, ref),
       ),
       ...(row.receiptSelections ?? []).map((selection) =>
-        selectReceipt(packet, receiptsById, selection.receiptId, selection),
+        selectReceipt(
+          packet,
+          receiptsById,
+          store,
+          selection.receiptId,
+          selection,
+        ),
       ),
     ];
+    // Keep the original imported artifact alongside every supplemental capture
+    // so an exported report can be reviewed without the investigation database.
+    for (const receipt of [...receipts]) {
+      if (receipt.server !== "stack-observation") continue;
+      const sourceId = receipt.origin.arguments["sourceReceiptId"];
+      if (typeof sourceId !== "string") continue;
+      if (
+        receipts.some((item) => item.receiptId === sourceId && !item.selection)
+      )
+        continue;
+      receipts.push(selectRuntimeReceipt(store, sourceId));
+    }
     if (!excerpts.length && !receipts.length && !row.dependencies.length) {
       throw new CodexSecurityError(
         "A claim needs a cited source range, capture receipt or exact supporting claim.",
@@ -305,6 +375,47 @@ function currentAssessments(store: DependencyAttemptStore, claims: Ledger) {
     .filter((assessment) =>
       assessment.supportingClaims.every((ref) => claims.isUsable(ref)),
     );
+}
+
+function investigationVersion(store: DependencyAttemptStore) {
+  return dependencyClaimHash({
+    live: getLiveRun(store) ?? null,
+    queries: store.keys("supplemental-query"),
+    runtime: store.keys("runtime-receipt"),
+    sources: store.keys("source-note"),
+  });
+}
+
+function packetSnapshot(store: DependencyAttemptStore, base?: StackPacket) {
+  return store.read(() => ({
+    packet: overlayPacket(store, base),
+    version: investigationVersion(store),
+  }));
+}
+
+function reportWithEffectiveInputs(
+  store: DependencyAttemptStore,
+  packet: StackPacket,
+  report: StackInvestigationReport,
+): StackInvestigationReport {
+  if (
+    !getLiveRun(store) &&
+    !store.size("supplemental-query") &&
+    !store.size("runtime-receipt")
+  )
+    return report;
+  return {
+    ...report,
+    effectiveInputDigest: dependencyClaimHash({
+      format: "codex-security.stack-effective-input/v1",
+      inputDigest: packet.manifest.inputDigest,
+      target: packet.manifest.target,
+      sources: packet.sources,
+      sinks: packet.sinks,
+      stacks: packet.stacks,
+      runtimeReceiptIds: store.keys("runtime-receipt").sort(),
+    }),
+  };
 }
 
 function nextItem(items: WorkItem[], assessments: StackAssessment[]) {
@@ -391,6 +502,7 @@ async function verifyFinal(
   claims: Ledger,
   requireSaved: boolean,
   signal?: AbortSignal,
+  version?: string,
 ): Promise<StackInvestigationReport> {
   const saved = store.get("report", "final");
   const rejection = store.get<string>("stack-migration", "final-rejection");
@@ -405,7 +517,11 @@ async function verifyFinal(
       "The investigator did not finalize the report.",
     );
   const decisions = store.values<StackAssessment>("stack-assessment");
-  const snapshot = finalizeStackReport(packet, decisions, claims);
+  const snapshot = reportWithEffectiveInputs(
+    store,
+    packet,
+    finalizeStackReport(packet, decisions, claims),
+  );
   const digest = dependencyClaimHash(snapshot);
   const items = stackPacketWorkItems(packet);
   const byId = new Map(items.map((item) => [item.id, item]));
@@ -450,6 +566,7 @@ async function verifyFinal(
       packet,
       items,
       repository,
+      store,
       signal,
     );
     const verified = current!.prepared;
@@ -457,8 +574,8 @@ async function verifyFinal(
       claims.preview(verified, original.revision).hash !== ref.hash ||
       dependencyClaimHash(verified.excerpts) !==
         dependencyClaimHash(original.excerpts) ||
-      dependencyClaimHash(verified.receipts) !==
-        dependencyClaimHash(original.receipts)
+      dependencyClaimHash(verified.receipts.map(dependencyClaimHash).sort()) !==
+        dependencyClaimHash(original.receipts.map(dependencyClaimHash).sort())
     ) {
       throw new CodexSecurityError(
         "Supporting evidence changed for claim " + ref.id + ".",
@@ -466,10 +583,18 @@ async function verifyFinal(
     }
   }
   return store.transaction(() => {
-    const report = finalizeStackReport(
+    if (version !== undefined && investigationVersion(store) !== version)
+      throw new CodexSecurityError(
+        "New observations or investigation metadata arrived during finalization. Retry finalize.",
+      );
+    const report = reportWithEffectiveInputs(
+      store,
       packet,
-      store.values<StackAssessment>("stack-assessment"),
-      claims,
+      finalizeStackReport(
+        packet,
+        store.values<StackAssessment>("stack-assessment"),
+        claims,
+      ),
     );
     if (dependencyClaimHash(report) !== digest)
       throw new CodexSecurityError(
@@ -499,21 +624,44 @@ export async function readFinalStackReport(
 ): Promise<StackInvestigationReport> {
   const store = openStackAttempt(state);
   try {
-    const location = runLocation(store);
-    const packet =
-      expected?.packet ??
-      (await readStackPacket(location.inputs, location.repo));
-    if (dependencyClaimHash(packet.manifest) !== location.fingerprint)
+    const live = getLiveRun(store);
+    if (live && expected)
+      throw new CodexSecurityError(
+        "Finalized state does not belong to the expected input packet.",
+      );
+    const location = live ? undefined : runLocation(store);
+    const base = location
+      ? (expected?.packet ??
+        (await readStackPacket(
+          location.inputs,
+          location.repo,
+          expected?.signal,
+        )))
+      : undefined;
+    if (
+      location &&
+      dependencyClaimHash(base!.manifest) !== location.fingerprint
+    )
       throw new CodexSecurityError(
         "Finalized state does not belong to this input packet.",
+      );
+    const { packet, version } = packetSnapshot(store, base);
+    if (
+      expected &&
+      dependencyClaimHash(packet.stacks.queries) !==
+        dependencyClaimHash(expected.packet.stacks.queries)
+    )
+      throw new CodexSecurityError(
+        "Finalized state contains observations outside the expected input packet.",
       );
     return await verifyFinal(
       store,
       packet,
-      expected?.repository ?? location.repo,
+      expected?.repository ?? live?.repo ?? location!.repo,
       openClaims(store, packet),
       true,
       expected?.signal,
+      version,
     );
   } finally {
     store.close();
@@ -532,19 +680,72 @@ export async function executeStackRun(
 ): Promise<unknown> {
   const { state, signal } = options;
   if (command === "init")
-    return initialize(state, options.inputs, options.repo, signal);
-  const store = openStackAttempt(state);
-  try {
-    const location = runLocation(store);
-    if (command === "tools") return { commands: stackRunTools };
-    const packet = await readStackPacket(
-      location.inputs,
-      location.repo,
+    return initialize(
+      state,
+      options.inputs,
+      options.repo,
+      options.input,
       signal,
     );
-    if (dependencyClaimHash(packet.manifest) !== location.fingerprint) {
+  const store = openStackAttempt(state);
+  try {
+    const live = getLiveRun(store);
+    const location = live ? undefined : runLocation(store);
+    const repository = live?.repo ?? location!.repo;
+    if (command === "tools") return { commands: stackRunTools };
+    const base = location
+      ? await readStackPacket(location.inputs, repository, signal)
+      : undefined;
+    if (
+      location &&
+      dependencyClaimHash(base!.manifest) !== location.fingerprint
+    ) {
       throw new CodexSecurityError("The frozen investigation packet changed.");
     }
+    if (command === "record-evidence") {
+      const op = mutation(store, command, options.input);
+      const previous = op.receipt();
+      if (previous) return previous.result;
+      if (op.body["kind"] === "runtime") {
+        const captured = await prepareRuntimeEvidence(
+          op.body,
+          repository,
+          signal,
+        );
+        return op.commit(() => saveRuntimeEvidence(store, captured));
+      }
+      const target = live?.target ?? base!.manifest.target;
+      const captured = await prepareDependencySourceNote(repository, op.body, {
+        targetSha: target.sha,
+        logicalRepository: target.repository,
+        ...(signal && { signal }),
+      });
+      return op.commit(() => {
+        if (
+          live &&
+          dependencyClaimHash(getLiveRun(store)?.target) !==
+            dependencyClaimHash(target)
+        )
+          throw new CodexSecurityError(
+            "The investigation target changed while reading source evidence. Retry record-evidence.",
+          );
+        return saveDependencySourceNote(store, captured);
+      });
+    }
+    if (command === "record-observations") {
+      const op = mutation(store, command, options.input);
+      const previous = op.receipt();
+      if (previous) return previous.result;
+      const input = recordObservationsInputSchema.parse(op.body);
+      if (input.receiptId) selectRuntimeReceipt(store, input.receiptId);
+      return op.commit(() => recordObservations(store, input, base));
+    }
+    if (live) {
+      const gaps = liveMetadataGaps(store);
+      if (command === "next" && gaps.length)
+        return { workItem: null, target: live.target, openQuestions: gaps };
+    }
+    const { packet, version } = packetSnapshot(store, base);
     const { manifest } = packet;
     const claims = openClaims(store, packet);
     const items = stackPacketWorkItems(packet);
@@ -558,22 +759,14 @@ export async function executeStackRun(
             workItem: null,
             coverage: summarizeStackCoverage(packet, assessments()),
           };
-        const observation = item.observation;
         return {
-          workItem: {
-            ...item,
-            observation: observation && {
-              id: observation.id,
-              stackHash: observation.stackHash,
-              sourceIndex: observation.sourceIndex,
-              sinkIndex: observation.sinkIndex,
-              frameCount: observation.frames.length,
-              framesTruncated: observation.framesTruncated,
-              sinkIds: observation.sinkIds,
-              sinkMatches: observation.sinkMatches,
-            },
-          },
+          workItem: item,
           receiptId: captureId(packet, item),
+          rootFirstRawIndices: item.observation
+            ? stackFramesRootFirst(item.observation).map(
+                ({ rawIndex }) => rawIndex,
+              )
+            : [],
           target: manifest.target,
           cve: manifest.cve,
           advisory: manifest.advisory,
@@ -584,49 +777,24 @@ export async function executeStackRun(
           ),
         };
       }
-      case "read-stacks": {
-        const { workItemId } = stackReadSchema.parse(options.input);
-        const item = items.find((entry) => entry.id === workItemId);
-        if (!item)
-          throw new CodexSecurityError("Unknown work item: " + workItemId);
-        return {
-          ...item,
-          receiptId: captureId(packet, item),
-          rootFirstRawIndices: item.observation
-            ? stackFramesRootFirst(item.observation).map(
-                ({ rawIndex }) => rawIndex,
-              )
-            : [],
-        };
-      }
       case "query-claims":
         return claims.query(options.input);
       case "summarize-coverage":
         return summarizeStackCoverage(packet, assessments());
       case "finalize":
+        if (live && (!packet.sinks.sinks.length || !items.length))
+          throw new CodexSecurityError(
+            "Finalize requires at least one identified sink and an assessed observation or coverage gap.",
+          );
         return await verifyFinal(
           store,
           packet,
-          location.repo,
+          repository,
           claims,
           false,
           signal,
+          version,
         );
-      case "record-evidence": {
-        const op = mutation(store, command, options.input);
-        const previous = op.receipt();
-        if (previous) return previous.result;
-        const captured = await prepareDependencySourceNote(
-          location.repo,
-          op.body,
-          {
-            targetSha: manifest.target.sha,
-            logicalRepository: manifest.target.repository,
-            ...(signal && { signal }),
-          },
-        );
-        return op.commit(() => saveDependencySourceNote(store, captured));
-      }
       case "record-claims": {
         const op = mutation(store, command, options.input);
         const previous = op.receipt();
@@ -636,10 +804,15 @@ export async function executeStackRun(
           input.claims,
           packet,
           items,
-          location.repo,
+          repository,
+          store,
           signal,
         );
         return op.commit(() => {
+          if (investigationVersion(store) !== version)
+            throw new CodexSecurityError(
+              "The investigation changed while preparing claims. Retry record-claims.",
+            );
           const refs = rows.map(({ prepared, expectedRevision }) => {
             const { record } = claims.propose(prepared, expectedRevision);
             return claims.reference(record);
@@ -674,6 +847,10 @@ export async function executeStackRun(
           signal,
         );
         return op.commit(() => {
+          if (investigationVersion(store) !== version)
+            throw new CodexSecurityError(
+              "The investigation changed while assessing this path. Run next again.",
+            );
           if (current()?.id !== item.id)
             throw new CodexSecurityError(
               "The active work item changed. Run next again.",

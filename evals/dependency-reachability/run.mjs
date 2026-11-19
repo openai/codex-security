@@ -141,7 +141,10 @@ async function initialize(fixture) {
 async function contracts(fixture) {
   const { manifest, tool } = await initialize(fixture);
   const next = await tool("next");
-  const item = await tool("read-stacks", { workItemId: next.workItem.id });
+  // The harness can also compare CLI builds that returned only a frame count.
+  const item = Array.isArray(next.workItem.observation.frames)
+    ? { ...next.workItem, receiptId: next.receiptId }
+    : await tool("read-stacks", { workItemId: next.workItem.id });
   const binding = item.observation.bindings[0];
   const result = await tool("record-claims", {
     claims: [
