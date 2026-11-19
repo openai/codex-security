@@ -1226,25 +1226,19 @@ async function canonicalCreationPath(path: string): Promise<string> {
 }
 
 async function canonicalPythonPath(path: string): Promise<string> {
-  try {
-    await realpath(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    for (let ancestor = path; ; ancestor = dirname(ancestor)) {
-      const metadata = await lstat(ancestor).catch(undefinedIfMissingFile);
-      if (metadata?.isSymbolicLink()) {
-        const target = await readlink(ancestor);
-        return canonicalPythonPath(
-          (isAbsolute(target)
-            ? target
-            : `${dirname(ancestor)}${sep}${target}`) +
-            path.slice(ancestor.length),
-        );
-      }
-      if (metadata !== undefined || dirname(ancestor) === ancestor) break;
-    }
+  const requested = resolveTargetPath(path);
+  for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
+    // Keep missing components (including "link/..") for pinned-tree lookup.
+    const suffix = requested.slice(ancestor.length);
+    const physical = await realpath(ancestor).catch(undefinedIfMissingFile);
+    if (physical !== undefined) return physical + suffix;
+    const metadata = await lstat(ancestor).catch(undefinedIfMissingFile);
+    if (metadata?.isSymbolicLink())
+      return canonicalPythonPath(
+        resolveTargetPath(await readlink(ancestor), dirname(ancestor)) + suffix,
+      );
+    if (dirname(ancestor) === ancestor) return requested;
   }
-  return canonicalCreationPath(path);
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
@@ -1992,11 +1986,11 @@ async function loadResumableScan(
               ? ".exe"
               : "");
           if (await realpath(candidate).catch(undefinedIfMissingFile)) break;
-          const selected = relative(
-            matchedRoot,
-            await canonicalPythonPath(candidate),
-          );
-          if (!relativePathIsOutside(selected)) {
+          const selected = await canonicalPythonPath(candidate);
+          if (
+            selected.startsWith(matchedRoot + sep) ||
+            !relativePathIsOutside(relative(matchedRoot, selected))
+          ) {
             await restorePaths(matchedRoot, [selected]);
             if (await realpath(candidate).catch(undefinedIfMissingFile)) break;
           }
@@ -2426,7 +2420,6 @@ async function checkoutRevision(
     }
     gitOptions.push("--git-dir", repairDirectory, "--work-tree", path);
     gitEnvironment["GIT_OBJECT_DIRECTORY"] = canonicalObjects;
-    gitEnvironment["GIT_INDEX_FILE"] = join(canonicalGit, "index");
     const configured = async (
       file: string,
       key: string,
@@ -2533,21 +2526,22 @@ async function checkoutRevision(
       );
   }
   if (
-    restore &&
+    repairDirectory &&
     !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
   ) {
     // Rebuild the lost index without restoring unrelated deleted worktree files.
+    gitEnvironment["GIT_INDEX_FILE"] = join(gitDirectory, "index");
     await git("read-tree", retainedHead || task.revision);
+    delete gitEnvironment["GIT_INDEX_FILE"];
   }
-  if (!retainedHead)
-    await git(
-      "checkout",
-      "--quiet",
-      "--detach",
-      ...(restore ? ["--no-overwrite-ignore"] : []),
-      task.revision,
-    );
-  if (restore) {
+  if (!restore) {
+    await git("checkout", "--quiet", "--detach", task.revision);
+  } else {
+    if (!retainedHead)
+      await git("update-ref", "--no-deref", "HEAD", task.revision);
+    // A full pinned index in the private (or freshly initialized) Git directory
+    // inventories selected paths even when the retained index omits them.
+    await git("read-tree", "--no-sparse-checkout", task.revision);
     const ignoreCase =
       (
         await git("config", "--bool", "core.ignorecase").catch(
@@ -2650,20 +2644,7 @@ async function checkoutRevision(
     const scopes = [...selectedPaths, ...aliases].map((name) =>
       Buffer.from(comparisonPath(name)),
     );
-    const worktreeDeleted = await gitOutput(["ls-files", "--deleted", "-z"]);
-    const deletedPaths = Buffer.concat([
-      worktreeDeleted,
-      await gitOutput([
-        "diff",
-        "--cached",
-        "--name-only",
-        "--diff-filter=D",
-        "--no-renames",
-        "-z",
-        task.revision,
-        "--",
-      ]),
-    ]);
+    const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
     const selectedDeleted: Buffer[] = [];
     let start = 0;
     for (

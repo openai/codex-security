@@ -2682,6 +2682,47 @@ for (const modified of [
   });
 }
 
+test.each(["missing HEAD", "skip-worktree"])(
+  "scoped recovery with %s preserves the retained index",
+  async (condition) => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "retained-index-source");
+    await writeFile(join(source.path, "deleted.txt"), "Tracked file");
+    await writeFile(join(source.path, "edited.txt"), "Original content");
+    git(source.path, "add", ".");
+    commitFixture(source.path, "Tracked files outside the scope");
+    source.revision = git(source.path, "rev-parse", "HEAD");
+    await writeRecoveryTask(paths, source, "src");
+    const { runs, campaign } = await completedRetry(paths);
+    const checkout = recoveryCheckout(paths);
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    git(checkout, "rm", "deleted.txt");
+    await writeFile(join(checkout, "edited.txt"), "Staged edit");
+    git(checkout, "add", "edited.txt");
+    if (condition === "skip-worktree")
+      git(checkout, "update-index", "--skip-worktree", "src/app.ts");
+    else await rm(join(checkout, ".git", "HEAD"));
+    const index = join(checkout, ".git", "index");
+    const saved = await readFile(index);
+    const app = join(checkout, "src", "app.ts");
+    const expected = await readFile(app);
+    await rm(join(checkout, "src"), { recursive: true });
+
+    await expectReused(campaign);
+
+    expect(await readFile(index)).toEqual(saved);
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(source.revision);
+    expect(await readFile(app)).toEqual(expected);
+    await expect(lstat(join(checkout, "deleted.txt"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readFile(join(checkout, "edited.txt"), "utf8")).toBe(
+      "Staged edit",
+    );
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
 for (const nested of [false, true, "chain"] as const) {
   testPosix(
     `scope alias recovery restores tracked link nested=${nested}`,
@@ -3759,6 +3800,7 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
     "Refresh this synthetic report.\n",
   );
 
+  if (process.platform !== "win32") await rm(join(checkout, "jump"));
   await rm(join(checkout, interpreterPath));
   await expectReused(campaign);
   expect(await realpath(join(checkout, interpreterPath))).toBe(
