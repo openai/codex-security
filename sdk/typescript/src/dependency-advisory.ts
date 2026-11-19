@@ -141,6 +141,11 @@ export interface PackageAdvisory {
   advisories: FrozenDependencyAdvisory[];
 }
 
+export const advisoryTriggerInstructions = [
+  "Describe what an attacker must control, how the affected operation must be used, and which downstream behavior is required for impact. Include only necessary conditions grounded in the vulnerability evidence. Make each condition concise and independently checkable.",
+  "For a given affected operation, combine alternative ways to meet the same requirement into one condition joined by OR. Treat example payloads, optional configurations, and example impacts as illustrations unless the evidence establishes a requirement.",
+] as const;
+
 export const frozenDependencyAdvisorySchema = advisoryRecord
   .extend({
     sha256: z.string().regex(/^[a-f0-9]{64}$/u),
