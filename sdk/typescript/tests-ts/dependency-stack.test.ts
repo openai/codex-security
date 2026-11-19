@@ -248,12 +248,15 @@ test("an unchanged finalized packet with a legacy read-stacks receipt retains it
   const savedBytes = () => {
     const db = sqliteDatabaseOpener()(state);
     try {
-      const [row] = db
-        .prepare(
-          "SELECT value FROM records WHERE kind = 'report' AND id = 'final'",
-        )
-        .all() as { value: string }[];
-      return row!.value;
+      const statement = db.prepare(
+        "SELECT value FROM records WHERE kind = 'report' AND id = 'final'",
+      );
+      try {
+        const [row] = statement.all() as { value: string }[];
+        return row!.value;
+      } finally {
+        statement.finalize?.();
+      }
     } finally {
       db.close();
     }
