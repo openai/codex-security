@@ -1,4 +1,5 @@
 import type { GraphCandidates } from "./dependency-graph-candidates.js";
+import { defaultDependencyCallerScope } from "./dependency-caller-scope.js";
 import {
   assertReviewedPremises,
   claimInputs,
@@ -153,7 +154,12 @@ export const proposedDisposition = dependencyCoverageDispositionSchema
 type FindingInput =
   z.infer<typeof proposedUse> | z.infer<typeof proposedDisposition>;
 export const investigationSchema = z.strictObject({
-  outOfScope: z.array(z.strictObject({ scope: text, reason: text })).optional(),
+  outOfScope: z
+    .array(z.strictObject({ scope: text, reason: text }))
+    .optional()
+    .describe(
+      "Explain each omitted manifest against the supplied caller or endpoint boundary. An explanation for an exploratory scope with no manifest records a search limitation. Each scope ID may appear once.",
+    ),
   uses: z
     .array(proposedUse)
     .describe(
@@ -699,9 +705,15 @@ export async function verifyProposedDisposition(
     callerScope,
     decidingPremiseEvidence,
   );
-  if (input.classification && (input.kind !== "dismissed" || !callerScope))
+  // Every review receives the effective caller scope, including the default production
+  // boundary. Only an operator-supplied scope can support a deployment assumption.
+  if (
+    input.classification &&
+    (input.kind !== "dismissed" ||
+      !(callerScope ?? defaultDependencyCallerScope).trim())
+  )
     throw new CodexSecurityError(
-      "A test-only dismissal requires an explicit caller scope and an observed caller.",
+      "A test-only dismissal requires a caller scope and an observed caller.",
     );
   if (
     input.kind === "dismissed" &&

@@ -436,6 +436,179 @@ test("a positive use requires an endpoint on each explicitly bounded side", asyn
   }
 });
 
+test("an exploratory scope explanation retains reviewed uses, open handoffs and observed callers", async () => {
+  await using f = await fixture({
+    "package.json": JSON.stringify({
+      name: "example",
+      dependencies: { "fixture-parser": "1.0.0" },
+    }),
+    "secondary.js":
+      'import adapt from "fixture-adapter";\nadapt(other.body);\n',
+  });
+  const adapter = { ecosystem: "npm", name: "fixture-adapter" };
+  const cve = "CVE-2099-0001";
+  const affected = [f.pkg, adapter].map((pkg) => ({
+    package: pkg,
+    versions: ["1.0.0"],
+  }));
+  const advisory = {
+    id: cve,
+    url: "https://example.invalid/advisories/fixture",
+    affected,
+  };
+  const observedCaller = { path: "secondary.js", line: 2 };
+  const explanation = {
+    scope: "2.1",
+    reason: "No adapter manifest or selected version was found.",
+  };
+  const handoff = "Determine which adapter implementation this caller selects.";
+  const result = readDependencyCheckOutput(
+    await runReviewedDependencyCheck(
+      { directory: f.path, subject: cve, signal },
+      {
+        lookupCve: async () => ({
+          cve,
+          advisories: [{ ...advisory, sha256: dependencyRecordHash(advisory) }],
+        }),
+        discover: async ({ package: pkg }) =>
+          pkg.name === adapter.name
+            ? {
+                ...f.discovery,
+                package: adapter,
+                callers: [observedCaller],
+                dependencyFiles: [],
+              }
+            : {
+                ...f.discovery,
+                manifests: [
+                  {
+                    project: ".",
+                    name: "example",
+                    requested: "1.0.0",
+                    path: "package.json",
+                    line: 1,
+                  },
+                ],
+                callers: [
+                  { ...f.discovery.callers[0]!, manifest: "package.json" },
+                ],
+              },
+        async runAgent(req) {
+          const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          if (!req.coordinator) {
+            return JSON.stringify({
+              decisions: packet.claims.map(
+                (c: PremiseRef & { availableEvidenceKeys: string[] }) => ({
+                  ...reference(c),
+                  approved: true,
+                  reason: "Checked the cited source and outstanding caller.",
+                  evidenceKeys: c.availableEvidenceKeys,
+                }),
+              ),
+            });
+          }
+          const submit = (outOfScope: { scope: string; reason: string }[]) =>
+            req.onCoordinatorAnswer!(
+              JSON.stringify({ uses: [], limitations: [], outOfScope }),
+            );
+          const feedback = async (
+            scope: (typeof explanation)[],
+            reason: string,
+          ) =>
+            expect(
+              JSON.parse((await submit(scope))!).feedback.reason,
+            ).toContain(reason);
+          // A search explanation cannot account for the discovered parser manifest.
+          await feedback(
+            [explanation],
+            "omitted a discovered dependency scope",
+          );
+          const { call } = await req.investigationTools!();
+          await call("submit_dependency_assessments", {
+            assessments: [
+              { id: "parser", expectedRevision: 0, use: f.use },
+              {
+                id: "adapter",
+                expectedRevision: 0,
+                disposition: {
+                  kind: "unresolved",
+                  scope: explanation.scope,
+                  reason: handoff,
+                  locations: [],
+                  evidence: [
+                    {
+                      path: observedCaller.path,
+                      startLine: 1,
+                      endLine: 2,
+                      supports: ["context"],
+                    },
+                  ],
+                  observations: [],
+                },
+              },
+            ],
+          });
+          await feedback(
+            [{ ...explanation, scope: "3.1" }],
+            "Unknown dependency scope",
+          );
+          await feedback(
+            [explanation, explanation],
+            "Duplicate scope explanation",
+          );
+          await feedback(
+            [{ ...explanation, scope: f.use.scope }],
+            "assessed dependency scope",
+          );
+          expect(await submit([explanation])).toBeUndefined();
+          return JSON.stringify({
+            uses: [],
+            limitations: [],
+            outOfScope: [explanation],
+          });
+        },
+      },
+    ),
+  );
+  if (!("cve" in result)) throw Error("Expected a CVE report.");
+  expect(result.uses).toMatchObject([
+    { conclusionClaim: { id: "assessment:parser", revision: 1 } },
+  ]);
+  expect(
+    result.limitations.some(
+      (text) =>
+        text.includes(adapter.name) && text.includes(explanation.reason),
+    ),
+  ).toBe(true);
+  expect(result.coverage?.filter((row) => row.kind === "dismissed")).toEqual(
+    [],
+  );
+  expect(result.coverage).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "unresolved",
+        reason: handoff,
+        conclusionClaim: expect.objectContaining({ id: "disposition:adapter" }),
+      }),
+      expect.objectContaining({
+        kind: "unresolved",
+        reason: expect.stringContaining("secondary.js:2"),
+        evidence: [
+          expect.objectContaining({
+            path: observedCaller.path,
+            startLine: 2,
+            endLine: 2,
+            commit: f.revision,
+          }),
+        ],
+      }),
+    ]),
+  );
+  expect(
+    result.coverage?.some((row) => row.reason === explanation.reason),
+  ).toBe(false);
+});
+
 test("independent approvals cannot be carried to a newer revision", async () => {
   await using f = await fixture();
   const store = new DependencyAttemptStore(join(f.path, "attempt.sqlite"));
@@ -2953,7 +3126,10 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
 
 test("independently verifies candidate dispositions and publishes their selected evidence and handoffs", async () => {
   await using f = await fixture({
-    "parser.test.js": "import parse from 'fixture-parser';\nparse('sample');\n",
+    "parser.test.js":
+      "import { test } from 'node:test'; import parse from 'fixture-parser';\ntest('fixture', () => parse('sample'));\n",
+    "package.json":
+      '{"scripts":{"start":"node app.js","test":"node --test parser.test.js"}}\n',
   });
   const caller = { path: "app.js", line: 2 };
   const demo = { path: "parser.test.js", line: 2 };
@@ -3017,7 +3193,6 @@ test("independently verifies candidate dispositions and publishes their selected
       directory: f.path,
       subject: "npm:fixture-parser",
       vulnDescription: "Review the parser.",
-      scope: "Investigate production workloads.",
       signal,
       evidenceSources: [
         { server: "catalog", instructions: "Identify the deployed consumer." },
@@ -3073,6 +3248,16 @@ test("independently verifies candidate dispositions and publishes their selected
           call("submit_dependency_assessments", {
             assessments: [{ id, expectedRevision: 0, disposition }],
           });
+        await expect(
+          submit("default-deployment", {
+            ...input,
+            place: {
+              ...place,
+              deploymentBasis: "assumed_not_deployed",
+              deploymentDetail: packet.callerScope,
+            },
+          }),
+        ).rejects.toThrow("caller-supplied boundary");
         await expect(
           submit("unknown-candidate", {
             ...input,
@@ -3159,7 +3344,10 @@ test("independently verifies candidate dispositions and publishes their selected
           classification: "test_only_outside_scope",
           reason: "The test fixture invokes the parser only in tests.",
           locations: [demo],
-          evidence: [source(demo)],
+          evidence: [
+            { ...source(demo), startLine: 1 },
+            source({ path: "package.json", line: 1 }),
+          ],
           observations: [],
         });
         return JSON.stringify({ uses: [], limitations: [] });
