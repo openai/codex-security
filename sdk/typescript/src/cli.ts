@@ -1601,9 +1601,20 @@ function patchWorkspaceProfile(
       ),
       ...Object.fromEntries(
         credentialStorePaths.map((path) => {
-          if (process.platform !== "win32" || existsSync(path))
-            return [path, { ".": "deny" }];
-          return [windowsMissingStorePattern(path), "deny"];
+          if (process.platform === "win32" && !existsSync(path))
+            return [windowsMissingStorePattern(path), "deny"];
+          if (process.platform === "linux" && !existsSync(dirname(path))) {
+            // A literal deny under an absent directory makes bubblewrap mount
+            // a missing parent. Expand the exact filename at each tool launch.
+            const escape = (part: string) =>
+              part.replace(/[\\*?[\]{},]/gu, "\\$&");
+            const name = escape(basename(path)).replace(
+              /[a-zA-Z0-9.]/u,
+              "[$&]",
+            );
+            return [join(escape(dirname(path)), name), "deny"];
+          }
+          return [path, { ".": "deny" }];
         }),
       ),
       ...(workspace["exclude_tmpdir_env_var"] === true
@@ -11479,6 +11490,35 @@ async function patchPreflightRemoteSettings(
   return settings;
 }
 
+async function requireOperatorPatchMirrors(
+  pushRemotes: readonly string[],
+  repository: string,
+  dependencies: CliDependencies,
+) {
+  const unapproved = new Set(pushRemotes);
+  if (unapproved.size < 2) return;
+  // Native push sends history to every pushurl. Compare the effective list
+  // (including URL rewrites) with literal destinations the operator selected.
+  const entries = await patchScopedConfig(
+    "^remote\\.origin\\.pushurl$",
+    repository,
+    dependencies,
+  );
+  const directories = await patchTransportDirectories(repository, dependencies);
+  for (let i = 0; i + 2 < entries.length; i += 3) {
+    const url = entries[i + 2]!.slice("remote.origin.pushurl\n".length);
+    if (
+      unapproved.has(url) &&
+      (await operatorPatchConfig(entries[i]!, entries[i + 1]!, directories))
+    )
+      unapproved.delete(url);
+  }
+  if (unapproved.size)
+    throw new CodexSecurityError(
+      "Patch publication to multiple destinations requires each effective remote.origin.pushurl in your user or system Git configuration. Use a conditional include for this checkout or select a single destination.",
+    );
+}
+
 async function patchPublicationDestination(
   repository: string,
   branch: string,
@@ -13054,66 +13094,11 @@ async function captureHiddenPatchContent(
         return [];
       throw error;
     });
-    const commands = new Map<string, boolean>();
-    for (const setting of settings) {
-      if (!setting) continue;
-      const end = setting.indexOf("\n");
-      // Preserve Git's last assignment, including an explicitly empty override.
-      const key = end < 0 ? setting : setting.slice(0, end);
-      commands.set(key, end !== setting.length - 1);
-    }
-    const drivers = new Set<string>();
-    for (const [key, active] of commands)
-      if (active && !key.endsWith(".required"))
-        drivers.add(key.slice(7, key.lastIndexOf(".")));
-    if (drivers.size) {
-      // Unspecified attributes have no record in --all mode. A driver can be
-      // named "unspecified", "set", or "unset" just like any other driver.
-      const ambiguous = ["set", "unset"].filter((value) => drivers.has(value));
-      const literal = new Set(
-        ambiguous.length
-          ? await patchGitRecords(
-              root,
-              [
-                ...source,
-                "ls-files",
-                "-z",
-                "--",
-                ...ambiguous.map((name) => ":(attr:ident filter=" + name + ")"),
-              ],
-              dependencies,
-              {
-                environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
-                patchSnapshot: [],
-              },
-            )
-          : [],
-      );
-      const input = Buffer.from(
-        [...materialized.keys()].join("\0") + "\0",
-        "latin1",
-      );
-      for (const direction of [[], ["--cached"]]) {
-        const attributes = await patchGitRecords(
-          root,
-          [...source, "check-attr", ...direction, "-z", "--stdin", "--all"],
-          dependencies,
-          { environment, patchSnapshot: [], input },
-        );
-        for (let i = 0; i + 2 < attributes.length; i += 3) {
-          const path = attributes[i]!;
-          const value = attributes[i + 2]!;
-          if (
-            attributes[i + 1] === "filter" &&
-            drivers.has(value) &&
-            (!ambiguous.includes(value) || literal.has(path))
-          )
-            materialized.delete(path);
-        }
-      }
-      if (!materialized.size) return;
-    }
-    const filters = [...commands.keys()].map((key) => patchPathText(key));
+    // Compare against the built-in checkout representation even when a
+    // smudge driver exists. Any differing bytes still need a fingerprint.
+    const filters = settings
+      .filter(Boolean)
+      .map((entry) => patchPathText(entry.split("\n", 1)[0]!));
     renderEnvironment = {
       ...environment,
       GIT_CONFIG_PARAMETERS: patchFilterParameters(
@@ -13207,6 +13192,11 @@ async function preparePatchPublication(
     );
     existing = Boolean(destination.existing);
     if (!existing) {
+      await requireOperatorPatchMirrors(
+        destination.pushRemotes,
+        repository,
+        dependencies,
+      );
       const name = `codex-security-preflight-${randomUUID()}`;
       const settings = destination.settings.flatMap((setting) => [
         "-c",
@@ -13313,7 +13303,9 @@ async function preparePatchPublication(
     ? await patchGitRecords(root, listIgnored, dependencies)
     : [];
   const stagedBlobs = new Set<string>();
-  const nestedRepositoryDigests = new Set<string>();
+  const nestedRepositoryDigests = new Set(
+    gitControls?.nestedConfigurationDigests,
+  );
   // An index can hold bytes absent from both HEAD and the worktree.
   const captureStagedBlobs = async (checkout?: string) => {
     const source = checkout === undefined ? [] : ["-C", checkout];
@@ -13663,6 +13655,7 @@ async function publishPatchBranch(
     }
 
     if (!url) {
+      await requireOperatorPatchMirrors(pushRemotes, repository, dependencies);
       let head = branch;
       if (!gitlab) {
         const base = new URL(

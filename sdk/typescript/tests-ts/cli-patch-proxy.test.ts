@@ -78,7 +78,12 @@ test.each(["compiled exec directory", "config separator in executable path"])(
   },
 );
 
-test("one native push uses the configured proxy for each destination", async () => {
+test("one native push uses the configured proxy for each destination", () =>
+  checkNativePush(true));
+test("one checkout-selected mirror blocks a native push to all destinations", () =>
+  checkNativePush(false));
+
+async function checkNativePush(approved: boolean) {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-proxy-routes-");
   const system = join(external, "system.gitconfig");
@@ -107,7 +112,13 @@ test("one native push uses the configured proxy for each destination", async () 
     const host = "127.0.0.1:" + port;
     const remote = "git://" + host + "/team/repository.git";
     if (port === 1) git("remote", "set-url", "origin", remote);
-    git("config", "--add", "remote.origin.pushurl", remote);
+    git(
+      "config",
+      ...(approved || port === 1 ? ["--file", include] : []),
+      "--add",
+      "remote.origin.pushurl",
+      remote,
+    );
     const receiver = join(external, "receiver-" + port);
     git("init", "--bare", receiver);
     receivers.push(receiver);
@@ -168,9 +179,16 @@ exec git receive-pack ${literal}
     },
     { localHosting: false },
   );
+  if (!approved) {
+    expect(outcome.stderr).toContain("multiple destinations");
+    expect(pushes).toBe(0);
+    for (const receiver of receivers)
+      expect(git("--git-dir", receiver, "for-each-ref")).toBe("");
+    return;
+  }
   expect(pushes, outcome.stderr).toBe(1);
   for (const receiver of receivers)
     expect(
       git("--git-dir", receiver, "rev-parse", "refs/heads/" + branch),
     ).toBe(commit);
-});
+}

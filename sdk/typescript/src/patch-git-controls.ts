@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
@@ -195,6 +196,7 @@ export async function withPatchGitIndex<T>(
 export interface PatchGitControls {
   readonly publicationHooks: PatchPublicationHooks;
   readonly nestedCheckouts: readonly string[];
+  readonly nestedConfigurationDigests: ReadonlySet<string>;
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly unavailableFilters: readonly string[];
@@ -501,6 +503,18 @@ function credentialPointerFiles(
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
+  // gh stores file-backed logins in hosts.yml. A delegate can unset an
+  // override to consult the default directory, or read the file directly.
+  const home =
+    environment[process.platform === "win32" ? "USERPROFILE" : "HOME"] ||
+    homedir();
+  selected.add(join(home, ".config", "gh", "hosts.yml"));
+  if (environment["XDG_CONFIG_HOME"])
+    selected.add(join(environment["XDG_CONFIG_HOME"], "gh", "hosts.yml"));
+  if (process.platform === "win32" && environment["APPDATA"])
+    selected.add(join(environment["APPDATA"], "GitHub CLI", "hosts.yml"));
+  if (environment["GH_CONFIG_DIR"])
+    selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
   for (const { defaultPath, path } of awsProfileFiles(
     awsAccountHome(environment),
     environment,
@@ -1027,6 +1041,7 @@ export async function capturePatchGitControls(
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
   const administrationLinks = new Set<string>();
   const nestedDirectories = new Map<string, readonly string[]>();
+  const nestedConfigurationDigests = new Set<string>();
   const rememberAdministrationReference = async (
     path: string,
   ): Promise<void> => {
@@ -1185,7 +1200,7 @@ export async function capturePatchGitControls(
       return storeTarget(relativeFile(parent, await readlink(path)));
     return relativeFile(await storeTarget(parent), basename(path));
   };
-  const protectStore = async (path: string) => {
+  const protectStore = async (path: string, includeDirectory = false) => {
     try {
       const metadata = await stat(path).catch(missing);
       if (metadata && !metadata.isFile() && !metadata.isDirectory()) {
@@ -1194,10 +1209,10 @@ export async function capturePatchGitControls(
         unisolatedCredentialHelper = true;
         return;
       }
-      if (metadata?.isFile()) hostMayReadStore = true;
+      if (metadata?.isFile() || includeDirectory) hostMayReadStore = true;
       // Mounting a deny at a symlink itself fails on Linux. Git's file store
       // follows the link when locking and replacing its backing file.
-      if (!metadata || metadata.isFile())
+      if (!metadata || metadata.isFile() || includeDirectory)
         credentialStorePaths.add(await storeTarget(path));
     } catch (error) {
       // Git cannot read an inaccessible store or a cyclic link. Preserve its
@@ -1231,21 +1246,26 @@ export async function capturePatchGitControls(
     if (xdg) await protectStore(relativeFile(root, xdg));
     // Git for Windows can initialize HOME from the drive and home path.
     // libcurl otherwise falls back to USERPROFILE or the Unix account home.
-    let home = await expandConfigurationPath("~");
-    if (!home) {
-      if (process.platform === "win32") home = userProfile ?? undefined;
-      else {
-        try {
-          home = userInfo().homedir;
-        } catch {
-          // An effective UID need not have an entry in the password database.
-        }
-      }
+    let accountHome: string | undefined;
+    try {
+      accountHome = userInfo().homedir;
+    } catch {
+      // An effective UID need not have an entry in the password database.
     }
+    const profile = process.platform === "win32" ? userProfile : undefined;
+    const home = (await expandConfigurationPath("~")) || profile || accountHome;
     if (home) {
       await protectTransportFile(root, relativeFile(home, ".netrc"));
       await protectTransportFile(root, relativeFile(home, "_netrc"));
     }
+    // OpenSSH locates account keys independently of Git's HOME override.
+    // Checkout-selected hooks can otherwise copy a key into COMMIT_EDITMSG.
+    for (const directory of new Set([home, profile, accountHome]))
+      if (directory)
+        await protectStore(
+          relativeFile(root, relativeFile(directory, ".ssh")),
+          true,
+        );
   }
   const globalConfigurationPaths: string[] = [];
   if (configuration.global !== undefined) {
@@ -1721,7 +1741,17 @@ export async function capturePatchGitControls(
         "config",
       ])
     ).replace(/\n$/u, "");
-    await rememberSelectedConfiguration(localConfig);
+    const captureLocalConfig = async (path: string) => {
+      await rememberSelectedConfiguration(path);
+      // Absorbed submodules keep these files outside their worktrees. The
+      // status inventory omits them even when they contain local credentials.
+      const contents = controlPaths.get(path)?.contents;
+      if (automaticPublication && checkout !== root && contents?.length)
+        nestedConfigurationDigests.add(
+          createHash("sha256").update(contents).digest("hex"),
+        );
+    };
+    await captureLocalConfig(localConfig);
     let worktreeConfig = false;
     try {
       worktreeConfig =
@@ -1753,7 +1783,7 @@ export async function capturePatchGitControls(
           "config.worktree",
         ])
       ).replace(/\n$/u, "");
-      await rememberSelectedConfiguration(path);
+      await captureLocalConfig(path);
     }
     await captureHooks();
   };
@@ -2583,6 +2613,7 @@ export async function capturePatchGitControls(
       ]),
     ],
     nestedCheckouts: [...nestedDirectories.keys()],
+    nestedConfigurationDigests,
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     unavailableFilters: unisolatedCredentialHelper ? protectedFilterKeys() : [],
     credentialStorePaths: [...credentialStorePaths],

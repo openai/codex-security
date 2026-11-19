@@ -119,9 +119,11 @@ for (const kind of [
   "ignored metadata",
   "committed",
   "initialized submodule",
+  "metadata in initialized submodule",
   "untracked file in initialized submodule",
   "tracked edit in initialized submodule",
   "ident edit in initialized submodule",
+  "filtered ident edit in initialized submodule",
   "encoded ident edit in initialized submodule",
   "assume-unchanged edit in initialized submodule",
   "skip-worktree edit in initialized submodule",
@@ -173,6 +175,10 @@ for (const kind of [
         );
         const encodedIdent =
           kind === "encoded ident edit in initialized submodule";
+        const filteredIdent =
+          kind === "filtered ident edit in initialized submodule";
+        const nestedConfig = kind === "metadata in initialized submodule";
+        if (filteredIdent) nestedGit("config", "filter.noop.smudge", "cat");
         const encoding = encodedIdent ? "utf16le" : "utf8";
         if (ordinaryIdent) {
           // These names overlap Git's display of missing and boolean attributes.
@@ -196,7 +202,9 @@ for (const kind of [
             "local.txt ident " +
               (encodedIdent
                 ? "-text -filter working-tree-encoding=UTF-16LE"
-                : "-text") +
+                : filteredIdent
+                  ? "-text filter=noop"
+                  : "-text") +
               "\n.gitignore ident -text\n",
           );
           nestedGit("add", ".gitattributes");
@@ -339,6 +347,18 @@ for (const kind of [
           git("commit", "-m", "Synthetic registered submodule");
           git("submodule", "init");
           git("submodule", "absorbgitdirs", "--", "nested");
+          if (nestedConfig) {
+            nestedGit(
+              "config",
+              "http.extraHeader",
+              "Authorization: Bearer SYNTHETIC_METADATA_CREDENTIAL",
+            );
+            source = join(
+              nestedGit("rev-parse", "--absolute-git-dir"),
+              "config",
+            );
+            content = await readFile(source, "utf8");
+          }
           expect(
             git("ls-files", "--others", "--ignored", "--exclude-standard"),
           ).toBe("");
@@ -361,6 +381,7 @@ for (const kind of [
           hiddenFlag ||
             ordinaryIdent ||
             kind.startsWith("ignored") ||
+            nestedConfig ||
             kind === "initialized submodule"
             ? ""
             : ordinarySubmoduleFile || trackedEdit

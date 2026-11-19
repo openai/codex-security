@@ -219,6 +219,13 @@ export async function runWorkflow(
           return args[2]!.slice(args[2]!.indexOf("/") + 1);
       }
       const environment = { ...commandOptions?.environment };
+      // The local transport adapter owns the synthetic hosted destinations.
+      if (localRemotes.size && args.at(-1) === "^remote\\.origin\\.pushurl$")
+        return [...localRemotes.keys()]
+          .map(
+            (url) => `command\0command line:\0remote.origin.pushurl\n${url}\0`,
+          )
+          .join("");
       for (const [key, value] of Object.entries(environment)) {
         if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
         for (const [hosted, local] of localRemotes)

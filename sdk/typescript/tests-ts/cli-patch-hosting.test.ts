@@ -1343,11 +1343,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         );
         for (const destination of [remote, secondary])
           git(
-            "remote",
-            "set-url",
+            "config",
+            "--file",
+            config,
             "--add",
-            "--push",
-            "origin",
+            "remote.origin.pushurl",
             `https://127.0.0.2:${origin.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
         git(
@@ -1966,6 +1966,17 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
+              if (args.at(-1) === "^remote\\.origin\\.pushurl$") {
+                // This host lookup fixture explicitly selects both destinations.
+                const first =
+                  mirror ?? `${hostingUrl}/first-owner/repository.git`;
+                return [first, pushRemote]
+                  .map(
+                    (url) =>
+                      `command\0command line:\0remote.origin.pushurl\n${url}\0`,
+                  )
+                  .join("");
+              }
               if (
                 args.includes("--show-scope") &&
                 args.at(-1) === "core.sshCommand"

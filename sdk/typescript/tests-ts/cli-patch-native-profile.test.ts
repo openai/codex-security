@@ -931,6 +931,12 @@ test("patch model and clean filters cannot read selected authentication files", 
   ];
   const policyCluster = join(operator, "policy cluster");
   const registry = join(operator, "selected registry");
+  const gh = join(operator, "selected gh");
+  const defaultGh = join(operator, ".config", "gh");
+  const ssh = join(operator, ".ssh");
+  await mkdir(gh);
+  await mkdir(ssh);
+  await mkdir(defaultGh, { recursive: true });
   const npm = join(operator, "selected npmrc");
   await mkdir(registry);
   const clusterList = (files: string[]) =>
@@ -940,6 +946,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   const pointers = {
     KUBECONFIG: clusterList(clusterFiles),
     DOCKER_CONFIG: registry,
+    GH_CONFIG_DIR: gh,
     NPM_CONFIG_USERCONFIG: npm,
   };
   const policySet = {
@@ -994,6 +1001,9 @@ test("patch model and clean filters cannot read selected authentication files", 
     ...clusterFiles,
     policyCluster,
     join(registry, "config.json"),
+    join(gh, "hosts.yml"),
+    join(defaultGh, "hosts.yml"),
+    join(ssh, "id_rsa"),
     npm,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);

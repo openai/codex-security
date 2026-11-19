@@ -2783,7 +2783,10 @@ and a drive letter for an explicit store on Windows. The same rules cover
 `.netrc` and `_netrc` in the host user's effective home directory, the file
 selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
-URL-specific values. The host HTTPS transport retains access to these files.
+URL-specific values. Delegates also have deny rules for the account's `.ssh`
+directory and the GitHub CLI's file-backed logins in `hosts.yml`, including
+the directory selected by `GH_CONFIG_DIR`. The host transport retains access
+to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can
@@ -2864,6 +2867,8 @@ environment. Publication rechecks the selected files before running SSH.
 If they change, inspect them before retrying. A resumed publication selects
 the current operator settings. With `--external-sandbox`, the operator supplies
 the filesystem isolation.
+For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
+publication also rechecks the selected executable before each connection.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
 
@@ -2915,6 +2920,11 @@ File permissions are left unchanged. This adds reads proportional to the ignored
 data and does not detect arbitrary transformed or partial copies. Existing tracked
 edits are protected by path overlap and Git's rename/copy recognition.
 
+When `origin` pushes to multiple distinct URLs, select each effective
+`remote.origin.pushurl` explicitly in the system, user, or command scope.
+A conditional include in your user Git configuration can select mirrors
+for a single checkout. The CLI checks the effective destinations after
+URL rewriting during preflight and before pushing, including on resume.
 All configured push destinations are checked for existing branch namespace
 collisions before patching. Separate remote servers cannot be updated atomically:
 a remote can change or fail after that check, leaving an earlier push complete.
