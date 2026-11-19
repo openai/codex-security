@@ -590,7 +590,7 @@
     ]
   },
   {
-    "version": 73,
+    "version": 80,
     "name": "retain fixed revisions for finding triage decisions",
     "statements": [
       "ALTER TABLE finding_triage ADD COLUMN fixed_revision TEXT;",

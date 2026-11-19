@@ -1,5 +1,16 @@
 [
   [
+    "-- Move each branch's preview receipts by name before repairing earlier histories.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations JOIN history USING (name)",
+    "WHERE version BETWEEN 73 AND 77 AND destination BETWEEN 79 AND 87;"
+  ],
+  [
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",

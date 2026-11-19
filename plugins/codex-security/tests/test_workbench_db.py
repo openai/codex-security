@@ -1019,7 +1019,7 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
     with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
         db.execute("ALTER TABLE finding_triage DROP COLUMN fixed_revision")
         db.execute("ALTER TABLE finding_decisions DROP COLUMN fixed_revision")
-        db.execute("DELETE FROM schema_migrations WHERE version = 73")
+        db.execute("DELETE FROM schema_migrations WHERE version = 80")
     migrated = close()
     assert migrated == legacy
     for reason, revision, rationale, diagnostic in (
