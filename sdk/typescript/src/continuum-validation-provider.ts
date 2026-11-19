@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prepareContinuumAws } from "./continuum-aws.js";
+import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
 import {
   type ValidationProvider,
@@ -517,17 +518,25 @@ export class ContinuumValidationProvider implements ValidationProvider {
     );
 
     const results: ValidationProviderAssessment[] = new Array(supplied.length);
-    let next = 0;
-    const workers = Array.from(
-      { length: Math.min(MAX_CONCURRENT_POLLS, submissions.length) },
-      async () => {
-        for (;;) {
-          const index = next++;
-          if (index >= submissions.length) return;
-          const submission = submissions[index]!;
-          results[index] = submission.assessment
-            ? submission.assessment
-            : await this.#poll(
+    let pending = submissions.flatMap((submission, index) => {
+      if (submission.assessment) {
+        results[index] = submission.assessment;
+        return [];
+      }
+      return [index];
+    });
+    while (pending.length > 0 && now().getTime() < deadline) {
+      let next = 0;
+      // Rotate a single polling round across all items before waiting again.
+      await Promise.all(
+        Array.from(
+          { length: Math.min(MAX_CONCURRENT_POLLS, pending.length) },
+          async () => {
+            for (;;) {
+              const index = pending[next++];
+              if (index === undefined) return;
+              const submission = submissions[index]!;
+              const assessment = await this.#poll(
                 submission.item!,
                 submission.findingId!,
                 submission.created!,
@@ -538,10 +547,31 @@ export class ContinuumValidationProvider implements ValidationProvider {
                 now,
                 submittedAt,
               );
+              if (assessment) results[index] = assessment;
+            }
+          },
+        ),
+      );
+      pending = pending.filter((index) => !results[index]);
+      if (pending.length > 0 && now().getTime() < deadline) {
+        try {
+          await delay(
+            Math.min(5_000, deadline - now().getTime()),
+            context.signal,
+          );
+        } catch (error) {
+          for (const index of pending)
+            results[index] = unavailableAssessment(this, error);
+          pending = [];
         }
-      },
-    );
-    await Promise.all(workers);
+      }
+    }
+    for (const index of pending) {
+      results[index] = unavailableAssessment(
+        this,
+        `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
+      );
+    }
     return results.map((assessment, index) => {
       const item = supplied[index];
       const finding = typeof item === "string" ? {} : item!;
@@ -605,14 +635,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
     delay: (milliseconds: number, signal?: AbortSignal) => Promise<void>,
     now: () => Date,
     submittedAt: Date,
-  ): Promise<ValidationProviderAssessment> {
+  ): Promise<ValidationProviderAssessment | undefined> {
     let issueId: string | undefined;
     let issue: Record<string, unknown> = {};
     let validationArtifact: Record<string, unknown> | undefined;
     let likelihoodArtifact: Record<string, unknown> | undefined;
     let status = "SUBMITTED";
     try {
-      while (now().getTime() <= deadline) {
+      {
         const current = await this.#call(
           launch,
           "get-code-finding",
@@ -714,23 +744,22 @@ export class ContinuumValidationProvider implements ValidationProvider {
                 now,
               );
               if (kind === "EVIDENCE") likelihoodArtifact = artifact;
-              else validationArtifact = artifact;
+              else
+                validationArtifact = selectFindingValidationArtifact(
+                  artifact,
+                  findingId,
+                )?.artifact;
             }
           }
-          if (validationArtifact && likelihoodArtifact) break;
         }
-        await delay(5_000, context.signal);
       }
-      if (!validationArtifact || !likelihoodArtifact || !issueId)
-        return unavailableAssessment(
-          this,
-          `timed out waiting for Continuum validation evidence for ${findingId}`,
-        );
+      if (!validationArtifact || !likelihoodArtifact || !issueId) return;
       const verdict = verdictFrom(validationArtifact);
       const body = object(validationArtifact["body"]);
       const validationBody = object(body["validationEvidence"] ?? body);
       // A retained issue caption must not override proof of a different flaw.
       const claimEvidence =
+        validationBody["perFindingResults"] !== undefined ||
         validationBody["executedProof"] !== undefined ||
         validationBody["sourceAnalysis"] !== undefined
           ? validationArtifact
@@ -746,9 +775,13 @@ export class ContinuumValidationProvider implements ValidationProvider {
       const issueTime = new Date(
         text(issue["updatedAt"] ?? issue["createdAt"]) ?? validatedAt,
       );
+      const scorerTime = new Date(
+        text(likelihoodArtifact["createdAt"]) ?? validatedAt,
+      );
       const stale =
         validatedAt.getTime() < submittedAt.getTime() ||
-        issueTime.getTime() < submittedAt.getTime();
+        issueTime.getTime() < submittedAt.getTime() ||
+        scorerTime.getTime() < submittedAt.getTime();
       const reason = `Basis: CODE — Continuum returned ${verdict} using ${proofType(validationArtifact)}. Basis: INFERRED — The proof-to-claim comparison was ${match}. Raw proof code, payloads, commands, and console output are intentionally omitted.`;
       return this.#report(
         finding,

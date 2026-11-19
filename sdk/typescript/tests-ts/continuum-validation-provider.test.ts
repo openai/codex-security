@@ -36,6 +36,9 @@ function fakeAws(link = "createdIssueId") {
     if (operation === "get-code-issue-artifact")
       return args.at(-1) === "EVIDENCE"
         ? {
+            artifactType: "EVIDENCE",
+            artifactId: "scorer-artifact",
+            createdAt: "2026-11-13T00:00:00Z",
             body: {
               prevalidationSignals: {
                 signals: [
@@ -49,6 +52,8 @@ function fakeAws(link = "createdIssueId") {
             },
           }
         : {
+            artifactType: "VALIDATION_EVIDENCE",
+            artifactId: "validation-artifact",
             createdAt: "2026-11-13T00:00:00Z",
             body: {
               validationEvidence: {
@@ -148,6 +153,120 @@ describe("Continuum validation provider", () => {
     const result = await p.validate(finding, { repositoryPath: "/repo" });
     expect(result.record?.freshness.stale).toBe(true);
     expect(result.report).toContain("possibly stale");
+  });
+
+  test.each(["duplicateOfIssueId", "mergedIntoIssueId"])(
+    "scopes bundled validation evidence through %s to the submitted finding",
+    async (link) => {
+      const aws = fakeAws(link);
+      const result = await provider(async (op, args, signal) => {
+        const response = await aws.launcher(op, args, signal);
+        if (
+          op === "get-code-issue-artifact" &&
+          args.at(-1) === "VALIDATION_EVIDENCE"
+        ) {
+          const validation = (response["body"] as any).validationEvidence;
+          validation.exploitable = "EXPLOITABLE";
+          validation.perFindingResults = [
+            {
+              findingId: "another-finding",
+              exploitable: "EXPLOITABLE",
+              executedProof: validation.executedProof,
+            },
+            {
+              findingId: "finding-1",
+              exploitable: "NOT_EXPLOITABLE",
+              sourceAnalysis: "Insufficient evidence for the submitted claim.",
+            },
+          ];
+        }
+        return response;
+      }).validate(finding, { repositoryPath: "/repo" });
+      expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
+      expect(result.record?.claimMatch).toBe("unknown");
+      expect(result.record?.severityAfter).toBe("high");
+    },
+  );
+
+  test("does not use another finding's proof when a bundle has no matching result", async () => {
+    const aws = fakeAws();
+    let elapsed = 0;
+    const p = new ContinuumValidationProvider({
+      environmentId: "environment-1",
+      waitMinutes: 0.1,
+      now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
+      delay: async (ms) => {
+        elapsed += ms;
+      },
+      launcher: async (op, args, signal) => {
+        const response = await aws.launcher(op, args, signal);
+        if (
+          op === "get-code-issue-artifact" &&
+          args.at(-1) === "VALIDATION_EVIDENCE"
+        ) {
+          (response["body"] as any).validationEvidence.perFindingResults = [
+            { findingId: "another-finding", exploitable: "EXPLOITABLE" },
+          ];
+        }
+        return response;
+      },
+    });
+    const result = await p.validate(finding, { repositoryPath: "/repo" });
+    expect(result.record?.verdict).toBe("UNAVAILABLE");
+    expect(result.record?.severityAfter).toBe("high");
+  });
+
+  test("polls a ready fifth finding before waiting on four pending findings", async () => {
+    const aws = fakeAws();
+    const polled: string[] = [];
+    let elapsed = 0;
+    const p = new ContinuumValidationProvider({
+      environmentId: "environment-1",
+      waitMinutes: 0.1,
+      now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
+      delay: async (ms) => {
+        expect(polled).toContain("item-5");
+        elapsed += ms;
+      },
+      launcher: async (op, args, signal) => {
+        if (op === "create-code-finding")
+          return {
+            findingId: JSON.parse(args[1]!).ocsfDocument.finding_info.uid,
+          };
+        if (op === "get-code-finding") {
+          const id = args.at(-1)!;
+          polled.push(id);
+          if (id !== "item-5") return { status: "SUBMITTED" };
+        }
+        return aws.launcher(op, args, signal);
+      },
+    });
+    const result = await p.validateBatch(
+      Array.from({ length: 5 }, (_, i) => ({
+        ...finding,
+        occurrenceId: `item-${i + 1}`,
+      })),
+      { repositoryPath: "/repo" },
+    );
+    expect(
+      result.slice(0, 4).every((row) => row.record?.verdict === "UNAVAILABLE"),
+    ).toBe(true);
+    expect(result[4]?.record?.verdict).toBe("EXPLOITABLE");
+    expect(result[4]?.record?.itemId).toBe("item-5");
+  });
+
+  test("fresh proof and issue do not make older scorer evidence current", async () => {
+    const aws = fakeAws();
+    const result = await provider(async (op, args, signal) => {
+      const response = await aws.launcher(op, args, signal);
+      if (op === "get-code-issue") response["updatedAt"] = "2026-11-13T00:00:00Z";
+      if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
+        response["createdAt"] = "2025-11-13T00:00:00Z";
+      return response;
+    }).validate(finding, { repositoryPath: "/repo" });
+    expect(result.record?.freshness.stale).toBe(true);
+    expect(result.report).toContain("possibly stale");
+    expect(result.report).not.toContain("current at submission");
   });
 
   test("retries throttling within the same deadline", async () => {

@@ -13,6 +13,8 @@ import {
 } from "./external-import-contract.js";
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
+import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
+export { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
 import {
   array,
   awsTimestampSeconds,
@@ -482,37 +484,6 @@ export function singleFindingValidationIssue(
   )
     return null;
   return { issueArn: arn, issueId, findingIds: [finding.id] };
-}
-
-export function selectFindingValidationArtifact(
-  artifact: Record<string, unknown>,
-  findingId: unknown,
-) {
-  if (artifact["artifactType"] !== "VALIDATION_EVIDENCE") return;
-  const body = issueEvidenceBody(artifact);
-  if (!body) return;
-  const results = body.validationEvidence?.["perFindingResults"];
-  if (results === undefined) return { scope: "issue", artifact };
-  // A bundle's top-level proof can belong to a different finding.
-  const matches = array(results, "Continuum per-finding results")
-    .map((value) => record(value, "Continuum per-finding result"))
-    .filter((result) => result["findingId"] === findingId);
-  if (matches.length === 0) return;
-  return {
-    scope: "finding",
-    artifact: {
-      ...issueEvidenceDescriptor(artifact),
-      body: {
-        validationEvidence: {
-          ...(matches.length === 1 &&
-            "exploitable" in matches[0]! && {
-              exploitable: matches[0]!["exploitable"],
-            }),
-          perFindingResults: matches,
-        },
-      },
-    },
-  };
 }
 
 function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
