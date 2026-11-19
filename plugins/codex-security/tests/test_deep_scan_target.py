@@ -84,6 +84,26 @@ def test_git_inventory_failure_is_reported_with_its_diagnostic(
     check_targets(tmp_path, ["selected", "selected.py"], ["selected.py"])
 
 
+@pytest.mark.cross_platform
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="requires POSIX permissions")
+def test_unreadable_git_metadata_does_not_supply_ignored_content(tmp_path, check_targets):
+    subprocess.run(["git", "-C", tmp_path, "init", "-q"], check=True)
+    metadata = tmp_path / ".git"
+    (metadata / "info" / "exclude").write_text("*.ignored\n")
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (selected / "cache.ignored").touch()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(tmp_path, ["selected"], [])
+
+    metadata.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            check_targets(tmp_path, ["selected"], [])
+    finally:
+        metadata.chmod(0o700)
+
+
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="requires POSIX permissions")
 @pytest.mark.parametrize("tracked", [True, False])
 def test_unreadable_child_with_a_readable_sibling(tmp_path, monkeypatch, check_targets, tracked):

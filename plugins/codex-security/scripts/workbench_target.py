@@ -1232,6 +1232,20 @@ def _nested_worktree_error(path: Path, *, selected_ancestor: bool = False) -> OS
     return OSError(detail or f"Could not inspect the nested Git working tree: {path}")
 
 
+def _worktree_probe_error(target: Path, stderr: bytes) -> OSError | None:
+    for parent in (target, *target.parents):
+        for marker in (".git", ".git/HEAD", ".git/config"):
+            try:
+                mode = (parent / marker).stat().st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                return exc
+            if stat.S_ISREG(mode):
+                return OSError(_git_diagnostic(stderr).rstrip())
+    return None
+
+
 def git_directory_snapshot_paths(
     target: Path,
     *,
@@ -1246,13 +1260,9 @@ def git_directory_snapshot_paths(
             if (
                 onerror
                 and probe.stderr
-                and any(
-                    (parent / marker).is_file()
-                    for parent in (target, *target.parents)
-                    for marker in (".git", ".git/HEAD", ".git/config")
-                )
+                and (error := _worktree_probe_error(target, probe.stderr)) is not None
             ):
-                onerror(OSError(_git_diagnostic(probe.stderr).rstrip()))
+                onerror(error)
                 return []
             return None
         repository, pathspec = git_worktree_context(target, root=root)
