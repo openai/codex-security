@@ -135,6 +135,125 @@ async function fixture(extraFiles: Record<string, string> = {}) {
   };
 }
 
+for (const late of ["assessment", "candidate"] as const) {
+  test(`rechecks coverage when a new ${late} arrives during final review`, async () => {
+    await using f = await fixture({
+      "package.json":
+        '{"name":"example","dependencies":{"fixture-parser":"1.0.0"}}\n',
+    });
+    let arrive: () => Promise<void>;
+    let coverageReviews = 0;
+    const checked = await runReviewedDependencyCheck(
+      {
+        subject: "npm:fixture-parser",
+        vulnDescription: "Check calls to the parser.",
+        directory: f.path,
+        signal,
+        evidenceSources: [
+          { server: "catalog", instructions: "Check deployed callers." },
+        ],
+      },
+      {
+        discover: async () => ({
+          ...f.discovery,
+          callers: f.discovery.callers.map((c) => ({
+            ...c,
+            manifest: "package.json",
+          })),
+          manifests:
+            late === "candidate"
+              ? [
+                  {
+                    path: "package.json",
+                    name: "example",
+                    project: ".",
+                    requested: "1.0.0",
+                    line: 1,
+                  },
+                ]
+              : [],
+        }),
+        async runAgent(req) {
+          const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          if (req.coordinator) {
+            const { call } = await req.investigationTools!();
+            arrive = async () => {
+              if (late === "assessment") {
+                await call("submit_dependency_assessments", {
+                  assessments: [
+                    { id: "late-use", expectedRevision: 0, use: f.use },
+                  ],
+                });
+              } else {
+                const record = {
+                  server: investigationServer,
+                  tool: "query_codex_security_graph",
+                  arguments: {},
+                  result: {
+                    structuredContent: {
+                      paths: [
+                        {
+                          relation: "candidate_call",
+                          source: "secondary.js",
+                          line: 2,
+                        },
+                      ],
+                    },
+                  },
+                };
+                req.onEvidence!({
+                  ...record,
+                  sha256: dependencyRecordHash(record),
+                });
+              }
+            };
+            const answer = JSON.stringify({
+              uses: late === "candidate" ? [f.use] : [],
+              limitations: [],
+            });
+            const correction = await req.onCoordinatorAnswer!(answer);
+            expect(JSON.parse(correction!).feedback.reason).toContain(
+              "changed during final review",
+            );
+            expect(await req.onCoordinatorAnswer!(answer)).toBeUndefined();
+            return answer;
+          }
+          if (
+            packet.claims.some((c: Claim) => c.id === "coverage") &&
+            ++coverageReviews === 1
+          )
+            await arrive();
+          return JSON.stringify({
+            decisions: packet.claims.map(
+              (c: Claim & { availableEvidenceKeys: string[] }) => ({
+                ...reference(c),
+                approved: true,
+                reason: "Checked the cited evidence and remaining callers.",
+                evidenceKeys: c.availableEvidenceKeys,
+              }),
+            ),
+          });
+        },
+      },
+    );
+    if (!("checks" in checked)) throw Error("Expected package report");
+    const report = checked.checks[0]!;
+    expect(coverageReviews).toBe(2);
+    if (late === "assessment")
+      expect(report.uses.map((u) => u.conclusionClaim.id)).toEqual([
+        "assessment:late-use",
+      ]);
+    else
+      expect(
+        report.coverage?.some(
+          (c) =>
+            c.kind === "unresolved" &&
+            c.evidence.some((ref) => ref.path === "secondary.js"),
+        ),
+      ).toBe(true);
+  });
+}
+
 test("package checks freeze each advisory independently and verify exact source and review references", async () => {
   await using f = await fixture();
   const events: {

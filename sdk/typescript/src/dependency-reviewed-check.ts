@@ -633,6 +633,7 @@ async function investigateIssue(
       new Set(options.evidenceSources?.map((s) => s.server)),
       records,
     );
+    let assessmentGeneration = 0;
     const observedCandidates = new Map<string, DependencyGraphCandidate>();
     let graphLineSnapshot: Promise<GraphCandidates> | undefined;
     const graphCandidates = () =>
@@ -1177,6 +1178,12 @@ async function investigateIssue(
               return store.recordClaim(id, value, expectedRevision);
             }),
           );
+          if (
+            claims.some(
+              (c, index) => c.revision !== prepared[index]!.expectedRevision,
+            )
+          )
+            assessmentGeneration++;
           return queue!.enqueue(claims);
         },
       },
@@ -1246,11 +1253,23 @@ async function investigateIssue(
           "The host already includes all current approved assessments. Omit an unchanged submitted use from final uses. Inspect a queued assessment with query_dependency_claims({ids:[id]}) and revise it through submit_dependency_assessments if needed. For a genuinely new use, correct the cited evidence and include it or submit it separately. If every intended use is already approved, return uses: [] with the final limitations and exclusions.",
       };
     }
+    // New evidence, searches, limitations and assessment revisions are append-only.
+    // Read-only reviewer queries leave the coverage generation unchanged.
+    function coverageGeneration() {
+      return (
+        assessmentGeneration +
+        records.size +
+        block.failures.size +
+        searches.length +
+        evidenceLimitations.size
+      );
+    }
     const reviewQueue = queue;
     async function submit(raw: string, canCorrect: boolean) {
       signal.throwIfAborted();
       await reviewQueue.drain();
       signal.throwIfAborted();
+      const generation = coverageGeneration();
       let draft;
       const queued = queuedFindings();
       const submitted = queued.filter((c) => c.value.kind === "use");
@@ -1311,6 +1330,10 @@ async function investigateIssue(
       try {
         await review(claims);
         signal.throwIfAborted();
+        if (coverageGeneration() !== generation)
+          throw new DependencyReviewRejection(
+            "The investigation changed during final review. Check the latest assessments, evidence and outstanding callers before submitting again.",
+          );
         const premises = reviewQueue.approved(
           claims.flatMap((c) => claimInputs(c).dependencies),
         );
