@@ -80,6 +80,7 @@ import {
 import {
   approveDependencyClaims,
   approvedUse,
+  findingSelectionProblem,
   DependencyReviewRejection,
   type Scope,
   investigationSchema,
@@ -169,7 +170,7 @@ const reviewInstructions = [
   "Treat an explanation for a manifestless search as a limitation and check all observed callers. For a test_only_outside_scope dismissal, require cited source for each caller's test membership and its exclusion under the effective callerScope. A filename alone cannot establish that production never invokes it.",
   "A disposition with previousUse requests withdrawal of an approved finding. Compare its proposed reason and evidence with the previous use's scope, sink, proof and decision. For a claimed duplicate, query the surviving assessment and verify the same caller, copy and deployment. Reject withdrawal of a distinct use or an unsupported dismissal.",
   "Repository discovery describes the initial search. Check that the coverage claim accounts for outstanding gaps. Later source citations and tool replies can resolve a discovery gap, including which builds consume shared source. Verify the cited original lines and each observation against the complete recorded tool replies. Verify that the returned records describe this use, rather than echoing a request, naming a different artifact, or expressing a planned or failed action. Follow the evidence linking multiple replies to the same running service, revision and package version. Caller access needs separate evidence naming the relevant caller and showing that it can reach this use. Check that the actual dependency selection belongs to this service and that each claimed advisory condition follows. A trace hit establishes a lead; source must establish value flow. For a positive verdict verify both caller control and evidence proving this running revision and caller access. For an exclusion verify a prerequisite is decisively false. Check that unresolved callers are disclosed. For every omitted manifest, verify the stated reason against the supplied caller or endpoint boundary and the checkout. Reject unsupported omissions. Approve a scoped unknown if the missing deciding facts are identified.",
-  "Return one decision for every entry in claims, including coverage when present. Copy its exact id, revision and hash. References in approvedClaims or dependencies are context and do not need another decision. Set approved to false if the evidence is insufficient for the asserted conclusion, the scope is conflated, or relevant coverage was dropped. Explain the decision. Select only the evidenceKeys that decide the claim from its availableEvidenceKeys; the others are supporting context. Consider each dependency at precisely its supplied revision. Read each use with only its cited evidence and exact premises. If its conclusion depends on a caller, entrypoint, build or copy selection documented only on a sibling, request that specific binding. For each claimed application identity check the original catalog row and the cited launch or import that binds this caller. If the caller requested mappings, require a scoped final graph lookup or a specific attempted check and open gap. Select the bound evidence key or exact approved premise for each structured finding reference, as well as the exact ranges for the deciding binding, copy and condition. Keep neighboring declarations and unrelated catalog rows as context. The initial evidence list is a bounded preview. Use read_dependency_evidence to list receipts, then pass an id and an optional path or offset to inspect the original result. Reject a scope omission unless the checkout evidence and the actual caller boundary justify it. You cannot modify claims or issue an alternative verdict.",
+  "Return one decision for every entry in claims, including coverage when present. Copy its exact id, revision and hash. References in approvedClaims or dependencies are context and do not need another decision. Set approved to false if the evidence is insufficient for the asserted conclusion, the scope is conflated, or relevant coverage was dropped. Explain the decision. Select only the evidenceKeys that decide the claim from its availableEvidenceKeys; the others are supporting context. Consider each dependency at precisely its supplied revision. Read each use with only its cited evidence and exact premises. If its conclusion depends on a caller, entrypoint, build or copy selection documented only on a sibling, request that specific binding. For each claimed application identity check the original catalog row and the cited launch or import that binds this caller. If the caller requested mappings, require a scoped final graph lookup or a specific attempted check and open gap. For each findingEvidence entry on a use or disposition, independently verify the fact against the cited originals and include at least one of its keys in this decision's evidenceKeys. Reject the claim if none supports the fact. Also select the exact ranges for the deciding binding, copy and condition. Keep neighboring declarations and unrelated catalog rows as context. The initial evidence list is a bounded preview. Use read_dependency_evidence to list receipts, then pass an id and an optional path or offset to inspect the original result. Reject a scope omission unless the checkout evidence and the actual caller boundary justify it. You cannot modify claims or issue an alternative verdict.",
 ].join("\n");
 
 function decode<T>(raw: string, schema: z.ZodType<T>) {
@@ -177,7 +178,11 @@ function decode<T>(raw: string, schema: z.ZodType<T>) {
   const fenced = /^\s*```(?:json)?\s*\n([\s\S]*?)\n```\s*$/iu.exec(raw);
   return schema.parse(JSON.parse(fenced?.[1] ?? raw));
 }
-function correlateReviewReply(raw: string, claims: Claim[]) {
+function correlateReviewReply(
+  raw: string,
+  claims: Claim[],
+  canCorrect: boolean,
+) {
   let decisions: Decision[];
   try {
     decisions = decode(raw, reviewSchema).decisions;
@@ -213,6 +218,15 @@ function correlateReviewReply(raw: string, claims: Claim[]) {
     problems.push(
       "Missing ids " + JSON.stringify(missing.map((claim) => claim.id)),
     );
+  if (identitiesMatch && canCorrect)
+    decisions = decisions.filter((decision) => {
+      const claim = expected.get(decision.id)!;
+      const problem = findingSelectionProblem(claim, decision);
+      if (!problem) return true;
+      problems.push(problem);
+      missing.push(claim);
+      return false;
+    });
   return {
     // A partial reply is usable only if it contains unique, correctly identified siblings.
     ...(identitiesMatch && { decisions, missing }),
@@ -1000,7 +1014,7 @@ async function investigateIssue(
         for (let attempt = 0; attempt < 2; attempt++) {
           const raw = await requestReview(outstanding, problem);
           signal.throwIfAborted();
-          const reply = correlateReviewReply(raw, outstanding);
+          const reply = correlateReviewReply(raw, outstanding, attempt === 0);
           problem = reply.problem;
           if (reply.decisions && reply.missing) {
             if (!reply.missing.length) {

@@ -391,7 +391,7 @@ export function createInvestigationSession(options: {
     {
       name: "read_dependency_evidence",
       description:
-        "List captured receipts, optionally filtering by server or tool. Supply an id to read its original response, optionally narrowing it with selection or path. Use next as the offset for the next page. originalPayloadSha256 identifies the complete response.",
+        'List captured receipts, optionally filtering by server or tool. Pass {id} to read the original response or {id,path:["content",0,"text"]} to read its first text block. For JSON, selection.record starts inside structuredContent (textBlock:null) or a parsed JSON text block (textBlock:index). Use next as the offset for the next page. originalPayloadSha256 identifies the complete response.',
       inputSchema: z.toJSONSchema(readEvidence),
       run(raw) {
         const args = readEvidence.parse(raw);

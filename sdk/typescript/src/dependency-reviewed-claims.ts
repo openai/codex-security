@@ -989,6 +989,13 @@ export async function verifyProposedUse(
       throw new CodexSecurityError(
         "An exploitable use needs cited attacker control, all advisory conditions met, and observations of this running workload and caller access.",
       );
+    for (const support of ["running", "access"] as const)
+      findingEvidence.push({
+        field: support === "running" ? "running build" : "caller access",
+        keys: linkedObservations.flatMap((r) =>
+          r.supports.includes(support) ? (r.evidenceKeys ?? [r.sha256]) : [],
+        ),
+      });
   }
   const selectedCopyExcluded =
     !embedded &&
@@ -1072,6 +1079,26 @@ export function approvedUse(store: DependencyAttemptStore, ref: PremiseRef) {
   };
 }
 
+export function findingSelectionProblem(
+  { id, value }: Claim,
+  decision: Decision,
+) {
+  if (!decision.approved) return;
+  const finding =
+    value.kind === "use"
+      ? value.use
+      : value.kind === "disposition"
+        ? value.disposition
+        : undefined;
+  const missing = finding?.findingEvidence
+    ?.filter(
+      ({ keys }) => !keys.some((key) => decision.evidenceKeys.includes(key)),
+    )
+    .map(({ field }) => field);
+  if (missing?.length)
+    return `Approval of ${id} requires evidence for ${missing.join(", ")}. Select a key from each findingEvidence entry or reject the claim.`;
+}
+
 /** Commit approvals only if every decision still names the exact current claim. */
 export function approveDependencyClaims(
   store: DependencyAttemptStore,
@@ -1121,36 +1148,8 @@ export function approveDependencyClaims(
           "Reviewer must select the deciding evidence from this claim's original evidence or approved premises: " +
             claim.id,
         );
-      const use = claim.value.kind === "use" ? claim.value.use : undefined;
-      const finding =
-        claim.value.kind === "disposition" ? claim.value.disposition : use;
-      const unselected = finding?.findingEvidence?.find(
-        (binding) =>
-          !binding.keys.some((key) => decision.evidenceKeys.includes(key)),
-      );
-      if (decision.approved && unselected)
-        throw new DependencyReviewRejection(
-          "The reviewer must select the original evidence or approved premise for " +
-            unselected.field +
-            ".",
-        );
-      if (
-        decision.approved &&
-        use?.verdict === "exploitable" &&
-        ["running", "access"].some(
-          (support) =>
-            !use.observations.some(
-              (r) =>
-                r.supports.some((s) => s === support) &&
-                (r.evidenceKeys ?? [r.sha256]).some((key) =>
-                  decision.evidenceKeys.includes(key),
-                ),
-            ),
-        )
-      )
-        throw new DependencyReviewRejection(
-          "A positive review must select evidence for the running build and caller access.",
-        );
+      const problem = findingSelectionProblem(claim, decision);
+      if (problem) throw new DependencyReviewRejection(problem);
       store.set("dependency-review", claim.id, decision);
       if (
         decision.approved &&

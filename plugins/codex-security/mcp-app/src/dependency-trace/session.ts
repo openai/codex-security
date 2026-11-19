@@ -20,7 +20,7 @@ import type { TraceObservation } from "./types.ts";
 export const dependencyGraphTools = {
   trace_codex_security_code: {
     description:
-      "Search source files and dependency manifests in this checkout. With source_terms, symbol and directories, the tool feeds the matching files directly into OpenGrep in batches. The graph retains cited dependency declarations, candidate calls, and same-file flows.",
+      "Search source files and dependency manifests in this checkout. Use source_terms with a required symbol and optional directory paths to select files for OpenGrep. When supplying exact files, omit source_terms. The graph retains cited dependency declarations, candidate calls, and same-file flows.",
     schema: traceInputSchema,
   },
   resolve_codex_security_services: {

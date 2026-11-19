@@ -185,7 +185,7 @@ const graphActions = {
   update: {
     name: "update_codex_security_graph",
     description:
-      "Pass exactly one of note or sourceWork. A note shares a question, scope and assertion with exact line ranges from the pinned checkout. Reopen it by ID with query_codex_security_graph. Use sourceWork to append a page of search results with source references and gaps, resolve a gap by ID, assign files to a partition, or mark paths examined.",
+      "Pass exactly one of note or sourceWork. A note shares a question, scope and assertion with exact line ranges from the pinned checkout. Use sourceWork to record search results, resolve gaps, assign files or mark paths examined. For append_roster_page, omit expectedRevision on the first page and supply the current roster revision on later pages. Set declaredComplete to true when no gaps remain across all pages, and false when any gap remains open.",
     fields: { note: dependencySourceNoteSchema, sourceWork: mutationSchema },
   },
 };

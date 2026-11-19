@@ -262,7 +262,7 @@ export function createDependencyGraphEvidenceTools(
   const local = {
     name: resolveServices,
     description:
-      "Pass project alone to search local configuration for references to that project.",
+      "Pass project alone to find local configuration lines that mention its literal path. Use a path below the checkout root, such as apps/mail. For a root project, use its build file (for example, package.json) instead of '.'.",
     inputSchema: z.toJSONSchema(projectInput),
     run: (input: unknown) =>
       graph.call(resolveServices, projectInput.parse(input), signal),

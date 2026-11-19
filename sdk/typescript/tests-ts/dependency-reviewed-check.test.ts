@@ -1272,7 +1272,7 @@ function deploymentFor(
   return { records, positive };
 }
 
-test("the investigator cites live replies and a separate reviewer sees their originals", async () => {
+test("the reviewer corrects an omitted direct access citation without repeating the investigation", async () => {
   await using f = await fixture();
   const { records, positive } = deploymentFor(f, "example");
   const original = records[0]!;
@@ -1287,6 +1287,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
     },
   };
   records[0] = { ...structured, sha256: dependencyRecordHash(structured) };
+  let reviews = 0;
   const result = await runReviewedDependencyCheck(
     {
       directory: f.path,
@@ -1307,8 +1308,20 @@ test("the investigator cites live replies and a separate reviewer sees their ori
         if (input.claims) {
           expect(onEvidence).toBeUndefined();
           expect(input.evidence).toEqual(records);
+          expect(input.claims[0].payload.use.findingEvidence).toEqual([
+            { field: "running build", keys: [records[0]!.sha256] },
+            { field: "caller access", keys: [records[1]!.sha256] },
+          ]);
+          if (++reviews === 1) {
+            const reply = JSON.parse(approvedReview(input.claims));
+            reply.decisions[0].evidenceKeys = [records[0]!.sha256];
+            return JSON.stringify(reply);
+          }
+          expect(input.reviewCorrection.problem).toContain("caller access");
+          expect(input.claims).toHaveLength(1);
           return approvedReview(input.claims);
         }
+        expect(reviews).toBe(0);
         expect(input.evidenceSources[0].server).toBe("deployments");
         if (!onEvidence) throw new Error("Missing evidence collector");
         for (const record of records) onEvidence(record);
@@ -1318,6 +1331,7 @@ test("the investigator cites live replies and a separate reviewer sees their ori
   );
   if (!("checks" in result)) throw new Error("Missing package report");
   const check = result.checks[0]!;
+  expect(reviews).toBe(2);
   expect(check.uses[0]!.verdict).toBe("exploitable");
   expect<unknown>(check.uses[0]!.observations).toEqual(
     positive.observations.map((ref) => ({
@@ -1931,7 +1945,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
         [claim],
         [{ ...decision, evidenceKeys: [keys[0]!] }],
       ),
-    ).toThrow("running build and caller access");
+    ).toThrow("caller access");
     expect(() =>
       approveDependencyClaims(
         store,
@@ -3345,7 +3359,6 @@ test("independently verifies candidate dispositions and publishes their selected
     originalPayloadSha256: dependencyRecordHash(original.result),
     selection,
   };
-  let incompleteReview = true;
   const handoff = {
     verified: "Requests reach the parser dispatch.",
     missing: "Which backend does the running worker select?",
@@ -3406,8 +3419,7 @@ test("independently verifies candidate dispositions and publishes their selected
               }) => {
                 if (c.id === "disposition:handoff") {
                   expect(c.availableEvidenceKeys.length).toBe(3);
-                  if (incompleteReview) {
-                    incompleteReview = false;
+                  if (c.revision === 1) {
                     return {
                       id: c.id,
                       revision: c.revision,
