@@ -228,6 +228,9 @@ export function applyMigrations(
         for (const statement of migration(6).statements)
           applyRepairStatement(database, statement.replaceAll("\n", " "));
       } else if (item.version === 16) backfill = repairStableTargets(database);
+      // Earlier readers created these objects under other previews’ receipts.
+      else if (item.version >= 82 && item.version <= 85)
+        repairSchema(database, item.version);
       else if (applied.has(item.version)) {
         if (
           [
@@ -239,7 +242,7 @@ export function applyMigrations(
         else if (
           item.version === 51 ||
           item.version === 63 ||
-          (item.version >= 73 && item.version <= 77)
+          item.version === 86
         ) {
           // Restore recorded extensions when the base Deep tables were recreated.
           // Data updates from an already applied migration must not run again.

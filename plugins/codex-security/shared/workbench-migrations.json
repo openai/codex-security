@@ -590,7 +590,7 @@
     ]
   },
   {
-    "version": 73,
+    "version": 82,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n    scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n    attempt INTEGER NOT NULL,\n    status TEXT NOT NULL,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    end_reason TEXT,\n    error_message TEXT,\n    accepted_result_path TEXT,\n    accepted_result_sha256 TEXT,\n    receipt_json TEXT,\n    PRIMARY KEY (worker_id, attempt)\n);",
@@ -602,28 +602,28 @@
     ]
   },
   {
-    "version": 74,
+    "version": 83,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 75,
+    "version": 84,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 76,
+    "version": 85,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"
     ]
   },
   {
-    "version": 77,
+    "version": 86,
     "name": "preserve original deep scan discovery context",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;",

@@ -27,6 +27,7 @@ from workbench_test_support import SCRIPT
         "before-worker-usage",
         "before-log-boundaries",
         "before-repository-migrations",
+        "before-preview-coordination",
     ],
 )
 def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
@@ -43,7 +44,13 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
         "bind original deep scan parent usage turn": 48,
         "bind original deep scan execution settings": 51,
     }
-    if snapshot in {"before-worker-usage", "before-log-boundaries", "before-repository-migrations"}:
+    if snapshot == "before-preview-coordination":
+        original_versions = {name: v - 9 for v, name, _ in SCHEMA.MIGRATIONS if 82 <= v <= 86}
+    elif snapshot in {
+        "before-worker-usage",
+        "before-log-boundaries",
+        "before-repository-migrations",
+    }:
         first_preview_version = 67 if snapshot == "before-repository-migrations" else 64
         original_versions = {
             name: first_preview_version + index
@@ -77,6 +84,7 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
                 "before-worker-usage": 62,
                 "before-log-boundaries": 63,
                 "before-repository-migrations": 66,
+                "before-preview-coordination": 72,
                 "early": 43,
                 "previous": 46,
                 "current": 47,
@@ -149,7 +157,7 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
     connection.close()
 
 
-@pytest.mark.parametrize("version", range(73, 78))
+@pytest.mark.parametrize("version", range(82, 87))
 def test_conflicting_deep_scan_receipt_preserves_database(version: int) -> None:
     connection, migrate = create_historical_database(73)
     try:

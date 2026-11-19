@@ -79,7 +79,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      workbenchMigrations[version - 1].name,
+      workbenchMigrations.find((item) => item.version === version)!.name,
     );
 }
 
@@ -880,13 +880,13 @@ test("legacy execution profiles retain values while allowing independent model s
 test("refuses a conflicting Deep Scan receipt before applying schema changes", (t) => {
   const database = memory(t, 72);
   database.exec(
-    "INSERT INTO schema_migrations VALUES (73, 'other preview', 'original')",
+    "INSERT INTO schema_migrations VALUES (82, 'other preview', 'original')",
   );
   const before = schema(database);
   const history = migrationHistory(database);
   assert.throws(
     () => applyMigrations(database),
-    /Unsupported workbench migration receipt at version 73/u,
+    /Unsupported workbench migration receipt at version 82/u,
   );
   assert.deepEqual(schema(database), before);
   assert.deepEqual(migrationHistory(database), history);
@@ -1064,11 +1064,14 @@ test("recorded additive migrations restore missing columns and configured error 
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
   for (const version of [
-    27, 28, 31, 32, 47, 51, 54, 55, 57, 58, 59, 60, 61, 63, 73, 74, 75, 76, 77,
+    27, 28, 31, 32, 47, 51, 54, 55, 57, 58, 59, 60, 61, 63, 82, 83, 84, 85, 86,
   ])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
-      .run(version, workbenchMigrations[version - 1].name);
+      .run(
+        version,
+        workbenchMigrations.find((item) => item.version === version)!.name,
+      );
   applyMigrations(database);
   const launch = database
     .prepare(
@@ -1385,8 +1388,10 @@ for (const snapshot of [
     if (snapshot === "before-repository-migrations") {
       previousMain = 66;
       originalVersions.clear();
-      for (const item of migrations.filter((entry) => entry.version >= 73))
-        originalVersions.set(item.name, item.version - 6);
+      for (const item of migrations.filter(
+        (entry) => entry.version >= 82 && entry.version <= 86,
+      ))
+        originalVersions.set(item.name, item.version - 15);
     } else if (snapshot === "previous-main") {
       previousMain = 52;
       // This preview followed main migration 52 and recorded its six extensions at 53–58.
