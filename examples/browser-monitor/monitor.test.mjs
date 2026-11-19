@@ -1,86 +1,144 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { get } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { text } from "node:stream/consumers";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
-import { createMonitor, observeScan } from "./monitor.mjs";
 
-test(
-  "demo entrypoint starts without SDK access and Ctrl+C cancels and closes it",
-  {
-    skip:
-      process.platform === "win32"
-        ? "process.kill does not deliver console Ctrl+C on Windows"
-        : false,
-  },
-  async (t) => {
-    const child = spawn(
-      process.execPath,
-      [fileURLToPath(new URL("monitor.mjs", import.meta.url)), "--demo"],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
-    const exited = once(child, "exit");
-    t.after(() => child.kill());
-    let output = "";
-    const url = await new Promise((done, fail) => {
-      child.once("error", fail);
-      child.once("exit", () =>
-        fail(new Error(`Demo exited before listening: ${output}`)),
-      );
-      child.stdout.on("data", (chunk) => {
-        output += chunk;
-        const match = /Monitor: (http:\/\/127\.0\.0\.1:\d+\/\w+\/)/.exec(
-          output,
-        );
-        if (match) done(match[1]);
-      });
-    });
-    const response = await fetch(`${url}state`);
-    const state = await response.json();
-    assert.equal(state.demo, true);
-    assert.equal(state.status, "running");
-    child.kill("SIGINT");
-    const [code, signal] = await exited;
-    assert.equal(signal, null);
-    assert.equal(code, 130);
-    await assert.rejects(fetch(url));
-  },
-);
+const demo = [fileURLToPath(new URL("monitor.mjs", import.meta.url)), "--demo"];
 
-test("loopback monitor observes one scan, preserves unknown usage, and serves no actions", async (t) => {
-  const monitor = await createMonitor("Synthetic repository");
-  t.after(() => {
-    monitor.server.closeAllConnections();
-    return new Promise((done) => monitor.server.close(done));
+async function startMonitor(t, args = demo) {
+  const child = spawn(process.execPath, args, {
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  let callbacks;
-  let finish;
-  let calls = 0;
-  const security = {
-    run(repository, options) {
-      assert.equal(repository, "Synthetic repository");
-      assert.equal(options.auth, "chatgpt");
-      calls++;
-      callbacks = options;
-      return new Promise((done) => {
-        finish = done;
-      });
-    },
-  };
-  const pending = observeScan(
-    security,
-    "Synthetic repository",
-    { auth: "chatgpt" },
-    monitor.state,
+  const exited = once(child, "close");
+  t.after(async () => {
+    child.kill();
+    await exited;
+  });
+  const stderr = text(child.stderr);
+  const [line] = await Promise.race([
+    once(createInterface({ input: child.stdout }), "line"),
+    exited.then(async () => {
+      throw new Error(`Monitor exited before listening: ${await stderr}`);
+    }),
+  ]);
+  const match = /^Monitor: (http:\/\/127\.0\.0\.1:\d+\/\w+\/)$/.exec(line);
+  assert.ok(match, line);
+  const url = match[1];
+  const snapshot = async () => (await fetch(`${url}state`)).json();
+  return { child, exited, url, stderr, snapshot };
+}
+
+async function startScan(t, repository, config) {
+  const root = await mkdtemp(join(tmpdir(), "browser-monitor-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const example = join(root, "example");
+  const sdk = join(example, "node_modules", "@openai", "codex-security");
+  await mkdir(sdk, { recursive: true });
+  for (const name of ["monitor.mjs", "monitor.html"]) {
+    await copyFile(new URL(name, import.meta.url), join(example, name));
+  }
+  await writeFile(
+    join(sdk, "index.js"),
+    `let calls = 0;
+    exports.loadProjectConfig = file => ({ options: { scanPromptFile: file } });
+    exports.CodexSecurity = class {
+      run(repo, options) {
+        options.onMeasurement({ coverage: "partial", usage: { total_tokens: 0 }, cost: null });
+        if (options.scanPromptFile !== "success.yaml") {
+          throw new Error(repo + "\\u001b[2J" + options.scanPromptFile);
+        }
+        options.onProgress({ phase: "discovery", reviewItems: { completed: 2, total: 4 } });
+        options.onDeepProgress({ completed: 1, active: 0, maximum: 2 });
+        options.onLifecycle({ scanId: "scan-" + ++calls, status: "completed" });
+        options.onWarning("source changed");
+        return {
+          manifest: { scan: {
+            target: { headRevision: "abc123" }, warnings: ["source changed", "partial coverage"]
+          } },
+          reportPath: "report.md",
+          findings: { findings: [] },
+        };
+      }
+      close() {}
+    };`,
   );
-  const snapshot = async () => (await fetch(`${monitor.url}state`)).json();
-  assert.equal((await snapshot()).status, "running");
-  assert.equal((await snapshot()).measurement, null);
-  assert.equal((await snapshot()).findings, null);
-  const html = await fetch(monitor.url);
+  const alias = join(root, "alias");
+  await symlink(example, alias, "junction");
+  return startMonitor(t, [join(alias, "monitor.mjs"), repository, config]);
+}
+
+test("SDK callbacks and completed results survive reloading the same scan", async (t) => {
+  const { snapshot, url } = await startScan(t, "source", "success.yaml");
+  const state = await snapshot();
+  assert.equal(state.status, "completed");
+  assert.ok(state.finishedAt);
+  assert.deepEqual(state.lifecycle, { scanId: "scan-1", status: "completed" });
+  assert.equal(state.progress.reviewItems.completed, 2);
+  assert.equal(state.deepProgress.completed, 1);
+  assert.equal(state.measurement.cost, null);
+  assert.equal(state.revision, "abc123");
+  assert.deepEqual(state.warnings, ["source changed", "partial coverage"]);
+  assert.deepEqual(state.findings, []);
+  assert.equal(state.reportPath, "report.md");
+  await fetch(url);
+  assert.deepEqual(await snapshot(), state);
+});
+
+test("SDK failure retains the original paths and measurement, escaping controls on stderr", async (t) => {
+  const repo = "~/source";
+  const file = "link/../scan.yaml";
+  const { child, exited, snapshot, stderr } = await startScan(t, repo, file);
+  const state = await snapshot();
+  child.kill();
+  await exited;
+  assert.equal(state.status, "failed");
+  assert.ok(state.finishedAt);
+  assert.equal(state.findings, null);
+  assert.equal(state.measurement.usage.total_tokens, 0);
+  assert.equal(state.error, `${repo}\u001b[2J${file}`);
+  const diagnostic = await stderr;
+  assert.ok(diagnostic.includes(`${repo}\\u001b[2J${file}`));
+  assert.ok(!diagnostic.includes("\u001b"));
+});
+
+for (const [signal, code] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
+  test(
+    `demo entrypoint cancels and closes on ${signal}`,
+    { skip: process.platform === "win32" && "requires POSIX signal delivery" },
+    async (t) => {
+      const { child, exited, url, snapshot } = await startMonitor(t);
+      const state = await snapshot();
+      assert.equal(state.demo, true);
+      assert.equal(state.status, "running");
+      child.kill(signal);
+      assert.deepEqual(await exited, [code, null]);
+      await assert.rejects(fetch(url));
+    },
+  );
+}
+
+test("loopback server only serves reads on its private paths", async (t) => {
+  const { url } = await startMonitor(t);
+  const html = await fetch(url);
   assert.equal(html.status, 200);
   assert.equal(html.headers.get("cache-control"), "no-store");
   assert.match(
@@ -88,83 +146,23 @@ test("loopback monitor observes one scan, preserves unknown usage, and serves no
     /frame-ancestors 'none'/,
   );
   assert.doesNotMatch(await html.text(), /__NONCE__/);
-  assert.equal((await fetch(monitor.url, { method: "POST" })).status, 405);
-  assert.equal((await fetch(`${monitor.url}patch`)).status, 404);
-  assert.equal((await fetch(new URL("/", monitor.url))).status, 404);
-  const reboundStatus = await new Promise((done, fail) => {
-    get(
-      monitor.url,
-      { headers: { Host: "other.example.test" } },
-      (response) => {
-        response.resume();
-        done(response.statusCode);
-      },
-    ).once("error", fail);
-  });
-  assert.equal(reboundStatus, 403);
-  assert.equal(
-    (
-      await fetch(`${monitor.url}state`, {
-        headers: { Origin: "https://other.example.test" },
-      })
-    ).status,
-    403,
+  assert.equal((await fetch(url, { method: "POST" })).status, 405);
+  assert.equal((await fetch(`${url}patch`)).status, 404);
+  assert.equal((await fetch(new URL("/", url))).status, 404);
+  const [response] = await once(
+    get(url, { headers: { Host: "other.example.test" } }),
+    "response",
   );
-  callbacks.onProgress({
-    phase: "discovery",
-    reviewItems: { completed: 2, total: 4 },
+  response.resume();
+  assert.equal(response.statusCode, 403);
+  const foreign = await fetch(`${url}state`, {
+    headers: { Origin: "https://other.example.test" },
   });
-  callbacks.onMeasurement({
-    coverage: "partial",
-    observedAt: "2026-01-01T00:00:00Z",
-    usage: { total_tokens: 0 },
-    cost: null,
-  });
-  callbacks.onLifecycle({ scanId: "synthetic-scan", status: "running" });
-  assert.equal((await snapshot()).measurement.cost, null);
-  assert.equal((await snapshot()).measurement.usage.total_tokens, 0);
-  assert.equal((await snapshot()).progress.reviewItems.completed, 2);
-  finish({ findings: { findings: [] }, reportPath: "synthetic/report.md" });
-  await pending;
-  assert.equal((await snapshot()).status, "completed");
-  assert.deepEqual((await snapshot()).findings, []);
-  assert.ok((await snapshot()).finishedAt);
-  await fetch(monitor.url);
-  assert.equal(calls, 1);
+  assert.equal(foreign.status, 403);
 });
 
-test("failure and cancellation retain the last observations and original diagnostic", async () => {
-  for (const aborted of [false, true]) {
-    const controller = new AbortController();
-    if (aborted) controller.abort();
-    const state = {};
-    const error = new Error("Synthetic failure <script>example()</script>");
-    await assert.rejects(
-      observeScan(
-        {
-          async run(_, options) {
-            options.onMeasurement({
-              coverage: "partial",
-              usage: { total_tokens: 123 },
-            });
-            throw error;
-          },
-        },
-        "Synthetic repository",
-        { signal: controller.signal },
-        state,
-      ),
-      (actual) => actual === error,
-    );
-    assert.equal(state.status, aborted ? "canceled" : "failed");
-    assert.equal(state.error, error.message);
-    assert.equal(state.measurement.usage.total_tokens, 123);
-    assert.ok(state.finishedAt);
-  }
-});
-
-test("browser renders findings as text, distinguishes zero and unknown, and retains a disconnected snapshot", async () => {
-  const nodes = new Map();
+test("browser follows progress, retries disconnects and stops at the final snapshot", async () => {
+  const nodes = {};
   const node = () => ({
     textContent: "",
     children: [],
@@ -175,79 +173,90 @@ test("browser renders findings as text, distinguishes zero and unknown, and reta
       throw new Error("Untrusted text must not become HTML");
     },
   });
-  const document = {
-    getElementById(id) {
-      if (!nodes.has(id)) nodes.set(id, node());
-      return nodes.get(id);
-    },
-    createElement: node,
-  };
   const title = '<img src=x onerror="globalThis.injected=true">';
   const state = {
-    status: "completed",
+    status: "running",
     repository: "Synthetic repository",
-    demo: true,
+    warnings: [title],
     startedAt: "2026-01-01T00:00:00Z",
-    finishedAt: "2026-01-01T00:01:00Z",
-    progress: { phase: "reporting", reviewItems: { completed: 2, total: 4 } },
+    progress: {
+      phase: "discovery",
+      filesCompleted: 1,
+      filesTotal: 3,
+      reviewItems: { completed: 0, total: 0 },
+    },
     measurement: {
       coverage: "partial",
       observedAt: "2026-01-01T00:01:00Z",
       usage: { total_tokens: 0 },
       cost: { estimatedUsd: 0 },
     },
-    findings: [
-      {
-        title,
-        summary: title,
-        severity: { level: "high" },
-        locations: [{ path: title, startLine: 42 }],
-      },
-    ],
-    lifecycle: null,
-    error: title,
-    reportPath: "synthetic/report.md",
   };
   const html = await readFile(new URL("monitor.html", import.meta.url), "utf8");
-  let scheduled;
+  const pending = [];
+  const refresh = () => pending.shift()();
   let connected = true;
-  const context = {
-    document,
-    fetch: async () => {
-      if (!connected) throw new Error("Synthetic disconnect");
-      return { ok: true, json: async () => state };
-    },
-    setTimeout: (callback) => {
-      scheduled = callback;
-    },
-    setInterval: () => {},
-  };
-  runInNewContext(
+  await runInNewContext(
     html.match(/<script nonce="__NONCE__">([\s\S]*?)<\/script>/)[1],
-    context,
+    {
+      document: {
+        getElementById: (id) => (nodes[id] ??= node()),
+        createElement: node,
+      },
+      fetch: async () => {
+        if (!connected) throw new Error("Synthetic disconnect");
+        return { ok: true, json: async () => state };
+      },
+      setTimeout: (callback) => pending.push(callback),
+    },
   );
-  await new Promise(setImmediate);
-  assert.equal(nodes.get("tokens").textContent, "0");
-  assert.equal(nodes.get("cost").textContent, "$0.0000");
-  assert.equal(nodes.get("elapsed").textContent, "1m 0s");
-  assert.equal(nodes.get("progress").textContent, "Review items: 2 / 4");
-  assert.match(nodes.get("measurement").textContent, /partial/);
-  assert.equal(nodes.get("error").textContent, title);
+  assert.equal(nodes.progress.textContent, "Files: 1 / 3");
+  assert.equal(nodes.tokens.textContent, "0");
+  assert.equal(nodes.cost.textContent, "$0.0000");
+  assert.match(nodes.measurement.textContent, /partial/);
+  assert.equal(nodes.warnings.textContent, `Warnings\n${title}`);
+
+  connected = false;
+  await refresh();
+  assert.match(nodes.connection.textContent, /disconnected/);
+  assert.equal(nodes.status.textContent, "running");
+
+  connected = true;
+  state.measurement.cost = { estimatedUsdRange: { min: 1, max: null } };
+  state.progress.reviewItems = { completed: 2, total: 4 };
+  state.deepProgress = {
+    completed: 3,
+    active: 0,
+    maximum: 8,
+    consolidating: true,
+  };
+  await refresh();
+  assert.equal(nodes.connection.textContent, "");
+  assert.equal(nodes.cost.textContent, "≥ $1.0000");
+  assert.equal(nodes.progress.textContent, "Review items: 2 / 4");
+  assert.match(nodes.deep.textContent, /3 completed, 0 active, cap 8/);
+  assert.equal(nodes.phase.textContent, "consolidating results");
+
+  state.measurement = null;
+  state.revision = "synthetic-revision";
+  state.findings = [
+    {
+      title,
+      summary: title,
+      severity: { level: "high" },
+      locations: [{ path: title, startLine: 42 }],
+    },
+  ];
+  state.status = "completed";
+  state.finishedAt = "2026-01-01T00:01:00Z";
+  await refresh();
+  assert.equal(nodes.tokens.textContent, "Unknown");
+  assert.equal(nodes.cost.textContent, "Unknown");
+  assert.equal(nodes.elapsed.textContent, "1m 0s");
+  assert.match(nodes.revision.textContent, /synthetic-revision/);
   assert.equal(
-    nodes.get("findings").children[0].children[0].children[0].textContent,
+    nodes.findings.children[0].children[0].textContent,
     `HIGH · ${title}`,
   );
-  assert.equal(context.injected, undefined);
-  state.measurement.cost = { estimatedUsdRange: { min: 1, max: null } };
-  await scheduled();
-  assert.equal(nodes.get("cost").textContent, "≥ $1.0000");
-  state.measurement = null;
-  await scheduled();
-  assert.equal(nodes.get("tokens").textContent, "Unknown");
-  assert.equal(nodes.get("cost").textContent, "Unknown");
-  assert.equal(nodes.get("findings").children.length, 1);
-  connected = false;
-  await scheduled();
-  assert.match(nodes.get("connection").textContent, /disconnected/);
-  assert.equal(nodes.get("status").textContent, "completed");
+  assert.equal(pending.length, 0);
 });

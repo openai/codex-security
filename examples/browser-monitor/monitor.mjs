@@ -1,31 +1,83 @@
 import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
+import { format } from "node:util";
 
-export async function createMonitor(repository, demo = false) {
+async function loadClient(configFile) {
+  const { CodexSecurity, loadProjectConfig } =
+    await import("@openai/codex-security");
+  const { config, options } = await loadProjectConfig(configFile);
+  return { security: new CodexSecurity(config), options };
+}
+
+async function runScan({ security, options }, state, signal) {
+  const record = (field) => (value) => {
+    state[field] = value;
+  };
+  function onWarning(message) {
+    if (!state.warnings.includes(message)) state.warnings.push(message);
+  }
+  const result = await security.run(state.repository, {
+    ...options,
+    signal,
+    onProgress: record("progress"),
+    onDeepProgress: record("deepProgress"),
+    onLifecycle: record("lifecycle"),
+    onMeasurement: record("measurement"),
+    onWarning,
+  });
+  const { target, warnings = [] } = result.manifest.scan;
+  for (const warning of warnings) onWarning(warning);
+  state.revision = target.revision ?? target.headRevision ?? null;
+  state.findings = result.findings.findings;
+  state.reportPath = result.reportPath;
+  if (
+    options.failureSeverity &&
+    result.hasFindingsAtOrAbove(options.failureSeverity)
+  ) {
+    process.exitCode = 1;
+  }
+}
+
+async function runDemo(state, signal) {
+  state.lifecycle = { scanId: "synthetic-demo", status: "running" };
+  const phases = ["preflight", "discovery", "reporting"];
+  for (const [index, phase] of phases.entries()) {
+    state.progress = { phase, filesCompleted: index, filesTotal: 2 };
+    state.measurement = {
+      coverage: "partial",
+      observedAt: new Date().toISOString(),
+      usage: { total_tokens: (index + 1) * 1000 },
+      cost: { estimatedUsd: (index + 1) * 0.01 },
+    };
+    await setTimeout(1500, undefined, { signal });
+  }
+  state.lifecycle.status = "completed";
+  state.findings = [
+    {
+      title: "Synthetic cross-workspace invoice access",
+      summary: "An invoice lookup accepts another workspace’s invoice ID.",
+      severity: { level: "high" },
+      locations: [{ path: "app/invoices.mjs", startLine: 42 }],
+    },
+  ];
+}
+
+async function serveMonitor(state) {
   const nonce = randomBytes(24).toString("hex");
   const prefix = `/${randomBytes(24).toString("hex")}/`;
   const html = (
     await readFile(new URL("monitor.html", import.meta.url), "utf8")
   ).replaceAll("__NONCE__", nonce);
-  const state = {
-    repository,
-    demo,
-    status: "waiting",
-    startedAt: null,
-    finishedAt: null,
-    progress: null,
-    lifecycle: null,
-    measurement: null,
-    findings: null,
-    reportPath: null,
-    error: null,
-  };
-  const server = createServer((request, response) => {
-    const origin = `http://127.0.0.1:${server.address().port}`;
+  const server = createServer(serve);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const host = `127.0.0.1:${server.address().port}`;
+  const origin = `http://${host}`;
+
+  function serve(request, response) {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
@@ -34,8 +86,9 @@ export async function createMonitor(repository, demo = false) {
       `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`,
     );
     if (
-      request.headers.host !== new URL(origin).host ||
-      (request.headers.origin && request.headers.origin !== origin)
+      request.headers.host !== host ||
+      (request.headers.origin !== undefined &&
+        request.headers.origin !== origin)
     ) {
       response.writeHead(403).end();
     } else if (request.method !== "GET") {
@@ -51,83 +104,19 @@ export async function createMonitor(repository, demo = false) {
     } else {
       response.writeHead(404).end();
     }
-  });
-  await new Promise((done, fail) => {
-    server.once("error", fail);
-    server.listen(0, "127.0.0.1", done);
-  });
-  return {
-    server,
-    state,
-    url: `http://127.0.0.1:${server.address().port}${prefix}`,
-  };
-}
-
-export async function observeScan(security, repository, options, state) {
-  state.status = "running";
-  state.startedAt = new Date().toISOString();
-  try {
-    const result = await security.run(repository, {
-      ...options,
-      onProgress: (progress) => {
-        state.progress = progress;
-      },
-      onLifecycle: (lifecycle) => {
-        state.lifecycle = lifecycle;
-      },
-      onMeasurement: (measurement) => {
-        state.measurement = measurement;
-      },
-    });
-    state.findings = result.findings.findings;
-    state.reportPath = result.reportPath;
-    state.status = "completed";
-    return result;
-  } catch (error) {
-    state.status = options.signal?.aborted ? "canceled" : "failed";
-    state.error = error instanceof Error ? error.message : String(error);
-    throw error;
-  } finally {
-    state.finishedAt = new Date().toISOString();
   }
+  return { server, url: origin + prefix };
 }
 
-export function demoSecurity() {
-  return {
-    async run(repository, { onProgress, onMeasurement, onLifecycle, signal }) {
-      onLifecycle({ scanId: "synthetic-demo", status: "running" });
-      for (const [index, phase] of [
-        "preflight",
-        "discovery",
-        "reporting",
-      ].entries()) {
-        onProgress({ phase, filesCompleted: index, filesTotal: 3 });
-        onMeasurement({
-          coverage: "partial",
-          observedAt: new Date().toISOString(),
-          usage: { total_tokens: (index + 1) * 1000 },
-          cost: { estimatedUsd: (index + 1) * 0.01 },
-        });
-        await setTimeout(1500, undefined, { signal });
-      }
-      onLifecycle({ scanId: "synthetic-demo", status: "completed" });
-      return {
-        reportPath: "Synthetic demo — no report written",
-        findings: {
-          findings: [
-            {
-              title: "Synthetic cross-workspace invoice access",
-              summary:
-                "An example finding for previewing the monitor. No repository was scanned.",
-              severity: { level: "high" },
-              locations: [{ path: "app/invoices.mjs", startLine: 42 }],
-            },
-          ],
-        },
-      };
-    },
-    async close() {},
-  };
+function reportError(error) {
+  process.exitCode = 2;
+  // Match the CLI's multiline terminal escaping after formatting nested causes.
+  const diagnostic = format(error).replaceAll(
+    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+  console.error(diagnostic);
 }
 
 async function main() {
@@ -138,60 +127,49 @@ async function main() {
       "Usage: node monitor.mjs --demo | <repository> <trusted-project-config>",
     );
   }
-  let security;
-  let options = {};
-  if (demo) {
-    security = demoSecurity();
-  } else {
-    const { CodexSecurity, loadProjectConfig } =
-      await import("@openai/codex-security");
-    const loaded = await loadProjectConfig(resolve(configFile));
-    security = new CodexSecurity(loaded.config);
-    options = loaded.options;
-  }
-  const target = demo ? "Synthetic demo" : resolve(repository);
-  const controller = new AbortController();
-  const monitor = await createMonitor(target, demo);
-  const stop = () => {
-    if (monitor.state.status === "running") process.exitCode = 130;
-    controller.abort();
-    monitor.server.close();
-    monitor.server.closeAllConnections();
+  const client = demo ? null : await loadClient(configFile);
+  const state = {
+    repository: demo ? "Synthetic demo" : repository,
+    demo,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    progress: null,
+    deepProgress: null,
+    lifecycle: null,
+    measurement: null,
+    revision: null,
+    warnings: [],
+    findings: null,
+    reportPath: null,
+    error: null,
   };
+  const { server, url } = await serveMonitor(state);
+  const controller = new AbortController();
+  function stop(signal) {
+    if (state.status === "running") {
+      process.exitCode = signal === "SIGINT" ? 130 : 143;
+      controller.abort();
+    }
+    server.close();
+    server.closeAllConnections();
+  }
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  console.log(`Monitor: ${monitor.url}`);
-  console.log(
-    "Read-only browser view. Press Ctrl+C to stop the scan and server.",
-  );
+  console.log(`Monitor: ${url}`);
+  console.log("Press Ctrl+C to stop the scan and server.");
   try {
-    const result = await observeScan(
-      security,
-      target,
-      { ...options, signal: controller.signal },
-      monitor.state,
-    );
-    if (
-      options.failureSeverity &&
-      result.hasFindingsAtOrAbove(options.failureSeverity)
-    )
-      process.exitCode = 1;
+    if (demo) await runDemo(state, controller.signal);
+    else await runScan(client, state, controller.signal);
+    state.status = "completed";
   } catch (error) {
-    if (!controller.signal.aborted) {
-      process.exitCode = 2;
-      console.error(error);
-    }
+    state.status = controller.signal.aborted ? "canceled" : "failed";
+    state.error = error instanceof Error ? error.message : String(error);
+    if (!controller.signal.aborted) reportError(error);
   } finally {
-    await security.close();
+    state.finishedAt = new Date().toISOString();
+    await client?.security.close();
   }
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
-  main().catch((error) => {
-    console.error(error);
-    process.exitCode = 2;
-  });
-}
+main().catch(reportError);

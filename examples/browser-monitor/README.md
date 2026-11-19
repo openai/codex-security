@@ -1,42 +1,43 @@
-# Browser scan monitor example
+# Browser scan monitor
 
-Watch one SDK scan in a local browser: phase, elapsed time, observed tokens,
-estimated API cost, saved lifecycle, and completed findings. The browser polls a
-read-only snapshot once per second. It does not launch commands, apply patches,
-or publish findings. This example does not restore the retired `serve` command.
+Start one SDK scan in your terminal and follow it in a read-only browser tab.
+The page refreshes once per second until the scan finishes. Reload the private
+URL to revisit the same scan. Press Ctrl+C to close the server and cancel any
+active scan.
 
-## Preview without model access
+## Try the demo
 
-From the repository root, using a [supported Node.js version](../../sdk/typescript/package.json):
+The demo simulates a scan and a finding using only Node.js. Run it from the
+repository root with a [supported Node.js version](../../sdk/typescript/package.json).
 
 ```bash
 node examples/browser-monitor/monitor.mjs --demo
 ```
 
-Open the printed loopback URL. The synthetic demo completes in a few seconds,
-requires no dependencies or credentials, and makes no model requests. The server
-stays open for result review. Press Ctrl+C to close it.
+Open the URL printed in the terminal. The demo finishes in a few seconds.
 
 ## Monitor a real scan
 
-Install the published SDK beside the example. This leaves the repository's
-package manifests and lockfiles unchanged:
+Install the published SDK beside the example. It requires Python 3.10 or later
+and `tomli` on Python 3.10.
 
 ```bash
 npm install --prefix examples/browser-monitor --no-save --package-lock=false @openai/codex-security
 ```
 
-The SDK also needs Python 3.10 or later (`tomli` on Python 3.10). Sign in using
-the installed CLI, or supply a scan API key:
+Sign in with ChatGPT using the installed CLI. For API key authentication, set
+`OPENAI_API_KEY` and use `auth: api-key` in the project file. See the
+[authentication guide](../../sdk/typescript/docs/cli.md#openai-credentials).
 
 ```bash
 npm exec --prefix examples/browser-monitor -- codex-security login
 ```
 
-See the
-[CLI authentication guide](../../sdk/typescript/docs/cli.md#openai-credentials).
-
-Save a trusted project file outside the target checkout. For example:
+Save a project file you control outside the target checkout. Project files
+select model endpoints and can configure MCP servers. This example requests
+15 minutes of Standard investigation and a $1 estimated cost limit. The time
+is advisory, and in-flight requests can exceed the cost limit. See
+[project configuration](../../docs/project-configuration.md).
 
 ```yaml
 auth: chatgpt
@@ -49,37 +50,31 @@ codex:
   approval_policy: never
 ```
 
-Use `auth: api-key` instead when intentionally using an API key. The USD limit
-is an estimate, not a billing cap; in-flight requests can exceed it. Standard
-investigation time is advisory. Other model, scope, and provider settings use
-the existing [project configuration](../../docs/project-configuration.md).
-
-Start the scan from the terminal with an authorized, disposable source copy:
+Use a disposable source copy you have permission to scan. The command starts
+model requests immediately and uses your account. The scan has the SDK's usual
+filesystem, network, and credential access. Remove unrelated credentials from
+the environment before launching.
 
 ```bash
 node examples/browser-monitor/monitor.mjs /path/to/source-copy /path/to/trusted-config.yaml
 ```
 
-Starting this command starts a model-backed scan and consumes account usage.
-The server listens on an automatically allocated `127.0.0.1` port and prints
-a private, random-path URL. Open it in a local browser. The browser is read-only;
-the scan itself retains the SDK's filesystem, network, and credential permissions.
-Remove unrelated credentials from the environment before launching. Only load
-project files you control, because they can configure model endpoints and MCP
-servers. Do not forward the port or share the URL.
+Keep the printed URL private and the port local. Anyone with access to the
+loopback port and URL can read the snapshot. Findings, diagnostics, and saved
+reports can contain source and credentials.
 
-Unknown measurements remain unknown. Partial coverage and collection time appear
-beside usage; review-item counts are not file counts or an overall percentage.
-SDK callback delivery can lag, and a quiet interval does not establish a hang.
-Findings appear only after `run()` returns. A completed scan does not establish
-full coverage; inspect its saved report and manifest.
+## Read the results
 
-The server remains available after completion or failure. Reloading the page
-reads the same snapshot without starting a second scan. Ctrl+C aborts any active
-scan through its SDK signal and closes the server. Errors retain their diagnostic
-text. Scan data can include source, credentials, and vulnerability details; keep
-the page, logs, and artifacts private. Scan history stays in the SDK workbench;
-use `codex-security scans list` and `scans show` for earlier runs.
+Progress and usage reflect the latest SDK observations, which can lag behind
+the scan. Standard reports files or review items. Deep Scan also tracks
+independent reviews. Token counts and API-equivalent cost estimates include
+their measurement time and coverage.
+
+After completion, expand a finding to see its summary and location. Check the
+saved revision and any warnings, and consult the report and manifest for
+coverage. The page retains the final result or failure until you close the
+server. Use `codex-security scans list` and `codex-security scans show` for
+earlier runs.
 
 ## Check the example
 
@@ -87,4 +82,4 @@ use `codex-security scans list` and `scans show` for earlier runs.
 node --test examples/browser-monitor/monitor.test.mjs
 ```
 
-Tests use synthetic SDK callbacks and local HTTP requests, without model access.
+These tests run the example with synthetic data and local HTTP requests.

@@ -3,224 +3,188 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>Codex Security · Scan monitor</title>
     <style nonce="__NONCE__">
-      :root {
-        color-scheme: light dark;
-        font:
-          16px/1.5 system-ui,
-          sans-serif;
+      body {
+        font: 1rem/1.5 system-ui;
         background: light-dark(#f5f5f2, #161817);
         color: light-dark(#242924, #e4e8e3);
-      }
-      body {
-        max-width: 960px;
-        margin: auto;
-        padding: 32px 20px;
-      }
-      header,
-      .cards {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-      }
-      header {
-        align-items: baseline;
-        justify-content: space-between;
-      }
-      h1 {
-        margin: 0;
-        font-size: 26px;
-        letter-spacing: -0.04em;
-      }
-      h2 {
-        margin-top: 32px;
-        font-size: 18px;
-      }
-      p {
+        max-width: 48rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
         overflow-wrap: anywhere;
       }
-      .muted,
-      dt {
-        color: light-dark(#535d54, #a5afa6);
+      h1,
+      h2 {
+        font-size: 1.35rem;
       }
-      .badge {
-        border: 1px solid currentColor;
-        border-radius: 20px;
-        padding: 3px 12px;
-      }
-      .cards > div {
-        flex: 1 1 170px;
-        padding: 20px;
-        background: light-dark(white, #222623);
-        border: 1px solid light-dark(#d8ddd5, #3b433d);
-        border-radius: 12px;
+      dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.3rem 1rem;
+        padding-block: 1rem;
+        border-block: 1px solid light-dark(#ccc, #555);
       }
       dd {
-        margin: 6px 0 0;
-        font-size: 22px;
+        margin: 0;
         font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+      dt:has(+ dd:empty),
+      dd:empty {
+        display: none;
       }
       #connection,
-      #demo {
+      #warnings {
         color: light-dark(#844207, #ffbd79);
+        white-space: pre-wrap;
       }
       #error {
         white-space: pre-wrap;
-        overflow-wrap: anywhere;
         color: light-dark(#a41f2b, #ff9ba5);
       }
-      ul {
-        padding: 0;
-        list-style: none;
-      }
-      li {
-        padding: 16px 0;
-        border-top: 1px solid light-dark(#d8ddd5, #3b433d);
-      }
       summary {
+        padding-bottom: 0.5rem;
         cursor: pointer;
-        overflow-wrap: anywhere;
-      }
-      code {
-        overflow-wrap: anywhere;
       }
     </style>
   </head>
   <body>
-    <header>
-      <h1>Codex Security / Scan monitor</h1>
-      <span id="status" class="badge" role="status">Connecting</span>
-    </header>
-    <p id="repository" class="muted"></p>
-    <p id="demo" hidden>
-      Demo · Synthetic data only. No model calls, repository scan, or charges.
-    </p>
-    <p id="connection" role="status"></p>
-    <dl class="cards">
-      <div>
+    <main>
+      <h1>Codex Security monitor</h1>
+      <p>
+        <strong id="status" role="status">Connecting</strong> ·
+        <span id="repository"></span>
+      </p>
+      <p id="revision"></p>
+      <p id="saved"></p>
+      <p id="connection" role="status"></p>
+      <p id="warnings" role="status"></p>
+      <pre id="error" role="alert"></pre>
+      <dl>
         <dt>Elapsed</dt>
         <dd id="elapsed">—</dd>
-      </div>
-      <div>
-        <dt>Phase</dt>
-        <dd id="phase">Awaiting observation</dd>
-      </div>
-      <div>
+        <dt>Last phase</dt>
+        <dd id="phase">Unknown</dd>
+        <dt>Review progress</dt>
+        <dd id="progress"></dd>
+        <dt>Independent reviews</dt>
+        <dd id="deep"></dd>
         <dt>Observed tokens</dt>
         <dd id="tokens">Unknown</dd>
-      </div>
-      <div>
         <dt>Estimated API cost</dt>
         <dd id="cost">Unknown</dd>
-      </div>
-    </dl>
-    <p id="progress" class="muted">Review progress has not been reported.</p>
-    <p id="measurement" class="muted">
-      Usage has not been observed. Estimates are not a bill or subscription
-      allowance.
-    </p>
-    <p id="saved" class="muted"></p>
-    <pre id="error" role="alert"></pre>
-    <h2 id="findings-title">Findings · Awaiting completed scan</h2>
-    <ul id="findings"></ul>
-    <p id="report" class="muted"></p>
-    <p class="muted">
-      Progress is best effort. Completion does not establish full coverage. This
-      view cannot start, patch, or publish scans. Keep its URL and results
-      private.
-    </p>
+      </dl>
+      <p id="measurement"></p>
+      <h2 id="findings-title" hidden></h2>
+      <p id="report"></p>
+      <div id="findings"></div>
+    </main>
+    <p><small>Keep this URL and results private.</small></p>
     <script nonce="__NONCE__">
       const element = (id) => document.getElementById(id);
-      let current;
-      let findingsRendered = false;
-      const money = (value) => `$${value.toFixed(4)}`;
-      function render(state) {
-        current = state;
-        element("status").textContent = state.status;
-        element("repository").textContent = state.repository;
-        element("demo").hidden = !state.demo;
-        element("phase").textContent =
-          state.progress?.phase?.replaceAll("_", " ") ?? "Awaiting observation";
-        const progress = state.progress;
+      function setText(id, text) {
+        const node = element(id);
+        if (node.textContent !== text) node.textContent = text;
+      }
+      function formatCost(cost) {
+        if (!cost) return "Unknown";
+        const money = (value) => `$${value.toFixed(4)}`;
+        if (!cost.estimatedUsdRange) return money(cost.estimatedUsd);
+        const { min, max } = cost.estimatedUsdRange;
+        return max === null
+          ? `≥ ${money(min)}`
+          : `${money(min)} – ${money(max)}`;
+      }
+      function showFindings(findings) {
+        element("findings-title").hidden = false;
+        setText("findings-title", `Findings · ${findings.length}`);
+        for (const finding of findings) {
+          const details = document.createElement("details");
+          const summary = document.createElement("summary");
+          summary.textContent = `${finding.severity.level.toUpperCase()} · ${finding.title}`;
+          const description = document.createElement("p");
+          description.textContent = finding.summary;
+          const locations = document.createElement("code");
+          locations.textContent = finding.locations
+            .map(({ path, startLine }) => `${path}:${startLine}`)
+            .join(", ");
+          details.append(summary, description, locations);
+          element("findings").append(details);
+        }
+      }
+      function showProgress(progress, deep) {
+        let phase = progress?.phase;
         if (progress) {
           const reviews = progress.reviewItems;
-          element("progress").textContent = reviews
-            ? `Review items: ${reviews.completed} / ${reviews.total}`
-            : `Files: ${progress.filesCompleted} / ${progress.filesTotal}`;
+          setText(
+            "progress",
+            reviews?.total > 0
+              ? `Review items: ${reviews.completed} / ${reviews.total}`
+              : `Files: ${progress.filesCompleted} / ${progress.filesTotal}`,
+          );
         }
-        const measurement = state.measurement;
-        element("tokens").textContent =
-          measurement?.usage?.total_tokens?.toLocaleString() ?? "Unknown";
-        const cost = measurement?.cost;
-        const range = cost?.estimatedUsdRange;
-        element("cost").textContent = range
-          ? range.max === null
-            ? `≥ ${money(range.min)}`
-            : `${money(range.min)} – ${money(range.max)}`
-          : cost
-            ? money(cost.estimatedUsd)
-            : "Unknown";
-        element("measurement").textContent = measurement
-          ? `Usage coverage: ${measurement.coverage}. Collected: ${measurement.observedAt}. In-flight usage may be missing; cost is an API-equivalent estimate.`
-          : "Usage has not been observed. Estimates are not a bill or subscription allowance.";
-        element("saved").textContent = state.lifecycle
-          ? `Saved scan: ${state.lifecycle.scanId} · ${state.lifecycle.status}`
-          : "";
-        element("error").textContent = state.error ?? "";
-        element("report").textContent = state.reportPath
-          ? `Report: ${state.reportPath}`
-          : "";
-        if (state.findings !== null && !findingsRendered) {
-          findingsRendered = true;
-          element("findings-title").textContent =
-            `Findings · ${state.findings.length}`;
-          for (const finding of state.findings) {
-            const item = document.createElement("li");
-            const details = document.createElement("details");
-            const summary = document.createElement("summary");
-            summary.textContent = `${finding.severity.level.toUpperCase()} · ${finding.title}`;
-            const description = document.createElement("p");
-            description.textContent = finding.summary;
-            const locations = document.createElement("code");
-            locations.textContent = finding.locations
-              .map((location) => `${location.path}:${location.startLine}`)
-              .join(", ");
-            details.append(summary, description, locations);
-            item.append(details);
-            element("findings").append(item);
-          }
+        if (deep) {
+          if (deep.consolidating) phase = "consolidating results";
+          else if (deep.active || deep.completed) phase = "discovery";
+          setText(
+            "deep",
+            `Last observed: ${deep.completed} completed, ${deep.active} active, cap ${deep.maximum}`,
+          );
         }
-        tick();
+        if (phase) setText("phase", phase.replaceAll("_", " "));
       }
-      function tick() {
-        if (!current?.startedAt) return;
-        const seconds = Math.max(
-          0,
-          Math.floor(
-            ((current.finishedAt
-              ? Date.parse(current.finishedAt)
-              : Date.now()) -
-              Date.parse(current.startedAt)) /
-              1000,
-          ),
+      function render(state) {
+        const { lifecycle, measurement, revision, startedAt, finishedAt } =
+          state;
+        setText("status", state.status);
+        setText("repository", state.repository);
+        if (revision) setText("revision", `Saved revision: ${revision}`);
+        if (lifecycle) {
+          const { scanId, status } = lifecycle;
+          setText("saved", `Saved scan: ${scanId} · ${status}`);
+        }
+        if (state.warnings.length)
+          setText("warnings", `Warnings\n${state.warnings.join("\n")}`);
+        setText("error", state.error ?? "");
+        if (startedAt) {
+          const end = finishedAt ? Date.parse(finishedAt) : Date.now();
+          const duration = Math.max(0, end - Date.parse(startedAt));
+          const seconds = Math.floor(duration / 1000);
+          setText("elapsed", `${Math.floor(seconds / 60)}m ${seconds % 60}s`);
+        }
+        showProgress(state.progress, state.deepProgress);
+        setText(
+          "tokens",
+          measurement?.usage?.total_tokens?.toLocaleString() ?? "Unknown",
         );
-        element("elapsed").textContent =
-          `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+        setText("cost", formatCost(measurement?.cost));
+        setText(
+          "measurement",
+          measurement
+            ? `Usage coverage: ${measurement.coverage} · Collected ${measurement.observedAt}`
+            : "",
+        );
+        if (state.reportPath) setText("report", `Report: ${state.reportPath}`);
+        if (state.findings) showFindings(state.findings);
       }
       async function poll() {
         try {
           const response = await fetch("state", { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          render(await response.json());
-          element("connection").textContent = "";
+          const state = await response.json();
+          render(state);
+          setText("connection", "");
+          if (state.finishedAt) return;
         } catch (error) {
-          element("connection").textContent =
-            `Monitor disconnected; displaying the last observation. ${error.message}`;
+          setText(
+            "connection",
+            `Monitor disconnected. Retrying… ${error.message}`,
+          );
         }
         setTimeout(poll, 1000);
       }
-      setInterval(tick, 1000);
       poll();
     </script>
   </body>
