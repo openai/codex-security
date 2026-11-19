@@ -8,7 +8,7 @@ At the first usable threat model, call `record_codex_security_scan_draft` with t
 
 A bound Standard draft may include `reviewState.reviewedFiles`. List the exact repository-relative paths of files fully reviewed in this batch, including paths that returning reviewers confirm they fully reviewed. Put partially reviewed paths and their remaining questions in `reviewState.deferred`. The draft records file reviews without separate receipt files.
 
-Omit `reviewedFiles` if the Git checkout was dirty at scan start. Omit individual paths when their checked-out bytes differ from the registered Git blob, including after line-ending conversion to CRLF. If the workbench rejects a file declaration, retry the same draft with the ineligible paths removed, preserving its findings and deferred work.
+Omit `reviewedFiles` if the Git checkout was dirty at scan start. Git receipts cover the reviewed checkout bytes, including CRLF, when Git maps them to the registered blob. If a declaration fails validation, the workbench saves the draft with a warning and skips the entire receipt batch. Include eligible paths in a later draft to record those reviews.
 
 Checkpoint returned candidates before merging or validating them. Keep their original evidence under `reviewState.deferred` until resolved. Reuse saved surface IDs. Preserve validation decisions, counterevidence, and unfinished questions as directed by the core audit. Use [artifact storage](../../../references/artifact-storage.md) for supplemental evidence. A caller-supplied custom validation handoff determines which candidates are provisional.
 

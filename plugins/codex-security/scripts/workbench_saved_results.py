@@ -1007,18 +1007,21 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 def stage_standard_file_reviews(
     connection: sqlite3.Connection, scan: sqlite3.Row, checkpoint: dict[str, Any] | None, now: str
-) -> None:
+) -> str | None:
     """Stage only the current submitter's explicit file reviews in the draft transaction."""
     if scan["mode"] != "standard" or checkpoint is None:
-        return
+        return None
     state = checkpoint.get("reviewState")
     if not isinstance(state, dict) or "reviewedFiles" not in state:
-        return
+        return None
     if scan["recipe_json"] and json.loads(scan["recipe_json"]).get("mock") is True:
-        return
-    digests = review_file_digests(scan, state["reviewedFiles"])
+        return None
+    try:
+        digests = review_file_digests(scan, state["reviewedFiles"])
+    except (SystemExit, ValueError) as exc:
+        return f"Skipped this batch of file review receipts: {exc}"
     if not digests:
-        return
+        return None
     inserted = connection.executemany(
         "INSERT INTO standard_reviewed_files (scan_id, relative_path, content_sha256, closed_at) "
         "VALUES (?, ?, ?, ?) ON CONFLICT(scan_id, relative_path) DO NOTHING",
@@ -1035,7 +1038,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
     Read the draft from its registered scan directory and bind it to the scan
     before publishing it under the completion lock. Return the scan ID, the
-    draft_written status, and any warning about the optional threat model.
+    draft_written status, and any warnings about optional artifacts.
     """
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id), connection:
@@ -1145,7 +1148,12 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
-        stage_standard_file_reviews(connection, scan, accepted_checkpoint, timestamp)
+        receipt_warning = stage_standard_file_reviews(
+            connection, scan, accepted_checkpoint, timestamp
+        )
+        if receipt_warning:
+            del checkpoint["reviewState"]["reviewedFiles"]
+            checkpoint_contents = _encoded(checkpoint)
         if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             if scan["mode"] == "deep":
@@ -1189,6 +1197,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                     (str(scan_dir / "scan-manifest.json"), scan_id),
                 )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+        warnings = [warning for warning in (receipt_warning, model_warning) if warning]
         if acknowledge:
             # Optional recovery evidence is written only after the publication succeeds.
             try:
@@ -1196,7 +1205,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                     "status": "draft_written",
                     "input": acceptance_input,
                     "draftDigest": _scan_draft_contents_digest(documents),
-                    **({"warnings": [model_warning]} if model_warning else {}),
+                    **({"warnings": warnings} if warnings else {}),
                 }
                 write_scan_local_bytes(scan_dir, acceptance_relative, _encoded(acceptance))
             except (OSError, ScanLocalIOError):
@@ -1235,7 +1244,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {
         "scanId": scan_id,
         "status": "draft_written",
-        **({"warnings": [model_warning]} if model_warning else {}),
+        **({"warnings": warnings} if warnings else {}),
     }
 
 

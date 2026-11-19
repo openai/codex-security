@@ -18,6 +18,7 @@ from finalize_scan_contract import (
 from workbench_source_scopes import (
     existing_tree_path,
     load_source_scopes,
+    offline_git_bytes,
     requested_scan_paths,
 )
 from workbench_target import (
@@ -27,22 +28,59 @@ from workbench_target import (
 )
 
 
+def _permits_crlf_normalization(target: Path, path: str) -> bool:
+    """Ask Git whether its indexed blob permits CRLF normalization without invoking filters."""
+    metadata = offline_git_bytes(target, "ls-files", "--eol", "-z", "--", path)
+    fields = (metadata or b"").partition(b"\t")[0].split()
+    if len(fields) < 3:
+        return False
+    indexed, working, attribute = fields[:3]
+    if attribute == b"attr/text":
+        return True
+    if indexed in (b"i/crlf", b"i/mixed") or working not in (b"w/crlf", b"w/mixed"):
+        return False
+    if attribute == b"attr/text=auto":
+        return True
+    if attribute == b"attr/":
+        autocrlf = offline_git_bytes(
+            target, "config", "--type=bool-or-str", "--get", "core.autocrlf"
+        )
+        return (autocrlf or b"").strip().lower() in (b"true", b"input")
+    return False
+
+
 def _git_file_digest(target: Path, path: str, blob: str) -> str:
     descriptor = open_scan_local_file_descriptor(target, path, "reviewed file", portable=False)
     with os.fdopen(descriptor, "rb") as stream:
-        size = os.fstat(stream.fileno()).st_size
-        identity = hashlib.new(
-            "sha1" if len(blob) == 40 else "sha256",
-            f"blob {size}\0".encode(),
-            usedforsecurity=False,
-        )
-        content = hashlib.sha256()
-        while block := stream.read(1024 * 1024):
-            identity.update(block)
-            content.update(block)
-    if identity.hexdigest() != blob:
-        raise SystemExit(f"Reviewed file no longer matches its registered Git blob: {path}")
-    return content.hexdigest()
+        for normalize in (False, True):
+            if normalize:
+                if not _permits_crlf_normalization(target, path):
+                    break
+                blob_size = offline_git_bytes(target, "cat-file", "-s", blob)
+                if blob_size is None:
+                    break
+                size = int(blob_size)
+                stream.seek(0)
+            else:
+                size = os.fstat(stream.fileno()).st_size
+            identity = hashlib.new(
+                "sha1" if len(blob) == 40 else "sha256",
+                f"blob {size}\0".encode(),
+                usedforsecurity=False,
+            )
+            content = hashlib.sha256()
+            pending = b""
+            while block := stream.read(1024 * 1024):
+                content.update(block)
+                if normalize:
+                    block = pending + block
+                    pending = b"\r" if block.endswith(b"\r") else b""
+                    block = block.removesuffix(pending).replace(b"\r\n", b"\n")
+                identity.update(block)
+            identity.update(pending)
+            if identity.hexdigest() == blob:
+                return content.hexdigest()
+    raise SystemExit(f"Reviewed file no longer matches its registered Git blob: {path}")
 
 
 def _directory_receipts(

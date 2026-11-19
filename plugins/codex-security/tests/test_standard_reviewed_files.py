@@ -55,7 +55,7 @@ def test_standard_file_review_receipts_allow_partial_completion(tmp_path: Path, 
     drafts = scan_dir / "drafts"
     drafts.mkdir(exist_ok=True)
 
-    def submit(paths, *, complete=False, check=True):
+    def submit(paths, *, complete=False):
         draft = drafts / f"{uuid.uuid4()}.json"
         documents["manifest"]["scan"]["complete"] = complete
         draft.write_text(json.dumps(documents))
@@ -76,7 +76,6 @@ def test_standard_file_review_receipts_allow_partial_completion(tmp_path: Path, 
             str(draft),
             "--checkpoint-path",
             str(checkpoint),
-            check=check,
         )
 
     assert submit([reviewed])["status"] == "draft_written"
@@ -101,7 +100,7 @@ def test_standard_file_review_receipts_allow_partial_completion(tmp_path: Path, 
         assert submit([reviewed, reviewed])["status"] == "draft_written"
         assert receipt() == original
         for invalid in (["pending.py", "absent.py"], {"pending.py": False}):
-            assert submit(invalid, check=False)["returncode"] != 0
+            assert "Skipped this batch of file review receipts" in submit(invalid)["warnings"][0]
             assert receipt() == original
 
     assert submit(None, complete=True)["status"] == "draft_written"
@@ -115,3 +114,62 @@ def test_standard_file_review_receipts_allow_partial_completion(tmp_path: Path, 
     head = json.loads((scan_dir / "checkpoint-head.json").read_text())
     accepted = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
     assert accepted["reviewState"]["deferred"] == deferred
+
+
+@pytest.mark.cross_platform
+def test_stopped_scan_retains_finding_after_rejected_file_receipt(tmp_path: Path):
+    state, repository, scan_dir = tmp_path / "state", tmp_path / "repository", tmp_path / "scan"
+    initialize_git_repository(repository)
+    registered = register_cli_scan(state, repository, scan_dir)
+    scan_id = registered["scanId"]
+    template = tmp_path / "contract"
+    template.mkdir()
+    write_completed_contract(
+        template,
+        scan_id,
+        repository,
+        relative_path="README.md",
+        target_kind="git_revision",
+        target_revision=registered["targetRevision"],
+    )
+    documents = read_draft_documents(template)
+    documents["manifest"]["scan"]["complete"] = False
+    findings = documents["findings"]["findings"]
+    drafts = scan_dir / "drafts"
+    drafts.mkdir(exist_ok=True)
+    draft = drafts / f"{uuid.uuid4()}.json"
+    draft.write_text(json.dumps(documents))
+    checkpoint = drafts / f"{uuid.uuid4()}.checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "scanId": scan_id,
+                "complete": False,
+                "findings": findings,
+                "reviewState": {"reviewedFiles": ["README.md"]},
+            }
+        )
+    )
+    (repository / "README.md").write_text("Changed after review.")
+
+    result = scan_command(
+        state,
+        "write-scan-draft",
+        scan_id,
+        "--draft-path",
+        str(draft),
+        "--checkpoint-path",
+        str(checkpoint),
+    )
+    assert result["status"] == "draft_written"
+    assert "registered Git blob: README.md" in result["warnings"][0]
+    scan_command(state, "cancel-scan", scan_id)
+    detail = get_scan(state, scan_id)["scan"]
+    assert detail["progress"]["coverage"].get("filesReviewed", 0) == 0
+    head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+    accepted = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+    assert accepted["findings"][0]["title"] == findings[0]["title"]
+    assert (
+        json.loads((scan_dir / "findings.json").read_text())["findings"][0]["title"]
+        == findings[0]["title"]
+    )

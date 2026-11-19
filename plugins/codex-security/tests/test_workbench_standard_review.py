@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -57,6 +58,63 @@ def test_reviewed_file_must_match_the_registered_blob_and_scope(tmp_path: Path) 
     source.write_bytes(b"replaced\x00bytes")
     with pytest.raises(SystemExit):
         review(scan, [selected])
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("conversion", ["autocrlf", "attributes"])
+def test_receipt_hashes_crlf_checkout_of_lf_blob(tmp_path: Path, conversion: str) -> None:
+    repo = tmp_path / "repo"
+    initialize_git_repository(repo)
+    target = repo / "component"
+    (target / "src").mkdir(parents=True)
+    path = "src/main.py"
+    source = target / path
+    source.write_bytes(b"pass\n")
+
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", *args], cwd=target)
+
+    git("config", "core.autocrlf", "true" if conversion == "autocrlf" else "false")
+    if conversion == "attributes":
+        (target / ".gitattributes").write_text(f"{path} text eol=crlf\n")
+    git("add", ".")
+    git("commit", "-qm", "Add review input")
+    source.unlink()
+    git("checkout", "--", path)
+    assert git("show", f"HEAD:component/{path}") == b"pass\n"
+    assert source.read_bytes() == b"pass\r\n"
+    scan = registered_scan(tmp_path, target)
+    review = load_script("workbench_standard_review").review_file_digests
+
+    assert review(scan, [path]) == {path: hashlib.sha256(b"pass\r\n").hexdigest()}
+    (target / ".gitattributes").write_text(f"{path} -text\n")
+    with pytest.raises(SystemExit, match="registered Git blob"):
+        review(scan, [path])
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("driver", ["clean", "process"])
+def test_receipt_does_not_execute_git_filter_commands(tmp_path: Path, driver: str) -> None:
+    repo = tmp_path / "repo"
+    initialize_git_repository(repo)
+    (repo / "src").mkdir()
+    source = repo / "src" / "main.py"
+    source.write_bytes(b"pass\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add input"], cwd=repo, check=True)
+    scan = registered_scan(tmp_path, repo)
+    name = "fixture=value" if os.name == "nt" else os.fsdecode(b"fixture=\xff")
+    (repo / ".gitattributes").write_bytes(os.fsencode(f"*.py text filter={name}\n"))
+    command = "echo ran > filter-ran && echo pass"
+    subprocess.run(["git", "config", f"filter.{name}.{driver}", command], cwd=repo, check=True)
+    subprocess.run(["git", "config", f"filter.{name}.required", "true"], cwd=repo, check=True)
+    review = load_script("workbench_standard_review").review_file_digests
+    source.write_bytes(b"pass\r\n")
+    assert review(scan, ["src/main.py"]) == {"src/main.py": hashlib.sha256(b"pass\r\n").hexdigest()}
+    source.write_bytes(b"changed\n")
+    with pytest.raises(SystemExit, match="registered Git blob"):
+        review(scan, ["src/main.py"])
+    assert not (repo / "filter-ran").exists()
 
 
 @pytest.mark.cross_platform
