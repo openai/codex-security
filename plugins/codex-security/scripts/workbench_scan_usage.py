@@ -1323,6 +1323,7 @@ def _read_rollout_usage(
     counter_total = _empty_token_usage()
     warnings = result.warnings
     previous = _empty_token_usage()
+    previous_counter_turn: str | None = None
     after_compaction = False
     previous_cache_writes_reported = True
     prefix_unclassified = 0
@@ -1566,6 +1567,11 @@ def _read_rollout_usage(
                 ):
                     warnings.add("compaction_usage_unavailable")
                 continue
+            if (
+                event.get("type") == "session_meta"
+                and (payload.get("id") or payload.get("session_id")) == session.thread_id
+            ):
+                previous_counter_turn = None
             if event.get("type") == "token_usage_record":
                 response_id = payload.get("response_id")
                 usage = _token_snapshot({"info": {"total_token_usage": payload.get("usage")}})
@@ -1706,7 +1712,9 @@ def _read_rollout_usage(
                 and not past_scan_end(timestamp, current_turn_id)
             ):
                 regressed_turns.add(current_turn_id)
-                continue
+                # A reconnect or a new turn can restart the cumulative counter.
+                if previous_counter_turn == current_turn_id:
+                    continue
             if reset:
                 prefix_unclassified = 0
             missing_cache = _missing_cache_fields(payload)
@@ -1742,6 +1750,7 @@ def _read_rollout_usage(
             ):
                 delta["cacheWriteInputTokensReported"] = False
             previous = baseline
+            previous_counter_turn = current_turn_id
             if past_scan_end(timestamp, current_turn_id):
                 continue
             if isinstance(current_turn_id, str) and (
