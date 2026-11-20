@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
@@ -204,6 +205,7 @@ export async function withPatchGitIndex<T>(
 export interface PatchGitControls {
   readonly publicationHooks: PatchPublicationHooks;
   readonly nestedCheckouts: readonly string[];
+  readonly nestedConfigurationDigests: ReadonlySet<string>;
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly unavailableFilters: readonly string[];
@@ -486,8 +488,8 @@ function httpCredentialPath(directory: string, file: string): string {
   return relativeFile(directory, file);
 }
 
-// Windows Go clients accept quotes around KUBECONFIG entries containing ';'.
-function kubeConfigFiles(value: string): string[] {
+// Windows Go clients accept quotes around path list entries containing ';'.
+function goPathList(value: string): string[] {
   if (process.platform !== "win32") return value.split(delimiter);
   const files: string[] = [];
   let current = "";
@@ -503,6 +505,61 @@ function kubeConfigFiles(value: string): string[] {
   return files;
 }
 
+function accountHomeDirectory(): string | undefined {
+  try {
+    return userInfo().homedir;
+  } catch {
+    // An effective UID need not have an entry in the password database.
+    return undefined;
+  }
+}
+
+function gitLabConfigRoots(
+  environment: NodeJS.ProcessEnv,
+  homes: Set<string | undefined>,
+): Set<string> {
+  // glab searches the legacy home location and the platform's XDG roots.
+  const windows = process.platform === "win32";
+  const homePrefix = windows ? /^%USERPROFILE%/u : /^(?:~|\$HOME)/u;
+  const roots = new Set<string>();
+  const xdg = [
+    environment["XDG_CONFIG_HOME"],
+    ...goPathList(environment["XDG_CONFIG_DIRS"] ?? ""),
+  ];
+  for (const dir of xdg) {
+    if (!dir) continue;
+    if (isAbsolute(dir)) roots.add(dir);
+    else if (homePrefix.test(dir))
+      for (const home of homes)
+        if (home) roots.add(join(home, dir.replace(homePrefix, "")));
+  }
+  for (const home of homes) {
+    if (!home) continue;
+    roots.add(relativeFile(home, ".config"));
+    if (windows) {
+      roots.add(relativeFile(home, join("AppData", "Local")));
+      roots.add(relativeFile(home, join("AppData", "Roaming")));
+    } else if (process.platform === "darwin") {
+      roots.add(relativeFile(home, join("Library", "Application Support")));
+      roots.add(relativeFile(home, join("Library", "Preferences")));
+    }
+  }
+  if (windows) {
+    for (const key of [
+      "LOCALAPPDATA",
+      "APPDATA",
+      "PROGRAMDATA",
+      "ALLUSERSPROFILE",
+    ])
+      if (environment[key]) roots.add(environment[key]);
+    roots.add(join((environment["SYSTEMDRIVE"] ?? "C:") + sep, "ProgramData"));
+  } else if (process.platform === "darwin") {
+    roots.add("/Library/Application Support");
+    roots.add("/Library/Preferences");
+  } else roots.add("/etc/xdg");
+  return roots;
+}
+
 function credentialPointerFiles(
   inherited: Readonly<Record<string, unknown>>,
   settings?: Readonly<Record<string, unknown>>,
@@ -514,25 +571,75 @@ function credentialPointerFiles(
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
-  for (const { defaultPath, path } of awsProfileFiles(
+  const gcloudCredentials = "application_default_credentials.json";
+  const selectFile = (directory: string, file: string) => {
+    // A delegate can use the literal path or a client's normalized spelling.
+    selected.add(relativeFile(directory, file));
+    selected.add(join(directory, file));
+    if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
+      selected.add(directory + file);
+  };
+  // A delegate can unset a client override or read the default file directly.
+  // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
+  const homes = new Set([
+    environment["HOME"],
     awsAccountHome(environment),
-    environment,
-  )) {
-    selected.add(defaultPath);
-    if (path) selected.add(path);
+    accountHomeDirectory(),
+  ]);
+  if (
+    process.platform === "win32" &&
+    environment["HOMEDRIVE"] &&
+    environment["HOMEPATH"]
+  )
+    homes.add(environment["HOMEDRIVE"] + environment["HOMEPATH"]);
+  for (const home of homes) {
+    if (home === undefined) continue;
+    for (const file of [
+      join(".config", "gh", "hosts.yml"),
+      join(".config", "gcloud", gcloudCredentials),
+      join(".docker", "config.json"),
+      join(".kube", "config"),
+      ".npmrc",
+    ])
+      selectFile(home, file);
+    for (const { defaultPath, path } of awsProfileFiles(home, environment)) {
+      selected.add(defaultPath);
+      if (path) selected.add(path);
+    }
   }
+  if (environment["XDG_CONFIG_HOME"])
+    selected.add(join(environment["XDG_CONFIG_HOME"], "gh", "hosts.yml"));
+  if (process.platform === "win32") {
+    const appData = environment["APPDATA"];
+    if (appData) selected.add(join(appData, "GitHub CLI", "hosts.yml"));
+    // google-auth uses the system drive when APPDATA is absent.
+    selectFile(
+      appData ?? (environment["SYSTEMDRIVE"] ?? "C:") + sep,
+      join("gcloud", gcloudCredentials),
+    );
+  }
+  if (environment["GH_CONFIG_DIR"])
+    selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
+  for (const root of gitLabConfigRoots(environment, homes))
+    selectFile(root, join("glab-cli", "config.yml"));
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
     switch (name.toUpperCase()) {
       case "KUBECONFIG":
-        for (const path of kubeConfigFiles(value)) if (path) selected.add(path);
+        for (const path of goPathList(value)) if (path) selected.add(path);
+        break;
+      case "GLAB_CONFIG_DIR":
+        selectFile(value, "config.yml");
         break;
       case "DOCKER_CONFIG":
-        // A filter can open the literal spelling. Docker cleans it before open.
-        selected.add(relativeFile(value, "config.json"));
-        selected.add(join(value, "config.json"));
-        if (process.platform === "win32" && /^[a-z]:$/iu.test(value))
-          selected.add(value + "config.json");
+        selectFile(value, "config.json");
+        break;
+      case "CLOUDSDK_CONFIG":
+        selectFile(value, gcloudCredentials);
+        break;
+      case "GOOGLE_APPLICATION_CREDENTIALS":
+        selected.add(value);
+        selected.add(normalize(value));
         break;
       case "NPM_CONFIG_USERCONFIG": {
         selected.add(value);
@@ -1054,6 +1161,7 @@ export async function capturePatchGitControls(
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
   const administrationLinks = new Set<string>();
   const nestedDirectories = new Map<string, readonly string[]>();
+  const nestedConfigurationDigests = new Set<string>();
   const rememberAdministrationReference = async (
     path: string,
   ): Promise<void> => {
@@ -1062,6 +1170,9 @@ export async function capturePatchGitControls(
   };
   const remember = async (path: string): Promise<void> => {
     const metadata = await stat(path, { bigint: true });
+    // glab config set can save a token in the repository configuration.
+    if (mode !== "external" && !administrationRoots.has(path))
+      await protectStore(join(path, "glab-cli", "config.yml"));
     administrationRoots.set(path, { dev: metadata.dev, ino: metadata.ino });
   };
   const controlPaths = new Map<
@@ -1212,7 +1323,7 @@ export async function capturePatchGitControls(
       return storeTarget(relativeFile(parent, await readlink(path)));
     return relativeFile(await storeTarget(parent), basename(path));
   };
-  const protectStore = async (path: string) => {
+  const protectStore = async (path: string, includeDirectory = false) => {
     try {
       const metadata = await stat(path).catch(missing);
       if (metadata && !metadata.isFile() && !metadata.isDirectory()) {
@@ -1221,10 +1332,10 @@ export async function capturePatchGitControls(
         unisolatedCredentialHelper = true;
         return;
       }
-      if (metadata?.isFile()) hostMayReadStore = true;
+      if (metadata?.isFile() || includeDirectory) hostMayReadStore = true;
       // Mounting a deny at a symlink itself fails on Linux. Git's file store
       // follows the link when locking and replacing its backing file.
-      if (!metadata || metadata.isFile())
+      if (!metadata || metadata.isFile() || includeDirectory)
         credentialStorePaths.add(await storeTarget(path));
     } catch (error) {
       // Git cannot read an inaccessible store or a cyclic link. Preserve its
@@ -1267,21 +1378,21 @@ export async function capturePatchGitControls(
     }
     // Git for Windows can initialize HOME from the drive and home path.
     // libcurl otherwise falls back to USERPROFILE or the Unix account home.
-    let home = await expandConfigurationPath("~");
-    if (!home) {
-      if (process.platform === "win32") home = userProfile ?? undefined;
-      else {
-        try {
-          home = userInfo().homedir;
-        } catch {
-          // An effective UID need not have an entry in the password database.
-        }
-      }
-    }
+    const accountHome = accountHomeDirectory();
+    const profile = process.platform === "win32" ? userProfile : undefined;
+    const home = (await expandConfigurationPath("~")) || profile || accountHome;
     if (home) {
       await protectTransportFile(root, root, relativeFile(home, ".netrc"));
       await protectTransportFile(root, root, relativeFile(home, "_netrc"));
     }
+    // OpenSSH locates account keys independently of Git's HOME override.
+    // Checkout-selected hooks can otherwise copy a key into COMMIT_EDITMSG.
+    for (const directory of new Set([home, profile, accountHome]))
+      if (directory)
+        await protectStore(
+          relativeFile(root, relativeFile(directory, ".ssh")),
+          true,
+        );
   }
   const globalConfigurationPaths: string[] = [];
   if (configuration.global !== undefined) {
@@ -1466,8 +1577,8 @@ export async function capturePatchGitControls(
       );
   };
   const snapshotFilter = (key: string) =>
-    /^filter\..+\.(?:clean|process)$/u.test(key) ||
-    (automaticPublication && /^filter\..+\.smudge$/u.test(key));
+    /^filter\..*\.(?:clean|process)$/su.test(key) ||
+    (automaticPublication && /^filter\..*\.smudge$/su.test(key));
   const activeCheckoutFilters = async (
     checkout: string,
     configurationDirectory: string,
@@ -1479,7 +1590,7 @@ export async function capturePatchGitControls(
       "--show-origin",
       "--includes",
       "--get-regexp",
-      "^filter\\..+\\.(clean|smudge|process)$",
+      "^filter\\..*\\.(clean|smudge|process)$",
     ]).catch((error: NodeJS.ErrnoException & { status?: number }) => {
       if (error.status === 1 || Number(error.code) === 1) return [];
       throw error;
@@ -1770,7 +1881,7 @@ export async function capturePatchGitControls(
         if (
           automaticPublication &&
           value &&
-          /^filter\..+\.(clean|smudge|process)$/u.test(key)
+          /^filter\..*\.(clean|smudge|process)$/su.test(key)
         ) {
           hasConditionalFilters = true;
           if (!userSelected || insideSelectedRoots(control.canonical))
@@ -1806,7 +1917,7 @@ export async function capturePatchGitControls(
     if (
       automaticPublication &&
       settings.some(({ key }) =>
-        /^filter\..+\.(clean|smudge|process)$/u.test(key),
+        /^filter\..*\.(clean|smudge|process)$/su.test(key),
       )
     ) {
       for (const key of await activeCheckoutFilters(
@@ -1835,7 +1946,17 @@ export async function capturePatchGitControls(
         "config",
       ])
     ).replace(/\n$/u, "");
-    await rememberSelectedConfiguration(localConfig);
+    const captureLocalConfig = async (path: string) => {
+      await rememberSelectedConfiguration(path);
+      // Absorbed submodules keep these files outside their worktrees. The
+      // status inventory omits them even when they contain local credentials.
+      const contents = controlPaths.get(path)?.contents;
+      if (automaticPublication && checkout !== root && contents?.length)
+        nestedConfigurationDigests.add(
+          createHash("sha256").update(contents).digest("hex"),
+        );
+    };
+    await captureLocalConfig(localConfig);
     let worktreeConfig = false;
     try {
       worktreeConfig =
@@ -1867,7 +1988,7 @@ export async function capturePatchGitControls(
           "config.worktree",
         ])
       ).replace(/\n$/u, "");
-      await rememberSelectedConfiguration(path);
+      await captureLocalConfig(path);
     }
     await captureHooks();
   };
@@ -2703,6 +2824,7 @@ export async function capturePatchGitControls(
       ]),
     ],
     nestedCheckouts: [...nestedDirectories.keys()],
+    nestedConfigurationDigests,
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     unavailableFilters: unisolatedCredentialHelper ? protectedFilterKeys() : [],
     credentialStorePaths: [...credentialStorePaths],

@@ -111,9 +111,8 @@ for (const outside of [true, false])
       }
       const result = resultWithFindings(["high"]);
       let trustedHostPush = false;
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
+      const invoke = (args: string[]) =>
+        runWorkflow(args, {
           currentDirectory: directory,
           result,
           environment,
@@ -223,27 +222,32 @@ for (const outside of [true, false])
             );
             return 0;
           },
-        },
-      );
-      expect(outcome.exitCode, outcome.stderr).toBe(outside ? 2 : 0);
+        });
+      const outcome = await invoke([
+        "patch",
+        "--scan",
+        "scan-1",
+        "--create-pr",
+        "--json",
+      ]);
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(await readFile(join(allowed, "hook-ran"), "utf8")).toBe("reached");
       expect(await readFile(privateFile).catch(() => null)).toBeNull();
-      expect(trustedHostPush).toBe(!outside);
+      expect(trustedHostPush).toBe(false);
       const receiver = repositoryGit(remote);
-      expect(receiver("for-each-ref", "--format=%(refname)")).toBe(
-        outside ? "" : "refs/heads/codex-security/patch-scan-1",
+      expect(receiver("for-each-ref", "--format=%(refname)")).toBe("");
+      if (outside) return;
+      const branch = "codex-security/patch-scan-1";
+      const commit = git("rev-parse", branch);
+      expect(git("log", "-1", "--format=%B", commit)).toBe(
+        "Verified synthetic message\n\nReviewed-by: Synthetic Validator",
       );
-      if (!outside)
-        expect(
-          receiver(
-            "log",
-            "-1",
-            "--format=%B",
-            "refs/heads/codex-security/patch-scan-1",
-          ),
-        ).toBe(
-          "Verified synthetic message\n\nReviewed-by: Synthetic Validator",
-        );
+      expect(outcome.stderr).toContain(commit);
+      expect(outcome.stderr).toContain(`patch --resume-pr ${branch}`);
+      const resumed = await invoke(["patch", "--resume-pr", branch, "--json"]);
+      expect(resumed.exitCode, resumed.stderr).toBe(0);
+      expect(trustedHostPush).toBe(true);
+      expect(receiver("rev-parse", branch)).toBe(commit);
     },
     process.platform === "win32" ? 300000 : 90000,
   );

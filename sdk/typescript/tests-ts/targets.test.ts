@@ -32,6 +32,7 @@ import {
   isGitMetadataDirectory,
   gitProtectionRoots,
   validateCommittedDiffCheckout,
+  normalizeExcludedPaths,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
@@ -48,6 +49,23 @@ const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-targets-");
 
 afterEach(cleanup);
+
+test("excluded paths normalize literal directories without requiring them to exist", () => {
+  expect(
+    normalizeExcludedPaths([
+      "./examples/",
+      "examples",
+      "src/demo app",
+      "missing",
+    ]),
+  ).toEqual(["examples", "src/demo app", "missing"]);
+  expect(() => normalizeExcludedPaths(["../elsewhere"])).toThrow(
+    InvalidTargetError,
+  );
+  expect(() => normalizeExcludedPaths(["/elsewhere"])).toThrow(
+    InvalidTargetError,
+  );
+});
 
 describe("abortable", () => {
   test.each([

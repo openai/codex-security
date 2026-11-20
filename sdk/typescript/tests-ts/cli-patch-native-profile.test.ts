@@ -932,6 +932,17 @@ test("patch model and clean filters cannot read selected authentication files", 
   ];
   const policyCluster = join(operator, "policy cluster");
   const registry = join(operator, "selected registry");
+  const gh = join(operator, "selected gh");
+  const glab = join(operator, "selected glab");
+  const defaultGh = join(operator, ".config", "gh");
+  const cloudConfig = join(operator, "selected gcloud");
+  const cloudKey = join(operator, "selected Google credentials.json");
+  const cloudDefault = "application_default_credentials.json";
+  const appdata = join(operator, "Roaming");
+  const ssh = join(operator, ".ssh");
+  await mkdir(gh);
+  await mkdir(ssh);
+  await mkdir(defaultGh, { recursive: true });
   const npm = join(operator, "selected npmrc");
   await mkdir(registry);
   const clusterList = (files: string[]) =>
@@ -941,6 +952,9 @@ test("patch model and clean filters cannot read selected authentication files", 
   const pointers = {
     KUBECONFIG: clusterList(clusterFiles),
     DOCKER_CONFIG: registry,
+    GH_CONFIG_DIR: gh,
+    GLAB_CONFIG_DIR: glab,
+    GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
   const policySet = {
@@ -953,10 +967,14 @@ test("patch model and clean filters cannot read selected authentication files", 
     FILTER_FIXTURE_SETTING: "from host",
     AWS_CONFIG_FILE: awsConfig,
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
+    CLOUDSDK_CONFIG: cloudConfig,
+    APPDATA: appdata,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
-    XDG_CONFIG_HOME: join(operator, ".config"),
+    XDG_CONFIG_HOME: join(operator, "xdg"),
+    XDG_CONFIG_DIRS:
+      (process.platform === "win32" ? "%USERPROFILE%" : "$HOME") + "/xdg-extra",
     GIT_CONFIG_GLOBAL: config,
     GIT_CONFIG_NOSYSTEM: "1",
   };
@@ -981,6 +999,18 @@ test("patch model and clean filters cannot read selected authentication files", 
   const clientCert = join(operator, "origin identity.pem");
   const proxyCert = join(operator, "proxy identity.pem");
   const existing = [...paths.slice(0, 2), netrc, proxyKey, clientCert];
+  const glabDirectories = [
+    glab,
+    join(operator, ".config", "glab-cli"),
+    join(environment.XDG_CONFIG_HOME, "glab-cli"),
+    join(operator, "xdg-extra", "glab-cli"),
+  ];
+  if (process.platform === "win32")
+    glabDirectories.push(join(appdata, "glab-cli"));
+  if (process.platform === "darwin")
+    glabDirectories.push(
+      join(operator, "Library", "Application Support", "glab-cli"),
+    );
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
@@ -995,6 +1025,19 @@ test("patch model and clean filters cannot read selected authentication files", 
     ...clusterFiles,
     policyCluster,
     join(registry, "config.json"),
+    join(gh, "hosts.yml"),
+    join(defaultGh, "hosts.yml"),
+    ...glabDirectories.map((directory) => join(directory, "config.yml")),
+    cloudKey,
+    join(cloudConfig, cloudDefault),
+    join(operator, ".config", "gcloud", cloudDefault),
+    ...(process.platform === "win32"
+      ? [join(appdata, "gcloud", cloudDefault)]
+      : []),
+    join(ssh, "id_rsa"),
+    join(operator, ".docker", "config.json"),
+    join(operator, ".kube", "config"),
+    join(operator, ".npmrc"),
     npm,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
@@ -1003,7 +1046,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   for (const i of existing.keys()) await createInput(i);
   const neighbor = join(registry, "ordinary-sibling.txt");
   await writeFile(neighbor, "ordinary sibling");
-  const readFiles = `const fs = require("node:fs");
+  const readFiles = () => `const fs = require("node:fs");
 if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
   throw new Error("Cannot read the ordinary sibling");
@@ -1021,6 +1064,14 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       // An operator may have no AWS profile directory when the first model tool runs.
       expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
       await mkdir(awsDirectory);
+      await mkdir(join(operator, ".docker"));
+      await mkdir(join(operator, ".kube"));
+      for (const directory of glabDirectories)
+        await mkdir(directory, { recursive: true });
+      await mkdir(cloudConfig);
+      await mkdir(join(operator, ".config", "gcloud"));
+      if (process.platform === "win32")
+        await mkdir(join(appdata, "gcloud"), { recursive: true });
       await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
       for (let i = existing.length; i < protectedPaths.length; i++)
@@ -1040,7 +1091,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       );
       await writeFile(
         join(repo, program),
-        readFiles +
+        readFiles() +
           `\nprocess.stdout.write(process.env.FILTER_FIXTURE_SETTING + "\\n");
 for (const name of ${JSON.stringify(Object.keys(pointers))}) if (name in process.env) contents.push(name);
 process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n`,
@@ -1058,7 +1109,7 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
         "from host\n" + contents.join("") + Object.keys(pointers).join(""),
       );
       const modelRead =
-        readFiles + "\nprocess.stdout.write(JSON.stringify(contents));";
+        readFiles() + "\nprocess.stdout.write(JSON.stringify(contents));";
       expect(await inspectModel(modelRead)).toBe("[]");
       if (patchSnapshotWindowsConfig().includes('"elevated"'))
         console.info(
@@ -1110,6 +1161,10 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
     },
     async (repository) => {
       const literalTilde = join(repository, "~");
+      const localGlabDir = join(repository, ".git", "glab-cli");
+      glabDirectories.push(localGlabDir);
+      protectedPaths.push(join(localGlabDir, "config.yml"));
+      contents.push("synthetic local glab login\n");
       await mkdir(literalTilde);
       environment.NETRC = relative(repository, selectedNetrc);
       const scopedCookie = relative(repository, paths[2]!).replaceAll(
