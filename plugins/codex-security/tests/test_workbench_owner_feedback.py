@@ -14,13 +14,15 @@ from test_workbench_scan_history import (
     create_cli_scan,
     save_scan_matches,
 )
-from workbench_test_support import initialize_git_repository, run_workbench, set_triage
+from workbench_test_support import (
+    close_finding,
+    finding_detail,
+    initialize_git_repository,
+    run_workbench,
+    scan_finding,
+)
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
-
-
-def finding(state, scan):
-    return run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
 
 
 @pytest.mark.parametrize("command", ["triage", "remediation"])
@@ -28,7 +30,7 @@ def test_previous_owner_cannot_mutate_or_replay_finding_actions(tmp_path, comman
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     revision = initialize_git_repository(repository)
     previous = create_cli_scan(state, root, repository, target_revision=revision)
-    occurrence = finding(state, previous)["occurrenceId"]
+    occurrence = scan_finding(state, previous)["occurrenceId"]
     request, token = str(uuid.uuid4()), str(uuid.uuid4())
     arguments = (
         ["set-finding-triage", "--occurrence-id", occurrence, "--status", "open"]
@@ -64,21 +66,13 @@ def test_feedback_cites_the_selected_occurrence_of_an_existing_match(tmp_path):
         )
         for name in ("first", "second")
     ]
-    findings = [finding(state, scan) for scan in scans]
+    findings = [scan_finding(state, scan) for scan in scans]
     save_scan_matches(state, *scans, confirmed_match(*(row["occurrenceId"] for row in findings)))
     current = create_cli_scan(state, root, repository, complete=False)
     note = "Reviewed this synthetic occurrence."
     for index, expected_decisions in ((0, 2), (1, 3), (1, 3)):
         reviewed = findings[index]
-        set_triage(
-            state,
-            reviewed["occurrenceId"],
-            "closed",
-            "--close-reason",
-            "false_positive",
-            "--note",
-            note,
-        )
+        close_finding(state, reviewed["occurrenceId"], "false_positive", note)
         (feedback,) = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])[
             "falsePositives"
         ]
@@ -102,16 +96,10 @@ def test_replacement_checkout_does_not_receive_previous_owner_feedback(tmp_path)
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     repository.mkdir()
     previous = create_cli_scan(state, root, repository)
-    run_workbench(
+    close_finding(
         state,
-        "set-finding-triage",
-        "--occurrence-id",
-        finding(state, previous)["occurrenceId"],
-        "--status",
-        "closed",
-        "--close-reason",
+        scan_finding(state, previous)["occurrenceId"],
         "false_positive",
-        "--note",
         "Synthetic previous-owner rationale.",
     )
     current = create_cli_scan(state, root, repository, complete=False)
@@ -128,9 +116,9 @@ def test_related_findings_respect_the_current_owner_of_both_scans(
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     repository.mkdir()
     before = create_cli_scan(state, root, repository, identity_anchor="before")
-    old_finding = finding(state, before)
+    old_finding = scan_finding(state, before)
     after = create_cli_scan(state, root, repository, identity_anchor="after")
-    current_finding = finding(state, after)
+    current_finding = scan_finding(state, after)
     # A persisted comparison may survive a later checkout replacement.
     run_workbench(
         state,
@@ -165,9 +153,7 @@ def test_related_findings_respect_the_current_owner_of_both_scans(
                 "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
                 (*identity, after["scanId"]),
             )
-    detail = run_workbench(
-        state, "get-finding", "--occurrence-id", current_finding["occurrenceId"]
-    )["scan"]["findings"][0]
+    detail = finding_detail(state, current_finding["occurrenceId"])
     assert len(detail.get("related", [])) == (0 if replaced else 1)
 
 

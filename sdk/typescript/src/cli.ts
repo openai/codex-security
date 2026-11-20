@@ -2932,6 +2932,14 @@ export async function main(
       }
     });
   };
+  const findingOccurrenceArgs = z.object({
+    occurrenceId: z
+      .string()
+      .trim()
+      .min(1)
+      .max(256)
+      .describe("Finding occurrence ID from findings list."),
+  });
   const findingFeedback = Cli.create("findings", {
     description: "Browse and manage saved findings (defaults to list).",
   })
@@ -3026,28 +3034,19 @@ export async function main(
           !argv.some((argument) =>
             /^--(?:offset|limit)(?:=|$)/u.test(argument),
           );
-        const arguments_ = [
-          ...(options.scan === undefined
-            ? ["list-global-findings"]
-            : ["list-findings", "--scan-id", options.scan]),
-          ...(options.scan === undefined && status === "closed"
-            ? ["--include-resolved"]
-            : []),
-          ...(repository === undefined ? [] : ["--repository", repository]),
-          ...(options.query === undefined ? [] : [`--query=${options.query}`]),
-          ...(options.severity === undefined
-            ? []
-            : ["--severity", options.severity]),
-          ...(status === undefined ? [] : ["--status", status]),
-          ...(allPages
-            ? []
-            : [
-                "--offset",
-                String(options.offset),
-                "--limit",
-                String(options.limit),
-              ]),
-        ];
+        const arguments_ = workbenchArgs(
+          options.scan === undefined ? "list-global-findings" : "list-findings",
+          {
+            scanId: options.scan,
+            includeResolved: options.scan === undefined && status === "closed",
+            repository,
+            query: options.query,
+            severity: options.severity,
+            status,
+            offset: allPages ? undefined : options.offset,
+            limit: allPages ? undefined : options.limit,
+          },
+        );
         return presentHistory(
           await history(arguments_, async (response): Promise<JsonObject> => {
             const page = savedFindingPage(response);
@@ -3085,14 +3084,7 @@ export async function main(
     .command("show", {
       description:
         "Show finding details, its occurrence ID, and its scan history.",
-      args: z.object({
-        occurrenceId: z
-          .string()
-          .trim()
-          .min(1)
-          .max(256)
-          .describe("Finding occurrence ID from findings list."),
-      }),
+      args: findingOccurrenceArgs,
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
         return presentHistory(
@@ -3148,14 +3140,7 @@ export async function main(
       ],
       hint: "Future scans of the repository can reuse the reason while it applies. Read the occurrence’s triage.note in codex-security scans show SCAN_ID --json.",
       destructive: true,
-      args: z.object({
-        occurrenceId: z
-          .string()
-          .trim()
-          .min(1)
-          .max(256)
-          .describe("Finding occurrence ID from findings list."),
-      }),
+      args: findingOccurrenceArgs,
       options: z.object({
         reason: z
           .string()

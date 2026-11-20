@@ -31,8 +31,6 @@ from workbench_validation import bounded_output_text, timestamp_key
 def list_global_findings(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    read_coverage: Callable | None = None,
 ) -> dict[str, Any]:
     """Return a page of indexed findings after applying the requested filters, with nextOffset for continuation."""
     limit = args.limit
@@ -275,18 +273,8 @@ def _indexed_findings(
             and match["after_generation"] is not None
         ):
             continue
-        before = group(
-            (
-                before_repository,
-                match["before_finding_id"],
-            )
-        )
-        after = group(
-            (
-                after_repository,
-                match["after_finding_id"],
-            )
-        )
+        before = group((before_repository, match["before_finding_id"]))
+        after = group((after_repository, match["after_finding_id"]))
         if before != after:
             parents[after] = before
 
@@ -339,20 +327,9 @@ def _indexed_findings(
             triage.status AS decision_status,
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
-            COALESCE(
-                (SELECT MAX(decisions.decision_sequence)
-                 FROM finding_decisions AS decisions
-                 WHERE decisions.occurrence_id = occurrences.id),
-                triage.rowid
-            ) AS decision_sequence,
-            (SELECT decisions.scan_sequence
-             FROM finding_decisions AS decisions
-             WHERE decisions.occurrence_id = occurrences.id
-             ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_scan_sequence,
-            (SELECT decisions.admission_sequence
-             FROM finding_decisions AS decisions
-             WHERE decisions.occurrence_id = occurrences.id
-             ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_admission_sequence,
+            COALESCE(decision.decision_sequence, triage.rowid) AS decision_sequence,
+            decision.scan_sequence AS decision_scan_sequence,
+            decision.admission_sequence AS decision_admission_sequence,
             scans.rowid AS scan_sequence,
             admissions.sequence AS admission_sequence,
             COALESCE(scans.target_id, scans.target_path) AS indexed_target_id,
@@ -364,19 +341,16 @@ def _indexed_findings(
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN scan_admissions AS admissions ON admissions.scan_id = scans.id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        LEFT JOIN finding_decisions AS decision ON decision.rowid = (
+            SELECT rowid FROM finding_decisions WHERE occurrence_id = occurrences.id
+            ORDER BY decision_sequence DESC LIMIT 1
+        )
         WHERE {target_filter}
         """,
         ((query,) if query else ()) + target_values,
     ):
-        grouped.setdefault(
-            group(
-                (
-                    repository_group(row),
-                    row["finding_id"],
-                )
-            ),
-            [],
-        ).append(row)
+        key = group((repository_group(row), row["finding_id"]))
+        grouped.setdefault(key, []).append(row)
 
     # When a match group spans current targets, keep decisions within each verified
     # generation or legacy target in that group. Scoped queries already select their history.
@@ -511,10 +485,7 @@ def indexed_scan_findings(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     *,
-    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
     through_scan: sqlite3.Row | None = None,
-    include_resolved: bool = True,
-    verification_occurrence_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not connection.execute(
         "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
@@ -554,11 +525,66 @@ def indexed_scan_findings(
         through_admission_sequence=through,
         require_current_owners=True,
     )
-    coverage_by_scan_id: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
-    uncertain_occurrence_ids: set[str] | None = None
+    return {occurrence: row for row in indexed for occurrence in row["occurrence_ids"]}
 
-    def superseded_for_verification(finding, later_scan, finding_group):
-        nonlocal uncertain_occurrence_ids
+
+def verification_occurrence_ids(
+    connection: sqlite3.Connection,
+    finding_group: dict[str, Any],
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+) -> set[str]:
+    admitted = json.dumps(finding_group["known_scan_ids"])
+    verification_scans = connection.execute(
+        "SELECT scans.*, rowid AS scan_sequence, "
+        "(SELECT sequence FROM scan_admissions WHERE scan_id = scans.id) AS admission_sequence, "
+        "COALESCE(target_id, target_path) AS indexed_target_id "
+        "FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
+        (admitted,),
+    ).fetchall()
+
+    @cache
+    def has_uncertain_match():
+        return any(
+            match[f"{side}OccurrenceId"] in finding_group["occurrence_ids"]
+            for comparison in connection.execute(
+                "SELECT result_json FROM scan_comparisons "
+                "WHERE before_scan_id IN (SELECT value FROM json_each(?)) "
+                "OR after_scan_id IN (SELECT value FROM json_each(?))",
+                (admitted, admitted),
+            )
+            for match in json.loads(comparison["result_json"]).get("uncertain", [])
+            for side in ("before", "after")
+        )
+
+    @cache
+    def verification_coverage(scan):
+        if (
+            scan["status"] != "complete"
+            or scan["mode"] == "diff"
+            or scan["seal_manifest_digest"] is None
+        ):
+            return None
+        try:
+            return read_coverage(scan)
+        except SystemExit as error:
+            cause: BaseException | None = error
+            while cause is not None:
+                if isinstance(cause, FileNotFoundError):
+                    return None
+                cause = cause.__cause__
+            message = str(error)
+            if message == "Scan directory must be an existing canonical non-symlink directory.":
+                try:
+                    Path(scan["scan_dir"]).lstat()
+                except FileNotFoundError:
+                    return None
+            if message.startswith("missing required contract artifact: ") or message.endswith(
+                ": expected a regular file inside the scan directory."
+            ):
+                return None
+            raise
+
+    def superseded(finding, later_scan):
         if (
             finding["scan_sequence"] >= later_scan["scan_sequence"]
             or finding["indexed_target_id"] != later_scan["indexed_target_id"]
@@ -575,55 +601,9 @@ def indexed_scan_findings(
             )
         ):
             return False
-        if uncertain_occurrence_ids is None:
-            admitted = json.dumps(sorted(finding_group["known_scan_ids"]))
-            uncertain_occurrence_ids = {
-                match[f"{side}OccurrenceId"]
-                for comparison in connection.execute(
-                    "SELECT result_json FROM scan_comparisons "
-                    "WHERE before_scan_id IN (SELECT value FROM json_each(?)) "
-                    "OR after_scan_id IN (SELECT value FROM json_each(?))",
-                    (admitted, admitted),
-                )
-                for match in json.loads(comparison["result_json"]).get("uncertain", [])
-                for side in ("before", "after")
-            }
-        if finding_group["occurrence_ids"] & uncertain_occurrence_ids:
+        if has_uncertain_match():
             return False
-        scan_id = later_scan["id"]
-        if scan_id not in coverage_by_scan_id:
-            scan = later_scan
-            coverage = None
-            if (
-                scan["status"] == "complete"
-                and scan["mode"] != "diff"
-                and scan["seal_manifest_digest"] is not None
-            ):
-                try:
-                    coverage = read_coverage(scan)
-                except SystemExit as error:
-                    cause: BaseException | None = error
-                    while cause is not None and not isinstance(cause, FileNotFoundError):
-                        cause = cause.__cause__
-                    message = str(error)
-                    if isinstance(cause, FileNotFoundError):
-                        pass
-                    elif message == (
-                        "Scan directory must be an existing canonical non-symlink directory."
-                    ):
-                        try:
-                            Path(scan["scan_dir"]).lstat()
-                        except FileNotFoundError:
-                            pass
-                        else:
-                            raise
-                    elif not (
-                        message.startswith("missing required contract artifact: ")
-                        or message.endswith(": expected a regular file inside the scan directory.")
-                    ):
-                        raise
-            coverage_by_scan_id[scan_id] = scan, coverage
-        scan, coverage = coverage_by_scan_id[scan_id]
+        coverage = verification_coverage(later_scan)
         return (
             coverage is not None
             and coverage.get("completeness", "complete") == "complete"
@@ -633,40 +613,23 @@ def indexed_scan_findings(
                 for surface in coverage.get("surfaces", [])
             )
             and scan_history.scan_covers_path(
-                {**dict(scan), "target_id": later_scan["indexed_target_id"]},
+                {**dict(later_scan), "target_id": later_scan["indexed_target_id"]},
                 target_id=finding["indexed_target_id"],
                 path=finding["location_path"],
                 coverage=coverage,
             )
         )
 
-    result = {}
-    for row in indexed:
-        row["active_occurrence_ids"] = row["occurrence_ids"]
-        if verification_occurrence_id in row["occurrence_ids"]:
-            verification_scans = connection.execute(
-                "SELECT scans.*, rowid AS scan_sequence, "
-                "(SELECT sequence FROM scan_admissions WHERE scan_id = scans.id) AS admission_sequence, "
-                "COALESCE(target_id, target_path) AS indexed_target_id "
-                "FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
-                (json.dumps(row["known_scan_ids"]),),
-            ).fetchall()
-            row["active_occurrence_ids"] = {
-                item["occurrence_id"]
-                for item in row["occurrences"]
-                if not any(
-                    superseded_for_verification(item, later, row) for later in verification_scans
-                )
-            }
-        result.update(dict.fromkeys(row["occurrence_ids"], row))
-    return result
+    return {
+        item["occurrence_id"]
+        for item in finding_group["occurrences"]
+        if not any(superseded(item, later) for later in verification_scans)
+    }
 
 
 def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
-    *,
-    read_coverage: Callable | None = None,
 ) -> dict[str, Any]:
     """Return tracked targets with scan summaries, finding counts, and current checkout availability."""
     identities = RepositoryIdentityCache(connection)

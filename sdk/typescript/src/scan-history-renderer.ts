@@ -321,13 +321,7 @@ export function renderScanHistory(
     if (Array.isArray(locations) && locations.length > 1) {
       lines.push("", `  ${strong("AFFECTED LOCATIONS")}`);
       for (const location of locations) {
-        if (
-          typeof location !== "object" ||
-          location === null ||
-          Array.isArray(location)
-        ) {
-          continue;
-        }
+        if (!isRecord(location)) continue;
         const path = location["path"];
         if (typeof path !== "string") continue;
         const startLine = location["startLine"];
@@ -380,9 +374,7 @@ export function renderScanHistory(
       ["CONFIDENCE", "confidence"],
     ] as const) {
       const value = result[key];
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        continue;
-      }
+      if (!isRecord(value)) continue;
       const level = value["level"];
       const rationale = description(value);
       if (
@@ -408,11 +400,7 @@ export function renderScanHistory(
           : result[key];
       const detail = description(value);
       const sections = detail === undefined ? [] : [detail];
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        !Array.isArray(value)
-      ) {
+      if (isRecord(value)) {
         if (key === "validation") {
           for (const [fieldLabel, fieldKey] of [
             ["Method", "method"],
@@ -447,57 +435,32 @@ export function renderScanHistory(
             if (nested !== undefined) {
               sections.push(`${nestedLabel}: ${nested}`);
             }
-            if (
-              typeof nestedValue !== "object" ||
-              nestedValue === null ||
-              Array.isArray(nestedValue)
-            ) {
-              continue;
+            if (!isRecord(nestedValue)) continue;
+            const isDataflow = nestedLabel === "Dataflow";
+            if (!isDataflow && nestedKey !== "reachability") continue;
+            const attributes: [string, string][] = [
+              ["Source", "source"],
+              ["Sink", "sink"],
+              ["Outcome", "outcome"],
+            ];
+            if (!isDataflow) {
+              attributes.unshift(
+                ["Attacker", "attacker"],
+                ["Entry point", "entrypoint"],
+              );
             }
-            const attributes: ReadonlyArray<readonly [string, string]> =
-              nestedKey === "dataflow" ||
-              nestedKey === "dataFlow" ||
-              nestedKey === "data_flow"
-                ? [
-                    ["Source", "source"],
-                    ["Sink", "sink"],
-                    ["Outcome", "outcome"],
-                  ]
-                : nestedKey === "reachability"
-                  ? [
-                      ["Attacker", "attacker"],
-                      ["Entry point", "entrypoint"],
-                      ["Source", "source"],
-                      ["Sink", "sink"],
-                      ["Outcome", "outcome"],
-                    ]
-                  : [];
             for (const [attributeLabel, attributeKey] of attributes) {
               const detail = description(nestedValue[attributeKey]);
               if (detail !== undefined) {
                 sections.push(`${attributeLabel}: ${detail}`);
               }
             }
-            if (
-              nestedKey === "dataflow" ||
-              nestedKey === "dataFlow" ||
-              nestedKey === "data_flow"
-            ) {
-              appendDescriptions(
-                sections,
-                nestedValue,
-                "transformations",
-                "Transformation",
-              );
-            }
-            if (nestedKey === "reachability") {
-              appendDescriptions(
-                sections,
-                nestedValue,
-                "preconditions",
-                "Precondition",
-              );
-            }
+            appendDescriptions(
+              sections,
+              nestedValue,
+              isDataflow ? "transformations" : "preconditions",
+              isDataflow ? "Transformation" : "Precondition",
+            );
           }
         }
         const caveats: ReadonlyArray<readonly [string, string]> =
@@ -614,10 +577,7 @@ export function renderScanHistory(
     }
     if (typeof result["occurrenceId"] === "string") {
       const triage = result["triage"];
-      const details =
-        typeof triage === "object" && triage !== null && !Array.isArray(triage)
-          ? triage
-          : undefined;
+      const details = isRecord(triage) ? triage : undefined;
       const action =
         details?.["status"] === "closed"
           ? ""
