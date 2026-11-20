@@ -12369,13 +12369,15 @@ async function githubSocketIdentity(socket: string, directory: string) {
   // Linux abstract sockets have no pathname to replace.
   if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
     return;
-  // Preserve Unix path components so '..' follows symlink resolution as in net.Dial.
   const path =
     process.platform === "win32"
       ? resolve(directory, socket)
-      : isAbsolute(socket)
-        ? socket
-        : directory + sep + socket;
+      : resolveGitControlPath(directory, socket);
+  if (process.platform !== "win32") {
+    // A link through /proc/self/cwd can select a different socket inside gh.
+    const host = await trustedHostPathResolver("/", ["/proc", "/dev/fd"]);
+    if (!host(path)) throw patchTransportChanged("gh");
+  }
   return (
     (await realpath(path)) +
     ":" +

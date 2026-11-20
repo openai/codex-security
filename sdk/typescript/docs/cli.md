@@ -3285,8 +3285,11 @@ the saved commit. For SSH, publication binds the SSH client's own
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
 For hosting discovery, a relative `GIT_CONFIG` selects a file from the initial
 hosting command’s working directory. Publication verifies that selection before
-subsequent hosting commands. Git stores the verified commit and branch settings
-in the repository configuration.
+subsequent hosting commands. If you configure GitHub CLI's `http_unix_socket`
+with a filesystem path, use a path that reaches the same socket from every
+publication directory. On Unix, keep the path and its symlinks outside `/proc`
+and `/dev/fd`. Git stores the verified commit and branch settings in the
+repository configuration.
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.

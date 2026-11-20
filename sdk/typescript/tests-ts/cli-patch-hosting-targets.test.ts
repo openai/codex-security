@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { symlink, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
   publicationRepository,
   runPublicationCommand,
@@ -18,16 +18,21 @@ const branch = "codex-security/patch-scan-1";
 describe("GitHub patch destinations", () => {
   const fixtures = patchDirectories();
 
-  test.skipIf(process.platform === "win32").each(["stable", "replaced"])(
-    "binds a relative GitHub CLI socket across the patch: %s",
+  const socketCases = ["stable", "replaced"];
+  if (process.platform === "linux") socketCases.push("process-relative");
+  test.skipIf(process.platform === "win32").each(socketCases)(
+    "binds the configured GitHub CLI socket across the patch: %s",
     async (mode) => {
-      const { directory } = await publicationRepository(fixtures);
-      const caller = directory;
+      const { directory: caller } = await publicationRepository(fixtures);
       const config = await fixtures.create("gh-");
       const name = " gh";
+      const socket =
+        mode === "process-relative"
+          ? "/proc/self/cwd/" + relative(process.cwd(), join(caller, name))
+          : name;
       await writeFile(
         join(config, "config.yml"),
-        `http_unix_socket: "${name}"\n`,
+        `http_unix_socket: "${socket}"\n`,
       );
       const listen = (base: string) =>
         Bun.serve({ unix: join(base, name), fetch: () => new Response() });
@@ -43,13 +48,13 @@ describe("GitHub patch destinations", () => {
               if (edited) callsAfterEdit++;
               if (args[0] === "config") {
                 expect(args).toEqual(["config", "get", "http_unix_socket"]);
-                return name + "\n";
+                return socket + "\n";
               }
             }
             return runPublicationCommand(command, args, cwd, options);
           },
           onCodex: async (_args, output) => {
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            await writeFile(join(caller, "src/finding-1.ts"), "fixed\n");
             if (mode === "replaced") {
               await unlink(join(caller, name));
               sockets.push(listen(caller));
