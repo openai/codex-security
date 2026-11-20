@@ -1984,7 +1984,7 @@ interface PatchTransportAccess {
   sshPatterns?: Map<string, () => Promise<void>>;
   verifyHostingConfig?: Record<
     PatchPublicationTool,
-    () => Promise<NodeJS.ProcessEnv>
+    (directory?: string) => Promise<NodeJS.ProcessEnv>
   >;
   readonly writable: Set<string>;
   readonly invocations: Map<string, string>;
@@ -4022,7 +4022,7 @@ export async function main(
           ...environment,
           ...(!Object.hasOwn(environment, "GIT_CONFIG") &&
             (await verify.git())),
-          ...(await verify[command]()),
+          ...(await verify[command](repository)),
         };
       }
       // The hostname probe invokes the same selected SSH launcher as the transport.
@@ -12299,6 +12299,10 @@ function patchTransportChanged(kind: PatchTransportFile["kind"]) {
   );
 }
 
+function patchFileStamp(entry: { dev: bigint; ino: bigint; ctimeNs: bigint }) {
+  return [entry.dev, entry.ino, entry.ctimeNs].join(":");
+}
+
 async function patchTransportIdentity(
   path: string,
   kind: PatchTransportFile["kind"],
@@ -12323,7 +12327,7 @@ async function patchTransportIdentity(
   const entry = await stat(target, { bigint: true });
   if (options.writers && entry.nlink > 1n && entry.isFile())
     await requireProtectedTransportLinks(target, entry, options.writers);
-  const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
+  const stamp = patchFileStamp(entry);
   if (selected && !options.updatedHostKeys && selected.stamp !== stamp)
     throw patchTransportChanged(kind);
   if (
@@ -12358,6 +12362,24 @@ async function patchTransportIdentity(
   } finally {
     await file.close();
   }
+}
+
+async function githubSocketIdentity(socket: string, directory: string) {
+  // Linux abstract sockets have no pathname to replace.
+  if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
+    return;
+  // Preserve Unix path components so '..' follows symlink resolution as in net.Dial.
+  const path =
+    process.platform === "win32"
+      ? resolve(directory, socket)
+      : isAbsolute(socket)
+        ? socket
+        : directory + sep + socket;
+  return (
+    (await realpath(path)) +
+    ":" +
+    patchFileStamp(await stat(path, { bigint: true }))
+  );
 }
 
 async function captureHostingConfig(
@@ -12403,9 +12425,24 @@ async function captureHostingConfig(
     }
     for (const path of paths)
       files.set(path, await patchTransportIdentity(path, provider));
-    return async () => {
+    const config = pinned["GH_CONFIG_DIR"];
+    let socket = "";
+    if (config && files.get(join(config, "config.yml"))?.digest) {
+      socket = (
+        await dependencies.runRepositoryCommand(
+          "gh",
+          ["config", "get", "http_unix_socket"],
+          repository,
+          { trim: false, environment: pinned },
+        )
+      ).replace(/\n$/u, "");
+    }
+    const endpoint = await githubSocketIdentity(socket, cwd);
+    return async (directory = cwd) => {
       for (const [path, file] of files)
         await patchTransportIdentity(path, provider, file);
+      if (endpoint !== (await githubSocketIdentity(socket, directory)))
+        throw patchTransportChanged(provider);
       return pinned;
     };
   } catch (error) {
