@@ -405,6 +405,11 @@ export interface PatchSnapshotConfig {
   files: string[];
   global?: number;
   system?: number;
+  selector?: {
+    file: string;
+    root: string;
+    checkouts: Record<string, number | null>;
+  };
   commands: Record<string, number>;
 }
 
@@ -1581,6 +1586,16 @@ export async function capturePatchGitControls(
     (await runControl(checkout, ["rev-parse", ...args])).replace(/\n$/u, "");
   const absolutePath = (checkout: string, ...args: string[]) =>
     controlPath(checkout, "--path-format=absolute", ...args);
+  // Git can retain an outside caller's cwd or move an inside caller to the
+  // worktree root. Resolve its relative paths in that setup directory.
+  const setupDirectory = async (checkout: string): Promise<string> =>
+    (
+      await runControl(
+        checkout,
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        { environment: { GIT_OBJECT_DIRECTORY: "." } },
+      )
+    ).replace(/\n$/u, "");
   const configPath = (field: string) =>
     controlPathText(Buffer.from(field, "latin1"));
   if (mode === "resumed-hook") {
@@ -1944,8 +1959,14 @@ export async function capturePatchGitControls(
           ).trim();
     if (disabled === "false") systemConfigurationPath = systemConfig;
   }
+  const file = environmentEntry(environment, "GIT_CONFIG");
+  const filterRoot =
+    file && mode === "resumed-hook" && !isAbsolute(file)
+      ? await setupDirectory(root)
+      : root;
   const insideSelectedRoots = (path: string): boolean =>
     inside(root, path) ||
+    (filterRoot !== root && inside(filterRoot, path)) ||
     [...administrationRoots.keys()].some((administration) =>
       inside(administration, path),
     );
@@ -2015,16 +2036,6 @@ export async function capturePatchGitControls(
       inaccessibleHooks.add(path);
     }
   };
-  // Git can retain an outside caller's cwd or move an inside caller to the
-  // worktree root. Resolve its relative paths in that setup directory.
-  const setupDirectory = async (checkout: string): Promise<string> =>
-    (
-      await runControl(
-        checkout,
-        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-        { environment: { GIT_OBJECT_DIRECTORY: "." } },
-      )
-    ).replace(/\n$/u, "");
 
   const publicationHooks = {
     events: new Set<string>(),
@@ -2174,17 +2185,16 @@ export async function capturePatchGitControls(
         );
     }
   };
+  const projectConfig =
+    mode !== "external" && (process.platform === "win32" || !!onSnapshotConfig);
+  const expandedIncludes = new Map<string, string>();
   const captureReferences = async (checkout: string): Promise<void> => {
     const configurationDirectory = await setupDirectory(checkout);
     for (const path of relativeDefaultStores)
       await protectStore(relativeFile(configurationDirectory, path));
-    filterDirectories.set(checkout, configurationDirectory);
+    const filterDirectory = checkout === root ? filterRoot : checkout;
+    filterDirectories.set(filterDirectory, configurationDirectory);
     await protectPointers(checkout, configurationDirectory, inheritedPointers);
-    const projectConfig =
-      checkout === root &&
-      mode !== "external" &&
-      (process.platform === "win32" || !!onSnapshotConfig);
-    const expandedIncludes = new Map<string, string>();
     const parsedFiles = new Map<Buffer, string[] | undefined>();
     const readConfig = async (contents: Buffer) => {
       if (parsedFiles.has(contents)) return parsedFiles.get(contents);
@@ -2346,8 +2356,7 @@ export async function capturePatchGitControls(
         source !== "active",
       );
       if (path === undefined) return;
-      if (projectConfig && source !== "selector")
-        expandedIncludes.set(value, path);
+      if (projectConfig) expandedIncludes.set(value, path);
       await inspectFile(relativeFile(relativeTo, path), source, userSelected);
     };
     const inspectFile = async (
@@ -2372,12 +2381,14 @@ export async function capturePatchGitControls(
           throw new Error(
             `Checkout requested ${optional ? "a conditional" : "an active"} include outside the selected Git roots: ${includePath}`,
           );
-        if (selector) {
+        if (selector && !(await stat(canonical).catch(missing))?.isFile())
+          return;
+        if (selector && (!projectConfig || insideSelectedRoots(canonical))) {
           // GIT_CONFIG affects git-config consumers such as LFS. Inspect its
           // credentials without freezing ordinary selected checkout files.
-          if (!(await stat(canonical).catch(missing))?.isFile()) return;
           contents = await readFile(canonical);
         } else {
+          // A Windows ACL can still deny an external selector on resume.
           await rememberConfiguration(includePath, !optional, optional);
           contents = controlPaths.get(includePath)!.contents;
         }
@@ -2447,7 +2458,6 @@ export async function capturePatchGitControls(
           await captureHooks(configPath(value));
       }
     };
-    const file = environmentEntry(environment, "GIT_CONFIG");
     if (file && mode !== "external")
       for (const base of new Set([
         checkout,
@@ -2530,10 +2540,10 @@ export async function capturePatchGitControls(
       : [];
     for (const path of [...globals, ...systems])
       await rememberSelectedConfiguration(path, true);
-    if (projectConfig)
+    if (projectConfig && checkout === root)
       projectSnapshotConfig = async () => {
         // Windows shares its read-deny ACL across commands. Give snapshot Git
-        // its own system/global files, leaving the originals denied. Keep the
+        // its own configuration files, leaving the originals denied. Keep the
         // include graph so Git evaluates conditions in each branch and repo.
         const files: string[] = [];
         const numbers = new Map<string, number>();
@@ -2617,6 +2627,17 @@ export async function capturePatchGitControls(
         };
         const global = await scope(globals);
         const system = await scope(systems);
+        let selector: PatchSnapshotConfig["selector"];
+        if (file) {
+          const checkouts: Record<string, number | null> = {};
+          for (const directory of filterDirectories.keys()) {
+            const path = gitConfigFile(directory, file);
+            const number = path ? await numberFor(path) : undefined;
+            checkouts[directory.toLowerCase()] = number ?? null;
+            if (number !== undefined)
+              selector ??= { file, root: filterRoot.toLowerCase(), checkouts };
+          }
+        }
         const commands: Record<string, number> = Object.create(null);
         for (const { scope, origin, key, value } of settings) {
           if (
@@ -2635,7 +2656,13 @@ export async function capturePatchGitControls(
         // The launch context retains this object as shell policy can supply
         // additional credential paths before the native permissions resolve.
         snapshotConfig ??= { files, commands };
-        Object.assign(snapshotConfig, { files, global, system, commands });
+        Object.assign(snapshotConfig, {
+          files,
+          global,
+          system,
+          selector,
+          commands,
+        });
         onSnapshotConfig?.(snapshotConfig);
       };
     if (mode === "resumed-hook") return;

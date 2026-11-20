@@ -1750,13 +1750,25 @@ function currentGitParameters(
     : environmentEntry(inherited, "GIT_CONFIG_PARAMETERS");
 }
 
-function gitSubcommand(args: readonly string[]) {
+function gitInvocation(args: readonly string[], directory: string) {
+  let subcommand: string | undefined;
+  let workTree: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
-    if (["-C", "-c", "--git-dir", "--work-tree"].includes(arg)) index++;
-    else if (!arg.startsWith("-")) return arg;
+    if (arg === "-C") directory = resolve(directory, args[++index] ?? "");
+    else if (arg === "--work-tree") workTree = args[++index];
+    else if (arg.startsWith("--work-tree="))
+      workTree = arg.slice("--work-tree=".length);
+    else if (arg === "-c" || arg === "--git-dir") index++;
+    else if (!arg.startsWith("-")) {
+      subcommand = arg;
+      break;
+    }
   }
-  return undefined;
+  return {
+    subcommand,
+    directory: workTree ? resolve(directory, workTree) : directory,
+  };
 }
 
 function shellEnvironmentSettings(config: JsonObject): JsonObject | undefined {
@@ -2167,6 +2179,8 @@ if (windowsConfig) {
       process.env.GIT_CONFIG_SYSTEM = prefix + config.system;
     if (config.global !== undefined)
       process.env.GIT_CONFIG_GLOBAL = prefix + config.global;
+    if (windowsConfig.selector && process.env.GIT_CONFIG === windowsConfig.selector.file)
+      process.env.GIT_CONFIG = prefix + windowsConfig.selector.number;
     Object.assign(process.env, windowsConfig.bindings);
   }
 }
@@ -2410,6 +2424,18 @@ export async function runRepositoryCommand(
             config: sandbox.snapshotConfig,
           }
         : undefined;
+    if (windowsConfig?.config.selector) {
+      const { selector, ...config } = windowsConfig.config;
+      windowsConfig.config = config;
+      const { root, checkouts, file } = selector;
+      const key = gitInvocation(
+        args,
+        options?.directory ?? repository,
+      ).directory.toLowerCase();
+      // Filters launched from a component still run at their checkout root.
+      const number = checkouts[Object.hasOwn(checkouts, key) ? key : root];
+      if (number != null) windowsConfig.selector = { file, number };
+    }
     const home = sandbox && configuredCodexHome(sandbox.environment);
     if (
       home &&
@@ -4011,7 +4037,10 @@ export async function main(
         loaderAccess: loaderWriters,
       };
       options.signal?.throwIfAborted();
-      const subcommand = command === "git" ? gitSubcommand(args) : undefined;
+      const subcommand =
+        command === "git"
+          ? gitInvocation(args, options?.directory ?? repository).subcommand
+          : undefined;
       // Configuration and git-path discovery must see the operator's hooks and filters.
       const useHooks =
         subcommand && subcommand !== "config" && subcommand !== "rev-parse";
