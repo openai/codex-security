@@ -2403,7 +2403,7 @@ test("original coordinates reuse an existing pinned scope checkout without refet
   );
   const { runs, campaign } = savedCampaign(paths);
   await expectScanned(campaign);
-  const checkout = cloneRetained(paths, source);
+  cloneRetained(paths, source);
   await rename(source.path, join(paths.root, "temporarily-unavailable-source"));
   await expectReused(campaign);
   expect(runs).toHaveBeenCalledTimes(1);
