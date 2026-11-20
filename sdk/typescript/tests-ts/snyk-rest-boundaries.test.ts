@@ -22,7 +22,7 @@ function cloudCatalog(environment: NodeJS.ProcessEnv, repositoryUrl: string) {
     fetch: async (url: string, init: RequestInit) => {
       expect(init.method).toBe("GET");
       expect(new URL(url).pathname).toEndWith("/repositories");
-      return Response.json({
+      const page = {
         object: "page",
         has_more: false,
         next: null,
@@ -37,6 +37,13 @@ function cloudCatalog(environment: NodeJS.ProcessEnv, repositoryUrl: string) {
             import_environment_id: "env-example",
           },
         ],
+      };
+      return Response.json(page, {
+        headers: {
+          "Content-Type":
+            "application/vnd.openai.codex-security.scanner-imports.v1+json",
+          "Codex-Security-Import-Scope": "personal",
+        },
       });
     },
   };

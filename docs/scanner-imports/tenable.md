@@ -1,6 +1,6 @@
-# Import Tenable One code repository findings locally
+# Import Tenable One code repository findings
 
-Select a **Code Repository** in Tenable Exposure Management Inventory. Copy its asset UUID and the finding UUIDs you want. Verify the HTTPS clone URL independently in your source control system and use a checkout with a matching Git fetch remote. [Tenable asset details](https://docs.tenable.com/exposure-management/Content/inventory/asset-details.htm)
+Select a **Code Repository** in Tenable Exposure Management Inventory. Copy its asset UUID and the finding UUIDs you want. Verify the HTTPS clone URL independently in your source control system and use it as the source URL for either destination. A local import requires a checkout with a matching Git fetch remote. [Tenable asset details](https://docs.tenable.com/exposure-management/Content/inventory/asset-details.htm)
 
 ## Export the selection
 
@@ -32,7 +32,7 @@ python3 examples/tenable-one/capture.py --assets "$reports/assets.csv" \
 
 Pass additional finding chunks after `--findings`. To retain file locations, add `--path-column file_path --line-column code_line_number`, substituting your tenant's column names. A path is repository-relative. A zero line number leaves the line unspecified.
 
-## Preview, save and read back
+## Preview and save locally
 
 Use the [installed CLI](../../README.md#quick-start) to preview the selection for the local checkout. Choose a stable tenant alias and keep it with the asset UUID in `--source-key` on repeat imports.
 
@@ -52,3 +52,17 @@ Remove `--dry-run` and confirm to save. Run
 the exact Tenable finding ID and its initial `not_assessed` Codex assessment.
 Reusing the source key updates changed evidence and preserves the version of
 an identical finding.
+
+## Preview and publish to Cloud
+
+Use the same selection file, verified source URL, and tenant/asset source key. For `--repository`, use the connected Cloud repository URL or ID instead of a checkout path. Preview the destination before sending the findings:
+
+```sh
+codex-security publish findings "$reports/selection.json" --provider tenable \
+  --to cloud --repository "$repository_url" --source-repository-url "$repository_url" \
+  --source-key "TENANT_ALIAS/$asset_id" --dry-run --format json
+```
+
+Check the account, repository, finding IDs and exclusions. Cloud support depends on the destination: a workspace that advertises Tenable private imports shows `privateImport` in the preview; `requests` identifies a repository publisher. If the destination does not support Tenable, you can still save the selection locally.
+
+To publish, remove `--dry-run` and confirm the reviewed selection. For a private inbox, check the completed job and its processed and error counts. For the repository publisher, check the verified findings, unacknowledged findings and failures in the receipt. [How to verify the import](README.md#verify-the-import)

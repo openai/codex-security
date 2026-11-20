@@ -11,6 +11,19 @@ import type {
   SourceReport,
 } from "./external-import-models.js";
 
+export const SCANNER_IMPORT_MEDIA_TYPE =
+  "application/vnd.openai.codex-security.scanner-imports.v1+json";
+
+export function importResponseMediaType(
+  response: Response,
+): string | undefined {
+  return response.headers
+    .get("Content-Type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+}
+
 const ajv = new Ajv2020({
   strict: false,
   validateFormats: false,

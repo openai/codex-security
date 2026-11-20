@@ -737,7 +737,9 @@ export function normalizeSelectedSemgrepPlatformFindings(
 }
 
 function sourceId(
-  scope: SemgrepPlatformScope,
+  scope: Pick<SemgrepPlatformScope, "deployment" | "product" | "ref"> & {
+    project: { id: string };
+  },
   finding: Record<string, unknown>,
 ) {
   // Keep the same tuple for a selected import and a subsequent scoped Platform collection.
@@ -759,6 +761,27 @@ function scopeProduct(native: unknown, complete: boolean) {
       "Select a supported Semgrep Platform product for this report.",
     );
   return product;
+}
+
+/** Recover the native occurrence ID from the evidence in an approved request. */
+export function submittedSemgrepPlatformId(finding: ExternalFinding) {
+  const data = finding.evidence.source_data;
+  if (!data || !isSemgrepPlatformFormat(data["format"])) return;
+  const project = responseRecord(data["project"], "Semgrep project");
+  return sourceId(
+    {
+      deployment: requiredText(data["deployment"], "Semgrep deployment"),
+      project: { id: requiredText(project["id"], "Semgrep project ID") },
+      product: scopeProduct(
+        data["product"],
+        data["format"] === semgrepPlatformFormat,
+      ),
+      ref: requiredText(data["ref"], "Semgrep ref"),
+    },
+    parseSemgrepResponse(
+      requiredText(data["semgrepPlatformFindingJson"], "Semgrep finding JSON"),
+    ),
+  );
 }
 
 function readScope(
