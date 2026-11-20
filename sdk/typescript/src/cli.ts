@@ -9587,7 +9587,7 @@ async function matchAllScans(
   let uncertainPairs = 0;
   let unmatchedBatches = 0;
   let firstFailure: unknown;
-  const newlyMatchedGroups: string[][] = [];
+  const savedFindingGroups: (readonly string[])[] = [];
   for (const batch of batches) {
     options.signal?.throwIfAborted();
     const {
@@ -9599,7 +9599,7 @@ async function matchAllScans(
     const before = beforeScans.flatMap(({ findings }) => findings);
     const knownGroups = unionFindingGroups([
       ...knownFindingGroups,
-      ...newlyMatchedGroups,
+      ...savedFindingGroups,
     ]);
     const input: ScanComparisonInput = {
       before,
@@ -9631,6 +9631,11 @@ async function matchAllScans(
         throw error;
       if (unmatchedBatches === 0) firstFailure = error;
       unmatchedBatches += 1;
+      savedFindingGroups.push(
+        ...beforeScans.flatMap(
+          ({ retainedFindingGroups = [] }) => retainedFindingGroups,
+        ),
+      );
       writeOptionalDiagnostic(
         errorOutput,
         `codex-security: warning: Could not match findings against scan ${diagnosticValue(afterScanId)}: ${diagnosticValue(error)}\n`,
@@ -9657,7 +9662,7 @@ async function matchAllScans(
       relatedPairs += comparison.related?.length ?? 0;
       uncertainPairs += comparison.uncertain.length;
     }
-    newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
+    savedFindingGroups.push(...comparisonFindingGroups(input, matching));
   }
   if (matchedPairs === 0 && unmatchedBatches > 0) throw firstFailure;
   return {

@@ -669,6 +669,7 @@ def list_unmatched_scan_pairs(
     compact = os.environ.get("CODEX_SECURITY_MATCHING_PLAN_FORMAT") == "compact"
     sites: dict[str, _FindingSites] = {}
     known_links: list[sqlite3.Row] | None = None
+    retained_groups: dict[frozenset[str], list[list[str]]] = {}
     for index, after in enumerate(available):
         if focus_scan_id is not None and after["id"] != focus_scan_id:
             continue
@@ -686,7 +687,14 @@ def list_unmatched_scan_pairs(
         if not previous:
             continue
         if known_links is None:
-            known_links = [] if args.force else _saved_finding_links(connection, set(scan_ids))
+            known_links = _saved_finding_links(connection, set(scan_ids))
+            if args.force:
+                for link in known_links:
+                    pair = frozenset((link["before_scan_id"], link["after_scan_id"]))
+                    retained_groups.setdefault(pair, []).append(
+                        [link["before_finding_id"], link["after_finding_id"]]
+                    )
+                known_links = []
         for scan in (*previous, after):
             if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
@@ -707,6 +715,11 @@ def list_unmatched_scan_pairs(
                         **_cross_mode_context(before, after, matching_findings, sites),
                         "scanId": before["id"],
                         **({} if compact else {"findings": matching_findings[before["id"]]}),
+                        **(
+                            {"retainedFindingGroups": retained_groups[pair]}
+                            if (pair := frozenset((before["id"], after["id"]))) in retained_groups
+                            else {}
+                        ),
                     }
                     for before in previous
                 ],

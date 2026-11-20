@@ -107,6 +107,7 @@ export interface ScanMatchingBatch {
   beforeScans: ({
     scanId: string;
     findings?: readonly Finding[];
+    retainedFindingGroups?: readonly (readonly string[])[];
   } & SavedComparisonContext)[];
   knownFindingGroups?: readonly (readonly string[])[];
 }

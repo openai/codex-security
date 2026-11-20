@@ -1188,6 +1188,69 @@ describe("CLI workbench", () => {
       return fixture;
     }
 
+    test.each(["matcher", "projection", "success"] as const)(
+      "restores retained forced links after the %s outcome",
+      async (outcome) => {
+        const { stdout, runCli } = createCliTest(main);
+        const { batches, saved, onWorkbench } = batchWorkbench([
+          "replaced",
+          "retry",
+          "later",
+        ]);
+        for (const batch of batches.slice(0, 2)) {
+          Object.assign(batch.beforeScans[0]!, {
+            retainedFindingGroups: [["source", batch.afterScanId]],
+          });
+        }
+        const matcher = mock<typeof matchScanFindings>(async (input) => {
+          if (input.after[0]!.occurrenceId === "retry") {
+            if (outcome === "matcher") throw new Error("Matcher unavailable");
+            if (outcome === "projection")
+              return {
+                matches: [
+                  {
+                    beforeOccurrenceIds: ["source"],
+                    afterOccurrenceIds: ["retry"],
+                    confidence: "high",
+                    reason: "Synthetic match",
+                  },
+                ],
+                uncertain: [
+                  {
+                    beforeOccurrenceId: "source",
+                    afterOccurrenceId: "retry",
+                    reason: "Conflicting decision",
+                  },
+                ],
+              };
+          }
+          return { matches: [], uncertain: [] };
+        });
+        expect(
+          await runCli(
+            [...argv, "--force"],
+            dependencies({
+              onWorkbench,
+              onMatch: matcher,
+            }),
+          ),
+        ).toBe(0);
+        expect(matcher.mock.calls[0]![0].knownFindingGroups).toBeUndefined();
+        expect(matcher.mock.calls[1]![0].knownFindingGroups).toBeUndefined();
+        expect(matcher.mock.calls[2]![0].knownFindingGroups).toEqual(
+          outcome === "success" ? undefined : [["source", "retry"]],
+        );
+        expect(saved).toEqual([
+          ["source", "replaced"],
+          ...(outcome === "success" ? [["source", "retry"]] : []),
+          ["source", "later"],
+        ]);
+        expect(JSON.parse(stdout.text()).unmatchedBatches).toBe(
+          outcome === "success" ? undefined : 1,
+        );
+      },
+    );
+
     test("skips conflicting and failed batches without losing saved groups", async () => {
       const { stdout, stderr, runCli } = createCliTest(main);
       const { saved, onWorkbench } = batchWorkbench(

@@ -2612,8 +2612,8 @@ A partial success reports `unmatchedBatches` in JSON. An ordinary rerun retries
 unsaved comparisons. When retrying a forced rebuild, keep `--force` so pairs
 with older cached decisions are compared again. Cancellation, storage or
 configuration errors, and recognized authentication failures stop the command.
-For failed matcher turns, Codex supplies diagnostic text. The matcher recognizes
-the native `unexpected status 401 Unauthorized:` prefix.
+If a forced matching batch fails, its cached links remain available to later
+batches; successful rematches replace their old decisions.
 
 ```ts
 import { readFile } from "node:fs/promises";
