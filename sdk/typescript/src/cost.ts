@@ -3632,7 +3632,9 @@ function readSessionEvent(
     }
     const activityRepository =
       repository ??
-      (isSessionToolCall(payload["type"]) ? session.aliasRepository : undefined);
+      (isSessionToolCall(payload["type"])
+        ? session.aliasRepository
+        : undefined);
     if (activityRepository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
