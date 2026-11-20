@@ -479,6 +479,12 @@ jobs:
         run: |
           node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
           ln -s ../../plugins/codex-security sdk/typescript/_bundled_plugin
+      - name: Test dependency reachability eval contracts
+        run: |
+          node --test evals/dependency-reachability/test-eval.mjs
+          node --experimental-strip-types --test evals/package-application-mapping/test_grade.mts
+          python3 -B -m unittest discover -s evals/dependency-reachability/upstream/fixtures/zip -p test_catalog.py
+          node evals/dependency-reachability/run.mjs contracts --cli sdk/typescript/bin/codex-security.mjs
       - name: Test Standard time-budget eval contracts
         run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts
@@ -560,11 +566,37 @@ jobs:
           node --experimental-strip-types --test --test-reporter=tap
           --test-name-pattern="^(testAbortKillsPreflightChild|testDiscoveryDeadlineReducesSingleBufferedFinding)$"
           tests/test_deep_scan_permission_profile_preflight.ts tests/test_deep_scan_coordinator.ts
+      - name: Test Deep Scan worker settings and executable selection on Windows
+        if: matrix.shard == 3
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: >-
+          node --experimental-strip-types --test --test-reporter=tap
+          --test-name-pattern="^Deep worker (runtime settings|executable selection)$"
+          tests/test_deep_scan_executor.ts
       - name: Test MCP helper paths on Windows
         if: matrix.shard == 1
         working-directory: plugins/codex-security/mcp-app
         env: *windows-shard-env
         run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts tests/test_normalize_candidates.ts
+      - name: Test MCP app with long saved patch paths on Windows
+        if: matrix.shard == 4
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        shell: pwsh
+        run: |
+          $ripgrep = 'ripgrep-15.2.0-x86_64-pc-windows-msvc'
+          $zip = Join-Path $env:RUNNER_TEMP "$ripgrep.zip"
+          Invoke-WebRequest "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/$ripgrep.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne '71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5') {
+            throw 'Unexpected ripgrep archive checksum'
+          }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          $env:PATH = (Join-Path $env:RUNNER_TEMP $ripgrep) + ";" + $env:PATH
+          $deepTemp = Join-Path $env:TEMP 'remediation-smoke\local-app-workspace\temporary-files'
+          New-Item -ItemType Directory -Path $deepTemp -Force | Out-Null
+          $env:TEMP = $env:TMP = $env:TMPDIR = $deepTemp
+          node --experimental-strip-types --test --test-reporter=tap tests/test_mcp_app_smoke.ts
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
