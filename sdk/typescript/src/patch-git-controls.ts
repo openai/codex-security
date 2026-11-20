@@ -87,11 +87,20 @@ const GIT_HOOKS = [
 
 export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
+  readonly callerContext?: boolean;
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
   readonly hookMessagePath?: string;
   readonly input?: string | Uint8Array;
   readonly environment?: NodeJS.ProcessEnv;
+}
+
+export interface PatchGitAdministrationReference {
+  readonly path: string;
+  readonly canonical: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly root: string;
 }
 
 type RunGit = (
@@ -227,6 +236,7 @@ export interface PatchGitControls {
   readonly hostRefreshFilters: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
+  validateCapturedSelection(): Promise<void>;
 }
 
 export interface PatchPublicationHooks {
@@ -485,9 +495,12 @@ const relativeFile = (directory: string, path: string) =>
 
 function httpCredentialPath(directory: string, file: string): string {
   if (process.platform === "win32") {
+    const windowsDirectory = directory.replaceAll("/", "\\");
     const drive = /^[a-z]:(?![\\/])/iu.exec(file)?.[0];
     if (drive) {
-      const current = /^(?:\\\\[?.]\\)?([a-z]:)[\\/]/iu.exec(directory)?.[1];
+      const current = /^(?:\\\\[?.]\\)?([a-z]:)[\\/]/iu.exec(
+        windowsDirectory,
+      )?.[1];
       if (drive.toLowerCase() !== current?.toLowerCase())
         throw new Error(
           "Use a fully qualified path for a Git HTTP credential file on another Windows drive.",
@@ -496,8 +509,8 @@ function httpCredentialPath(directory: string, file: string): string {
     }
     if (/^[\\/](?![\\/])/u.test(file)) {
       const volume =
-        /^\\\\[?.]\\UNC\\[^\\]+\\[^\\]+/iu.exec(directory)?.[0] ??
-        parse(directory).root;
+        /^\\\\[?.]\\UNC\\[^\\]+\\[^\\]+/iu.exec(windowsDirectory)?.[0] ??
+        parse(windowsDirectory).root;
       return `${volume.replace(/[\\/]$/u, "")}${file}`;
     }
   }
@@ -1688,6 +1701,19 @@ async function directoryLinks(path: string): Promise<string[]> {
   return [...links];
 }
 
+export async function capturePatchGitAdministrationReferences(
+  path: string,
+): Promise<PatchGitAdministrationReference[]> {
+  const root = await realControlPath(path);
+  const references: PatchGitAdministrationReference[] = [];
+  for (const link of await directoryLinks(path)) {
+    const canonical = await realControlPath(link);
+    const { dev, ino } = await stat(canonical, { bigint: true });
+    references.push({ path: link, canonical, dev, ino, root });
+  }
+  return references;
+}
+
 async function readableGitParent(
   checkout: string,
   path: Buffer,
@@ -1765,6 +1791,7 @@ export async function capturePatchGitControls(
     usesWorktreeMarker = true,
     usesCommonDirectoryMarker = true,
     selectedGitDirectory,
+    administrationReferences = [],
     environment = process.env,
     automaticPublication = false,
     mode = "sandbox",
@@ -1775,6 +1802,7 @@ export async function capturePatchGitControls(
     usesWorktreeMarker?: boolean;
     usesCommonDirectoryMarker?: boolean;
     selectedGitDirectory?: string;
+    administrationReferences?: readonly PatchGitAdministrationReference[];
     environment?: ProcessEnvironment;
     automaticPublication?: boolean;
     mode?: PatchGitControlMode;
@@ -2135,34 +2163,43 @@ export async function capturePatchGitControls(
       if (!hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) throw error;
     }
   };
+  const relativeDefaultStores: string[] = [];
   const requestedDirectory =
     mode === "resumed-hook" ? root : await realControlPath(directory);
   const protectTransportFile = async (
     checkout: string,
+    configurationDirectory: string,
     file: string,
     includeDirectory = false,
   ) => {
-    const paths = new Set([httpCredentialPath(checkout, file)]);
-    // Git can retain an external caller's cwd for transport.
+    // Git can keep an outside caller's cwd for transport, while snapshot
+    // commands and nested checkouts can use their own setup directory.
+    const paths = new Set([
+      httpCredentialPath(checkout, file),
+      httpCredentialPath(configurationDirectory, file),
+    ]);
     if (checkout === root && !inside(root, requestedDirectory))
       paths.add(httpCredentialPath(requestedDirectory, file));
     for (const path of paths) await protectStore(path, includeDirectory);
   };
   if (mode !== "external") {
     const legacy = await expandConfigurationPath("~/.git-credentials");
-    if (legacy) await protectStore(relativeFile(root, legacy));
     const xdg = xdgConfigHome
       ? relativeFile(xdgConfigHome, "git/credentials")
       : await expandConfigurationPath("~/.config/git/credentials");
-    if (xdg) await protectStore(relativeFile(root, xdg));
+    for (const path of [legacy, xdg]) {
+      if (!path) continue;
+      if (isAbsolute(path)) await protectStore(path);
+      else relativeDefaultStores.push(path);
+    }
     // Git for Windows can initialize HOME from the drive and home path.
     // libcurl otherwise falls back to USERPROFILE or the Unix account home.
     const accountHome = accountHomeDirectory();
     const profile = process.platform === "win32" ? userProfile : undefined;
     const home = (await expandConfigurationPath("~")) || profile || accountHome;
     if (home) {
-      await protectTransportFile(root, relativeFile(home, ".netrc"));
-      await protectTransportFile(root, relativeFile(home, "_netrc"));
+      await protectTransportFile(root, root, relativeFile(home, ".netrc"));
+      await protectTransportFile(root, root, relativeFile(home, "_netrc"));
     }
     // OpenSSH locates account keys independently of Git's HOME override.
     // Checkout-selected hooks can otherwise copy a key into COMMIT_EDITMSG.
@@ -2234,6 +2271,23 @@ export async function capturePatchGitControls(
     );
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
+      const reference = administrationReferences.find(
+        (reference) => reference.path === entry,
+      );
+      if (reference !== undefined) {
+        const canonical = await realControlPath(entry);
+        const identity = await stat(canonical, { bigint: true });
+        if (
+          canonical !== reference.canonical ||
+          identity.dev !== reference.dev ||
+          identity.ino !== reference.ino ||
+          !administrationRoots.has(reference.root)
+        )
+          throw new Error(
+            `Git administration reference changed during the patch: ${entry}`,
+          );
+        administrationLinks.add(entry);
+      }
       if (administrationLinks.has(entry)) {
         await rememberControl(entry, true, false);
       } else if (insideSelectedRoots(dirname(entry))) {
@@ -2268,6 +2322,7 @@ export async function capturePatchGitControls(
       inaccessibleHooks.add(path);
     }
   };
+
   const publicationHooks = {
     events: new Set<string>(),
     configured: new Set<string>(),
@@ -2275,7 +2330,7 @@ export async function capturePatchGitControls(
   const activeHostFilters = new Set<string>();
   const branchFilterSettings = new Set<string>();
   let hasConditionalFilters = false;
-  const filterCheckouts = new Set<string>();
+  const filterDirectories = new Map<string, string>();
   let checkoutCleanFilter = false;
   const delegateFilters = new Set<string>();
   const nonemptyFilters = new Set<string>();
@@ -2284,6 +2339,7 @@ export async function capturePatchGitControls(
   let externalInlineAuthentication = false;
   const captureCredentialSource = async (
     checkout: string,
+    configurationDirectory: string,
     key: string,
     value: string,
     origin: "file" | "command",
@@ -2303,7 +2359,7 @@ export async function capturePatchGitControls(
         environment,
         sshDirectories,
       );
-      await protectPointers(checkout, pointers);
+      await protectPointers(checkout, configurationDirectory, pointers);
       return;
     }
     if (httpCredentialFile.test(key)) {
@@ -2314,13 +2370,14 @@ export async function capturePatchGitControls(
       const file = /\.proxyssl(?:key|cert)$/iu.test(key)
         ? configPath(value)
         : await expandConfigurationPath(configPath(value));
-      if (file) await protectTransportFile(checkout, file);
+      if (file)
+        await protectTransportFile(checkout, configurationDirectory, file);
       return;
     }
     if (/^credential(?:\..*)?\.plaintextstorepath$/iu.test(key)) {
       const pointers = credentialPointers();
       selectStoreDirectory(pointers.directories, configPath(value));
-      await protectPointers(checkout, pointers);
+      await protectPointers(checkout, configurationDirectory, pointers);
       return;
     }
     if (!/^credential(?:\..*)?\.helper$/iu.test(key)) return;
@@ -2345,7 +2402,10 @@ export async function capturePatchGitControls(
   const snapshotFilter = (key: string) =>
     /^filter\..*\.(?:clean|process)$/su.test(key) ||
     (automaticPublication && /^filter\..*\.smudge$/su.test(key));
-  const activeCheckoutFilters = async (checkout: string): Promise<string[]> => {
+  const activeCheckoutFilters = async (
+    checkout: string,
+    configurationDirectory: string,
+  ): Promise<string[]> => {
     const entries = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -2370,7 +2430,7 @@ export async function capturePatchGitControls(
           !(await userSelectedConfig(
             entries[index],
             configPath(entries[index + 1]!),
-            checkout,
+            configurationDirectory,
           )),
       );
     }
@@ -2397,6 +2457,7 @@ export async function capturePatchGitControls(
   }
   const protectPointers = async (
     checkout: string,
+    configurationDirectory: string,
     { files, directories }: ReturnType<typeof credentialPointers>,
   ) => {
     if (mode === "external") return;
@@ -2409,7 +2470,12 @@ export async function capturePatchGitControls(
         const expanded = await expandConfigurationPath(file);
         if (expanded) await protectStore(expanded, includeDirectory);
       }
-      await protectTransportFile(checkout, file, includeDirectory);
+      await protectTransportFile(
+        checkout,
+        configurationDirectory,
+        file,
+        includeDirectory,
+      );
       // Commands may also inherit the original caller's subdirectory.
       if (checkout === root && directory !== root && !isAbsolute(file))
         await protectStore(
@@ -2422,6 +2488,12 @@ export async function capturePatchGitControls(
     mode !== "external" && (process.platform === "win32" || !!onSnapshotConfig);
   const expandedIncludes = new Map<string, string>();
   const captureReferences = async (checkout: string): Promise<void> => {
+    const configurationDirectory = await setupDirectory(checkout);
+    for (const path of relativeDefaultStores)
+      await protectStore(relativeFile(configurationDirectory, path));
+    const filterDirectory = checkout === root ? filterRoot : checkout;
+    filterDirectories.set(filterDirectory, configurationDirectory);
+    await protectPointers(checkout, configurationDirectory, inheritedPointers);
     const parsedFiles = new Map<Buffer, string[] | undefined>();
     const readConfig = async (contents: Buffer) => {
       if (parsedFiles.has(contents)) return parsedFiles.get(contents);
@@ -2442,7 +2514,6 @@ export async function capturePatchGitControls(
       if (projectConfig) parsedFiles.set(contents, entries);
       return entries;
     };
-    await protectPointers(checkout, inheritedPointers);
     const records = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -2489,7 +2560,11 @@ export async function capturePatchGitControls(
     for (const { scope, origin, key, value } of settings) {
       if (
         key === "user.signingkey" &&
-        (await userSelectedConfig(scope, configPath(origin), checkout))
+        (await userSelectedConfig(
+          scope,
+          configPath(origin),
+          configurationDirectory,
+        ))
       )
         signingKeys.add(value);
       if (automaticPublication && value && snapshotFilter(key))
@@ -2504,16 +2579,35 @@ export async function capturePatchGitControls(
             /^credential(?:\..*)?\.(?:helper|plaintextstorepath)$/iu.test(
               key,
             )) &&
-          (await userSelectedConfig(scope, configPath(origin), checkout))
+          (await userSelectedConfig(
+            scope,
+            configPath(origin),
+            configurationDirectory,
+          ))
         ) {
           externalInlineAuthentication ||= inline;
-          await captureCredentialSource(checkout, key, value, "file");
+          await captureCredentialSource(
+            checkout,
+            configurationDirectory,
+            key,
+            value,
+            "file",
+          );
         }
-        const path = relativeFile(checkout, configPath(origin.slice(5)));
+        const path = relativeFile(
+          configurationDirectory,
+          configPath(origin.slice(5)),
+        );
         activeConfigurations.add(path);
       } else if (scope === "command") {
         // Removing a command-scope setting does not prevent opening its file.
-        await captureCredentialSource(checkout, key, value, "command");
+        await captureCredentialSource(
+          checkout,
+          configurationDirectory,
+          key,
+          value,
+          "command",
+        );
       }
     }
     const captureHooks = async (configured?: string): Promise<void> => {
@@ -2524,6 +2618,9 @@ export async function capturePatchGitControls(
             ? []
             : ["-c", `core.hooksPath=${configured}`]),
           "rev-parse",
+          // Report an entry relative to the worktree even when called from a subdirectory.
+          "--prefix",
+          "",
           "--git-path",
           "hooks/post-index-change",
         ]);
@@ -2631,7 +2728,13 @@ export async function capturePatchGitControls(
             key !== "core.sshcommand" ||
             (userSelected && !insideSelectedRoots(canonical))
           )
-            await captureCredentialSource(checkout, key, value, "file");
+            await captureCredentialSource(
+              checkout,
+              configurationDirectory,
+              key,
+              value,
+              "file",
+            );
         }
         if (includeSetting.test(key))
           await captureInclude(
@@ -2659,10 +2762,12 @@ export async function capturePatchGitControls(
           await captureHooks(configPath(value));
       }
     };
-    const filterDirectory = checkout === root ? filterRoot : checkout;
-    filterCheckouts.add(filterDirectory);
     if (file && mode !== "external")
-      for (const base of new Set([filterDirectory, requestedDirectory])) {
+      for (const base of new Set([
+        checkout,
+        requestedDirectory,
+        configurationDirectory,
+      ])) {
         const path = gitConfigFile(base, file);
         if (path) await inspectFile(path, "selector", true);
       }
@@ -2676,13 +2781,15 @@ export async function capturePatchGitControls(
     for (const { scope, origin, key, value } of settings) {
       if (!includeSetting.test(key)) continue;
       const relativeTo = origin.startsWith("file:")
-        ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
-        : checkout;
+        ? dirname(
+            relativeFile(configurationDirectory, configPath(origin.slice(5))),
+          )
+        : configurationDirectory;
       await captureInclude(
         relativeTo,
         value,
         key.startsWith("includeif.") ? "conditional" : "active",
-        await userSelectedConfig(scope, origin, checkout),
+        await userSelectedConfig(scope, origin, configurationDirectory),
       );
     }
     // A branch switch can activate a conditional SSH format or key path.
@@ -2692,11 +2799,15 @@ export async function capturePatchGitControls(
         const file = await expandConfigurationPath(configPath(key), checkout);
         if (!file) continue;
         hostMayReadStore = true;
-        await protectTransportFile(checkout, file);
+        await protectTransportFile(checkout, configurationDirectory, file);
         // ssh-keygen -Y sign strips the public key or certificate suffix.
         const privateKey = file.replace(/(.)(?:-cert)?\.pub$/su, "$1");
         if (privateKey !== file)
-          await protectTransportFile(checkout, privateKey);
+          await protectTransportFile(
+            checkout,
+            configurationDirectory,
+            privateKey,
+          );
       }
     }
     if (mode === "resumed-hook" && !projectConfig) return;
@@ -2707,13 +2818,16 @@ export async function capturePatchGitControls(
         /^filter\..*\.(clean|smudge|process)$/su.test(key),
       )
     ) {
-      for (const key of await activeCheckoutFilters(checkout)) {
+      for (const key of await activeCheckoutFilters(
+        checkout,
+        configurationDirectory,
+      )) {
         activeHostFilters.add(key);
         if (!key.endsWith(".smudge")) checkoutCleanFilter = true;
       }
     }
     const globals = globalConfigurationPaths.map((path) =>
-      relativeFile(checkout, path),
+      relativeFile(configurationDirectory, path),
     );
     // The first system record belongs to the top-level file, including
     // when its first setting is itself an include.
@@ -2725,7 +2839,9 @@ export async function capturePatchGitControls(
       (systemOrigin?.startsWith("file:")
         ? configPath(systemOrigin.slice(5))
         : undefined);
-    const systems = system ? [relativeFile(checkout, system)] : [];
+    const systems = system
+      ? [relativeFile(configurationDirectory, system)]
+      : [];
     for (const path of [...globals, ...systems])
       await rememberSelectedConfiguration(path, true);
     if (projectConfig && checkout === root)
@@ -2818,7 +2934,7 @@ export async function capturePatchGitControls(
         let selector: PatchSnapshotConfig["selector"];
         if (file) {
           const checkouts: Record<string, number | null> = {};
-          for (const directory of filterCheckouts) {
+          for (const directory of filterDirectories.keys()) {
             const path = gitConfigFile(directory, file);
             const number = path ? await numberFor(path) : undefined;
             checkouts[directory.toLowerCase()] = number ?? null;
@@ -2893,9 +3009,14 @@ export async function capturePatchGitControls(
     }
     await captureHooks();
   };
+  const directoryArguments = ["--absolute-git-dir", "--git-common-dir"];
+  const readSelectedPath = async (argument: string) =>
+    (
+      await runControl(root, ["rev-parse", "--path-format=absolute", argument])
+    ).replace(/\n$/u, "");
   const selectedPaths: string[] = [];
-  for (const argument of ["--absolute-git-dir", "--git-common-dir"])
-    selectedPaths.push(await absolutePath(root, argument));
+  for (const argument of directoryArguments)
+    selectedPaths.push(await readSelectedPath(argument));
   const selectedDirectories = await Promise.all(
     selectedPaths.map(realControlPath),
   );
@@ -2971,11 +3092,15 @@ export async function capturePatchGitControls(
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
     : selectedDirectories[1];
+  const selectorDirectory = await setupDirectory(root);
   for (const argument of [
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
     ...(usesCommonDirectoryMarker ? [] : ["--git-common-dir"]),
   ]) {
-    const path = relativeFile(root, await controlPath(root, argument));
+    const path = relativeFile(
+      selectorDirectory,
+      await controlPath(root, argument),
+    );
     await rememberControl(path);
     for (const link of await directoryLinks(path))
       administrationLinks.add(link);
@@ -3629,7 +3754,10 @@ export async function capturePatchGitControls(
       resolved = await runBytes(
         root,
         ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-        { environment: { GIT_OBJECT_DIRECTORY: selected } },
+        {
+          callerContext: true,
+          environment: { GIT_OBJECT_DIRECTORY: selected },
+        },
       );
     } catch (error) {
       const failure = error as Error & { code?: unknown; status?: unknown };
@@ -3694,8 +3822,8 @@ export async function capturePatchGitControls(
       for (const dir of inheritedPointers.directories)
         added.directories.delete(dir);
       const previouslyUnisolated = unisolatedCredentialHelper;
-      for (const checkout of filterCheckouts)
-        await protectPointers(checkout, added);
+      for (const [checkout, configurationDirectory] of filterDirectories)
+        await protectPointers(checkout, configurationDirectory, added);
       if (added.files.size || added.directories.size)
         await projectSnapshotConfig?.();
       if (
@@ -3725,11 +3853,27 @@ export async function capturePatchGitControls(
       return [
         ...new Set(
           (
-            await Promise.all([...filterCheckouts].map(activeCheckoutFilters))
+            await Promise.all(
+              [...filterDirectories].map(([checkout, directory]) =>
+                activeCheckoutFilters(checkout, directory),
+              ),
+            )
           ).flat(),
         ),
       ];
     },
     validate: () => discover(false),
+    async validateCapturedSelection() {
+      for (const [index, argument] of directoryArguments.entries()) {
+        if (
+          (await realControlPath(await readSelectedPath(argument))) !==
+          selectedDirectories[index]
+        )
+          throw new Error(
+            "Selected Git administration changed during the patch. Inspect the checkout before retrying.",
+          );
+      }
+      await discover(false);
+    },
   };
 }

@@ -53,6 +53,19 @@ export function resultWithFindings(severities: readonly SeverityLevel[]) {
   return result;
 }
 
+export const patchRiskSkill = "$codex-security:assess-patch-risk";
+
+export function savedPatchFixture(
+  directory: string,
+  result = resultWithFindings(["high"]),
+) {
+  return {
+    currentDirectory: directory,
+    result,
+    onWorkbench: () => savedScan(result, "scan-1", directory),
+  };
+}
+
 export function savedScan(
   result: ReturnType<typeof resultWithFindings>,
   scanId = "scan-1",
@@ -176,12 +189,19 @@ export function patchDependencies(
         repository,
         commandOptions,
       );
+      // An empty canned result cannot identify the active staging worktree.
+      const missingStagedGitDirectory =
+        output === "" &&
+        args.includes("-C") &&
+        args.at(-2) === "rev-parse" &&
+        args.at(-1) === "--absolute-git-dir" &&
+        commandOptions?.encoding === "base64";
       if (command !== "git" || output) return output;
       const inspectSearchPath = args[1]?.startsWith(
         "alias.codex-security-transport-path-",
       );
       const resolveGitPath =
-        output === undefined &&
+        (output === undefined || missingStagedGitDirectory) &&
         args.includes("rev-parse") &&
         args.some((argument) =>
           [
@@ -205,7 +225,7 @@ export async function runWorkflow(
   options: {
     interactive?: boolean;
     review?: boolean;
-    localHosting?: boolean;
+    localHosting?: boolean | "git";
     hostingOrigin?: string;
     configure?: (value: ReturnType<typeof dependencies>) => void;
   } = {},
@@ -247,19 +267,37 @@ export async function runWorkflow(
     const run = current.runRepositoryCommand;
     const localRemotes = new Map<string, string>();
     let hostedRemote = "https://github.example.test/example/repository.git";
+    let creatingRequest = false;
     current.runRepositoryCommand = async (
       command,
       args,
       cwd,
       commandOptions,
     ) => {
+      if (command !== "git" && options.localHosting === "git")
+        return run(command, args, cwd, commandOptions);
       if (command === "gh" && args[0] === "repo" && args[1] === "view") {
-        if (localRemotes.size && args.at(-1) === ".id")
-          return "synthetic-origin-id";
-        if (args.at(-1) === ".url") return hostedRemote.replace(/\.git$/u, "");
-        if (args.at(-1) === ".nameWithOwner")
-          return args[2]!.slice(args[2]!.indexOf("/") + 1);
+        if (args.at(-1) === ".url") {
+          creatingRequest = true;
+          return hostedRemote.replace(/\.git$/u, "");
+        }
+        if (
+          (localRemotes.size || creatingRequest) &&
+          args.at(-1) === "tojson" &&
+          args.includes("id,url")
+        )
+          return JSON.stringify({
+            id: "synthetic-origin-id",
+            url: hostedRemote.replace(/\.git$/u, ""),
+          });
       }
+      if (
+        (localRemotes.size || creatingRequest) &&
+        command === "gh" &&
+        args[0] === "repo" &&
+        args[1] === "set-default"
+      )
+        return new URL(hostedRemote).pathname.slice(1).replace(/\.git$/u, "");
       const environment = { ...commandOptions?.environment };
       // The local transport adapter owns the synthetic hosted destinations.
       if (localRemotes.size && args.at(-1) === "^remote\\.origin\\.pushurl$")
@@ -268,10 +306,10 @@ export async function runWorkflow(
             (url) => `command\0command line:\0remote.origin.pushurl\n${url}\0`,
           )
           .join("");
-      for (const [key, value] of Object.entries(environment)) {
+      for (const key of Object.keys(environment)) {
         if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
         for (const [hosted, local] of localRemotes)
-          if (value === `url.${hosted}.insteadOf`)
+          if (environment[key] === `url.${hosted}.insteadOf`)
             environment[key] = `url.${local}.insteadOf`;
       }
       const bound = { ...commandOptions, environment };
@@ -283,10 +321,10 @@ export async function runWorkflow(
           ? localHostingOptions(bound)
           : bound,
       );
-      if (command !== "git" || args[0] !== "remote" || args[1] !== "get-url")
+      if (command !== "git" || args[args.indexOf("remote") + 1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;
-      const remotes = output.split("\n").map((remote) => {
+      const asHosted = (remote: string) => {
         if (
           !isAbsolute(remote) &&
           !win32.isAbsolute(remote) &&
@@ -303,7 +341,15 @@ export async function runWorkflow(
           localRemotes.set(hosted, remote);
         }
         return hosted;
-      });
+      };
+      const remotes = output.split("\n").map(asHosted);
+      // The appended selector names one complete URL, including any line feeds.
+      const selected = environment["CODEX_SECURITY_PATCH_REMOTE"];
+      if (selected?.includes("\n"))
+        localRemotes.set(
+          selected.split("\n").map(asHosted).join("\n"),
+          selected,
+        );
       if (args.includes("--push") && remotes[0]?.includes("://"))
         hostedRemote = remotes[0];
       return remotes.join("\n");
@@ -481,7 +527,7 @@ export const runGitRepositoryCommand: (
       options?.encoding === "base64" || options?.onStdout !== undefined
         ? "buffer"
         : "utf8",
-    cwd: workingDirectory,
+    cwd: options?.directory ?? workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     input: options?.input,
@@ -501,16 +547,10 @@ export const runGitRepositoryCommand: (
 function localHostingOptions(
   options: Parameters<typeof runGitRepositoryCommand>[3],
 ) {
-  const environment = { ...options?.environment };
-  for (const [key, value] of Object.entries(environment))
-    if (key.startsWith("GIT_CONFIG_KEY_") && value === "protocol.file.allow")
-      environment[key.replace("_KEY_", "_VALUE_")] = "always";
-  if (environment["GIT_ALLOW_PROTOCOL"] !== undefined)
-    environment["GIT_ALLOW_PROTOCOL"] = [
-      ...environment["GIT_ALLOW_PROTOCOL"].split(":"),
-      "file",
-    ].join(":");
-  return { ...options, environment };
+  return {
+    ...options,
+    environment: { ...options?.environment, GIT_ALLOW_PROTOCOL: "file" },
+  };
 }
 
 export const runLocalHostingTransport: typeof runGitRepositoryCommand = (

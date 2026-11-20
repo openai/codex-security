@@ -3055,6 +3055,11 @@ codex-security verify-fix finding.md --verification-mode static
 `--assess-patch-risk` runs an advisory assessment after patching. Human-readable
 output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
+Saved-scan patch flows stop automatic assessment or publication if the selected
+path is no longer a directory or points to a different location after patching.
+Supplied-issue flows can continue from the captured repository root when a patch
+removes the caller's subdirectory. Both flows preserve the selected Git context;
+local edits remain available for review.
 The assessment does not change the patch or merge state.
 
 Git snapshots, including snapshots of initialized submodules, run configured Git
@@ -3103,8 +3108,9 @@ policies in those defaults.
 For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
 versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
 On Unix, Git target discovery and patch commands clear native loader overrides
-(`LD_*` and `DYLD_*`). On Linux they also clear `GCONV_PATH` so glibc uses its
-default conversion modules.
+(`LD_*` and `DYLD_*`). The `scan` and `patch` commands preserve verified
+[library search directories](#create-or-resume-a-draft-pull-request).
+On Linux they also clear `GCONV_PATH` so glibc uses its default conversion modules.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.
@@ -3254,20 +3260,40 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 ### Create or resume a draft pull request
 
+For a Git installation with private libraries, use absolute directories in
+`LD_LIBRARY_PATH` or the macOS library and framework search paths. Keep the
+libraries and their dependencies outside the patch's writable roots. Install
+them under a separate account and disable group and public write access.
+The CLI omits a directory if its tree contains a path into a writable root
+or a regular file the current account can modify, including through a
+permission change. A file with one hard link today may have had a writable
+alias during an earlier patch. Fresh patches and `patch --resume-pr` use
+the same checks since each starts with a new view of the installation.
+When the CLI runs as root, it treats all regular files as mutable.
+It filters out relative entries and ELF loader tokens such as `$ORIGIN`, and
+clears other `LD_*` and `DYLD_*` overrides when launching repository commands.
+With an external sandbox or unknown write permissions, the CLI clears the
+search paths as well.
+
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
 Publication checks the source of `core.sshCommand` and binds its executable
-before Git probes a host or examines remote branches. Keep SSH launchers,
-identity files and explicit configuration files outside directories the patch
-can write. Use existing files and absolute paths for explicit file operands such
-as `-i` and `-F`. Keep each symlink in those paths outside the checkout.
-SSH and its configuration probes run from the filesystem
-volume root, with checkout directories excluded from their command search path. For a
-command that needs shell expansion, use an operator-owned wrapper on a trusted
-PATH. Virtualenv interpreters need a protected launcher path to retain their
-environment. Publication rechecks the selected files before running SSH.
-If they change, inspect them before retrying. A resumed publication selects
-the current operator settings. With `--external-sandbox`, the operator supplies
-the filesystem isolation.
+before Git probes a host or examines remote branches. Keep SSH, askpass and
+proxy launchers, identity files and explicit configuration files outside
+directories the patch can write. Use absolute paths for explicit file operands.
+Keep each symlink in those paths outside the checkout.
+Identity files and configuration files selected by `-i` or `-F` must already
+exist. OpenSSH can create a new `UserKnownHostsFile` during a connection when
+its parent directory exists outside the patch's writable roots. SSH and its
+configuration probes run from the filesystem volume root, with checkout
+directories excluded from their command search path. For a command that needs
+shell expansion, use an operator-owned wrapper on a trusted PATH.
+
+If a launcher symlink crosses a directory the patch can write, Git uses the
+approved executable target. A virtualenv interpreter needs a protected launcher
+path to retain its environment. Publication rechecks the selected transport
+files before dispatch. If they change, inspect them before retrying.
+`--resume-pr` selects the current operator settings for that invocation.
+With `--external-sandbox`, the operator supplies the filesystem isolation.
 
 Publication binds the OpenSSH configuration selected by `-F`. With the default
 search it checks the account's `.ssh/config` and system files under `/etc/ssh`,
@@ -3316,10 +3342,14 @@ the saved commit. For SSH, publication binds the SSH client's own
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
-For hosting discovery, a relative `GIT_CONFIG` selects a file from the initial
-hosting command’s working directory. Publication verifies that selection before
-subsequent hosting commands. Git stores the verified commit and branch settings
-in the repository configuration.
+For hosting discovery, a relative `GIT_CONFIG` selects a file from the original
+caller directory. Publication checks that selection again after patching. Git
+stores the verified commit and branch settings in the repository configuration.
+For GitHub, `GH_REPO` selects the base repository. Otherwise, publication uses
+the repository selected by `gh`. For an enterprise endpoint on a custom HTTPS
+port, use the account configured for that endpoint or select the base explicitly
+with `GH_REPO=HOST:PORT/OWNER/REPO`. The `origin` push destination identifies
+the repository that supplies the head branch.
 
 Publication checks the hosting client's configuration before its first
 request. Keep the configuration files and any GitHub CLI `http_unix_socket`

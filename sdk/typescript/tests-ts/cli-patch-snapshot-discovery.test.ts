@@ -8,7 +8,7 @@ import {
   writeFile,
   rm,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   repositoryGit,
   runGitRepositoryCommand,
@@ -229,14 +229,18 @@ function commitBaseline(directory: string) {
   return git;
 }
 
-test.each([
-  { foreign: false, gitlink: false },
-  { foreign: true, gitlink: false },
-  { foreign: false, gitlink: true },
-  { foreign: true, gitlink: true },
-])(
+test.each(
+  [
+    { foreign: false, configuration: "absolute" },
+    { foreign: true, configuration: "absolute" },
+    { foreign: false, configuration: "unset" },
+    { foreign: false, configuration: "relative" },
+  ].flatMap((configuration) =>
+    [false, true].map((gitlink) => ({ ...configuration, gitlink })),
+  ),
+)(
   "patch discovery binds selected nested administration: %p",
-  async ({ foreign, gitlink }) => {
+  async ({ foreign, configuration, gitlink }) => {
     const root = await fixtures.create("patch-worktree-selected-");
     const nested = join(root, "source");
     await mkdir(nested);
@@ -249,7 +253,12 @@ test.each([
       : nested;
     if (foreign) await writeFile(join(worktree, "app.ts"), "foreign source\n");
     const git = commitBaseline(worktree);
-    git("config", "core.worktree", worktree);
+    if (configuration !== "unset")
+      git(
+        "config",
+        "core.worktree",
+        configuration === "relative" ? ".." : worktree,
+      );
     if (foreign) {
       await writeFile(join(worktree, "app.ts"), "foreign local edit\n");
       await writeFile(
@@ -262,7 +271,7 @@ test.each([
       const hook = join(worktree, ".git", "hooks", "synthetic-fsmonitor");
       await writeFile(
         hook,
-        "#!/bin/sh\nprintf effect > hook-effect\nprintf '\\0'\n",
+        `#!/bin/sh\nprintf effect > ${JSON.stringify(effect)}\nprintf '\\0'\n`,
         {
           mode: 0o755,
         },
@@ -285,7 +294,12 @@ test.each([
     let beforeTurnEffect: string | undefined;
     const outcome = await runIssuePatch(root, {
       onRepositoryCommand: (command, args, cwd, options) => {
-        if (args[0] === "-C" && args[1] === nested && args.includes("ls-files"))
+        const gitDirectory = args.indexOf("--git-dir");
+        if (
+          args.includes("ls-files") &&
+          gitDirectory >= 0 &&
+          resolve(args[gitDirectory + 1]!) === join(nested, ".git")
+        )
           nestedInventory.push([...args]);
         return runGitRepositoryCommand(command, args, cwd, options);
       },

@@ -19,6 +19,7 @@ import { join, parse, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCodexSkillCommand } from "../src/cli.js";
 import {
+  capturePatchGitAdministrationReferences,
   capturePatchGitControls,
   snapshotConfigBytes,
 } from "../src/patch-git-controls.js";
@@ -203,6 +204,114 @@ describe("patch Git administration", () => {
       expect(stores).toContain(await realpath(adc));
     },
   );
+
+  test.each(["GIT_DIR", "GIT_COMMON_DIR"] as const)(
+    "a saved patch cannot adopt a different %s between findings",
+    async (selector) => {
+      const checkout = await fixtures.create("patch-bound-checkout-");
+      const other = await fixtures.create("patch-other-checkout-");
+      repositoryGit(checkout)("init", "--quiet");
+      repositoryGit(other)("init", "--quiet");
+      const environment = {
+        GIT_DIR: join(checkout, ".git"),
+        GIT_COMMON_DIR: join(checkout, ".git"),
+        GIT_WORK_TREE: checkout,
+      };
+      const controls = await captureControls(checkout, environment, {
+        usesWorktreeMarker: false,
+        usesCommonDirectoryMarker: false,
+      });
+      expect(controls).toBeDefined();
+      await controls!.validateCapturedSelection();
+      environment[selector] = join(other, ".git");
+      await expect(controls!.validateCapturedSelection()).rejects.toThrow(
+        "Selected Git administration changed during the patch",
+      );
+    },
+  );
+
+  for (const link of [
+    "none",
+    "directory",
+    "ancestor",
+    "removed-caller",
+  ] as const) {
+    test(`retains selected administration provenance after caller removal: ${link}`, async () => {
+      const repository = await fixtures.create(
+        "patch-retained-administration-",
+      );
+      const component = join(repository, "component");
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      await mkdir(component);
+      const administration = await realpath(join(repository, ".git"));
+      const alias = join(repository, "administration-alias");
+      if (link !== "none")
+        await symlink(
+          link === "ancestor"
+            ? repository
+            : link === "removed-caller"
+              ? component
+              : administration,
+          alias,
+          directoryLinkType,
+        );
+      const selected =
+        link === "removed-caller"
+          ? `${alias}${sep}..${sep}.git`
+          : `${component}${sep}..${sep}${link === "none" ? ".git" : `administration-alias${link === "ancestor" ? `${sep}.git` : ""}`}`;
+      const raw = await runGitRepositoryCommand(
+        "git",
+        ["rev-parse", "--git-common-dir"],
+        repository,
+        { environment: { GIT_COMMON_DIR: selected } },
+      );
+      const references = await capturePatchGitAdministrationReferences(raw);
+      git(
+        "config",
+        "lfs.storage",
+        join(
+          link === "none" || link === "removed-caller"
+            ? administration
+            : link === "ancestor"
+              ? join(alias, ".git")
+              : alias,
+          "lfs",
+        ),
+      );
+      await rm(component, { recursive: true });
+      const capture = () =>
+        captureControls(
+          repository,
+          { GIT_COMMON_DIR: administration },
+          {
+            usesCommonDirectoryMarker: false,
+            administrationReferences: references,
+          },
+        );
+      const controls = await capture();
+      expect(controls!.snapshotStoragePaths).toEqual([
+        join(administration, "lfs"),
+      ]);
+      expect(controls!.modelOnlyReadOnlyPaths).toEqual([
+        join(administration, "lfs", "objects"),
+        join(administration, "lfs", "tmp"),
+      ]);
+      await controls!.validate();
+      expect(controls!.readOnlyPaths).not.toContain(repository);
+      if (link === "directory" || link === "ancestor") {
+        const replacement = await fixtures.create(
+          "patch-administration-replacement-",
+        );
+        await rm(alias, { recursive: true });
+        await symlink(replacement, alias, directoryLinkType);
+        await expect(capture()).rejects.toThrow(
+          "Git administration reference changed during the patch",
+        );
+        expect(await readdir(replacement)).toEqual([]);
+      }
+    });
+  }
 
   test("snapshot config preserves native scopes and conditional includes after the original files become unavailable", async () => {
     const root = await fixtures.create("patch-config-graph-");
@@ -1601,7 +1710,7 @@ lines.on("line", (line) => {
         import { capturePatchGitControls } from ${JSON.stringify(await buildPatchGitControlsForNode(bundle))};
         const root = ${JSON.stringify(root)};
         const child = ${JSON.stringify(child)};
-        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}) }}).toString(options?.encoding ?? "utf8"));
+        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}), ...options?.environment }}).toString(options?.encoding ?? "utf8"));
         await writeFile(child + "/app.txt", "after\\n");
         await controls.validate();
         process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));

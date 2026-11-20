@@ -398,7 +398,7 @@ describe("compact diff scan", () => {
     } finally {
       await client.close();
     }
-  }, 30_000);
+  });
 
   test.each(["object", "Markdown"])("MCP diff retains %s", async (format) => {
     const { root, repository } = createRepository();

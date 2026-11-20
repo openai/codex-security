@@ -1,24 +1,27 @@
+import { gitText } from "./support/shell.js";
+import { loopbackProxy, loopbackTls } from "./support/loopback-git-proxy.js";
 import { describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
-import { once } from "node:events";
 import {
   link,
   mkdir,
   readFile,
   realpath,
+  rename,
+  rmdir,
   symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { createServer } from "node:http";
-import { createServer as createHttpsServer } from "node:https";
-import { connect } from "node:net";
 import { delimiter, dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
 import { throwing } from "./support/errors.js";
 import {
+  resultWithFindings,
+  savedScan,
+  completePatches,
   runWorkflow,
   runGitRepositoryCommand,
   runLocalHostingTransport,
@@ -38,70 +41,6 @@ const branch = "codex-security/patch-scan-1";
 describe("patch change tracking", () => {
   const fixtures = patchDirectories();
   const publicationRepository = () => createPublicationRepository(fixtures);
-
-  async function loopbackTls(
-    config: string,
-    git: (...args: string[]) => string,
-    usage: "server" | "client" | "proxy-client" = "server",
-    combined = false,
-  ) {
-    const directory = dirname(config);
-    const settings = join(directory, `${usage}-openssl.cnf`);
-    const key = join(
-      directory,
-      usage === "proxy-client" ? "operator preferences" : `${usage}-key.pem`,
-    );
-    const cert = join(directory, `${usage}-cert.pem`);
-    await writeFile(
-      settings,
-      "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n" +
-        `[dn]\nCN=Loopback test ${usage}\n` +
-        `[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=${usage === "server" ? "serverAuth" : "clientAuth"}\n` +
-        "subjectAltName=IP:127.0.0.1,IP:127.0.0.2\n",
-    );
-    // Git for Windows supplies OpenSSL on its shell PATH.
-    git(
-      "-C",
-      directory,
-      "-c",
-      "alias.test-openssl=!openssl",
-      "test-openssl",
-      "req",
-      "-newkey",
-      "rsa:2048",
-      "-x509",
-      "-nodes",
-      "-days",
-      "1",
-      "-config",
-      settings,
-      "-keyout",
-      key,
-      "-out",
-      cert,
-    );
-    const identity = { key: await readFile(key), cert: await readFile(cert) };
-    if (usage !== "server") {
-      const prefix = usage === "proxy-client" ? "http.proxySSL" : "http.ssl";
-      if (combined) {
-        const bundle = join(directory, usage + "-identity.pem");
-        await writeFile(bundle, Buffer.concat([identity.cert, identity.key]), {
-          mode: 0o600,
-        });
-        git("config", "--file", config, prefix + "Cert", bundle);
-      } else {
-        git("config", "--file", config, prefix + "Cert", cert);
-        git("config", "--file", config, prefix + "Key", key);
-      }
-      // Git for Windows also offers Schannel, which uses a certificate store.
-      if (process.platform === "win32")
-        git("config", "--file", config, "http.sslBackend", "openssl");
-    } else {
-      git("config", "--file", config, "http.sslCAInfo", cert);
-      git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
-    }
-    return identity;
-  }
 
   test.each([
     ["local", false],
@@ -209,7 +148,7 @@ describe("patch change tracking", () => {
     test(
       rewritten
         ? "push rejects an external proxy rewritten through a worktree hard link"
-        : "push uses the external proxy selected before its alias is retargeted",
+        : "push from a component uses the external proxy selected before its alias is retargeted",
       async () => {
         const { directory, git, remote } = await publicationRepository();
         const external = await fixtures.create("patch-proxy-retarget-");
@@ -260,7 +199,10 @@ exit 1
         );
         const environment = {
           GITLAB_HOST: "127.0.0.1:1",
-          GIT_PROXY_COMMAND: join(alias, "proxy"),
+          GIT_PROXY_COMMAND: relative(
+            directory,
+            join(alias, "proxy"),
+          ).replaceAll("\\", "/"),
           GIT_CONFIG_GLOBAL: join(external, "gitconfig"),
           GIT_CONFIG_NOSYSTEM: "1",
         };
@@ -268,7 +210,7 @@ exit 1
         const outcome = await runPublicationWorkflow(
           "issue",
           {
-            currentDirectory: directory,
+            currentDirectory: join(directory, "src"),
             environment,
             onCodex: async (_args, output) => {
               if (rewritten)
@@ -379,6 +321,7 @@ exit 1
   test.each([
     ["preflight", "external shell"],
     ["push", "external shell"],
+    ["push from removed component", "external shell"],
     ["push", "retargeted helper"],
     ["preflight", "named after reset"],
     ["preflight", "checkout relative"],
@@ -390,6 +333,9 @@ exit 1
     async (stage, selection) => {
       const { directory, git } = await publicationRepository();
       const external = await fixtures.create("patch-credentials-");
+      const component = join(directory, "component");
+      const removesComponent = stage === "push from removed component";
+      if (removesComponent) await mkdir(component);
       const global = join(external, "global.gitconfig");
       let challenged = false;
       let authenticated = false;
@@ -473,6 +419,10 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           NO_PROXY: "127.0.0.1",
           PATCH_HELPER_CANARY: "synthetic",
         };
+        if (removesComponent) {
+          await symlink(git("--exec-path"), alias, linkType);
+          environment["GIT_EXEC_PATH"] = relative(component, alias);
+        }
         if (retarget) {
           const trusted = join(external, "trusted");
           await mkdir(trusted);
@@ -540,7 +490,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           "config",
           "--file",
           global,
-          stage === "push"
+          stage !== "preflight"
             ? "includeIf.onbranch:codex-security/**.path"
             : "include.path",
           checkout,
@@ -549,20 +499,32 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         git("config", "credential.helper", helper("local"));
         git("remote", "set-url", "origin", remote);
         let modelCalls = 0;
-        const outcome = await runSavedPublication(
-          directory,
+        const outcome = await runPublicationWorkflow(
+          removesComponent ? "issue" : "scan",
           {
+            currentDirectory: removesComponent ? component : directory,
             environment,
-            onCodex: fixSavedFinding(directory, async () => {
+            onWorkbench: () =>
+              savedScan(resultWithFindings(["high"]), "scan-1", directory),
+            onCodex: async (args, output) => {
               modelCalls++;
               if (retarget) {
                 await unlink(alias);
                 await symlink(directory, alias, linkType);
               }
-            }),
+              if (removesComponent) await rmdir(component);
+              await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+              if (removesComponent) output?.stdout.write("Patch complete.\n");
+              else completePatches(args, output);
+              return 0;
+            },
             onRepositoryCommand: (tool, args, cwd, options) => {
               if (tool !== "git") return "";
-              if (stage === "push" && !retarget && args.includes("ls-remote"))
+              if (
+                stage !== "preflight" &&
+                !retarget &&
+                args.includes("ls-remote")
+              )
                 return "";
               return runRepositoryCommand(tool, args, cwd, {
                 ...options,
@@ -573,7 +535,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           { localHosting: false },
         );
         expect(outcome.exitCode, outcome.stderr).toBe(2);
-        expect(modelCalls).toBe(stage === "push" ? 1 : 0);
+        expect(modelCalls).toBe(stage === "preflight" ? 0 : 1);
         const observed = await readFile(marker, "utf8").catch((error) => {
           if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
           throw error;
@@ -741,7 +703,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     },
   );
 
-  test.each(["local", "include"] as const)(
+  test.each(["local", "include", "separate caller include"] as const)(
     "publication preflight refuses a checkout-selected SSH command from %s",
     async (source) => {
       const { directory, git } = await publicationRepository();
@@ -754,8 +716,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       );
       const commandPath = (value: string) => `"${value.replaceAll("\\", "/")}"`;
       const config = join(directory, "transport.gitconfig");
+      const separate = source === "separate caller include";
+      const tree = separate
+        ? await fixtures.create("patch-ssh-worktree-")
+        : directory;
       const environment: NodeJS.ProcessEnv = {};
-      if (source === "include") {
+      if (source !== "local") {
         environment["GIT_CONFIG_GLOBAL"] = join(external, "user.gitconfig");
         git(
           "config",
@@ -767,13 +733,18 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       }
       git(
         "config",
-        ...(source === "include" ? ["--file", config] : []),
+        ...(source !== "local" ? ["--file", config] : []),
         "core.sshCommand",
         [process.execPath, script, marker].map(commandPath).join(" "),
       );
-      if (source === "include") {
+      if (source !== "local") {
         git("add", "transport.gitconfig");
         git("commit", "-m", "Synthetic checkout configuration");
+      }
+      if (separate) {
+        git("--work-tree=" + tree, "checkout-index", "--all");
+        environment["GIT_WORK_TREE"] = tree;
+        environment["GIT_DIR"] = join(directory, ".git");
       }
       git(
         "remote",
@@ -783,10 +754,13 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       );
       const model = mock(async () => 0);
       const runGit = gitWithEnvironment(environment);
-      const outcome = await runSavedPublication(
-        directory,
+      const outcome = await runPublicationWorkflow(
+        separate ? "issue" : "scan",
         {
+          currentDirectory: directory,
           environment,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", tree),
           onCodex: model,
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git" ? runGit(command, args, cwd, options) : "[]",
@@ -797,6 +771,528 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain("core.sshCommand");
       expect(model).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ["core.gitProxy", "git://gitlab.com/test/project.git", "core.gitProxy"],
+    [
+      "http.proxy",
+      "https://gitlab.com/test/project.git",
+      "checkout-selected HTTP",
+    ],
+    [
+      "remote.origin.proxy",
+      "https://gitlab.com/test/project.git",
+      "remote.origin.proxy",
+    ],
+    [
+      "credential.helper",
+      "https://gitlab.com/test/project.git",
+      "fixture credentials checked",
+    ],
+  ] as const)(
+    "excludes caller-owned %s for a separate worktree",
+    async (setting, remote, error) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-separate-config-");
+      const tree = join(external, "tree");
+      await mkdir(tree);
+      git("--work-tree=" + tree, "checkout-index", "--all");
+      const included = join(directory, "transport.gitconfig");
+      const global = join(external, "global.gitconfig");
+      git("config", "--file", global, "include.path", included);
+      git("config", "--file", included, setting, "fixture-caller-value");
+      git("remote", "set-url", "origin", remote);
+      const environment = {
+        GIT_DIR: join(directory, ".git"),
+        GIT_WORK_TREE: tree,
+        GIT_CONFIG_GLOBAL: global,
+      };
+      const model = mock(() => 0);
+      const runGit = gitWithEnvironment(environment);
+      const outcome = await runPublicationWorkflow(
+        "issue",
+        {
+          currentDirectory: directory,
+          environment,
+          onCodex: model,
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote")) {
+              expect(setting).toBe("credential.helper");
+              expect(Object.values(options?.environment ?? {})).not.toContain(
+                "fixture-caller-value",
+              );
+              throw new Error("fixture credentials checked");
+            }
+            return runGit(tool, args, cwd, options);
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.stderr).toContain(error);
+      expect(model).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    "relative external command",
+    "relative external executable",
+    "relative external core command",
+    "checkout program",
+    "shell expansion",
+    "checkout SSH configuration",
+    "ambiguous known-hosts list",
+  ])("binds the %s before running a patch", async (kind) => {
+    const { directory, git } = await publicationRepository();
+    const external = await realpath(
+      await fixtures.create("patch-ssh-external-"),
+    );
+    const component = join(directory, "component");
+    await mkdir(component);
+    const safe = kind.startsWith("relative external");
+    const helper = join(safe ? external : directory, "operator's ssh");
+    await writeFile(helper, "", { mode: 0o700 });
+    const relativeHelper = relative(directory, helper).replaceAll("\\", "/");
+    const configured =
+      '"' + (safe ? relativeHelper : "./" + relativeHelper) + '"';
+    const environment: NodeJS.ProcessEnv = {};
+    if (kind.endsWith("core command")) {
+      const config = join(external, "gitconfig");
+      git("config", "--file", config, "core.sshCommand", configured);
+      environment["GIT_CONFIG_GLOBAL"] = config;
+    } else if (kind.endsWith("executable")) {
+      environment["GIT_SSH"] = relativeHelper;
+    } else if (kind === "ambiguous known-hosts list") {
+      const hosts = join(external, "known hosts");
+      await writeFile(hosts, "");
+      environment["GIT_SSH_COMMAND"] = `ssh -o "UserKnownHostsFile=${hosts}"`;
+    } else {
+      environment["GIT_SSH_COMMAND"] =
+        kind === "shell expansion"
+          ? 'ssh "$DYNAMIC_OPTION"'
+          : kind === "checkout SSH configuration"
+            ? "ssh -F relative/config"
+            : configured;
+    }
+    git("remote", "set-url", "origin", "git@gitlab.com:example/repository.git");
+    let probed = false;
+    const model = mock(() => 0);
+    const runGit = gitWithEnvironment(environment);
+    const result = await runSavedPublication(
+      directory,
+      {
+        currentDirectory: component,
+        onCodex: model,
+        environment,
+        onRepositoryCommand: (tool, args, cwd, options) => {
+          if (tool === "glab") return "";
+          if (args.includes("ls-remote")) {
+            probed = true;
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
+              " && exec '" + helper.replaceAll("'", "'\\''") + "'",
+            );
+            // End this preflight after observing the bound command.
+            throw new Error("fixture transport inspected");
+          }
+          return runGit(tool, args, cwd, options);
+        },
+      },
+      { localHosting: false },
+    );
+    expect(probed).toBe(safe);
+    expect(result.stderr).toContain(
+      safe ? "fixture transport inspected" : "Cannot bind the SSH transport",
+    );
+    expect(model).not.toHaveBeenCalled();
+  });
+
+  test
+    .skipIf(process.platform === "win32")
+    .each(["GIT_SSH", "GIT_ASKPASS", "SSH_ASKPASS"] as const)(
+    "stops publication when a patch retargets the selected %s launcher",
+    async (setting) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-ssh-launcher-");
+      const launcher = join(external, "launcher");
+      const approved = Bun.which("true")!;
+      const replacement = Bun.which("false")!;
+      await symlink(approved, launcher);
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        setting === "GIT_SSH"
+          ? "git@work:example/repository.git"
+          : "https://gitlab.com/example/repository.git",
+      );
+      let patched = false;
+      let attemptedAuthentication = false;
+      const outcome = await runSavedPublication(
+        directory,
+        {
+          environment: { [setting]: launcher, GITLAB_HOST: "gitlab.com" },
+
+          onCodex: async (args, output) => {
+            await unlink(launcher);
+            await symlink(replacement, launcher);
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            patched = true;
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (args.includes("codex-security-ssh-config")) {
+              attemptedAuthentication ||= patched;
+              return "hostname gitlab.com";
+            }
+            if (tool !== "git" || args.includes("push")) {
+              attemptedAuthentication ||= patched;
+              return "";
+            }
+            if (args.includes("ls-remote")) return "";
+            return runGitRepositoryCommand(tool, args, cwd, options);
+          },
+        },
+        { localHosting: false },
+      );
+      expect(patched).toBe(true);
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("Patch transport executable changed");
+      expect(attemptedAuthentication).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform === "win32").each([
+    ["GIT_SSH", false],
+    ["GIT_ASKPASS", false],
+    ["core.askPass", false],
+    ["core.askPass", true],
+    ["GIT_PROXY_COMMAND", false],
+    ["GIT_PROXY_COMMAND", true],
+  ] as const)(
+    "dispatches %s through a writable launcher only when the target is protected (writable target: %p)",
+    async (setting, writableTarget) => {
+      const { directory, git } = await publicationRepository();
+      const trusted = await fixtures.create("patch-approved-tool-");
+      const writable = await fixtures.create("patch-writable-tool-");
+      const launcher = join(writable, "launcher with spaces;$literal");
+      const askpass = setting === "GIT_ASKPASS" || setting === "core.askPass";
+      const targetDirectory = writableTarget ? writable : trusted;
+      const marker = join(trusted, "invoked");
+      for (const name of ["approved", "replacement"]) {
+        await writeFile(
+          join(targetDirectory, name),
+          `#!/bin/sh\nprintf '%s' ${name} > "$LAUNCHER_MARKER"\nexit 1\n`,
+          { mode: 0o755 },
+        );
+      }
+      await symlink(join(targetDirectory, "approved"), launcher);
+      const scheme = setting === "GIT_SSH" ? "ssh" : askpass ? "https" : "git";
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        `${scheme}://127.0.0.1:1/example/repository.git`,
+      );
+      const environment: NodeJS.ProcessEnv = {
+        GITLAB_HOST: "127.0.0.1:1",
+      };
+      if (setting === "core.askPass") {
+        environment["GIT_CONFIG_GLOBAL"] = join(trusted, "operator.gitconfig");
+        environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        git(
+          "config",
+          "--file",
+          environment["GIT_CONFIG_GLOBAL"],
+          setting,
+          launcher,
+        );
+      } else {
+        environment[setting] = launcher;
+      }
+      const venv = join(trusted, "venv");
+      let prefix: string | undefined;
+      if (setting === "GIT_ASKPASS") {
+        await promisify(execFile)(process.env["PYTHON"] ?? "python3", [
+          "-m",
+          "venv",
+          "--without-pip",
+          "--symlinks",
+          venv,
+        ]);
+        environment["SSH_ASKPASS"] = join(venv, "bin", "python");
+      }
+      const runGit = gitWithEnvironment(environment);
+      const outcome = await runSavedPublication(
+        directory,
+        {
+          environment,
+          manualCodexPreparation: true,
+
+          onCodex: async (args, output) => {
+            output!.appServer!.onPermissions!({
+              directory,
+              environment,
+              profile: {
+                extends: ":workspace",
+                network: { enabled: false },
+                workspace_roots: { [writable]: true },
+                filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+              },
+            });
+            await output!.appServer!.onBeforeTurn?.();
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (args.includes("codex-security-ssh-config"))
+              return "hostname 127.0.0.1";
+            if (tool !== "git" || args.includes("ls-remote")) return "";
+            if (!options?.patchTransport || !args.includes("push"))
+              return runGit(tool, args, cwd, options);
+
+            // The host has just revalidated the launcher. Git has yet to look it up.
+            await unlink(launcher);
+            await symlink(join(targetDirectory, "replacement"), launcher);
+            // Exercise Git's askpass lookup without requiring an HTTP server.
+            if (setting === "GIT_ASKPASS") {
+              const python = options.environment!["SSH_ASKPASS"]!;
+              prefix = (
+                await promisify(execFile)(python, [
+                  "-c",
+                  "import sys; print(sys.prefix)",
+                ])
+              ).stdout.trim();
+            }
+            return runGitRepositoryCommand(
+              tool,
+              askpass
+                ? ["-c", "credential.helper=", "credential", "fill"]
+                : args,
+              cwd,
+              {
+                ...options,
+                input: askpass
+                  ? "protocol=https\nhost=127.0.0.1\n\n"
+                  : undefined,
+                environment: {
+                  ...options.environment,
+                  LAUNCHER_MARKER: marker,
+                  GIT_TERMINAL_PROMPT: "0",
+                },
+              },
+            );
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      if (writableTarget) {
+        expect(outcome.stderr).toContain("patch-writable");
+        await expect(readFile(marker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        if (setting === "GIT_ASKPASS")
+          expect(prefix).toBe(await realpath(venv));
+        expect(await readFile(marker, "utf8")).toBe("approved");
+      }
+    },
+  );
+
+  test.each([
+    "ssh config",
+    "identity",
+    "known hosts",
+    "interpreter script",
+    "resume",
+    "approved known-hosts update",
+  ] as const)(
+    "preserves selected transport file identity: %s",
+    async (kind) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-transport-input-");
+      const file = join(external, "operand");
+      await writeFile(file, "approved\n");
+      const path = file.replaceAll("\\", "/");
+      const sshCommand =
+        kind === "interpreter script"
+          ? 'node "' + path + '"'
+          : kind === "identity"
+            ? 'ssh -i "' + path + '"'
+            : kind === "known hosts" || kind === "approved known-hosts update"
+              ? 'ssh -o "UserKnownHostsFile=' + path + '"'
+              : 'ssh -F "' + path + '"';
+      git("remote", "set-url", "origin", "git@work:example/repository.git");
+      const resume = kind === "resume";
+      if (resume) {
+        git("branch", branch);
+        git(
+          "config",
+          "branch." + branch + ".codexSecurityPatchCommit",
+          git("rev-parse", "HEAD"),
+        );
+      }
+      const approvedUpdate = kind === "approved known-hosts update";
+      let changed = false;
+      let pushed = false;
+      const outcome = await runSavedPublication(
+        directory,
+        {
+          environment: {
+            GIT_SSH_COMMAND: sshCommand,
+            GITLAB_HOST: "gitlab.com",
+          },
+          onCodex: fixSavedFinding(directory, async () => {
+            expect(resume).toBe(false);
+            if (!approvedUpdate) {
+              await writeFile(file, "replaced by patch\n");
+              changed = true;
+            }
+          }),
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (args.includes("codex-security-ssh-config")) {
+              if (resume && !changed) {
+                await writeFile(file, "replaced during resume\n");
+                changed = true;
+              }
+              return "hostname gitlab.com";
+            }
+            if (args.includes("ls-remote")) {
+              if (approvedUpdate) {
+                // A successful SSH connection can record a new host key.
+                await writeFile(file, "operator-approved host key\n");
+                changed = true;
+              }
+              return "";
+            }
+            if (args.includes("push")) {
+              pushed = true;
+              throw new Error("fixture reached push");
+            }
+            return tool === "git"
+              ? runGitRepositoryCommand(tool, args, cwd, options)
+              : "";
+          },
+        },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
+      );
+      expect(changed, outcome.stderr).toBe(true);
+      expect(pushed, outcome.stderr).toBe(approvedUpdate);
+      expect(outcome.stderr).toContain(
+        approvedUpdate
+          ? "fixture reached push"
+          : "Patch transport file changed",
+      );
+    },
+  );
+
+  test.each([
+    "created during preflight",
+    "stays absent",
+    "replaced after preflight creation",
+    "appears during the patch",
+    "parent replaced",
+    "writable parent",
+    "dangling link",
+  ] as const)(
+    "binds an initially absent SSH known-hosts file: %s",
+    async (mode) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-known-hosts-");
+      const parent = join(external, "keys");
+      const hosts = join(parent, "known_hosts");
+      await mkdir(parent);
+      if (mode === "dangling link") {
+        const target = join(external, "removed");
+        await mkdir(target);
+        await symlink(
+          target,
+          hosts,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        await rmdir(target);
+      }
+      const environment = {
+        GIT_SSH_COMMAND: `ssh -o "UserKnownHostsFile=${hosts.replaceAll("\\", "/")}" -o StrictHostKeyChecking=accept-new`,
+        GITLAB_HOST: "gitlab.example.test",
+      };
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        "git@gitlab.example.test:example/repository.git",
+      );
+      let turnStarted = false;
+      let pushed = false;
+      const outcome = await runPublicationWorkflow(
+        "issue",
+        {
+          currentDirectory: directory,
+          environment,
+          manualCodexPreparation: true,
+          onCodex: async (_args, output) => {
+            output!.appServer!.onPermissions!({
+              directory,
+              environment,
+              profile: {
+                extends: ":workspace",
+                workspace_roots:
+                  mode === "writable parent" ? { [parent]: true } : {},
+                filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+              },
+            });
+            await output!.appServer!.onBeforeTurn?.();
+            turnStarted = true;
+            if (mode === "parent replaced") {
+              await rename(parent, join(external, "original"));
+              await mkdir(parent);
+            } else if (mode === "appears during the patch") {
+              await writeFile(hosts, "unexpected key\n", { flag: "wx" });
+            } else if (mode === "replaced after preflight creation") {
+              await writeFile(hosts, "replacement key\n", { flag: "r+" });
+            }
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            output!.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote")) {
+              if (
+                mode === "created during preflight" ||
+                mode === "replaced after preflight creation"
+              ) {
+                // Model the authorized SSH connection recording a host for the first time.
+                await writeFile(hosts, "first host key\n", { flag: "wx" });
+              }
+              return "";
+            }
+            if (args.includes("push")) {
+              pushed = true;
+              throw new Error("fixture reached push");
+            }
+            return runGitRepositoryCommand(tool, args, cwd, options);
+          },
+        },
+        { localHosting: false },
+      );
+      const allowed =
+        mode === "created during preflight" || mode === "stays absent";
+      expect(pushed, outcome.stderr).toBe(allowed);
+      expect(turnStarted, outcome.stderr).toBe(
+        mode !== "writable parent" && mode !== "dangling link",
+      );
+      if (allowed) expect(outcome.stderr).toContain("fixture reached push");
+      else if (turnStarted)
+        expect(outcome.stderr).toContain("Patch transport file changed");
+      else if (mode === "writable parent")
+        expect(outcome.stderr).toContain("outside patch-writable directories");
+      if (mode === "stays absent")
+        await expect(readFile(hosts)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
 
@@ -935,6 +1431,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         [
           "path",
           "file-url",
+          ...(process.platform === "win32" ? [] : ["newline-relative"]),
           ...(process.platform === "win32" ? ["drive-relative"] : []),
         ].map((spelling) => ({ resume, host, spelling })),
       ),
@@ -951,6 +1448,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       );
       let pushUrl = remote;
       if (spelling === "file-url") pushUrl = pathToFileURL(remote).href;
+      if (spelling === "newline-relative") pushUrl = "\nproject";
       if (spelling === "drive-relative") {
         pushUrl = parse(remote).root.slice(0, 2) + relative(directory, remote);
         expect(pushUrl).toMatch(/^[a-z]:[^\\/]/iu);
@@ -1022,11 +1520,13 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             expect(command).toBe("gh");
             if (args[1] === "list") return "[]";
             if (args.at(-1) === ".url") return base;
-            if (args.at(-1) === ".nameWithOwner") {
-              expect(args[2]).toBe(
-                `github.example.test/${configuredOwner}/repository`,
-              );
-              return `${pushOwner}/repository`;
+            if (args[1] === "set-default")
+              return `${configuredOwner}/repository`;
+            if (args.at(-1) === "tojson" && args.includes("id,url")) {
+              return JSON.stringify({
+                id: "synthetic-origin-id",
+                url: `https://github.example.test/${pushOwner}/repository`,
+              });
             }
             expect(args[args.indexOf("--head") + 1]).toBe(
               transport === "same-repository"
@@ -1052,8 +1552,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     ["local", "remote"].flatMap((location) =>
       [
         "codex-security",
+        "codex-security/patch-scan-1",
         "codex-security/patch-scan-1/other",
         "codex-security/patch-scan-10",
+        "archive/refs/heads/codex-security",
+        "archive/refs/heads/codex-security/patch-scan-1",
+        "archive/refs/heads/codex-security/patch-scan-1/other",
       ].map((existing) => [location, existing] as const),
     ),
   )(
@@ -1065,9 +1569,16 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       else git("branch", existing);
       const head = git("rev-parse", "HEAD");
       const before = git("ls-remote", remote);
-      const blocked = existing !== "codex-security/patch-scan-10";
+      const blocked = [
+        "codex-security",
+        "codex-security/patch-scan-1",
+        "codex-security/patch-scan-1/other",
+      ].includes(existing);
+      const result = resultWithFindings(["high"]);
       const onCodex = mock(fixSavedFinding(directory));
       const outcome = await runSavedPublication(directory, {
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
         onRepositoryCommand: runPublicationCommand,
       });
@@ -1112,8 +1623,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       const decoyRefs = git("--git-dir", decoy, "show-ref");
       const configuration = git("config", "--get-regexp", "^(remote|url)\\.");
       expect(git("remote", "get-url", "--push", "origin")).toBe(destination);
+      const result = resultWithFindings(["high"]);
       const onCodex = mock(fixSavedFinding(directory));
       const outcome = await runSavedPublication(directory, {
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
         onRepositoryCommand: runPublicationCommand,
       });
@@ -1286,30 +1800,6 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           });
         },
       });
-      const proxy = proxyClient
-        ? createHttpsServer({
-            ...serverTls,
-            ca: proxyClient.cert,
-            requestCert: true,
-            rejectUnauthorized: true,
-          })
-        : createServer();
-      let tunnels = 0;
-      // Only this tunnel maps the destination address to the loopback Git server.
-      proxy.on("connect", (request, client, head) => {
-        if (request.url !== `127.0.0.2:${origin.port}`) {
-          client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
-          return;
-        }
-        tunnels++;
-        const upstream = connect(origin.port!, "127.0.0.1", () => {
-          client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-          if (head.length) upstream.write(head);
-          client.pipe(upstream).pipe(client);
-        });
-        upstream.on("error", () => client.destroy());
-        client.on("error", () => upstream.destroy());
-      });
       try {
         const cookieFile = join(dirname(config), "operator cookies.txt");
         await writeFile(
@@ -1323,11 +1813,17 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           `http.https://127.0.0.2:${origin.port}/.cookieFile`,
           cookieFile,
         );
-        proxy.listen(0, "127.0.0.1");
-        await once(proxy, "listening");
-        const address = proxy.address();
-        if (!address || typeof address === "string")
-          throw new Error("Missing loopback proxy address");
+        using proxy = await loopbackProxy(
+          origin.port!,
+          proxyClient
+            ? {
+                ...serverTls,
+                ca: proxyClient.cert,
+                requestCert: true,
+                rejectUnauthorized: true,
+              }
+            : undefined,
+        );
         git(
           "remote",
           "set-url",
@@ -1343,13 +1839,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             "remote.origin.pushurl",
             `https://127.0.0.2:${origin.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
-        git(
-          "config",
-          "--file",
-          config,
-          "remote.origin.proxy",
-          `${proxyClient ? "https" : "http"}://127.0.0.1:${address.port}`,
-        );
+        git("config", "--file", config, "remote.origin.proxy", proxy.url);
         if (proxyClient)
           git(
             "config",
@@ -1376,7 +1866,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
               { cwd: directory, env: environment },
             ),
           ).rejects.toThrow();
-          if (prefix === "http.proxySSL") expect(tunnels).toBe(0);
+          if (prefix === "http.proxySSL") expect(proxy.tunnels).toBe(0);
           expect(requests).toBe(0);
         }
         if (credentials === "askpass") {
@@ -1426,7 +1916,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         });
         expect(outcome.exitCode, outcome.stderr).toBe(collision ? 2 : 0);
         expect(models).toBe(collision ? 0 : 1);
-        expect(tunnels).toBeGreaterThan(0);
+        expect(proxy.tunnels).toBeGreaterThan(0);
         expect(requests).toBeGreaterThanOrEqual(2);
         expect(git("config", "--get-regexp", "^remote\\.")).toBe(remoteConfig);
         if (credentials === "askpass") {
@@ -1454,16 +1944,28 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           }
         }
       } finally {
-        proxy.close();
         origin.stop(true);
       }
     },
   );
 
-  test.each(["free", "occupied", "race", "option"] as const)(
+  test.each([
+    "free",
+    "occupied",
+    "race",
+    "option",
+    "uploadpack",
+    "legacy-free",
+    "legacy-occupied",
+    "legacy-settings",
+  ] as const)(
     "preserves all push destinations: second destination=%s",
     async (destination) => {
-      const occupied = destination === "occupied" || destination === "race";
+      const occupied =
+        destination === "occupied" ||
+        destination === "race" ||
+        destination === "legacy-occupied" ||
+        destination === "legacy-settings";
       const option = destination === "option";
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-destination-secondary-");
@@ -1477,7 +1979,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           `refs/heads/${branch}`,
           original,
         );
-      if (destination === "occupied") occupy();
+      if (occupied && destination !== "race") occupy();
       git("remote", "set-url", "--add", "--push", "origin", remote);
       const marker = join(directory, "upload-pack-marker");
       const script = join(directory, "upload-pack.cjs");
@@ -1495,35 +1997,107 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           ? `--upload-pack=${commandPath(process.execPath)} ${commandPath(script)} ${commandPath(marker)}`
           : secondary,
       );
+      const environment: NodeJS.ProcessEnv = {};
+      const uploadTrace = join(directory, ".git", "transport-trace");
+      if (destination === "uploadpack") {
+        const transportDirectory = await fixtures.create("patch-transport-");
+        const transport = join(transportDirectory, "transport.cjs");
+        const config = join(transportDirectory, "operator.gitconfig");
+        environment["GIT_CONFIG_GLOBAL"] = config;
+        await writeFile(
+          transport,
+          `
+const { spawnSync } = require("node:child_process");
+const { appendFileSync } = require("node:fs");
+if (process.argv[2] === "upload-pack") appendFileSync(${JSON.stringify(uploadTrace)}, process.argv[3] + "\\n");
+const result = spawnSync(${JSON.stringify(Bun.which("git")!)}, [process.argv[2], process.argv[3].replace(/\\.logical$/, "")], { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+        );
+        for (const operation of ["upload", "receive"])
+          git(
+            "config",
+            "--file",
+            config,
+            `remote.origin.${operation}pack`,
+            `${commandPath(process.execPath)} ${commandPath(transport)} ${operation}-pack`,
+          );
+        git("config", "--unset-all", "remote.origin.pushurl");
+        git("config", "--add", "remote.origin.pushurl", `${remote}.logical`);
+        git("config", "--add", "remote.origin.pushurl", `${secondary}.logical`);
+        const include = `include.path=${config}`;
+        git("-c", include, "push", "origin", "HEAD:refs/heads/native-control");
+        git("-c", include, "ls-remote", "origin");
+        await writeFile(uploadTrace, "");
+      }
+      if (destination.startsWith("legacy-")) {
+        git("config", "--remove-section", "remote.origin");
+        await mkdir(join(directory, ".git", "remotes"));
+        await writeFile(
+          join(directory, ".git", "remotes", "origin"),
+          `URL: ${remote}\nURL: ${secondary}\nPull: refs/heads/main:refs/remotes/origin/main\n`,
+        );
+        if (destination === "legacy-settings")
+          git("config", "remote.origin.skipDefaultUpdate", "true");
+      }
       const before = git("ls-remote", secondary, `refs/heads/${branch}`);
+      const result = resultWithFindings(["high"]);
       const onCodex = mock(
         fixSavedFinding(directory, () => {
           if (destination === "race") occupy();
         }),
       );
       const outcome = await runSavedPublication(directory, {
+        environment,
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[0] === "repo"
-              ? "synthetic-origin-id"
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "git") {
+            const execution = promisify(execFile)("git", [...args], {
+              cwd: options?.directory ?? cwd,
+              env: {
+                ...process.env,
+                ...environment,
+                ...options?.environment,
+              },
+              maxBuffer: options?.maxBuffer,
+              encoding: options?.encoding === "base64" ? "buffer" : "utf8",
+            });
+            execution.child.stdin?.end(options?.input);
+            const { stdout } = await execution;
+            const text = Buffer.isBuffer(stdout)
+              ? stdout.toString(options?.encoding ?? "utf8")
+              : stdout;
+            return options?.trim === false ? text : text.trim();
+          }
+          return args[0] === "repo"
+            ? "synthetic-origin-id"
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1";
+        },
       });
       expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
+      if (destination === "uploadpack")
+        expect(
+          (await readFile(uploadTrace, "utf8")).trim().split("\n"),
+        ).toEqual([`${remote}.logical`, `${secondary}.logical`]);
       expect(onCodex).toHaveBeenCalledTimes(
-        destination === "occupied" || option ? 0 : 1,
+        (occupied && destination !== "race") || option ? 0 : 1,
       );
       await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
-      if (destination === "occupied" || option) {
+      if ((occupied && destination !== "race") || option) {
+        if (destination.startsWith("legacy-"))
+          expect(outcome.stderr).toContain("already exists");
         expect(git("rev-parse", "HEAD")).toBe(original);
         expect(git("ls-remote", remote, `refs/heads/${branch}`)).toBe("");
         expect(git("ls-remote", secondary, `refs/heads/${branch}`)).toBe(
           before,
         );
-      } else if (occupied) {
+        return;
+      }
+      if (occupied) {
         if (occupied)
           expect(
             git("--git-dir", secondary, "rev-parse", `refs/heads/${branch}`),
@@ -1551,99 +2125,6 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       }
     },
   );
-
-  test.each([
-    "available only in Git's subprocess PATH",
-    "selected explicitly from the Git metadata directory",
-  ] as const)("resumes publication with SSH %s", async (mode) => {
-    const metadata =
-      mode === "selected explicitly from the Git metadata directory";
-    const { directory, git } = await publicationRepository();
-    const sshDirectory = await fixtures.create("patch-git-ssh-");
-    const ssh = join(sshDirectory, "ssh");
-    const marker = join(sshDirectory, "probe");
-    await writeFile(
-      ssh,
-      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf called > "$PATCH_SSH_PROBE"\nprintf "hostname github.com\\n"\n',
-      { mode: 0o755 },
-    );
-    const emptyPath = await fixtures.create("patch-no-ssh-");
-    const gitExecutable = Bun.which("git")!;
-    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
-    const environment = {
-      PATH: emptyPath,
-      GIT_EXEC_PATH: sshDirectory,
-      GIT_SSH: undefined,
-      GIT_SSH_COMMAND: metadata
-        ? JSON.stringify(ssh.replaceAll("\\", "/"))
-        : undefined,
-      PATCH_SSH_PROBE: marker,
-    };
-    git(
-      "remote",
-      "set-url",
-      "origin",
-      "https://github.com/example/repository.git",
-    );
-    git(
-      "remote",
-      "set-url",
-      "--push",
-      "origin",
-      "git@GitHub-Work:example/repository.git",
-    );
-    const branch = "codex-security/saved-patch";
-    const commit = git("rev-parse", "HEAD");
-    createSavedPatchBranch(git, branch, commit);
-    const url = "https://github.com/example/repository/pull/1";
-    let repositoryLookups = 0;
-    const outcome = await runWorkflow(
-      ["patch", "--resume-pr", branch, "--json"],
-      {
-        currentDirectory: metadata ? join(directory, ".git") : directory,
-        environment,
-        onRepositoryCommand: async (command, args, cwd, options) => {
-          if (command === "gh") {
-            if (args[0] === "pr" && args[1] === "list")
-              return JSON.stringify([
-                {
-                  url,
-                  head: commit,
-                  repository: "synthetic-id",
-                  crossRepository: true,
-                },
-              ]);
-            expect(args).toEqual([
-              "repo",
-              "view",
-              "github.com/example/repository",
-              "--json",
-              "id",
-              "--jq",
-              ".id",
-            ]);
-            repositoryLookups++;
-            return "synthetic-id";
-          }
-          const { stdout } = await promisify(execFile)(
-            command === "git" ? gitExecutable : command,
-            args,
-            {
-              cwd,
-              env: { ...process.env, ...environment, ...options?.environment },
-              encoding: options?.encoding ?? "utf8",
-            },
-          );
-          return options?.trim === false ? stdout : stdout.trim();
-        },
-        onCodex: throwing("must reuse the saved patch"),
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
-    expect(repositoryLookups).toBe(1);
-    expect(await readFile(marker, "utf8")).toBe("called");
-  });
 
   test.each(
     [
@@ -1923,6 +2404,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           "Synthetic body",
         );
       }
+      const unresolvedPush =
+        ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport) ||
+        transport === "ssh-mirror-only" ||
+        transport === "https-mirror-only";
+      const matchingRequest = ownIncluded && !unresolvedPush;
+      const result = resultWithFindings(["high"]);
       let modelCalls = 0;
       let pushes = 0;
       let repositoryLookups = 0;
@@ -1933,6 +2420,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         directory,
         {
           environment,
+          result,
+          onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (args.at(-1) === "^remote\\.origin\\.pushurl$") {
@@ -1979,13 +2468,24 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
                   ? ""
                   : `hostname ${transport.endsWith("ipv6-api") ? "::1" : transport === "ssh-host" ? "ssh.github.com" : hostingHost}`;
               }
-              if (args.includes("ls-remote"))
+              if (args[0] === "ls-remote") {
+                expect(args.slice(0, 3)).toEqual([
+                  "ls-remote",
+                  "--heads",
+                  "--",
+                ]);
+                expect(args.slice(4)).toEqual([
+                  "refs/heads/codex-security",
+                  `refs/heads/${branch}`,
+                  `refs/heads/${branch}/*`,
+                ]);
                 return runLocalHostingTransport(
                   command,
-                  ["ls-remote", "--heads", "--", remote],
+                  [...args.slice(0, 3), remote, ...args.slice(4)],
                   cwd,
                   options,
                 );
+              }
               if (args[0] === "push") {
                 if (
                   transport.startsWith("scp") ||
@@ -2022,27 +2522,71 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             }
             if (args.at(-1) === ".url")
               return `${hostingUrl}/upstream/repository`;
-            if (args.at(-1) === ".nameWithOwner")
-              return args[2]!.slice(args[2]!.indexOf("/") + 1);
             if (args[0] === "repo") {
-              repositoryLookups++;
+              const selectedToken = gitText(
+                ["config", "--get", "remote.codex-security-push.url"],
+                {
+                  cwd: options?.directory ?? cwd,
+                  env: {
+                    ...process.env,
+                    ...environment,
+                    ...options?.environment,
+                  },
+                },
+              ).trim();
+              const selectedRemote = gitText(
+                ["ls-remote", "--get-url", selectedToken],
+                {
+                  cwd: options?.directory ?? cwd,
+                  env: {
+                    ...process.env,
+                    ...environment,
+                    ...options?.environment,
+                  },
+                },
+              ).trim();
+              expect(options?.environment?.["GH_REPO"]).toBe("");
+              expect(options?.environment?.["GH_HOST"]).toBe(hostingHost);
+              const unresolved =
+                selectedRemote === remote ||
+                selectedRemote === "origin" ||
+                selectedRemote.startsWith("file:") ||
+                selectedRemote.startsWith("C:\\") ||
+                selectedRemote.includes("mirror.example.test") ||
+                selectedRemote.toLowerCase().includes("github-work");
+              const first = selectedRemote.includes("/first-owner/repository");
+              const expected = first
+                ? `${hostingHost}${apiPort}/first-owner/repository`
+                : lookupRemote!;
+              const selectedRepository = expected?.slice(
+                expected.indexOf("/") + 1,
+              );
+              if (args[1] === "set-default") {
+                expect(args).toEqual(["repo", "set-default", "--view"]);
+                return unresolved ? "" : selectedRepository;
+              }
+              expect(unresolved).toBe(false);
               expect(args).toEqual([
                 "repo",
                 "view",
-                transport === "multiple-hosted" && repositoryLookups % 2 === 1
-                  ? `${hostingHost}${apiPort}/first-owner/repository`
-                  : lookupRemote!,
+                ...(apiPort
+                  ? [`${hostingHost}${apiPort}/${selectedRepository}`]
+                  : []),
                 "--json",
-                "id",
+                "id,url",
                 "--jq",
-                ".id",
+                "tojson",
               ]);
-              if (
-                transport === "multiple-hosted" &&
-                repositoryLookups % 2 === 1
-              )
-                return "synthetic-first-id";
-              return "synthetic-origin-id";
+              repositoryLookups++;
+              expect(
+                decodeURIComponent(new URL(selectedRemote).pathname)
+                  .replace(/^\/+|\/+$/gu, "")
+                  .replace(/\.git$/u, ""),
+              ).toBe(selectedRepository);
+              return JSON.stringify({
+                id: first ? "synthetic-first-id" : "synthetic-origin-id",
+                url: `${hostingUrl}/${first ? "first-owner" : "canonical-owner"}/repository`,
+              });
             }
             if (args[1] === "list") {
               expect(args).toEqual([
@@ -2053,9 +2597,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
                 "--state",
                 "all",
                 "--json",
-                "url,headRefOid,headRepository,isCrossRepository",
+                "url,state,headRefOid,headRepository,isCrossRepository",
                 "--jq",
-                "[.[] | {url, head: .headRefOid, repository: .headRepository.id, crossRepository: .isCrossRepository}]",
+                "map({url, head: .headRefOid, state, repositoryId: .headRepository.id, crossRepository: .isCrossRepository}) | tojson",
+                ...(environment["GH_REPO"]
+                  ? ["--repo", environment["GH_REPO"]]
+                  : []),
               ]);
               return JSON.stringify(
                 transport === "no-candidates"
@@ -2064,7 +2611,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
                       {
                         url: `${hostingUrl}/upstream/repository/pull/7`,
                         head: commit,
-                        repository: "synthetic-foreign-id",
+                        repositoryId: "synthetic-foreign-id",
+                        state: "OPEN",
                         crossRepository: true,
                       },
                       ...(ownIncluded
@@ -2072,7 +2620,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
                             {
                               url: ownUrl,
                               head: commit,
-                              repository: "synthetic-origin-id",
+                              repositoryId: "synthetic-origin-id",
+                              state: "OPEN",
                               crossRepository: !!lookupRemote,
                             },
                           ]
@@ -2088,8 +2637,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         },
         { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
-      const localPushes = transport === "local" || localOnly || localFirst;
-      if (localPushes) {
+      if (transport === "local" || localOnly || localFirst) {
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(outcome.stderr).toContain("network push URL");
         expect(modelCalls).toBe(0);
@@ -2098,31 +2646,139 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         expect(sshLookups).toBe(0);
         return;
       }
-      const missingHostedPush =
-        (!!mirror && transport.endsWith("only")) ||
-        ["ssh-missing", "ssh-failed", "ssh-empty"].includes(transport);
-      const creating = !ownIncluded;
+      const creating = !matchingRequest;
       expect(outcome.exitCode, outcome.stderr).toBe(
-        (!resume && ownIncluded) || (creating && missingHostedPush) ? 2 : 0,
+        (!resume && matchingRequest) || unresolvedPush ? 2 : 0,
       );
-      const attempts = !resume && !ownIncluded ? 2 : 1;
+      const attempts = !resume && !matchingRequest ? 2 : 1;
       expect(repositoryLookups).toBe(
-        (!lookupRemote || transport === "no-candidates"
+        (!lookupRemote || unresolvedPush || transport === "no-candidates"
           ? 0
           : transport === "multiple-hosted"
             ? 2
-            : 1) * attempts,
+            : 1) *
+          attempts +
+          (creating && !unresolvedPush ? 1 : 0),
       );
       expect(sshLookups).toBe(
         (aliasLookup || mirror?.startsWith("ssh:") ? 1 : 0) *
           (attempts + (creating ? 1 : 0)),
       );
-      expect(modelCalls).toBe(resume || ownIncluded ? 0 : 1);
-      expect(pushes).toBe(ownIncluded || missingHostedPush ? 0 : 1);
-      if ((resume || !ownIncluded) && !(creating && missingHostedPush))
+      expect(modelCalls).toBe(resume || matchingRequest ? 0 : 1);
+      expect(pushes).toBe(matchingRequest || unresolvedPush ? 0 : 1);
+      if ((resume || !matchingRequest) && !unresolvedPush)
         expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
-          ownIncluded ? ownUrl : createdUrl,
+          matchingRequest ? ownUrl : createdUrl,
         );
     },
   );
+
+  test.each([
+    "available only in Git's subprocess PATH",
+    "selected explicitly from the Git metadata directory",
+    "found through a relative GIT_EXEC_PATH from a subdirectory",
+  ] as const)("resumes publication with SSH %s", async (mode) => {
+    const metadata =
+      mode === "selected explicitly from the Git metadata directory";
+    const { directory, git } = await publicationRepository();
+    const nested =
+      mode === "found through a relative GIT_EXEC_PATH from a subdirectory";
+    const caller = metadata
+      ? join(directory, ".git")
+      : nested
+        ? join(directory, "src")
+        : directory;
+    const sshDirectory = await fixtures.create("patch-git-ssh-");
+    const ssh = join(sshDirectory, "ssh");
+    const marker = join(sshDirectory, "probe");
+    await writeFile(
+      ssh,
+      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf called > "$PATCH_SSH_PROBE"\nprintf "hostname github.com\\n"\n',
+      { mode: 0o755 },
+    );
+    const emptyPath = await fixtures.create("patch-no-ssh-");
+    const gitExecutable = Bun.which("git")!;
+    expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
+    const environment = {
+      PATH: emptyPath,
+      GIT_EXEC_PATH: nested ? relative(caller, sshDirectory) : sshDirectory,
+      GIT_SSH: undefined,
+      GIT_SSH_COMMAND: metadata
+        ? JSON.stringify(ssh.replaceAll("\\", "/"))
+        : undefined,
+      PATCH_SSH_PROBE: marker,
+    };
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/example/repository.git",
+    );
+    git(
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      "git@GitHub-Work:example/repository.git",
+    );
+    const branch = "codex-security/saved-patch";
+    const commit = git("rev-parse", "HEAD");
+    createSavedPatchBranch(git, branch, commit);
+    const url = "https://github.com/example/repository/pull/1";
+    let repositoryLookups = 0;
+    const outcome = await runWorkflow(
+      ["patch", "--resume-pr", branch, "--json"],
+      {
+        currentDirectory: caller,
+        environment,
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          if (command === "gh") {
+            if (args[0] === "pr" && args[1] === "list")
+              return JSON.stringify([
+                {
+                  url,
+                  head: commit,
+                  repositoryId: "synthetic-id",
+                  state: "OPEN",
+                  crossRepository: true,
+                },
+              ]);
+            if (args[1] === "set-default") {
+              expect(args).toEqual(["repo", "set-default", "--view"]);
+              return "example/repository";
+            }
+            expect(args).toEqual([
+              "repo",
+              "view",
+              "--json",
+              "id,url",
+              "--jq",
+              "tojson",
+            ]);
+            repositoryLookups++;
+            return JSON.stringify({
+              id: "synthetic-id",
+              url: "https://github.com/example/repository",
+            });
+          }
+          const { stdout } = await promisify(execFile)(
+            command === "git" ? gitExecutable : command,
+            args,
+            {
+              cwd,
+              env: { ...process.env, ...environment, ...options?.environment },
+              encoding: options?.encoding ?? "utf8",
+            },
+          );
+          return options?.trim === false ? stdout : stdout.trim();
+        },
+        onCodex: throwing("must reuse the saved patch"),
+      },
+      { localHosting: false },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
+    expect(repositoryLookups).toBe(1);
+    expect(await readFile(marker, "utf8")).toBe("called");
+  });
 });

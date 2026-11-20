@@ -84,6 +84,26 @@ test.each(["compiled exec directory", "config separator in executable path"])(
   },
 );
 
+test("HTTPS preflight rejects a checkout-relative Git exec directory without a push hook", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const host = "127.0.0.1:1";
+  git("remote", "set-url", "origin", `https://${host}/team/repository.git`);
+  const result = await runWorkflow(
+    ["patch", "Synthetic issue", "--create-pr"],
+    {
+      currentDirectory: join(directory, "src"),
+      environment: { GITLAB_HOST: host, GIT_EXEC_PATH: "tools" },
+      onRepositoryCommand: (tool, args, cwd, options) => {
+        if (tool !== "git") return "";
+        if (args.includes("ls-remote")) throw new Error("Reached transport");
+        return runGitRepositoryCommand(tool, args, cwd, options);
+      },
+    },
+    { localHosting: false },
+  );
+  expect(result.stderr).toContain("outside patch-writable directories");
+});
+
 test("hook-free publication rejects a rewritten native HTTPS helper", () =>
   checkNativeHttpsHelper("hard link"));
 test("hook-free publication rejects a retargeted HTTPS helper search directory", () =>
@@ -185,12 +205,17 @@ test.skipIf(process.platform === "win32").each([0o700, 0o600])(
   (mode) => checkNativePush("linked launcher", "single", mode),
 );
 test.skipIf(process.platform === "win32")(
+  "a pre-push hook cannot replace a Git child in a checkout-selected exec directory",
+  () => checkNativePush("checkout launcher", "single"),
+);
+test.skipIf(process.platform === "win32")(
   "a single destination with a pre-push hook accepts Git installation hard links",
   () => checkNativePush("approved", "single"),
 );
 
 async function checkNativePush(
-  scenario: "approved" | "unapproved mirror" | "linked launcher",
+  scenario:
+    "approved" | "unapproved mirror" | "linked launcher" | "checkout launcher",
   route: "proxy" | "ssh" | "ssh-script" | "https" | "single" = "proxy",
   childMode = 0o700,
 ) {
@@ -284,7 +309,8 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
       launcher = join(external, "git-remote-https");
       await writeFile(launcher, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
     } else if (route === "single") {
-      const execPath = join(external, "libexec", "git-core");
+      const root = scenario === "checkout launcher" ? directory : external;
+      const execPath = join(root, "libexec", "git-core");
       await mkdir(execPath, { recursive: true });
       environment["GIT_EXEC_PATH"] = execPath;
       launcher = join(execPath, "git");
@@ -296,7 +322,7 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
       await mkdir(bin);
       await link(launcher, join(bin, "git"));
     }
-    if (scenario === "linked launcher")
+    if (scenario === "linked launcher" || scenario === "checkout launcher")
       await link(launcher, join(directory, "launcher-alias"));
     await writeFile(
       join(directory, ".git", "hooks", "pre-push"),
@@ -342,11 +368,12 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
     { localHosting: false },
   );
   if (scenario !== "approved") {
-    expect(outcome.stderr).toContain(
-      scenario === "linked launcher"
-        ? "hard-linked transport file"
-        : "multiple destinations",
-    );
+    const reason = {
+      "linked launcher": "hard-linked transport file",
+      "checkout launcher": "outside patch-writable directories",
+      "unapproved mirror": "multiple destinations",
+    };
+    expect(outcome.stderr).toContain(reason[scenario]);
     expect(pushes).toBe(0);
     for (const receiver of receivers)
       expect(git("--git-dir", receiver, "for-each-ref")).toBe("");

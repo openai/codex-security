@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { writeFile, mkdir, readFile, rename } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import {
+  writeFile,
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+} from "node:fs/promises";
+import { join, resolve, relative } from "node:path";
 import {
   PATCH_GIT_ENVIRONMENT_RUNNER as runner,
   runRepositoryCommand,
@@ -14,6 +22,15 @@ import {
   runGitRepositoryCommand,
   patchDirectories,
   runIssuePatch,
+  completePatches,
+  patchArtifactFromPrompt,
+  patchRiskAssessment,
+  repositoryGit,
+  resultWithFindings,
+  runWorkflow,
+  savedScan,
+  initializePatchGit,
+  gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -407,7 +424,7 @@ GIT_CONFIG_PARAMETERS="'http.extraHeader'='Authorization: synthetic-config-marke
 });
 
 test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
-  "patch probes nested placeholders independently of selected-root %s",
+  "patch discovery preserves %s while treating ordinary nested source as data",
   async (setting) => {
     const root = await fixtures.create("patch-probe-environment-");
     const support = await fixtures.create("patch-probe-administration-");
@@ -460,6 +477,34 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
       ),
     ).toBe(marker);
 
+    const nested = join(root, "source");
+    let nestedHead: string | undefined;
+    let nestedIndex: Buffer<ArrayBuffer> | undefined;
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      git(
+        ["-C", nested, "config", "user.name", "Synthetic User"],
+        selectedEnvironment,
+      );
+      git(
+        ["-C", nested, "config", "user.email", "synthetic@example.test"],
+        selectedEnvironment,
+      );
+      git(["-C", nested, "add", "app.ts"], selectedEnvironment);
+      git(
+        ["-C", nested, "commit", "-m", "Synthetic shared object baseline"],
+        selectedEnvironment,
+      );
+      nestedHead = git(
+        ["-C", nested, "rev-parse", "HEAD"],
+        selectedEnvironment,
+      );
+      nestedIndex = await readFile(join(marker, "index"));
+      expect(() => git(["-C", nested, "rev-parse", "HEAD"])).toThrow();
+      await expect(lstat(join(marker, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+
     let launches = 0;
     let rootCommands = 0;
     const outcome = await runIssuePatch(root, {
@@ -469,8 +514,19 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
           ...selectedEnvironment,
           ...options?.environment,
         };
-        if (!args.includes("--resolve-git-dir") && !args.includes("-C")) {
-          expect(effectiveEnvironment[setting]).toBe(selectedPath);
+        const objectDirectoryProbe =
+          args.join(" ") ===
+            "rev-parse --path-format=absolute --git-path objects" &&
+          options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
+        if (
+          !args.includes("--resolve-git-dir") &&
+          !args.includes("-C") &&
+          !objectDirectoryProbe
+        ) {
+          expect(effectiveEnvironment[setting]).toBeDefined();
+          expect(
+            resolve(options?.directory ?? cwd, effectiveEnvironment[setting]!),
+          ).toBe(selectedPath);
           rootCommands++;
         }
         return runGitRepositoryCommand(command, args, cwd, {
@@ -480,6 +536,9 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
       },
       onCodex: async (_args, output) => {
         launches++;
+        const controls = output?.appServer?.permissions?.readOnlyPaths;
+        expect(controls).toBeDefined();
+        expect(controls).not.toContain(marker);
         await writeFile(source, "after\n");
         output?.stdout.write("Synthetic patch complete.\n");
         return 0;
@@ -493,6 +552,15 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
     expect(await readFile(join(marker, "HEAD"), "utf8")).toBe(markerHead);
     expect(git(["rev-parse", "HEAD"], selectedEnvironment)).toBe(head);
     expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      expect(
+        git(["-C", nested, "rev-parse", "HEAD"], selectedEnvironment),
+      ).toBe(nestedHead!);
+      expect(await readFile(join(marker, "index"))).toEqual(nestedIndex!);
+      await expect(lstat(join(marker, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
   },
 );
 
@@ -540,4 +608,303 @@ test("snapshot fixture children use private temporary directories without changi
   expect(["TEMP", "TMP", "TMPDIR"].map((name) => process.env[name])).toEqual(
     parentTemporarySettings,
   );
+});
+
+async function configuredRepository(selector: string, absolute: boolean) {
+  const directory = await fixtures.create("patch-snapshot-settings-");
+  const support = await fixtures.create("patch-snapshot-filter-");
+  const nested = join(directory, "nested");
+  await mkdir(nested);
+  const git = initializePatchGit(directory);
+  const nestedGit = initializePatchGit(nested);
+  await writeFile(join(directory, "root.txt"), "unchanged\n");
+  await writeFile(join(directory, ".gitignore"), "settings\n");
+  await writeFile(join(nested, "app.txt"), "original\n");
+  await writeFile(join(nested, ".gitattributes"), "*.txt filter=synthetic\n");
+  nestedGit("add", ".");
+  nestedGit("commit", "-m", "Synthetic nested baseline");
+  git("add", ".");
+  git("commit", "-m", "Synthetic root baseline");
+  const filter = join(support, "clean.cjs");
+  await writeFile(
+    filter,
+    'process.stdout.write(require("node:fs").readFileSync(0,"utf8").toUpperCase());\n',
+  );
+  const settings = join(directory, "settings");
+  git(
+    "config",
+    "--file",
+    settings,
+    "filter.synthetic.clean",
+    `node ${JSON.stringify(filter.replaceAll("\\", "/"))}`,
+  );
+  git("config", "--file", settings, "filter.synthetic.required", "true");
+  const empty = join(support, "empty");
+  await writeFile(empty, "");
+  const environment: NodeJS.ProcessEnv = {
+    GIT_CONFIG_GLOBAL: empty,
+    GIT_CONFIG_SYSTEM: empty,
+    GIT_CONFIG_NOSYSTEM: undefined,
+    [selector]: absolute ? settings : "settings",
+  };
+  return { directory, support, nested, git, nestedGit, environment, settings };
+}
+
+for (const selector of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]) {
+  for (const absolute of [false, true]) {
+    test.each(["none", "root", "nested"])(
+      `snapshot honors ${absolute ? "absolute" : "relative"} ${selector} for %s edits`,
+      async (edit) => {
+        const { directory, nested, git, nestedGit, environment, settings } =
+          await configuredRepository(selector, absolute);
+        const originalEnvironment = { ...environment };
+        const config = await readFile(settings);
+        const head = git("rev-parse", "HEAD");
+        const nestedHead = nestedGit("rev-parse", "HEAD");
+        const index = git("ls-files", "--stage");
+        const nestedIndex = nestedGit("ls-files", "--stage");
+        let patches = 0;
+        let assessments = 0;
+        const files =
+          edit === "none"
+            ? []
+            : [edit === "root" ? "root.txt" : "nested/app.txt"];
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+          {
+            currentDirectory: directory,
+            environment,
+            onRepositoryCommand: gitWithEnvironment(environment),
+            onCodex: async (_args, output, childEnvironment) => {
+              if (
+                output!.appServer!.prompt.includes("immutable patch artifact")
+              ) {
+                assessments++;
+                const artifact = patchArtifactFromPrompt(
+                  output!.appServer!.prompt,
+                );
+                expect(artifact.changedFiles).toEqual(files);
+                const verification = await fixtures.create(
+                  "patch-settings-apply-",
+                );
+                await mkdir(join(verification, "nested"));
+                await writeFile(join(verification, "root.txt"), "unchanged\n");
+                await writeFile(
+                  join(verification, "nested/app.txt"),
+                  "ORIGINAL\n",
+                );
+                const verify = repositoryGit(verification);
+                verify("init", "--initial-branch=main");
+                verify("config", "core.autocrlf", "false");
+                verify("apply", "--check", artifact.path);
+                verify("apply", artifact.path);
+                expect(
+                  await readFile(join(verification, "root.txt"), "utf8"),
+                ).toBe(edit === "root" ? "fixed\n" : "unchanged\n");
+                expect(
+                  await readFile(join(verification, "nested/app.txt"), "utf8"),
+                ).toBe(edit === "nested" ? "FIXED\n" : "ORIGINAL\n");
+                output!.stdout.write(patchRiskAssessment().report);
+              } else {
+                patches++;
+                expect(childEnvironment?.[selector]).toBe(
+                  environment[selector],
+                );
+                if (edit !== "none")
+                  await writeFile(
+                    join(
+                      edit === "root" ? directory : nested,
+                      edit === "root" ? "root.txt" : "app.txt",
+                    ),
+                    "fixed\n",
+                  );
+                output!.stdout.write("Synthetic patch turn completed.\n");
+              }
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(edit === "none" ? 2 : 0);
+        expect(JSON.parse(outcome.stdout)).toMatchObject({
+          applied: edit !== "none",
+          filesChanged: files.length,
+          files,
+          ...(edit === "none" ? { error: { code: "NO_PATCH_APPLIED" } } : {}),
+        });
+        expect(patches).toBe(1);
+        expect(assessments).toBe(edit === "none" ? 0 : 1);
+        expect(git("rev-parse", "HEAD")).toBe(head);
+        expect(nestedGit("rev-parse", "HEAD")).toBe(nestedHead);
+        expect(git("ls-files", "--stage")).toBe(index);
+        expect(nestedGit("ls-files", "--stage")).toBe(nestedIndex);
+        expect(await readFile(settings)).toEqual(config);
+        expect(environment).toEqual(originalEnvironment);
+        expect(await readFile(join(nested, "app.txt"), "utf8")).toBe(
+          edit === "nested" ? "fixed\n" : "original\n",
+        );
+      },
+    );
+  }
+}
+
+test.each(["implicit", "explicit relative"])(
+  "snapshot honors nested filters through an %s Git alias",
+  async (kind) => {
+    const { directory, support, environment } = await configuredRepository(
+      "GIT_CONFIG_GLOBAL",
+      false,
+    );
+    const alias = join(support, "alias");
+    await symlink(
+      directory,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    if (kind === "explicit relative") {
+      environment["GIT_DIR"] = relative(directory, join(alias, ".git"));
+      environment["GIT_WORK_TREE"] = directory;
+    }
+    let patches = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+      {
+        currentDirectory: kind === "implicit" ? alias : directory,
+        environment,
+        onRepositoryCommand: gitWithEnvironment(environment),
+        onCodex: (_args, output, childEnvironment) => {
+          expect(output!.appServer!.prompt).not.toContain(
+            "immutable patch artifact",
+          );
+          expect(childEnvironment?.["GIT_CONFIG_GLOBAL"]).toBe("settings");
+          expect(childEnvironment?.["GIT_DIR"]).toBe(environment["GIT_DIR"]);
+          patches++;
+          output!.stdout.write("Synthetic no-op turn.\n");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: false,
+      files: [],
+      error: { code: "NO_PATCH_APPLIED" },
+    });
+    expect(patches).toBe(1);
+  },
+);
+
+test.each(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])(
+  "snapshot preserves relative %s after removing its caller directory",
+  async (selector) => {
+    const { directory, nested, git, environment } = await configuredRepository(
+      selector,
+      false,
+    );
+    const component = join(directory, "component");
+    await mkdir(component);
+    await writeFile(join(component, "app.txt"), "component\n");
+    git("add", "component/app.txt");
+    git("commit", "-m", "Synthetic caller component");
+    environment[selector] = "../settings";
+    let patches = 0;
+    let assessments = 0;
+    const files = ["component/app.txt", "root.txt"];
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+      {
+        currentDirectory: component,
+        environment,
+        onRepositoryCommand: gitWithEnvironment(environment),
+        onCodex: async (_args, output, childEnvironment) => {
+          if (output!.appServer!.prompt.includes("immutable patch artifact")) {
+            assessments++;
+            const artifact = patchArtifactFromPrompt(output!.appServer!.prompt);
+            expect(artifact.changedFiles).toEqual(files);
+            const patch = await readFile(artifact.path, "utf8");
+            expect(patch).toContain("-component");
+            expect(patch).toContain("+fixed");
+            expect(patch).not.toContain("nested/app.txt");
+            output!.stdout.write(patchRiskAssessment().report);
+          } else {
+            patches++;
+            expect(childEnvironment?.[selector]).toBe("../settings");
+            await rm(component, { recursive: true });
+            await writeFile(join(directory, "root.txt"), "fixed\n");
+            output!.stdout.write("Synthetic patch turn completed.\n");
+          }
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      applied: true,
+      files: ["app.txt", "../root.txt"],
+      filesChanged: 2,
+    });
+    expect(patches).toBe(1);
+    expect(assessments).toBe(1);
+    expect(await readFile(join(nested, "app.txt"), "utf8")).toBe("original\n");
+    expect(environment[selector]).toBe("../settings");
+  },
+);
+
+test("saved findings rebaseline with the same nested filter configuration", async () => {
+  const { directory, git, environment } = await configuredRepository(
+    "GIT_CONFIG_GLOBAL",
+    false,
+  );
+  await writeFile(join(directory, "second.txt"), "second\n");
+  git("add", "second.txt");
+  git("commit", "-m", "Synthetic second finding");
+  const result = resultWithFindings(["high", "medium"]);
+  const files = ["root.txt", "second.txt"];
+  for (const [index, finding] of result.findings.findings.entries())
+    finding.locations[0]!.path = files[index]!;
+  let patches = 0;
+  let assessments = 0;
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--assess-patch-risk", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      result,
+      onWorkbench: () => savedScan(result, "scan-1", directory),
+      onRepositoryCommand: gitWithEnvironment(environment),
+      onCodex: async (args, output, childEnvironment) => {
+        if (output!.appServer!.prompt.includes("immutable patch artifact")) {
+          assessments++;
+          const artifact = patchArtifactFromPrompt(output!.appServer!.prompt);
+          expect(artifact.changedFiles).toEqual(files);
+          const patch = await readFile(artifact.path, "utf8");
+          expect(patch).toContain("-unchanged");
+          expect(patch).toContain("-second");
+          expect(patch).not.toContain("nested/app.txt");
+          output!.stdout.write(patchRiskAssessment().report);
+        } else {
+          expect(childEnvironment?.["GIT_CONFIG_GLOBAL"]).toBe("settings");
+          const findings = completePatches(args, output);
+          expect(findings).toHaveLength(1);
+          await writeFile(
+            join(directory, findings[0]!.locations[0]!.path),
+            `fixed ${++patches}\n`,
+          );
+        }
+        return 0;
+      },
+    },
+  );
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(JSON.parse(outcome.stdout)).toMatchObject({
+    applied: true,
+    files,
+    filesChanged: 2,
+    patches: [
+      { status: "verified", files: ["root.txt"] },
+      { status: "verified", files: ["second.txt"] },
+    ],
+  });
+  expect(patches).toBe(2);
+  expect(assessments).toBe(1);
+  expect(environment["GIT_CONFIG_GLOBAL"]).toBe("settings");
 });

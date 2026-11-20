@@ -520,6 +520,7 @@ async function latestTargets(
             configured ?? "git",
             environment,
             protectedRoots,
+            { gitDiscovery: true },
           );
     for (const key of Object.keys(environment))
       if (key.toUpperCase() === "CODEX_SECURITY_GIT") delete environment[key];

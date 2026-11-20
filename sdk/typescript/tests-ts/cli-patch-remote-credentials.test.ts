@@ -109,7 +109,7 @@ test("later patch grants exclude writable directories from host and SSH command 
   let turns = 0;
   let preflightPath: string | undefined;
   let pushPath: string | undefined;
-  let protectedRoots: readonly string[] = [];
+  let pushOptions: Parameters<typeof runRepositoryCommand>[3];
   const outcome = await runSavedPublication(
     directory,
     {
@@ -148,7 +148,7 @@ test("later patch grants exclude writable directories from host and SSH command 
         }
         if (options?.patchTransport && args.includes("push")) {
           pushPath = options.environment?.["PATH"];
-          protectedRoots = options.protectedRoots ?? [];
+          pushOptions = options;
         }
         return runGitRepositoryCommand(tool, args, cwd, {
           ...options,
@@ -172,7 +172,7 @@ test("later patch grants exclude writable directories from host and SSH command 
   const PATH = [writable, alias].join(delimiter);
   await expect(
     runRepositoryCommand("gh", ["--version"], directory, {
-      protectedRoots,
+      loaderAccess: pushOptions?.loaderAccess,
       sandbox: { directory, environment: { PATH }, profile: {} },
     }),
   ).rejects.toThrow("gh is not available on a trusted PATH");
@@ -383,9 +383,19 @@ test.each(["github.example.test", "gitlab.com"])(
                 commandOptions,
               ),
             ).toBe(remote);
-            expect(args).toContain(
-              `remote.${alias}.serveroption=${serverOption}`,
-            );
+            expect(
+              runGitRepositoryCommand(
+                "git",
+                [
+                  ...args.slice(0, transport),
+                  "config",
+                  "--get",
+                  `remote.${alias}.serveroption`,
+                ],
+                cwd,
+                commandOptions,
+              ),
+            ).toBe(serverOption);
             expect(
               runGitRepositoryCommand(
                 "git",
@@ -666,7 +676,7 @@ test.each(["worktree", "operator", "linked directory"] as const)(
           ? checkoutConfig
           : operatorConfig;
     git("config", "--file", global, "include.path", included);
-    const script = join(external, "transport.cjs");
+    const script = join(external, "ssh helper.cjs");
     await writeFile(
       script,
       'require("node:fs").writeFileSync(process.env.PATCH_SSH_MARKER, process.argv[2]); process.exitCode = 1;\n',

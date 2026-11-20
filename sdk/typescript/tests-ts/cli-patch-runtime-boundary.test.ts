@@ -2,7 +2,15 @@ import * as runtime from "../src/runtime.js";
 import * as executables from "../src/trusted-executable.js";
 import { expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  readFile,
+  readdir,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -10,6 +18,116 @@ import { repositoryGit, patchDirectories } from "./cli-patch-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const fixtures = patchDirectories();
+
+function inspectLoader(
+  checkout: string,
+  name: string,
+  value: string,
+  options?: Parameters<typeof runRepositoryCommand>[3],
+) {
+  const binding = `--config-env=probe.loader=${name}`;
+  return runRepositoryCommand(
+    "git",
+    [binding, "config", "--get", "probe.loader"],
+    checkout,
+    {
+      environment: { [name]: value, LC_ALL: "C" },
+      ...options,
+    },
+  );
+}
+
+test.each(["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"])(
+  "host Git cannot inherit %s from a writable component",
+  async (variable) => {
+    const directory = await fixtures.create("patch-loader-");
+    await expect(
+      inspectLoader(directory, variable, "./selected-library"),
+    ).rejects.toThrow(`missing environment variable '${variable}'`);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "host Git preserves external library directories in search order",
+  async () => {
+    const checkout = await fixtures.create("loader-checkout-");
+    const tools = await fixtures.create("loader-tools-");
+    const first = join(tools, "first");
+    const last = join(tools, "last");
+    const viaFile = join(tools, "via-file");
+    const shared = join(tools, "shared");
+    const viaDirectory = join(tools, "via-directory");
+    const grant = join(tools, "grant");
+    for (const path of [first, last, viaFile, grant, shared]) await mkdir(path);
+    await mkdir(join(first, "nested"));
+    await symlink("nested", join(first, "alias"));
+    await writeFile(join(checkout, "library"), "writable");
+    await link(join(checkout, "library"), join(shared, "library"));
+    await symlink(checkout, viaDirectory);
+    await symlink(join(checkout, "library"), join(viaFile, "library"));
+    const optimized = join(tools, "optimized");
+    const tier = join(optimized, "glibc-hwcaps", "x86-64-v3");
+    await mkdir(tier, { recursive: true });
+    await symlink(join(checkout, "library"), join(tier, "library"));
+    const aliases = [viaDirectory, viaFile, shared, optimized];
+    if (process.platform === "linux") {
+      const bytes = Buffer.concat([
+        Buffer.from(tools + "/"),
+        Buffer.from([255]),
+      ]);
+      const selected = join(tools, "selected-bytes");
+      await mkdir(bytes);
+      await symlink(bytes, selected);
+      await symlink(join(checkout, "library"), join(selected, "library"));
+      // The resolver represents byte FF as a lone surrogate. Give its string
+      // spelling a separate, harmless directory for a lossy filesystem lookup.
+      await mkdir(join(tools, "\udcff"), { recursive: true });
+      aliases.push(selected);
+    }
+    const paths = [first, "", "./lib", checkout, ...aliases, grant, last];
+    const names = ["LD_LIBRARY_PATH"];
+    // macOS system programs also clear DYLD_* at execution.
+    if (process.platform !== "darwin") {
+      names.push("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH");
+    }
+    for (const name of names) {
+      const value = paths.join(name === "LD_LIBRARY_PATH" ? ";" : ":");
+      const loaderAccess = { writable: new Set<string>() };
+      const inspect = (...extra: string[]) =>
+        inspectLoader(checkout, name, value, {
+          loaderAccess,
+          protectedRoots: [join(grant, "library"), ...extra],
+        });
+      expect(await inspect(first)).toBe(last);
+      expect(await inspect()).toBe([first, last].join(":"));
+      loaderAccess.writable.add(first);
+      expect(await inspect()).toBe(last);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "host Git excludes a changed library on retry after its checkout alias is removed",
+  async () => {
+    const checkout = await fixtures.create("loader-checkout-");
+    const tools = await fixtures.create("loader-tools-");
+    const fallback = await fixtures.create("loader-fallback-");
+    const library = join(tools, "library");
+    const alias = join(checkout, "edit");
+    const paths = [tools, fallback].join(":");
+    const current = { writable: new Set<string>() };
+    const inspect = (loaderAccess = current) =>
+      inspectLoader(checkout, "LD_LIBRARY_PATH", paths, { loaderAccess });
+    await writeFile(library, "original");
+    await link(library, alias);
+    expect(await inspect()).toBe(fallback);
+    current.writable.add(checkout);
+    await writeFile(alias, "modified");
+    await unlink(alias);
+    expect(await inspect()).toBe(fallback);
+    expect(await inspect({ writable: new Set() })).toBe(fallback);
+  },
+);
 
 test("a private-index snapshot reuses only unchanged profiles outside its writable roots", async () => {
   const name =
