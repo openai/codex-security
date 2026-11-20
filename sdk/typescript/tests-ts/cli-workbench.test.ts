@@ -1021,29 +1021,18 @@ describe("CLI workbench", () => {
 
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
-    const batches = [
-      {
-        afterScanId: "scan-b",
-        afterFindings: [finding("b"), finding("b-shared")],
-        beforeScans: [
-          {
-            scanId: "scan-a",
-            findings: [finding("a"), finding("a-shared")],
-          },
-        ],
-      },
+    const findingsByScanId = {
+      "scan-a": [finding("a"), finding("a-shared")],
+      "scan-b": [finding("b"), finding("b-shared")],
+      "scan-c": [finding("c"), finding("c-shared")],
+    };
+    const batches: JsonObject[] = [
+      { afterScanId: "scan-b", beforeScans: [{ scanId: "scan-a" }] },
       {
         afterScanId: "scan-c",
-        afterFindings: [finding("c"), finding("c-shared")],
         beforeScans: [
-          {
-            scanId: "scan-a",
-            findings: [finding("a"), finding("a-shared")],
-          },
-          {
-            scanId: "scan-b",
-            findings: [finding("b"), finding("b-shared")],
-          },
+          { scanId: "scan-a" },
+          { scanId: "scan-b", crossModeOccurrenceIds: ["b", "c"] },
         ],
       },
     ];
@@ -1101,6 +1090,7 @@ describe("CLI workbench", () => {
                   scanCount: 5,
                   unavailableScans: 2,
                   skippedPairs: 1,
+                  findingsByScanId,
                   batches,
                 }
               : {};
@@ -1110,6 +1100,9 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(matcherCalls).toHaveBeenCalledTimes(2);
+    expect(matcherCalls.mock.calls[1]?.[0]).toMatchObject({
+      crossModeOccurrenceIds: ["b", "c"],
+    });
     expect(calls[0]).toEqual([
       "list-unmatched-scan-pairs",
       "--repository",
@@ -1649,17 +1642,12 @@ describe("CLI workbench", () => {
               scanCount: 2,
               unavailableScans: 0,
               skippedPairs: 0,
+              findingsByScanId: {
+                before: [{ occurrenceId: "before" }],
+                after: [],
+              },
               batches: [
-                {
-                  afterScanId: "after",
-                  afterFindings: [],
-                  beforeScans: [
-                    {
-                      scanId: "before",
-                      findings: [{ occurrenceId: "before" }],
-                    },
-                  ],
-                },
+                { afterScanId: "after", beforeScans: [{ scanId: "before" }] },
               ],
             }
           : {};
@@ -1675,6 +1663,38 @@ describe("CLI workbench", () => {
       matches: [],
       uncertain: [],
     });
+  });
+
+  test("rejects a missing scan before matching or saving the batch", async () => {
+    const calls: string[] = [];
+    const stderr = captureCli(main, "stderr");
+    const match = mock(rejecting("unexpected matching call"));
+    expect(
+      await stderr.run(
+        ["scans", "match", "--all"],
+        dependencies({
+          onWorkbench: ([command]): JsonObject => {
+            calls.push(command!);
+            return {
+              findingsByScanId: {
+                before: [{ occurrenceId: "before" }],
+                after: [{ occurrenceId: "after" }],
+              },
+              batches: [
+                {
+                  afterScanId: "after",
+                  beforeScans: [{ scanId: "before" }, { scanId: "missing" }],
+                },
+              ],
+            };
+          },
+          onMatch: match,
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("missing findings for scan missing");
+    expect(match).not.toHaveBeenCalled();
+    expect(calls).toEqual(["list-unmatched-scan-pairs"]);
   });
 
   test("projects historical uncertainty per scan without losing a known match", async () => {
@@ -2126,6 +2146,7 @@ describe("CLI workbench", () => {
               recipe: {
                 repository,
                 target: { kind: "paths", paths: ["src", "packages/core"] },
+                excludePaths: ["src/examples"],
                 mode: "deep",
                 pluginVersion: "1.2.3",
                 failOnSeverity: "high",
@@ -2147,6 +2168,7 @@ describe("CLI workbench", () => {
       expect(onTurn.mock.lastCall?.[0]).toBe(repository);
       expect(onTurn.mock.lastCall?.[1]).toMatchObject({
         target: ["src", "packages/core"],
+        excludePaths: ["src/examples"],
         mode: "deep",
         parentScanId: "scan-original",
         expectedPluginVersion: "1.2.3",
