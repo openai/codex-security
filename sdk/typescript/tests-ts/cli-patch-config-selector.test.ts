@@ -432,7 +432,10 @@ for (const selected of [
           environment["GIT_CONFIG_SYSTEM"] = control;
           if (selected === "system") environment["GIT_CONFIG_NOSYSTEM"] = "0";
         } else if (selected === "device") {
-          if (create) await symlink("/dev/null", control);
+          if (create) {
+            control = join(await fixtures.create("patch-device-"), "config");
+            await symlink("/dev/null", control);
+          }
           environment["GIT_CONFIG_GLOBAL"] = create ? control : "/dev/null";
         } else if (selected !== "disabled global") {
           environment["GIT_CONFIG_GLOBAL"] =
