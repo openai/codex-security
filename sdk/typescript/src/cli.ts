@@ -798,6 +798,26 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
   return value;
 }
 
+function importedPackageAdvisory({
+  provider,
+  evidence,
+}: StoredExternalFinding): string | null {
+  if (
+    (provider !== "trivy" && provider !== "grype") ||
+    !evidence.packages?.length
+  )
+    return null;
+  const ids = evidence.advisory_ids ?? [];
+  if (ids.length < 2) return ids[0] ?? null;
+  // A normalized import may reorder aliases. Use the scanner's primary ID.
+  const data = evidence.source_data;
+  const match = provider === "grype" ? data?.["match"] : undefined;
+  const vulnerability = (isJsonObject(match) ? match : data)?.["vulnerability"];
+  if (!isJsonObject(vulnerability)) return null;
+  const id = vulnerability[provider === "grype" ? "id" : "VulnerabilityID"];
+  return typeof id === "string" && ids.includes(id) ? id : null;
+}
+
 function renderImportedFindings(
   repository: string,
   findings: readonly StoredExternalFinding[],
@@ -806,35 +826,7 @@ function renderImportedFindings(
   const lines = [
     `${formatItemCount(findings.length, "imported finding")} in ${diagnosticValue(repository)}`,
   ];
-  const groups = new Map<string | null, StoredExternalFinding[]>();
-  for (const finding of findings) {
-    const { provider, evidence } = finding;
-    const ids = evidence.advisory_ids ?? [];
-    const data = evidence.source_data;
-    const match = data?.["match"];
-    const vulnerability =
-      provider === "grype" && isJsonObject(match)
-        ? match["vulnerability"]
-        : data?.["vulnerability"];
-    const nativeId = isJsonObject(vulnerability)
-      ? vulnerability[provider === "grype" ? "id" : "VulnerabilityID"]
-      : undefined;
-    // A normalized SDK import may reorder aliases or omit native metadata.
-    const primary =
-      typeof nativeId === "string" && ids.includes(nativeId)
-        ? nativeId
-        : ids.length === 1
-          ? ids[0]
-          : null;
-    const advisory =
-      (provider === "trivy" || provider === "grype") &&
-      evidence.packages?.length
-        ? (primary ?? null)
-        : null;
-    const group = groups.get(advisory);
-    if (group) group.push(finding);
-    else groups.set(advisory, [finding]);
-  }
+  const groups = Map.groupBy(findings, importedPackageAdvisory);
   for (const [advisory, occurrences] of groups) {
     if (advisory === null && groups.size > 1)
       lines.push("", "Other imported findings");

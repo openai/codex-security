@@ -571,30 +571,33 @@ test("terminal advisory groups preserve occurrences and distinguish upgrade and 
   const deps = dependencies({ currentDirectory: repository });
   deps.readLocalExternalFindings = async () => ({
     repository,
-    findings: ["one", "two", "ambiguous"].map((id, index) => ({
+    findings: ["trivy", "grype", "github"].map((provider) => ({
       repository,
-      id,
+      id: provider,
       version: 1,
-      provider: index === 2 ? "github" : "trivy",
+      provider,
       sourceKey: "fixture",
-      sourceFindingId: id,
+      sourceFindingId: provider,
       createdAt: "",
       updatedAt: "",
       assessment: { state: "not_assessed" },
       evidence: {
-        title: id,
+        title: provider,
         severity: "high",
         advisory_ids:
-          index === 2
+          provider === "github"
             ? ["CVE-2099-1000", "CVE-2099-1001"]
-            : index === 0
+            : provider === "trivy"
               ? ["alias", "CVE-2099-1000"]
               : ["CVE-2099-1000", "alias"],
-        source_data: { vulnerability: { VulnerabilityID: "CVE-2099-1000" } },
+        source_data:
+          provider === "grype"
+            ? { match: { vulnerability: { id: "CVE-2099-1000" } } }
+            : { vulnerability: { VulnerabilityID: "CVE-2099-1000" } },
         packages: [
           {
-            name: id,
-            ...(index === 0
+            name: provider,
+            ...(provider === "trivy"
               ? { manifest_path: "package.json", fixed_versions: ["2"] }
               : {}),
           },
@@ -607,7 +610,7 @@ test("terminal advisory groups preserve occurrences and distinguish upgrade and 
   const view = cli.stdout.text();
   expect(view).toContain("CVE-2099-1000 · 2 package findings");
   expect(view).toContain("Other imported findings");
-  for (const id of ["one", "two", "ambiguous"])
+  for (const id of ["trivy", "grype", "github"])
     expect(view).toContain(`Finding ID: ${id}`);
   expect(view).toContain("Source to confirm: package.json");
   expect(view).toContain("Identify the consuming repository");
