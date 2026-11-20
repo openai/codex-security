@@ -3262,13 +3262,12 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 For a Git installation with private libraries, use absolute directories in
 `LD_LIBRARY_PATH` or the macOS library and framework search paths. Keep the
-libraries and their dependencies outside the patch's writable roots, in an
-installation owned by a separate account. The CLI checks each directory tree,
-including nested search locations. It omits the entire directory if a path
-leads into a writable root or a file could be modified through a hard link.
-This includes files owned by the current account, which can change their
-permissions even if they are read-only. When the CLI runs as root, all regular
-files are considered mutable.
+libraries and their dependencies outside the patch's writable roots. The CLI
+checks each selected directory tree, including nested search locations, and
+omits directories with links into writable roots. For files your account can
+modify, each file must have a single hard link and the CLI must check the tree
+before the first patch turn or filter starts. The Linux and macOS sandboxes
+prevent the turn, filter or hook from creating a link across this boundary.
 It filters out relative entries and ELF loader tokens such as `$ORIGIN`, and
 clears other `LD_*` and `DYLD_*` overrides when launching repository commands.
 With an external sandbox or unknown write permissions, the CLI clears the
