@@ -1016,6 +1016,7 @@ async function collectCredentialPointers(
       selectComposer(relativeFile(home, "AppData/Roaming/Composer"));
     for (const file of [
       ".databrickscfg",
+      join(".databricks", "token-cache.json"),
       ".dockercfg",
       ".rclone.conf",
       ".gemrc",

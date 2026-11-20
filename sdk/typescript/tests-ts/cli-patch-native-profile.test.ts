@@ -942,6 +942,7 @@ test("patch model and clean filters cannot read selected authentication files", 
       "GIT_PROXY_SSL_CERT",
       "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
       "DATABRICKS_CONFIG_FILE",
+      "DATABRICKS_OIDC_TOKEN_FILEPATH",
       "AWS_WEB_IDENTITY_TOKEN_FILE",
       "PNPM_CONFIG_NPMRC_AUTH_FILE",
       "BUNDLE_USER_CONFIG",
@@ -1077,6 +1078,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     ".mamba/auth/authentication.json",
     ".rattler/credentials.json",
     ".config/rclone/rclone.conf",
+    ".databricks/token-cache.json",
     ".continuum/anaconda-client/tokens/example.token",
     join(pointers.BINSTAR_CONFIG_DIR, "data/example.token"),
     loginCache + ".keyring",
@@ -1214,6 +1216,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     siblings.set(path, contents);
   };
   await createSibling(join(azure, "config"), "Azure settings");
+  await createSibling(at(".databricks/ordinary.txt"), "Databricks sibling");
   await createSibling(at(".config/rclone/ordinary.txt"), "rclone sibling");
   await createSibling(
     join(pointers.DOCKER_CONFIG, "ordinary-sibling.txt"),

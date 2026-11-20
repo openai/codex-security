@@ -3134,8 +3134,8 @@ In the standard gcloud directory and under `CLOUDSDK_CONFIG`, the rules cover
 Application Default Credentials, `credentials.db`, `access_tokens.db`, their
 SQLite journals, and the `legacy_credentials` directory. They also cover the
 file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
-Databricks profiles are protected in `~/.databrickscfg` and the file
-selected by `DATABRICKS_CONFIG_FILE`.
+Databricks protection covers `~/.databrickscfg`, `~/.databricks/token-cache.json`,
+and files selected by `DATABRICKS_CONFIG_FILE` or `DATABRICKS_OIDC_TOKEN_FILEPATH`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
 the standard `glab-cli` configuration directories and Git administration.
 PostgreSQL password and service file protection covers `PGPASSFILE`,
