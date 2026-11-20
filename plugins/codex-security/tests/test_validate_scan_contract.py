@@ -21,6 +21,82 @@ class ValidateScanContractTest(ScanFixtureTestCase):
     validator = VALIDATOR
     example_scan = EXAMPLE_SCAN
 
+    def validate_cli(self, *options: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                str(PLUGIN_ROOT / "scripts" / "validate_scan_contract.py"),
+                "--scan-dir",
+                str(self.scan_dir),
+                *options,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def assert_rejection(self, reason: str, location: str | None = None) -> None:
+        result = self.validate_cli("--json-errors")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        expected = {"status": "invalid", "reason": reason}
+        if location:
+            expected["location"] = location
+        self.assertEqual(json.loads(result.stdout), expected)
+        self.assertIn("scan contract validation failed:", result.stderr)
+
+    def test_rejection_receipts_keep_the_existing_cli_streams_and_exit_codes(self) -> None:
+        default = self.validate_cli()
+        structured = self.validate_cli("--json-errors")
+        self.assertEqual(structured.returncode, 0, structured.stderr)
+        self.assertEqual((structured.stdout, structured.stderr), (default.stdout, default.stderr))
+
+        (self.scan_dir / "report.md").unlink()
+        default = self.validate_cli()
+        structured = self.validate_cli("--json-errors")
+        self.assertEqual(default.returncode, 2)
+        self.assertEqual(default.stdout, "")
+        self.assertIn("report.md", default.stderr)
+        self.assertEqual(default.stderr, structured.stderr)
+        self.assert_rejection("missing_artifact", "report.md")
+
+    def test_completion_field_rejections(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        del manifest["scan"]["completedAt"]
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("missing_required_field", "manifest.scan.completedAt")
+        manifest["scan"]["completedAt"] = []
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("invalid_required_field", "manifest.scan.completedAt")
+
+    def test_artifact_rejections(self) -> None:
+        path = self.scan_dir / "findings.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+        self.assert_rejection("artifact_digest_mismatch", "findings.json")
+        path.write_text("{")
+        self.assert_rejection("invalid_json", "findings.json")
+        path.unlink()
+        self.assert_rejection("missing_artifact", "findings.json")
+
+        manifest = self.read_json("scan-manifest.json")
+        manifest["scan"]["artifacts"] = [
+            item for item in manifest["scan"]["artifacts"] if item["path"] != "findings.json"
+        ]
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("missing_artifact_record", "findings.json")
+
+    def test_rejection_receipt_omits_custom_paths_and_values(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        manifest["scan"]["artifacts"].append(
+            {"path": "artifacts/custom.txt", "sha256": "0" * 64, "mediaType": "text/plain"}
+        )
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("missing_artifact")
+
+        manifest["scan"]["target"]["kind"] = "custom target"
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("validation_failed")
+
     def test_accepts_sealed_contract_without_mutating_it(self) -> None:
         before = {
             path.name: path.read_bytes() for path in self.scan_dir.iterdir() if path.is_file()
