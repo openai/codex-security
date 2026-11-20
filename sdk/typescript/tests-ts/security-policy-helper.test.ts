@@ -98,7 +98,7 @@ describe("built SECURITY.md helper", () => {
     const env = { ...process.env, CODEX_SECURITY_POLICY_BASE: base };
     const command = (scope: string, ...extra: string[]) =>
       run(["--repo", root, "--scope", scope, ...extra], env);
-    const added = command("new/token");
+    const added = command("new/token", "--revision", base.toUpperCase());
     expect(added.status, added.stderr).toBe(0);
     expectGuidance(added.stdout, [
       ["SECURITY.md", "Report standalone token exposures."],
@@ -109,7 +109,12 @@ describe("built SECURITY.md helper", () => {
       ["SECURITY.md", "Report standalone token exposures."],
       ["old/SECURITY.md", "Established nested exception."],
     ]);
-    const policies = run(["--repo", root, "--revision", base, "--list"]);
+    const list = (revision: string) =>
+      run(["--repo", root, "--revision", revision, "--list"]);
+    const branch = "7".repeat(base.length === 40 ? 64 : 40);
+    git("branch", branch, base);
+    expect(list(branch).status).toBe(2);
+    const policies = list(base);
     expect(policies.status, policies.stderr).toBe(0);
     expect(JSON.parse(policies.stdout)).toEqual([
       "SECURITY.md",
