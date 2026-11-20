@@ -961,6 +961,26 @@ const checkoutScannerNames = {
   crowdstrike: "CrowdStrike",
 } as const;
 
+export function checkRetainedCheckoutProvider(
+  current: Pick<ExternalFindings, "findings" | "report">,
+  selected: Provider,
+) {
+  for (const [provider, format] of [
+    ["tenable", tenableReportFormat],
+    ["crowdstrike", crowdstrikeReportFormat],
+  ] as const)
+    if (
+      selected !== provider &&
+      (current.report?.["format"] === format ||
+        current.findings.some(
+          (row) => row.evidence?.source_data?.["format"] === format,
+        ))
+    )
+      throw new CodexSecurityError(
+        `Retained ${checkoutScannerNames[provider]} evidence requires the ${provider} provider.`,
+      );
+}
+
 async function requireScannerFetchRemote(
   source: ExternalSourceRepository,
   provider: keyof typeof checkoutScannerNames,
@@ -1048,20 +1068,7 @@ export async function prepareLocalImport(
     "local",
     options.provider,
   );
-  for (const [provider, format] of [
-    ["tenable", tenableReportFormat],
-    ["crowdstrike", crowdstrikeReportFormat],
-  ] as const)
-    if (
-      options.provider !== provider &&
-      (current.report?.["format"] === format ||
-        current.findings.some(
-          (row) => row.evidence?.source_data?.["format"] === format,
-        ))
-    )
-      throw new CodexSecurityError(
-        `Retained ${checkoutScannerNames[provider]} evidence requires the ${provider} provider.`,
-      );
+  checkRetainedCheckoutProvider(current, options.provider);
   checkTrivyReportProvider(options.provider, current.report);
   let dependabotSource: string | undefined;
   validateFindingIds(current);

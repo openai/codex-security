@@ -34,8 +34,10 @@ import {
   tenableReportFormat,
   tenableSourceRepository,
 } from "./tenable-findings.js";
-import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
-import { prepareCrowdStrikeCloudReport } from "./external-findings-local.js";
+import {
+  checkRetainedCheckoutProvider,
+  prepareCrowdStrikeCloudReport,
+} from "./external-findings-local.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -615,26 +617,19 @@ function checkFindingProvider(
   input: Pick<ExternalFindings, "findings" | "report">,
   provider: Provider,
 ): void {
-  function checkFormat(format: unknown) {
-    if (format === tenableReportFormat && provider !== "tenable")
-      throw new CodexSecurityError(
-        "Retained Tenable evidence requires the tenable provider.",
-      );
-    if (format === crowdstrikeReportFormat && provider !== "crowdstrike")
-      throw new CodexSecurityError(
-        "Retained CrowdStrike evidence requires the crowdstrike provider.",
-      );
-    if (format === guardianSelectionFormat && provider !== "semgrep")
-      throw new CodexSecurityError(
-        "Use the semgrep provider for Guardian findings.",
-      );
-  }
-  checkFormat(input.report?.["format"]);
-  for (const { source_finding_id, evidence } of input.findings) {
-    if (guardianFindingId.test(source_finding_id))
-      checkFormat(guardianSelectionFormat);
-    checkFormat(evidence.source_data?.["format"]);
-  }
+  checkRetainedCheckoutProvider(input, provider);
+  if (
+    provider !== "semgrep" &&
+    (input.report?.["format"] === guardianSelectionFormat ||
+      input.findings.some(
+        ({ source_finding_id, evidence }) =>
+          guardianFindingId.test(source_finding_id) ||
+          evidence.source_data?.["format"] === guardianSelectionFormat,
+      ))
+  )
+    throw new CodexSecurityError(
+      "Use the semgrep provider for Guardian findings.",
+    );
 }
 
 export async function prepareExternalPublication(
