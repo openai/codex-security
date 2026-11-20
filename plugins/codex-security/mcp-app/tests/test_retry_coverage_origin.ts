@@ -354,3 +354,44 @@ test("retry coverage ignores projected origin claims and rejects invalid archive
   assert.equal(coverage.deferred[0].provenance.attempt, 1);
   assert.equal(coverage.deferred[0].provenance.note, "Worker note");
 });
+
+test("archived shared receipts follow the surface's reference order", async (t) => {
+  const f = await workerHistoryFixture(t, 2);
+  const receiptRefs = [
+    "artifacts/review/nested/first.txt",
+    "artifacts/second.txt",
+  ];
+  for (const ref of receiptRefs) {
+    const file = path.join(f.scanRoot, ref);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "Synthetic review receipt.\n");
+  }
+  const checkpoint = workerDraft([], {
+    complete: false,
+    reviewState: {
+      surfaces: [
+        {
+          id: "saved-review",
+          label: "Synthetic retained review",
+          disposition: "no_issue_found",
+          receiptRefs,
+          provenance: { scanReceiptRefs: [receiptRefs[1]] },
+        },
+      ],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
+  const directory = path.join(f.workerRoot, "attempts/attempt-01/checkpoints");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    path.join(directory, "saved.json"),
+    JSON.stringify(checkpoint),
+  );
+
+  const [saved] = await readArchivedWorkerCheckpoints(f.workerContext);
+  assert.deepEqual(
+    saved.input.reviewState.surfaces[0].provenance.scanReceiptRefs,
+    receiptRefs,
+  );
+});
