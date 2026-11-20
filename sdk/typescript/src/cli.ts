@@ -12498,32 +12498,43 @@ async function runPatchTransport(
         ...args,
       ]
     : args;
+  const { root, caller, directory } = await patchTransportDirectories(
+    repository,
+    dependencies,
+  );
   const run = async (overrides: NodeJS.ProcessEnv = {}) => {
     const effective = { ...environment, ...overrides };
-    if (dependencies.patchTransportAccess?.pushHooks) {
-      const { root, caller, directory } = await patchTransportDirectories(
-        repository,
-        dependencies,
-      );
-      const transport = {
-        ...dependencies,
-        environment: { ...dependencies.environment, ...effective },
-      };
-      // Git resolves its own child commands through its exec directory before
-      // PATH. It starts pack-objects after pre-push, even with one destination.
-      const commands = ["git"];
-      if (remotes.some((remote) => remote.startsWith("https://")))
-        commands.push("git-remote-https");
-      for (const command of commands)
-        await inspectPatchGitExecutable(
-          command,
-          repository,
-          transport,
-          [root, caller],
-          directory,
-          { afterHook: command === "git", implicit: true },
-        );
+    const transport = {
+      ...dependencies,
+      environment: { ...dependencies.environment, ...effective },
+    };
+    // Git prepends its exec directory from the invocation cwd. Child Git
+    // processes may start from the worktree root, so pass the absolute path.
+    const selected = environmentEntry(transport.environment, "GIT_EXEC_PATH");
+    if (selected) {
+      const resolveHostPath = await trustedHostPathResolver(caller, [
+        root,
+        caller,
+      ]);
+      const execPath = resolveHostPath(selected);
+      if (!execPath) throw writablePatchTransportError(selected);
+      effective["GIT_EXEC_PATH"] = execPath;
+      transport.environment["GIT_EXEC_PATH"] = execPath;
     }
+    // Capture the implicit launchers during ls-remote, before the patch turn.
+    // Push can start a remote helper and a child Git even without a hook.
+    const commands = ["git"];
+    if (remotes.some((remote) => remote.startsWith("https://")))
+      commands.push("git-remote-https");
+    for (const command of commands)
+      await inspectPatchGitExecutable(
+        command,
+        repository,
+        transport,
+        [root, caller],
+        directory,
+        { afterHook: command === "git", implicit: true },
+      );
     const result = await dependencies.runRepositoryCommand(
       "git",
       transportArgs,
@@ -12568,10 +12579,6 @@ async function runPatchTransport(
       : [];
   if (override === undefined && entries.length < 3)
     return run({ GIT_PROXY_COMMAND: "" });
-  const { root, caller, directory } = await patchTransportDirectories(
-    repository,
-    dependencies,
-  );
   let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
   const hostPath =
     environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
