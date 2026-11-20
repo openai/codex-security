@@ -435,22 +435,20 @@ function resolveConfigPath(
   }
 }
 
-/** @internal Keep agent, skill, and TLS file paths anchored to their config directory. */
-export function resolveNestedConfigPaths(
+/** @internal File settings shared by path resolution and interpreter discovery. */
+export function* nestedConfigPathEntries(
   config: JsonObject,
-  directory: string,
-): void {
+): Generator<[JsonObject, string]> {
   const agents = config["agents"];
   if (isObject(agents)) {
     for (const agent of Object.values(agents)) {
-      if (isObject(agent)) resolveConfigPath(agent, "config_file", directory);
+      if (isObject(agent)) yield [agent, "config_file"];
     }
   }
   const skills = config["skills"];
   if (isObject(skills) && Array.isArray(skills["config"])) {
     for (const skill of skills["config"]) {
-      if (!isObject(skill)) continue;
-      resolveConfigPath(skill, "path", directory);
+      if (isObject(skill)) yield [skill, "path"];
     }
   }
 
@@ -467,10 +465,19 @@ export function resolveNestedConfigPaths(
         "client-certificate",
         "client-private-key",
       ]) {
-        resolveConfigPath(tls, field, directory);
+        yield [tls, field];
       }
     }
   }
+}
+
+/** @internal Keep agent, skill, and TLS file paths anchored to their config directory. */
+export function resolveNestedConfigPaths(
+  config: JsonObject,
+  directory: string,
+): void {
+  for (const [object, key] of nestedConfigPathEntries(config))
+    resolveConfigPath(object, key, directory);
 }
 
 export async function mergedCodexConfig(

@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import {
   MODEL_FILE_SETTINGS,
+  nestedConfigPathEntries,
   resolveCodexProfile,
   writeCodexConfig,
   type JsonObject,
@@ -63,18 +64,8 @@ export function scanConfigSourcePaths(
 ): string[] {
   const selected = resolveCodexProfile(config);
   const paths = MODEL_FILE_SETTINGS.map((key) => selected[key]);
-  const skills = selected["skills"];
-  if (isRecord(skills) && Array.isArray(skills["config"])) {
-    for (const skill of skills["config"])
-      if (isRecord(skill) && typeof skill["path"] === "string")
-        paths.push(skill["path"]);
-  }
-  const agents = selected["agents"];
-  if (isRecord(agents)) {
-    for (const agent of Object.values(agents))
-      if (isRecord(agent) && typeof agent["config_file"] === "string")
-        paths.push(agent["config_file"]);
-  }
+  for (const [object, key] of nestedConfigPathEntries(selected))
+    paths.push(object[key]);
   return paths.flatMap((path) => {
     if (typeof path !== "string" || !path) return [];
     if (!scanDir && !isAbsolute(expandHome(path, environment))) return [];
