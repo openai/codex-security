@@ -7,6 +7,7 @@ import path from "node:path";
 import test, { after, type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
+import { CODEX_EXECUTABLE_VERSION } from "../../../sdk/typescript/dist/version.js";
 import { beforeAll } from "./triage-provider.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
@@ -35,6 +36,23 @@ function temporaryRoot(t: TestContext, prefix: string) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
+}
+
+function writeFakeCodex(
+  filename: string,
+  script: string,
+  version = CODEX_EXECUTABLE_VERSION,
+) {
+  fs.writeFileSync(
+    filename,
+    `#!${process.execPath}
+if (process.argv.includes('--version')) {
+  console.log('codex-cli-exec ${version}');
+  process.exit(0);
+}
+${script}`,
+    { mode: 0o755 },
+  );
 }
 
 function evalArgs(...args: string[]) {
@@ -218,14 +236,12 @@ test(
       else process.env.TRIAGE_RUNTIME_ROOT = priorRuntime;
     });
     const fakeCodex = path.join(root, "codex");
-    fs.writeFileSync(
+    writeFakeCodex(
       fakeCodex,
-      `#!${process.execPath}
-console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-auth'}));
+      `console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-auth'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:JSON.stringify({apiKey:process.env.CODEX_API_KEY,cwd:process.argv[process.argv.indexOf('--cd')+1],directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])})}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 `,
-      { mode: 0o755 },
     );
     await import("./initialize-provider.mts");
     const { loadApiProvider } = await import("promptfoo");
@@ -323,10 +339,9 @@ test(
     const root = temporaryRoot(t, "triage-cli-provider-");
     const capture = path.join(root, "capture.json");
     const fakeCodex = path.join(root, "custom-codex");
-    fs.writeFileSync(
+    writeFakeCodex(
       fakeCodex,
-      `#!${process.execPath}
-const fs = require('node:fs');
+      `const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
@@ -336,7 +351,6 @@ console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-cli-provi
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:'ok'}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 `,
-      { mode: 0o755 },
     );
     const provider = {
       id: "openai:codex-sdk:gpt-5.5",
@@ -394,10 +408,9 @@ function captureProvider(t: TestContext, mode: "launcher" | "replay") {
   const capture = path.join(root, "captures.jsonl");
   const fakeCodex = path.join(root, "codex");
   const fail = path.join(root, "fail");
-  fs.writeFileSync(
+  writeFakeCodex(
     fakeCodex,
-    `#!${process.execPath}
-const fs = require('node:fs');
+    `const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 fs.readFileSync(path.join(cwd, 'plugins/codex-security/skills/triage-finding/SKILL.md'));
@@ -418,7 +431,6 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
 }
 `,
-    { mode: 0o755 },
   );
   const ambientNode = providerNode("ambient-node", "bin", "node");
   const customNode = providerNode("custom-node", "bin", "node");
@@ -692,15 +704,13 @@ test(
     const extra = path.join(root, "extra");
     fs.mkdirSync(extra);
     const fakeCodex = path.join(root, "codex");
-    fs.writeFileSync(
+    writeFakeCodex(
       fakeCodex,
-      `#!${process.execPath}
-const details = {executable:process.env.CODEX_TEST_EXECUTABLE || require('node:fs').realpathSync(process.argv[1]), path:process.env.PATH, node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
+      `const details = {executable:process.env.CODEX_TEST_EXECUTABLE || require('node:fs').realpathSync(process.argv[1]), path:process.env.PATH, node:process.env.CODEX_MCP_NODE_PATH, marker:process.env.EXTRA_MARKER, directories:process.argv.flatMap((arg,index)=>arg==='--add-dir'?[process.argv[index+1]]:[])};
 console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-thread'}));
 console.log(JSON.stringify({type:'item.completed',item:{id:'message',type:'agent_message',text:JSON.stringify(details)}}));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
 `,
-      { mode: 0o755 },
     );
     const environment = {
       ...promptfooEnvironment(root),
@@ -925,6 +935,13 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
           });
         }),
       );
+      const mismatchedCodex = path.join(root, "mismatched-codex");
+      writeFakeCodex(mismatchedCodex, "", "0.0.0");
+      const mismatch = await selectedCodex.callApi("synthetic", {
+        vars: { selected_codex: mismatchedCodex },
+        prompt: { raw: "synthetic", label: "synthetic" },
+      });
+      assert.match(mismatch.error ?? "", /reports 0\.0\.0/);
     } finally {
       await selectedCodex.cleanup?.();
     }
@@ -1102,10 +1119,9 @@ test(
     const capture = path.join(root, "captures.jsonl");
     const failure = path.join(root, "failure");
     const fakeCodex = path.join(root, "codex");
-    fs.writeFileSync(
+    writeFakeCodex(
       fakeCodex,
-      `#!${process.execPath}
-const fs = require('node:fs');
+      `const fs = require('node:fs');
 const path = require('node:path');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 const prompt = fs.readFileSync(0, 'utf8');
@@ -1121,7 +1137,6 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 }
 `,
-      { mode: 0o755 },
     );
     const configPath = path.join(root, "config.json");
     // These are the native-provider placeholders saved by the previous configs.
@@ -1242,10 +1257,9 @@ for (const [suite, legacy] of [
       const capture = path.join(root, "captures.jsonl");
       const failure = path.join(root, "failure");
       const fakeCodex = path.join(root, "codex");
-      fs.writeFileSync(
+      writeFakeCodex(
         fakeCodex,
-        `#!${process.execPath}
-const fs = require('node:fs');
+        `const fs = require('node:fs');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
 const model = process.argv[process.argv.indexOf('--model') + 1];
 const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
@@ -1259,7 +1273,6 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
  console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));
 }
 `,
-        { mode: 0o755 },
       );
       const environment = {
         ...promptfooEnvironment(root),

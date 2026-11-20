@@ -1,8 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { once } from "node:events";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { setImmediate } from "node:timers/promises";
+import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
   readScanBudgetUsage,
@@ -118,8 +117,16 @@ test.each([false, true])(
           runStreamed: async (_input, { signal }) => ({
             events: (async function* (): AsyncGenerator<ThreadEvent> {
               yield { type: "thread.started", thread_id: "scan-thread" };
+              // The tracker starts on thread.started. Bound only the live stream wait.
+              const budgetAbort = delay(15_000, undefined, { signal }).then(
+                () => {
+                  throw new Error(
+                    "The scan did not stop at its spending limit.",
+                  );
+                },
+              );
               if (raiseLimit) {
-                await limitSaved.promise;
+                await Promise.race([limitSaved.promise, budgetAbort]);
                 // Resume after the caller adopts the saved limit.
                 await setImmediate();
                 measured = 3_000;
@@ -139,19 +146,16 @@ test.each([false, true])(
                   }) + "\n",
                 );
               }
-              if (!signal?.aborted) await once(signal!, "abort");
-              throw new DOMException("aborted", "AbortError");
+              await budgetAbort;
             })(),
           }),
         }),
       }),
     });
-    const keepAlive = setTimeout(() => {}, 10_000);
     try {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.004,
-          signal: AbortSignal.timeout(5_000),
           onCost: costs,
           onUsage: usages,
           ...(raiseLimit ? { onBudgetApproaching: approaching } : {}),
@@ -165,7 +169,6 @@ test.each([false, true])(
       expect(usages).not.toHaveBeenCalled();
       expect(approaching).toHaveBeenCalledTimes(raiseLimit ? 1 : 0);
     } finally {
-      clearTimeout(keepAlive);
       await client.close();
     }
   },

@@ -911,7 +911,7 @@ connection.rollback()`,
       scanId: run.scanId,
       findings: [],
     });
-    const canonical = await createCanonicalFixture(run.scanDir);
+    await createCanonicalFixture(run.scanDir);
     const afterCommit = await store.recordIteration({
       id: reducer.id,
       scanId: run.scanId,

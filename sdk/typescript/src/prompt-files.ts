@@ -9,6 +9,7 @@ import {
   parse,
   sep,
 } from "node:path";
+import { sameCheckedFileDevice } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import { resolveInputPath, resolveParentTraversal } from "./runtime.js";
 import { isWithin } from "./trusted-executable.js";
@@ -113,6 +114,16 @@ export async function readRegularInputFile(
   repository: string | DocumentRootSource,
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
+  return (await readRegularInputFileBytes(path, repository, metadata)).toString(
+    "utf8",
+  );
+}
+
+export async function readRegularInputFileBytes(
+  path: string,
+  repository: string | DocumentRootSource,
+  metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
+): Promise<Buffer> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
@@ -141,14 +152,21 @@ export async function readRegularInputFile(
   );
   try {
     const opened = await file.stat({ bigint: true });
+    const current = await lstat(canonical, { bigint: true });
     if (
       !opened.isFile() ||
-      opened.dev !== selected.dev ||
-      opened.ino !== selected.ino
+      !current.isFile() ||
+      current.dev !== selected.dev ||
+      current.ino !== selected.ino ||
+      !(await sameCheckedFileDevice(
+        file,
+        { path: canonical, metadata: selected },
+        opened,
+      ))
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }
-    return await file.readFile({ encoding: "utf8" });
+    return await file.readFile();
   } finally {
     await file.close();
   }
