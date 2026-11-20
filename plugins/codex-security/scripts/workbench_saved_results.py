@@ -1380,6 +1380,9 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "canceledScanId": scan["id"],
             }
         if scan["status"] != "running":
+            if scan["status"] == "failed":
+                # Caller cancellation can arrive after the coordinator records failure.
+                connection.commit()
             raise SystemExit("Only a running scan can be canceled.")
         updated = connection.execute(
             """

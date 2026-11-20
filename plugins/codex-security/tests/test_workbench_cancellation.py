@@ -202,6 +202,56 @@ def test_stop_retains_observation_separately_from_committed_progress(
         assert detail["failureMessage"] == "Fixture interruption"
 
 
+@pytest.mark.parametrize("status", ["failed", "complete"])
+def test_cancellation_after_stop_preserves_only_failed_scan_observation(
+    tmp_path: Path, status: str
+):
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    if status == "failed":
+        fail_scan(state_dir, scan_id, "Coordinator failure")
+    else:
+        write_completed_contract(scan_dir, scan_id, target)
+        scan_command(state_dir, "complete-scan", scan_id)
+    before = get_scan(state_dir, scan_id)["scan"]
+    observed_at = before["progress"]["updatedAt"]
+    observation = ["--observed-phase", "discovery", "--phase-observed-at", observed_at]
+    wrong_thread = scan_command(
+        state_dir,
+        "cancel-scan",
+        scan_id,
+        "--thread-id",
+        "another-thread",
+        *observation,
+        check=False,
+    )
+    assert wrong_thread["returncode"] != 0
+    assert "owning Codex thread" in wrong_thread["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"] == before["progress"]
+    for phase in ("discovery", "reporting"):
+        rejected = scan_command(
+            state_dir,
+            "cancel-scan",
+            scan_id,
+            "--observed-phase",
+            phase,
+            "--phase-observed-at",
+            observed_at,
+            check=False,
+        )
+        assert rejected["returncode"] != 0
+        assert rejected["stderr"].strip() == "Only a running scan can be canceled."
+        after = get_scan(state_dir, scan_id)["scan"]
+        expected_progress = dict(before["progress"])
+        if status == "failed":
+            expected_progress["lastObservedPhase"] = {
+                "phase": "discovery",
+                "observedAt": observed_at,
+            }
+        assert after["progress"] == expected_progress
+        assert after["lifecycle"] == before["lifecycle"]
+        assert after["failureMessage"] == before["failureMessage"]
+
+
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
