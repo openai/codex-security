@@ -3,12 +3,15 @@ import {
   readStackReport,
   stackFrames,
 } from "../src/dependency-report-stacks.js";
+import { renderDependencyReport } from "../src/dependency-report-renderer.js";
+import { renderDependencyReportMarkdown } from "../src/dependency-report-markdown.js";
+import { dependencyClaimHash } from "../src/dependency-stack-claims.js";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
 
 test("projects a sparse observation, query limits and no-match without inventing reviewed uses", () => {
   const input = stackReport();
   const report = readStackReport(input)!;
-  expect(report.reviewPolicy).toBe("single_agent");
+  expect(report.review).toBeNull();
   expect(report.coverage).toEqual(input.coverage);
   expect(report).not.toHaveProperty("uses");
   const [path, missing] = report.assessments;
@@ -52,9 +55,65 @@ test("does not attach a different revision or hash in place of missing evidence"
   expect(path.missingClaims).toEqual(input.claims[0]!.dependencies);
 });
 
-test("only recognizes the stack contract and rejects conflicting review policies", () => {
+test("only recognizes the stack contract and requires a nullable review", () => {
   expect(readStackReport({ schemaVersion: 2, uses: [] })).toBeUndefined();
   expect(() =>
-    readStackReport({ ...stackReport(), reviewPolicy: "independent_review" }),
+    readStackReport({ ...stackReport(), review: undefined }),
   ).toThrow();
+});
+
+test("reviewed exports preserve each decision and the frozen advisory", () => {
+  const input = stackReport();
+  const advisory = {
+    id: input.cve,
+    url: "https://example.org/decoder",
+    body: "The decoder requires the optional mode.",
+    affected: [],
+  };
+  const draft = {
+    ...input,
+    advisoryDetails: [{ ...advisory, sha256: dependencyClaimHash(advisory) }],
+  };
+  const [observed, missing] = input.assessments;
+  const review = {
+    draftDigest: dependencyClaimHash(draft),
+    decisions: [
+      {
+        workItemId: missing.workItemId,
+        reason: "No runtime observation for the job.",
+        followUp: null,
+      },
+      {
+        workItemId: observed.workItemId,
+        reason: "Checked configuration and sampled binding.",
+        followUp: null,
+      },
+    ],
+  };
+  const reviewed = { ...draft, review };
+  const report = readStackReport(reviewed)!;
+  expect(report.assessments.map((a) => a.reviewReason)).toEqual([
+    review.decisions[1]!.reason,
+    review.decisions[0]!.reason,
+  ]);
+  for (const render of [
+    renderDependencyReport,
+    renderDependencyReportMarkdown,
+  ]) {
+    const output = render(reviewed);
+    expect(output).toContain("Independently reviewed");
+    expect(output).toContain(review.draftDigest);
+    for (const decision of review.decisions)
+      expect(output).toContain(decision.reason);
+    expect(output).toContain(advisory.body);
+    expect(output).toContain(observed.questionChecks[0]!.checked);
+    expect(output).toContain(observed.questionChecks[0]!.missingEvidence);
+    expect(output).not.toMatch(
+      /finalized offline|omits the advisory description/iu,
+    );
+    expect(output).not.toContain("RAW_RECEIPT_CONTENT");
+    expect(
+      render({ ...input, advisoryLookupError: "Registry unavailable." }),
+    ).toContain("Registry unavailable.");
+  }
 });
