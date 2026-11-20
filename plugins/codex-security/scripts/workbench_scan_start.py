@@ -175,10 +175,11 @@ def _archive_owner(
             matches = same_directory_spelling(Path(stored), expected)
             if matches is None:
                 raise SystemExit("Cannot verify the owner of a case-variant scan directory.")
-            if matches:
-                if name is not None:
-                    raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
-                name = stored
+            if not matches:
+                continue
+            if name is not None:
+                raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
+            name = stored
         if name is None:
             return None
     columns = "id, status, scan_dir" if for_registration else "id"
