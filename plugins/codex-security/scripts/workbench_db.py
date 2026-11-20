@@ -105,6 +105,7 @@ from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
+    parse_scan_recipe,
     prepare_cli_scan_target,
     register_windows_resume_output,
     restore_cli_scan_archive,
@@ -138,6 +139,9 @@ from workbench_source_scopes import (
     public_scan_recipe,
     requested_scan_paths,
     safe_source_path,
+)
+from workbench_source_scopes import (
+    requested_exclude_paths as requested_exclude_paths,
 )
 from workbench_target import (
     checked_scan_target,
@@ -175,7 +179,6 @@ from workbench_validation import (
     bounded_output_text,
     optional_text,
     parse_scan_cost,
-    parse_scan_recipe,
     read_json_object,
     reject_non_finite_json,
     require_close_note,
@@ -1675,10 +1678,19 @@ def register_cli_scan(
         paths or ["."],
         diff_target_kind=diff_target["kind"] if diff_target is not None else None,
     )
+    exclusions = recipe.get("excludePaths", [])
     scope_file_count = (
-        scoped_regular_file_count(repository, paths)
-        if mode == "standard" and len(paths) > 1
-        else scan_scope_file_count(repository, paths or ["."], diff_target)
+        (
+            diff_scope_file_count(repository, diff_target, exclusions)
+            if diff_target is not None
+            else scoped_regular_file_count(repository, paths or ["."], exclusions)
+        )
+        if exclusions
+        else (
+            scoped_regular_file_count(repository, paths)
+            if mode == "standard" and len(paths) > 1
+            else scan_scope_file_count(repository, paths or ["."], diff_target)
+        )
     )
     require_working_tree_unchanged(repository, diff_target)
     parent_scan_id = (

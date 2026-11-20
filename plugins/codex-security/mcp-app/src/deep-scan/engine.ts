@@ -74,6 +74,7 @@ export function startDeepScanEngine(options: {
             options.parentSandbox,
           ),
           serviceTier: owned.serviceTier,
+          deepScanConfig: owned.config,
           artifactContext: {
             pluginRoot,
             scanRoot: owned.scanDir,
@@ -81,6 +82,7 @@ export function startDeepScanEngine(options: {
             scanId: owned.scanId,
             scope: owned.scope,
             includePaths: owned.includePaths,
+            excludePaths: owned.excludePaths,
             filePaths: owned.filePaths,
             pythonCommand: options.pythonCommand,
           },
@@ -99,6 +101,7 @@ export function startDeepScanEngine(options: {
           scanId: run.scanId,
           scope: run.scope,
           includePaths: run.includePaths,
+          excludePaths: run.excludePaths,
           filePaths: run.filePaths,
           pythonCommand: options.pythonCommand,
         },

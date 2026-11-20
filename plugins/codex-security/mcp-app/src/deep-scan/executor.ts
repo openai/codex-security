@@ -84,6 +84,7 @@ export interface CodexSdkWorkerArtifactContext {
   scope?: string;
   scanRoot?: string;
   includePaths?: readonly string[];
+  excludePaths?: readonly string[];
   filePaths?: readonly string[];
   pythonCommand?: string;
 }
@@ -297,9 +298,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           JSON.stringify({
             paths: includePaths,
             filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+            excludePaths:
+              this.modelSettings.artifactContext?.excludePaths ?? [],
           }),
         );
       }
+      childEnv.CODEX_SECURITY_EXCLUDE_PATHS = JSON.stringify(
+        this.modelSettings.artifactContext?.excludePaths ?? [],
+      );
       if (resolved?.apiKey !== undefined)
         childEnv.CODEX_API_KEY = resolved.apiKey;
       // Snapshot per-scan selections once; a reconstructed owner can supply them.

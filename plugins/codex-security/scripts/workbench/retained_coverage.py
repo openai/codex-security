@@ -7,7 +7,7 @@ import hashlib
 import os
 from collections import Counter, deque
 from functools import partial
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from finalize_scan_contract import (
@@ -18,6 +18,7 @@ from finalize_scan_contract import (
     _require_safe_json_value,
     _validate_schema_node,
     finding_candidate_id,
+    finding_in_scope,
     write_scan_local_bytes,
 )
 from review_state import uses_legacy_review
@@ -93,7 +94,7 @@ from workbench_coverage_receipts import (
     retain_recorded_receipt_ownership,
 )
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import javascript_utf8, path_within_scope
+from workbench_validation import javascript_utf8
 
 
 def merge_saved_results(
@@ -533,8 +534,14 @@ def merge_saved_results(
 
     # Keep frozen source digests over the original data, before discarding markers
     # that never passed through the worker draft writer.
+    scope = (
+        finding_scope
+        if finding_scope is not None
+        else [(path, False) for path in binding["scope"]["includePaths"]]
+    )
+    exclusions = binding["scope"].get("excludePaths", [])
     retain_recorded_receipt_ownership(
-        sources, _digest, binding["scope"]["includePaths"], finding_scope
+        sources, _digest, binding["scope"]["includePaths"], scope, exclusions
     )
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     # A frozen model capture supplies context without replacing earlier findings.
@@ -1239,23 +1246,7 @@ def merge_saved_results(
         _restore_legacy_identity, legacy_identities, legacy_identity_sources
     )
 
-    def finding_within_scope(finding: dict[str, Any]) -> bool:
-        locations = finding.get("locations", [])
-        return isinstance(locations, list) and any(
-            isinstance(location, dict)
-            and isinstance(location.get("path"), str)
-            and any(
-                PurePosixPath(location["path"]) == PurePosixPath(path)
-                if is_file
-                else path_within_scope(location["path"], path)
-                for path, is_file in (
-                    finding_scope
-                    if finding_scope is not None
-                    else [(path, False) for path in binding["scope"]["includePaths"]]
-                )
-            )
-            for location in locations
-        )
+    finding_within_scope = partial(finding_in_scope, scope=scope, exclusions=exclusions)
 
     valid_findings: dict[bytes, bool] = {}
 

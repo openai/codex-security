@@ -1,3 +1,4 @@
+import { importSource } from "./import-module.ts";
 import {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
@@ -10,7 +11,6 @@ import {
   parseDeepScan,
   temporaryDirectories,
   fakeCodexFixture,
-  bundledCodexSdkEnvironment,
   workerRequest,
   assertReadOnlyWorkerPolicy,
   workerPermissionProfileOverride,
@@ -58,7 +58,6 @@ import {
   mkdir,
   readFile,
   realpath,
-  stat,
   symlink,
   utimes,
   writeFile,
@@ -966,9 +965,9 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       else process.env.CODEX_CLI_PATH = configured;
       const hasBundledTools = expectedExecutable === codexPath;
       if (hasBundledTools) {
-        process.env.PATH = bundledCodexSdkEnvironment(resolveCodexPath(), {
-          PATH: process.env.PATH,
-        }).PATH;
+        process.env.PATH = [bundledTools, process.env.PATH].join(
+          path.delimiter,
+        );
       }
       await writeFile(
         promptPath,
@@ -3104,6 +3103,17 @@ async function testZeroSubagentsPreservesHostRestrictions() {
 }
 
 async function testLargeScopeTransport() {
+  const { startDeepScanEngine } = await importSource(
+    "src/deep-scan/engine.ts",
+    {
+      loader: { ".md": "text" },
+      define: {
+        "import.meta.url": JSON.stringify(
+          new URL("../src/deep-scan/engine.ts", import.meta.url).href,
+        ),
+      },
+    },
+  );
   const names = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -3162,6 +3172,7 @@ async function testLargeScopeTransport() {
             const filePaths = includePaths.filter(
               (_, index) => index % 2 === 0,
             );
+            const excludePaths = [`scan-${index}/examples`];
             const run = parseDeepScan({
               deepScan: {
                 scanId,
@@ -3170,12 +3181,15 @@ async function testLargeScopeTransport() {
                 scope: ".",
                 includePaths,
                 filePaths,
+                excludePaths,
                 scanDir: workerRoot,
                 config: {
-                  workers: 1,
+                  workers: index + 1,
                   subagents: 0,
-                  stopAfterNoNew: 1,
-                  maxDiscoveryRuns: 1,
+                  stopAfterNoNew: 2,
+                  stopAfterConsecutiveErrors: 3,
+                  maxDiscoveryRuns: 9,
+                  maxTimeHours: index + 0.5,
                 },
                 dispatchedCount: 0,
                 noNewStreak: 0,
@@ -3186,25 +3200,31 @@ async function testLargeScopeTransport() {
               index === 0
                 ? { pluginReadRoot: pluginRoot, sourceReadRoot: run.targetPath }
                 : {};
-            const executor = new CodexSdkWorkerExecutor({
-              ...restoredDeepScanWorkerSettings(
-                {
-                  parentSandbox: {
-                    ...trustedParentSandbox,
-                    pluginReadRoot: path.join(fixture.root, "previous-plugin"),
-                    sourceReadRoot: path.join(fixture.root, "previous-source"),
+            const settings = await captureDeepScanExecutionSettings(run, {
+              ...trustedParentSandbox,
+              pluginReadRoot: path.join(fixture.root, "previous-plugin"),
+              sourceReadRoot: path.join(fixture.root, "previous-source"),
+            });
+            const { coordinator: executor } = await startDeepScanEngine({
+              run,
+              store: {
+                claimCoordinator: async () => ({
+                  acquired: true,
+                  run: {
+                    ...run,
+                    executionSettings: { version: 1, settings },
                   },
-                },
-                { ...trustedParentSandbox, ...currentRoots },
-              ),
-              artifactContext: {
-                pluginRoot: fixture.root,
-                repoRoot: run.targetPath,
-                scanId: run.scanId,
-                scope: run.scope,
-                includePaths: run.includePaths,
-                filePaths: run.filePaths,
+                }),
               },
+              registry: {
+                get: () => undefined,
+                start: ({ executor }: { executor: unknown }) => executor,
+              },
+              runWorkbench: async () => ({}),
+              pluginRoot: fixture.root,
+              pythonCommand: process.env.PYTHON || "python3",
+              parentSandbox: { ...trustedParentSandbox, ...currentRoots },
+              threadId: `scope-parent-${index}`,
             });
             await executor.run(
               workerRequest(prompt, output, {
@@ -3237,8 +3257,24 @@ async function testLargeScopeTransport() {
                   : {}),
               },
             );
+            assert.deepEqual(
+              { ...(parseToml(invocation.deepConfig).deep_scan as object) },
+              {
+                workers: index + 1,
+                subagents: 0,
+                stop_after_no_new: 2,
+                stop_after_consecutive_errors: 3,
+                max_discovery_runs: 9,
+                max_time_hours: index + 0.5,
+              },
+            );
             assert.deepEqual(invocation.scopeInput.paths, includePaths);
             assert.deepEqual(invocation.scopeInput.filePaths, filePaths);
+            assert.deepEqual(invocation.scopeInput.excludePaths, excludePaths);
+            assert.deepEqual(
+              JSON.parse(invocation.scanExclusions),
+              excludePaths,
+            );
             assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
             await assert.rejects(readFile(invocation.scopeInput.file), {
               code: "ENOENT",

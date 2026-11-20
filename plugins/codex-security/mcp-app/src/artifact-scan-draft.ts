@@ -288,11 +288,12 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     const target = buildTarget(context, contract, trustedTarget);
     const scope = buildScope(context, trustedScope, reconciled.scope);
     const scopedFindings =
-      context.mode === "deep"
+      context.mode === "deep" || (scope.excludePaths as string[]).length > 0
         ? findingsWithinScope(
             reconciled.findings,
             scope.includePaths as string[],
             trustedScope.filePaths as string[] | undefined,
+            scope.excludePaths as string[],
           )
         : reconciled.findings;
     // Coordinator publication also carries retained historical payloads.
@@ -468,6 +469,7 @@ export async function recordCodexSecurityWorkerScanDraft(
         parsed.findings,
         includePaths,
         context.filePaths,
+        context.excludePaths,
       ),
     };
     const preserved = await preserveScanDraft(context, scoped);
@@ -477,6 +479,7 @@ export async function recordCodexSecurityWorkerScanDraft(
       scoped.findings,
       includePaths,
       context.filePaths,
+      context.excludePaths,
     );
     const destination = await artifactDestination(
       context,
@@ -525,11 +528,15 @@ export function findingsWithinScope<Finding extends JsonObject>(
   findings: Finding[],
   includePaths: readonly string[],
   filePaths: readonly string[] = [],
+  excludePaths: readonly string[] = [],
 ): Finding[] {
   const scopes = includePaths.map((scope) =>
     posix.normalize(scope).replace(/\/$/u, ""),
   );
-  if (scopes.includes(".")) return findings;
+  const exclusions = excludePaths.map((scope) =>
+    posix.normalize(scope).replace(/\/$/u, ""),
+  );
+  if (scopes.includes(".") && exclusions.length === 0) return findings;
   const files = new Set(
     filePaths.map((path) => posix.normalize(path).replace(/\/$/u, "")),
   );
@@ -540,10 +547,20 @@ export function findingsWithinScope<Finding extends JsonObject>(
   return findings.filter((finding) =>
     (finding.locations as JsonObject[]).some((location) => {
       const path = posix.normalize(location.path as string);
-      return targets.some(
-        (scope) =>
-          path === scope.path ||
-          (!scope.isFile && path.startsWith(`${scope.path}/`)),
+      if (
+        exclusions.some(
+          (scope) =>
+            scope === "." || path === scope || path.startsWith(`${scope}/`),
+        )
+      )
+        return false;
+      return (
+        scopes.includes(".") ||
+        targets.some(
+          (scope) =>
+            path === scope.path ||
+            (!scope.isFile && path.startsWith(`${scope.path}/`)),
+        )
       );
     }),
   );
@@ -613,7 +630,7 @@ export async function hasScanDraftCheckpoint(
   const { handoffClaimToken: _claim, ...snapshot } = input;
   if (saved?.contents === JSON.stringify(snapshot, null, 2) + "\n") return true;
   const includePaths = context.includePaths ?? [context.scope || "."];
-  if (includePaths.includes(".")) return false;
+  if (includePaths.includes(".") && !context.excludePaths?.length) return false;
   // Older writers checkpointed inherited findings before applying the bound scope.
   // Compare the entire projected payload, including every receipt ownership field.
   for (const { snapshot: recorded } of await readSavedCheckpoints(
@@ -630,6 +647,7 @@ export async function hasScanDraftCheckpoint(
             checkpoint.findings as JsonObject[],
             includePaths,
             context.filePaths,
+            context.excludePaths,
           ),
         },
         snapshot,
@@ -1450,6 +1468,7 @@ async function preserveScanDraft(
       result.findings,
       context.includePaths ?? [context.scope || "."],
       context.filePaths,
+      context.excludePaths,
     );
   }
   const receiptLocation = (ref: string) => {

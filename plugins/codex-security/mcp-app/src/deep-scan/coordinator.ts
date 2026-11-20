@@ -416,6 +416,7 @@ export class DeepScanCoordinator {
         draft.findings,
         this.state.includePaths ?? [this.state.scope],
         this.state.filePaths,
+        this.state.excludePaths,
       );
       await this.options.onComplete?.(
         draft,

@@ -285,6 +285,10 @@ for (const {
   resumeValidation,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
+  const excludePaths =
+    outcome === "restart-deleted-target" && !resumeValidation
+      ? ["examples"]
+      : undefined;
   const restart = outcome.startsWith("restart") || resumedStop;
   const unavailableStartup =
     outcome.startsWith("restart-") && outcome !== "restart-changed-target";
@@ -906,6 +910,7 @@ for (const {
         await expect(
           client.run(repository, {
             mode: "deep",
+            excludePaths,
             postScanPrompt: resumedStop ? undefined : followUp,
             ...(budgeted || recoveryBudget ? { maxCostUsd: 0.004 } : {}),
           }),
@@ -1370,8 +1375,19 @@ for (const {
         );
         return;
       }
+      if (excludePaths) {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+            excludePaths: ["extract.py"],
+          }),
+        ).rejects.toThrow("mismatched scan resume context");
+      }
       const result = await client.run(repository, {
         mode: "deep",
+        excludePaths,
         ownerSuggestions: recoverOwners,
         ...(outcome === "restart-missing-knowledge"
           ? { knowledgeBasePaths: [join(root, "missing-knowledge.md")] }

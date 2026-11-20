@@ -8,7 +8,11 @@ from typing import Any
 import workbench_scan_history as scan_history
 from finalize_scan_contract import PRODUCER_NAME
 from workbench_scan_start import loaded_plugin_version, stored_diff_target
-from workbench_source_scopes import expected_target_kinds, requested_scan_paths
+from workbench_source_scopes import (
+    expected_target_kinds,
+    requested_exclude_paths,
+    requested_scan_paths,
+)
 from workbench_target import clean_worktree_content_digest, diff_snapshot_digest
 from workbench_validation import path_within_scope, reject_non_finite_json
 
@@ -48,7 +52,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     return {
         "diffTarget": stored_diff_target(scan),
         "scope": {
-            "requiredExcludePaths": [],
+            "requiredExcludePaths": requested_exclude_paths(scan),
             "requestedPath": scan["scope"],
             "filePaths": requested_scan_file_paths(scan),
             **(
@@ -162,7 +166,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
     include_paths = scope.get("includePaths")
     if not isinstance(include_paths, list):
         raise SystemExit("scan-manifest.json scope includePaths must be an array.")
-    if scope.get("excludePaths") != []:
+    if scope.get("excludePaths") != expected_contract["scope"]["requiredExcludePaths"]:
         raise SystemExit(
             "scan-manifest.json scope excludePaths must match the workbench scan scope."
         )

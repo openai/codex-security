@@ -553,13 +553,6 @@ export function createCoordinator(
   });
 }
 
-type CoordinatorFinding = ReturnType<
-  typeof standardScanDraft
->["findings"][number] & {
-  identity?: { anchor: string };
-  provenance: { sourceFindingIds?: string[] };
-};
-
 export function startCoordinator(
   ...args: Parameters<typeof createCoordinator>
 ) {

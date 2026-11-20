@@ -37,6 +37,7 @@ import { type ScanExecutionAttribution } from "./scan-sessions.js";
 import {
   DiffTarget,
   enclosingGitWorktreeRoot,
+  normalizeExcludedPaths,
   resolveRepositoryPath,
   type NormalizedTarget,
 } from "./targets.js";
@@ -192,7 +193,12 @@ export async function recoverSelectedScanStartup<T>(input: {
             : Array.isArray(requested) &&
               target["kind"] === "paths" &&
               JSON.stringify(paths) === JSON.stringify(target["paths"]);
-    if (!matches)
+    const excludePaths = normalizeExcludedPaths(options.excludePaths);
+    if (
+      !matches ||
+      JSON.stringify(recipe["excludePaths"] ?? []) !==
+        JSON.stringify(excludePaths)
+    )
       throw new CodexSecurityError(
         "The workbench returned mismatched scan resume context.",
       );
@@ -383,6 +389,7 @@ export async function recoverSelectedScanStartup<T>(input: {
             ? null
             : saved["targetRevision"],
         target: target as unknown as NormalizedTarget,
+        excludePaths,
         mode: "deep",
         pluginVersion:
           typeof saved["sealedProducerVersion"] === "string"

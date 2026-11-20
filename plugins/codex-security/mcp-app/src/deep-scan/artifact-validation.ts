@@ -69,7 +69,7 @@ export function parseScanUnion(input: unknown): ScanUnion {
 
 interface DiscoveryAuditOptions extends Pick<
   ArtifactContext,
-  "scope" | "includePaths" | "filePaths"
+  "scope" | "includePaths" | "filePaths" | "excludePaths"
 > {
   accepted?: boolean;
   validateWriteups?: boolean;
@@ -114,6 +114,7 @@ export async function readDiscoveryAuditDraft(
     scope: options.scope,
     includePaths: options.includePaths,
     filePaths: options.filePaths,
+    excludePaths: options.excludePaths,
   };
   const stored = await readJsonObject(resultPath, {
     scanRoot: artifacts.scanDir,

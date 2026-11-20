@@ -17,7 +17,7 @@ import re
 import stat
 import struct
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -107,6 +107,13 @@ WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
 
 class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
+
+    def __init__(
+        self, message: str, *, reason: str = "validation_failed", location: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.location = location
 
 
 class ScanLocalIOError(ContractError):
@@ -408,24 +415,32 @@ def _require_safe_json_string(value: str, context: str) -> None:
         raise ContractError(f"{context}: expected well-formed Unicode JSON strings") from exc
 
 
+def _required_field_error(value: Any, location: str, expected: str) -> ContractError:
+    return ContractError(
+        f"{location}: expected {expected}",
+        reason="missing_required_field" if value is None else "invalid_required_field",
+        location=location,
+    )
+
+
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
     value = payload.get(key)
     if not isinstance(value, dict):
-        raise ContractError(f"{context}.{key}: expected an object")
+        raise _required_field_error(value, f"{context}.{key}", "an object")
     return value
 
 
 def _require_list(payload: dict[str, Any], key: str, context: str) -> list[Any]:
     value = payload.get(key)
     if not isinstance(value, list):
-        raise ContractError(f"{context}.{key}: expected an array")
+        raise _required_field_error(value, f"{context}.{key}", "an array")
     return value
 
 
 def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise ContractError(f"{context}.{key}: expected a non-empty string")
+        raise _required_field_error(value, f"{context}.{key}", "a non-empty string")
     return value
 
 
@@ -629,7 +644,9 @@ def _open_scan_local_file_with_path(
             # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
             if exc.errno in {2, 3}:
                 raise MissingScanLocalFileError(
-                    f"{context}: expected a file inside the scan directory"
+                    f"{context}: expected a file inside the scan directory",
+                    reason="missing_artifact",
+                    location=relative_path,
                 ) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
@@ -648,7 +665,9 @@ def _open_scan_local_file_with_path(
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 raise MissingScanLocalFileError(
-                    f"{context}: expected a file inside the scan directory"
+                    f"{context}: expected a file inside the scan directory",
+                    reason="missing_artifact",
+                    location=relative_path,
                 ) from exc
             if exc.errno == errno.ELOOP:
                 try:
@@ -749,7 +768,9 @@ def _read_scan_local_json_with_metadata(
         try:
             payload = _loads_json(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, ValueError) as exc:
-            raise ContractError(f"{context}: invalid JSON: {exc}") from exc
+            raise ContractError(
+                f"{context}: invalid JSON: {exc}", reason="invalid_json", location=relative_path
+            ) from exc
         if not isinstance(payload, dict):
             raise ContractError(f"{context}: expected a JSON object")
         _require_safe_json_value(payload, context, validate_strings=False)
@@ -1765,6 +1786,29 @@ def path_within_scope(path: str, scope: str) -> bool:
     return candidate.is_relative_to(requested)
 
 
+def finding_in_scope(
+    finding: dict[str, Any],
+    scope: Sequence[tuple[str, bool]] | None,
+    exclusions: Sequence[str],
+) -> bool:
+    locations = finding.get("locations")
+    if not isinstance(locations, list):
+        return False
+    for location in locations:
+        if not isinstance(location, dict) or not isinstance(path := location.get("path"), str):
+            continue
+        if any(path_within_scope(path, excluded) for excluded in exclusions):
+            continue
+        if scope is None or any(
+            PurePosixPath(path) == PurePosixPath(target)
+            if is_file
+            else path_within_scope(path, target)
+            for target, is_file in scope
+        ):
+            return True
+    return False
+
+
 def _validate_finding(finding: dict[str, Any], context: str) -> None:
     for key in ("findingId", "occurrenceId", "ruleId", "title", "summary", "remediation"):
         _require_str(finding, key, context)
@@ -1998,7 +2042,9 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
         if required_path not in artifact_paths:
             raise ContractError(
-                f"manifest.scan.artifacts: missing required artifact: {required_path}"
+                f"manifest.scan.artifacts: missing required artifact: {required_path}",
+                reason="missing_artifact_record",
+                location=required_path,
             )
     _require_safe_json_value(manifest, "scan-manifest.json")
 
@@ -2200,7 +2246,11 @@ def _validate_schema_node(
                     _validate_schema_node(value, then_schema, context, root_schema)
         for key in schema.get("required", []):
             if key not in value:
-                raise ContractError(f"{context}.{key}: missing required schema property")
+                raise ContractError(
+                    f"{context}.{key}: missing required schema property",
+                    reason="missing_required_field",
+                    location=f"{context}.{key}",
+                )
         if "minProperties" in schema and len(value) < schema["minProperties"]:
             raise ContractError(f"{context}: object has too few properties")
         properties = schema.get("properties", {})
@@ -2724,7 +2774,11 @@ def _validate_existing_seal(
             else _sha256_scan_local_file(scan_dir, path, context)
         )
         if actual_sha256 != expected_sha256:
-            raise ContractError(f"{context}: sealed artifact changed or is missing")
+            raise ContractError(
+                f"{context}: sealed artifact changed or is missing",
+                reason="artifact_digest_mismatch",
+                location=path,
+            )
 
 
 def _read_scan_artifacts(
@@ -3208,23 +3262,23 @@ def _prepare_scan_finalization(
     validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
-    if finding_scope is not None:
+    requested_exclusions = (
+        completion_binding.get("scope", {}).get("excludePaths", [])
+        if completion_binding is not None
+        else []
+    )
+    if finding_scope is not None or requested_exclusions:
         # Accepted worker/reducer files remain immutable; only the new parent
         # projection is scoped, after the existing validation of every finding.
         scoped_findings = []
         excluded_findings = []
         for finding in findings["findings"]:
-            in_scope = any(
-                PurePosixPath(location["path"]) == PurePosixPath(path)
-                if is_file
-                else path_within_scope(location["path"], path)
-                for location in finding["locations"]
-                for path, is_file in finding_scope
-            )
+            in_scope = finding_in_scope(finding, finding_scope, requested_exclusions)
             (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
+            label = "Deep scan" if finding_scope is not None else "scan"
             raise ContractError(
-                "The sealed Deep scan contains findings outside its requested paths; "
+                f"The sealed {label} contains findings outside its requested scope; "
                 "start a new scan to produce scoped results."
             )
         if not was_sealed:

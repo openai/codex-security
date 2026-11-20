@@ -173,3 +173,39 @@ def test_conflicting_deep_scan_receipt_preserves_database(version: int) -> None:
         assert list(connection.iterdump()) == before
     finally:
         connection.close()
+
+
+def test_repository_preview_history_keeps_original_application_times_after_budget_upgrade():
+    connection, migrate = create_historical_database(72)
+    connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
+    connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 63")
+    for column in (
+        "log_completed_at",
+        "windows_resume_output_identity",
+        "windows_resume_target_identity",
+    ):
+        connection.execute(f"ALTER TABLE scans DROP COLUMN {column}")
+    connection.execute("DELETE FROM schema_migrations WHERE version BETWEEN 64 AND 66")
+    for version in range(67, 72):
+        connection.execute(
+            "UPDATE schema_migrations SET version = ?, applied_at = ? WHERE version = ?",
+            (version - 4, f"preview-{version - 4}", version),
+        )
+
+    migrate(connection)
+    migrate(connection)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, applied_at FROM schema_migrations "
+            "WHERE version BETWEEN 67 AND 71 ORDER BY version"
+        )
+    ] == [(version, f"preview-{version - 4}") for version in range(67, 72)]
+    assert (
+        connection.execute("SELECT name FROM schema_migrations WHERE version = 63").fetchone()[0]
+        == "retain unverified Deep Scan worker attempts"
+    )
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
