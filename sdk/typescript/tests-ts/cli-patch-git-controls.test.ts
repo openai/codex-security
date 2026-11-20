@@ -337,7 +337,7 @@ const controls = await capturePatchGitControls(repository, async (_root, checkou
     },
   });
   return result.toString(options?.encoding === "base64" ? "base64" : "utf8");
-}, false);
+}, { usesWorktreeMarker: false });
 await controls.validate();
 console.log(JSON.stringify(controls.snapshotStoragePaths));
 `,
@@ -1722,7 +1722,7 @@ lines.on("line", (line) => {
         import { capturePatchGitControls } from ${JSON.stringify(await buildPatchGitControlsForNode(bundle))};
         const root = ${JSON.stringify(root)};
         const child = ${JSON.stringify(child)};
-        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}) }}).toString(options?.encoding ?? "utf8"), true);
+        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}) }}).toString(options?.encoding ?? "utf8"));
         await writeFile(child + "/app.txt", "after\\n");
         await controls.validate();
         process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));
