@@ -40,6 +40,141 @@ including file names that begin with a dash.
 - [Use a hosted executor](#hosted-standard-scan) or
   [run bulk scans in containers](#containerized-bulk-scans).
 
+## Experimental dependency investigations
+
+Set `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` to enable the experimental
+`exploitability` command group for an invocation. The group is hidden and unavailable
+by default. Use its help to see the commands available in your installed version.
+
+```sh
+CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability --help
+```
+
+Supply one CVE and the three documents described by the package’s `schemas/dependency-stack-inputs-v1.schema.json`. Run the check in the repository at the exact Git commit identified by the stacks.
+
+```sh
+CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability check CVE-2099-0001 \
+  --sources sources.json --sinks sinks.json --stacks stacks.json --report-file report.json
+```
+
+The CLI looks up the CVE using the same OSV and alias resolution as a repository check. Before inspecting callers, it makes one model call to identify necessary trigger conditions for the supplied sinks. Each derived condition cites an exact passage in a resolved advisory. An investigator checks the supplied and derived conditions against the captured calls and the pinned source. The validator uses those same conditions for each verdict. The public lookup uses the CVE and associated advisory identifiers. The stack data stays out of the lookup.
+
+Open `report.json` to see the public records, their hashes and available revisions in `advisoryDetails`, and the per-sink conditions and supporting quotes in `triggerAnalysis`. If the public lookup fails, the CLI records `advisoryLookupError` and proceeds with the catalog advisory and its original preconditions. If the trigger analysis fails validation, the check stops before investigating callers.
+
+After validating the draft, the CLI asks a fresh read-only reviewer to check each verdict against the packet and pinned checkout. The reviewer looks for unanswered questions the available evidence could settle, such as which parser handles the input or how a downstream consumer uses the output. A missing deployment fact can still justify `unknown`.
+
+If the reviewer requests follow-up, the CLI reopens the specified work items and retains the evidence and other assessments. A fresh reviewer checks all assessments after each correction. Stack checks share the repository workflow’s allowance of two correction passes when each pass starts a fresh model call. Unresolved follow-up after that allowance or an invalid review causes the check to exit with an error. Each draft has `review: null`. After approval, the CLI fills `review` with the draft’s digest and the reviewer’s reason for each decision. The reviewer can approve an `unknown` verdict when the report identifies the specific missing evidence.
+
+To reuse a successful analysis with the same catalog and capture, copy both fields from the report to a new sink document.
+
+```sh
+jq -e --slurpfile r report.json '
+  select($r[0].advisoryDetails and $r[0].triggerAnalysis)
+  | . + ($r[0] | {advisoryDetails, triggerAnalysis})
+' sinks.json > sinks-replay.json
+```
+
+Pass `--sinks sinks-replay.json` and choose a new report filename. The CLI validates the supplied records and quotes, skips the public lookup and trigger extraction, and reruns the caller investigation and independent review. Treat a supplied snapshot as evidence from its producer. The hashes verify its contents against the saved hashes. Supplying only `advisoryDetails` skips the lookup and runs trigger extraction on those records.
+
+An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt. `run tools --state <database>` lists operation schemas. Use `next` and `read-stacks` to select evidence, `record-evidence` and `record-claims` to save it, and `query-claims` to retrieve its exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file. These lower-level operations run offline. A direct `run finalize` returns an immutable report with `review: null`.
+
+When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
+
+A missing observation or a gap in the evidence can yield a completed `unknown` assessment. An `unknown` verdict on a matched stack with consistent scope requires one `questionChecks` entry per remaining question. Each entry records the exact question, what the investigator inspected, the supporting claim revisions and the specific missing evidence. Both `record-assessments` and `finalize` apply the same static checks. Only the high-level `exploitability check` adds independent model review. Reports retain the question checks. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
+
+### Choose a report format
+
+Run `check` for a terminal summary. Add `--format html` to save a
+self-contained `exploitability_report_<timestamp>.html` in the current
+directory. The timestamp uses UTC, for example `20261119T213045123Z`.
+The terminal shows the summary and the path to the file. To choose
+a different destination, add `--report-file path/to/review.html`. Set
+`CVE_ID` to the advisory you want to check in your checkout.
+
+```sh
+export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
+cs exploitability check "$CVE_ID" --format html
+```
+
+Open the file in a browser. The header identifies the repository and commit
+assessed when those were recorded. Select a call site to read its verdict and
+the advisory conditions, then step through the path to see the code at each
+recorded line. **Expand all** shows the excerpts together. **Focus** opens
+the path across the workspace. For a sampled stack, the viewer shows gaps
+where the report omitted frames and identifies frames without matching source.
+
+For a stack investigation, use
+`cs exploitability run finalize --state investigation.sqlite --format html`.
+Each stack assessment applies to its captured workload and observation window.
+
+Use `--format md` with either command to print Markdown. Each sampled stack
+appears under its verdict, starting with the outermost recorded caller. Frames
+show the function and any recorded file and line. A code block shows the exact
+line when the saved source matches the frame and its build. Gaps mark omitted
+frames. A cited call that cannot be placed on the stack appears under
+**Source review**.
+
+Use `--json` to print the structured result. With Markdown, JSON, or the
+default terminal summary, `--report-file` saves the underlying JSON. A finding
+marked **Requires more information** corresponds to `unknown` in JSON.
+
+### Reviewed repository and package checks
+
+From a Git checkout, use the same opt-in to investigate a published CVE or a package. The CLI freezes the public advisory, finds dependency selections and caller paths at the checked-out commit, and asks a fresh reviewer to approve each exact claim revision. The resulting JSON keeps each supported use and its source citations separate.
+
+```sh
+export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
+cs exploitability check CVE-2019-10744 --json --report-file report.json
+cs exploitability check npm:lodash --progress-events progress.jsonl
+cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
+```
+
+Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed report atomically to a new file and preserves any existing destination.
+
+The investigator can delegate source searches while an independent reviewer evaluates proposed uses and the claims they rely on. Investigators share evidence collected during the check. The reviewer selects the citations that support each approved claim. A deciding MCP citation can identify a single JSON value. Its `receiptId` identifies the captured response, `originalPayloadSha256` identifies its contents, and `selection.record` gives the key and index path. A null `selection.textBlock` selects structured content. A numeric value selects a JSON text block by index. Whole-response citations omit `selection`. Open a use in the JSON report to see its component, version, verdict, and deciding evidence. The progress stream includes provisional verdicts that can change during review.
+
+Both a terminal and redirected stderr show investigation stages, scoped source searches, reviewed verdicts and the final verdict counts. When you use `--report-file`, stderr also shows the absolute path to the saved report. With `--json`, stdout contains only the report or blocked outcome.
+
+Use `--progress-events FILE` for live JSON Lines. Each event carries `schemaVersion: 1`, `elapsedMs`, `subject` and `type`. Match `activity_started` and `activity_finished` by `id`. A finished trace includes the checkout-relative `searchedPaths` when the tracer reports them. A `reviewed` event can carry a `previousVerdict` when an assessment changes. The `access_program` event reports the program selected for the investigation turn, or `unconfirmed` when the transport does not expose it. The `report_ready` event includes verdict counts, the limitation count and the saved report path when requested. The final `finished` event records the command outcome.
+
+For repository checks, the coordinator runs at high reasoning effort. Investigator subagents use the effort selected by `--effort` or the project profile unless `agents.default_subagent_reasoning_effort` sets their effort explicitly. Independent claim reviewers run at low effort. Review feedback returns to the same coordinator thread with the original plan, claims and evidence. If the native process exits unexpectedly, the CLI can resume that thread once when its last tool operations have a known outcome.
+
+The host includes every current approved assessment submitted during the investigation. The coordinator’s final `uses` array adds findings that have yet to be submitted and can be empty. To revise a submitted assessment, the coordinator uses its ID and current revision. Assessments for distinct call sites, package copies, or deployments can share a scope and location.
+
+Investigators use `update_codex_security_graph` to share a source note (`note`) or track files in a delegated search (`sourceWork`). A note can identify a newly discovered caller or sink and cite lines from the pinned Git revision. Other investigators can find it with `query_codex_security_graph({note:{search}})` and read the excerpts with `{note:{id}}`. Submitting a claim based on those lines starts independent review.
+
+Before creating an assessment, investigators query the existing uses. They submit new evidence for the same caller, copy and deployment under its existing ID. To withdraw a superseded use, an investigator submits a disposition under that ID with the latest `expectedRevision`, the approved use’s exact `{id, revision, hash}` in `replacesUse`, and evidence for the change. The reviewer receives the prior finding, its proof and the proposed reason. The original stays in effect while its evidence remains current, until a replacement passes review. An approved disposition’s `conclusionClaim` points to its current report entry. The claim payload’s `replacesUse` records the earlier revision in the investigation ledger.
+
+A repository use or disposition may include an ordered `trace` of cited
+source and handoff steps. Each step names the input or call, its file and
+line, and optionally the exact expression carrying the input. A gap names
+the missing link. The terminal function, call site, and optional argument
+live in `proof.sink` on a use. The reviewer checks these against the pinned
+source. Older reports can still show just the sink. The viewer never turns
+a location label into a call chain.
+
+When the investigation finds a caller but cannot establish which dependency operation it reaches, it can submit an unresolved coverage disposition. Its handoff records what the investigator verified and what evidence is still needed. A dismissal identifies the observed candidate and explains the evidence for excluding it. Each approved disposition in `coverage` links to its own reviewed claim revision, deciding source ranges or original receipt rows, and any selected supporting claims. Source tracing can add candidate lines after initial discovery. The host verifies their source against the checked-out Git revision and resolves the owning package before adding them to coverage. Other unassessed callers retain their own coverage gaps.
+
+A repository check can ask MCP servers for facts it cannot learn from the checkout. For example, a lockfile can identify the package selected by a build. A deployment inventory can show whether that build is running. In a project file, list the servers under `exploitability.evidence_sources` and describe when the investigator should use each one. Define the connection once under `codex.mcp_servers`. Configure read-only tools for the systems you want the investigator to query.
+
+```yaml
+exploitability:
+  evidence_sources:
+    - server: deployments
+      instructions: Look up the running commit and installed package version for the service under review.
+codex:
+  mcp_servers:
+    deployments:
+      command: /path/to/your/inventory-server
+      enabled_tools: [get_deployment]
+```
+
+Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. Repository checks default to production services, jobs, workers, and the code they deploy or import. Set `exploitability.scope.instructions` to replace that caller scope. Use `exploitability.scope.exclude_paths` for literal checkout-relative files or directories to omit from broad discovery. A nested `SECURITY.md` boundary or an exact source or build lead can bring a path back into the investigation.
+
+Repository checks also accept independent `exploitability.sources` and `exploitability.sinks` lists in the project file. Each endpoint names a `function` and can include its package, symbol, file, and line. Supply a list to describe all endpoints on that side of the scenario, including an empty list when the side has no endpoints. Omit the list to let the investigator discover endpoints. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
+
+The report's `assumptions` records the caller scope, supplied endpoint lists, and paths excluded from broad discovery. A runtime selector's source `line` requires its `location`. The selector retains additional JSON metadata supplied by the evidence source.
+
 ## Updating the CLI
 
 Run `cs update` to update an npm global installation managed by the running
@@ -264,6 +399,27 @@ comparisons, and deduplication preserve that selection. Relative helper paths an
 `auth.cwd` resolve from `CODEX_HOME` (default `~/.codex`). Comparisons and reviews
 also honor the selected command provider in that home's `config.toml`.
 
+For OrcaRouter, save this profile in `$CODEX_HOME/orcarouter.config.toml`
+(default `~/.codex/orcarouter.config.toml`), then run
+`codex-security scan . --codex 'profile="orcarouter"'`. Sign in to the 1Password CLI and
+replace the secret reference below with the one for your router key.
+
+```toml
+model = "orcarouter/fusion"
+model_provider = "orcarouter"
+
+[model_providers.orcarouter]
+name = "OrcaRouter"
+base_url = "https://api.orcarouter.ai/v1"
+wire_api = "responses"
+
+[model_providers.orcarouter.auth]
+command = "op"
+args = ["read", "op://Private/OrcaRouter/credential"]
+```
+
+This profile was tested up to the outgoing Responses request using a local service.
+
 For other providers, set their key and select a model the provider supports:
 
 ```bash
@@ -276,6 +432,88 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
+
+For Opper, save this profile in `$CODEX_HOME/opper.config.toml`
+(default `~/.codex/opper.config.toml`). Opper requires `web_search = "disabled"`.
+
+```toml
+model_provider = "opper"
+model = "anthropic/claude-sonnet-4-6"
+web_search = "disabled"
+
+[model_providers.opper]
+name = "Opper"
+base_url = "https://api.opper.ai/v3/compat"
+wire_api = "responses"
+env_key = "OPPER_API_KEY"
+```
+
+Set `OPPER_API_KEY` in your environment and run
+`codex-security scan . --codex 'profile="opper"'`. Choose a model that supports
+tool calling and streaming. Verification covered profile loading and a request to
+a local Responses endpoint.
+See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
+
+### xAI Responses API through a local gateway
+
+Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
+declarations. A direct scan against xAI can pass `--dry-run` and then fail with
+HTTP 422 on the first model request. CLIProxyAPI's xAI adapter exposes each
+namespace member to xAI as a plain function and restores the namespace when
+Codex receives a tool call. Both connections use the Responses API.
+[Direct xAI provider support](https://github.com/openai/codex-security/issues/2412)
+
+Install CLIProxyAPI v8.0.59 and save this gateway config outside the scanned
+repository in a file readable only by the gateway user. Replace the placeholders
+with a private client key of your choice and your xAI API key.
+[CLIProxyAPI release](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.59)
+
+```yaml
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+access:
+  api-keys: ["<gateway-client-key>"]
+api-keys:
+  xai:
+    - name: scan
+      base-url: "https://api.x.ai/v1"
+      models:
+        - name: "grok-4.7"
+      keys:
+        - api-key: "<xai-api-key>"
+oauth:
+  auth-dir: "~/.cli-proxy-api-xai"
+```
+
+Start the gateway in one shell.
+
+```bash
+cli-proxy-api -config /path/to/private/config.yaml -local-model
+```
+
+In a second shell on the same machine or in the same container, set
+`CODEX_API_KEY` to the client key from `access.api-keys` and run the scan.
+
+```bash
+codex-security scan . --auth api-key --model grok-4.7 --effort low \
+  --codex "model_provider='xai'" \
+  --codex "model_providers.xai.name='xAI'" \
+  --codex "model_providers.xai.base_url='http://127.0.0.1:8317/v1'" \
+  --codex "model_providers.xai.wire_api='responses'" \
+  --codex "model_providers.xai.env_key='CODEX_API_KEY'" \
+  --codex 'features.multi_agent_v2.max_concurrent_threads_per_session=1'
+```
+
+The one-thread setting keeps Standard scans from spawning subagents. Without it,
+the gateway can forward a subagent's `agent_message` on a later request, which
+xAI rejects with HTTP 422. A contributor completed a live Standard scan with
+this setting. Deep Scan workers have separate concurrency settings and remain
+unverified with this gateway.
+
+The SDK has no built-in price for `grok-4.7`, so it rejects `--max-cost` for this
+model before starting a scan.
 
 ### Hugging Face compatibility
 
@@ -508,13 +746,21 @@ callback, questions remain unresolved.
 ```bash
 codex-security scan .
 codex-security scan . --path src --path tests
+codex-security scan . --exclude-path examples/
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
 codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
-`--path` selects files or directories. The scan summary and saved scan details
+`--path` selects files or directories. Repeat `--exclude-path` to exclude literal
+repository-relative files or directories, including all descendants of a directory.
+Exclusions take precedence over `--path`, also apply to diff and Deep scans, and
+default to none. For persistent exclusions, set `scan.exclude_paths` in a selected
+project config. CLI exclusions replace that configured list. Excluded files remain
+readable as context, but findings whose locations are all excluded are removed
+from scan results.
+The scan summary and saved scan details
 show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
@@ -1438,10 +1684,10 @@ Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--post-scan-prompt-file` runs a follow-up even after failure, but not after
 cancellation or a cost stop.
 
-Concurrency defaults to four repositories. `--max-attempts` defaults to one
-attempt per pending repository per invocation. Repeating the command continues
-the campaign, skips completed results, and starts pending attempts. Occupied
-attempt directories stop that repository and suggest `--recover`.
+By default, `bulk-scan` runs up to four repositories concurrently and tries each
+unfinished CSV row once per run. With `--max-attempts 2`, a row that fails
+attempts 1 and 2 gets up to two more attempts (3 and 4) on the next run.
+An occupied attempt directory stops that row and prompts for `--recover`.
 If an ordinary attempt finds its checkout path already occupied, it stops before
 fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
 existing checkout before an ordinary retry.
@@ -1484,7 +1730,7 @@ failed or interrupted attempt:
   revision, preserving old artifacts and checkouts.
 
 Each nonempty committed line in `results.jsonl` must be valid JSON with a string
-task ID and a positive safe integer attempt number. If a line fails these checks,
+task ID from the manifest and a positive safe integer attempt number. For an invalid line,
 the command reports its line number and preserves the ledger. Restore a complete
 ledger backup that includes every committed attempt, or start a separate campaign
 in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
@@ -1636,12 +1882,14 @@ credential and Region selection. Preview and import the report separately
 with `publish findings FILE --provider continuum`. Pass
 `--source-repository-url URL` when the report has no saved repository URL.
 
-For one finding and its generated patches, add `--finding-id FINDING_ID` and
+For one finding, its matching validation evidence, and its generated patches, add `--finding-id FINDING_ID` and
 `--source-root CHECKOUT` with the absolute checkout path. The CLI uses
 `GetEnvironment` to verify that the environment has exactly one Git repository
 and no S3 sources before including unnamed patches. Pass
 `--repository-name AWS_SOURCE_NAME` for other environments to keep patches
-with that exact AWS source name. This mode accepts the same AWS profile and
+with that exact AWS source name. Validation is matched by AWS finding ID. When a
+validation artifact has no per-finding breakdown, the CLI uses `GetCodeIssue` to
+check that the issue covers just the selected finding. This mode accepts the same AWS profile and
 Region overrides and writes the finding-based JSON format for `publish findings`.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
@@ -1952,6 +2200,7 @@ codex-security classify-severity --scan-dir /path/to/completed-scan --json
 ```
 
 For repository-free canonical records, use `classify-severity --records` (optionally with `--runs N`).
+A records host can opt in to the CLI’s structured diagnostic records on its existing JSON-RPC connection. See the [records diagnostic protocol](classify-severity-records.md#cli-diagnostic-records).
 The [records protocol](classify-severity-records.md) accepts immutable Markdown and
 report snapshots and delegates model execution to the host.
 
@@ -2338,6 +2587,7 @@ Use `scans compare BEFORE AFTER` to compare a pair. A cache miss can use the mod
 and save its matching decisions. Pass `--force` to recompute saved matches.
 The older `scans match BEFORE AFTER` spelling is also supported.
 Use `scans match --all` to match completed scans in this repository generation, including linked worktrees.
+The SDK accepts matching plans with inline findings and asks compatible workbenches to send each scan’s findings once.
 Comparisons classify findings as new, persisting, reopened, not observed, resolved,
 or unknown. An absent finding in the later scope is not observed; absence alone
 does not verify remediation. A finding is resolved only after it was explicitly
@@ -2348,11 +2598,12 @@ One comparison ID is compared with the latest completed scan.
 codex-security scans match --all --force --model gpt-6.1-sol --effort high
 ```
 
-When a saved Standard scan and a Deep scan have the same recorded target,
-revision, and snapshot digest, matching flags findings that have different
-anchors but share a unique rule, first displayed source range, and optional
-instance. Matching preserves the case of saved paths. Codex can request the
-saved evidence to distinguish separate causes at that site. Automatic matching
+Standard and Deep scans can identify matching candidates in a single target or
+corresponding paths in linked worktrees with the same saved repository
+generation. When the revision and snapshot digest agree, matching flags findings
+with different anchors that share a unique rule, first displayed source range,
+and optional instance. Matching preserves the case of saved paths. Codex can
+request the saved evidence to distinguish separate causes at that site. Automatic matching
 under a cost limit keeps its single comparison call.
 
 Only high-confidence root-cause matches are grouped. Uncertain and related
@@ -2746,9 +2997,12 @@ text/files, and Linear inputs. Paths resolve from the invocation directory, even
 when the finding belongs to another repository. The file must be nonempty and
 regular, is read before patching, and cannot combine with `--resume-pr`.
 
-Use `--verification-mode static` to assess a patch from source and diff evidence
-without installing dependencies or running builds, tests, reproducers, or the
-application. Validation instructions become questions for that source review.
+Use `--verification-mode static` to request an assessment from source and diff
+evidence. It instructs Codex not to install dependencies or run builds, tests,
+reproducers, or the application; validation instructions become questions for
+that source review. This mode does not change execution permissions or enforce
+source-only behavior. Use an independently enforced execution restriction if
+commands must be prohibited.
 The default is `standard`, which retains the existing verification checks.
 Static results identify the evidence and state that runtime checks were not
 performed; material proof gaps can still block verification.

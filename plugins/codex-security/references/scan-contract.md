@@ -23,6 +23,26 @@ This bundle records immutable scan observations. It is not a workflow-state data
 
 Retention is an explicit consumer decision. Producing a sealed bundle must not silently copy it into an archive.
 
+## Validation receipts
+
+Run `python scripts/validate_scan_contract.py --scan-dir <scan-dir> --json-errors` from the plugin directory to get one JSON receipt on stdout. A valid bundle exits with code 0 and returns the usual success receipt. A missing completion timestamp produces this receipt.
+
+```json
+{"status":"invalid","reason":"missing_required_field","location":"manifest.scan.completedAt"}
+```
+
+| Reason | Meaning |
+| --- | --- |
+| `missing_required_field` | A required property is absent or null. |
+| `invalid_required_field` | A required property is present with an invalid type or empty value. |
+| `missing_artifact` | A file required for validation is absent. |
+| `missing_artifact_record` | The manifest omits a required artifact record. |
+| `artifact_digest_mismatch` | A sealed artifact's bytes differ from its recorded SHA-256 digest. |
+| `invalid_json` | An artifact could not be decoded as JSON. |
+| `validation_failed` | The validator has no more specific reason for this failure. |
+
+The optional `location` identifies a standard artifact or completion field. Consumers should handle unknown reasons and absent locations. Human-readable diagnostics remain on stderr. Without `--json-errors`, stdout stays empty on validation failure.
+
 ## Manifest Semantics
 
 The manifest records the terminal timestamp and a SHA-256 digest for each file listed in `scan.artifacts`. Each path appears exactly once. The current example lists `findings.json` alone. A legacy bundle also lists its referenced coverage file, and scans that retain immutable evidence receipts list those files too. The manifest carries these digests and does not hash itself. Adapters read the sealed files and write reports or exports separately from the seal.
