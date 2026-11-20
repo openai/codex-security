@@ -1413,6 +1413,9 @@ test.each([
   git("remote", "set-url", "origin", `https://${host}/${origin}.git`);
   git("config", marker, "upstream/repository");
   git("config", "push.recurseSubmodules", "false");
+  git("config", "--file", "selector", "lfs.storage", "filter-cache");
+  git("add", "selector");
+  git("commit", "-m", "Set synthetic filter cache");
   if (hook)
     await writeFile(
       join(directory, ".git/hooks/pre-commit"),
@@ -1448,6 +1451,10 @@ test.each([
       return "[]";
     },
     onCodex: async (_args, output) => {
+      if (!local)
+        expect(output?.appServer?.snapshotStoragePaths).toContain(
+          join(directory, ".git", "filter-cache"),
+        );
       if (!hook) await rm(component, { recursive: true });
       git("config", "--file", "selector", marker, "decoy/repository");
       output?.stdout.write("Synthetic patch complete.");

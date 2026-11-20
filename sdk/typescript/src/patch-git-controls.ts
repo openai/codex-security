@@ -1312,22 +1312,27 @@ async function canonicalPath(path: string): Promise<string> {
   return `${await canonicalPath(parent)}${path.slice(parent.length)}`;
 }
 
-export async function publicationConfigSelector(
-  directory: string,
-  environment: ProcessEnvironment,
-): Promise<string | undefined> {
-  const file = environmentEntry(environment, "GIT_CONFIG");
+function gitConfigFile(directory: string, file: string | undefined) {
   if (
     !file ||
     file === "-" ||
     (process.platform === "win32" && file.toUpperCase() === "NUL")
   )
     return undefined;
-  if (isAbsolute(file)) return file;
-  if (process.platform === "win32") return resolve(directory, file);
+  return process.platform === "win32"
+    ? resolve(directory, file)
+    : relativeFile(directory, file);
+}
+
+export async function publicationConfigSelector(
+  directory: string,
+  environment: ProcessEnvironment,
+): Promise<string | undefined> {
+  const file = environmentEntry(environment, "GIT_CONFIG");
+  const path = gitConfigFile(directory, file);
+  if (!path || isAbsolute(file!) || process.platform === "win32") return path;
   // git config interprets its explicit file from the caller, even when
   // Git enters the worktree. Resolve the parent before that caller can disappear.
-  const path = relativeFile(directory, file);
   const parent = dirname(path);
   return (await canonicalPath(parent)) + path.slice(parent.length);
 }
@@ -2962,9 +2967,10 @@ export async function capturePatchGitControls(
       }
       if (capture) {
         await captureReferences(checkout);
+        const selector = environmentEntry(environment, "GIT_CONFIG");
         const [common, storage] = await Promise.all([
           absolutePath(checkout, "--git-common-dir"),
-          // Git LFS reads the selected config with includes enabled.
+          // Git starts LFS filters at the checkout root, even from a component.
           runControl(
             checkout,
             [
@@ -2979,7 +2985,7 @@ export async function capturePatchGitControls(
             ],
             {
               environment: {
-                GIT_CONFIG: environmentEntry(environment, "GIT_CONFIG"),
+                GIT_CONFIG: gitConfigFile(checkout, selector) ?? selector,
               },
             },
           ).catch((error: unknown) => {
