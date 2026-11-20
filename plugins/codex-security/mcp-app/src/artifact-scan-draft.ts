@@ -1143,6 +1143,55 @@ export function matchesSavedCoverageSource(
   return isDeepStrictEqual(previous, current);
 }
 
+function inferSavedIds<T extends JsonObject>(
+  snapshots: T[][],
+  normalize: (rows: T[]) => T[],
+  identity: (row: T) => JsonObject | undefined,
+  same: (left: JsonObject, right: JsonObject) => boolean = isDeepStrictEqual,
+  originalId?: (rows: T[], index: number) => string | undefined,
+) {
+  const known: { id: string; content: JsonObject }[] = [];
+  function remember(row: T) {
+    if (typeof row.id !== "string") return;
+    const content = identity(row);
+    if (content) known.push({ id: row.id, content });
+  }
+  for (const rows of snapshots) rows.forEach(remember);
+  for (const rows of snapshots) {
+    const reserved = new Set(rows.map((row) => row.id));
+    for (const row of rows) {
+      // Candidate deferrals own their candidate IDs even before normalization.
+      if (typeof row.candidateId === "string" && !identity(row))
+        reserved.add(row.candidateId);
+    }
+    for (const [index, row] of rows.entries()) {
+      if (typeof row.id === "string") continue;
+      const content = identity(row);
+      if (!content) continue;
+      const matches = (saved: (typeof known)[number]) =>
+        !reserved.has(saved.id) && same(saved.content, content);
+      const preferred = originalId?.(rows, index);
+      const matching =
+        (preferred === undefined
+          ? undefined
+          : known.find((saved) => saved.id === preferred && matches(saved))) ??
+        known.find(matches);
+      if (matching) {
+        rows[index] = { ...row, id: matching.id };
+        reserved.add(matching.id);
+      }
+    }
+    const normalized = normalize(rows);
+    for (const [index, row] of rows.entries()) {
+      if (typeof row.id === "string") continue;
+      const id = originalId?.(rows, index);
+      rows[index] =
+        id === undefined ? normalized[index]! : { ...normalized[index]!, id };
+      remember(rows[index]!);
+    }
+  }
+}
+
 async function mergeSavedDraft(
   input: ScanDraftInput,
   result: ScanDraftInput,
@@ -1166,79 +1215,28 @@ async function mergeSavedDraft(
   // Older checkpoints can omit IDs already assigned in their published output.
   const surfaceIdentities = new Map(
     sources.map((source, index) => [
-      source,
+      source.reviewState.surfaces,
       savedSources[index]?.surfaceIdentities ?? [
         ...surfaceNormalization(source.reviewState.surfaces).values(),
       ],
     ]),
   );
   const drafts = [result, ...sources];
-  const savedSurfaces = drafts.flatMap((draft) => draft.reviewState.surfaces);
-  for (const source of drafts) {
-    const reservedSurfaceIds = new Set(
-      source.reviewState.surfaces.flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    const surfaces = source.reviewState.surfaces.map((row, index) => {
-      if (typeof row.id === "string") return row;
-      const matches = ({ id, ...content }: DraftCoverage["surfaces"][number]) =>
-        typeof id === "string" &&
-        !reservedSurfaceIds.has(id) &&
-        sameSurface(content, row);
-      const originalId = surfaceIdentities.get(source)?.[index]?.id;
-      const matching =
-        savedSurfaces.find(
-          (saved) => saved.id === originalId && matches(saved),
-        ) ?? savedSurfaces.find(matches);
-      if (matching === undefined) return row;
-      const id = matching.id as string;
-      reservedSurfaceIds.add(id);
-      return { ...row, id };
-    });
-    const normalizedSurfaces = normalizeSurfaces(surfaces);
-    // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
-    source.reviewState.surfaces = surfaces.map((row, index) => {
-      if (typeof row.id === "string") return row;
-      const normalized = {
-        ...normalizedSurfaces[index]!,
-        id:
-          surfaceIdentities.get(source)?.[index]?.id ??
-          normalizedSurfaces[index]!.id,
-      };
-      savedSurfaces.push(normalized);
-      return normalized;
-    });
-  }
-  const savedDeferred = drafts.flatMap((source) => source.reviewState.deferred);
-  for (const source of drafts) {
-    const reservedIds = new Set(
-      source.reviewState.deferred.flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    source.reviewState.deferred = normalizeDeferred(
-      source.reviewState.deferred.map((row) => {
-        if (
-          typeof row.id === "string" ||
-          "candidateId" in row ||
-          "candidate" in row ||
-          "finding" in row
-        )
-          return row;
-        const matching = savedDeferred.find(
-          ({ id, ...content }) =>
-            typeof id === "string" &&
-            !reservedIds.has(id) &&
-            isDeepStrictEqual(content, row),
-        );
-        if (matching === undefined) return row;
-        const id = matching.id as string;
-        reservedIds.add(id);
-        return { ...row, id };
-      }),
-    );
-  }
+  inferSavedIds(
+    drafts.map((draft) => draft.reviewState.surfaces),
+    normalizeSurfaces,
+    ({ id: _id, ...row }) => ({ ...row, receiptRefs: row.receiptRefs ?? [] }),
+    sameSurface,
+    (rows, index) => surfaceIdentities.get(rows)?.[index]?.id,
+  );
+  inferSavedIds(
+    drafts.map((draft) => draft.reviewState.deferred),
+    normalizeDeferred,
+    ({ id: _id, ...row }) =>
+      "candidateId" in row || "candidate" in row || "finding" in row
+        ? undefined
+        : row,
+  );
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
   const keepsGenericWork = (row: JsonObject) =>
     ambiguousGenericEntry(row, ambiguousDeferredIds);
@@ -1633,7 +1631,7 @@ async function mergeSavedDraft(
     const normalized = preserveSurfaceIds
       ? surfaceNormalization(
           source.reviewState.surfaces,
-          surfaceIdentities.get(source),
+          surfaceIdentities.get(source.reviewState.surfaces),
         )
       : undefined;
     const currentNormalized = preserveSurfaceIds

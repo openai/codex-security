@@ -73,8 +73,9 @@ test("three actual cumulative worker attempts retain original coverage ownership
   }
 });
 
-test("an accepted retry reconciles each occurrence of a legacy ID-less surface", async (t) => {
+test("an accepted retry reconciles each occurrence of legacy ID-less surfaces and deferrals", async (t) => {
   const f = await workerHistoryFixture(t, 2);
+  const task = { reason: "Synthetic pending review" };
   const single = { label: "Single review", disposition: "no_issue_found" };
   const repeated = { ...single, label: "Repeated review" };
   const named = { ...single, label: "Named review" };
@@ -98,7 +99,7 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
           { ...mixed, id: "known" },
         ],
         explicitExclusions: [],
-        deferred: [],
+        deferred: [task, { ...task, id: "saved" }],
       },
     }),
   );
@@ -113,10 +114,21 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
           { ...mixed, id: "known" },
           { ...mixed, id: "assigned" },
         ],
+        deferred: [task, { ...task, id: "assigned" }, task],
       }),
     ),
   );
-  const { coverage } = await f.readAccepted();
+  const { result, coverage } = await f.readAccepted();
+  assert.deepEqual(
+    coverage.deferred.map(
+      (row: { provenance: { attempt: number } }) => row.provenance.attempt,
+    ),
+    [1, 1, 2],
+  );
+  assert.equal(result.reviewState.deferred[0].id, "saved");
+  assert.equal(coverage.deferred[0].provenance.sourceId, undefined);
+  assert.equal(coverage.deferred[1].provenance.sourceId, "assigned");
+  assert.equal(coverage.deferred[2].provenance.sourceId, undefined);
   assert.deepEqual(
     coverage.surfaces.map(
       (row: { label: string; provenance: { attempt: number } }) => [
@@ -144,6 +156,68 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
     ["first", "second", "third", "current", "known", "assigned", "prior"],
   );
 });
+
+for (const kind of ["candidate reservation", "generated reuse"] as const) {
+  test(`saved generic task inference preserves ${kind}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const previous =
+      kind === "candidate reservation"
+        ? [{ id: "owned", reason: "Synthetic generic task" }]
+        : [
+            {
+              reason: "Synthetic generated task",
+              details: { second: 2, first: 1 },
+            },
+          ];
+    const current =
+      kind === "candidate reservation"
+        ? [
+            { reason: "Synthetic generic task" },
+            { candidateId: "owned", reason: "Synthetic candidate task" },
+          ]
+        : [
+            {
+              reason: "Synthetic generated task",
+              details: { first: 1, second: 2 },
+            },
+          ];
+    const archive = path.join(f.workerRoot, "attempts/attempt-01/result.json");
+    await mkdir(path.dirname(archive), { recursive: true });
+    const saved = JSON.stringify({
+      scanId,
+      findings: [],
+      complete: false,
+      coverage: {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: previous,
+      },
+    });
+    const terminal = JSON.stringify(reviewDraft(true, { deferred: current }));
+    await writeFile(archive, saved);
+    await writeFile(f.resultPath, terminal);
+    const { result, coverage } = await f.readAccepted();
+    assert.equal(await readFile(archive, "utf8"), saved);
+    assert.equal(await readFile(f.resultPath, "utf8"), terminal);
+    const rows = result.reviewState.deferred;
+    if (kind === "candidate reservation") {
+      assert.equal(rows[0].reason, "Synthetic generic task");
+      assert.notEqual(rows[0].id, "owned");
+      assert.equal(
+        rows.find(
+          (row: { candidateId?: string }) => row.candidateId === "owned",
+        )?.id,
+        "owned",
+      );
+    } else {
+      assert.equal(rows.length, 1);
+      assert.equal(coverage.deferred.length, 1);
+      assert.equal(coverage.deferred[0].provenance.attempt, 1);
+      assert.equal(coverage.deferred[0].provenance.sourceId, undefined);
+    }
+  });
+}
 
 for (const field of ["surfaces", "deferred"] as const) {
   for (const checkpointOnly of [false, true]) {
