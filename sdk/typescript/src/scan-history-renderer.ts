@@ -521,7 +521,7 @@ export function renderScanHistory(
     lines.push(
       `  ${strong(clean(basename(result["repository"] as string)))}`,
       "",
-      `  ${paint("●", 36)} ${clean(result["scanCount"])} scans    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparisons    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause matches`,
+      `  ${paint("●", 36)} ${clean(result["scanCount"])} scan${result["scanCount"] === 1 ? "" : "s"}    ${paint("↔", 36)} ${clean(result["matchedPairs"])} comparison${result["matchedPairs"] === 1 ? "" : "s"}    ${paint("◆", 32)} ${clean(result["findingMatches"])} root-cause match${result["findingMatches"] === 1 ? "" : "es"}`,
     );
     if (result["relatedPairs"] || result["uncertainPairs"]) {
       const related = result["relatedPairs"] ?? 0;
@@ -532,7 +532,7 @@ export function renderScanHistory(
     }
     if (result["unavailableScans"]) {
       lines.push(
-        `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,
+        `  ${paint(`${clean(result["unavailableScans"])} scan${result["unavailableScans"] === 1 ? "" : "s"} unavailable`, 33)}`,
       );
     }
   }
