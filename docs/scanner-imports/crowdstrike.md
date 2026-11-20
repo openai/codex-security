@@ -33,9 +33,7 @@ git clone --quiet "$repository_url.git" "$checkout"
 git -C "$checkout" checkout --quiet --detach "$commit"
 ```
 
-To scan another branch, replace `HEAD` with `refs/heads/BRANCH`. Paths start at the repository root. If the URL ends with a subdirectory, such as `.git//infra?ref=...`, paths start at that subdirectory. Use `"$checkout/infra"` as `--repository`. If the checkout is at a different commit, the import stops at the first file that changed.
-
-For Cloud publication, run from the directory that FCS scanned. If that directory is `infra` and the report lists `main.tf`, Cloud uses `infra/main.tf` for both the location and the finding ID. With the same source key, a scan from the repository root identifies the same detection, and equivalent detections in sibling directories have distinct Cloud IDs. Local findings and the retained FCS detection keep the original `main.tf` path.
+To scan another branch, replace `HEAD` with `refs/heads/BRANCH`. Paths start at the repository root. If the URL ends with a subdirectory, such as `.git//infra?ref=...`, paths start at that subdirectory. For a local import of that report, pass `--repository "$checkout/infra"`. If the checkout is at a different commit, the import stops at the first file that changed.
 
 A report of a `git::https://` URL names its repository. The import records that URL, without the subdirectory or `?ref=`, as the findings' repository. If you also pass `--source-repository-url`, both must name the same repository, or the import stops. If the scanned URL has a user name and token, FCS keeps them in the report's `flags.path`. The import does not store that field, but keep the report private.
 
@@ -57,8 +55,11 @@ Remove `--dry-run` and confirm to save. Run `codex-security findings imported /p
 
 ## Publish to Cloud
 
-Run the preview from the Git checkout directory where FCS scanned the files.
-Set `repository_url` to the connected repository’s verified HTTPS clone URL.
+Run the preview from the directory in the checkout that the report’s `file`
+paths are relative to. If you ran `fcs scan iac --path infra` from the
+checkout root, run the preview there. For a remote scan of
+`.git//infra?ref=...`, run `cd "$checkout/infra"` first. Set `repository_url`
+to the connected repository’s verified HTTPS clone URL.
 
 ```sh
 repository_url=https://github.com/example/project
@@ -71,6 +72,8 @@ The preview checks the repository against a Git fetch remote and checks the
 file hashes recorded by FCS. Review the destination, repository-relative paths
 and exclusions. To publish the reviewed selection, remove `--dry-run` and
 confirm. [Verify the import](README.md#verify-the-import).
+
+If the report lists `main.tf` relative to `infra`, Cloud uses `infra/main.tf` for both the location and the finding ID. With the same source key, a scan from the repository root identifies the same detection, and equivalent detections in sibling directories have distinct Cloud IDs. Local findings and the retained FCS detection keep the original `main.tf` path.
 
 ## Read the evidence
 
