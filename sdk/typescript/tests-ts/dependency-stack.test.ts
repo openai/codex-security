@@ -531,6 +531,39 @@ test("the gated check gives one investigator a usable child CLI and publishes it
         ],
       });
       await child("finalize");
+      const readDeps = dependencies({ currentDirectory: files.repo });
+      readDeps.environment[gate] = "1";
+      const args = ["exploitability", "run", "finalize", "--state", state];
+      const markdown = createCliTest(main);
+      expect(await markdown.runCli([...args, "--format", "md"], readDeps)).toBe(
+        0,
+      );
+      expect(markdown.stdout.text()).toContain(cve);
+      expect(markdown.stdout.text()).toContain("Source identity is missing.");
+      expect(markdown.stdout.text()).not.toContain("[object Object]");
+      const saved = createCliTest(main);
+      const htmlPath = join(dir.path, "saved.html");
+      expect(
+        await saved.runCli(
+          [...args, "--format=html", "--report-file", htmlPath],
+          readDeps,
+        ),
+      ).toBe(0);
+      expect(saved.stdout.text().trimEnd()).toEndWith(htmlPath);
+      expect(saved.stdout.text()).not.toContain("<!doctype html>");
+      expect(saved.stdout.text()).toContain("Next: Which source commit ran?");
+      const html = await readFile(htmlPath, "utf8");
+      expect(html).toStartWith("<!doctype html>");
+      expect(html).toContain("Source identity is missing.");
+      const duplicate = createCliTest(main);
+      expect(
+        await duplicate.runCli(
+          [...args, "--format", "html", "--report-file", htmlPath],
+          readDeps,
+        ),
+      ).not.toBe(0);
+      expect(duplicate.stdout.text()).toBe("");
+      expect(await readFile(htmlPath, "utf8")).toBe(html);
       out!.stdout.write("Investigation complete.\n");
       return 0;
     },

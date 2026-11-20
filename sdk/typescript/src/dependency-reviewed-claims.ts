@@ -16,6 +16,7 @@ import {
 } from "./dependency-attempt-store.js";
 import {
   dependencyFindingDetailsShape,
+  repositoryUseProofSchema,
   dependencyCoverageDispositionSchema,
   dependencyPlaceSchema,
   type DependencyReviewReference,
@@ -42,7 +43,6 @@ import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   assertDependencyUseProofCitations,
-  dependencyUseProofSchema,
   dependencyUseSchema,
 } from "./dependency-stack-use.js";
 
@@ -127,7 +127,7 @@ const proposedUse = z.strictObject({
   evidence: z.array(source).min(1),
   observations: z.array(receipt),
   receiptSelections: z.array(dependencyReceiptSelectionSchema).optional(),
-  proof: dependencyUseProofSchema,
+  proof: repositoryUseProofSchema,
   remainingQuestions: z.array(text),
 });
 export const proposedDisposition = dependencyCoverageDispositionSchema
@@ -552,6 +552,32 @@ function bindFindingEvidence(
       details.push({ field: field + ".evidence[" + i + "]", ref }),
     );
   }
+  function registerSite(
+    field: string,
+    site: { path: string; commit?: string; line: number },
+  ) {
+    details.push({
+      field,
+      ref: {
+        kind: "source",
+        path: site.path,
+        commit: site.commit ?? revision,
+        startLine: site.line,
+        endLine: site.line,
+      },
+    });
+  }
+  use.trace?.forEach((frame, i) => {
+    if (frame.kind !== "gap") registerSite("trace[" + i + "].site", frame.site);
+  });
+  if (
+    "proof" in use &&
+    use.proof.sink &&
+    (use.trace?.length ||
+      use.proof.sink.argument ||
+      use.proof.sink.callSite.commit)
+  )
+    registerSite("proof.sink.callSite", use.proof.sink.callSite);
   use.services?.forEach((v, i) => register("services[" + i + "]", v.evidence));
   use.inspections?.forEach((v, i) =>
     register("inspections[" + i + "]", v.evidence),
@@ -1245,6 +1271,19 @@ function publishedFindingEvidence(
   }
   return {
     evidence,
+    ...(use.trace && {
+      trace: use.trace.map((frame) =>
+        frame.kind === "gap"
+          ? frame
+          : {
+              ...frame,
+              site: {
+                ...frame.site,
+                commit: frame.site.commit ?? use.revision,
+              },
+            },
+      ),
+    }),
     observations: use.observations.map((ref) => ({
       server: ref.server,
       record: ref.quote,
@@ -1361,7 +1400,19 @@ export function reportedUse(
         ]),
       ],
     },
-    proof: use.proof,
+    proof:
+      use.trace?.length && use.proof.sink
+        ? {
+            ...use.proof,
+            sink: {
+              ...use.proof.sink,
+              callSite: {
+                ...use.proof.sink.callSite,
+                commit: use.proof.sink.callSite.commit ?? use.revision,
+              },
+            },
+          }
+        : use.proof,
     conclusionClaim: reference(claim),
     ...(supportingClaims.length && { supportingClaims: [...supportingClaims] }),
   };
