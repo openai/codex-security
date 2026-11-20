@@ -1015,6 +1015,7 @@ async function collectCredentialPointers(
     if (process.platform === "win32")
       selectComposer(relativeFile(home, "AppData/Roaming/Composer"));
     for (const file of [
+      ".databrickscfg",
       ".dockercfg",
       ".rclone.conf",
       ".gemrc",
