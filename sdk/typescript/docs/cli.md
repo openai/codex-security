@@ -3150,6 +3150,11 @@ Databricks protection covers `~/.databrickscfg`, `~/.databricks/token-cache.json
 and files selected by `DATABRICKS_CONFIG_FILE` or `DATABRICKS_OIDC_TOKEN_FILEPATH`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
 the standard `glab-cli` configuration directories and Git administration.
+MySQL protection covers `~/.my.cnf` and `~/.mylogin.cnf` on Unix,
+`%APPDATA%\MySQL\.mylogin.cnf` on Windows, and the login file selected by
+`MYSQL_TEST_LOGIN_FILE`. In `MYSQL_HOME`, the rules protect `my.cnf` and, on
+Windows, `my.ini`. MySQL adds a leading dot to these filenames when the
+directory setting starts with a literal `~`.
 PostgreSQL password and service file protection covers `PGPASSFILE`,
 `PGSERVICEFILE`, the standard per-user files and `pg_service.conf` in
 the directory selected by `PGSYSCONFDIR`.

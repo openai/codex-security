@@ -1026,6 +1026,7 @@ function selectClientFiles(
       [
         "AppData/Roaming",
         ["APPDATA"],
+        "MySQL/.mylogin.cnf",
         nuget,
         rcloneConfig,
         ...helmConfig,
@@ -1039,6 +1040,7 @@ function selectClientFiles(
         ...keyringFiles("Python Keyring"),
       ],
     );
+  else clientStores.push([".", [], ".my.cnf", ".mylogin.cnf"]);
   if (process.platform === "darwin")
     clientStores.push(
       ["Library/Preferences", [], ...helmConfig, ...pnpm()],
@@ -1379,6 +1381,12 @@ async function collectCredentialPointers(
     }
     return expanded && normalize(expanded);
   };
+  const selectPointer = (value: string, path = normalize(value)) => {
+    selected.add(value);
+    if (/^~[\\/]/u.test(value))
+      for (const home of homes) if (home) selectFile(home, value.slice(2));
+    if (path) selected.add(path);
+  };
   for (const [name, value] of entries) {
     if (typeof value !== "string" || !value) continue;
     const variable = name.toUpperCase();
@@ -1390,16 +1398,22 @@ async function collectCredentialPointers(
           value === (process.platform === "win32" ? "NUL" : "/dev/null"))
       )
         continue;
-      selected.add(value);
-      if (/^~[\\/]/u.test(value))
-        for (const home of homes) if (home) selectFile(home, value.slice(2));
-      const path = variable.startsWith("NPM_CONFIG_")
-        ? npmConfigPath(value)
-        : normalize(value);
-      if (path) selected.add(path);
+      selectPointer(
+        value,
+        variable.startsWith("NPM_CONFIG_")
+          ? npmConfigPath(value)
+          : normalize(value),
+      );
       continue;
     }
     switch (variable) {
+      case "MYSQL_HOME": {
+        // MySQL prefixes the basename with a dot for ~ directories.
+        const base = relativeFile(value, value.startsWith("~") ? ".my" : "my");
+        selectPointer(base + ".cnf");
+        if (process.platform === "win32") selectPointer(base + ".ini");
+        break;
+      }
       case "GIT_SSH_COMMAND":
         if (operator)
           await collectSshCommandIdentities(

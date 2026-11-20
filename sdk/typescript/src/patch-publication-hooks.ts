@@ -16,7 +16,7 @@ export function patchCredentialKind(
   name: string,
 ): "file" | "value" | undefined {
   if (
-    /^(?:GIT_(?:PROXY_)?SSL_(?:KEY|CERT)|NETRC|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY))$/iu.test(
+    /^(?:GIT_(?:PROXY_)?SSL_(?:KEY|CERT)|NETRC|MYSQL_TEST_LOGIN_FILE|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY))$/iu.test(
       name,
     ) ||
     /^(?:RATTLER_AUTH_FILE|ANACONDA_CONFIG_TOML|ANACONDA_(?:AUTH|CLOUD)_KEYRING_PATH)$/iu.test(
