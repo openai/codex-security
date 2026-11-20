@@ -60,6 +60,7 @@ from workbench.saved_coverage import (
     _resolved_deferred_rows,
     add_review,
     prepare_saved_coverage_projection,
+    saved_surface_views,
 )
 from workbench.saved_sources import (
     _capture_parent_observation,
@@ -500,6 +501,7 @@ def merge_saved_results(
 
     # Keep frozen source digests over the original data, before discarding markers
     # that never passed through the worker draft writer.
+    surface_views = saved_surface_views(sources)
     retain_recorded_receipt_ownership(
         sources, _digest, binding["scope"]["includePaths"], finding_scope
     )
@@ -692,7 +694,9 @@ def merge_saved_results(
                     for value in item["surfaceIds"]
                 ]
                 if retained is not None:
-                    return coverage_origins.relink_deferred(retained, result["surfaceIds"])
+                    return coverage_origins.relink_deferred(
+                        retained, item["surfaceIds"], surface_ids
+                    )
         return result
 
     workers_by_id = {worker["id"]: worker for worker in workers}
@@ -862,20 +866,12 @@ def merge_saved_results(
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     inferred_coverage_ids = _infer_saved_coverage_ids(all_sources)
     coverage_origins = SavedCoverageOrigins(
-        sorted(
-            sources,
-            key=lambda source: (
-                Path(source[0]).name == "result.json",
-                source_order[source[0]],
-                source[0] in authoritative_heads,
-                source[0],
-            ),
-            reverse=True,
-        ),
+        SavedCoverageOrigins.ordered_sources(sources, source_order, authoritative_heads),
         inferred_coverage_ids,
         worker_attempts,
         lambda relative, row, owner: coverage_receipts(row, workers_by_id[owner], relative),
         scan_dir,
+        surface_views,
     )
 
     # A discarded local surface must not fall back to another source's reused ID.

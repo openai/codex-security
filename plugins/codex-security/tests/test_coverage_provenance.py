@@ -5,6 +5,7 @@ import json
 import os
 import uuid
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 from workbench_test_support import (
@@ -1608,3 +1609,211 @@ def test_recovery_preserves_copied_checkpoint_observation_order(
         assert remaining == []
         assert coverage["resolvedDeferred"] == [published_closure]
     assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("with_current_surface", [False, True])
+def test_recovery_preserves_accepted_links_across_attempts(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, with_current_surface
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    previous = {
+        "id": "api",
+        "label": "API review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    current = {
+        "id": "auth",
+        "label": "Authentication review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    task = {
+        "id": "additional-review",
+        "reason": "Additional synthetic validation remains.",
+        "surfaceIds": [previous["id"]] + ([current["id"]] if with_current_surface else []),
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [previous],
+            "deferred": [],
+        },
+    }
+    archived = result.parent.parent / "attempts/attempt-1/result.json"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(json.dumps(draft))
+    result.write_text(
+        json.dumps(
+            {
+                **draft,
+                "reviewState": {
+                    **draft["reviewState"],
+                    "surfaces": [current] if with_current_surface else [],
+                    "deferred": [task],
+                },
+            }
+        )
+    )
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-{attempt}-surface-1",
+            "provenance": {"workerId": worker_id, "attempt": attempt, "sourceId": row["id"]},
+        }
+        for row, attempt in [(previous, 1)] + ([(current, 2)] if with_current_surface else [])
+    ]
+    published_task = {
+        **task,
+        "id": f"{worker_id}-attempt-2-deferred-1",
+        "surfaceIds": [surface["id"] for surface in surfaces],
+        "provenance": {"workerId": worker_id, "attempt": 2, "sourceId": task["id"]},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "deferred": [published_task],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
+    )
+    original = {path: path.read_bytes() for path in (archived, result)}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert [row for row in coverage["deferred"] if row.get("reason") == task["reason"]] == [
+        published_task
+    ]
+    assert coverage["surfaces"] == surfaces
+    assert all(path.read_bytes() == data for path, data in original.items())
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["unchanged", "reordered", "reserved", "roundtrip", "mixed_origins", "priority", "outer_proto"],
+)
+def test_recovery_preserves_writer_normalized_surface_origins(
+    workbench_api, workbench_db, publication_scan, monkeypatch, variant
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    first = {
+        "id": "api",
+        "label": "First synthetic review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    second = {**first, "label": "Second synthetic review"}
+    if variant == "mixed_origins":
+        second = first.copy()
+    raw = [first, second]
+    normalized = [first, {**second, "id": "api-2"}]
+    if variant == "reserved":
+        reserved = {**first, "id": "api-2", "label": "Reserved synthetic review"}
+        raw.append(reserved)
+        normalized = [first, {**second, "id": "api-3"}, reserved]
+    elif variant == "reordered":
+        normalized = [second, {**first, "id": "api-2"}]
+    current = raw if variant == "roundtrip" else normalized
+    histories = [(1, raw[:1] if variant == "mixed_origins" else raw)]
+    if variant in ("mixed_origins", "roundtrip"):
+        histories.append((2, raw if variant == "mixed_origins" else normalized))
+    attempts = [1, 2] if variant == "mixed_origins" else [1] * len(current)
+    if variant == "priority":
+        anonymous = {key: value for key, value in first.items() if key != "id"}
+        histories = [(1, [anonymous]), (2, [anonymous, first, first])]
+        current = [first, {**first, "id": "api-2"}, {**anonymous, "id": "surface-48521adab43e8a78"}]
+        attempts = [2, 2, 1]
+    elif variant == "outer_proto":
+        anonymous = {
+            "label": "Anonymous synthetic review",
+            "disposition": "no_issue_found",
+            "receiptRefs": [],
+            "__proto__": {"synthetic_outer": True},
+            "extra": {"__proto__": {"synthetic_nested": True}},
+        }
+        histories = [(1, [anonymous])]
+        current = [
+            {
+                **{key: value for key, value in anonymous.items() if key != "__proto__"},
+                "id": "surface-86d506280d65162d",
+            }
+        ]
+        attempts = [1]
+    original = {}
+    for attempt, rows in [*histories, (3, current)]:
+        target = (
+            result
+            if attempt == 3
+            else result.parent.parent / f"attempts/attempt-{attempt}/result.json"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "reviewState": {
+                        **scan.coverage,
+                        "completeness": "partial",
+                        "surfaces": rows,
+                        "deferred": [],
+                    },
+                }
+            )
+        )
+        original[target] = target.read_bytes()
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-{attempt}-surface-{index}",
+            "provenance": {
+                "workerId": worker_id,
+                "attempt": attempt,
+                "sourceId": row["id"],
+            },
+        }
+        for index, (row, attempt) in enumerate(zip(current, attempts), 1)
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "deferred": [],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2, 3)
+            ],
+        },
+    )
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, True)
+    assert recovered["surfaces"] == surfaces
+    assert all(path.read_bytes() == data for path, data in original.items())
+
+
+def test_saved_surface_comparison_ids_match_writer_fixtures(workbench_api):
+    from workbench.saved_coverage import saved_surface_views
+
+    cases = json.loads((Path(__file__).parent / "fixtures/surface-normalization.json").read_text())
+    for case in cases:
+        draft = {"reviewState": {"surfaces": case["surfaces"]}}
+        original = copy.deepcopy(draft)
+        views = saved_surface_views([("result.json", draft, "synthetic-worker")])
+        assert [identity for identity, _ in views["result.json"]] == case["ids"], case["case"]
+        assert draft == original

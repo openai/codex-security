@@ -213,6 +213,7 @@ export interface DeepScanPublication {
 
 interface SavedScanDraft {
   input: ScanDraftInput;
+  surfaceIdentities?: SurfaceNormalization[];
   modifiedMs: number;
   snapshot?: JsonObject;
   head?: boolean;
@@ -956,7 +957,13 @@ async function preserveScanDraft(
   }
   const previous = previousState.input;
   if (previous) {
-    current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
+    current.unshift({
+      input: previous,
+      modifiedMs: previousState.modifiedMs,
+      surfaceIdentities: [
+        ...surfaceNormalization(previous.reviewState.surfaces).values(),
+      ],
+    });
   }
   current.sort(
     (left, right) =>
@@ -1538,6 +1545,14 @@ function prepareScanDraftReconciliation(
   previouslyAccepted = false,
 ) {
   // Older checkpoints can omit IDs already assigned in their published output.
+  const surfaceIdentities = new Map(
+    sources.map((source, index) => [
+      source,
+      savedSources[index]?.surfaceIdentities ?? [
+        ...surfaceNormalization(source.reviewState.surfaces).values(),
+      ],
+    ]),
+  );
   const drafts = [result, ...sources];
   const savedSurfaces = drafts.flatMap((draft) => draft.reviewState.surfaces);
   for (const source of drafts) {
@@ -1546,14 +1561,17 @@ function prepareScanDraftReconciliation(
         typeof row.id === "string" ? [row.id] : [],
       ),
     );
-    const surfaces = source.reviewState.surfaces.map((row) => {
+    const surfaces = source.reviewState.surfaces.map((row, index) => {
       if (typeof row.id === "string") return row;
-      const matching = savedSurfaces.find(
-        ({ id, ...content }) =>
-          typeof id === "string" &&
-          !reservedSurfaceIds.has(id) &&
-          sameSurface(content, row),
-      );
+      const matches = ({ id, ...content }: DraftCoverage["surfaces"][number]) =>
+        typeof id === "string" &&
+        !reservedSurfaceIds.has(id) &&
+        sameSurface(content, row);
+      const originalId = surfaceIdentities.get(source)?.[index]?.id;
+      const matching =
+        savedSurfaces.find(
+          (saved) => saved.id === originalId && matches(saved),
+        ) ?? savedSurfaces.find(matches);
       if (matching === undefined) return row;
       const id = matching.id as string;
       reservedSurfaceIds.add(id);
@@ -1563,7 +1581,12 @@ function prepareScanDraftReconciliation(
     // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
     source.reviewState.surfaces = surfaces.map((row, index) => {
       if (typeof row.id === "string") return row;
-      const normalized = normalizedSurfaces[index]!;
+      const normalized = {
+        ...normalizedSurfaces[index]!,
+        id:
+          surfaceIdentities.get(source)?.[index]?.id ??
+          normalizedSurfaces[index]!.id,
+      };
       savedSurfaces.push(normalized);
       return normalized;
     });
@@ -1991,20 +2014,44 @@ function prepareScanDraftReconciliation(
         );
       });
       const unmatchedSurfaces = [...result.reviewState.surfaces];
+      const normalized = preserveSurfaceIds
+        ? surfaceNormalization(
+            source.reviewState.surfaces,
+            surfaceIdentities.get(source),
+          )
+        : undefined;
+      const currentNormalized = preserveSurfaceIds
+        ? surfaceNormalization(result.reviewState.surfaces)
+        : undefined;
       const present = (previous: JsonObject, current: JsonObject) =>
         coverageEntryPresent([current], previous, ambiguousDeferredIds);
       // Match unchanged occurrences before using a shared ID to recognize an update.
       for (const matches of preserveSurfaceIds
         ? [sameSurface, present]
         : [present]) {
-        previousSurfaces = previousSurfaces.filter((surface) => {
-          const index = unmatchedSurfaces.findIndex((current) =>
-            matches(surface, current),
-          );
-          if (index < 0) return true;
-          if (preserveSurfaceIds) unmatchedSurfaces.splice(index, 1);
-          return false;
-        });
+        const forms = preserveSurfaceIds
+          ? (["raw", "normalized", "group"] as const)
+          : (["raw"] as const);
+        for (const form of forms) {
+          previousSurfaces = previousSurfaces.filter((surface) => {
+            const index = unmatchedSurfaces.findIndex((current) => {
+              const pair =
+                form === "raw"
+                  ? ([surface, current] as const)
+                  : normalizedSurfacePair(
+                      surface,
+                      current,
+                      normalized?.get(surface),
+                      currentNormalized?.get(current),
+                      form,
+                    );
+              return pair !== undefined && matches(pair[0], pair[1]);
+            });
+            if (index < 0) return true;
+            if (preserveSurfaceIds) unmatchedSurfaces.splice(index, 1);
+            return false;
+          });
+        }
       }
       const previousCoverage = {
         ...source.reviewState,
@@ -2578,6 +2625,9 @@ async function readSavedCheckpoints(
     }
     return {
       input,
+      surfaceIdentities: [
+        ...surfaceNormalization(input.reviewState.surfaces).values(),
+      ],
       snapshot: draft,
       modifiedMs:
         entry.name === checkpointHead
@@ -2811,6 +2861,9 @@ export async function readArchivedWorkerCheckpoints(
           requireMatchingScan(context, result);
           drafts.push({
             input: result,
+            surfaceIdentities: [
+              ...surfaceNormalization(result.reviewState.surfaces).values(),
+            ],
             modifiedMs: saved.modifiedMs,
             result: true,
             name: "result.json",
@@ -3743,6 +3796,73 @@ function buildCoverage(
           ),
         }),
   };
+}
+
+export type SurfaceNormalization = {
+  id: string;
+  aliases: ReadonlySet<string>;
+};
+
+/** Compare known writer identities in either direction without changing raw rows. */
+export function normalizedSurfacePair(
+  previous: JsonObject,
+  current: JsonObject,
+  previousIdentity: SurfaceNormalization | undefined,
+  currentIdentity: SurfaceNormalization | undefined,
+  form: "normalized" | "group",
+): [JsonObject, JsonObject] | undefined {
+  if (previous.id === current.id) return undefined;
+  const previousId = previousIdentity?.id ?? previous.id;
+  const currentId = currentIdentity?.id ?? current.id;
+  let id: unknown;
+  if (form === "normalized") {
+    if (previousId === currentId) id = previousId;
+  } else if (previousId !== currentId) {
+    if (
+      typeof current.id === "string" &&
+      previousIdentity?.aliases.has(current.id)
+    )
+      id = current.id;
+    else if (
+      typeof previous.id === "string" &&
+      currentIdentity?.aliases.has(previous.id)
+    )
+      id = previous.id;
+  }
+  return typeof id === "string"
+    ? [
+        { ...previous, id },
+        { ...current, id },
+      ]
+    : undefined;
+}
+
+/** Preserve raw rows while comparing the writer's normalized occurrence identities. */
+export function surfaceNormalization(
+  surfaces: DraftCoverage["surfaces"],
+  identities?: readonly SurfaceNormalization[],
+): Map<JsonObject, SurfaceNormalization> {
+  if (identities !== undefined)
+    return new Map(
+      surfaces.map((surface, index) => [surface, identities[index]!]),
+    );
+  const normalized = normalizeSurfaces(surfaces);
+  const groups = new Map<string, Set<string>>();
+  for (const [index, surface] of surfaces.entries()) {
+    if (typeof surface.id !== "string") continue;
+    const ids = groups.get(surface.id) ?? new Set<string>();
+    ids.add(normalized[index].id as string);
+    groups.set(surface.id, ids);
+  }
+  return new Map(
+    surfaces.map((surface, index) => [
+      surface,
+      {
+        id: normalized[index].id as string,
+        aliases: groups.get(surface.id as string) ?? new Set<string>(),
+      },
+    ]),
+  );
 }
 
 function normalizeSurfaces(

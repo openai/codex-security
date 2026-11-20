@@ -5,8 +5,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterator
+from decimal import Decimal
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,7 @@ from finalize_scan_contract import (
     _validate_resolved_deferred,
     _validate_schema_node,
 )
+from workbench_validation import javascript_utf8
 
 
 def _has_candidate_metadata(row: dict[str, Any]) -> bool:
@@ -159,20 +163,24 @@ def _coverage_comparison_row(row: Any, field: str) -> Any:
     return row
 
 
-def _worker_coverage_sources(
-    rows: list[Any], worker_id: str, field: str
-) -> Iterator[tuple[Any, Any]]:
-    """Match accepted aggregate IDs without changing raw recovery identities."""
+def _worker_coverage_ids(
+    rows: list[Any], *, reserved_ids=(), generated_id=None
+) -> Iterator[tuple[str | None, Any]]:
+    """Allocate the existing per-snapshot worker IDs without changing source rows."""
     reserved = {
         row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
+    reserved.update(reserved_ids)
     emitted: set[str] = set()
     for index, original in enumerate(rows):
-        row = original
-        if isinstance(row, dict) and field != "openQuestions":
-            row = row.copy()
-            generated = not isinstance(row.get("id"), str)
-            identity = str(index) if generated else row["id"]
+        identity = None
+        if isinstance(original, dict):
+            generated = not isinstance(original.get("id"), str)
+            identity = (
+                (generated_id(original) if generated_id else str(index))
+                if generated
+                else original["id"]
+            )
             base = identity
             if generated or identity in emitted:
                 suffix = 2
@@ -181,7 +189,19 @@ def _worker_coverage_sources(
                     suffix += 1
             reserved.add(identity)
             emitted.add(identity)
-            row["id"] = identity
+        yield identity, original
+
+
+def _worker_coverage_sources(
+    rows: list[Any], worker_id: str, field: str
+) -> Iterator[tuple[Any, Any]]:
+    """Match accepted aggregate IDs without changing raw recovery identities."""
+    for identity, original in _worker_coverage_ids(rows):
+        row = (
+            {**original, "id": identity}
+            if identity is not None and field != "openQuestions"
+            else original
+        )
         qualified = _project_worker_coverage_row(row, worker_id, field)
         yield _coverage_comparison_row(qualified, field), original
 
@@ -312,10 +332,113 @@ def prepare_saved_coverage_projection(
     return True, surface_links
 
 
+def _surface_hash_json(value: Any) -> str:
+    """Match JSON.stringify for the writer's anonymous surface hash input."""
+    if value is None or isinstance(value, (str, bool)):
+        return re.sub(
+            r"[\ud800-\udfff]",
+            lambda match: f"\\u{ord(match[0]):04x}",
+            json.dumps(value, ensure_ascii=False),
+        )
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            return "null"
+        if not math.isfinite(number):
+            return "null"
+        if number == 0:
+            return "0"
+        text = repr(number)
+        if 1e-6 <= abs(number) < 1e21:
+            text = format(Decimal(text), "f")
+            return text.rstrip("0").rstrip(".") if "." in text else text
+        mantissa, exponent = text.split("e")
+        return (
+            mantissa.removesuffix(".0")
+            + "e"
+            + ("+" if int(exponent) >= 0 else "-")
+            + str(abs(int(exponent)))
+        )
+    if isinstance(value, list):
+        return "[" + ",".join(map(_surface_hash_json, value)) + "]"
+
+    def key_order(key):
+        return (
+            int(key)
+            if len(key) <= 10
+            and key.isascii()
+            and key.isdecimal()
+            and str(int(key)) == key
+            and int(key) < 2**32 - 1
+            else 2**32 - 1
+        )
+
+    return (
+        "{"
+        + ",".join(
+            _surface_hash_json(key) + ":" + _surface_hash_json(value[key])
+            for key in sorted(value, key=key_order)
+        )
+        + "}"
+    )
+
+
+@cache
+def _surface_fields():
+    schema = _read_json(
+        Path(__file__).resolve().parents[2] / "schemas/tools/scan-draft.schema.json"
+    )
+    return tuple(schema["$defs"]["surface"]["properties"])
+
+
+def _surface_normalization(rows):
+    def generated_id(row):
+        # The writer hashes parsed fields in schema order, before defaulting receiptRefs.
+        parsed = {key: row[key] for key in _surface_fields() if key in row}
+        # The surface parser omits this outer key; nested extension objects stay intact.
+        parsed.update((key, value) for key, value in row.items() if key != "__proto__")
+        digest = hashlib.sha256(javascript_utf8(_surface_hash_json(parsed))).hexdigest()
+        return f"surface-{digest[:16]}"
+
+    allocated = list(
+        _worker_coverage_ids(
+            rows,
+            reserved_ids=(
+                row["candidateId"]
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("candidateId"), str)
+            ),
+            generated_id=generated_id,
+        )
+    )
+    groups = {}
+    for identity, row in allocated:
+        if isinstance(row, dict) and isinstance(row.get("id"), str):
+            groups.setdefault(row["id"], set()).add(identity)
+    return [
+        (identity, groups[row["id"]])
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+        else (identity, set())
+        for identity, row in allocated
+    ]
+
+
+def saved_surface_views(sources):
+    """Capture comparison identities before receipt qualification or inferred names."""
+    return {
+        relative: _surface_normalization(_coverage_rows(draft["reviewState"], "surfaces"))
+        for relative, draft, owner in sources
+        if owner is not None
+    }
+
+
 class SavedCoverageOrigins:
     """Match saved occurrences before publication assigns attempt-specific IDs."""
 
-    def __init__(self, sources, inferred_ids, worker_attempts, receipt_resolver, scan_dir):
+    def __init__(
+        self, sources, inferred_ids, worker_attempts, receipt_resolver, scan_dir, surface_views=None
+    ):
         self.sources = {
             relative: (copy.deepcopy(draft["reviewState"]), owner)
             for relative, draft, owner in sources
@@ -328,8 +451,7 @@ class SavedCoverageOrigins:
             for index, row in enumerate(_coverage_rows(draft["reviewState"], field), 1)
             if id(row) in inferred_ids
         }
-        for relative, field, index in self.inferred_rows:
-            self.sources[relative][0][field][index - 1].pop("id", None)
+        self.surface_views = surface_views
         self.paths = {id(draft["reviewState"]): relative for relative, draft, _ in sources}
         self.worker_attempts = worker_attempts
         self.receipt_resolver = receipt_resolver
@@ -338,6 +460,19 @@ class SavedCoverageOrigins:
         self.attempts = {}
         self.origin_sources = {}
         self.relinked_deferred = []
+
+    @staticmethod
+    def ordered_sources(sources, source_order, authoritative_heads):
+        return sorted(
+            sources,
+            key=lambda source: (
+                Path(source[0]).name == "result.json",
+                source_order[source[0]],
+                source[0] in authoritative_heads,
+                source[0],
+            ),
+            reverse=True,
+        )
 
     @staticmethod
     def directory(relative):
@@ -349,6 +484,8 @@ class SavedCoverageOrigins:
         if field == "openQuestions" and isinstance(value, str):
             return {"question": value.strip()}
         result = copy.deepcopy(value)
+        if field == "surfaces" and isinstance(result, dict):
+            result.pop("__proto__", None)
         if (
             field == "openQuestions"
             and isinstance(result, dict)
@@ -466,10 +603,32 @@ class SavedCoverageOrigins:
             if owner == worker["id"]
         )
         occurrences = []
+        forms = ("raw", "normalized", "group") if field == "surfaces" else ("raw",)
 
-        def matches(origin, current, path, reserved):
+        def matches(origin, current, path, reserved, form, surface):
             previous, previous_path = origin["row"], origin["row_path"]
             comparison = current
+            if form != "raw":
+                if (
+                    not isinstance(previous, dict)
+                    or not isinstance(current, dict)
+                    or previous.get("id") == current.get("id")
+                ):
+                    return False
+                previous_id, previous_aliases = origin["surface"]
+                current_id, current_aliases = surface
+                identity = None
+                if form == "normalized":
+                    if previous_id == current_id:
+                        identity = previous_id
+                elif previous_id != current_id:
+                    if current.get("id") in previous_aliases:
+                        identity = current["id"]
+                    elif previous.get("id") in current_aliases:
+                        identity = previous["id"]
+                if not isinstance(identity, str):
+                    return False
+                previous, comparison = {**previous, "id": identity}, {**current, "id": identity}
             if (
                 isinstance(current, dict)
                 and "id" not in current
@@ -490,24 +649,43 @@ class SavedCoverageOrigins:
             current_rows = coverage.get(field, [])
             if not isinstance(current_rows, list):
                 continue
+            current_rows = [
+                {key: value for key, value in row.items() if key != "id"}
+                if (path, field, offset) in self.inferred_rows
+                else row
+                for offset, row in enumerate(current_rows, 1)
+            ]
+            normalized = (
+                (
+                    self.surface_views[path]
+                    if self.surface_views is not None
+                    else _surface_normalization(current_rows)
+                )
+                if field == "surfaces"
+                else None
+            )
             reserved = {
                 row["id"]
                 for row in current_rows
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
             }
             # One snapshot can consume each established occurrence only once.
-            unmatched = sorted(
-                occurrences,
-                key=lambda origin: isinstance(origin["row"], dict) and "id" in origin["row"],
-                reverse=True,
-            )
+            unmatched = list(occurrences)
             added = []
             for offset, current in enumerate(current_rows, 1):
+                surface = normalized[offset - 1] if normalized is not None else None
                 match = next(
                     (
                         i
+                        for named in (True, False)
+                        for form in forms
                         for i, origin in enumerate(unmatched)
-                        if matches(origin, current, path, reserved)
+                        if (
+                            isinstance(origin["row"], dict)
+                            and isinstance(origin["row"].get("id"), str)
+                        )
+                        == named
+                        and matches(origin, current, path, reserved, form, surface)
                     ),
                     None,
                 )
@@ -517,6 +695,7 @@ class SavedCoverageOrigins:
                         "row_path": path,
                         "attempt": snapshot_attempt,
                         "source_path": path,
+                        "surface": surface,
                     }
                     added.append(origin)
                 else:
@@ -524,6 +703,7 @@ class SavedCoverageOrigins:
                     if isinstance(current, dict) and "id" in current:
                         # A later name binds this occurrence; row order cannot reassign it.
                         origin["row"], origin["row_path"] = current, path
+                        origin["surface"] = surface
                 current_key = (path, field, offset)
                 self.attempts[current_key] = origin["attempt"]
                 if origin["attempt"] < snapshot_attempt:
@@ -566,7 +746,11 @@ class SavedCoverageOrigins:
                 return candidate
         return None
 
-    def relink_deferred(self, retained, surface_ids):
+    def relink_deferred(self, retained, source_ids, resolved_ids):
+        surface_ids = [
+            resolved_ids.get(source_id, previous) if isinstance(source_id, str) else previous
+            for source_id, previous in zip(source_ids, retained.get("surfaceIds", []))
+        ]
         if retained.get("surfaceIds") != surface_ids:
             previous = copy.deepcopy(retained)
             retained["surfaceIds"] = surface_ids

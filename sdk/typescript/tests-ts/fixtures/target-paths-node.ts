@@ -46,7 +46,7 @@ const localClient = () =>
   new TestClient(
     {},
     {
-      environment: {},
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
       prepareRuntime: async () => {
         throw new Error("Runtime must not initialize");
       },

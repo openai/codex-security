@@ -12,6 +12,9 @@ import {
 import {
   parsePersistedScanDraft,
   matchesSavedCoverageSource,
+  surfaceNormalization,
+  normalizedSurfacePair,
+  type SurfaceNormalization,
   readAcceptedWorkerCheckpoints,
   recordedScanReceiptRefs,
   reconcileAcceptedWorkerHistory,
@@ -210,6 +213,9 @@ export async function readAcceptedDiscovery(
   );
   const { context } = draft;
   let result = draft.result;
+  const surfaceIdentities = [
+    ...surfaceNormalization(result.reviewState.surfaces).values(),
+  ];
   clearWorkerOriginClaims(result.reviewState);
   function usableCheckpoint({ input }: { input: ScanDraftInput }) {
     try {
@@ -287,16 +293,26 @@ export async function readAcceptedDiscovery(
     coverage: scanCoverage(
       accepted,
       artifacts.scanDir,
-      archived.flatMap(({ input, attempt, result }) => {
+      archived.flatMap(({ input, attempt, result, surfaceIdentities }) => {
         const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
         return number === undefined
           ? []
-          : [{ attempt: Number(number), coverage: input.reviewState, result }];
+          : [
+              {
+                attempt: Number(number),
+                coverage: input.reviewState,
+                result,
+                surfaceIdentities,
+              },
+            ];
       }),
       receiptDigests,
       [
-        draft.result.reviewState,
-        ...current.map(({ input }) => input.reviewState),
+        { coverage: draft.result.reviewState, surfaceIdentities },
+        ...current.map(({ input, surfaceIdentities }) => ({
+          coverage: input.reviewState,
+          surfaceIdentities,
+        })),
       ],
     ),
   };
@@ -310,9 +326,13 @@ export function scanCoverage(
     attempt: number;
     coverage: ScanDraftInput["reviewState"];
     result?: boolean;
+    surfaceIdentities?: SurfaceNormalization[];
   }[] = [],
   receiptDigests: ReadonlyMap<string, string> = new Map(),
-  currentSources: ScanDraftInput["reviewState"][] = [worker.result.reviewState],
+  currentSources: {
+    coverage: ScanDraftInput["reviewState"];
+    surfaceIdentities?: SurfaceNormalization[];
+  }[] = [{ coverage: worker.result.reviewState }],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -335,7 +355,11 @@ export function scanCoverage(
     surfaces: [...coverage.surfaces].sort(namedFirst),
     deferred: [...coverage.deferred].sort(namedFirst),
   });
-  const authored = currentSources.map(matchingCoverage);
+  const authored = currentSources.map(({ coverage, surfaceIdentities }) => ({
+    coverage: matchingCoverage(coverage),
+    surfaces: surfaceNormalization(coverage.surfaces, surfaceIdentities),
+  }));
+  const normalizedOutput = surfaceNormalization(coverage.surfaces);
   const history = [...archived].sort(
     // Admission projects the direct result before retained checkpoint rows.
     (left, right) =>
@@ -346,14 +370,32 @@ export function scanCoverage(
     string,
     Map<ScanDraftInput["reviewState"], Set<number>>
   >();
-  type Origin = { row: JsonObject; attempt: number };
+  type Origin = {
+    row: JsonObject;
+    attempt: number;
+    surface?: SurfaceNormalization;
+  };
   const origins = new Map<string, Origin[]>();
   const matchesOrigin = (
     field: string,
     item: JsonObject,
-    previous: JsonObject,
+    origin: Origin,
     reserved: Set<unknown>,
+    form: "raw" | "normalized" | "group",
+    currentSurface: SurfaceNormalization | undefined,
   ) => {
+    let previous = origin.row;
+    if (form !== "raw") {
+      const pair = normalizedSurfacePair(
+        previous,
+        item,
+        origin.surface,
+        currentSurface,
+        form,
+      );
+      if (pair === undefined) return false;
+      [previous, item] = pair;
+    }
     if (
       item.id === undefined &&
       typeof previous.id === "string" &&
@@ -371,34 +413,73 @@ export function scanCoverage(
       receiptDigests,
     );
   };
+  const findOrigin = (
+    field: string,
+    item: JsonObject,
+    occurrences: Origin[],
+    reserved: Set<unknown>,
+    currentSurface: SurfaceNormalization | undefined,
+  ) => {
+    const forms =
+      field === "surfaces"
+        ? (["raw", "normalized", "group"] as const)
+        : (["raw"] as const);
+    for (const named of [true, false]) {
+      for (const form of forms) {
+        const index = occurrences.findIndex(
+          (origin) =>
+            (typeof origin.row.id === "string") === named &&
+            matchesOrigin(field, item, origin, reserved, form, currentSurface),
+        );
+        if (index >= 0) return index;
+      }
+    }
+    return -1;
+  };
   const savedOrigins = (field: string): Origin[] => {
     const cached = origins.get(field);
     if (cached !== undefined) return cached;
     const occurrences: Origin[] = [];
     for (const saved of history) {
+      const normalized =
+        field === "surfaces"
+          ? surfaceNormalization(
+              saved.coverage.surfaces,
+              saved.surfaceIdentities,
+            )
+          : undefined;
       const rows = ((saved.coverage[field] as unknown[] | undefined) ?? []).map(
         (row) =>
           typeof row === "string" ? { question: row } : (asRecord(row) ?? {}),
       );
       const reserved = new Set(rows.map((row) => row.id));
       // Preserve each snapshot's occurrence count before assigning its later names.
-      const unmatched = [...occurrences].sort((a, b) =>
-        namedFirst(a.row, b.row),
-      );
+      const unmatched = [...occurrences];
       const added: Origin[] = [];
       for (const row of rows) {
-        const index = unmatched.findIndex((origin) =>
-          matchesOrigin(field, row, origin.row, reserved),
+        const index = findOrigin(
+          field,
+          row,
+          unmatched,
+          reserved,
+          normalized?.get(row),
         );
-        if (index < 0) added.push({ row, attempt: saved.attempt });
+        if (index < 0)
+          added.push({
+            row,
+            attempt: saved.attempt,
+            surface: normalized?.get(row),
+          });
         else {
           const [origin] = unmatched.splice(index, 1);
-          if (row.id !== undefined) origin!.row = row;
+          if (row.id !== undefined) {
+            origin!.row = row;
+            origin!.surface = normalized?.get(row);
+          }
         }
       }
       occurrences.push(...added);
     }
-    occurrences.sort((a, b) => namedFirst(a.row, b.row));
     origins.set(field, occurrences);
     return occurrences;
   };
@@ -428,11 +509,13 @@ export function scanCoverage(
       return asRecord(rows[index]) ?? {};
     };
     let source: Record<string, unknown> | undefined;
+    let sourceSurface = normalizedOutput.get(item);
     let reserved = new Set<unknown>();
-    for (const coverage of authored) {
+    for (const { coverage, surfaces } of authored) {
       const row = match(coverage);
       if (source === undefined && row !== undefined) {
         source = row;
+        sourceSurface = surfaces.get(row);
         reserved = new Set(
           ((coverage[field] as JsonObject[] | undefined) ?? []).map(
             (row) => row.id,
@@ -444,8 +527,12 @@ export function scanCoverage(
     const previous = savedOrigins(field);
     const comparison = { ...item };
     if (source !== undefined && source.id === undefined) delete comparison.id;
-    const index = previous.findIndex((saved) =>
-      matchesOrigin(field, comparison, saved.row, reserved),
+    const index = findOrigin(
+      field,
+      comparison,
+      previous,
+      reserved,
+      sourceSurface,
     );
     if (index >= 0) {
       const [saved] = previous.splice(index, 1);

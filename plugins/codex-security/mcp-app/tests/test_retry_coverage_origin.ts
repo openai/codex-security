@@ -23,10 +23,13 @@ const { readAcceptedDiscovery } = await importSource(
     new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
   ),
 );
-const { recordCodexSecurityWorkerScanDraft, readArchivedWorkerCheckpoints } =
-  await importSource(
-    fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
-  );
+const {
+  recordCodexSecurityWorkerScanDraft,
+  readArchivedWorkerCheckpoints,
+  parseScanDraft,
+} = await importSource(
+  fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
+);
 const { archiveDirectory, createDeepScanArtifacts } = await importSource(
   fileURLToPath(new URL("../src/deep-scan/artifacts.ts", import.meta.url)),
 );
@@ -1108,3 +1111,226 @@ for (const copies of [1, 2]) {
     });
   }
 }
+
+for (const [reservedSuffix, completed, reversed, roundtrip] of [
+  [false, false, false, false],
+  [false, true, false, false],
+  [true, false, false, false],
+  [true, true, false, false],
+  [false, false, true, false],
+  [false, false, false, true],
+]) {
+  test(`typed retry preserves duplicate surface occurrences (reserved=${reservedSuffix}, completed=${completed}, reversed=${reversed}, roundtrip=${roundtrip})`, async (t) => {
+    const f = await workerHistoryFixture(t, roundtrip ? 3 : 2);
+    const surfaces = [
+      {
+        id: "api",
+        label: "First review",
+        disposition: "no_issue_found",
+        receiptRefs: [],
+      },
+      {
+        id: "api",
+        label: "Second review",
+        disposition: completed ? "needs_follow_up" : "no_issue_found",
+        receiptRefs: [],
+      },
+      ...(reservedSuffix
+        ? [
+            {
+              id: "api-2",
+              label: "Reserved identity",
+              disposition: "no_issue_found",
+              receiptRefs: [],
+            },
+          ]
+        : []),
+    ];
+    const archived = path.join(f.workerRoot, "attempts/attempt-1/result.json");
+    await mkdir(path.dirname(archived), { recursive: true });
+    await writeFile(
+      archived,
+      JSON.stringify(
+        workerDraft([], {
+          complete: true,
+          reviewState: { surfaces, explicitExclusions: [], deferred: [] },
+        }),
+      ),
+    );
+    const current = surfaces.map((surface) => ({
+      ...surface,
+      disposition: "no_issue_found",
+    }));
+    if (reversed) current.reverse();
+    await recordCodexSecurityWorkerScanDraft(
+      f.workerContext,
+      workerDraft([], {
+        complete: true,
+        reviewState: {
+          surfaces: current,
+          explicitExclusions: [],
+          deferred: [],
+        },
+      }),
+    );
+    const written = JSON.parse(await readFile(f.resultPath, "utf8"));
+    assert.deepEqual(
+      written.reviewState.surfaces.map((surface: { id: string }) => surface.id),
+      reservedSuffix ? ["api", "api-3", "api-2"] : ["api", "api-2"],
+    );
+    const files = [archived, f.resultPath];
+    if (roundtrip) {
+      const second = path.join(f.workerRoot, "attempts/attempt-2");
+      await archiveDirectory(f.output, second);
+      files.push(path.join(second, "result.json"));
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(
+          workerDraft([], {
+            complete: true,
+            reviewState: {
+              surfaces: current,
+              explicitExclusions: [],
+              deferred: [],
+            },
+          }),
+        ),
+      );
+    }
+    const original = await Promise.all(files.map((file) => readFile(file)));
+    const accepted = (
+      await readAcceptedDiscovery(
+        createDeepScanArtifacts(f.scanRoot),
+        f.worker,
+        scanId,
+      )
+    ).coverage;
+    assert.equal(accepted.surfaces.length, surfaces.length);
+    assert.deepEqual(
+      accepted.surfaces.map((surface: { label: string }) => surface.label),
+      current.map((surface) => surface.label),
+    );
+    assert.ok(
+      accepted.surfaces.every(
+        (surface: { disposition: string }) =>
+          surface.disposition === "no_issue_found",
+      ),
+    );
+    assert.deepEqual(
+      accepted.surfaces.map(
+        (surface: { provenance: { attempt: number } }) =>
+          surface.provenance.attempt,
+      ),
+      current.map(({ label }) =>
+        completed && label === "Second review" ? 2 : 1,
+      ),
+    );
+    assert.deepEqual(
+      await Promise.all(files.map((file) => readFile(file))),
+      original,
+    );
+  });
+}
+
+test("writer IDs match shared surface comparison fixtures", async () => {
+  const cases = JSON.parse(
+    await readFile(
+      new URL(
+        "../../tests/fixtures/surface-normalization.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  for (const fixture of cases) {
+    const input = workerDraft([], {
+      complete: true,
+      reviewState: {
+        surfaces: fixture.surfaces,
+        explicitExclusions: [],
+        deferred: [],
+      },
+    });
+    const before = JSON.stringify(input);
+    const parsed = parseScanDraft(input);
+    assert.deepEqual(
+      parsed.reviewState.surfaces.map((row: { id: string }) => row.id),
+      fixture.ids,
+      fixture.case,
+    );
+    assert.equal(JSON.stringify(input), before);
+  }
+});
+
+test("typed retry keeps named occurrence priority beside an older anonymous surface", async (t) => {
+  const f = await workerHistoryFixture(t, 3);
+  const anonymous = {
+    label: "First synthetic review",
+    disposition: "no_issue_found",
+    receiptRefs: [],
+  };
+  const named = { ...anonymous, id: "api" };
+  const artifacts = createDeepScanArtifacts(f.scanRoot);
+  const files: string[] = [];
+  for (const attempt of [1, 2]) {
+    await mkdir(f.output, { recursive: true });
+    await writeFile(
+      f.resultPath,
+      JSON.stringify(
+        workerDraft([], {
+          complete: true,
+          reviewState: {
+            surfaces: attempt === 1 ? [anonymous] : [anonymous, named, named],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        }),
+      ),
+    );
+    const accepted = (
+      await readAcceptedDiscovery(artifacts, { ...f.worker, attempt }, scanId)
+    ).coverage;
+    assert.deepEqual(
+      accepted.surfaces.map(
+        (row: { provenance: { attempt: number } }) => row.provenance.attempt,
+      ),
+      attempt === 1 ? [1] : [1, 2, 2],
+    );
+    const archived = path.join(f.workerRoot, "attempts", `attempt-${attempt}`);
+    await archiveDirectory(f.output, archived);
+    files.push(path.join(archived, "result.json"));
+  }
+  await mkdir(f.output, { recursive: true });
+  await recordCodexSecurityWorkerScanDraft(
+    f.workerContext,
+    workerDraft([], {
+      complete: true,
+      reviewState: {
+        surfaces: [named, named, anonymous],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    }),
+  );
+  files.push(f.resultPath);
+  const before = await Promise.all(files.map((file) => readFile(file)));
+  const accepted = (await readAcceptedDiscovery(artifacts, f.worker, scanId))
+    .coverage;
+  assert.deepEqual(
+    accepted.surfaces.map(
+      (row: { provenance: { sourceId: string; attempt: number } }) => [
+        row.provenance.sourceId,
+        row.provenance.attempt,
+      ],
+    ),
+    [
+      ["api", 2],
+      ["api-2", 2],
+      ["surface-48521adab43e8a78", 1],
+    ],
+  );
+  assert.deepEqual(
+    await Promise.all(files.map((file) => readFile(file))),
+    before,
+  );
+});
