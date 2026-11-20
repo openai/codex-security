@@ -206,6 +206,8 @@ async function resolvePatchProfile(
     `model_provider = "synthetic"
 model = "synthetic-local-only"
 sandbox_mode = "workspace-write"
+# Skip concurrent instruction probes against temporary mounts for absent stores.
+project_doc_max_bytes = 0
 ${windows}[analytics]
 enabled = false
 [features]
