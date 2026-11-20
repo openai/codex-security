@@ -1,13 +1,21 @@
 import { createHash, hash } from "node:crypto";
 import { realpath } from "node:fs/promises";
+import { basename } from "node:path";
 import { z } from "zod";
 import { portableRelativePath } from "./contract-values.js";
 import { CodexSecurityError } from "./errors.js";
+import { parseGitRemote } from "./git-remote.js";
 import { gitOutput } from "./targets.js";
 
 export const dependencyGitCommitSchema = z
   .string()
   .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u, "Expected a full Git commit ID.");
+
+export const dependencyTargetSchema = z.strictObject({
+  repository: z.string().min(1),
+  sha: dependencyGitCommitSchema,
+});
+export type DependencyTarget = z.infer<typeof dependencyTargetSchema>;
 
 const localObjects = {
   GIT_NO_LAZY_FETCH: "1",
@@ -15,6 +23,40 @@ const localObjects = {
   GIT_ALLOW_PROTOCOL: "",
   GIT_LITERAL_PATHSPECS: "1",
 };
+
+function repositoryLabel(directory: string, origin?: string) {
+  const checkout = basename(directory);
+  if (!origin || /^[A-Za-z]:[\\/]/u.test(origin)) return checkout;
+  try {
+    const remote = parseGitRemote(origin);
+    if (!remote?.url.hostname || remote.url.protocol === "file:")
+      return checkout;
+    // Record only the repository path, excluding URL credentials and query.
+    return (
+      remote.path.replace(/^\/+|\/+$/gu, "").replace(/\.git$/u, "") || checkout
+    );
+  } catch {
+    return checkout;
+  }
+}
+
+/** Capture once, before discovery, so all advisories analyze the same commit. */
+export async function readDependencyTarget(
+  directory: string,
+  signal?: AbortSignal,
+): Promise<DependencyTarget | undefined> {
+  const read = (args: string[]) =>
+    gitOutput(directory, args, signal, localObjects).catch(() => {
+      signal?.throwIfAborted();
+      return undefined;
+    });
+  const [sha, origin] = await Promise.all([
+    read(["rev-parse", "--verify", "HEAD^{commit}"]),
+    read(["remote", "get-url", "--", "origin"]),
+  ]);
+  const repository = repositoryLabel(directory, origin);
+  return sha && repository ? { repository, sha } : undefined;
+}
 
 /** Resolve the exact regular blob in the requested commit, including when the worktree is dirty. */
 export async function readDependencyGitSource(
