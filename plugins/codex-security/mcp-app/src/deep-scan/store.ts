@@ -157,42 +157,32 @@ export class WorkbenchDeepScanStore {
       scanRoot: input.scanRoot,
       workflowVersion: WORKFLOW_VERSION,
     };
-    let result = await this.enqueueWrite(
-      workbenchArgs("begin-deep-scan", {
-        ...args,
-        probeModelFileInputs: true,
-      }),
-      userContext,
-    );
-    let modelFileInputsJson: string | undefined;
-    if (typeof result.newScanTarget === "string") {
-      modelFileInputsJson = JSON.stringify(await currentModelFileInputs());
-      result = await this.enqueueWrite(
-        workbenchArgs("begin-deep-scan", {
-          ...args,
-          joinOnly: input.projectConfigPath !== undefined,
-          modelFileInputsJson,
-        }),
+    const begin = (options: Record<string, string | boolean>) =>
+      this.enqueueWrite(
+        workbenchArgs("begin-deep-scan", { ...args, ...options }),
         userContext,
       );
-    }
-    if (
-      input.projectConfigPath !== undefined &&
-      typeof result.newScanTarget === "string"
-    ) {
-      const project = await readDeepScanProjectConfig(
-        input.projectConfigPath,
-        result.newScanTarget,
-      );
-      result = await this.enqueueWrite(
-        workbenchArgs("begin-deep-scan", {
-          ...args,
+    let result = await begin({ probeModelFileInputs: true });
+    if (typeof result.newScanTarget === "string") {
+      const modelFileInputsJson = JSON.stringify(await currentModelFileInputs());
+      result = await begin({
+        joinOnly: input.projectConfigPath !== undefined,
+        modelFileInputsJson,
+      });
+      if (
+        input.projectConfigPath !== undefined &&
+        typeof result.newScanTarget === "string"
+      ) {
+        const project = await readDeepScanProjectConfig(
+          input.projectConfigPath,
+          result.newScanTarget,
+        );
+        result = await begin({
           targetPath: result.newScanTarget,
           deepScanProjectJson: JSON.stringify(project),
           modelFileInputsJson,
-        }),
-        userContext,
-      );
+        });
+      }
     }
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;

@@ -35,8 +35,5 @@ export const bindCodexExecutable: (
   environment: NodeJS.ProcessEnv,
   cwd: string,
   signal?: AbortSignal,
-) => Promise<Parameters<typeof verifyBoundCodexExecutable>[0]> = (
-  environment,
-  cwd,
-  signal,
-) => executor.bindCodexExecutable(environment, cwd, () => true, signal);
+) => Promise<Parameters<typeof verifyBoundCodexExecutable>[0]> =
+  executor.bindCodexExecutable;

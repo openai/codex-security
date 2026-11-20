@@ -1,11 +1,18 @@
 import { lstat, realpath } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { isWithin } from "../trusted-executable.js";
 
 function missing(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR"].includes(
     (error as NodeJS.ErrnoException).code ?? "",
   );
+}
+
+function existingPath(path: string) {
+  return realpath(path).catch((error: unknown) => {
+    if (!missing(error)) throw error;
+  });
 }
 
 /** Include the parent that supplied the source and any enclosing checkout, including worktrees. */
@@ -33,16 +40,10 @@ export async function workerExecutableRoots(
       );
     const directory = path === target ? path : dirname(path);
     await add(resolve(directory));
-    const physicalDirectory = await realpath(directory).catch(
-      (error: unknown) => {
-        if (!missing(error)) throw error;
-      },
-    );
+    const physicalDirectory = await existingPath(directory);
     if (physicalDirectory && physicalDirectory !== resolve(directory))
       await add(physicalDirectory);
-    const physical = await realpath(path).catch((error: unknown) => {
-      if (!missing(error)) throw error;
-    });
+    const physical = await existingPath(path);
     if (physical && physical !== path)
       await add(path === target ? physical : dirname(physical));
   }
@@ -55,10 +56,7 @@ export function outsideExecutableRoots(
 ): boolean {
   if (roots.length === 0) return true;
   const outside = (value: string) =>
-    roots.every((root) => {
-      const part = relative(root, value);
-      return part === ".." || part.startsWith(".." + sep) || isAbsolute(part);
-    });
+    !roots.some((root) => isWithin(root, value));
   if (!outside(resolve(path))) return false;
   try {
     return outside(realpathSync.native(path));
