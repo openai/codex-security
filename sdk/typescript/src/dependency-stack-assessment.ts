@@ -273,6 +273,7 @@ export const stackReviewDecisionSchema = z.strictObject({
 export const stackInvestigationReportSchema = z.strictObject({
   schemaVersion: z.literal("codex-security.pipeline-stacks.report/v1"),
   cve: text,
+  callerScope: stackManifestSchema.shape.callerScope,
   advisoryDetails: stackManifestSchema.shape.advisoryDetails,
   advisoryLookupError: stackManifestSchema.shape.advisoryLookupError,
   triggerAnalysis: stackManifestSchema.shape.triggerAnalysis,
@@ -902,6 +903,9 @@ export function finalizeStackReport(
     toolRevision,
     target,
     cve,
+    ...(packet.manifest.callerScope && {
+      callerScope: packet.manifest.callerScope,
+    }),
     ...(packet.manifest.advisoryDetails && {
       advisoryDetails: packet.manifest.advisoryDetails,
     }),
