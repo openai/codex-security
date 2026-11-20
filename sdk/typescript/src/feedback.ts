@@ -54,13 +54,7 @@ export async function sendFeedback(
       try {
         const logs = await readSavedScanLogs(
           scan,
-          [
-            codexHome,
-            configuredCodexHome(environment),
-            ...(scan.executionAttribution?.codexHome
-              ? [scan.executionAttribution.codexHome]
-              : []),
-          ],
+          [codexHome, configuredCodexHome(environment)],
           { allowMissingRoot: true },
         );
         if (logs.sessions.length > 0) {

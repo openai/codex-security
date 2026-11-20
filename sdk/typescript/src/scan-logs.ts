@@ -126,6 +126,8 @@ export async function readScanLogs(options: ScanLogOptions) {
       ? [options.codexHome]
       : options.codexHome,
   );
+  const workerHome = options.executionAttribution?.codexHome;
+  if (workerHome) homes.add(workerHome);
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
       for await (const session of scanSessions(home, directory)) {
@@ -245,20 +247,46 @@ export async function readScanLogs(options: ScanLogOptions) {
       traversed.add(session.threadId);
     }
   }
+  const eventsForComparison = attribution
+    ? selectedEvents
+    : (session: SessionLog) => sessionEvents(session.path);
   const sessions: SessionLog[] = [];
   for (const threadId of included) {
     const copies = logs.get(threadId);
     if (copies === undefined) continue;
     let session = copies[0];
     for (const copy of copies.slice(1)) {
-      if (await extendsSessionLog(session.path, copy.path)) session = copy;
+      if (
+        await extendsSessionLog(
+          eventsForComparison(session),
+          eventsForComparison(copy),
+        )
+      )
+        session = copy;
     }
     sessions.push(session);
   }
   const events: Record<string, unknown>[] = [];
+  for (const session of sessions) {
+    for await (const event of selectedEvents(session)) {
+      events.push({ threadId: session.threadId, event });
+    }
+  }
+
+  return {
+    scanId: options.scanId,
+    threadId: options.threadId ?? null,
+    sessions: sessions.map(({ threadId, parentThreadId, path }) => ({
+      threadId,
+      parentThreadId,
+      path,
+    })),
+    events,
+  };
+
   // Recorded completion can precede the scan turn's final response. Keep that
   // turn's remaining events, then stop before a post-completion turn starts.
-  for (const session of sessions) {
+  async function* selectedEvents(session: SessionLog) {
     let replaying = false;
     let finishingOwnerTurn = false;
     const completedAt = sessionStartedAt(attribution?.completedAt);
@@ -322,7 +350,7 @@ export async function readScanLogs(options: ScanLogOptions) {
           event["timestamp"],
         )
       ) {
-        events.push({ threadId: session.threadId, event });
+        yield event;
       }
       if (
         event["type"] === "event_msg" &&
@@ -333,17 +361,6 @@ export async function readScanLogs(options: ScanLogOptions) {
         finishingOwnerTurn = false;
     }
   }
-
-  return {
-    scanId: options.scanId,
-    threadId: options.threadId ?? null,
-    sessions: sessions.map(({ threadId, parentThreadId, path }) => ({
-      threadId,
-      parentThreadId,
-      path,
-    })),
-    events,
-  };
 }
 
 function belongsToScan(
@@ -377,12 +394,11 @@ function belongsToScan(
 // Prefer a longer copy only when it preserves every event in the earlier copy.
 // Identical or divergent copies keep the existing home/archive precedence.
 async function extendsSessionLog(
-  previousPath: string,
-  path: string,
+  previousEvents: AsyncGenerator<Record<string, unknown>>,
+  events: AsyncGenerator<Record<string, unknown>>,
 ): Promise<boolean> {
-  const events = sessionEvents(path);
   try {
-    for await (const previous of sessionEvents(previousPath)) {
+    for await (const previous of previousEvents) {
       const next = await events.next();
       if (next.done || !isDeepStrictEqual(previous, next.value)) return false;
     }

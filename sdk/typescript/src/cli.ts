@@ -3250,9 +3250,6 @@ export async function main(
               [
                 codexSecurityCredentialHome(dependencies.environment),
                 configuredCodexHome(dependencies.environment),
-                ...(scan.executionAttribution?.codexHome
-                  ? [scan.executionAttribution.codexHome]
-                  : []),
               ],
               {
                 allowMissingRoot: Boolean(

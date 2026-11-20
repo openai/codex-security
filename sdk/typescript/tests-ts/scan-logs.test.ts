@@ -72,6 +72,50 @@ function taskStarted(turnId: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("reads the complete worker log despite differing pre-scan history", async () => {
+    const current = await temporaryHome();
+    const recorded = await temporaryHome();
+    const before = "2026-08-11T12:00:00Z";
+    const startedAt = "2026-08-11T12:01:00Z";
+    const first = commandEvent("first", "first-call", startedAt);
+    const last = commandEvent("last", "last-call", startedAt);
+    await writeSession(current, "parent", []);
+    await writeSession(current, "worker", [
+      commandEvent("unrelated", "old-call", before),
+      first,
+    ]);
+    await writeSession(recorded, "worker", [
+      commandEvent("other history", "other-call", before),
+      first,
+      last,
+    ]);
+
+    const result = await readSavedScanLogs(
+      {
+        scanId: "scan-1",
+        continuationThreadId: "parent",
+        executionAttribution: {
+          formatVersion: 1,
+          codexHome: recorded,
+          executionThreadIds: ["worker"],
+          owner: { threadId: "parent", turnId: "scan-turn", startedAt },
+          startedAt,
+          completedAt: null,
+        },
+      },
+      current,
+    );
+    expect(
+      result.events
+        .filter(({ threadId }) => threadId === "worker")
+        .map(({ event }) => event),
+    ).toEqual([
+      { type: "session_meta", payload: { id: "worker" } },
+      first,
+      last,
+    ]);
+  });
+
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
     ["complete first", [0, 1, 1, 2], [0], 0, false, false],
