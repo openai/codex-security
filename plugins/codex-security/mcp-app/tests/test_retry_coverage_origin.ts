@@ -519,6 +519,100 @@ test("archived shared receipts follow the surface's reference order", async (t) 
   );
 });
 
+for (const admission of ["new", "previously-accepted"] as const) {
+  for (const variant of [
+    "legacy current",
+    "archived",
+    "recorded shared",
+    "worker-local",
+    "direct result",
+  ] as const) {
+    test(`saved checkpoint receipt ownership: ${variant}, ${admission}`, async (t) => {
+      const f = await workerHistoryFixture(t, variant === "archived" ? 2 : 1);
+      const ref = "artifacts/proof.txt";
+      await mkdir(path.join(f.scanRoot, "artifacts"), { recursive: true });
+      await writeFile(path.join(f.scanRoot, ref), "Synthetic shared evidence");
+      const surface = {
+        id: "saved-review",
+        label: "Synthetic retained review",
+        disposition: "no_issue_found",
+        receiptRefs: [ref],
+      };
+      const checkpoint = reviewDraft(false, { surfaces: [surface] });
+      if (variant === "recorded shared") {
+        await f.record(checkpoint);
+      } else if (variant !== "direct result") {
+        await mkdir(path.join(f.output, "checkpoints"));
+        await writeFile(
+          path.join(f.output, "checkpoints/saved.json"),
+          JSON.stringify(checkpoint),
+        );
+      }
+      if (variant === "archived") await f.archive();
+      if (variant === "worker-local" || variant === "recorded shared") {
+        await mkdir(path.join(f.output, "artifacts"));
+        await writeFile(path.join(f.output, ref), "Synthetic local evidence");
+      }
+      const checkpointRoot = path.join(
+        variant === "archived"
+          ? path.join(f.workerRoot, "attempts/attempt-01")
+          : f.output,
+        "checkpoints",
+      );
+      const checkpoints =
+        variant === "direct result"
+          ? []
+          : await Promise.all(
+              (await readdir(checkpointRoot)).map(async (name) => {
+                const file = path.join(checkpointRoot, name);
+                return [file, await readFile(file, "utf8")] as const;
+              }),
+            );
+      const terminal = JSON.stringify(
+        reviewDraft(true, {
+          surfaces: variant === "direct result" ? [surface] : [],
+        }),
+      );
+      await writeFile(f.resultPath, terminal);
+      const accepted = readAcceptedDiscovery(
+        f.artifacts,
+        f.worker,
+        scanId,
+        {},
+        admission,
+      );
+      if (variant === "direct result") {
+        await assert.rejects(
+          accepted,
+          /Standard scan worker coverage receipt: the requested artifact is unavailable/,
+        );
+      } else {
+        const { result, coverage } = await accepted;
+        assert.equal(result.reviewState.surfaces.length, 1);
+        assert.equal(result.reviewState.surfaces[0].id, surface.id);
+        assert.deepEqual(
+          result.reviewState.surfaces[0].provenance?.scanReceiptRefs ?? [],
+          variant === "worker-local" ? [] : [ref],
+        );
+        assert.equal(coverage.surfaces.length, 1);
+        assert.equal(coverage.surfaces[0].provenance.attempt, 1);
+        assert.deepEqual(coverage.surfaces[0].receiptRefs, [
+          variant === "worker-local"
+            ? `artifacts/deep_discovery/workers/discovery-0001/output/${ref}`
+            : ref,
+        ]);
+      }
+      assert.equal(await readFile(f.resultPath, "utf8"), terminal);
+      for (const [file, bytes] of checkpoints)
+        assert.equal(await readFile(file, "utf8"), bytes);
+      assert.equal(
+        await readFile(path.join(f.scanRoot, ref), "utf8"),
+        "Synthetic shared evidence",
+      );
+    });
+  }
+}
+
 test("current typed checkpoint receipt aliases retain one source observation", async (t) => {
   const f = await workerHistoryFixture(t, 1);
   const surface = {

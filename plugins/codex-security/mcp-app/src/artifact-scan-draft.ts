@@ -1964,12 +1964,15 @@ export async function readAcceptedWorkerCheckpoints(
   context: ArtifactContext,
   input: ScanDraftInput,
 ): Promise<SavedScanDraft[]> {
-  return readSavedCheckpoints(
+  const checkpoints = await readSavedCheckpoints(
     context,
     "current",
     scanDraftCheckpointName(input),
     true,
   ).catch(() => []);
+  for (const { input } of checkpoints)
+    await qualifyWorkerReceipts(context, input, (surface) => surface);
+  return checkpoints;
 }
 
 function copiedArchiveReceiptRef(workerPrefix: string, ref: string): string {
