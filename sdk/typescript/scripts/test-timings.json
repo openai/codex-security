@@ -275,10 +275,12 @@
     "win32": 3.9
   },
   "cli-patch-hosting.test.ts": {
-    "linux": 220
+    "linux": 220,
+    "darwin": 331.4
   },
   "cli-patch-nested.test.ts": {
-    "linux": 291
+    "linux": 291,
+    "darwin": 323.9
   },
   "cli-patch-results.test.ts": {
     "linux": 3.5,
@@ -292,7 +294,7 @@
   },
   "cli-patch.test.ts": {
     "linux": 585.2,
-    "darwin": 6.9,
+    "darwin": 905,
     "win32": 23.8
   },
   "cli-policy.test.ts": {

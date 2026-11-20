@@ -685,7 +685,7 @@ test.each([
   "checkout-match",
   ...(process.platform === "win32"
     ? []
-    : ["checkout-shell", "checkout-nested-ssh"]),
+    : ["checkout-shell", "checkout-nested-ssh", "checkout-script-fallback"]),
   "changed-config",
 ] as const)(
   "binds %s OpenSSH configuration during hostname lookup and transport",
@@ -705,7 +705,9 @@ test.each([
     await writeFile(checkoutScript, "#!/usr/bin/env node\n" + script, {
       mode: 0o755,
     });
-    if (location !== "checkout-relative")
+    const fallback = location === "checkout-script-fallback";
+    if (fallback) await symlink(checkoutScript, join(external, "fallback.js"));
+    else if (location !== "checkout-relative")
       await writeFile(join(external, name), script);
     const checkoutInclude = location === "checkout-include";
     const leaf =
@@ -727,7 +729,7 @@ test.each([
     const target =
       location === "checkout-relative"
         ? "./" + name
-        : join(external, name).replaceAll("\\", "/");
+        : join(external, fallback ? "fallback" : name).replaceAll("\\", "/");
     const checkoutProxy = location === "checkout-proxy";
     const checkoutMatch = location === "checkout-match";
     const nested = location === "checkout-nested-ssh";
@@ -831,13 +833,7 @@ test.each([
       expect(invoked, stderr).not.toContain(":-c");
       return;
     }
-    if (
-      checkoutInclude ||
-      checkoutProxy ||
-      checkoutMatch ||
-      nested ||
-      location === "checkout-provider"
-    ) {
+    if (location.startsWith("checkout-")) {
       expect(invoked, stderr).toBe("");
       expect(hostnameCommand, stderr).toBeUndefined();
       expect(stderr).toMatch(/SSH|transport/iu);
@@ -850,13 +846,11 @@ test.each([
       expect(invoked, stderr).toContain("hostname:match");
       expect(invoked, stderr).not.toContain("preflight:");
       expect(stderr).toContain("transport file changed");
-    } else if (location === "operator-absolute") {
+    } else {
       const records = invoked.split(/\r?\n/u);
       expect(records, stderr).toContain("hostname:match");
       expect(records, stderr).toContain("preflight:match");
       expect(records, stderr).toContain("preflight:proxy");
-    } else {
-      expect(invoked).toBe("");
     }
   },
 );
