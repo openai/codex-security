@@ -140,11 +140,14 @@ export function patchDependencies(
         repository,
         commandOptions,
       );
-      if (
-        output !== undefined ||
-        command !== "git" ||
-        !args.includes("rev-parse") ||
-        !args.some((argument) =>
+      if (command !== "git" || output) return output;
+      const inspectSearchPath = args[1]?.startsWith(
+        "alias.codex-security-transport-path-",
+      );
+      const resolveGitPath =
+        output === undefined &&
+        args.includes("rev-parse") &&
+        args.some((argument) =>
           [
             "--show-toplevel",
             "--absolute-git-dir",
@@ -153,9 +156,8 @@ export function patchDependencies(
             "--git-path",
             "--resolve-git-dir",
           ].includes(argument),
-        )
-      )
-        return output;
+        );
+      if (!inspectSearchPath && !resolveGitPath) return output;
       return runGitRepositoryCommand(command, args, repository, commandOptions);
     },
   });
