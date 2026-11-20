@@ -2343,11 +2343,12 @@ export class CodexSecurity {
       );
     }
     const target = recipe["target"];
+    const excludePaths = (recipe["excludePaths"] ?? []) as string[];
     if (
       options.excludePaths !== undefined &&
       !isDeepStrictEqual(
         normalizeExcludedPaths(options.excludePaths),
-        recipe["excludePaths"] ?? [],
+        excludePaths,
       )
     )
       throw new CodexSecurityError(
@@ -2459,6 +2460,7 @@ export class CodexSecurity {
       mode: "deep",
       repository: repo,
       target: target as unknown as NormalizedTarget,
+      excludePaths,
       repositoryRevision:
         typeof context["targetRevision"] === "string"
           ? context["targetRevision"]

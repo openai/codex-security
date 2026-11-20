@@ -67,6 +67,7 @@ async function interruptedScan(
   }: Pick<
     ScanOptions,
     | "safetyIdentifier"
+    | "excludePaths"
     | "maxCostUsd"
     | "maxTimeMinutes"
     | "ownerSuggestions"
@@ -1836,6 +1837,7 @@ test
 test("sealed SDK resumes the registered path scope after the checkout is removed", async () => {
   const f = await interruptedScan("deep", false, {
     target: { kind: "paths", paths: ["source.py"] },
+    excludePaths: ["generated"],
   });
   await sealWithOriginalPlugin(f);
   await rm(f.repository, { recursive: true });
@@ -1850,11 +1852,15 @@ test("sealed SDK resumes the registered path scope after the checkout is removed
   await expect(
     client.run(f.repository, { ...options, target: ["other"] }),
   ).rejects.toThrow("requested target differs");
+  await expect(
+    client.run(f.repository, { ...options, excludePaths: [] }),
+  ).rejects.toThrow("requested exclusions differ");
   const result = await client.run(f.repository, {
     ...options,
     target: ["./source.py"],
   });
   expect(result.manifest.scan.id).toBe(f.scanId);
+  expect(result.manifest.scan.scope.excludePaths).toEqual(["generated"]);
 });
 
 test("sealed SDK resume accepts the canonical target of a saved repository alias", async () => {
