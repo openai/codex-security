@@ -4,7 +4,10 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverDependencyRepository } from "../src/dependency-discovery.js";
+import {
+  discoverDependencyRepository,
+  sourceReferences,
+} from "../src/dependency-discovery.js";
 
 const pkg = { ecosystem: "npm", name: "sample-codec" };
 
@@ -250,4 +253,165 @@ test("reports a nested build-only package in the active caller boundary", async 
   } finally {
     await rm(repo, { recursive: true, force: true });
   }
+});
+
+test("discovers multi-line runtime callers while skipping type-only, commented, and string-only matches", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "dependency-callers-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  try {
+    await mkdir(join(repo, "src"), { recursive: true });
+    await writeFile(
+      join(repo, "package.json"),
+      JSON.stringify({ dependencies: { [pkg.name]: "1.2.3" } }),
+    );
+    await writeFile(
+      join(repo, "src/runtime.ts"),
+      [
+        "import {",
+        "  type CodecOptions,",
+        "  decode,",
+        "} from 'sample-codec';",
+        "const lazy = require(",
+        "  'sample-codec/sub'",
+        ");",
+      ].join("\n") + "\n",
+    );
+    await writeFile(
+      join(repo, "src/types-only.ts"),
+      [
+        "// import { decode } from 'sample-codec';",
+        "const example = \"import codec from 'sample-codec'\";",
+        "import type { CodecOptions } from 'sample-codec';",
+        "import { type CodecResult as Result } from 'sample-codec';",
+        "export type { CodecOptions } from 'sample-codec';",
+      ].join("\n") + "\n",
+    );
+    await writeFile(join(repo, "requirements.txt"), "sample-image==2.3.4\n");
+    await writeFile(
+      join(repo, "src/worker.py"),
+      [
+        '"""',
+        "from sample_image import ignored_docstring_symbol",
+        '"""',
+        "# import sample_image",
+        "import os, sample_image as img",
+      ].join("\n") + "\n",
+    );
+    git("init", "--quiet");
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "Fixture",
+    );
+
+    const npmResult = await discoverDependencyRepository({
+      repository: repo,
+      package: pkg,
+      environment: { PATH: "" },
+    });
+    expect(npmResult.callers.map(({ path, line }) => [path, line])).toEqual([
+      ["src/runtime.ts", 1],
+      ["src/runtime.ts", 5],
+    ]);
+    expect(npmResult.sourceLeads).toEqual(["src/types-only.ts"]);
+
+    const pypiResult = await discoverDependencyRepository({
+      repository: repo,
+      package: { ecosystem: "PyPI", name: "sample-image" },
+      environment: { PATH: "" },
+    });
+    expect(
+      pypiResult.callers.map(({ path, line, version }) => [
+        path,
+        line,
+        version,
+      ]),
+    ).toEqual([["src/worker.py", 5, "2.3.4"]]);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("extracts JavaScript, TypeScript, and Python import bindings across multi-line and aliased forms", () => {
+  const tsRefs = sourceReferences(
+    "src/service.ts",
+    [
+      "const fence = /`/g;",
+      "import type DefaultType from 'sample-codec';",
+      "import type * as NamespaceType from 'sample-codec';",
+      "import { type Options, type Output as Out } from 'sample-codec';",
+      "import codec, {",
+      "  // active decoder",
+      "  type InlineType,",
+      "  decode,",
+      "  encode as encodeSample,",
+      "} from 'sample-codec';",
+      "import type from 'sample-codec/type-value';",
+      "import { type as runtimeType } from 'sample-codec/type-value';",
+      "const {",
+      "  parse,",
+      "  format: formatSample = fallback,",
+      "  ...restCodec",
+      "} = require(",
+      "  'sample-codec'",
+      ");",
+      "const load = require('sample-codec').load;",
+      "const result = require('sample-codec').decode(payload);",
+      "const ratio = stats.return / 2; const inlineSub = require('sample-codec/sub');",
+      "const fs = require('node:fs'),",
+      "  chained = require('sample-codec');",
+      "export * from 'sample-codec/reexport';",
+    ].join("\n"),
+    pkg,
+    [],
+  );
+  expect(tsRefs.lines).toEqual([5, 11, 12, 13, 20, 21, 22, 24, 25]);
+  expect(tsRefs.bindings).toEqual([
+    "codec",
+    "decode",
+    "encodeSample",
+    "type",
+    "runtimeType",
+    "parse",
+    "formatSample",
+    "restCodec",
+    "load",
+    "inlineSub",
+    "chained",
+  ]);
+
+  const pyRefs = sourceReferences(
+    "src/service.py",
+    [
+      "from sample_image import (",
+      "    # primary entrypoints",
+      "    load,",
+      "    open as open_image,",
+      ")",
+      "from sample_image.ops import resize, crop as crop_image",
+      "from sample_image \\",
+      "    import stream",
+      "import sample_image.codec as codec",
+      "import os, sample_image as img",
+    ].join("\n"),
+    { ecosystem: "PyPI", name: "sample-image" },
+    [],
+  );
+  expect(pyRefs.lines).toEqual([1, 6, 7, 9, 10]);
+  expect(pyRefs.bindings).toEqual([
+    "load",
+    "open_image",
+    "resize",
+    "crop_image",
+    "stream",
+    "codec",
+    "img",
+  ]);
 });
