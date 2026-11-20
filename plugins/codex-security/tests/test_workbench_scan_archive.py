@@ -638,12 +638,13 @@ def test_archive_follows_the_owner_across_windows_spellings(
 
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires long Win32 archive paths")
-def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(tmp_path):
+@pytest.mark.parametrize("root_size", [232, 242], ids=["report", "root"])
+def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(tmp_path, root_size):
     extended = load_script("windows_scan_local_files")._extended_path
     state, repo = tmp_path / "state", tmp_path / "repo"
     repo.mkdir()
     units = len(str(tmp_path).encode("utf-16-le")) // 2
-    output = tmp_path / ("s" * max(1, 242 - units - 1))
+    output = tmp_path / ("s" * max(1, root_size - units - 1))
     output.mkdir()
     scan_id = register_scan(state, repo, output)["scanId"]
     fail_scan(state, scan_id, "Stopped")

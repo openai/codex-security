@@ -23,7 +23,6 @@ from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import write_scan_local_bytes
 from workbench.storage import (
     archive_source_directory,
-    archived_path,
     create_private_temporary_directory,
     relocate_scan_artifact,
     same_directory_spelling,
@@ -291,10 +290,15 @@ def archive_scan(
                 scan_dir.chmod(0o700)
         if previous_scan is not None:
             source = Path(previous_scan["scan_dir"])
-            archive = archived_path(archived_scan_dir, source, Path())
+
+            def archive_path(value: str | None) -> str | None:
+                return relocate_scan_artifact(source, archived_scan_dir, value, keep_extended=True)
+
+            archive = archive_path(str(source))
+            sarif = str(source / "exports" / "results.sarif")
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-                (str(archive), timestamp, previous_scan["id"]),
+                (archive, timestamp, previous_scan["id"]),
             )
             connection.execute(
                 """UPDATE finding_workflows SET scan_dir = ?,
@@ -302,16 +306,13 @@ def archive_scan(
                         THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
                     WHERE scan_id = ? AND scan_dir = ?""",
                 (
-                    str(archive),
-                    str(source / "exports" / "results.sarif"),
-                    str(archive / "exports" / "results.sarif"),
+                    archive,
+                    sarif,
+                    archive_path(sarif),
                     previous_scan["id"],
                     str(source),
                 ),
             )
-
-            def archive_path(value: str | None) -> str | None:
-                return relocate_scan_artifact(source, archive, value)
 
             connection.create_function("archive_path", 1, archive_path)
             try:
