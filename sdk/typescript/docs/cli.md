@@ -164,17 +164,17 @@ marked **Requires more information** corresponds to `unknown` in JSON.
 
 ### Repository and package checks
 
-From a Git checkout, use the same opt-in to investigate a published CVE or a package. The CLI freezes the public advisory and finds dependency selections and caller paths at the checked-out commit. With the default `--grader=enabled`, a fresh reviewer checks each exact claim revision and can send the investigator feedback. The resulting JSON keeps each supported use and its source citations separate.
+From a Git checkout, use the same opt-in to investigate a published CVE or a package. The CLI freezes the public advisory and finds dependency selections and caller paths at the checked-out commit. With the default `--reviewer=enabled`, a fresh reviewer checks each exact claim revision and can send the investigator feedback. The resulting JSON keeps each supported use and its source citations separate.
 
 ```sh
 export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
 cs exploitability check CVE-2019-10744 --json --report-file report.json
-cs exploitability check --grader=disabled CVE-2019-10744 --json --report-file unreviewed.json
+cs exploitability check --reviewer=disabled CVE-2019-10744 --json --report-file unreviewed.json
 cs exploitability check npm:lodash --progress-events progress.jsonl
 cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
 ```
 
-With `--grader=disabled`, the investigator submits its own assessment. The host checks claim revisions, source citations and evidence references, then publishes the submitted evidence without calling the independent reviewer. The JSON identifies the mode with `grader: "disabled"`. Each claim has `state: "unreviewed"` and omits the reviewer’s `decision`. Progress events label provisional verdicts `unreviewed` or `unreviewed_group`. To compare reports, run a check in each mode at the same commit with the same model and configuration. Captured stack checks with `--sources`, `--sinks` and `--stacks` require the grader.
+With `--reviewer=disabled`, the investigator submits its own assessment. The host checks claim revisions, source citations and evidence references, then publishes the submitted evidence without calling the independent reviewer. The JSON identifies the mode with `reviewer: "disabled"`. Each claim has `state: "unreviewed"` and omits the reviewer’s `decision`. Progress events label provisional verdicts `unreviewed` or `unreviewed_group`. To compare reports, run a check in each mode at the same commit with the same model and configuration. Captured stack checks with `--sources`, `--sinks` and `--stacks` require the reviewer.
 
 Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed report atomically to a new file and preserves any existing destination.
 

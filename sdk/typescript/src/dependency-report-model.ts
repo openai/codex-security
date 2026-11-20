@@ -105,7 +105,7 @@ export type Report = {
   sections: Section[];
 };
 export function useCountLabel(section: Section, count: number | "No"): string {
-  const state = section.check?.grader === "disabled" ? "reported" : "reviewed";
+  const state = section.check?.reviewer === "disabled" ? "reported" : "reviewed";
   return `${count} ${state} ${count === 1 ? "use" : "uses"}`;
 }
 export const verdictOrder: DependencyVerdict[] = [
@@ -427,7 +427,7 @@ function loadExcerpts(
 export function prepareDependencyReport(value: unknown): Report {
   const raw = unwrap(value);
   const report = readReport(raw);
-  if (isRecord(raw) && raw["grader"] === "disabled")
+  if (isRecord(raw) && raw["reviewer"] === "disabled")
     report.reviewNote = "Independent review disabled";
   for (const [i, section] of report.sections.entries()) {
     if (section.stack)

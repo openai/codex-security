@@ -406,7 +406,7 @@ function checkClaims(f: Finding, check: Check) {
     entries.push(refHtml + (claim.decision ? para(claim.decision.reason) : ""));
   }
   return group(
-    check.grader === "disabled" ? "Unreviewed claims" : "Claim decisions",
+    check.reviewer === "disabled" ? "Unreviewed claims" : "Claim decisions",
     list(entries),
   );
 }

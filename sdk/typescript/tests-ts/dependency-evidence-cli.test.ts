@@ -29,7 +29,7 @@ test("command schema exposes complete and blocked reports as direct output alter
     stderr.text(),
   ).toBe(0);
   const schema = JSON.parse(stdout.text());
-  expect(schema.options.properties.grader).toMatchObject({
+  expect(schema.options.properties.reviewer).toMatchObject({
     default: "enabled",
     enum: ["enabled", "disabled"],
   });
@@ -431,10 +431,10 @@ test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
 );
 
 test.each([
-  ["md", ["--grader=disabled", "npm:sample"]],
-  ["html", ["npm:sample", "--grader", "disabled"]],
+  ["md", ["--reviewer=disabled", "npm:sample"]],
+  ["html", ["npm:sample", "--reviewer", "disabled"]],
 ] as const)(
-  "disabling the grader skips the independent model call and labels the %s report",
+  "disabling the reviewer skips the independent model call and labels the %s report",
   (format, args) => checkCoordinatorOutput(format, args),
 );
 
@@ -554,8 +554,8 @@ async function checkCoordinatorOutput(
       expect(contents).toContain("Independent review disabled");
     else {
       const report = JSON.parse(contents);
-      expect(report.grader).toBe("disabled");
-      expect(report.checks[0].grader).toBe("disabled");
+      expect(report.reviewer).toBe("disabled");
+      expect(report.checks[0].reviewer).toBe("disabled");
       const [claim] = report.checks[0].claims;
       expect(claim.state).toBe("unreviewed");
       expect(claim).not.toHaveProperty("decision");

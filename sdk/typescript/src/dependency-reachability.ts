@@ -428,7 +428,7 @@ export const dependencyReachabilityReportSchema = z
   .strictObject({ limitations: z.array(z.string()) })
   .extend({
     schemaVersion: z.literal(2),
-    grader: z.literal("disabled").optional(),
+    reviewer: z.literal("disabled").optional(),
     target: dependencyTargetSchema.optional(),
     uses: z.array(reviewedDependencyUseSchema),
     claims: z.array(dependencyClaimSchema).optional(),
@@ -462,7 +462,7 @@ export const reviewedDependencyCheckSchema =
 // The CVE form keeps its original result. A package can have zero or more
 // independent issues, so each reviewed verdict belongs to a particular check.
 export const dependencyPackageCheckOutputSchema = z.object({
-  grader: z.literal("disabled").optional(),
+  reviewer: z.literal("disabled").optional(),
   target: dependencyTargetSchema.optional(),
   package: z.object({ ecosystem: z.string(), name: z.string() }),
   vulnDescription: z.string().optional(),

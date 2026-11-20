@@ -151,7 +151,7 @@ function progressLine(type: string, fields: Record<string, unknown>) {
       return `${verdictNames[String(fields["verdict"])]} · ${fields["callsites"]} ${state} calls · ${fields["location"]}`;
     }
     case "report_ready": {
-      const unreviewed = fields["grader"] === "disabled";
+      const unreviewed = fields["reviewer"] === "disabled";
       const counts = Object.entries(
         isRecord(fields["verdicts"]) ? fields["verdicts"] : {},
       ).filter(([, n]) => typeof n === "number" && n > 0);
@@ -202,7 +202,7 @@ function reportSummary(report: unknown) {
     verdicts,
     limitations,
     ...(isRecord(report) &&
-      report["grader"] === "disabled" && { grader: "disabled" }),
+      report["reviewer"] === "disabled" && { reviewer: "disabled" }),
   };
 }
 

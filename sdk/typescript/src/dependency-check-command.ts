@@ -121,7 +121,7 @@ export function registerDependencyCheck(
         .describe("Path to the observed stacks and target revision."),
       model: text.optional().describe("Investigator model."),
       effort: text.optional().describe("Investigator reasoning effort."),
-      grader: z
+      reviewer: z
         .enum(["enabled", "disabled"])
         .default("enabled")
         .describe(
@@ -160,9 +160,9 @@ export function registerDependencyCheck(
         throw new CodexSecurityError(
           "Supply --sources, --sinks and --stacks together for one CVE.",
         );
-      if (captured && options.grader === "disabled")
+      if (captured && options.reviewer === "disabled")
         throw new CodexSecurityError(
-          "--grader=disabled applies to repository investigations. Captured stack investigations require independent review.",
+          "--reviewer=disabled applies to repository investigations. Captured stack investigations require independent review.",
         );
       if (
         captured &&
@@ -244,7 +244,7 @@ export function registerDependencyCheck(
                 {
                   directory: repository,
                   subject: args.subject,
-                  grader: options.grader,
+                  reviewer: options.reviewer,
                   vulnDescription: options.vulnDescription,
                   scope: scope?.instructions,
                   excludePaths: scope?.exclude_paths,

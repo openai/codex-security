@@ -128,7 +128,7 @@ type Dependencies = {
 };
 
 export type ReviewedCheckOptions = AgentSettings & {
-  grader?: "enabled" | "disabled";
+  reviewer?: "enabled" | "disabled";
   directory: string;
   subject: string;
   vulnDescription?: string;
@@ -621,7 +621,7 @@ async function investigateIssue(
   const verdictProgress = createDependencyVerdictProgress(
     subject,
     options.onProgress,
-    options.grader === "disabled" ? "unreviewed" : "reviewed",
+    options.reviewer === "disabled" ? "unreviewed" : "reviewed",
   );
   const discover = dependencies.discover ?? discoverDependencyRepository;
   const callerBoundary = {
@@ -1026,7 +1026,7 @@ async function investigateIssue(
         }
       }
       try {
-        if (options.grader === "disabled") {
+        if (options.reviewer === "disabled") {
           // The host has checked the original evidence and still enforces claim
           // revisions, prerequisites, and coverage. Keep all submitted evidence.
           applyDecisions(
@@ -1035,7 +1035,7 @@ async function investigateIssue(
               ...reference(claim),
               approved: null,
               reason:
-                "Host checks passed. Independent grading disabled. Use this claim wherever an approved claim is requested.",
+                "Host checks passed. Independent review disabled. Use this claim wherever an approved claim is requested.",
               evidenceKeys: [...availableEvidenceKeys(claimInputs(claim))],
             })),
           );
@@ -1414,7 +1414,9 @@ async function investigateIssue(
           });
           return {
             schemaVersion: 2 as const,
-            ...(options.grader === "disabled" && { grader: options.grader }),
+            ...(options.reviewer === "disabled" && {
+              reviewer: options.reviewer,
+            }),
             uses: approved.flatMap((claim) => {
               if (claim.value.kind !== "use") return [];
               const selected = selectedPremises(
@@ -1640,7 +1642,7 @@ export async function runReviewedDependencyCheck(
   const target = await readDependencyTarget(options.directory, signal);
   const identity = {
     ...(target && { target }),
-    ...(options.grader === "disabled" && { grader: options.grader }),
+    ...(options.reviewer === "disabled" && { reviewer: options.reviewer }),
   };
   const activity = createActivityProgress(
     options.directory,

@@ -109,7 +109,7 @@ export function availableEvidenceKeys({
   ]);
 }
 
-// A null decision denotes a host-validated claim from an investigation with grading disabled.
+// A null decision denotes a host-validated claim from an investigation with review disabled.
 export function acceptedByHost(decision: Decision) {
   return decision.approved === true || decision.approved === null;
 }

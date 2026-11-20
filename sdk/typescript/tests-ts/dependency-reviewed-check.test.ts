@@ -1152,11 +1152,11 @@ test("host feedback repairs a bad citation and an independent rejection requires
   expect([investigations, reviews]).toEqual([3, 2]);
 });
 
-test("the grader switch preserves the investigator prompt, host checks and queued evidence", async () => {
+test("the reviewer switch preserves the investigator prompt, host checks and queued evidence", async () => {
   await using f = await fixture();
   const prompts: string[] = [];
-  for (const grader of ["enabled", "disabled"] as const) {
-    const reviewed = grader === "enabled";
+  for (const reviewer of ["enabled", "disabled"] as const) {
+    const reviewed = reviewer === "enabled";
     const state = reviewed ? "approved" : "unreviewed";
     const events: string[] = [];
     const result = await runReviewedDependencyCheck(
@@ -1164,7 +1164,7 @@ test("the grader switch preserves the investigator prompt, host checks and queue
         directory: f.path,
         subject: "npm:fixture-parser",
         vulnDescription: "Untrusted input reaches the parser.",
-        grader,
+        reviewer,
         onProgress: (type) => events.push(type),
         signal,
       },
@@ -1219,7 +1219,7 @@ test("the grader switch preserves the investigator prompt, host checks and queue
     );
     if (!("checks" in result)) throw Error("Missing package result");
     const check = result.checks[0]!;
-    expect(check.grader).toBe(reviewed ? undefined : "disabled");
+    expect(check.reviewer).toBe(reviewed ? undefined : "disabled");
     expect(events).toContain("proposed_sink");
     expect(events.includes("review")).toBe(reviewed);
     expect(events.includes("reviewed")).toBe(reviewed);
