@@ -1277,17 +1277,18 @@ export async function runOsvScan(
   let repository = options.repositoryPath;
   let selected: ScaInput[] = [];
   const reportMatching = (currentInput: string | null = null): void => {
-    const progress: DependencyScanProgress = {
-      phase: "matching",
-      inputsTotal: selected.length,
-      inputsProcessed: scanner.invocations!.length,
-      inputsFailed: selected.filter((input) => input.status === "failed")
-        .length,
-      currentInput,
-      components: result.components.length,
-      matches: result.matches.length,
-    };
-    notify(() => options.onProgress?.(progress));
+    notify(() =>
+      options.onProgress?.({
+        phase: "matching",
+        inputsTotal: selected.length,
+        inputsProcessed: scanner.invocations!.length,
+        inputsFailed: selected.filter((input) => input.status === "failed")
+          .length,
+        currentInput,
+        components: result.components.length,
+        matches: result.matches.length,
+      }),
+    );
   };
   let pending: {
     input: ScaInput;

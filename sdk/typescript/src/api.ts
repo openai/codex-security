@@ -15,8 +15,11 @@ import {
   dependencyTriageContract,
   dependencyTriagePrompt,
 } from "./sca-triage.js";
-import type { ScaAssessment, ScaMatch, ScaResult } from "./sca-types.js";
-import type { DependencyScanProgress } from "./sca-progress.js";
+import type { ScaAssessment, ScaResult } from "./sca-types.js";
+import {
+  assessmentProgress,
+  type DependencyScanProgress,
+} from "./sca-progress.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   explicitlyCanceled,
@@ -1071,8 +1074,8 @@ export class CodexSecurity {
   async #scanDependencies(
     options: DependencyScanOptions,
   ): Promise<DependencyScanResult> {
-    const { onProgress: _onProgress, ...scanOptions } = options;
-    const reportProgress = notifyObserver(options, "onProgress");
+    const { onProgress, ...scanOptions } = options;
+    const reportProgress = onProgress && notifyObserver(options, "onProgress");
     const onActivity = notifyObserver(options, "onActivity");
     const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
@@ -1085,7 +1088,7 @@ export class CodexSecurity {
     let result: ScaResult | undefined;
     try {
       throwIfAborted(signal);
-      reportProgress({ phase: "preparing" });
+      reportProgress?.({ phase: "preparing" });
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
         scanOptions,
@@ -1186,38 +1189,13 @@ export class CodexSecurity {
         }
         throw error;
       }
-      if (result.matches.length === 0) reportProgress({ phase: "saving" });
+      if (result.matches.length === 0) reportProgress?.({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
-      const reportAssessment = (match: ScaMatch | null): void => {
-        const component = result!.components.find(
-          (item) => item.id === match?.componentId,
-        );
-        reportProgress({
-          phase: "assessing",
-          assessmentsTotal: result!.matches.length,
-          assessmentsCompleted: result!.assessments.filter(
-            (item) => item.status === "completed",
-          ).length,
-          assessmentsFailed: result!.assessments.filter(
-            (item) => item.status === "failed",
-          ).length,
-          current:
-            match === null
-              ? null
-              : {
-                  matchId: match.id,
-                  componentId: match.componentId,
-                  packageName: component?.name ?? null,
-                  packageVersion: component?.version ?? null,
-                  advisoryIds: [...match.advisoryIds],
-                },
-        });
-      };
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
-        reportProgress({ phase: "preparing_assessment" });
+        reportProgress?.({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
         const auth =
           this.#dependencies.chooseDependencyAuthentication === undefined
@@ -1347,7 +1325,7 @@ export class CodexSecurity {
         try {
           for (const [index, match] of result.matches.entries()) {
             throwIfAborted(signal, outputDir);
-            reportAssessment(match);
+            reportProgress?.(assessmentProgress(result, match));
             const thread = codex.startThread(threadOptions);
             let assessment: ScaAssessment;
             try {
@@ -1429,7 +1407,7 @@ export class CodexSecurity {
             result.assessments[index] = assessment;
             await saveDependencyScan(result);
             finishCheckpoint();
-            reportAssessment(null);
+            reportProgress?.(assessmentProgress(result, null));
             const snapshot = await tracker.refresh().catch((error: unknown) => {
               reportTrackingError(error);
               if (options.maxCostUsd !== undefined) throw error;
@@ -1470,11 +1448,11 @@ export class CodexSecurity {
         }
         await saveDependencyScan(result);
         throwIfAborted(signal, outputDir);
-        reportAssessment(null);
-        reportProgress({ phase: "saving" });
+        reportProgress?.(assessmentProgress(result, null));
+        reportProgress?.({ phase: "saving" });
         return result;
       }
-      reportProgress({ phase: "saving" });
+      reportProgress?.({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       return result;
@@ -1491,7 +1469,7 @@ export class CodexSecurity {
             "Dependency scan interrupted; completed scanner facts are retained.",
           );
         } else result.diagnostics.push(errorMessage(error));
-        reportProgress({ phase: "saving" });
+        reportProgress?.({ phase: "saving" });
         await saveDependencyScan(result);
       }
       throwIfAborted(signal, outputDir);
