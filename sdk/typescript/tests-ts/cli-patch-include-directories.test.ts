@@ -15,21 +15,35 @@ import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
-  completePatches,
+  fixSavedFinding,
   publicationRepository,
-  resultWithFindings,
-  savedScan,
   patchDirectories,
+  directoryLinkType,
   initializePatchGit,
-  runIssuePatch,
   runSavedPublication,
-  gitWithEnvironment,
   observeIssuePatch,
 } from "./cli-patch-fixtures.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
 
 const fixtures = patchDirectories();
+
+function readGitState(root: string) {
+  return Promise.all(
+    ["HEAD", "refs/heads/main", "index", "config"].map((file) =>
+      readFile(join(root, ".git", file)),
+    ),
+  );
+}
+
+function configFailure(root: string, ...args: string[]) {
+  const result = spawnSync("git", ["config", "--includes", ...args], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  expect(result.status).toBe(128);
+  return result.stderr.trim();
+}
 
 for (const mutation of [
   "directory",
@@ -44,11 +58,7 @@ for (const mutation of [
     const target = join(repository, "cache-data");
     const alias = join(repository, "cache");
     await mkdir(target);
-    await symlink(
-      target,
-      alias,
-      process.platform === "win32" ? "junction" : "dir",
-    );
+    await symlink(target, alias, directoryLinkType);
     git(
       "config",
       mutation === "fixed-directory"
@@ -72,11 +82,7 @@ for (const mutation of [
         "patch-include-storage-replacement-",
       );
       await rm(alias, { recursive: true });
-      await symlink(
-        replacement,
-        alias,
-        process.platform === "win32" ? "junction" : "dir",
-      );
+      await symlink(replacement, alias, directoryLinkType);
     } else await mkdir(objects);
     if (mutation === "directory") await controls!.validate();
     else
@@ -108,25 +114,11 @@ for (const mode of [
       `includeIf.onbranch:${mode === "active directory" ? "main" : "future-branch"}.path`,
       "../src",
     );
-    const head = await readFile(join(root, ".git", "HEAD"));
-    const reference = await readFile(
-      join(root, ".git", "refs", "heads", "main"),
-    );
-    const index = await readFile(join(root, ".git", "index"));
-    const configuration = await readFile(join(root, ".git", "config"));
+    const state = await readGitState(root);
     let nativeFailure = "";
     if (mode === "active directory") {
-      try {
-        git("config", "--includes", "--get-regexp", "^includeif");
-        throw new Error(
-          "Expected native Git to reject an active directory include",
-        );
-      } catch (error) {
-        const failure = error as Error & { status?: number; stderr?: Buffer };
-        expect(failure.status).toBe(128);
-        nativeFailure = String(failure.stderr).trim();
-        expect(nativeFailure).not.toBe("");
-      }
+      nativeFailure = configFailure(root, "--get-regexp", "^includeif");
+      expect(nativeFailure).not.toBe("");
     } else {
       expect(git("config", "--includes", "--get-regexp", "^includeif")).toBe(
         "includeif.onbranch:future-branch.path ../src",
@@ -209,12 +201,7 @@ for (const mode of [
         ).toBe("now-a-config-file");
       }
     }
-    expect(await readFile(join(root, ".git", "HEAD"))).toEqual(head);
-    expect(await readFile(join(root, ".git", "refs", "heads", "main"))).toEqual(
-      reference,
-    );
-    expect(await readFile(join(root, ".git", "index"))).toEqual(index);
-    expect(await readFile(join(root, ".git", "config"))).toEqual(configuration);
+    expect(await readGitState(root)).toEqual(state);
   });
 }
 
@@ -245,11 +232,7 @@ test.each([
     git("config", "--file", global, "include.path", intermediate);
   } else if (source === "global through a checkout link") {
     const alias = join(repository, "settings");
-    await symlink(
-      operator,
-      alias,
-      process.platform === "win32" ? "junction" : "dir",
-    );
+    await symlink(operator, alias, directoryLinkType);
     git(
       "config",
       "--file",
@@ -278,17 +261,11 @@ test.each([
       { environment },
     ),
   ).toBe("fixture-value");
-  let launches = 0;
-  const outcome = await runIssuePatch(repository, {
+  const { outcome, launches } = await observeIssuePatch(
+    repository,
+    () => writeFile(join(repository, "app.txt"), "after\n"),
     environment,
-    onRepositoryCommand: gitWithEnvironment(environment),
-    onCodex: async (_args, output) => {
-      launches++;
-      await writeFile(join(repository, "app.txt"), "after\n");
-      output?.stdout.write("Synthetic patch complete.\n");
-      return 0;
-    },
-  });
+  );
   expect(outcome.exitCode, outcome.stderr).toBe(allowed ? 0 : 2);
   expect(launches).toBe(allowed ? 1 : 0);
   if (!allowed)
@@ -321,13 +298,11 @@ test.skipIf(process.platform === "win32")(
       expect(git("config", "--includes", "--list")).toContain(
         "includeif.onbranch:codex-security/patch-scan-1.path",
       );
-      const scan = resultWithFindings(["high"]);
       let launches = 0;
       const bookkeeping: string[][] = [];
       const publication: string[][] = [];
       const outcome = await runSavedPublication(directory, {
-        onWorkbench: () => savedScan(scan, "scan-1", directory),
-        onCodex: async (args, output) => {
+        onCodex: fixSavedFinding(directory, async () => {
           launches++;
           await chmod(blocked, 0o700);
           const hooks = join(blocked, "hooks");
@@ -339,10 +314,7 @@ test.skipIf(process.platform === "win32")(
             "#!/bin/sh\nprintf 'activated\\n' >> hook-effect\n",
           );
           await chmod(hook, 0o755);
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          completePatches(args, output);
-          return 0;
-        },
+        }),
         onRepositoryCommand: (command, args, cwd, options) => {
           if (command !== "git") {
             if (launches > 0) publication.push([...args]);
@@ -500,11 +472,7 @@ for (const mode of [
     expect(await readFile(effect, "utf8")).toContain("effect");
     await unlink(effect);
     const loop = join(root, "control-loop");
-    await symlink(
-      loop,
-      loop,
-      process.platform === "win32" ? "junction" : "dir",
-    );
+    await symlink(loop, loop, directoryLinkType);
     const link = await readlink(loop);
     const include = join(loop, "included");
     git(
@@ -512,42 +480,22 @@ for (const mode of [
       `includeIf.onbranch:${mode === "active" ? "main" : "future-branch"}.path`,
       "../control-loop/included",
     );
-    const head = await readFile(join(root, ".git", "HEAD"));
-    const reference = await readFile(
-      join(root, ".git", "refs", "heads", "main"),
-    );
-    const index = await readFile(join(root, ".git", "index"));
-    const configuration = await readFile(join(root, ".git", "config"));
+    const state = await readGitState(root);
     // Git for Windows ignores this unresolved junction include; Unix reports ELOOP.
     const nativeRejectsLoop = mode === "active" && process.platform !== "win32";
     let nativeFailure = "";
     if (nativeRejectsLoop) {
-      try {
-        git("config", "--includes", "--list");
-        throw new Error(
-          "Expected native Git to reject the active include loop",
-        );
-      } catch (error) {
-        const failure = error as Error & { status?: number; stderr?: Buffer };
-        expect(failure.status).toBe(128);
-        nativeFailure = String(failure.stderr).trim();
-        expect(nativeFailure).toContain("control-loop/included");
-      }
+      nativeFailure = configFailure(root, "--list");
+      expect(nativeFailure).toContain("control-loop/included");
     } else {
       expect(git("config", "--includes", "--list")).toContain(
         `includeif.onbranch:${mode === "active" ? "main" : "future-branch"}.path=../control-loop/included`,
       );
     }
-    let launches = 0;
     let effectsBefore = "";
-    const afterTurn: string[][] = [];
-    const outcome = await runIssuePatch(root, {
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurn.push([...args]);
-        return runGitRepositoryCommand(command, args, cwd, options);
-      },
-      onCodex: async (_args, output) => {
-        launches++;
+    const { outcome, launches, afterTurn } = await observeIssuePatch(
+      root,
+      async (output) => {
         expect(output?.appServer?.permissions?.readOnlyPaths).not.toContain(
           include,
         );
@@ -558,10 +506,8 @@ for (const mode of [
           await writeFile(include, "[synthetic]\n value = accessible\n");
         }
         await writeFile(join(root, "app.ts"), "after\n");
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+    );
     const effectsAfter = await readFile(effect, "utf8").catch(() => "");
     if (
       mode === "unchanged inactive" ||
@@ -590,12 +536,7 @@ for (const mode of [
       expect(await readlink(loop)).toBe(link);
       expect(effectsAfter).toBe("");
     }
-    expect(await readFile(join(root, ".git", "HEAD"))).toEqual(head);
-    expect(await readFile(join(root, ".git", "refs", "heads", "main"))).toEqual(
-      reference,
-    );
-    expect(await readFile(join(root, ".git", "index"))).toEqual(index);
-    expect(await readFile(join(root, ".git", "config"))).toEqual(configuration);
+    expect(await readGitState(root)).toEqual(state);
     expect(await readFile(hook, "utf8")).toBe(script);
     expect(await readFile(join(root, "app.ts"), "utf8")).toBe(
       nativeRejectsLoop ? "before\n" : "after\n",

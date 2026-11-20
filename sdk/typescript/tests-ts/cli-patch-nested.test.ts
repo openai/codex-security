@@ -46,6 +46,91 @@ import { execFileSync } from "node:child_process";
 
 const fixtures = patchDirectories();
 
+type TestGit = ReturnType<typeof repositoryGit>;
+
+function gitMetadata(git: TestGit, name: string) {
+  return join(git("rev-parse", "--absolute-git-dir"), name);
+}
+
+function retainMetadata(git: TestGit, outer: string, inner: string) {
+  git("init", "--separate-git-dir", join(outer, ".git", "retained-nested"));
+  git("config", "core.worktree", inner);
+}
+
+function hasUnprotectedIndexWrites(args: readonly string[]) {
+  return (
+    !args.includes("core.hooksPath=/dev/null") &&
+    args.some((arg) =>
+      ["add", "read-tree", "update-index", "write-tree"].includes(arg),
+    )
+  );
+}
+
+function riskArtifact(prompt?: string) {
+  return prompt?.includes("$codex-security:assess-patch-risk")
+    ? patchArtifactFromPrompt(prompt)
+    : undefined;
+}
+
+function localSubmodule(git: TestGit, ...args: string[]) {
+  git("-c", "protocol.file.allow=always", "submodule", ...args);
+}
+
+function commitSubmodule(git: TestGit, message: string) {
+  git(
+    "-c",
+    "user.name=Synthetic User",
+    "-c",
+    "user.email=synthetic@example.test",
+    "commit",
+    "-am",
+    message,
+  );
+}
+
+async function applyRiskArtifact(
+  patch: string,
+  scope: string,
+  baseline: Record<string, string>,
+  ...flags: string[]
+) {
+  const root = await fixtures.create("patch-risk-apply-");
+  await mkdir(join(root, scope), { recursive: true });
+  for (const [file, contents] of Object.entries(baseline))
+    await writeFile(join(root, scope, file), contents);
+  const git = repositoryGit(root);
+  git("apply", "--check", ...flags, patch);
+  git("apply", ...flags, patch);
+  return root;
+}
+
+async function initializeApp(directory: string, text = "before\n") {
+  const git = initializePatchGit(directory);
+  await writeFile(join(directory, "app.ts"), text);
+  git("add", ".");
+  git("commit", "-m", "Synthetic baseline");
+  return git;
+}
+
+async function registeredChild() {
+  const parent = await publicationRepository(fixtures);
+  const { directory, git } = parent;
+  const nested = join(directory, "nested");
+  await mkdir(nested);
+  const child = await initializeApp(nested, "original\n");
+  const remote = await fixtures.create("patch-nested-origin-");
+  git("clone", "--bare", nested, remote);
+  child("remote", "add", "origin", remote);
+  child("fetch", "origin");
+  git("config", "-f", ".gitmodules", "submodule.nested.path", "nested");
+  git("config", "-f", ".gitmodules", "submodule.nested.url", remote);
+  git("add", ".gitmodules", "nested");
+  git("commit", "-m", "Synthetic gitlink");
+  git("submodule", "init");
+  git("submodule", "absorbgitdirs", "--", "nested");
+  return { ...parent, nested, child };
+}
+
 describe("patch change tracking", () => {
   test.each([
     "external link",
@@ -65,18 +150,8 @@ describe("patch change tracking", () => {
       const nestedName = linked ? `nested${delimiter}checkout` : "nested";
       const nested = join(checkout, nestedName);
       await mkdir(nested);
-      const childGit = repositoryGit(nested);
-      childGit("init", "--quiet");
-      childGit(
-        "-c",
-        "user.name=Synthetic",
-        "-c",
-        "user.email=test@example.test",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "Nested baseline",
-      );
+      const childGit = initializePatchGit(nested);
+      childGit("commit", "--allow-empty", "-m", "Nested baseline");
       parentGit("add", nestedName);
       parentGit("commit", "-m", "Record nested checkout");
 
@@ -159,24 +234,13 @@ describe("patch change tracking", () => {
       const dangling = mode.endsWith("-dangling");
       const renamed = mode.includes("-renamed");
       const otherStore = mode.endsWith("-other-store");
-      const { directory, git, remote } = await publicationRepository(fixtures);
-      const nested = join(directory, "nested");
-      await mkdir(nested);
-      const nestedGit = initializePatchGit(nested);
-      await writeFile(join(nested, "app.ts"), "original\n");
-      nestedGit("add", ".");
-      nestedGit("commit", "-m", "Synthetic nested baseline");
-      const nestedRemote = await fixtures.create("patch-nested-origin-");
-      git("clone", "--bare", nested, nestedRemote);
-      nestedGit("remote", "add", "origin", nestedRemote);
-      nestedGit("fetch", "origin");
-      git("config", "-f", ".gitmodules", "submodule.nested.path", "nested");
-      git("config", "-f", ".gitmodules", "submodule.nested.url", nestedRemote);
-      git("add", ".gitmodules");
-      git("add", "nested");
-      git("commit", "-m", "Synthetic gitlink");
-      git("submodule", "init");
-      git("submodule", "absorbgitdirs", "--", "nested");
+      const {
+        directory,
+        git,
+        remote,
+        nested,
+        child: nestedGit,
+      } = await registeredChild();
       const nestedGitDirectory = nestedGit("rev-parse", "--absolute-git-dir");
       const nestedIndexPath = join(nestedGitDirectory, "index");
       if (mode === "push-no") git("config", "push.recurseSubmodules", "no");
@@ -208,18 +272,14 @@ describe("patch change tracking", () => {
           currentDirectory: directory,
           onRepositoryCommand,
           onCodex: async (_args, output) => {
-            if (
-              output?.appServer?.prompt.includes(
-                "$codex-security:assess-patch-risk",
-              )
-            ) {
+            const artifact = riskArtifact(output?.appServer?.prompt);
+            if (artifact) {
               assessments++;
-              const artifact = patchArtifactFromPrompt(output.appServer.prompt);
               const patch = await readFile(artifact.path, "utf8");
               expect(patch).toContain("-original");
               expect(patch).toContain("+fixed");
               expect(artifact.changedFiles).toContain("nested/app.ts");
-              output.stdout.write(patchRiskAssessment().report);
+              output?.stdout.write(patchRiskAssessment().report);
               return 0;
             }
             if (dangling) nestedGit("checkout", "--detach");
@@ -275,8 +335,8 @@ describe("patch change tracking", () => {
         );
         expect(creations).toBe(0);
         expect(git("ls-remote", "origin")).toBe("");
-        if (worktreeRemoved) {
-          const refused = await runWorkflow(
+        const resume = () =>
+          runWorkflow(
             ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
             {
               currentDirectory: directory,
@@ -286,6 +346,8 @@ describe("patch change tracking", () => {
               },
             },
           );
+        if (worktreeRemoved) {
+          const refused = await resume();
           expect(refused.exitCode, refused.stderr).toBe(2);
           expect(git("rev-parse", "HEAD")).toBe(savedCommit);
           expect(git("ls-remote", "origin")).toBe("");
@@ -298,16 +360,7 @@ describe("patch change tracking", () => {
           "origin",
           `${after}:refs/heads/main`,
         );
-        const resumed = await runWorkflow(
-          ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
-          {
-            currentDirectory: directory,
-            onRepositoryCommand,
-            onCodex: () => {
-              throw new Error("Resuming must reuse the saved commit");
-            },
-          },
-        );
+        const resumed = await resume();
         expect(resumed.exitCode, resumed.stderr).toBe(0);
         expect(git("rev-parse", "HEAD")).toBe(savedCommit);
       }
@@ -324,13 +377,7 @@ describe("patch change tracking", () => {
           remote,
           checkout,
         );
-        repositoryGit(checkout)(
-          "-c",
-          "protocol.file.allow=always",
-          "submodule",
-          "update",
-          "--init",
-        );
+        localSubmodule(repositoryGit(checkout), "update", "--init");
         expect(await readAppliedText(join(checkout, "nested/app.ts"))).toBe(
           "fixed\n",
         );
@@ -367,10 +414,7 @@ describe("patch change tracking", () => {
     const nested = join(directory, path);
     await mkdir(nested, { recursive: true });
     await mkdir(join(directory, "package"));
-    const nestedGit = initializePatchGit(nested);
-    await writeFile(join(nested, "app.ts"), "before\n");
-    nestedGit("add", ".");
-    nestedGit("commit", "-m", "Synthetic baseline");
+    const nestedGit = await initializeApp(nested);
     const parentGit =
       scope === "recursive"
         ? initializePatchGit(join(directory, "nested"))
@@ -394,20 +438,12 @@ describe("patch change tracking", () => {
       parentGit("submodule", "absorbgitdirs", name);
     }
     if (change === "flatten") {
-      nestedGit(
-        "init",
-        "--separate-git-dir",
-        join(directory, ".git", "retained-nested"),
-      );
-      nestedGit("config", "core.worktree", nested);
+      retainMetadata(nestedGit, directory, nested);
     }
     git("add", "nested");
     git("commit", "-m", "Synthetic gitlink");
     const moving = change === "move" || change === "registered-move";
-    const configurationPath = join(
-      nestedGit("rev-parse", "--absolute-git-dir"),
-      "config",
-    );
+    const configurationPath = gitMetadata(nestedGit, "config");
     const destination = moving ? `${path}-moved` : path;
     let assessments = 0;
     let afterTurn = false;
@@ -419,37 +455,23 @@ describe("patch change tracking", () => {
         currentDirectory:
           scope === "package" ? join(directory, "package") : directory,
         onRepositoryCommand: (command, args, cwd, options) => {
-          if (
-            afterTurn &&
-            !args.includes("core.hooksPath=/dev/null") &&
-            args.some((value) =>
-              ["add", "read-tree", "update-index", "write-tree"].includes(
-                value,
-              ),
-            )
-          )
+          if (afterTurn && hasUnprotectedIndexWrites(args))
             bookkeeping.push([...args]);
           return runGitRepositoryCommand(command, args, cwd, options);
         },
         onCodex: async (_args, output) => {
-          if (
-            output?.appServer?.prompt.includes(
-              "$codex-security:assess-patch-risk",
-            )
-          ) {
+          const artifact = riskArtifact(output?.appServer?.prompt);
+          if (artifact) {
             assessments++;
-            const artifact = patchArtifactFromPrompt(output.appServer.prompt);
             const patch = await readFile(artifact.path);
             expect(hash("sha256", patch)).toBe(artifact.sha256);
             expect(patch.toString()).toContain("Subproject commit");
-            const verification = await fixtures.create("coherent-risk-apply-");
-            await mkdir(join(verification, path), { recursive: true });
-            await writeFile(join(verification, path, "app.ts"), "before\n");
-            repositoryGit(verification)(
-              "apply",
+            const verification = await applyRiskArtifact(
+              artifact.path,
+              path,
+              { "app.ts": "before\n" },
               "--allow-empty",
               "--include=*.ts",
-              artifact.path,
             );
             expect(
               await readAppliedText(join(verification, destination, "app.ts")),
@@ -463,7 +485,7 @@ describe("patch change tracking", () => {
             expect(artifact.changedFiles).toContain(
               change === "revision" ? path : `${destination}/app.ts`,
             );
-            output.stdout.write(patchRiskAssessment().report);
+            output?.stdout.write(patchRiskAssessment().report);
             return 0;
           }
           if (change === "revision")
@@ -498,10 +520,7 @@ describe("patch change tracking", () => {
                 ...(scope === "recursive" ? [join(directory, "nested")] : []),
                 join(directory, destination),
               ].map(async (checkout) => {
-                const path = join(
-                  repositoryGit(checkout)("rev-parse", "--absolute-git-dir"),
-                  "index",
-                );
+                const path = gitMetadata(repositoryGit(checkout), "index");
                 return { path, contents: await readFile(path) };
               }),
             );
@@ -553,22 +572,14 @@ describe("patch change tracking", () => {
       const nested = join(directory, nestedPath);
       await mkdir(nested, { recursive: true });
       await mkdir(join(directory, "package"));
-      const nestedGit = initializePatchGit(nested);
-      await writeFile(join(nested, "app.ts"), "original\n");
-      nestedGit("add", ".");
-      nestedGit("commit", "-m", "Synthetic nested baseline");
+      const nestedGit = await initializeApp(nested, "original\n");
       if (scope === "recursive") {
         const parentGit = initializePatchGit(join(directory, "nested"));
         parentGit("add", "child");
         parentGit("commit", "-m", "Synthetic recursive gitlink");
       }
       if (change === "remove") {
-        nestedGit(
-          "init",
-          "--separate-git-dir",
-          join(directory, ".git", "retained-nested"),
-        );
-        nestedGit("config", "core.worktree", nested);
+        retainMetadata(nestedGit, directory, nested);
       }
       if (scope === "root" && change === "edit") {
         // Expanded submodule entries can match a diff driver in the parent.
@@ -586,10 +597,7 @@ describe("patch change tracking", () => {
       git("add", "nested");
       git("commit", "-m", "Synthetic gitlink");
       await writeFile(join(nested, "app.ts"), "original\nuser change\n");
-      const nestedIndexPath = join(
-        nestedGit("rev-parse", "--absolute-git-dir"),
-        "index",
-      );
+      const nestedIndexPath = gitMetadata(nestedGit, "index");
       const indexes = [
         ...new Set([directory, join(directory, "nested"), nested]),
       ].map((path) =>
@@ -634,26 +642,14 @@ describe("patch change tracking", () => {
               });
               indexCommands.add(args[0]!);
             }
-            if (
-              afterTurn &&
-              !args.includes("core.hooksPath=/dev/null") &&
-              args.some((value) =>
-                ["add", "read-tree", "update-index", "write-tree"].includes(
-                  value,
-                ),
-              )
-            )
+            if (afterTurn && hasUnprotectedIndexWrites(args))
               bookkeeping.push([...args]);
             return runGitRepositoryCommand(command, args, cwd, options);
           },
           onCodex: async (_args, output) => {
-            if (
-              output?.appServer?.prompt.includes(
-                "$codex-security:assess-patch-risk",
-              )
-            ) {
+            const artifact = riskArtifact(output?.appServer?.prompt);
+            if (artifact) {
               assessments++;
-              const artifact = patchArtifactFromPrompt(output.appServer.prompt);
               const patch = await readFile(artifact.path);
               expect(artifact.changedFiles.sort()).toEqual(
                 [
@@ -676,16 +672,11 @@ describe("patch change tracking", () => {
                 expect(patch.toString()).not.toContain("+user change");
               else expect(patch.toString()).toContain("deleted file mode");
               expect(hash("sha256", patch)).toBe(artifact.sha256);
-              const verification = await fixtures.create("patch-risk-apply-");
-              await mkdir(join(verification, nestedPath), { recursive: true });
-              await writeFile(
-                join(verification, nestedPath, "app.ts"),
-                "original\nuser change\n",
-              );
-              repositoryGit(verification)(
-                "apply",
-                `--include=${nestedPath}/*.ts`,
+              const verification = await applyRiskArtifact(
                 artifact.path,
+                nestedPath,
+                { "app.ts": "original\nuser change\n" },
+                `--include=${nestedPath}/*.ts`,
               );
               if (change === "remove") {
                 expect(
@@ -697,7 +688,7 @@ describe("patch change tracking", () => {
                 expect(
                   await readAppliedText(join(verification, reported)),
                 ).toBe("original\nuser change\npatch change\n");
-              output.stdout.write(patchRiskAssessment().report);
+              output?.stdout.write(patchRiskAssessment().report);
               return 0;
             }
             output?.appServer?.onPermissions?.({
@@ -792,10 +783,7 @@ describe("patch change tracking", () => {
       const external = join(parent, "external");
       for (const checkout of [root, nested, external]) {
         await mkdir(checkout, { recursive: true });
-        const git = initializePatchGit(checkout);
-        await writeFile(join(checkout, "app.ts"), "original\n");
-        git("add", ".");
-        git("commit", "-m", "Synthetic baseline");
+        await initializeApp(checkout, "original\n");
       }
       const git = repositoryGit(root);
       const outside = repositoryGit(external);
@@ -888,50 +876,31 @@ describe("patch change tracking", () => {
       const leaf = recursive
         ? await fixtures.create("synthetic-submodule-leaf-")
         : undefined;
+      const baseline: Record<string, string> = { "app.ts": "baseline\n" };
+      if (commitChange) {
+        baseline["gone.ts"] = "remove\n";
+        baseline["unchanged.ts"] = "unchanged\n";
+      }
       for (const directory of [root, origin, ...(leaf ? [leaf] : [])]) {
         const git = initializePatchGit(directory);
-        await writeFile(join(directory, "app.ts"), "baseline\n");
-        if (commitChange) {
-          await writeFile(join(directory, "gone.ts"), "remove\n");
-          await writeFile(join(directory, "unchanged.ts"), "unchanged\n");
-        }
+        for (const [file, contents] of Object.entries(baseline))
+          await writeFile(join(directory, file), contents);
         git("add", ".");
         git("commit", "-m", "Synthetic baseline");
       }
       if (leaf) {
         const upstream = repositoryGit(origin);
-        upstream(
-          "-c",
-          "protocol.file.allow=always",
-          "submodule",
-          "add",
-          leaf,
-          "inner",
-        );
+        localSubmodule(upstream, "add", leaf, "inner");
         upstream("commit", "-am", "Synthetic nested dependency");
       }
       const git = repositoryGit(root);
       await mkdir(join(root, "package"));
       await writeFile(join(root, "package/app.ts"), "outer baseline\n");
-      git(
-        "-c",
-        "protocol.file.allow=always",
-        "submodule",
-        "add",
-        origin,
-        "vendor",
-      );
+      localSubmodule(git, "add", origin, "vendor");
       git("add", ".");
       git("commit", "-m", "Synthetic dependency");
       const initialize = () =>
-        git(
-          "-c",
-          "protocol.file.allow=always",
-          "submodule",
-          "update",
-          "--init",
-          "--recursive",
-        );
+        localSubmodule(git, "update", "--init", "--recursive");
       initialize();
       const prefix = recursive ? "vendor/inner" : "vendor";
       const nested = join(root, prefix);
@@ -939,12 +908,7 @@ describe("patch change tracking", () => {
         root,
         join(root, "vendor"),
         ...(recursive ? [nested] : []),
-      ].map((checkout) =>
-        join(
-          repositoryGit(checkout)("rev-parse", "--absolute-git-dir"),
-          "config",
-        ),
-      );
+      ].map((checkout) => gitMetadata(repositoryGit(checkout), "config"));
       const configurationBytes = await Promise.all(
         configurations.map((path) => readFile(path)),
       );
@@ -966,35 +930,18 @@ describe("patch change tracking", () => {
           _args: readonly string[],
           output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
         ) => {
-          if (
-            output?.appServer?.prompt.includes(
-              "$codex-security:assess-patch-risk",
-            )
-          ) {
-            const artifact = patchArtifactFromPrompt(output.appServer.prompt);
+          const artifact = riskArtifact(output?.appServer?.prompt);
+          if (artifact) {
             expect(artifact.changedFiles).not.toContain(
               `${prefix}/unchanged.ts`,
             );
             expect(artifact.changedFiles).toContain(`${prefix}/gone.ts`);
             expect(artifact.changedFiles).toContain(`${prefix}/added.ts`);
-            const verification = await fixtures.create("restored-risk-apply-");
-            await mkdir(join(verification, prefix), { recursive: true });
-            await writeFile(join(verification, prefix, "app.ts"), "baseline\n");
-            await writeFile(join(verification, prefix, "gone.ts"), "remove\n");
-            await writeFile(
-              join(verification, prefix, "unchanged.ts"),
-              "unchanged\n",
-            );
-            repositoryGit(verification)(
-              "apply",
-              "--check",
-              "--include=*.ts",
+            const verification = await applyRiskArtifact(
               artifact.path,
-            );
-            repositoryGit(verification)(
-              "apply",
+              prefix,
+              baseline,
               "--include=*.ts",
-              artifact.path,
             );
             expect(
               await readAppliedText(join(verification, prefix, "app.ts")),
@@ -1014,7 +961,7 @@ describe("patch change tracking", () => {
               await readAppliedText(join(verification, prefix, "added.ts")),
             ).toBe("added\n");
             expect(await readFile(join(root, ".git/index"))).toEqual(index);
-            output.stdout.write(patchRiskAssessment().report);
+            output?.stdout.write(patchRiskAssessment().report);
             return 0;
           }
           if (operation.startsWith("restore")) initialize();
@@ -1024,15 +971,7 @@ describe("patch change tracking", () => {
             await writeFile(join(nested, "added.ts"), "added\n");
             const child = repositoryGit(nested);
             child("add", ".");
-            child(
-              "-c",
-              "user.name=Synthetic User",
-              "-c",
-              "user.email=synthetic@example.test",
-              "commit",
-              "-am",
-              "Synthetic child change",
-            );
+            commitSubmodule(child, "Synthetic child change");
           }
           if (operation === "restore-edit")
             await writeFile(join(nested, "app.ts"), "fixed\n");
@@ -1041,13 +980,8 @@ describe("patch change tracking", () => {
           if (operation === "restore-delete") await rm(join(nested, "app.ts"));
           if (operation === "remove-worktree-commit") {
             if (recursive)
-              repositoryGit(join(root, "vendor"))(
-                "-c",
-                "user.name=Synthetic User",
-                "-c",
-                "user.email=synthetic@example.test",
-                "commit",
-                "-am",
+              commitSubmodule(
+                repositoryGit(join(root, "vendor")),
                 "Synthetic recursive update",
               );
             git("add", "vendor");
@@ -1111,13 +1045,8 @@ describe("patch change tracking", () => {
     const nested = join(root, "nested");
     await mkdir(join(nested, "included"), { recursive: true });
     await mkdir(join(nested, "outside"));
-    const git = repositoryGit(root),
-      inner = repositoryGit(nested);
-    for (const command of [git, inner]) {
-      command("init", "--initial-branch=main");
-      command("config", "user.name", "Synthetic User");
-      command("config", "user.email", "test@example.test");
-    }
+    const git = initializePatchGit(root);
+    const inner = initializePatchGit(nested);
     for (const path of [
       "included/app",
       "outside/edited",
@@ -1189,11 +1118,8 @@ describe("patch change tracking", () => {
     "respects native sparse index changes when the turn chooses to %s",
     async (operation) => {
       const root = await fixtures.create("patch-sparse-index-");
-      const git = repositoryGit(root);
+      const git = initializePatchGit(root);
       const path = "outside/file";
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "test@example.test");
       for (const dir of ["inside", "outside"]) await mkdir(join(root, dir));
       await writeFile(join(root, "inside/other"), "baseline\n");
       await writeFile(join(root, path), "original\n");
@@ -1293,10 +1219,7 @@ describe("patch change tracking", () => {
       const nested = join(root, "vendor");
       await mkdir(nested);
       const git = initializePatchGit(root);
-      const inner = initializePatchGit(nested);
-      await writeFile(join(nested, "app.ts"), "old dependency\n");
-      inner("add", ".");
-      inner("commit", "-m", "Synthetic dependency baseline");
+      const inner = await initializeApp(nested, "old dependency\n");
       const recorded = inner("rev-parse", "HEAD");
       await mkdir(join(root, "package"));
       await writeFile(join(root, "app.ts"), "outer baseline\n");
@@ -1306,10 +1229,7 @@ describe("patch change tracking", () => {
       git("sparse-checkout", "set", "--no-cone", "/app.ts", "/package/app.ts");
       await rm(nested, { recursive: true });
       await mkdir(nested);
-      initializePatchGit(nested);
-      await writeFile(join(nested, "app.ts"), "different history\n");
-      inner("add", ".");
-      inner("commit", "-m", "Synthetic replacement baseline");
+      await initializeApp(nested, "different history\n");
       expect(inner("rev-parse", "--revs-only", `${recorded}^{tree}`)).toBe("");
       const index = await readFile(join(root, ".git/index"));
       const nestedIndex = await readFile(join(nested, ".git/index"));
@@ -1387,17 +1307,9 @@ describe("patch change tracking", () => {
       git("add", ".");
       git("commit", "-m", "Synthetic outer baseline");
       if (operation === "remove") {
-        inner(
-          "init",
-          "--separate-git-dir",
-          join(root, ".git", "retained-nested"),
-        );
-        inner("config", "core.worktree", nested);
+        retainMetadata(inner, root, nested);
       }
-      const childIndexPath = join(
-        inner("rev-parse", "--absolute-git-dir"),
-        "index",
-      );
+      const childIndexPath = gitMetadata(inner, "index");
       if (settings === "custom-objects")
         await rename(
           join(root, ".git", "objects"),
@@ -1405,32 +1317,23 @@ describe("patch change tracking", () => {
         );
       const target = scope === "root" ? root : directory;
       const alternateIndex = join(parent, "parent-index");
-      const gitEnvironment = {
-        ...(settings === "alternate-index"
-          ? { GIT_INDEX_FILE: alternateIndex }
-          : {}),
-        ...(settings !== "absolute" && settings !== "relative"
-          ? {}
-          : {
-              GIT_DIR:
-                settings === "relative"
-                  ? relative(target, join(root, ".git"))
-                  : join(root, ".git"),
-              GIT_WORK_TREE:
-                settings === "relative" ? relative(target, root) || "." : root,
-            }),
-        ...(settings === "object-directory" || settings === "custom-objects"
-          ? {
-              GIT_OBJECT_DIRECTORY: join(
-                root,
-                ".git",
-                settings === "custom-objects" ? "custom-objects" : "objects",
-              ),
-            }
-          : {}),
-        ...(settings === "common-directory"
-          ? { GIT_COMMON_DIR: join(root, ".git") }
-          : {}),
+      const admin = join(root, ".git");
+      const overrides: Record<string, NodeJS.ProcessEnv> = {
+        ordinary: {},
+        absolute: { GIT_DIR: admin, GIT_WORK_TREE: root },
+        relative: {
+          GIT_DIR: relative(target, admin),
+          GIT_WORK_TREE: relative(target, root) || ".",
+        },
+        "object-directory": { GIT_OBJECT_DIRECTORY: join(admin, "objects") },
+        "custom-objects": {
+          GIT_OBJECT_DIRECTORY: join(admin, "custom-objects"),
+        },
+        "common-directory": { GIT_COMMON_DIR: admin },
+        "alternate-index": { GIT_INDEX_FILE: alternateIndex },
+      };
+      const gitEnvironment: NodeJS.ProcessEnv = {
+        ...overrides[settings],
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "core.quotePath",
         GIT_CONFIG_VALUE_0: "false",
@@ -1455,15 +1358,7 @@ describe("patch change tracking", () => {
       const outcome = await runIssuePatch(target, {
         environment: gitEnvironment,
         onRepositoryCommand: (command, args, cwd, options) => {
-          if (
-            afterTurn &&
-            !args.includes("core.hooksPath=/dev/null") &&
-            args.some((value) =>
-              ["add", "read-tree", "update-index", "write-tree"].includes(
-                value,
-              ),
-            )
-          )
+          if (afterTurn && hasUnprotectedIndexWrites(args))
             bookkeeping.push([...args]);
           if (target !== root && cwd === root) boundToRoot = true;
           expect(cwd).not.toBe(nested);
@@ -1503,13 +1398,13 @@ describe("patch change tracking", () => {
           } else {
             if (index === undefined)
               expect(environment["GIT_INDEX_FILE"]).toBe(
-                gitEnvironment.GIT_INDEX_FILE,
+                gitEnvironment["GIT_INDEX_FILE"],
               );
             expect(environment["GIT_OBJECT_DIRECTORY"]).toBe(
-              gitEnvironment.GIT_OBJECT_DIRECTORY,
+              gitEnvironment["GIT_OBJECT_DIRECTORY"],
             );
             expect(environment["GIT_COMMON_DIR"]).toBe(
-              gitEnvironment.GIT_COMMON_DIR,
+              gitEnvironment["GIT_COMMON_DIR"],
             );
             expect(
               environment["GIT_DIR"] === undefined
@@ -1518,7 +1413,7 @@ describe("patch change tracking", () => {
             ).toBe(
               settings === "relative" || boundToRoot
                 ? join(root, ".git")
-                : gitEnvironment.GIT_DIR,
+                : gitEnvironment["GIT_DIR"],
             );
             expect(
               environment["GIT_WORK_TREE"] === undefined
@@ -1529,7 +1424,7 @@ describe("patch change tracking", () => {
                 boundToRoot ||
                 (target !== root && args.includes("--absolute-git-dir"))
                 ? root
-                : gitEnvironment.GIT_WORK_TREE,
+                : gitEnvironment["GIT_WORK_TREE"],
             );
           }
           expect(environment).toMatchObject({
@@ -1726,50 +1621,23 @@ describe("patch change tracking", () => {
   );
 });
 
+const literal = {
+  source: "literal",
+  parentEdit: true,
+  childEdit: true,
+  committed: false,
+  risk: false,
+  publish: true,
+};
 const cases = [
-  ...(["literal", "file", "linear"] as const).flatMap((source) =>
-    [false, true].map((parentEdit) => ({
-      source,
-      parentEdit,
-      childEdit: true,
-      committed: false,
-      risk: false,
-      publish: true,
-    })),
+  ...["literal", "file", "linear"].flatMap((source) =>
+    [false, true].map((parentEdit) => ({ ...literal, source, parentEdit })),
   ),
-  {
-    source: "literal",
-    parentEdit: false,
-    childEdit: true,
-    committed: true,
-    risk: false,
-    publish: true,
-  },
-  {
-    source: "literal",
-    parentEdit: true,
-    childEdit: true,
-    committed: false,
-    risk: true,
-    publish: true,
-  },
-  {
-    source: "literal",
-    parentEdit: true,
-    childEdit: false,
-    committed: false,
-    risk: false,
-    publish: true,
-  },
-  {
-    source: "literal",
-    parentEdit: true,
-    childEdit: true,
-    committed: false,
-    risk: false,
-    publish: false,
-  },
-] as const;
+  { ...literal, parentEdit: false, committed: true },
+  { ...literal, risk: true },
+  { ...literal, childEdit: false },
+  { ...literal, publish: false },
+];
 
 for (const {
   source,
@@ -1780,31 +1648,12 @@ for (const {
   publish,
 } of cases) {
   test(`direct ${source} patch tracks nested changes (parent: ${parentEdit}, child: ${childEdit}, committed: ${committed}, risk: ${risk}, publish: ${publish})`, async () => {
-    const { directory, git } = await publicationRepository(fixtures);
-    const nested = join(directory, "nested");
-    await mkdir(nested);
-    const child = initializePatchGit(nested);
-    await writeFile(join(nested, "app.ts"), "original\n");
-    child("add", ".");
-    child("commit", "-m", "Synthetic child baseline");
-    const childRemote = await fixtures.create("direct-patch-child-origin-");
-    git("clone", "--bare", nested, childRemote);
-    child("remote", "add", "origin", childRemote);
-    child("fetch", "origin");
-    git("config", "-f", ".gitmodules", "submodule.nested.path", "nested");
-    git("config", "-f", ".gitmodules", "submodule.nested.url", childRemote);
-    git("add", ".gitmodules", "nested");
-    git("commit", "-m", "Synthetic registered child");
-    git("submodule", "init");
-    git("submodule", "absorbgitdirs", "--", "nested");
+    const { directory, git, nested, child } = await registeredChild();
     const rootHead = git("rev-parse", "HEAD");
     const childHead = child("rev-parse", "HEAD");
     const childRefs = child("ls-remote", "origin");
     const rootIndexPath = join(directory, ".git", "index");
-    const childIndexPath = join(
-      child("rev-parse", "--absolute-git-dir"),
-      "index",
-    );
+    const childIndexPath = gitMetadata(child, "index");
     let rootIndex: Buffer<ArrayBuffer> | undefined;
     let childIndex: Buffer<ArrayBuffer> | undefined;
     let turns = 0;
@@ -1855,16 +1704,12 @@ for (const {
           return "https://github.example.test/example/repository/pull/1";
         },
         onCodex: async (_args, output) => {
-          if (
-            output?.appServer?.prompt.includes(
-              "$codex-security:assess-patch-risk",
-            )
-          ) {
+          const artifact = riskArtifact(output?.appServer?.prompt);
+          if (artifact) {
             assessments++;
-            const artifact = patchArtifactFromPrompt(output.appServer.prompt);
             expect(artifact.changedFiles).toContain("nested/app.ts");
             expect(artifact.changedFiles).toContain("src/finding-1.ts");
-            output.stdout.write(patchRiskAssessment().report);
+            output?.stdout.write(patchRiskAssessment().report);
             return 0;
           }
           turns++;
@@ -2017,11 +1862,9 @@ test.each([
       );
     }
     const initializeChild = () => {
-      git("init", "--initial-branch=main", child);
-      git("-C", child, "config", "user.name", "Synthetic User");
-      git("-C", child, "config", "user.email", "synthetic@example.test");
-      git("-C", child, "add", "input.ts");
-      git("-C", child, "commit", "-m", "Synthetic child baseline");
+      const childGit = initializePatchGit(child);
+      childGit("add", "input.ts");
+      childGit("commit", "-m", "Synthetic child baseline");
     };
     if (!introduced) initializeChild();
     expect(git("-C", source, "rev-parse", "--is-bare-repository")).toBe("true");
@@ -2083,14 +1926,6 @@ test.each([
   },
 );
 
-async function initialize(root: string) {
-  const git = initializePatchGit(root);
-  await writeFile(join(root, "app.ts"), "before\n");
-  git("add", ".");
-  git("commit", "-m", "Synthetic baseline");
-  return git;
-}
-
 for (const raw of [false, true]) {
   test.skipIf(
     process.platform === "win32" || (raw && process.platform !== "linux"),
@@ -2100,11 +1935,11 @@ for (const raw of [false, true]) {
       const root = await fixtures.create("patch-gitlink-symlink-");
       const foreign = await fixtures.create("patch-gitlink-unselected-");
       const support = await fixtures.create("patch-gitlink-support-");
-      const git = await initialize(root);
-      const other = await initialize(foreign);
+      const git = await initializeApp(root);
+      const other = await initializeApp(foreign);
       const source = join(root, "source");
       await mkdir(source);
-      const inner = await initialize(source);
+      const inner = await initializeApp(source);
       const revision = inner("rev-parse", "HEAD");
       const name = raw
         ? Buffer.concat([Buffer.from("source-"), Buffer.from([0xff])])
