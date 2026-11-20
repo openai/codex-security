@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -77,37 +78,33 @@ def read_scan_progress(
     wb: Any, connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     after = getattr(args, "after_cursor", None)
-    if after is None:
-        return _progress_page(connection, wb.resolve_scan_id(connection, args.scan_id))
-    # A checkpoint may commit between the progress query and the journal query.
-    connection.execute("BEGIN")
-    with connection:
-        scan = wb.require_scan(connection, args.scan_id)
-        result = _progress_page(connection, scan["id"])
-        try:
-            result["findingUpdates"] = finding_update_page(
-                wb, connection, scan, after, FINDINGS_PAGE_MAX
-            )
-        except (Exception, SystemExit) as exc:
-            # Feed reads are optional. Progress subscribers can still use this snapshot.
-            result["findingUpdatesError"] = str(exc)
+    columns = "scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at"
+    if after is not None:
+        # The journal can also need the recorded seal and scan binding for historical replay.
+        columns = "scans.*"
+        connection.execute("BEGIN")
+    with connection if after is not None else nullcontext():
+        scan = connection.execute(
+            f"""
+            SELECT {columns}, progress.*, progress.updated_at AS progress_updated_at
+            FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+            WHERE scans.id = ?
+            """,
+            (wb.resolve_scan_id(connection, args.scan_id),),
+        ).fetchone()
+        if scan is None:
+            raise SystemExit("Codex Security scan not found.")
+        progress_result, _ = scan_progress_result(connection, scan)
+        result = {"scan": {"progress": progress_result}}
+        if after is not None:
+            try:
+                result["findingUpdates"] = finding_update_page(
+                    wb, connection, scan, after, FINDINGS_PAGE_MAX
+                )
+            except (Exception, SystemExit) as exc:
+                # Feed reads are optional. Progress subscribers can still use this snapshot.
+                result["findingUpdatesError"] = str(exc)
         return result
-
-
-def _progress_page(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
-    scan = connection.execute(
-        """
-        SELECT scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at,
-               progress.*, progress.updated_at AS progress_updated_at
-        FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
-        WHERE scans.id = ?
-        """,
-        (scan_id,),
-    ).fetchone()
-    if scan is None:
-        raise SystemExit("Codex Security scan not found.")
-    progress_result, _ = scan_progress_result(connection, scan)
-    return {"scan": {"progress": progress_result}}
 
 
 def scan_progress_result(

@@ -1770,17 +1770,18 @@ describe("CodexSecurity orchestration", () => {
     "reads local progress and finding updates (%s)",
     async (scenario) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
-      const pluginRoot = await copyCredentialTestPlugin(root);
-      await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
-        recursive: true,
-      });
-      const manifestPath = join(pluginRoot, ".codex-plugin/plugin.json");
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      manifest.codexSecurity.findingUpdates = 1;
-      if (scenario === "legacy")
+      const runtime = preparedRuntime(codexHome);
+      if (scenario === "legacy") {
+        const pluginRoot = await copyCredentialTestPlugin(root);
+        await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+          recursive: true,
+        });
+        const manifestPath = join(pluginRoot, ".codex-plugin/plugin.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
         delete manifest.codexSecurity.progressFindingUpdates;
-      else manifest.codexSecurity.progressFindingUpdates = 1;
-      await writeFile(manifestPath, JSON.stringify(manifest));
+        await writeFile(manifestPath, JSON.stringify(manifest));
+        runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
+      }
       const progress = mock<NonNullable<ScanOptions["onProgress"]>>();
       const deepProgress = mock<NonNullable<ScanOptions["onDeepProgress"]>>();
       const finding = mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
@@ -1809,11 +1810,7 @@ describe("CodexSecurity orchestration", () => {
       });
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        prepareRuntime: async () => {
-          const runtime = preparedRuntime(codexHome);
-          runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
-          return runtime;
-        },
+        prepareRuntime: async () => runtime,
         runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           const index = args.indexOf("--after-cursor");
           const cursor = index < 0 ? undefined : Number(args[index + 1]);

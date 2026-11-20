@@ -82,22 +82,16 @@ export class ScanProgressTracker {
     afterCursor: number,
     signal: AbortSignal,
   ): Promise<unknown> {
-    if (this.#abortController.signal.aborted) return undefined;
     const combined = AbortSignal.any([signal, this.#abortController.signal]);
+    if (combined.aborted) return;
     let result: unknown;
     try {
       result = await this.#options.read(combined, afterCursor);
+      if (!combined.aborted) this.#report(result);
     } catch (error) {
       if (!combined.aborted) this.#options.onError?.(error);
-      return undefined;
     }
-    if (combined.aborted) return undefined;
-    try {
-      this.#report(result);
-    } catch (error) {
-      this.#options.onError?.(error);
-    }
-    if (!isRecord(result)) return undefined;
+    if (combined.aborted || !isRecord(result)) return;
     if (typeof result["findingUpdatesError"] === "string")
       throw new Error(result["findingUpdatesError"]);
     return result["findingUpdates"];
