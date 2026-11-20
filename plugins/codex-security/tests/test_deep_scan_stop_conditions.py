@@ -901,13 +901,15 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
     )
 
 
-def test_scoped_evidence_repair_claim_ignores_sparse_outside_findings(
+def test_scoped_evidence_repair_ignores_sparse_outside_findings(
     workbench_api, workbench_db, publication_scan, monkeypatch
 ):
     scan = publication_scan(scope="subdir")
     reducer = scan.add_worker()
     saved = scan.worker_draft(copy.deepcopy(scan.findings))
     outside = copy.deepcopy(saved["findings"][0])
+    outside["identity"] = {"anchor": "excluded-finding"}
+    outside["provenance"] = {"source": "local_plugin"}
     outside["locations"][0]["path"] = "unrelated/extract.py"
     outside.pop("validation")
     saved["findings"].append(outside)
@@ -916,9 +918,14 @@ def test_scoped_evidence_repair_claim_ignores_sparse_outside_findings(
     parent = scan.scan_dir / "findings.json"
     selected = json.loads(parent.read_text())
     selected["findings"][0].pop("validation")
+    selected["findings"].append(outside)
     parent.write_text(json.dumps(selected))
     owner = "scoped-repair-owner"
     with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET consecutive_no_new = stop_after_no_new WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
         workbench_db.execute(
             "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' "
             "WHERE result_manifest_path = ?",
@@ -952,3 +959,21 @@ def test_scoped_evidence_repair_claim_ignores_sparse_outside_findings(
     with pytest.raises(SystemExit, match="Checkout changed"):
         deep.require_selected_repair_target(workbench_db, selected_scan)
     assert checked == [scan.scan_id]
+    reducer.write_bytes(original)
+    original_mtime = reducer.stat().st_mtime_ns
+    generation = claimed["deepScan"]["coordinatorGeneration"]
+    publication = stage_publication(
+        scan, generation=generation, result_path=reducer, title=scan.findings[0]["title"]
+    )
+    for _ in range(2):
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
+        )
+    repaired = scan.finish(generation=generation)
+    assert repaired["completedAt"] == scan.timestamp
+    assert scan.complete()["progress"]["status"] == "complete"
+    (finding,) = json.loads(parent.read_text())["findings"]
+    assert finding["validation"] == scan.findings[0]["validation"]
+    assert finding["locations"] == scan.findings[0]["locations"]
+    assert reducer.read_bytes() == original
+    assert reducer.stat().st_mtime_ns == original_mtime

@@ -31,6 +31,8 @@ from finalize_scan_contract import (
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
+    _validate_current_findings,
+    _validate_finding,
     _validate_finding_evidence,
     _write_prepared_scan_finalization,
     finalize_scan,
@@ -474,7 +476,15 @@ def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) ->
     # worker's ordered revisions. Prefer the last authored proof or invalidation.
     previous = next((row for row in reversed(matches) if "findingId" not in row), matches[-1])
     if finding_evidence_error(previous) is None:
-        finding.update({field: previous[field] for field in missing})
+        restored = finding | {field: previous[field] for field in missing}
+        try:
+            _validate_current_findings(
+                {"findings": [restored]}, Path(__file__).resolve().parent.parent / "schemas"
+            )
+            _validate_finding(restored, "finding")
+        except ContractError:
+            return
+        finding.update(restored)
 
 
 def _defer_incomplete_deadline_findings(
@@ -1314,6 +1324,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             draft["findings"],
             draft.get("reviewState", draft.get("coverage")),
         )
+        selected_run = None
         if (
             scan["mode"] == "deep"
             and draft.get("deepScanPublication") is not None
@@ -1380,6 +1391,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 and checkpoint.get("scope", {}).get("validationMode") == "custom_pending"
             )
             for index, finding in enumerate(findings["findings"]):
+                if selected_run is not None and not db.deep_scan.findings_need_evidence_repair(
+                    [finding], scan
+                ):
+                    continue
                 _validate_finding_evidence(finding, index, source_only=source_only)
         checkpoint_contents = None
         if args.checkpoint_path is not None:

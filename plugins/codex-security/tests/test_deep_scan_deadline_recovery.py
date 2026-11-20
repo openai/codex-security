@@ -405,6 +405,79 @@ def test_deadline_uses_the_last_authored_validation(deadline_scan, renewed):
     assert {path: path.read_bytes() for path in originals} == originals
 
 
+@pytest.mark.parametrize("proof", ["valid", "null-snippet", "invalid-line", "unknown-reference"])
+def test_deadline_validates_restored_historical_proof(workbench_db, deadline_scan, proof):
+    scan = deadline_scan
+    worker_id, output = scan.canceled_discovery_output()
+    previous = worker_finding(scan, "historical-proof")
+    previous["provenance"]["candidateId"] = "historical-proof"
+    for section in ("rootCause", "attackPath", "validation"):
+        previous[section].pop("evidenceRefs", None)
+    previous["validation"]["evidence"] = ["The saved source shows an unchecked filesystem write."]
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        previous.pop(key, None)
+    latest = copy.deepcopy(previous)
+    field = "validation" if proof == "unknown-reference" else "codeEvidence"
+    latest.pop(field)
+    if proof == "null-snippet":
+        previous["codeEvidence"] = [None]
+    elif proof == "invalid-line":
+        previous["codeEvidence"][0]["startLine"] = 0
+    elif proof == "unknown-reference":
+        previous["validation"] = {
+            "method": "static_analysis",
+            "summary": "Historical proof references a missing snippet.",
+            "evidenceRefs": ["missing-snippet"],
+        }
+    latest["provenance"]["previousFindings"] = [previous]
+    receipt = output / "artifacts" / "proof.md"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("Saved review evidence.\n")
+    checkpoint = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            findings=[latest],
+            surfaces=[
+                {
+                    "id": "historical-proof",
+                    "label": "Historical review",
+                    "candidateId": "historical-proof",
+                    "disposition": "reported",
+                    "receiptRefs": ["artifacts/proof.md"],
+                }
+            ],
+        ),
+    )
+    head = select_checkpoint(output, checkpoint)
+    originals = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (checkpoint, head, receipt)
+    }
+
+    findings = finish_deadline(scan)
+
+    retained = [row for row in findings if row["title"] == latest["title"]]
+    coverage = read_review_state(workbench_db, scan.scan_dir)
+    deferred = [row for row in coverage["deferred"] if row.get("workerId") == worker_id]
+    surface = next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)
+    if proof == "valid":
+        assert len(retained) == 1
+        assert retained[0][field] == previous[field]
+        assert not deferred
+        assert surface["disposition"] == "reported"
+    else:
+        assert not retained
+        assert len(deferred) == 1
+        assert deferred[0]["surfaceIds"] == [surface["id"]]
+        assert deferred[0]["paths"] == [latest["locations"][0]["path"]]
+        assert field in deferred[0]["reason"]
+        assert surface["disposition"] == "needs_follow_up"
+    assert surface["receiptRefs"]
+    assert json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+    assert (scan.scan_dir / "report.md").is_file()
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in originals} == originals
+
+
 @pytest.mark.parametrize(
     "invalid_terminal", [False, True], ids=["valid-terminal", "invalid-terminal"]
 )
