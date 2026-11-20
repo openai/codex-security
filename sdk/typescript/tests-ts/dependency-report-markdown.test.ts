@@ -47,15 +47,90 @@ test("stack Markdown explains sampled call, gaps and claims without borrowing ev
   expect(sampled).toContain("sample-codec 1.0");
   expect(sampled).toContain("Which decoder mode ran?");
   expect(sampled).toContain("return decode(bytes);");
-  expect(recorded).toMatch(
-    /Frame 4.*upload[\s\S]*3 intervening frames omitted[\s\S]*Frame 0.*decode/u,
+  expect(sampled).toContain(
+    "**Sampled stack** · caller first\n\n- `upload` · source, frame 4\n- … 3 intervening frames omitted\n- `decode` · matched sink, frame 0",
   );
+  const [frames, review] = sampled!.split("**Source review**");
+  expect(frames).not.toContain("return decode(bytes);");
+  expect(review).toContain("return decode(bytes);");
+  expect(recorded).not.toContain("intervening frames");
+  expect(missing).not.toContain("**Sampled stack**");
   expect(recorded).toContain("Sampled copy 1.0");
   expect(missing).toContain("scheduled-job");
   expect(missing).not.toContain("return decode(bytes);");
   expect(missing).not.toContain("Sampled copy 1.0");
   expect(output).not.toContain("RAW_RECEIPT_CONTENT");
   expect(output).not.toContain("[object Object]");
+});
+
+test("Markdown puts the bound code at its sampled frame and shows locations even without source", () => {
+  const raw = stackReport();
+  const [sampled] = raw.assessments;
+  const observation = {
+    ...sampled.observation,
+    framesTruncated: true,
+    sinkMatches: [],
+    frames: [
+      {
+        rawIndex: 0,
+        frame: {
+          name: "decode",
+          type: "native",
+          location: "decoder.c",
+          line: 16,
+        },
+      },
+      {
+        rawIndex: 2,
+        frame: {
+          name: "handle",
+          type: "function",
+          location: "/app.runfiles/_main/src/codec.ts:3",
+        },
+      },
+      {
+        rawIndex: 4,
+        frame: { name: "upload", type: "function", location: "upload.ts:9" },
+      },
+    ],
+  };
+  const render = (sha: string) =>
+    renderDependencyReportMarkdown({
+      ...raw,
+      assessments: [
+        {
+          ...sampled,
+          observation: {
+            ...observation,
+            bindings: [
+              {
+                package: raw.target.repository,
+                version: sha,
+                sourceSha: sha,
+                provenance: "sampled build",
+              },
+            ],
+          },
+        },
+        raw.assessments[1],
+      ],
+    })
+      .split("**Sampled stack**")[1]!
+      .split("**Advisory conditions**")[0]!;
+  const stack = render(raw.target.sha);
+  expect(stack).toContain("`upload` · `upload.ts:9` · source");
+  expect(stack).toContain(
+    "`handle` · `src/codec.ts:3` · call site, frame 2 · calls `decode`\n\n  ```ts\n  return decode(bytes);\n  ```",
+  );
+  expect(stack).toContain("`decode` · `decoder.c:16` · query sink");
+  expect(stack).not.toContain("matched sink");
+  expect(stack).toContain("Frames truncated.");
+  expect(stack).not.toContain("stack-a");
+  expect(stack.split("return decode(bytes);")).toHaveLength(2);
+  const [stale, review] = render("d".repeat(40)).split("**Source review**");
+  expect(stale).toContain("`/app.runfiles/_main/src/codec.ts:3`");
+  expect(stale).not.toContain("return decode(bytes);");
+  expect(review).toContain("return decode(bytes);");
 });
 
 test("zero reviewed uses still retains unresolved handoffs", () => {

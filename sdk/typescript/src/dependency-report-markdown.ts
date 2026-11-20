@@ -14,7 +14,7 @@ import {
   type Section,
   type StackAssessment,
 } from "./dependency-report-model.js";
-import { stackFrames } from "./dependency-report-stacks.js";
+import { inspectPath } from "./dependency-report-path.js";
 import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
 
 // Saved report text can contain Markdown or HTML. Keep it in the paragraph
@@ -100,29 +100,8 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
   if (a.truncated)
     limits.push("The query returned only part of the matching stacks.");
   if (a.truncated === null) limits.push("Query completeness unknown.");
-  if (obs?.framesTruncated) limits.push("The captured stack is truncated.");
-  if (obs?.framesTruncated === null)
-    limits.push("Captured stack completeness unknown.");
   for (const conflict of a.scopeConflicts)
     limits.push("Scope conflict: " + prose(conflict));
-
-  const frames: string[] = [];
-  for (const step of obs ? stackFrames(obs) : []) {
-    if (step.omittedBefore > 0)
-      frames.push(
-        `… ${step.omittedBefore} intervening ${step.omittedBefore === 1 ? "frame" : "frames"} omitted`,
-      );
-    const sink = obs?.sinkMatches.some((m) => m.rawIndex === step.rawIndex)
-      ? "matched sink"
-      : "query sink";
-    const role = join([step.source && "source", step.sink && sink], ", ");
-    const label = "Frame " + step.rawIndex + (role ? " (" + role + ")" : "");
-    frames.push(
-      label +
-        ": " +
-        code(step.frame.name || step.frame.location || "(unnamed)"),
-    );
-  }
   const bindings =
     obs?.bindings.map((b) =>
       join([
@@ -155,7 +134,6 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
     );
   return blocks(
     limits.join(" "),
-    list(frames, "Sampled frames, caller first"),
     list(bindings, "Package evidence"),
     list(claimFacts, "Supporting evidence"),
     list(context, "Capture details"),
@@ -268,6 +246,11 @@ function source(f: Finding) {
   }
   return list([...new Set(refs)], "References");
 }
+function snippet(path: string, line: string) {
+  const language = /\.([a-z0-9]+)$/iu.exec(path)?.[1]?.toLowerCase() ?? "";
+  const fence = line.startsWith("```") ? "~~~" : "```";
+  return fence + language + "\n" + line + "\n" + fence;
+}
 function trace(f: Finding) {
   function describe(
     kind: "source" | "handoff" | "sink",
@@ -294,11 +277,7 @@ function trace(f: Finding) {
       " · " +
       code(site.path + ":" + site.line) +
       argument;
-    if (!line) return heading;
-    const language =
-      /\.([a-z0-9]+)$/iu.exec(site.path)?.[1]?.toLowerCase() ?? "";
-    const fence = line.startsWith("```") ? "~~~" : "```";
-    return blocks(heading, fence + language + "\n" + line + "\n" + fence);
+    return blocks(heading, line && snippet(site.path, line));
   }
   const steps = (f.item.trace ?? []).map((s) =>
     s.kind === "gap"
@@ -316,6 +295,76 @@ function trace(f: Finding) {
     );
   });
   return blocks("**Call path**", ...numbered);
+}
+function callPath(f: Finding, target?: Report["target"]) {
+  if (f.kind !== "stack" || !f.assessment.observation) return trace(f);
+  const { frames, notes } = inspectPath(f, target);
+  const roles = {
+    source: "source",
+    sink: "matched sink",
+    query_sink: "query sink",
+    call_site: "call site",
+    call: "",
+    gap: "",
+  };
+  const steps: string[] = [];
+  const site = f.proof?.sink?.callSite;
+  const reviewed = site && matchTraceFrame(f, "sink", site);
+  let includesReviewedCall = false;
+  for (const frame of frames) {
+    const { omittedBefore, line, code: excerpt } = frame;
+    if (omittedBefore)
+      steps.push(
+        `… ${omittedBefore} intervening ${omittedBefore === 1 ? "frame" : "frames"} omitted`,
+      );
+    const path = excerpt?.path ?? frame.path;
+    const location = path
+      ? join([path, line?.toString()], ":")
+      : line && "line " + line;
+    const text =
+      excerpt && line !== undefined
+        ? excerpt.text.split(/\r?\n/u)[line - excerpt.startLine]?.trim()
+        : undefined;
+    const sink =
+      text &&
+      reviewed &&
+      "index" in reviewed &&
+      excerpt?.citationIndex === reviewed.index &&
+      site?.line === line
+        ? f.proof?.sink
+        : undefined;
+    if (sink) includesReviewedCall = true;
+    const role = join(
+      [
+        roles[frame.role],
+        frame.role !== "source" &&
+          frame.rawIndex === f.assessment.observation.sourceIndex &&
+          "source",
+      ],
+      ", ",
+    );
+    const label = join([
+      code(frame.label),
+      location ? code(location) : undefined,
+      join([role, "frame " + frame.rawIndex], ", "),
+      sink && sink.function !== frame.label && "calls " + code(sink.function),
+      sink?.argument &&
+        text?.includes(sink.argument) &&
+        "follow " + code(sink.argument),
+    ]);
+    const step = blocks(label, excerpt && text && snippet(excerpt.path, text));
+    steps.push(step.replace(/\n(?=[^\n])/gu, "\n  "));
+  }
+  const source = includesReviewedCall && !f.item.trace?.length ? "" : trace(f);
+  return blocks(
+    "**Sampled stack** · caller first",
+    list(steps),
+    notes.map(prose).join(" "),
+    frames.length > 0 &&
+      !frames.some((frame) => frame.code) &&
+      "No source excerpts could be matched to the sampled frames.",
+    source && blocks("**Source review**", source),
+  );
 }
 function title(f: Finding, path = f.anchor?.path) {
   const status =
@@ -353,7 +402,7 @@ function contextLabel(f: Finding) {
     p && "deployment " + p.deploymentBasis.replaceAll("_", " "),
   ]);
 }
-function finding(f: Finding, heading: string) {
+function finding(f: Finding, heading: string, target?: Report["target"]) {
   const input = f.kind !== "stack" && inputFor(f.item);
   const exposure = {
     internet: "Internet exposed",
@@ -399,7 +448,7 @@ function finding(f: Finding, heading: string) {
         "Missing step: " + prose(handoff.missing),
       ),
     firstQuestion && "**What would decide this** — " + firstQuestion,
-    trace(f),
+    callPath(f, target),
     conditions(f),
   );
   const identity = f.anchor
@@ -495,7 +544,7 @@ function sectionBody(section: Section, heading: string) {
       a.applicability && prose(a.applicability),
     ),
   );
-  const results = findings.map((f) => finding(f, heading));
+  const results = findings.map((f) => finding(f, heading, stack?.target));
   const evidence = results.map((result) => result.evidence).filter(Boolean);
   return blocks(
     ...advisory,

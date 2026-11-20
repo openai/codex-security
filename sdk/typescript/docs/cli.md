@@ -88,10 +88,16 @@ For a stack investigation, use
 `cs exploitability run finalize --state investigation.sqlite --format html`.
 Each stack assessment applies to its captured workload and observation window.
 
-For text output, use `--format md` to print Markdown or `--json` to print
-the structured result. With these formats or the default terminal summary,
-`--report-file` saves the underlying JSON. A finding marked **Requires
-more information** corresponds to `unknown` in JSON.
+Use `--format md` with either command to print Markdown. Each sampled stack
+appears under its verdict, starting with the outermost recorded caller. Frames
+show the function and any recorded file and line. A code block shows the exact
+line when the saved source matches the frame and its build. Gaps mark omitted
+frames. A cited call that cannot be placed on the stack appears under
+**Source review**.
+
+Use `--json` to print the structured result. With Markdown, JSON, or the
+default terminal summary, `--report-file` saves the underlying JSON. A finding
+marked **Requires more information** corresponds to `unknown` in JSON.
 
 ### Reviewed repository and package checks
 
