@@ -14,7 +14,7 @@ import pytest
 from workbench_test_support import SCRIPT, run_workbench
 
 
-def start_scan(tmp_path: Path, version: str | None = None):
+def start_scan(tmp_path: Path, *args: str, version: str | None = None, **options):
     target = tmp_path / "target"
     target.mkdir()
     state = tmp_path / "state"
@@ -28,13 +28,15 @@ def start_scan(tmp_path: Path, version: str | None = None):
         "--scan-root",
         str(tmp_path / "scans"),
         *(["--workflow-version", version] if version else []),
+        *args,
+        **options,
     )["deepScan"]
     return state, run
 
 
-def owner_command(state, command, scan_id, *, check=True):
+def owner_command(state, command, scan_id, *args, **options):
     return run_workbench(
-        state, command, "--scan-id", scan_id, "--thread-id", "fixture-thread", check=check
+        state, command, "--scan-id", scan_id, "--thread-id", "fixture-thread", *args, **options
     )
 
 
@@ -93,7 +95,7 @@ def claim_requiring_original_settings(
 def test_missing_or_unsupported_settings_reject_before_takeover(
     tmp_path: Path, workflow: str, settings_version: int | None
 ) -> None:
-    state, run = start_scan(tmp_path, workflow)
+    state, run = start_scan(tmp_path, version=workflow)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 2, "
@@ -129,7 +131,7 @@ def test_missing_or_unsupported_settings_reject_before_takeover(
 def test_legacy_takeover_does_not_require_or_create_a_new_snapshot(
     tmp_path: Path, workflow: str
 ) -> None:
-    state, run = start_scan(tmp_path, workflow)
+    state, run = start_scan(tmp_path, version=workflow)
     result = claim_requiring_original_settings(state, run["scanId"])
     assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)["deepScan"]
@@ -179,7 +181,7 @@ def test_observation_and_selected_completion_do_not_require_worker_settings(
     "version", ["deep-security-scan/v1", "deep-scan-mcp/v1", "deep-security-scan/v2"]
 )
 def test_supported_workflows_keep_their_identity(tmp_path: Path, version: str) -> None:
-    state, begun = start_scan(tmp_path, version)
+    state, begun = start_scan(tmp_path, version=version)
     claimed = owner_command(state, "claim-deep-scan-coordinator", str(begun["scanId"]))["deepScan"]
     assert claimed["workflowVersion"] == version
     assert claimed["schemaVersion"] == 1
@@ -317,7 +319,7 @@ def test_unsupported_new_workflow_does_not_claim_registered_scan(tmp_path: Path)
 def test_new_workflow_default_preserves_existing_run_version(
     tmp_path: Path, legacy_version: str | None
 ) -> None:
-    state, created = start_scan(tmp_path, legacy_version)
+    state, created = start_scan(tmp_path, version=legacy_version)
     expected_version = legacy_version or "deep-security-scan/v2"
     assert created["workflowVersion"] == expected_version
     resumed = owner_command(state, "begin-deep-scan", created["scanId"])["deepScan"]
@@ -368,3 +370,85 @@ def test_unsupported_selection_rejects_without_mutation(tmp_path: Path, command:
     assert snapshot(state) == before
     observed = owner_command(state, "get-deep-scan", scan_id)["deepScan"]
     assert observed["finalizationInput"] == selected
+
+
+@pytest.mark.parametrize("original_context", [None, "Audit the original parser"])
+def test_reconstruction_preserves_discovery_input_settings_and_deadline(
+    tmp_path: Path,
+    original_context: str | None,
+) -> None:
+    codex_home = tmp_path / "home"
+    config = codex_home / "codex-security" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[deep_scan]\nworkers = 2\nmax_time_hours = 2.5\n")
+    environment = {"CODEX_HOME": str(codex_home)}
+    state, begun = start_scan(
+        tmp_path,
+        "--model",
+        "original-model",
+        "--reasoning-effort",
+        "high",
+        *(["--user-context-stdin"] if original_context is not None else []),
+        input_text=original_context,
+        environment=environment,
+    )
+    scan_id = str(begun["scanId"])
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET user_context = 'Later discussion'")
+        connection.execute("UPDATE deep_scan_runs SET updated_at = '2000-01-01T00:00:00Z'")
+        before = "\n".join(connection.iterdump())
+    config.write_text("[deep_scan]\nworkers = 8\nmax_time_hours = 12\n")
+    joined = owner_command(
+        state,
+        "begin-deep-scan",
+        scan_id,
+        "--model",
+        "observer-model",
+        "--reasoning-effort",
+        "low",
+        environment=environment,
+    )["deepScan"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert "\n".join(connection.iterdump()) == before
+        assert connection.execute("SELECT model, reasoning_effort FROM scans").fetchone() == (
+            "original-model",
+            "high",
+        )
+    recovered = owner_command(
+        state,
+        "claim-deep-scan-coordinator",
+        scan_id,
+        environment=environment,
+    )["deepScan"]
+    for run in (joined, recovered):
+        assert run["model"] == "original-model"
+        assert run["reasoningEffort"] == "high"
+        assert run["userContext"] == original_context
+        assert run["createdAt"] == begun["createdAt"]
+        assert run["config"] == begun["config"]
+        assert run["workflowVersion"] == begun["workflowVersion"]
+
+
+@pytest.mark.parametrize("workflow_version", ["deep-security-scan/v1", "deep-scan-mcp/v1"])
+def test_supported_old_run_snapshots_context_on_upgrade(
+    tmp_path: Path, workflow_version: str
+) -> None:
+    state, begun = start_scan(
+        tmp_path, "--user-context", "Legacy context", version=workflow_version
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN discovery_user_context")
+        connection.execute("UPDATE deep_scan_runs SET discovery_user_context_json = NULL")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("preserve original deep scan discovery context",),
+        )
+    upgraded = owner_command(state, "get-deep-scan", begun["scanId"])["deepScan"]
+    assert upgraded["workflowVersion"] == workflow_version
+    assert upgraded["userContext"] == "Legacy context"
+    assert upgraded["config"] == begun["config"]
+    assert upgraded["createdAt"] == begun["createdAt"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET user_context = 'Later discussion'")
+    observed = owner_command(state, "get-deep-scan", begun["scanId"])["deepScan"]
+    assert observed["userContext"] == "Legacy context"
