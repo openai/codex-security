@@ -122,7 +122,7 @@ export function registerDependencyCheck(
     }),
     output: z.union([
       ...dependencyCheckOutputSchema.options,
-      stackInvestigationReportSchema,
+      ...stackInvestigationReportSchema.options,
       dependencyScopedBlockedSchema,
       blockedPackage,
       blocked,
