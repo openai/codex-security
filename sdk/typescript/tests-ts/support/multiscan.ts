@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { gitText } from "./shell.js";
 import { readJson, readJsonLines, writeJson } from "./json.js";
 import { reseal as resealArtifacts } from "./sealed-scan.js";
@@ -166,7 +167,7 @@ export async function registeredCampaignResult(
     displayName: basename(checkout),
     revision: git(checkout, "rev-parse", "HEAD"),
   };
-  manifest.scan.scope = { includePaths, excludePaths };
+  manifest.scan.scope = { ...manifest.scan.scope, includePaths, excludePaths };
   manifest.scan.mode =
     target.kind === "paths"
       ? "scoped_path"
@@ -196,19 +197,20 @@ export async function registeredCampaignResult(
       "--workflow-version",
       "deep-scan-mcp/v1",
     ]);
-    const database = new Database(
-      join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
+    // The fake scanner supplied a finished Deep result. Persist that
+    // coordinator fixture before asking the real workbench to seal it.
+    execFileSync(
+      python,
+      [
+        "-I",
+        "-c",
+        "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET status='succeeded', phase='terminal', terminal_reason='saturated', manifest_path=?, completed_at=updated_at WHERE scan_id=?\", (sys.argv[2],sys.argv[3])); c.commit()",
+        join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
+        manifestPath,
+        scanId,
+      ],
+      { env: environment },
     );
-    try {
-      database.run(
-        `UPDATE deep_scan_runs SET status='succeeded', phase='terminal',
-         terminal_reason='saturated', manifest_path=?, completed_at=updated_at
-         WHERE scan_id=?`,
-        [manifestPath, scanId],
-      );
-    } finally {
-      database.close();
-    }
   }
   await workbench(["complete-scan", "--scan-id", scanId]);
   return new ScanResult({
