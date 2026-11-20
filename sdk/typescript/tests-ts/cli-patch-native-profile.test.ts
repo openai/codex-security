@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { readSkillCommandOutput, runRepositoryCommand } from "../src/cli.js";
 import {
   capturePatchGitControls,
-  ensureWindowsSnapshotConfigReadable,
+  type PatchSnapshotConfig,
 } from "../src/patch-git-controls.js";
 import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
 import {
@@ -32,7 +32,7 @@ afterEach(fixtures.cleanup);
 type RpcMessage = Record<string, any>;
 type PatchPermissions = NonNullable<
   NonNullable<Parameters<typeof readSkillCommandOutput>[1]>["permissions"]
->;
+> & { snapshotConfig?: PatchSnapshotConfig };
 
 interface PatchProfileContext {
   name: string;
@@ -40,6 +40,7 @@ interface PatchProfileContext {
   filesystem: RpcMessage;
   modelProfile: RpcMessage;
   snapshotProfile: RpcMessage;
+  snapshotConfig?: PatchSnapshotConfig;
   repository: string;
   home: string;
   temporaryDirectory: string;
@@ -457,6 +458,7 @@ glob_scan_max_depth = 8
       filesystem: profiles[name]!["filesystem"] as RpcMessage,
       modelProfile: profiles[name]!,
       snapshotProfile: snapshotProfile!,
+      snapshotConfig: captured?.snapshotConfig ?? controls?.snapshotConfig,
       repository,
       home,
       temporaryDirectory,
@@ -560,96 +562,6 @@ test("patch model cannot read external Git configuration used by snapshots", asy
       const root = dirname(context.repository);
       const selected = join(root, "selected.gitconfig");
       const included = join(root, "included.gitconfig");
-      const hostedWindows = patchSnapshotWindowsConfig().includes('"elevated"');
-      // Emit only account roles and read outcomes for these three fixture files.
-      const reader = `const fs = require("node:fs");
-const whoami = require("node:path").join(process.env.SystemRoot, "System32", "whoami.exe");
-const who = (...args) => {
-  const r = require("node:child_process").spawnSync(whoami, args, { encoding: "utf8" });
-  return r.status === 0 ? r.stdout.toLowerCase() : "";
-};
-const role = who().trim().split(String.fromCharCode(92)).pop();
-const groups = who("/groups", "/fo", "csv", "/nh");
-const reads = ${JSON.stringify([selected, included, join(root, "ordinary.txt")])}.map(path => {
-  try { fs.closeSync(fs.openSync(path, "r")); return "ok"; }
-  catch (error) { return error.code; }
-});
-console.log(JSON.stringify({ role: ["codexsandboxoffline", "codexsandboxonline"].includes(role) ? role : role ? "other" : "unknown",
-  sandboxGroup: groups ? groups.includes("codexsandboxusers") : null, reads }));`;
-      const observe = async (phase: string, probe: () => unknown) => {
-        try {
-          console.info("Windows external config", phase, await probe());
-        } catch {
-          // Never replace the real Git read or its diagnostic with a probe error.
-          console.info("Windows external config", phase, "probe unavailable");
-        }
-      };
-      const reportAcl = async () => {
-        // Windows PowerShell 5.1 exposes these .NET Framework APIs even when
-        // PowerShell's Security, Management and Utility modules cannot load.
-        const command = `
-$ErrorActionPreference = 'Stop'
-$sid = try { ([Security.Principal.NTAccount]'CodexSandboxUsers').Translate([Security.Principal.SecurityIdentifier]) } catch { $null }
-[Console]::WriteLine([string]$sid)
-foreach ($name in 'selected.gitconfig','included.gitconfig','ordinary.txt') {
-  try {
-    $file = [IO.Path]::Combine($env:ACL_FIXTURE_ROOT, $name)
-    $acl = [IO.File]::GetAccessControl($file, [Security.AccessControl.AccessControlSections]::Access)
-    $aces = @()
-    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-      if ($sid -eq $rule.IdentityReference) {
-        $aces += '{0}/{1:X8}/{2}' -f $rule.AccessControlType, ([int]$rule.FileSystemRights), $rule.IsInherited
-      }
-    }
-    [Console]::WriteLine('ok:' + ($aces -join ','))
-  } catch { [Console]::WriteLine('unavailable') }
-}`;
-        const output = execFileSync(
-          join(
-            process.env["SystemRoot"]!,
-            "System32",
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe",
-          ),
-          ["-NoProfile", "-NonInteractive", "-Command", command],
-          {
-            encoding: "utf8",
-            env: { ...process.env, ACL_FIXTURE_ROOT: root },
-            stdio: ["ignore", "pipe", "pipe"],
-            windowsHide: true,
-          },
-        );
-        const [sid = "", ...rows] = output.split(/\r?\n/u);
-        const tracked = await readFile(
-          join(context.home, ".sandbox", "deny_read_acl_state.json"),
-          "utf8",
-        )
-          .then((contents) => JSON.parse(contents).principals?.[sid] ?? [])
-          .catch((error: NodeJS.ErrnoException) =>
-            error.code === "ENOENT" ? [] : null,
-          );
-        return ["selected.gitconfig", "included.gitconfig", "ordinary.txt"].map(
-          (file, index) => {
-            const row = rows[index];
-            return {
-              file,
-              sandboxGroupAces:
-                sid && row?.startsWith("ok:")
-                  ? row.slice(3).split(",").filter(Boolean)
-                  : null,
-              tracked:
-                sid && Array.isArray(tracked)
-                  ? tracked.some(
-                      (path: unknown) =>
-                        typeof path === "string" &&
-                        path.toLowerCase() === join(root, file).toLowerCase(),
-                    )
-                  : null,
-            };
-          },
-        );
-      };
       const readConfigs = `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const paths = ${JSON.stringify([selected, included])};
@@ -660,17 +572,9 @@ for (const path of paths) {
 const git = spawnSync("git", ["config", "--file", paths[0], "--get", "http.extraHeader"]);
 if (git.stdout) process.stdout.write(git.stdout);`;
       const expectModelDenied = async () => {
-        const reads = await inspectModel(
-          hostedWindows
-            ? readConfigs + "\n;try { (() => {" + reader + "})(); } catch {}"
-            : readConfigs,
-        );
+        const reads = await inspectModel(readConfigs);
         expect(reads).not.toContain("Synthetic fixture");
         expect(reads).not.toContain("Included fixture");
-        if (hostedWindows)
-          await observe("model", () =>
-            JSON.parse(reads.slice(reads.indexOf("{"))),
-          );
       };
       const gitEnvironment = {
         GIT_CONFIG_GLOBAL: selected,
@@ -685,55 +589,10 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         directory: context.repository,
         environment,
         profile: context.snapshotProfile,
+        snapshotConfig: context.snapshotConfig,
         gitEnvironment,
       };
-      const snapshotReader = async () => {
-        // An unreadable selected global stops Git before it can dispatch this fixture alias.
-        // Keep its real profile and open the original files from the child.
-        const result = await runRepositoryCommand(
-          "git",
-          ["-c", "alias.fixture-reader=!node -", "fixture-reader"],
-          context.repository,
-          {
-            input: reader,
-            sandbox: {
-              ...sandbox,
-              gitEnvironment: { ...gitEnvironment, GIT_CONFIG_GLOBAL: "" },
-            },
-          },
-        );
-        return JSON.parse(result);
-      };
-      if (hostedWindows) {
-        await observe("snapshot before model", async () => {
-          await writeFile(join(root, "ordinary.txt"), "ordinary");
-          return snapshotReader();
-        });
-        await observe("DACL before model", reportAcl);
-      }
       await expectModelDenied();
-      if (process.platform === "win32") {
-        if (hostedWindows) await observe("DACL after model", reportAcl);
-        try {
-          await ensureWindowsSnapshotConfigReadable(
-            context.controls!.snapshotConfigPaths,
-            (args, input, refreshWindowsReadGrants) =>
-              runRepositoryCommand("git", args, context.repository, {
-                input,
-                sandbox: {
-                  ...sandbox,
-                  gitEnvironment: { ...gitEnvironment, LC_ALL: "C" },
-                  refreshWindowsReadGrants,
-                },
-              }),
-          );
-        } finally {
-          if (hostedWindows) {
-            await observe("DACL after snapshot probe", reportAcl);
-            await observe("snapshot after probe", snapshotReader);
-          }
-        }
-      }
       expect(
         await runRepositoryCommand(
           "git",
@@ -742,10 +601,54 @@ if (git.stdout) process.stdout.write(git.stdout);`;
           { sandbox },
         ),
       ).toBe("Included fixture");
+      if (process.platform === "win32") {
+        // A concurrent model command shares the sandbox account. Give it the
+        // exact pathname while the snapshot still has the projection open.
+        const marker = join(context.repository, "snapshot-path");
+        const done = join(context.repository, "snapshot-done");
+        const running = runRepositoryCommand(
+          "git",
+          ["-c", "alias.config-reader=!node -", "config-reader"],
+          context.repository,
+          {
+            sandbox,
+            input: `const fs = require("node:fs");
+const file = process.env.GIT_CONFIG_GLOBAL;
+if (!fs.readFileSync(file).length) throw new Error("Empty snapshot config");
+fs.writeFileSync("path.tmp", file);
+fs.renameSync("path.tmp", "snapshot-path");
+const end = setTimeout(() => process.exit(1), 10000);
+const timer = setInterval(() => { if (fs.existsSync("snapshot-done")) { clearTimeout(end); clearInterval(timer); } }, 10);`,
+          },
+        );
+        let staged;
+        try {
+          while (
+            !(await lstat(marker).then(
+              () => true,
+              () => false,
+            ))
+          )
+            await Promise.race([
+              running,
+              new Promise((resolve) => setTimeout(resolve, 10)),
+            ]);
+          staged = await readFile(marker, "utf8");
+          expect(staged).not.toBe(selected);
+          expect(
+            await inspectModel(`try { require("node:fs").readFileSync(${JSON.stringify(staged)}); process.stdout.write("readable"); }
+catch (error) { process.stdout.write(error.code); }`),
+          ).toMatch(/^(?:EPERM|EACCES)$/);
+        } finally {
+          await writeFile(done, "");
+          await running;
+        }
+        await expect(lstat(staged!)).rejects.toMatchObject({ code: "ENOENT" });
+      }
       await expectModelDenied();
     },
   );
-}, 90000);
+}, 30000);
 
 async function captureFilterPermissions(
   repository: string,
@@ -775,7 +678,11 @@ async function captureFilterPermissions(
         environment: { ...environment, ...options?.environment },
       }),
     onCodex: (_args, output) => {
-      selected = output?.appServer?.permissions;
+      if (output?.appServer?.permissions)
+        selected = {
+          ...output.appServer.permissions,
+          snapshotConfig: output.appServer.snapshotConfig,
+        };
       throw new Error(stopped);
     },
   });
@@ -900,6 +807,7 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
           environment: sandboxEnvironment,
           gitEnvironment: environment,
           profile: context.snapshotProfile,
+          snapshotConfig: context.snapshotConfig,
         },
       });
       expect(actual).toBe(hash(protectedResult));
@@ -940,11 +848,17 @@ test("patch model and clean filters cannot read selected authentication files", 
   const pgservice = join(operator, "selected pg service");
   const pgKey = join(operator, "selected pg key");
   const pgCert = join(operator, "selected pg cert");
+  const terraformConfig = join(operator, "selected terraform config");
+  const legacyTerraformConfig = join(operator, "legacy terraform config");
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
   const cloudDefault = "application_default_credentials.json";
   const appdata = join(operator, "Roaming");
+  const terraformDir =
+    process.platform === "win32"
+      ? join(appdata, "terraform.d")
+      : join(operator, ".terraform.d");
   const pgTlsDir =
     process.platform === "win32"
       ? join(appdata, "postgresql")
@@ -953,6 +867,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   await mkdir(gh);
   await mkdir(ssh);
   await mkdir(defaultGh, { recursive: true });
+  await mkdir(terraformDir, { recursive: true });
   const npm = join(operator, "selected npmrc");
   await mkdir(registry);
   const clusterList = (files: string[]) =>
@@ -968,6 +883,8 @@ test("patch model and clean filters cannot read selected authentication files", 
     PGSERVICEFILE: pgservice,
     PGSSLKEY: pgKey,
     PGSSLCERT: pgCert,
+    TF_CLI_CONFIG_FILE: terraformConfig,
+    TERRAFORM_CONFIG: legacyTerraformConfig,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
@@ -978,6 +895,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   };
   const environment = {
     ...pointers,
+    CODEX_HOME: operator,
+    CODEX_SECURITY_STATE_DIR: operator,
     FILTER_FIXTURE_SETTING: "from host",
     AWS_CONFIG_FILE: awsConfig,
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
@@ -1013,7 +932,14 @@ test("patch model and clean filters cannot read selected authentication files", 
   const scopedProxyKey = join(operator, "scoped proxy key.pem");
   const clientCert = join(operator, "origin identity.pem");
   const proxyCert = join(operator, "proxy identity.pem");
-  const existing = [...paths.slice(0, 2), netrc, proxyKey, clientCert];
+  const existing = [
+    ...paths.slice(0, 2),
+    netrc,
+    proxyKey,
+    clientCert,
+    join(terraformDir, "registry.tfrc"),
+    join(terraformDir, "workspace.tfrc.json"),
+  ];
   const glabDirectories = [
     glab,
     join(operator, ".config", "glab-cli"),
@@ -1029,6 +955,9 @@ test("patch model and clean filters cannot read selected authentication files", 
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
+    join(operator, ".codex", "auth.json"),
+    join(operator, "auth.json"),
+    join(operator, "codex-home", "auth.json"),
     join(operator, "_netrc"),
     scopedProxyKey,
     proxyCert,
@@ -1046,6 +975,12 @@ test("patch model and clean filters cannot read selected authentication files", 
     pgservice,
     pgKey,
     pgCert,
+    terraformConfig,
+    legacyTerraformConfig,
+    process.platform === "win32"
+      ? join(appdata, "terraform.rc")
+      : join(operator, ".terraformrc"),
+    join(terraformDir, "credentials.tfrc.json"),
     join(pgTlsDir, "postgresql.key"),
     join(pgTlsDir, "postgresql.crt"),
     join(operator, "pg_service.conf"),
@@ -1078,6 +1013,8 @@ test("patch model and clean filters cannot read selected authentication files", 
 if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
   throw new Error("Cannot read the ordinary sibling");
+if (fs.readFileSync(${JSON.stringify(join(terraformDir, "ordinary.txt"))}, "utf8") !== "Terraform sibling")
+  throw new Error("Cannot read the ordinary Terraform sibling");
 const contents = [];
 for (const path of ${JSON.stringify(protectedPaths)}) {
   try { contents.push(fs.readFileSync(path, "utf8")); }
@@ -1091,6 +1028,8 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
     async (context, inspectModel) => {
       // An operator may have no AWS profile directory when the first model tool runs.
       expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
+      await mkdir(join(operator, ".codex"), { recursive: true });
+      await mkdir(join(operator, "codex-home"), { recursive: true });
       await mkdir(awsDirectory);
       await mkdir(join(operator, ".docker"));
       await mkdir(join(operator, ".kube"));
@@ -1098,6 +1037,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         await mkdir(directory, { recursive: true });
       await mkdir(cloudConfig);
       await mkdir(pgTlsDir, { recursive: true });
+      await writeFile(join(terraformDir, "ordinary.txt"), "Terraform sibling");
       await mkdir(join(operator, ".config", "gcloud"));
       if (process.platform === "win32")
         await mkdir(join(appdata, "gcloud"), { recursive: true });
@@ -1169,6 +1109,7 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
             NETRC: environment.NETRC,
           },
           profile: context.snapshotProfile,
+          snapshotConfig: context.snapshotConfig,
         },
       });
       const sharedCredentials = join(awsDirectory, "credentials");
@@ -1262,6 +1203,7 @@ test.each(["administration", "direct-administration"] as const)(
           directory: context.repository,
           environment,
           profile: context.snapshotProfile,
+          snapshotConfig: context.snapshotConfig,
         },
       },
     );

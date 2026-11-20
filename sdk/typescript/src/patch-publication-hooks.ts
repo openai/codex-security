@@ -8,16 +8,22 @@ export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 export const httpCredentialFile =
   /^http(?:\..*)?\.(?:cookiefile|(?:proxy)?ssl(?:key|cert))$/iu;
 
+export const credentialFileVariable =
+  /^(?:GOOGLE_APPLICATION_CREDENTIALS|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY)|TERRAFORM_CONFIG|TF_CLI_CONFIG_FILE)$/iu;
+
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
   environment: NodeJS.ProcessEnv,
   credentialNames: readonly string[],
   stripAwsCredentials?: boolean,
   proxyCredentials = proxyUserinfo,
+  fileVariable = credentialFileVariable,
 ): void {
   for (const [name, value] of Object.entries(environment)) {
     if (
-      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PG(?:PASSFILE|PASSWORD|SERVICEFILE|SSLCERT|SSLKEY))$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
+      fileVariable.test(name) ||
+      /^TF_TOKEN_/iu.test(name) ||
+      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
         name,
       ) ||
       credentialNames.includes(name.toUpperCase()) ||
@@ -42,16 +48,53 @@ export function withoutUrlCredentials(value: string): string {
   );
 }
 
+export interface WindowsGitConfig {
+  directory: string;
+  binding: string;
+  coordinator: string;
+  bindings?: Record<string, string>;
+  config: import("./patch-git-controls.js").PatchSnapshotConfig;
+}
+
+// A fresh pinned scratch root for each launch avoids re-provisioning files
+// left by an earlier delegate and keeps the reusable permission file stable.
+export function configWorkspaceArgs(profile: string, root?: string): string[] {
+  return root
+    ? [
+        "-c",
+        "permissions." +
+          profile +
+          ".workspace_roots={" +
+          JSON.stringify(root) +
+          "=true}",
+      ]
+    : [];
+}
+
 // Executed by the coordinator and embedded in the standalone hook dispatcher.
 export function filterCommandConfig(
   environment: NodeJS.ProcessEnv,
   git: string,
   marker?: string,
+  windowsConfig?: WindowsGitConfig,
   parseGit = spawnSync,
   stripUrlCredentials = withoutUrlCredentials,
   proxyCredentials = proxyUserinfo,
   credentialFile = httpCredentialFile,
 ): void {
+  function include(key: string, value: string) {
+    if (
+      !windowsConfig ||
+      !/^include(?:if\..*)?\.path$/i.test(key) ||
+      !Object.hasOwn(windowsConfig.config.commands, value)
+    )
+      return value;
+    return (
+      windowsConfig.directory.replaceAll("\\", "/") +
+      "/" +
+      windowsConfig.config.commands[value]
+    );
+  }
   function credentialSetting(key: string, value: string): boolean {
     if (/^(?:http|remote)(?:\..*)?\.proxy$/i.test(key))
       return proxyCredentials.test(value) || stripUrlCredentials(key) !== key;
@@ -86,7 +129,13 @@ export function filterCommandConfig(
     const key = environment["GIT_CONFIG_KEY_" + index];
     const value = environment["GIT_CONFIG_VALUE_" + index];
     if (key === undefined || value === undefined || !key) invalid = true;
-    else if (!credentialSetting(key, value)) tuples.push([key, value]);
+    else if (!credentialSetting(key, value)) {
+      const staged = include(key, value);
+      if (staged !== value && windowsConfig)
+        (windowsConfig.bindings ??= {})["GIT_CONFIG_VALUE_" + tuples.length] =
+          staged;
+      tuples.push([key, value]);
+    }
   }
   if (!invalid) {
     if (tuples.length < count) {
@@ -143,6 +192,8 @@ export function filterCommandConfig(
     );
   const records = parsed.stdout.split("\0");
   const parameters = [];
+  const stagedParameters = [];
+  let staged = false;
   let changed = false;
   let bridge = false,
     removed = false;
@@ -159,16 +210,26 @@ export function filterCommandConfig(
       removed ||= value === "end";
       continue;
     }
-    if (bridge || credentialSetting(key, value)) changed = true;
-    else
-      parameters.push(
-        key.includes("=")
-          ? quote(key) + "=" + (split === -1 ? "" : quote(value))
-          : quote(split === -1 ? key : key + "=" + value),
-      );
+    if (bridge || credentialSetting(key, value)) {
+      changed = true;
+      continue;
+    }
+    const parameter = (value: string) =>
+      key.includes("=")
+        ? quote(key) + "=" + (split === -1 ? "" : quote(value))
+        : quote(split === -1 ? key : key + "=" + value);
+    parameters.push(parameter(value));
+    if (windowsConfig) {
+      const rewritten = include(key, value);
+      staged ||= rewritten !== value;
+      stagedParameters.push(parameter(rewritten));
+    }
   }
   if (marker && (!removed || bridge))
     throw new Error("Could not restore the publication hook configuration.");
+  if (staged && windowsConfig)
+    (windowsConfig.bindings ??= {})["GIT_CONFIG_PARAMETERS"] =
+      stagedParameters.join(" ");
   if (changed) environment["GIT_CONFIG_PARAMETERS"] = parameters.join(" ");
 }
 
@@ -189,10 +250,20 @@ const plan = JSON.parse(
 );
 const environment = { ...process.env };
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo});
+removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
 environment.CODEX_HOME = plan.home;
 
-filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile});
+const windowsConfig = plan.windowsConfig;
+const configWorkspaceArgs = ${configWorkspaceArgs};
+let configStage;
+if (windowsConfig) {
+  const root = path.join(path.dirname(windowsConfig.directory), require("node:crypto").randomUUID());
+  configStage = require(windowsConfig.binding).createWindowsHookMessageStage(
+    Buffer.from(path.toNamespacedPath(root), "utf16le"),
+  );
+  windowsConfig.directory = path.join(root, "message", "config");
+}
+filterCommandConfig(environment, plan.git, plan.marker, windowsConfig, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile});
 const bindings = Object.entries(environment).filter(([name]) =>
   /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS|_COUNT|_(?:KEY|VALUE)_\d+)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
     name,
@@ -201,6 +272,7 @@ const bindings = Object.entries(environment).filter(([name]) =>
 const header = Buffer.from(
   JSON.stringify({
     bindings,
+    windowsConfig,
     credentialNames: plan.credentialNames,
     stripAwsCredentials: plan.stripAwsCredentials,
   }),
@@ -424,6 +496,7 @@ try {
         stageMessage, "(" + runWindowsMessageHook + ")();",
       ].join("\n")
     : original ? "(" + stageMessage + ")();\n" + plan.runner : plan.runner;
+  const permissionProfile = messageEvent ? plan.profile + "_" + event : plan.profile;
   const result = spawnSync(
     plan.codex,
     [
@@ -434,7 +507,8 @@ try {
       "--profile",
       plan.profile,
       "--permission-profile",
-      messageEvent ? plan.profile + "_" + event : plan.profile,
+      permissionProfile,
+      ...configWorkspaceArgs(permissionProfile, windowsConfig && path.dirname(windowsConfig.directory)),
       "--include-managed-config",
       "--",
       plan.runtime,
@@ -457,6 +531,7 @@ try {
       windowsHide: true,
     },
   );
+  configStage?.close();
   if (result.error) throw result.error;
   // Git keeps a validator's message edits even when it vetoes the commit.
   let bytes;
@@ -515,6 +590,7 @@ export async function writePublicationHooks(
     message?: string;
     messageDirectories: Record<string, string>;
     windowsMessageBinding?: string;
+    windowsConfig?: WindowsGitConfig;
     runner: string;
     credentialNames: string[];
     stripAwsCredentials: boolean;

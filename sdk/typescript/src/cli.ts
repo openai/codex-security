@@ -105,16 +105,19 @@ import {
   type PatchGitControlMode,
   type PatchGitControls,
   type PatchPublicationHooks,
-  ensureWindowsSnapshotConfigReadable,
+  type PatchSnapshotConfig,
   selectedGitFileReference,
   withPatchGitIndex,
   type PatchGitAdministrationReference,
 } from "./patch-git-controls.js";
 import {
+  credentialFileVariable,
   filterCommandConfig,
   proxyUserinfo,
   removePatchCredentials,
   writePublicationHooks,
+  type WindowsGitConfig,
+  configWorkspaceArgs,
 } from "./patch-publication-hooks.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -369,6 +372,7 @@ import {
   requirePrivateSnapshotProfileHome,
   requirePrivateSnapshotProfileFile,
   createWindowsHookMessageStage,
+  createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
@@ -1447,7 +1451,7 @@ interface SkillPermissions {
 
 interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
-  readonly refreshWindowsReadGrants?: boolean;
+  readonly snapshotConfig?: PatchSnapshotConfig;
   readonly environment: NodeJS.ProcessEnv;
   readonly providerKeyVariable?: string;
   readonly stripAwsCredentials?: boolean;
@@ -1765,7 +1769,7 @@ interface SkillCommandOutput {
     readonly sandbox?: "read-only" | "workspace-write";
     readonly permissions?: SkillPermissions;
     readonly snapshotStoragePaths?: readonly string[];
-    readonly snapshotConfigPaths?: readonly string[];
+    readonly snapshotConfig?: PatchSnapshotConfig;
     readonly publicationHooks?: PatchPublicationHooks;
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
@@ -2015,7 +2019,7 @@ if (process.platform === "win32") {
       nativeGitOptions.push("-c", "safe.directory=" + value);
   }
 }
-const { bindings, credentialNames = [], stripAwsCredentials } = JSON.parse(header.toString());
+const { bindings, credentialNames = [], stripAwsCredentials, windowsConfig } = JSON.parse(header.toString());
 // Only replay coordinator-approved Git command config after native shell policy.
 for (const name of Object.keys(process.env))
   if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\\d+)$/i.test(name))
@@ -2025,7 +2029,23 @@ for (const [name, value] of bindings) {
   else process.env[name] = value;
 }
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo});
+removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
+if (windowsConfig) {
+  const { directory, binding, coordinator, config } = windowsConfig;
+  const path = require("node:path");
+  const fs = require("node:fs");
+  if (require(binding).createWindowsGitConfigDirectory(
+    Buffer.from(path.toNamespacedPath(directory), "utf16le"), coordinator,
+  )) {
+    for (const [index, contents] of config.files.entries())
+      fs.writeFileSync(path.join(directory, String(index)), contents, { encoding: "base64", flag: "wx" });
+    if (config.system !== undefined)
+      process.env.GIT_CONFIG_SYSTEM = path.join(directory, String(config.system));
+    if (config.global !== undefined)
+      process.env.GIT_CONFIG_GLOBAL = path.join(directory, String(config.global));
+    Object.assign(process.env, windowsConfig.bindings);
+  }
+}
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
@@ -2104,14 +2124,33 @@ export async function runRepositoryCommand(
   >[] = [];
   let hostArgs = args;
   try {
+    let windowsConfig: WindowsGitConfig | undefined;
+    let configRoot: string | undefined;
+    if (process.platform === "win32" && sandbox?.snapshotConfig?.files.length) {
+      const temp = await realpath(tmpdir());
+      if (!isOutsidePath(relative(sandbox.snapshotConfig.root, temp)))
+        throw new CodexSecurityError(
+          "Windows Git configuration needs temporary storage outside the patch worktree.",
+        );
+      const stage = await createWindowsHookMessageStage(
+        join(temp, "codex-security-git-config-" + randomUUID()),
+      );
+      windowsMessageStages.push(stage);
+      configRoot = stage.directory;
+      windowsConfig = {
+        directory: join(configRoot, randomUUID()),
+        coordinator: stage.coordinator,
+        binding: stage.binding,
+        config: sandbox.snapshotConfig,
+      };
+    }
     const home = sandbox && configuredCodexHome(sandbox.environment);
     if (
       home &&
       sandbox &&
       options?.snapshotProfiles &&
       process.platform === "win32" &&
-      !hooks &&
-      !sandbox.refreshWindowsReadGrants
+      !hooks
     ) {
       await mkdir(home, { recursive: true, mode: 0o700 });
       if (
@@ -2204,9 +2243,18 @@ export async function runRepositoryCommand(
               );
           }
         }
-        hookDirectory = await mkdtemp(
-          join(canonicalHome, "publication-hooks-"),
-        );
+        if (windowsConfig) {
+          const privatePlan = join(
+            canonicalHome,
+            "publication-hooks-" + randomUUID(),
+          );
+          await createWindowsOutputDirectory(privatePlan, false);
+          hookDirectory = privatePlan;
+        } else {
+          hookDirectory = await mkdtemp(
+            join(canonicalHome, "publication-hooks-"),
+          );
+        }
         if (process.platform !== "win32")
           await requireSecureOutputAncestry(hookDirectory);
         // The sandbox cannot traverse a denied credential home to read stdin.
@@ -2259,15 +2307,6 @@ export async function runRepositoryCommand(
             [dirname(hookDirectory)]: { ".": "deny" },
             [hookDataDirectory!]: { ".": "read" },
           };
-        if (sandbox.refreshWindowsReadGrants) {
-          // The elevated Windows backend omits explicit read roots for a full-read
-          // policy. Denying the probe's own private profile retains the individual
-          // Git configuration grants and the normal platform read roots.
-          permissions["filesystem"] = {
-            ...(permissions["filesystem"] as JsonObject | undefined),
-            [path]: { ".": "deny" },
-          };
-        }
         const profiles = { [profile]: permissions };
         for (const [event, messageDirectory] of Object.entries(
           messageDirectories,
@@ -2355,6 +2394,7 @@ export async function runRepositoryCommand(
           data: hookDataDirectory!,
           messageDirectories,
           windowsMessageBinding: windowsMessageStages[0]?.binding,
+          windowsConfig,
           runner: PATCH_GIT_ENVIRONMENT_RUNNER,
           credentialNames,
           stripAwsCredentials: sandbox.stripAwsCredentials === true,
@@ -2379,7 +2419,12 @@ export async function runRepositoryCommand(
           effective[process.platform === "win32" ? name.toUpperCase() : name] =
             value;
       }
-      filterCommandConfig(effective, executable.executable);
+      filterCommandConfig(
+        effective,
+        executable.executable,
+        undefined,
+        windowsConfig,
+      );
       for (const name of Object.keys(environment))
         if (commandConfig.test(name)) delete environment[name];
       for (const [name, value] of Object.entries(sandbox.gitEnvironment ?? {}))
@@ -2391,6 +2436,7 @@ export async function runRepositoryCommand(
         }
       bindings = Buffer.from(
         JSON.stringify({
+          windowsConfig,
           credentialNames,
           stripAwsCredentials: sandbox.stripAwsCredentials,
           bindings: Object.entries(gitEnvironment).map(([key, value]) => [
@@ -2415,6 +2461,7 @@ export async function runRepositoryCommand(
             profile,
             "--permission-profile",
             profile,
+            ...configWorkspaceArgs(profile, configRoot),
             "--include-managed-config",
             "--",
             bridgeRuntime?.executable ?? process.execPath,
@@ -3630,8 +3677,6 @@ export async function main(
   };
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let unavailableFilters: readonly string[] = [];
-  let snapshotConfigPaths: readonly string[] | undefined;
-  let snapshotConfigReady: Promise<void> | undefined;
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
@@ -3654,11 +3699,10 @@ export async function main(
               ? {}
               : {
                   onPermissions(context: PatchSnapshotSandbox) {
-                    patchSandbox = context;
-                    if (process.platform === "win32") {
-                      snapshotConfigPaths = appServer.snapshotConfigPaths;
-                      snapshotConfigReady = undefined;
-                    }
+                    patchSandbox = {
+                      ...context,
+                      snapshotConfig: appServer.snapshotConfig,
+                    };
                   },
                 }),
             async onBeforeTurn(signal) {
@@ -3671,9 +3715,6 @@ export async function main(
                     patchSandbox,
                   );
                 await appServer.onBeforeTurn?.(signal);
-                // The model's Windows profile denies external Git config files.
-                // Check their snapshot read grants again after the turn.
-                snapshotConfigReady = undefined;
               } finally {
                 patchPreparationSignal = previous;
               }
@@ -3778,30 +3819,6 @@ export async function main(
               },
             }),
       };
-      if (options.sandbox && snapshotConfigPaths?.length) {
-        const sandbox = options.sandbox;
-        snapshotConfigReady ??= ensureWindowsSnapshotConfigReadable(
-          snapshotConfigPaths,
-          (probeArgs, input, refreshReadGrants) =>
-            parentDependencies.runRepositoryCommand(
-              "git",
-              probeArgs,
-              repository,
-              {
-                signal: options.signal,
-                environment: options.environment,
-                sandbox: {
-                  ...sandbox,
-                  refreshWindowsReadGrants: refreshReadGrants,
-                  gitEnvironment: { ...sandbox.gitEnvironment, LC_ALL: "C" },
-                },
-                input,
-              },
-            ),
-          options.signal,
-        );
-        await snapshotConfigReady;
-      }
       if (
         command === "git" &&
         publicationHooks?.events.size &&
@@ -8983,6 +9000,7 @@ export async function main(
                 const controller = new AbortController();
                 const removeSignals = listenForAbort(dependencies, controller);
                 try {
+                  let snapshotConfig: PatchSnapshotConfig | undefined;
                   patchSandbox = await resumeHookSandbox(
                     directory,
                     dependencies.environment,
@@ -8998,12 +9016,19 @@ export async function main(
                           {
                             credentialStorePaths: paths,
                             shellSettings: shellEnvironmentSettings(config),
+                            onSnapshotConfig:
+                              process.platform === "win32"
+                                ? (config) => {
+                                    snapshotConfig = config;
+                                  }
+                                : undefined,
                           },
                         );
                       return [...paths];
                     },
                     controller.signal,
                   );
+                  patchSandbox = { ...patchSandbox, snapshotConfig };
                   await addPatchTransportWriters(
                     patchTransportAccess,
                     patchSandbox,
@@ -17775,6 +17800,7 @@ async function readPatchGitControls(
   options: Pick<SkillRunOptions, "patchGitContext"> & {
     credentialStorePaths?: Set<string>;
     shellSettings?: JsonObject;
+    onSnapshotConfig?: (config: PatchSnapshotConfig) => void;
   } = {},
 ) {
   const selectedGitDirectory = environmentValue(
@@ -17903,6 +17929,7 @@ async function readPatchGitControls(
               await readCodexHomeConfig(dependencies.environment),
             ),
           )),
+    options.onSnapshotConfig,
   );
 }
 
@@ -18666,7 +18693,7 @@ async function runSkill(
                             }),
                       },
                       snapshotStoragePaths: gitControls!.snapshotStoragePaths,
-                      snapshotConfigPaths: gitControls!.snapshotConfigPaths,
+                      snapshotConfig: gitControls!.snapshotConfig,
                       ...(options.automaticPublication
                         ? { publicationHooks: gitControls!.publicationHooks }
                         : {}),
@@ -19069,6 +19096,12 @@ export async function readSkillCommandOutput(
                 shellEnvironmentSettings(resolvedConfig),
               )) ?? appServer.permissions.credentialStorePaths,
             );
+            // Keep the shared Windows sandbox account denied at the original
+            // paths. Snapshot Git reads its private staged configuration.
+            if (process.platform === "win32")
+              for (const path of appServer.permissions.externalConfigPaths ??
+                [])
+                profile.filesystem[path] = { ".": "deny" };
             appServer.onPermissions?.(profile, {
               ...config,
               ...workspaceOverride,
