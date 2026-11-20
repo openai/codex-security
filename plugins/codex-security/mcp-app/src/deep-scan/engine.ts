@@ -53,6 +53,7 @@ export function startDeepScanEngine(options: {
           scanId: run.scanId,
           scope: run.scope,
           includePaths: run.includePaths,
+          excludePaths: run.excludePaths,
           filePaths: run.filePaths,
           pythonCommand: options.pythonCommand,
         },

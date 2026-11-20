@@ -373,6 +373,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "includePaths": dependencies().requested_scan_paths(scan),
+        "excludePaths": dependencies().requested_exclude_paths(scan),
         "filePaths": dependencies().requested_scan_file_paths(scan),
         "userContext": (
             json.loads(run["discovery_user_context_json"])

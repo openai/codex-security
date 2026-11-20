@@ -235,6 +235,36 @@ const cases: [string, unknown, boolean][] = [
     false,
   ],
   ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
+  [
+    "runtime line has a source location",
+    {
+      exploitability: {
+        sinks: [
+          {
+            function: "decode",
+            runtime_selectors: [
+              { name: "decode", location: "codec.c", line: 8 },
+            ],
+          },
+        ],
+      },
+    },
+    true,
+  ],
+  [
+    "runtime line without a location",
+    {
+      exploitability: {
+        sinks: [
+          {
+            function: "decode",
+            runtime_selectors: [{ name: "decode", line: 8 }],
+          },
+        ],
+      },
+    },
+    false,
+  ],
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
 
