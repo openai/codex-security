@@ -55,11 +55,9 @@ Remove `--dry-run` and confirm to save. Run `codex-security findings imported /p
 
 ## Publish to Cloud
 
-Run the preview from the directory in the checkout that the report’s `file`
-paths are relative to. If you ran `fcs scan iac --path infra` from the
-checkout root, run the preview there. For a remote scan of
-`.git//infra?ref=...`, run `cd "$checkout/infra"` first. Set `repository_url`
-to the connected repository’s verified HTTPS clone URL.
+Run from the directory where you ran FCS. For a remote scan, use the matching
+checkout directory, such as `"$checkout/infra"` for `.git//infra?ref=...`.
+Set `repository_url` to the connected repository’s verified HTTPS clone URL.
 
 ```sh
 repository_url=https://github.com/example/project
@@ -68,12 +66,11 @@ codex-security publish findings "$report" --to cloud --provider crowdstrike \
   --source-key example/project/main --dry-run --format json
 ```
 
-The preview checks the repository against a Git fetch remote and checks the
-file hashes recorded by FCS. Review the destination, repository-relative paths
-and exclusions. To publish the reviewed selection, remove `--dry-run` and
-confirm. [Verify the import](README.md#verify-the-import).
-
-If the report lists `main.tf` relative to `infra`, Cloud uses `infra/main.tf` for both the location and the finding ID. With the same source key, a scan from the repository root identifies the same detection, and equivalent detections in sibling directories have distinct Cloud IDs. Local findings and the retained FCS detection keep the original `main.tf` path.
+The preview checks the Git fetch remote and the file hashes recorded by FCS.
+For `main.tf` scanned from `infra`, Cloud uses `infra/main.tf` for the location
+and finding ID. With the same source key, scanning from the root gives that
+detection the same ID. Sibling directories have distinct IDs. Local findings
+and retained FCS evidence keep the scanned path. [Publish and verify the reviewed selection](README.md#save-or-publish-and-verify).
 
 ## Read the evidence
 

@@ -65,6 +65,4 @@ codex-security publish findings "$report_dir/armorcode-findings.json" \
   --dry-run --format json
 ```
 
-Check the destination, findings and exclusions. An ArmorCode report that names
-a different repository fails validation. To publish the reviewed selection,
-remove `--dry-run` and confirm. [Verify the import](README.md#verify-the-import).
+Review the destination, findings and exclusions. [Publish and verify the reviewed selection](README.md#save-or-publish-and-verify).
