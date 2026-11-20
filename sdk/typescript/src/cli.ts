@@ -1908,7 +1908,6 @@ interface PatchTransportAccess {
   // A null target represents a known-hosts file that SSH may create.
   readonly invocations: Map<string, string | null>;
   readonly afterHook: Set<string>;
-  readonly pushHooks: boolean;
   external: boolean;
   unknownWriters?: boolean;
 }
@@ -3722,12 +3721,6 @@ export async function main(
     writable: new Set(),
     invocations: new Map(),
     afterHook: new Set(),
-    get pushHooks() {
-      const events = publicationHooks?.events;
-      return Boolean(
-        events?.has("pre-push") || events?.has("reference-transaction"),
-      );
-    },
     external: false,
   };
   let patchSandbox: PatchSnapshotSandbox | undefined;
@@ -3908,13 +3901,15 @@ export async function main(
       ) {
         // Git can launch its packer and ask for HTTPS credentials after
         // pre-push. With mirrors it can start a whole second transport.
+        const hooks = publicationHooks?.events;
         const prePush =
-          options.patchTransport?.pushing &&
-          publicationHooks?.events.has("pre-push");
+          options.patchTransport?.pushing && hooks?.has("pre-push");
+        const mirrorHooks =
+          options.patchTransport?.mirrors &&
+          (hooks?.has("pre-push") || hooks?.has("reference-transaction"));
         for (const [path, selected] of patchTransportFiles) {
           const checkLinks =
-            (options.patchTransport?.mirrors &&
-              patchTransportAccess.pushHooks) ||
+            mirrorHooks ||
             (prePush && patchTransportAccess.afterHook.has(path));
           await patchTransportIdentity(path, selected.kind, selected, {
             ...(checkLinks && { writers: patchTransportAccess }),
@@ -12758,35 +12753,31 @@ async function runPatchTransport(
         ...args,
       ]
     : args;
+  const { protectedRoots, directory } = await patchTransportDirectories(
+    repository,
+    dependencies,
+  );
+  const transport = {
+    ...dependencies,
+    environment: { ...dependencies.environment, ...environment },
+  };
+  // Git searches its exec directory before PATH. Bind its children during
+  // preflight and recheck them before the push, even without a hook.
+  const commands = ["git"];
+  if (remotes.some((remote) => remote.startsWith("https://")))
+    commands.push("git-remote-https");
+  for (const command of commands) {
+    const { configuredExecPath } = await inspectPatchGitExecutable(
+      command,
+      repository,
+      transport,
+      protectedRoots,
+      directory,
+      { afterHook: command === "git", implicit: true },
+    );
+    if (configuredExecPath) environment["GIT_EXEC_PATH"] = configuredExecPath;
+  }
   const run = async (overrides: NodeJS.ProcessEnv = {}) => {
-    const effective = { ...environment, ...overrides };
-    if (dependencies.patchTransportAccess?.pushHooks) {
-      const { protectedRoots, directory } = await patchTransportDirectories(
-        repository,
-        dependencies,
-      );
-      const transport = {
-        ...dependencies,
-        environment: { ...dependencies.environment, ...effective },
-      };
-      // Git resolves its own child commands through its exec directory before
-      // PATH. It starts pack-objects after pre-push, even with one destination.
-      const commands = ["git"];
-      if (remotes.some((remote) => remote.startsWith("https://")))
-        commands.push("git-remote-https");
-      for (const command of commands) {
-        const { configuredExecPath } = await inspectPatchGitExecutable(
-          command,
-          repository,
-          transport,
-          protectedRoots,
-          directory,
-          { afterHook: command === "git", implicit: true },
-        );
-        // Child Git processes prepend this again from their own cwd.
-        if (configuredExecPath) effective["GIT_EXEC_PATH"] = configuredExecPath;
-      }
-    }
     const result = await dependencies.runRepositoryCommand(
       "git",
       transportArgs,
@@ -12797,7 +12788,7 @@ async function runPatchTransport(
           mirrors: remotes.length > 1,
           pushing: args[0] === "push",
         },
-        environment: effective,
+        environment: { ...environment, ...overrides },
       },
     );
     if (
@@ -12844,10 +12835,6 @@ async function runPatchTransport(
       : [];
   if (override === undefined && entries.length < 3)
     return run({ GIT_PROXY_COMMAND: "" });
-  const { protectedRoots, directory } = await patchTransportDirectories(
-    repository,
-    dependencies,
-  );
   const pin = async (command: string): Promise<string | null> => {
     if (!transportBindings.proxy.has(command)) {
       const result = await inspectPatchGitExecutable(
