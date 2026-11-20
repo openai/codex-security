@@ -41,16 +41,25 @@ export type DependencyUseProof = z.infer<typeof dependencyUseProofSchema>;
 
 export function assertDependencyUseProofCitations(
   proof: DependencyUseProof,
-  evidence: readonly { path: string; startLine: number; endLine: number }[],
+  evidence: readonly {
+    path: string;
+    startLine: number;
+    endLine: number;
+    commit?: string;
+  }[],
   context = "this use",
 ): void {
-  const refs = proof.conditions.flatMap(({ citations }) => citations);
+  const refs: { path: string; line: number; commit?: string }[] =
+    proof.conditions.flatMap(({ citations }) => citations);
   if (proof.sink) refs.push(proof.sink.callSite);
-  for (const { path, line } of refs) {
+  for (const { path, line, commit } of refs) {
     if (
       !evidence.some(
         (cite) =>
-          cite.path === path && cite.startLine <= line && line <= cite.endLine,
+          cite.path === path &&
+          (commit === undefined || cite.commit === commit) &&
+          cite.startLine <= line &&
+          line <= cite.endLine,
       )
     )
       throw new Error(
