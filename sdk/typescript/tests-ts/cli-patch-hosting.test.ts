@@ -688,7 +688,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         GIT_CONFIG_GLOBAL: global,
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_ASKPASS: ssh ? ordinary : undefined,
-        SSH_ASKPASS: undefined,
+        SSH_ASKPASS: ssh ? await helper("SSH") : undefined,
         GIT_TERMINAL_PROMPT: "0",
       };
       const selections: string[] = [];
@@ -710,22 +710,25 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           const preflight = args.includes("ls-remote");
           if (preflight && ssh) {
             expect(options.environment?.["GIT_SSH_COMMAND"]).toBeTruthy();
-            selections.push("SSH");
+            // Exercise the literal program passed to the SSH client.
+            context.environment.GIT_ASKPASS =
+              options.environment?.["SSH_ASKPASS"];
+            expect(context.environment.GIT_ASKPASS).toBeTruthy();
           } else {
             expect(options.environment?.["GIT_SSH_COMMAND"]).toBeUndefined();
-            // Git fills a synthetic password with the same options as the network transport.
-            const filled = await runGitRepositoryCommand(
-              tool,
-              ["-c", "credential.helper=", "credential", "fill"],
-              cwd,
-              {
-                ...context,
-                input:
-                  "protocol=https\nhost=example.invalid\nusername=fixture\n\n",
-              },
-            );
-            selections.push(filled.match(/^password=(.+)$/mu)?.[1] ?? "");
           }
+          // Git fills a synthetic password with the selected prompt.
+          const filled = await runGitRepositoryCommand(
+            tool,
+            ["-c", "credential.helper=", "credential", "fill"],
+            cwd,
+            {
+              ...context,
+              input:
+                "protocol=https\nhost=example.invalid\nusername=fixture\n\n",
+            },
+          );
+          selections.push(filled.match(/^password=(.+)$/mu)?.[1] ?? "");
           return runLocalHostingTransport(
             tool,
             preflight
@@ -856,9 +859,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     const marker = join(external, "marker");
     const script = join(external, "transport.cjs");
     const globalConfig = join(external, "user.gitconfig");
+    const askPass = join(directory, ".git", "prompt.sh");
+    await writeFile(askPass, "#!/bin/sh\necho synthetic\n", { mode: 0o755 });
     await writeFile(
       script,
-      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.argv[2]); process.exit(1);`,
+      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify([process.argv[2], process.env.SSH_ASKPASS ?? ""])); process.exit(1);`,
     );
     const command = (label: string) =>
       `node "${script.replaceAll("\\", "/")}" ${label}`;
@@ -883,7 +888,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     );
     git("remote", "set-url", "origin", "git@gitlab.com:example/repository.git");
 
-    const environment = { GIT_CONFIG_GLOBAL: globalConfig };
+    const environment = {
+      GIT_CONFIG_GLOBAL: globalConfig,
+      SSH_ASKPASS: askPass,
+      SSH_ASKPASS_REQUIRE: "force",
+    };
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
       {
@@ -899,6 +908,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         onRepositoryCommand: (tool, args, cwd, options) => {
           if (tool === "glab") return "";
           if (args.includes("ls-remote")) {
+            expect(options?.environment?.["SSH_ASKPASS"]).toBe("");
             expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
               ` '${script}' 'approved'`,
             );
@@ -914,7 +924,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     );
     expect(outcome.exitCode, outcome.stderr).toBe(2);
     expect(git("config", "--get", "core.sshCommand")).toBe(command("checkout"));
-    expect(await readFile(marker, "utf8")).toBe("approved");
+    const received = JSON.parse(await readFile(marker, "utf8"));
+    expect(received).toEqual(["approved", ""]);
   });
 
   test.each([false, true])(

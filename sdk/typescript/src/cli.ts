@@ -12346,6 +12346,12 @@ function requireStablePatchTransportTarget(
         throw writablePatchTransportError(path);
 }
 
+function barePatchExecutable(command: string) {
+  return (
+    !command.includes("/") && !command.includes("\\") && !parse(command).root
+  );
+}
+
 async function inspectPatchGitExecutable(
   command: string,
   repository: string,
@@ -12357,8 +12363,7 @@ async function inspectPatchGitExecutable(
   let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
   const hostPath =
     environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
-  const bare =
-    !command.includes("/") && !command.includes("\\") && !parse(command).root;
+  const bare = barePatchExecutable(command);
   let path: string | undefined;
   if (process.platform === "win32" && bare) {
     // Git for Windows adds its own tool directories before the parent PATH.
@@ -12603,12 +12608,7 @@ async function runPatchTransport(
     environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
   const pin = async (command: string): Promise<string | null> => {
     if (!transportBindings.proxy.has(command)) {
-      if (
-        !execPath &&
-        !command.includes("/") &&
-        !command.includes("\\") &&
-        !parse(command).root
-      )
+      if (!execPath && barePatchExecutable(command))
         execPath = (
           await dependencies.runRepositoryCommand(
             "git",
@@ -13167,6 +13167,24 @@ async function pinPublicationCommand(
   const cwd =
     process.platform === "win32" ? volume.replaceAll("\\", "/") : volume;
 
+  // OpenSSH can invoke its own prompt independently of Git's HTTPS prompt.
+  let sshAskPass: string | undefined;
+  if (kind === "ssh") {
+    sshAskPass = environmentEntry(dependencies.environment, "SSH_ASKPASS");
+    if (sshAskPass) {
+      const helper = await inspectPatchGitExecutable(
+        sshAskPass,
+        repository,
+        dependencies,
+        protectedRoots,
+        // Relative PATH entries were normalized before the launcher's cd.
+        barePatchExecutable(sshAskPass) ? directory : cwd,
+        { afterHook: true },
+      );
+      sshAskPass = helper.executable ?? "";
+    }
+  }
+
   return {
     command:
       "cd " +
@@ -13196,6 +13214,7 @@ async function pinPublicationCommand(
       // Git for Windows converts the native PATH for its POSIX shell.
       return {
         PATH: path || (process.platform === "win32" ? "" : "/dev/null"),
+        ...(sshAskPass !== undefined && { SSH_ASKPASS: sshAskPass }),
         ...(execPath !== undefined && {
           GIT_EXEC_PATH: pinnedExec || undefined,
         }),

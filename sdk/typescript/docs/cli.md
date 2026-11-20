@@ -3213,7 +3213,8 @@ For HTTPS, publication checks `GIT_ASKPASS`, the operator's `core.askPass`, and
 `SSH_ASKPASS` in order. The first defined value selects the helper. An empty
 value disables askpass. If the patch branch activates a new helper, inspect
 the configuration and run `codex-security patch --resume-pr BRANCH` to publish
-the saved commit.
+the saved commit. For SSH, publication binds the SSH client's own
+`SSH_ASKPASS` executable outside patch-writable directories.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
