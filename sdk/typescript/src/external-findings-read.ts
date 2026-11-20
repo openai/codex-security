@@ -198,16 +198,12 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
   const url = options.sourceRepositoryUrl ?? "";
-  if (provider === "promptfoo") {
-    if (target === "cloud") requireCloudReader(options);
+  if (target === "cloud") requireCloudReader(options);
+  if (provider === "promptfoo")
     return { findings: await readPromptfooFindings(path) };
-  }
-  if (provider === "tenable") {
-    if (target === "cloud") requireCloudReader(options);
+  if (provider === "tenable")
     return { findings: await readTenableFindings(path, url) };
-  }
   if (provider === "crowdstrike") {
-    if (target === "cloud") requireCloudReader(options);
     return {
       findings: await readCrowdStrikeFindings(
         path,

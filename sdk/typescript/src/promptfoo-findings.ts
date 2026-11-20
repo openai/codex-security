@@ -103,7 +103,7 @@ export async function readPromptfooFindings(
         if (text(assertion["type"])?.startsWith("promptfoo:redteam:"))
           return true;
         const metric = text(assertion["metric"]);
-        if (!metric) return false;
+        if (!metric || generated?.["metric"] !== metric) return false;
         // Later transforms can change strategyId and append metric segments
         // while keeping the Best-of-N provider and its basic refusal check.
         if (assertion["type"] === "is-refusal")
@@ -112,15 +112,13 @@ export async function readPromptfooFindings(
               asRecord(testCase?.["provider"])?.["id"] ===
                 "promptfoo:redteam:best-of-n") &&
             /\/BestOfN(?:\/|$)/.test(metric) &&
-            generated?.["type"] === "is-refusal" &&
-            generated["metric"] === metric
+            generated["type"] === "is-refusal"
           );
         // Promptfoo can append a moderation grader to its native attack assertion.
         if (assertion["type"] === "moderation")
           return (
             plugin.startsWith("harmful:") &&
-            generated?.["type"] === `promptfoo:redteam:${plugin}` &&
-            generated["metric"] === metric &&
+            generated["type"] === `promptfoo:redteam:${plugin}` &&
             Array.isArray(declared) &&
             isDeepStrictEqual(declared[generatedIndex + 1], assertion)
           );
@@ -130,8 +128,7 @@ export async function readPromptfooFindings(
               metric.split("/", 1)[0]?.toLowerCase() === plugin)) &&
           assertion["type"] === "llm-rubric" &&
           text(assertion["value"]) &&
-          generated?.["type"] === assertion["type"] &&
-          generated["metric"] === assertion["metric"] &&
+          generated["type"] === assertion["type"] &&
           generated["value"] === assertion["value"]
         );
       });

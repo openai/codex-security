@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
 import { expect, test } from "bun:test";
+import type { ExternalFindings } from "../src/external-findings.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { main } from "../src/cli.js";
 import { readPromptfooFindings } from "../src/promptfoo-findings.js";
 import {
@@ -417,4 +420,56 @@ test("replays and updates one native occurrence, and excludes Promptfoo from Clo
       repository: "example/qa",
     }),
   ).rejects.toThrow(/local/i);
+});
+
+test("preserves normalized Promptfoo findings from existing custom adapters", async () => {
+  await using fixture = await checkout();
+  const adapted: ExternalFindings = {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "adapter-result",
+        evidence: { title: "Custom probe", severity: "medium" },
+      },
+    ],
+    excluded: [],
+  };
+  const first = await fixture.prepareNormalized(adapted);
+  expect((await first.import()).counts.created).toBe(1);
+  const replay = await fixture.prepareNormalized({
+    ...adapted,
+    report: { format: "custom-adapter/v1" },
+  });
+  expect((await replay.import()).counts.unchanged).toBe(1);
+});
+
+test("binds retained Promptfoo evidence to its provider, evaluation and native result ID", async () => {
+  await using fixture = await checkout();
+  await fixture.writeJson(report([leak]));
+  const selection = await readPromptfooFindings(fixture.file);
+  const { report: metadata, ...rows } = selection;
+  for (const provider of ["example-scanner", "wiz"]) {
+    for (const input of [rows, { ...selection, read: 0, findings: [] }]) {
+      await expect(
+        prepareNormalizedLocalImport(
+          input,
+          { ...source, provider, repository: fixture.repository },
+          { environment: fixture.environment },
+        ),
+      ).rejects.toThrow(/promptfoo provider/i);
+    }
+  }
+  const prepare = fixture.prepareNormalized;
+  await expect(prepare(rows)).rejects.toThrow(/promptfoo/i);
+  await expect(
+    prepare({ ...rows, report: { ...metadata, evalId: "another-eval" } }),
+  ).rejects.toThrow(/evaluation/i);
+  const finding = selection.findings[0]!;
+  const wrongId = { ...finding, source_finding_id: "another-result" };
+  await expect(prepare({ ...selection, findings: [wrongId] })).rejects.toThrow(
+    /result ID/i,
+  );
+  finding.evidence.source_data!["format"] = "tenable-one-code-repository/v1";
+  await expect(prepare(selection)).rejects.toThrow(/tenable provider/i);
+  expect(existsSync(fixture.stateDirectory)).toBe(false);
 });
