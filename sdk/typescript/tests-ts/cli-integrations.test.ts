@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   link,
   mkdir,
@@ -11,6 +11,11 @@ import {
 import { join } from "node:path";
 import { runCommand } from "./support/shell.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+
+const cliTestTimeoutMs = Number(
+  process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? 30_000,
+);
+setDefaultTimeout(cliTestTimeoutMs);
 
 async function isolatedCli(root: string, environment: NodeJS.ProcessEnv = {}) {
   const home = join(root, "home");
@@ -33,7 +38,7 @@ async function isolatedCli(root: string, environment: NodeJS.ProcessEnv = {}) {
     runCommand(
       process.execPath,
       [join(import.meta.dir, "../src/cli.ts"), ...args],
-      { env, cwd, timeout: 30_000 },
+      { env, cwd, timeout: cliTestTimeoutMs },
     );
   return {
     home,
@@ -118,7 +123,6 @@ describe("integration command dispatch", () => {
       expect(await readdir(home)).toEqual([]);
       expect(await readdir(project)).toEqual([]);
     },
-    30_000,
   );
 
   test.each([
@@ -135,7 +139,6 @@ describe("integration command dispatch", () => {
       expect(result.status).toBe(0);
       expect(result.stdout.replace(/\s+/gu, " ")).toContain(term);
     },
-    30_000,
   );
 
   test("shell hooks complete integration flags without executing commands", async () => {
@@ -156,7 +159,7 @@ describe("integration command dispatch", () => {
     }
     expect(await readdir(home)).toEqual([]);
     expect(await readdir(project)).toEqual([]);
-  }, 30_000);
+  });
 
   test("zsh completes at the supplied cursor after an equals-form option", async () => {
     await using temp = await scopedTemporaryDirectory("cli-zsh-completions-");
@@ -175,7 +178,7 @@ describe("integration command dispatch", () => {
     );
     expect(result.status).toBe(0);
     expect(result.stdout).toStartWith("--depth:");
-  }, 30_000);
+  });
 
   test.each([
     {
@@ -235,7 +238,6 @@ describe("integration command dispatch", () => {
       expect(await readdir(home)).toEqual([]);
       expect(await readdir(project)).toEqual([]);
     },
-    30_000,
   );
 
   test("empty completion callbacks emit the shell registration script", async () => {
@@ -245,7 +247,7 @@ describe("integration command dispatch", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("#compdef codex-security");
     expect(result.stdout).toContain("#compdef cs");
-  }, 30_000);
+  });
 
   test("the command manifest includes integration leaves without installing them", async () => {
     await using temp = await scopedTemporaryDirectory(
@@ -267,7 +269,7 @@ describe("integration command dispatch", () => {
       expect(commands).toContain(command);
     expect(await readdir(home)).toEqual([]);
     expect(await readdir(project)).toEqual([]);
-  }, 30_000);
+  });
 
   test("registers selected clients from the installed SDK with no package runners on PATH", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-clients-");
@@ -311,7 +313,7 @@ describe("integration command dispatch", () => {
       command: "my-tool",
       args: ["--mcp"],
     });
-  }, 30_000);
+  });
 
   test("empty scopes require explicit targets and --all registers compatible project clients", async () => {
     await using temp = await scopedTemporaryDirectory("cli-mcp-targets-");
@@ -337,7 +339,7 @@ describe("integration command dispatch", () => {
     expect(JSON.parse(result.stdout).agents).toContain("Cursor");
     expect(JSON.parse(result.stdout).agents.length).toBeGreaterThan(1);
     expect(await readdir(home)).toEqual([]);
-  }, 30_000);
+  });
 
   test("user detection follows the configured Codex profile", async () => {
     await using temp = await scopedTemporaryDirectory("cli-mcp-codex-home-");
@@ -351,7 +353,7 @@ describe("integration command dispatch", () => {
       "mcp_servers.codex-security",
     );
     expect(await readdir(home)).toEqual([]);
-  }, 30_000);
+  });
 
   test("MCP launchers preserve literal arguments and use npm only when selected", async () => {
     await using temp = await scopedTemporaryDirectory("cli-mcp-launcher-");
@@ -414,7 +416,7 @@ describe("integration command dispatch", () => {
       expect(cursor.mcpServers["codex-security"]).toEqual(expected);
       expect(amp["amp.mcpServers"]["codex-security"]).toEqual(expected);
     }
-  }, 30_000);
+  });
 
   test("project registration keeps linked configurations inside the project", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-links-");
@@ -431,7 +433,7 @@ describe("integration command dispatch", () => {
     await link(external, join(dir, "mcp.json"));
     expect((await register()).status).toBe(2);
     expect(await readFile(external, "utf8")).toBe("{}");
-  }, 30_000);
+  });
 
   test("explicit JSON returns a parseable MCP installer result", async () => {
     await using temp = await scopedTemporaryDirectory("cli-integrations-");
@@ -458,7 +460,7 @@ describe("integration command dispatch", () => {
       command: "my-tool",
       args: ["--mcp"],
     });
-  }, 30_000);
+  });
 
   test("lists installed guidance at the selected grouping depth", async () => {
     await using temp = await scopedTemporaryDirectory("cli-skill-grouping-");
@@ -516,5 +518,5 @@ describe("integration command dispatch", () => {
     ]);
     const defaultList = await run("skills", "list");
     expect(defaultList.stdout).toContain("Skill grouping depth: 1");
-  }, 30_000);
+  });
 });

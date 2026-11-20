@@ -192,12 +192,17 @@ assume an open `CodexSecurity` client named `security`; close it when finished.
 ```ts
 const result = await security.run("/path/to/repository", {
   target: ["src", "tests"],
+  excludePaths: ["src/examples"],
   knowledgeBasePaths: ["/path/to/architecture.md"],
   scanPrompt: "Focus on authentication and authorization.",
   outputDir: "/path/outside/repository/results",
   maxCostUsd: 5,
 });
 ```
+
+`excludePaths` takes literal repository-relative files or directories. A directory
+excludes all descendants, and exclusions take precedence over `target`. The default
+is no exclusions. Requested exclusions are recorded in `result.manifest.scan.scope.excludePaths`.
 
 | Option                                      | Use                                                                            |
 | ------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -794,7 +799,7 @@ If you know the source repository, pass its Git URL in `options.sourceRepository
 to check the Sonar binding before fetching issues.
 
 For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
-saved issue export or finding response. Use
+saved issue export, single-finding capture, or native finding response. Use
 `normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
 Issue exports with a saved repository URL can omit the second argument.
 For other reports, pass the verified source repository URL.
@@ -803,7 +808,11 @@ For other reports, pass the verified source repository URL.
 Pass `"local"` as the third argument to retain full patch contents in collector
 captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
 when the patch contents exceed the evidence budget. Available patches are in
-`evidence.source_data.patches`.
+`evidence.source_data.patches`. Single-finding captures provide their matching
+validation artifacts in `evidence.source_data.evidence_artifacts`. The local
+projection retains each validation body, and Cloud marks omitted bodies with
+the same `contentOmitted` value. When even the validation descriptors exceed
+the budget, Cloud omits them and preserves the finding and its fitting patches.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
@@ -850,6 +859,21 @@ credentials, deduplication, backups, and independently operated HTTP endpoints.
 For an older service deployment, see [migration guidance](findings-service.md#local-service-removal).
 For records stored in your own system, see
 [SDK records deduplication](dedupe-records.md).
+
+## Repository dependency evidence
+
+The experimental dependency investigator reads source, manifests and lockfiles at
+one Git commit. For npm it can follow a requesting project's installed path in
+a v2 or v3 npm lockfile. For Python it can cite a literal, unconditional version
+pin in a requirements file. Both are build inputs. A deployment needs a separate
+observation that connects the running package to its source revision. Import
+matches and OpenGrep call locations are candidates for review.
+
+For a reviewed repository check, select MCP servers through
+`exploitability.evidence_sources` in the project file. The investigator can
+query those servers and cite their replies. A deployment record can establish
+which build ran. Establishing caller access takes evidence of who could reach
+the affected operation. See the [CLI configuration example](cli.md#experimental-dependency-investigations).
 
 ## Containerized bulk scans
 

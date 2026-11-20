@@ -1,0 +1,55 @@
+{
+  "artifact": {
+    "filename": "Pillow-10.0.1-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "url": "https://files.pythonhosted.org/packages/0c/ce/3cceae2fab54118a5fcdfd9a2ddd0167c21169446c05378c5dc10b0d5093/Pillow-10.0.1-cp312-cp312-manylinux_2_28_x86_64.whl",
+    "sha256": "4ce90f8a24e1c15465048959f1e94309dfef93af272633e8f37361b824532e91",
+    "metadataUrl": "https://pypi.org/pypi/Pillow/10.0.1/json"
+  },
+  "component": {
+    "name": "libwebp",
+    "version": "1.3.2",
+    "path": "Pillow.libs/libwebp-850e2bec.so.7.1.8",
+    "sha256": "5cb4eb5f1dabff56bd39d5e28dc91e3c83ece43889256ae73f543282fb048cb3"
+  },
+  "nativeExtension": {
+    "path": "PIL/_webp.cpython-312-x86_64-linux-gnu.so",
+    "sha256": "6fb070175c525abb65b2113be4f82176682f87fb5d0a921956cc580b4b4077ea",
+    "neededLibrary": "libwebp-850e2bec.so.7.1.8",
+    "rpath": "$ORIGIN/../Pillow.libs"
+  },
+  "verification": {
+    "method": "Downloaded official wheel; verified its SHA256 against PyPI metadata; inspected ZIP members and ELF symbols/dynamic entries without executing code.",
+    "versionEncoding": "(major << 16) | (minor << 8) | patch",
+    "versionGetters": [
+      {
+        "symbol": "WebPGetEncoderVersion",
+        "fileOffset": 636688,
+        "codeHex": "b802030100c3",
+        "packedVersion": "0x010302"
+      },
+      {
+        "symbol": "WebPGetDecoderVersion",
+        "fileOffset": 49872,
+        "codeHex": "b802030100c3",
+        "packedVersion": "0x010302"
+      }
+    ],
+    "instructionMeaning": "x86-64: mov eax, packedVersion; ret",
+    "sourceFiles": [
+      {
+        "path": "PIL/Image.py",
+        "sha256": "dae9de8a1ac270273f0aac3b043a58813bc2fdfffae5d812b2545dee207a8d42",
+        "checkoutPath": "src/PIL/Image.py",
+        "checkoutRevision": "e34d346f10c0b1c814661e662a3e0c1ef084cf1c",
+        "byteIdentical": true
+      },
+      {
+        "path": "PIL/WebPImagePlugin.py",
+        "sha256": "f698c891bd9d28b24e80b4179539d861338779d09841aa8bbd66e193ea5e8838",
+        "checkoutPath": "src/PIL/WebPImagePlugin.py",
+        "checkoutRevision": "e34d346f10c0b1c814661e662a3e0c1ef084cf1c",
+        "byteIdentical": true
+      }
+    ]
+  }
+}

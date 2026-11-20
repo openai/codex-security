@@ -63,6 +63,14 @@ def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
     return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
 
 
+def requested_exclude_paths(scan: sqlite3.Row) -> list[str]:
+    if scan["recipe_json"] is None:
+        return []
+    return json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json).get(
+        "excludePaths", []
+    )
+
+
 def public_scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     """Return the decoded launch recipe with the internal file-scope metadata removed."""
     recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
