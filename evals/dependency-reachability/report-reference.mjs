@@ -12,7 +12,7 @@ function targetsFor({ id, suite, component, callerScope }) {
   if (suite === "application")
     return [
       "Which Compose service, application entry point and Starlette build handle this POST /clips request? Resolve the gate setting for that service, including possible values if externally supplied.",
-      "For the relevant content types, does validation stop the request before parsing? Trace the gateway, form parser selection, parser limits and handler checks in order, up to the decisive step.",
+      "Can caller-controlled URL-encoded input reach the affected form parser? Trace the gateway, content-type dispatch and handler checks in order up to the decisive step. If that parser runs, determine whether it enforces the supplied limits. For other content types the relevant question is whether they could reach the same parser.",
     ];
   if (suite === "backstage")
     return [

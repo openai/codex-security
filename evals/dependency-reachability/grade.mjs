@@ -371,7 +371,7 @@ function receiptKey(ref) {
 
 // Resolve each reviewer-selected receipt against the original captured MCP reply.
 // A selected row proves only its own returned value, even when its siblings look alike.
-function selectedReceipt(table, key) {
+export function selectedReceipt(table, key) {
   const row = table[key];
   assert(row, "original approved receipt");
   const selected = key.startsWith("receipt:");

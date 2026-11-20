@@ -1,4 +1,4 @@
-import { sourceReader } from "./grade.mjs";
+import { selectedReceipt, sourceReader } from "./grade.mjs";
 
 // The CLI sometimes describes the investigation process in its limitations.
 // Remove explicit mode announcements while retaining conclusions and gaps.
@@ -70,6 +70,15 @@ function reportView(report, read, sha) {
     const item = report.claimEvidence?.receipts?.[id];
     if (!item) return null;
     if (!receiptIndexes.has(id)) {
+      try {
+        selectedReceipt(report.claimEvidence.receipts, id);
+      } catch {
+        receiptIndexes.set(id, receipts.length);
+        receipts.push({
+          error: "Receipt does not match the captured evidence.",
+        });
+        return receiptIndexes.get(id);
+      }
       const reply = item.result?.structuredContent ?? item.result;
       const tool = item.tool ?? item.origin?.tool;
       const result =
@@ -90,6 +99,12 @@ function reportView(report, read, sha) {
 
   function view(value, field) {
     if (typeof value === "string") {
+      // A report can cite a captured reply by hash in prose, even with
+      // no structured use. Retain its original key for that citation.
+      for (const id of value.match(/\b[0-9a-f]{64}\b/gu) ?? []) {
+        const index = receiptRef(id);
+        if (index !== null) receipts[index].id = id;
+      }
       return [
         "record",
         "quote",
@@ -173,7 +188,7 @@ function reportView(report, read, sha) {
     limitations: view((report.limitations ?? []).filter((s) => !leads.has(s))),
     searches: view(searches),
     premises: premises.map(({ payload, evidence }) => ({
-      statement: neutralProse(payload.statement),
+      statement: view(payload.statement),
       evidence: payload.sources.map(sourceRef),
       receiptIndexes: (evidence.receiptIds ?? []).map(receiptRef),
     })),

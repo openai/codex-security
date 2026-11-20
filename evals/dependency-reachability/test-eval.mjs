@@ -103,12 +103,23 @@ test("the report rater sees the same published evidence in both reviewer modes",
     observations: [{ record: "Release A is active." }],
   };
   const lead = "Unassessed caller in route.js:1.";
-  const limitation = "Caller access remains unverified.";
+  const receipt = {
+    arguments: {},
+    result: { observation: "Build A is active." },
+    server: "records",
+    tool: "release",
+  };
+  const receiptId = sha256(JSON.stringify(receipt));
+  const limitation =
+    "Receipt " +
+    receiptId +
+    " identifies the build. Caller access remains unverified.";
   const reference = { question: "Can an anonymous caller reach parse?" };
   function packet(reviewer) {
     const enabled = reviewer === "enabled";
     const check = {
       advisoryId: "test-advisory",
+      claimEvidence: { receipts: { [receiptId]: receipt } },
       reviewer,
       uses: [
         {
@@ -142,6 +153,8 @@ test("the report rater sees the same published evidence in both reviewer modes",
   assert.equal(report.sources["route.js:1"], "parse(request.body)");
   assert.deepEqual(report.unassessedLeads, [lead]);
   assert.deepEqual(report.limitations, [limitation]);
+  assert.equal(report.receipts[0].id, receiptId);
+  assert.deepEqual(report.receipts[0].result, receipt.result);
   assert.equal(
     report.coverage[0].reason,
     "The test imports a different parser.",
