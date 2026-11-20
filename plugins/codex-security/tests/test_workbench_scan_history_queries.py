@@ -762,7 +762,7 @@ def test_confirmed_history_follows_recurring_ids_and_reverts_after_unlink(
         # Both the group and its matches follow scan start time.
         for scan in group:
             row = db.execute("SELECT * FROM scans WHERE id = ?", (scan,)).fetchone()
-            indexed = workbench_api["_indexed_scan_findings"](db, row)[occurrences[scan]]
+            indexed = workbench_api["indexed_scan_findings"](db, row)[occurrences[scan]]
             matches, first, bounds = history.finding_matches(
                 db, occurrences[scan], indexed["occurrence_ids"]
             )

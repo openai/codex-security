@@ -204,11 +204,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     detail.add_argument("--metadata-only", action="store_true")
     get_scan.add_argument("--check-target", action="store_true")
 
-    get_finding = subparsers.add_parser("get-finding")
-    get_finding.add_argument("--occurrence-id", required=True)
-    rename_scan = subparsers.add_parser("rename-scan")
-    rename_scan.add_argument("--scan-id", required=True)
-    rename_scan.add_argument("--name", required=True)
+    add_command("get-finding", "--occurrence-id")
+    add_command("rename-scan", "--scan-id", "--name")
 
     read_scan_usage = add_command("read-scan-usage", "--scan-id", "--thread-id")
     read_scan_usage.add_argument("--validation-thread-id")

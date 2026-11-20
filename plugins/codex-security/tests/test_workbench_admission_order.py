@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import runpy
 import sqlite3
-import subprocess
-import sys
 from contextlib import closing
 from pathlib import Path
 
@@ -22,34 +20,15 @@ from test_workbench_setup_and_migrations import (
 )
 from workbench_test_support import (
     SCRIPT,
+    close_finding,
+    complete_pending,
     create_cli_scan,
+    finding_detail,
+    get_scan,
     load_script,
     run_workbench,
-    write_completed_contract,
+    scan_finding,
 )
-
-
-def complete_pending(state: Path, repository: Path, scan: dict, *, failed: bool = False):
-    scan_dir = Path(scan["scanDir"])
-    write_completed_contract(scan_dir, scan["scanId"], repository)
-    subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT.with_name("finalize_scan_contract.py")),
-            "--scan-dir",
-            str(scan_dir),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return run_workbench(
-        state,
-        "fail-scan" if failed else "complete-scan",
-        "--scan-id",
-        scan["scanId"],
-        *(["--message", "Synthetic interruption"] if failed else []),
-    )
 
 
 @pytest.mark.parametrize(
@@ -74,9 +53,7 @@ def test_triage_observes_first_result_admission(tmp_path: Path, ordering: str, r
     state, scans, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     repository.mkdir()
     first = create_cli_scan(state, scans, repository)
-    occurrence = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
-        0
-    ]["occurrenceId"]
+    occurrence = scan_finding(state, first)["occurrenceId"]
     pending = (
         None
         if ordering == "registered-after"
@@ -88,18 +65,7 @@ def test_triage_observes_first_result_admission(tmp_path: Path, ordering: str, r
             target = tmp_path / "other-repository"
             target.mkdir()
         create_cli_scan(state, scans, target)
-    run_workbench(
-        state,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence,
-        "--status",
-        "closed",
-        "--close-reason",
-        reason,
-        "--note",
-        "Synthetic reviewed decision.",
-    )
+    close_finding(state, occurrence, reason, "Synthetic reviewed decision.")
     if pending is None:
         pending = create_cli_scan(state, scans, repository)
     elif ordering != "complete":
@@ -117,7 +83,7 @@ def test_triage_observes_first_result_admission(tmp_path: Path, ordering: str, r
     )["findings"]
     assert len(findings) == 1
     assert findings[0]["status"] == expected
-    detail = run_workbench(state, "get-scan", "--scan-id", pending["scanId"])["scan"]["findings"]
+    detail = get_scan(state, pending["scanId"])["scan"]["findings"]
     assert detail[0]["status"] == expected
     assert len(
         run_workbench(
@@ -135,21 +101,8 @@ def test_comparison_reopens_finding_admitted_after_dismissal(tmp_path: Path):
     repository.mkdir()
     pending = create_cli_scan(state, scans, repository, complete=False)
     completed = create_cli_scan(state, scans, repository)
-    occurrence = run_workbench(state, "get-scan", "--scan-id", completed["scanId"])["scan"][
-        "findings"
-    ][0]["occurrenceId"]
-    run_workbench(
-        state,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence,
-        "--status",
-        "closed",
-        "--close-reason",
-        "false_positive",
-        "--note",
-        "Synthetic dismissal.",
-    )
+    occurrence = scan_finding(state, completed)["occurrenceId"]
+    close_finding(state, occurrence, "false_positive", "Synthetic dismissal.")
     complete_pending(state, repository, pending)
     assert compare_scan_pair(state, completed, pending)["summary"]["reopened"] == 1
 
@@ -160,21 +113,8 @@ def test_replayed_completion_does_not_advance_admission(tmp_path: Path, failed: 
     repository.mkdir()
     scan = create_cli_scan(state, scans, repository, complete=False)
     complete_pending(state, repository, scan, failed=failed)
-    occurrence = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][
-        0
-    ]["occurrenceId"]
-    run_workbench(
-        state,
-        "set-finding-triage",
-        "--occurrence-id",
-        occurrence,
-        "--status",
-        "closed",
-        "--close-reason",
-        "false_positive",
-        "--note",
-        "Synthetic retained decision.",
-    )
+    occurrence = scan_finding(state, scan)["occurrenceId"]
+    close_finding(state, occurrence, "false_positive", "Synthetic retained decision.")
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         before = connection.execute("SELECT sequence, scan_id FROM scan_admissions").fetchall()
     run_workbench(
@@ -184,9 +124,7 @@ def test_replayed_completion_does_not_advance_admission(tmp_path: Path, failed: 
         assert (
             connection.execute("SELECT sequence, scan_id FROM scan_admissions").fetchall() == before
         )
-    detail = run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][
-        0
-    ]
+    detail = finding_detail(state, occurrence)
     assert detail["status"] == "closed"
 
 

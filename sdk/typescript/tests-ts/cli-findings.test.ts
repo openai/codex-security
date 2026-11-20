@@ -3,24 +3,52 @@ import { resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import {
+  capture,
+  dependencies,
+  mustNotInitializeCodex,
+} from "./cli-fixtures.js";
+
+async function runHistory(
+  args: string[],
+  response: JsonObject | ((args: readonly string[]) => JsonObject),
+  options: { interactive?: boolean; directory?: string } = {},
+) {
+  const calls: (readonly string[])[] = [];
+  const deps = dependencies({
+    onWorkbench: (command) => {
+      calls.push(command);
+      return typeof response === "function" ? response(command) : response;
+    },
+  });
+  const { directory, interactive } = options;
+  if (directory !== undefined) deps.currentDirectory = () => directory;
+  deps.createSecurity = mustNotInitializeCodex;
+  const stdout = capture(interactive);
+  const stderr = capture();
+  const code = await main(args, stdout.stream, stderr.stream, deps);
+  expect(code, stderr.text()).toBe(0);
+  return { calls, stdout };
+}
+
+const repositoryQuery = (repository: string) => [
+  "list-global-findings",
+  "--repository",
+  repository,
+  "--status",
+  "open",
+  "--offset",
+  "0",
+  "--limit",
+  "20",
+];
 
 describe("CLI findings history", () => {
   test("expands a home-relative repository before querying saved findings", async () => {
-    const calls: Array<readonly string[]> = [];
-    expect(
-      await main(
-        ["findings", "list", "~/repository", "--json"],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return { findings: [] };
-          },
-        }),
-      ),
-    ).toBe(0);
+    const { calls } = await runHistory(
+      ["findings", "list", "~/repository", "--json"],
+      { findings: [] },
+    );
     expect(calls[0]).toContain(resolve(homedir(), "repository"));
   });
 
@@ -29,20 +57,10 @@ describe("CLI findings history", () => {
     { scope: ["--all-repositories"] },
     { scope: ["--scan", "saved-scan"] },
   ])("accepts larger finding pages for scope %j", async ({ scope }) => {
-    const calls: Array<readonly string[]> = [];
-    expect(
-      await main(
-        ["findings", "list", ...scope, "--limit", "100", "--json"],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return { findings: [], findingsPage: { findings: [] } };
-          },
-        }),
-      ),
-    ).toBe(0);
+    const { calls } = await runHistory(
+      ["findings", "list", ...scope, "--limit", "100", "--json"],
+      { findings: [], findingsPage: { findings: [] } },
+    );
     expect(calls[0]?.slice(-2)).toEqual(["--limit", "100"]);
   });
 
@@ -53,46 +71,13 @@ describe("CLI findings history", () => {
       ["findings", "list"],
       ["findings", "list", repository],
     ]) {
-      const calls: Array<readonly string[]> = [];
-      const stdout = capture();
-      const deps = dependencies({
-        onWorkbench: (args): JsonObject => {
-          calls.push(args);
-          return {
-            findings: [
-              { occurrenceId: "occ-1", title: "Missing authorization" },
-            ],
-            limit: 20,
-            nextOffset: null,
-            offset: 0,
-          };
-        },
+      const { calls, stdout } = await runHistory([...command, "--json"], {
+        findings: [{ occurrenceId: "occ-1", title: "Missing authorization" }],
+        limit: 20,
+        nextOffset: null,
+        offset: 0,
       });
-      deps.createSecurity = () => {
-        throw new Error("saved findings must not initialize Codex");
-      };
-
-      expect(
-        await main(
-          [...command, "--json"],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(0);
-      expect(calls).toEqual([
-        [
-          "list-global-findings",
-          "--repository",
-          repository,
-          "--status",
-          "open",
-          "--offset",
-          "0",
-          "--limit",
-          "20",
-        ],
-      ]);
+      expect(calls).toEqual([repositoryQuery(repository)]);
       expect(JSON.parse(stdout.text())).toMatchObject({
         findings: [{ occurrenceId: "occ-1" }],
       });
@@ -101,37 +86,12 @@ describe("CLI findings history", () => {
 
   test("lets the workbench scope findings from a checkout subdirectory", async () => {
     const repository = resolve("/current/repository/src");
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
-    const deps = dependencies({
-      onWorkbench: (args): JsonObject => {
-        calls.push(args);
-        return { findings: [{ occurrenceId: "nested-finding" }] };
-      },
-    });
-    deps.currentDirectory = () => repository;
-
-    expect(
-      await main(
-        ["findings", "list", "--json"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
-    expect(calls).toEqual([
-      [
-        "list-global-findings",
-        "--repository",
-        repository,
-        "--status",
-        "open",
-        "--offset",
-        "0",
-        "--limit",
-        "20",
-      ],
-    ]);
+    const { calls, stdout } = await runHistory(
+      ["findings", "list", "--json"],
+      { findings: [{ occurrenceId: "nested-finding" }] },
+      { directory: repository },
+    );
+    expect(calls).toEqual([repositoryQuery(repository)]);
     expect(JSON.parse(stdout.text())).toMatchObject({
       findings: [{ occurrenceId: "nested-finding" }],
     });
@@ -139,43 +99,20 @@ describe("CLI findings history", () => {
 
   test("preserves pagination for machine-readable current-repository findings", async () => {
     const repository = resolve("/current/repository");
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
     const page = {
       findings: [{ occurrenceId: "first-finding" }],
       limit: 20,
       nextOffset: 20,
       offset: 0,
     };
-
-    expect(
-      await main(
-        ["findings", "list", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return calls.length === 1
-              ? page
-              : { ...page, findings: [], nextOffset: null, offset: 20 };
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(calls).toEqual([
-      [
-        "list-global-findings",
-        "--repository",
-        repository,
-        "--status",
-        "open",
-        "--offset",
-        "0",
-        "--limit",
-        "20",
-      ],
-    ]);
+    const { calls, stdout } = await runHistory(
+      ["findings", "list", "--json"],
+      (args) =>
+        args[args.indexOf("--offset") + 1] === "20"
+          ? { ...page, findings: [], nextOffset: null, offset: 20 }
+          : page,
+    );
+    expect(calls).toEqual([repositoryQuery(repository)]);
     expect(JSON.parse(stdout.text())).toEqual({ ...page, repository });
   });
 
@@ -183,30 +120,20 @@ describe("CLI findings history", () => {
     { scope: [], status: "open" },
     { scope: ["--scan", "saved-scan"], status: "all" },
   ])("shows the effective filters for scope %j", async ({ scope, status }) => {
-    const stdout = capture(true);
-    const calls: Array<readonly string[]> = [];
     const page = { findings: [], limit: 20, nextOffset: null, offset: 0 };
-    expect(
-      await main(
-        [
-          "findings",
-          "list",
-          ...scope,
-          "--query",
-          "authorization",
-          "--severity",
-          "high",
-        ],
-        stdout.stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return scope.length === 0 ? page : { findingsPage: page };
-          },
-        }),
-      ),
-    ).toBe(0);
+    const { calls, stdout } = await runHistory(
+      [
+        "findings",
+        "list",
+        ...scope,
+        "--query",
+        "authorization",
+        "--severity",
+        "high",
+      ],
+      scope.length === 0 ? page : { findingsPage: page },
+      { interactive: true },
+    );
     expect(calls).toHaveLength(1);
     expect(stdout.text()).toContain(`Status: ${status}`);
     expect(stdout.text()).toContain("Severity: high");
@@ -218,20 +145,10 @@ describe("CLI findings history", () => {
       [[], "open"],
       [["--status", "closed"], "closed"],
     ] as const) {
-      const calls: Array<readonly string[]> = [];
-      expect(
-        await main(
-          ["findings", "list", "--all-repositories", ...arguments_],
-          capture().stream,
-          capture().stream,
-          dependencies({
-            onWorkbench: (args) => {
-              calls.push(args);
-              return { findings: [], limit: 20, nextOffset: null, offset: 0 };
-            },
-          }),
-        ),
-      ).toBe(0);
+      const { calls } = await runHistory(
+        ["findings", "list", "--all-repositories", ...arguments_],
+        { findings: [], limit: 20, nextOffset: null, offset: 0 },
+      );
       expect(calls[0]).toContain("--status");
       expect(calls[0]).toContain(expectedStatus);
     }
@@ -244,27 +161,16 @@ describe("CLI findings history", () => {
   ])(
     "includes resolved findings in closed history for scope %j",
     async ({ scope, includeResolved }) => {
-      const calls: Array<readonly string[]> = [];
-      const stdout = capture();
       const finding = { occurrenceId: "resolved-finding", status: "closed" };
-      expect(
-        await main(
-          ["findings", "list", ...scope, "--status", "closed", "--json"],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            onWorkbench: (args) => {
-              calls.push(args);
-              const findings =
-                args[0] === "list-findings" ||
-                args.includes("--include-resolved")
-                  ? [finding]
-                  : [];
-              return { findings };
-            },
-          }),
-        ),
-      ).toBe(0);
+      const { calls, stdout } = await runHistory(
+        ["findings", "list", ...scope, "--status", "closed", "--json"],
+        (args) => ({
+          findings:
+            args[0] === "list-findings" || args.includes("--include-resolved")
+              ? [finding]
+              : [],
+        }),
+      );
       expect(JSON.parse(stdout.text())).toEqual({
         ...(scope.length === 0
           ? { repository: resolve("/current/repository") }
@@ -277,26 +183,17 @@ describe("CLI findings history", () => {
   );
 
   test("preserves the current checkout when opening a relocated finding", async () => {
-    const stdout = capture();
-    const deps = dependencies({
-      onWorkbench: (): JsonObject => ({
+    const { stdout } = await runHistory(
+      ["findings", "show", "historical-occurrence", "--json"],
+      {
         scan: {
           scanId: "historical-scan",
           targetPath: "/previous/checkout",
           currentTargetPath: "/current/repository",
           findings: [{ occurrenceId: "historical-occurrence" }],
         },
-      }),
-    });
-
-    expect(
-      await main(
-        ["findings", "show", "historical-occurrence", "--json"],
-        stdout.stream,
-        capture().stream,
-        deps,
-      ),
-    ).toBe(0);
+      },
+    );
     expect(JSON.parse(stdout.text())).toMatchObject({
       targetPath: "/previous/checkout",
       currentTargetPath: "/current/repository",
@@ -304,30 +201,20 @@ describe("CLI findings history", () => {
   });
 
   test("lists findings across repositories without a target filter", async () => {
-    const calls: Array<readonly string[]> = [];
-    expect(
-      await main(
-        [
-          "findings",
-          "list",
-          "--all-repositories",
-          "--severity",
-          "critical",
-          "--status",
-          "open",
-          "--limit",
-          "5",
-        ],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return { findings: [], limit: 5, nextOffset: null, offset: 0 };
-          },
-        }),
-      ),
-    ).toBe(0);
+    const { calls } = await runHistory(
+      [
+        "findings",
+        "list",
+        "--all-repositories",
+        "--severity",
+        "critical",
+        "--status",
+        "open",
+        "--limit",
+        "5",
+      ],
+      { findings: [], limit: 5, nextOffset: null, offset: 0 },
+    );
     expect(calls).toEqual([
       [
         "list-global-findings",
@@ -344,52 +231,41 @@ describe("CLI findings history", () => {
   });
 
   test("paginates and filters findings from a selected historical scan", async () => {
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
-    expect(
-      await main(
-        [
-          "findings",
-          "list",
-          "--scan",
-          "31107fbe",
-          "--query",
-          "login injection",
-          "--severity",
-          "high",
-          "--status",
-          "open",
-          "--offset",
-          "20",
-          "--limit",
-          "5",
-          "--json",
-        ],
-        stdout.stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return {
-              findingsPage: {
-                findings: [{ occurrenceId: "occ-25", title: "Historic SQLi" }],
-                limit: 5,
-                nextOffset: null,
-                offset: 20,
-                scanId: "31107fbe-full",
-                total: 21,
-              },
-            };
-          },
-        }),
-      ),
-    ).toBe(0);
+    const page = {
+      findings: [{ occurrenceId: "occ-25", title: "Historic SQLi" }],
+      limit: 5,
+      nextOffset: null,
+      offset: 20,
+      scanId: "31107fbe-full",
+      total: 21,
+    };
+    const { calls, stdout } = await runHistory(
+      [
+        "findings",
+        "list",
+        "--scan",
+        "31107fbe",
+        "--query",
+        "login injection",
+        "--severity",
+        "high",
+        "--status",
+        "open",
+        "--offset",
+        "20",
+        "--limit",
+        "5",
+        "--json",
+      ],
+      { findingsPage: page },
+    );
     expect(calls).toEqual([
       [
         "list-findings",
         "--scan-id",
         "31107fbe",
-        "--query=login injection",
+        "--query",
+        "login injection",
         "--severity",
         "high",
         "--status",
@@ -400,14 +276,7 @@ describe("CLI findings history", () => {
         "5",
       ],
     ]);
-    expect(JSON.parse(stdout.text())).toEqual({
-      findings: [{ occurrenceId: "occ-25", title: "Historic SQLi" }],
-      limit: 5,
-      nextOffset: null,
-      offset: 20,
-      scanId: "31107fbe-full",
-      total: 21,
-    });
+    expect(JSON.parse(stdout.text())).toEqual(page);
   });
 
   test("rejects repository arguments with conflicting findings scopes", async () => {
@@ -461,8 +330,6 @@ describe("CLI findings history", () => {
   });
 
   test("shows a historical occurrence without exposing unrelated findings", async () => {
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
     const selected: JsonObject = {
       occurrenceId: "occ-25",
       severity: { level: "high" },
@@ -471,29 +338,20 @@ describe("CLI findings history", () => {
       remediationTests: ["Reject interpolated account identifiers."],
       preventiveControls: ["Require parameterized query helpers."],
     };
-    expect(
-      await main(
-        ["findings", "show", "occ-25", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args) => {
-            calls.push(args);
-            return {
-              scan: {
-                scanId: "31107fbe-full",
-                scanDir: "/private/results/31107fbe-full",
-                targetPath: "/current/repository",
-                findings: [
-                  { occurrenceId: "occ-other", title: "Unrelated finding" },
-                  selected,
-                ],
-              },
-            };
-          },
-        }),
-      ),
-    ).toBe(0);
+    const { calls, stdout } = await runHistory(
+      ["findings", "show", "occ-25", "--json"],
+      {
+        scan: {
+          scanId: "31107fbe-full",
+          scanDir: "/private/results/31107fbe-full",
+          targetPath: "/current/repository",
+          findings: [
+            { occurrenceId: "occ-other", title: "Unrelated finding" },
+            selected,
+          ],
+        },
+      },
+    );
     expect(calls).toEqual([["get-finding", "--occurrence-id", "occ-25"]]);
     expect(JSON.parse(stdout.text())).toEqual({
       ...selected,

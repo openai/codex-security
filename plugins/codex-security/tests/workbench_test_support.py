@@ -1069,6 +1069,33 @@ def usage_counts(
     }
 
 
+def scan_finding(state: Path, scan: dict) -> dict:
+    return get_scan(state, scan["scanId"])["scan"]["findings"][0]
+
+
+def finding_detail(state: Path, occurrence: str) -> dict:
+    return run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][0]
+
+
+def close_finding(state: Path, occurrence: str, reason: str, note: str | None = None, **options):
+    extra = ["--note", note] if note is not None else []
+    return set_triage(state, occurrence, "closed", "--close-reason", reason, *extra, **options)
+
+
+def complete_pending(state: Path, repository: Path, scan: dict, *, failed: bool = False):
+    scan_dir = Path(scan["scanDir"])
+    write_completed_contract(scan_dir, scan["scanId"], repository)
+    finalize_cli_scan(scan_dir)
+    if failed:
+        return fail_scan(state, scan["scanId"], "Synthetic interruption")
+    return scan_command(state, "complete-scan", scan["scanId"])
+
+
+def finalize_cli_scan(scan_dir: Path) -> None:
+    finalizer = SCRIPT.with_name("finalize_scan_contract.py")
+    subprocess.run([sys.executable, str(finalizer), "--scan-dir", str(scan_dir)], check=True)
+
+
 def create_cli_scan(
     state_dir: Path,
     root: Path,
@@ -1170,15 +1197,7 @@ def create_cli_scan(
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
         ]
         coverage_path.write_text(json.dumps(coverage))
-    subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT.with_name("finalize_scan_contract.py")),
-            "--scan-dir",
-            str(scan_dir),
-        ],
-        check=True,
-    )
+    finalize_cli_scan(scan_dir)
     completion = ["complete-scan", "--scan-id", launched["scanId"]]
     if cost is not None:
         completion.extend(("--cost-json", json.dumps(cost)))
