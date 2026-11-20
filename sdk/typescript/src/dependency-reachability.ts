@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { dependencyClaimReferenceSchema } from "./dependency-stack-claims.js";
-import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
-import { dependencyUseSchema } from "./dependency-stack-use.js";
+import {
+  dependencyGitCommitSchema,
+  dependencyTargetSchema,
+} from "./dependency-source-identity.js";
+import {
+  dependencyUseSchema,
+  dependencyUseProofSchema,
+} from "./dependency-stack-use.js";
 import { stackJsonValue } from "./dependency-stack-evidence.js";
 
 const identity = z.string().trim().min(1);
@@ -259,8 +265,54 @@ const inspection = z
       });
   });
 
+const site = dependencyUseProofSchema.shape.sink
+  .unwrap()
+  .shape.callSite.extend({
+    commit: dependencyGitCommitSchema.optional(),
+  });
+const argument = z
+  .string()
+  .trim()
+  .min(1)
+  .describe(
+    "Exact single-line expression carrying the input at the cited site. Omit when ambiguous.",
+  );
+const label = z.string().trim().min(1);
+export const dependencyTraceSchema = z
+  .array(
+    z.discriminatedUnion("kind", [
+      z.strictObject({
+        kind: z.enum(["source", "handoff"]),
+        label,
+        site,
+        argument: argument.optional(),
+      }),
+      z.strictObject({ kind: z.literal("gap"), label }),
+    ]),
+  )
+  .refine(
+    (frames) =>
+      frames.every((frame, index) => index === 0 || frame.kind !== "source"),
+    "The source, if known, starts the trace.",
+  );
+
+export const repositoryUseProofSchema = dependencyUseProofSchema.extend({
+  sink: dependencyUseProofSchema.shape.sink
+    .unwrap()
+    .extend({
+      callSite: site,
+      argument: argument.optional(),
+    })
+    .optional(),
+});
+
 /** Optional, independently reviewed context. Older saved reports omit it. */
 export const dependencyFindingDetailsShape = {
+  trace: dependencyTraceSchema
+    .optional()
+    .describe(
+      "Ordered, cited input flow up to the sink or unresolved handoff. Mark missing links as gaps.",
+    ),
   services: z.array(serviceAssociation).optional(),
   openConditions: z.array(openCondition).optional(),
   inspections: z.array(inspection).optional(),
@@ -275,6 +327,7 @@ export const dependencyCoverageHandoffSchema = z.strictObject({
 export { dependencyPlaceSchema };
 
 const reportUseSchema = dependencyUseSchema.safeExtend({
+  proof: repositoryUseProofSchema.optional(),
   observations: z.array(observation).prefault([]),
   place: dependencyPlaceSchema.optional(),
   ...dependencyFindingDetailsShape,
@@ -367,6 +420,7 @@ export const dependencyReachabilityReportSchema = z
   .strictObject({ limitations: z.array(z.string()) })
   .extend({
     schemaVersion: z.literal(2),
+    target: dependencyTargetSchema.optional(),
     uses: z.array(reviewedDependencyUseSchema),
     claims: z.array(dependencyApprovedClaimSchema).optional(),
     claimEvidence: dependencyClaimEvidenceSchema.optional(),
@@ -399,6 +453,7 @@ export const reviewedDependencyCheckSchema =
 // The CVE form keeps its original result. A package can have zero or more
 // independent issues, so each reviewed verdict belongs to a particular check.
 export const dependencyPackageCheckOutputSchema = z.object({
+  target: dependencyTargetSchema.optional(),
   package: z.object({ ecosystem: z.string(), name: z.string() }),
   vulnDescription: z.string().optional(),
   checks: z.array(
