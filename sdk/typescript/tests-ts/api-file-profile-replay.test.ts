@@ -354,10 +354,7 @@ test.each(
     const scanDir = join(root, "scan");
     for (const path of [repository, home, runtimeHome, scanDir])
       await mkdir(path, { mode: 0o700 });
-    await writeFile(
-      join(root, "caller-catalog.json"),
-      JSON.stringify({ models: [] }),
-    );
+    await writeFile(join(root, "caller-catalog.json"), '{"models":[]}');
     const profilePath = join(home, "review.config.toml");
     const ambientAuth = {
       cli_auth_credentials_store: "file",
