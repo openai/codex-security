@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep, win32 } from "node:path";
-import type { CodexOptions } from "@openai/codex-sdk";
+import type { CodexOptions, CyberAccessProgram } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import {
   bedrockProviderConfig,
@@ -33,6 +33,8 @@ export interface DeepScanExecutionSettings {
   reasoningEffort?: string;
   reasoningSummary?: string;
   serviceTier?: string;
+  /** Effective program from the originating native turn, ahead of runner configuration. */
+  cyberAccessProgram?: CyberAccessProgram;
   /** The native snapshot recorded no request tier; serviceTier preserves its wire behavior. */
   nativeServiceTierAbsent?: true;
   providerConfig?: JsonObject;
@@ -93,7 +95,7 @@ export async function captureDeepScanExecutionSettings(
   >,
   parentSandbox: DeepWorkerParentSandbox,
   environment: NodeJS.ProcessEnv = process.env,
-  parent?: { threadId: string; startedAt?: string },
+  parent?: { threadId: string; turnId?: string; startedAt?: string },
 ): Promise<DeepScanExecutionSettings> {
   const configuredHome = environment.CODEX_HOME || join(homedir(), ".codex");
   const codexHome =
@@ -207,6 +209,7 @@ export async function captureDeepScanExecutionSettings(
       ? { nativeServiceTierAbsent: true as const }
       : {}),
     providerConfig: selected.model_providers as JsonObject | undefined,
+    cyberAccessProgram: native.cyberAccessProgram,
     runtimeSettings,
     runtimeConfigPath,
     runtimeConfigSource,
@@ -334,6 +337,10 @@ async function originalParentSettings(
       }
       if (event.type === "turn_context") {
         if (parent.turnId && context.turn_id !== parent.turnId) continue;
+        settings.cyberAccessProgram =
+          typeof context.cyber_access_program === "string"
+            ? (context.cyber_access_program as CyberAccessProgram)
+            : undefined;
         if (typeof context.model === "string") settings.model = context.model;
         if (typeof context.effort === "string")
           settings.reasoningEffort = context.effort;
@@ -384,9 +391,8 @@ export async function loadDeepScanExecutionSettings(
       // can recover selections, but cannot establish an original executable or
       // home. Leave those unknown and retain the existing native launch behavior.
       const context = await readLegacyContext?.();
-      const selected = recoveryModelConfig(
-        resolveCodexProfile(context?.config ?? {}),
-      );
+      const resolved = resolveCodexProfile(context?.config ?? {});
+      const selected = recoveryModelConfig(resolved);
       const owner = original.usageOwner ?? context?.usageOwner;
       const home = environment.CODEX_HOME || join(homedir(), ".codex");
       const native = !owner?.threadId
@@ -397,6 +403,8 @@ export async function loadDeepScanExecutionSettings(
             startedAt: original.createdAt ?? owner.startedAt,
           });
       return {
+        cyberAccessProgram: native.cyberAccessProgram,
+        runtimeSettings: workerRuntimeSettingsFromConfig(resolved),
         model:
           original.model ??
           (selected.model as string | undefined) ??
@@ -433,7 +441,8 @@ export async function loadDeepScanExecutionSettings(
       settings.reasoningEffort !== undefined &&
       settings.modelProvider !== undefined &&
       settings.reasoningSummary !== undefined &&
-      settings.serviceTier !== undefined)
+      settings.serviceTier !== undefined &&
+      settings.cyberAccessProgram !== undefined)
   )
     return settings;
   // Earlier snapshots can omit native selections. Recover only from the saved
@@ -450,6 +459,8 @@ export async function loadDeepScanExecutionSettings(
   // its workers without overwriting a snapshot owned by a newer coordinator.
   return executionSettings({
     ...settings,
+    cyberAccessProgram:
+      settings.cyberAccessProgram ?? native.cyberAccessProgram,
     model: settings.model ?? original.model ?? native.model,
     reasoningEffort:
       settings.reasoningEffort ??
@@ -474,6 +485,7 @@ export function restoredDeepScanWorkerSettings(
   runtimeConfigPath?: string;
   runtimeConfigSource?: WorkerRuntimeConfigSource;
   codexOptions: CodexOptions;
+  parentCyberAccessProgram?: CyberAccessProgram;
   model?: string;
   reasoningEffort?: string;
   parentSandbox: DeepWorkerParentSandbox;
@@ -525,6 +537,7 @@ export function restoredDeepScanWorkerSettings(
     ...(settings.runtimeConfigSource === undefined
       ? {}
       : { runtimeConfigSource: settings.runtimeConfigSource }),
+    parentCyberAccessProgram: settings.cyberAccessProgram,
     ...(settings.runtimeSettings === undefined
       ? {}
       : { runtimeSettings: settings.runtimeSettings }),
@@ -605,6 +618,9 @@ function executionSettings(
     reasoningEffort: value.reasoningEffort,
     reasoningSummary: value.reasoningSummary,
     serviceTier: value.serviceTier,
+    ...(value.cyberAccessProgram === undefined
+      ? {}
+      : { cyberAccessProgram: value.cyberAccessProgram }),
     ...(value.nativeServiceTierAbsent === true
       ? { nativeServiceTierAbsent: true }
       : {}),

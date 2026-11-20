@@ -88,7 +88,7 @@ export async function testReconstructedWorkers() {
         (name === "second"
           ? '[profiles."cloud.production"]\nmodel_provider = "amazon-bedrock"\n[model_providers.amazon-bedrock.aws]\nregion = "us-west-2"\nprofile = "fixture-profile"\n'
           : "") +
-        `[codex_security]\ncyber_access_program = "${name === "first" ? "daybreak_blue" : "standard"}"\n[features]\napi_key_cyber_access_programs = ${name === "first"}\napi_key_model_discovery = ${name !== "first"}\n`,
+        `[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\napi_key_cyber_access_programs = ${name === "first"}\napi_key_model_discovery = ${name !== "first"}\n`,
     );
     const providerKeys =
       name === "first"
@@ -140,6 +140,7 @@ export async function testReconstructedWorkers() {
         name === "first" ? trustedParentSandboxWithDenials : uncappedSandbox,
     };
     await mkdir(path.join(codexHome, "sessions"));
+    const program = name === "first" ? "daybreak_blue" : "standard";
     await writeFile(
       path.join(codexHome, "sessions", "owner.jsonl"),
       [
@@ -170,6 +171,7 @@ export async function testReconstructedWorkers() {
           timestamp: "2026-01-01T00:00:01Z",
           payload: {
             turn_id: "original-turn",
+            cyber_access_program: program,
             model: "native-parent-model",
             effort: "medium",
             summary: "none",
@@ -177,9 +179,10 @@ export async function testReconstructedWorkers() {
         },
         {
           type: "turn_context",
-          timestamp: "2026-01-01T00:02:00Z",
+          timestamp: "2026-01-01T00:00:30Z",
           payload: {
             turn_id: "later-turn",
+            cyber_access_program: "daybreak_red",
             model: "later-parent-model",
             effort: "low",
             summary: "detailed",
@@ -212,6 +215,20 @@ export async function testReconstructedWorkers() {
     assert.equal(
       saved.nativeServiceTierAbsent,
       name === "first" ? true : undefined,
+    );
+    const legacy = await loadDeepScanExecutionSettings(
+      {
+        ...settings,
+        workflowVersion: "deep-security-scan/v1",
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+      async () => ({ config: parseToml(await readFile(configPath, "utf8")) }),
+      codexOptions.env,
+    );
+    assert.equal(legacy.cyberAccessProgram, program);
+    assert.equal(
+      legacy.runtimeSettings?.features?.api_key_cyber_access_programs,
+      name === "first",
     );
     const targetPath = path.join(fixture.root, "target");
     await mkdir(targetPath);
@@ -334,6 +351,7 @@ export async function testReconstructedWorkers() {
       snapshot,
       providerKeys,
       expectedProvider,
+      program,
       executor: new CodexSdkWorkerExecutor(restored),
     };
   }
@@ -377,6 +395,7 @@ export async function testReconstructedWorkers() {
           }
           if (phase === "incomplete") {
             const saved = JSON.parse(scan.snapshot);
+            delete saved.settings.cyberAccessProgram;
             for (const key of ["model", "reasoningEffort", "reasoningSummary"])
               delete saved.settings[key];
             if (scan.name === "first") delete saved.settings.modelProvider;
@@ -475,11 +494,7 @@ export async function testReconstructedWorkers() {
             ),
           );
           assertFlagPair(child.argv, "--model", scan.settings.model);
-          assertFlagPair(
-            child.argv,
-            "--cyber-access-program",
-            scan.name === "first" ? "daybreak_blue" : "standard",
-          );
+          assertFlagPair(child.argv, "--cyber-access-program", scan.program);
           assertConfigOverrides(child.argv, {
             "features.api_key_cyber_access_programs": scan.name === "first",
             "features.api_key_model_discovery": scan.name !== "first",

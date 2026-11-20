@@ -863,17 +863,11 @@ stop_after_no_new = 2
 max_discovery_runs = 2
 `,
   );
-  await writeFile(
-    path.join(codexHome, `${threadId}.jsonl`),
-    [
+  const sessions = path.join(codexHome, "sessions");
+  await mkdir(sessions);
+  const writeParentHistory = async (threadId: string) => {
+    const events = [
       { type: "session_meta", payload: { id: threadId } },
-      {
-        type: "turn_context",
-        payload: {
-          turn_id: "active-parent-turn",
-          cyber_access_program: "daybreak_red",
-        },
-      },
       {
         type: "turn_context",
         payload: {
@@ -881,10 +875,22 @@ max_discovery_runs = 2
           cyber_access_program: "standard",
         },
       },
-    ]
-      .map((record) => JSON.stringify(record))
-      .join("\n") + "\n",
-  );
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "active-parent-turn",
+          cyber_access_program: "daybreak_red",
+        },
+      },
+    ];
+    const file = path.join(sessions, `${threadId}.jsonl`);
+    await writeFile(
+      file,
+      events.map((record) => JSON.stringify(record)).join("\n") + "\n",
+    );
+    return file;
+  };
+  await writeParentHistory(threadId);
   await writeFakeCodex(fakeCodexPath);
   await writeFile(projectConfigPath, "scan: {max_time_minutes: 30}\n");
   await writeFile(
@@ -1533,6 +1539,7 @@ service_tier = "ultrafast"
       );
     }
 
+    const ownerHistory = await writeParentHistory(resumedThreadId);
     const restartStartIndex = (await readLogLines(startLogPath)).length;
     await writeFile(restartControlPath, "before-restart");
     server.sendRequest(
@@ -1544,6 +1551,8 @@ service_tier = "ultrafast"
         resumedThreadId,
         {
           "x-codex-turn-metadata": {
+            thread_id: resumedThreadId,
+            turn_id: "another-parent-turn",
             model: "gpt-5.6-sol",
             reasoning_effort: "high",
           },
@@ -1657,7 +1666,9 @@ service_tier = "ultrafast"
       handoffClaimToken,
     ]);
     handoffClaimToken = randomUUID();
+    await rm(ownerHistory);
     resumedThreadId = "deep-scan-stdio-replacement-thread";
+    await writeParentHistory(resumedThreadId);
     await runWorkbench(environment, [
       "claim-handoff-delivery",
       "--scan-id",
@@ -1677,7 +1688,7 @@ service_tier = "ultrafast"
     await writeFile(restartControlPath, "after-restart");
     await writeFile(
       runtimeConfigPath,
-      'model_reasoning_summary = "detailed"\n',
+      'model_reasoning_summary = "detailed"\n[features]\napi_key_cyber_access_programs = false\n',
     );
 
     const restartedServer = startServer(serverBundlePath, environment);
@@ -1692,6 +1703,8 @@ service_tier = "ultrafast"
           resumedThreadId,
           {
             "x-codex-turn-metadata": {
+              thread_id: resumedThreadId,
+              turn_id: "active-parent-turn",
               model: "gpt-6.1-sol",
               reasoning_effort: "max",
             },
@@ -1888,7 +1901,11 @@ service_tier = "ultrafast"
         restartStartIndex,
       );
       for (const execution of executions) {
-        assertConfigOverrides(execution.argv, { service_tier: "default" });
+        assertFlagPair(execution.argv, "--cyber-access-program", "standard");
+        assertConfigOverrides(execution.argv, {
+          service_tier: "default",
+          "features.api_key_cyber_access_programs": true,
+        });
         assertReadOnlyWorkerInvocation(
           execution.argv,
           codexHome,
@@ -2634,7 +2651,7 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
       } else if (message.method === 'thread/read') {
-        result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
+        result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, 'sessions', message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
         result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: effectiveProfile } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {

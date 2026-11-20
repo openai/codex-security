@@ -73,6 +73,7 @@ export interface CodexSdkWorkerModelSettings {
   parentSandbox?: DeepWorkerParentSandbox;
   runtimeSettings?: CodexSdkWorkerRuntimeSettings;
   parentTurn?: DeepScanParentTurn;
+  parentCyberAccessProgram?: CyberAccessProgram;
 }
 
 /** The coordinator supplies scan identity; worker tools never choose paths. */
@@ -436,6 +437,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                 },
                 features: {
                   ...(isRecord(workerConfig.features) && workerConfig.features),
+                  ...runtimeSettings.features,
                   apps: false,
                   plugins: false,
                   shell_tool: false,
@@ -485,24 +487,29 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         env: childEnv,
         signal: request.signal,
       };
-      const parentProgram = this.modelSettings.parentTurn
-        ? await (this.parentCyberAccessProgram ??=
-            readDeepScanParentCyberAccessProgram({
-              ...preflightOptions,
-              parentTurn: this.modelSettings.parentTurn,
-            }).catch((error: unknown) => {
-              this.parentCyberAccessProgram = undefined;
-              throw error;
-            }))
-        : undefined;
-      const workerFeatures = {
-        ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
-        ...runtimeSettings.features,
-      };
+      const savedProgram = this.modelSettings.parentCyberAccessProgram;
+      const parentProgram =
+        savedProgram ??
+        (this.modelSettings.parentTurn
+          ? await (this.parentCyberAccessProgram ??=
+              readDeepScanParentCyberAccessProgram({
+                ...preflightOptions,
+                parentTurn: this.modelSettings.parentTurn,
+              }).catch((error: unknown) => {
+                this.parentCyberAccessProgram = undefined;
+                throw error;
+              }))
+          : undefined);
+      const workerFeatures =
+        savedProgram !== undefined
+          ? this.modelSettings.runtimeSettings?.features
+          : {
+              ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
+              ...runtimeSettings.features,
+            };
       if (
         parentProgram !== undefined &&
-        (!isRecord(workerFeatures) ||
-          workerFeatures.api_key_cyber_access_programs === undefined)
+        workerFeatures?.api_key_cyber_access_programs === undefined
       ) {
         // Transmitting the inherited program requires this gate for API-key auth.
         // Explicit per-scan feature settings remain authoritative.

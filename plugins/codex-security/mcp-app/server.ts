@@ -949,6 +949,7 @@ export function createCodexSecurityServer(): McpServer {
       }
       const serviceTier =
         requestMetadataFromExtra(extra)?.["codex/turn-service-tier"];
+      const parentTurn = codexParentTurnFromExtra(extra);
       const modelSettings = {
         ...codexModelSettingsFromExtra(extra),
         ...(typeof serviceTier === "string" ? { serviceTier } : {}),
@@ -1010,7 +1011,11 @@ export function createCodexSecurityServer(): McpServer {
               modelSettings,
               parentSandbox,
               process.env,
-              { threadId, startedAt: new Date().toISOString() },
+              {
+                threadId,
+                turnId: parentTurn?.turnId,
+                startedAt: new Date().toISOString(),
+              },
             ),
           async (executionSettings) =>
             deepScanStore.begin({
@@ -1078,7 +1083,9 @@ export function createCodexSecurityServer(): McpServer {
           runWorkbench,
           ...modelSettings,
           parentSandbox,
-          parentTurn: codexParentTurnFromExtra(extra),
+          // Only the creating call can supply the original native turn.
+          parentTurn:
+            begun.startDisposition === "created" ? parentTurn : undefined,
           pythonCommand: await resolvePythonCommand(),
           pluginRoot: PLUGIN_ROOT,
           log: logDeepScanEvent,
