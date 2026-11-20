@@ -1314,12 +1314,16 @@ export async function capturePatchGitControls(
       throw error;
     }
   };
-  const expandConfigurationPath = async (path: string) => {
+  const expandConfigurationPath = async (
+    path: string,
+    checkout = root,
+    optional = true,
+  ) => {
     try {
       return (
         await runControl(
           root,
-          root,
+          checkout,
           [
             "-c",
             `codexsecurity.patchcontrolpath=${path}`,
@@ -1333,8 +1337,9 @@ export async function capturePatchGitControls(
         )
       ).replace(/\0$/u, "");
     } catch (error) {
-      // Git omits the per-user defaults when it cannot expand HOME.
+      // Per-user defaults and inactive includes can name an unavailable home.
       if (
+        optional &&
         error instanceof Error &&
         error.message.includes("failed to expand user dir")
       )
@@ -1762,36 +1767,10 @@ export async function capturePatchGitControls(
       optional: boolean,
       userSelected: boolean,
     ): Promise<void> => {
-      let path = configPath(value);
-      if (path.length === 0) return;
-      try {
-        // Expand each value with Git without expanding inactive values as a group.
-        path = (
-          await runControl(
-            root,
-            checkout,
-            [
-              "-c",
-              `codexsecurity.patchcontrolpath=${path}`,
-              "config",
-              "--null",
-              "--type=path",
-              "--get",
-              "codexsecurity.patchcontrolpath",
-            ],
-            { environment: configurationEnvironment },
-          )
-        ).replace(/\0$/u, "");
-      } catch (error) {
-        // Active includes already passed Git's normal --includes read above.
-        if (
-          optional &&
-          error instanceof Error &&
-          error.message.includes("failed to expand user dir")
-        )
-          return;
-        throw error;
-      }
+      const rawPath = configPath(value);
+      if (rawPath.length === 0) return;
+      const path = await expandConfigurationPath(rawPath, checkout, optional);
+      if (path === undefined) return;
       const includePath = relativeFile(relativeTo, path);
       if (projectConfig) expandedIncludes.set(value, path);
       try {
