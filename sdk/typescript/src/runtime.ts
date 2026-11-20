@@ -2761,6 +2761,18 @@ export async function validatePreparedOutputDir(
   return canonical;
 }
 
+/** Check directory identity without following a replacement link at either leaf. */
+export async function sameOutputDirectory(
+  left: string,
+  right: string,
+): Promise<boolean> {
+  const [a, b] = await Promise.all([
+    lstat(left, { bigint: true }),
+    lstat(right, { bigint: true }),
+  ]);
+  return a.isDirectory() && b.isDirectory() && a.ino !== 0n && sameInode(a, b);
+}
+
 async function checkedOutputPath(
   path: string,
   writableLeaf: boolean,
@@ -2775,14 +2787,11 @@ async function checkedOutputPath(
     const canonical = await realpath(selected);
     if (canonical === selected) return selected;
     // Accept a canonical leaf spelling (case or short name) within the checked parent.
-    if (dirname(canonical) === parent) {
-      const [leaf, resolved] = await Promise.all([
-        lstat(selected, { bigint: true }),
-        lstat(canonical, { bigint: true }),
-      ]);
-      if (leaf.isDirectory() && leaf.ino !== 0n && sameInode(leaf, resolved)) {
-        return canonical;
-      }
+    if (
+      dirname(canonical) === parent &&
+      (await sameOutputDirectory(selected, canonical))
+    ) {
+      return canonical;
     }
     throw new OutputDirectoryError(
       `Scan output directory changed during preparation: ${path}`,

@@ -312,12 +312,13 @@ import {
   preparePolicyOutputDirectory,
   resolveCodexCommand,
   resolveInputPath,
+  resolveParentTraversal,
   resolvePluginPath,
   resolvePluginSource,
   resolvePluginPython,
   resolveScanOutputPath,
   runWorkbench,
-  sameFile,
+  sameOutputDirectory,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginInstall,
@@ -334,6 +335,7 @@ import {
   normalizeTarget,
   normalizeExcludedPaths,
   nullIfMissingFile,
+  nullIfMissingPath,
   gitMarkerRoot,
   gitProtectionRoots,
   repositoryRevision,
@@ -2350,9 +2352,11 @@ export class CodexSecurity {
     options: ScanOptions,
     signal: AbortSignal,
   ): Promise<ScanResult | undefined> {
-    const selectedScanDir = resolve(
-      expandHome(outputDir, this.#dependencies.environment),
-    );
+    const resolveRequestedPath = (value: string) =>
+      resolveParentTraversal(
+        resolveInputPath(value, process.cwd(), this.#dependencies.environment),
+      );
+    const selectedScanDir = await resolveRequestedPath(outputDir);
     // A manifest is only a hint. The workbench verifies the host ledger, producer,
     // owner and sealed artifact digests before this path can publish anything.
     try {
@@ -2382,9 +2386,8 @@ export class CodexSecurity {
         return undefined;
       throw error;
     }
-    const requestedRepository = resolve(
-      expandHome(repository, this.#dependencies.environment),
-    );
+    const requestedRepository =
+      await resolveRequestedPath(repository).catch(nullIfMissingPath);
     const pluginRoot = await bundledPluginRoot();
     const saved = await savedScanWorkbench(scanId, {
       environment: this.#dependencies.environment,
@@ -2409,10 +2412,12 @@ export class CodexSecurity {
       context["scanId"] !== scanId ||
       typeof scanDir !== "string" ||
       !isAbsolute(scanDir) ||
-      !(await sameFile(selectedScanDir, scanDir)) ||
+      (scanDir !== selectedScanDir &&
+        !(await sameOutputDirectory(selectedScanDir, scanDir))) ||
       typeof recipe["repository"] !== "string" ||
       typeof repo !== "string" ||
       !isAbsolute(repo) ||
+      requestedRepository === null ||
       (requestedRepository !== repo &&
         requestedRepository !== recipe["repository"] &&
         (await canonicalConfigPath(requestedRepository)) !== repo) ||

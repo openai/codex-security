@@ -5,6 +5,7 @@ import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
 import { readJson, readJsonLines, writeJson } from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -19,7 +20,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { strToU8, zipSync } from "fflate";
@@ -2203,6 +2204,8 @@ test("sealed SDK resumes the registered path scope after the checkout is removed
   });
   await sealWithOriginalPlugin(f);
   await rm(f.repository, { recursive: true });
+  const other = await temporaryDirectory();
+  Object.assign(f.environment, { HOME: other });
   await using client = resumeDependencies(f, () =>
     fail("Unexpected model launch"),
   ).createSecurity({});
@@ -2217,6 +2220,30 @@ test("sealed SDK resumes the registered path scope after the checkout is removed
   await expect(
     client.run(f.repository, { ...options, excludePaths: [] }),
   ).rejects.toThrow("requested exclusions differ");
+  if (process.platform !== "win32") {
+    const name = basename(f.scanDir);
+    const foreignOutput = join(other, name);
+    await mkdir(foreignOutput, { mode: 0o700 });
+    const foreignManifest = join(foreignOutput, "scan-manifest.json");
+    await cp(join(f.scanDir, "scan-manifest.json"), foreignManifest);
+    const foreignLink = join(f.root, "foreign-output");
+    await symlink(foreignOutput, foreignLink);
+    const foreign = `${relative(process.cwd(), foreignLink)}/../${name}`;
+    await expect(
+      client.run(f.repository, { ...options, outputDir: foreign }),
+    ).rejects.toThrow("mismatched scan resume context");
+    await rm(foreignLink);
+    await expect(
+      client.run(f.repository, { ...options, outputDir: foreign }),
+    ).rejects.toThrow();
+
+    const savedLink = join(other, "saved-output");
+    await symlink(f.scanDir, savedLink);
+    await expect(
+      client.run(f.repository, { ...options, outputDir: savedLink }),
+    ).rejects.toThrow("non-symlink directory");
+    options.outputDir = `~/saved-output/../${name}`;
+  }
   const result = await client.run(f.repository, {
     ...options,
     target: ["./source.py"],
@@ -2233,16 +2260,16 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
   const client = resumeDependencies(f, () =>
     fail("Unexpected new model session"),
   ).createSecurity({});
-  let outputDir;
-  if (process.platform === "win32") {
-    outputDir = join(f.root, basename(f.scanDir).toUpperCase());
-  } else {
+  const upperOutput = join(f.root, basename(f.scanDir).toUpperCase());
+  const caseInsensitive = existsSync(upperOutput);
+  let outputDir = caseInsensitive ? upperOutput : f.scanDir;
+  if (process.platform !== "win32") {
     const parentAlias = join(
       await temporaryDirectory(),
       "original-output-parent",
     );
     await symlink(f.root, parentAlias);
-    outputDir = join(parentAlias, basename(f.scanDir));
+    outputDir = join(parentAlias, basename(outputDir));
   }
   const options = {
     mode: "deep" as const,
@@ -2250,7 +2277,9 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
     outputDir,
   };
   try {
-    const unrelatedOutput = join(f.root, "unrelated-output");
+    const unrelatedOutput = caseInsensitive
+      ? join(f.root, "unrelated-output")
+      : upperOutput;
     await mkdir(unrelatedOutput, { mode: 0o700 });
     await cp(
       join(f.scanDir, "scan-manifest.json"),
@@ -2262,7 +2291,27 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
     await expect(client.run(f.root, options)).rejects.toThrow(
       "mismatched scan resume context",
     );
-    const result = await client.run(f.repository, options);
+    let repository = f.repository;
+    if (process.platform !== "win32") {
+      const other = await temporaryDirectory();
+      const otherRepository = join(other, basename(f.repository));
+      await mkdir(otherRepository);
+      const foreignLink = join(f.root, "foreign-link");
+      await symlink(otherRepository, foreignLink);
+      const foreign = `${foreignLink}/../${basename(f.repository)}`;
+      await expect(client.run(foreign, options)).rejects.toThrow(
+        "mismatched scan resume context",
+      );
+      await rm(foreignLink);
+      await expect(client.run(foreign, options)).rejects.toThrow(
+        "mismatched scan resume context",
+      );
+
+      const savedLink = join(other, "saved-link");
+      await symlink(f.scanDir, savedLink);
+      repository = `${savedLink}/../${basename(f.repository)}`;
+    }
+    const result = await client.run(repository, options);
     expect(result.manifest.scan.id).toBe(f.scanId);
     expect(result.threadId).toBe(f.threadId);
   } finally {
