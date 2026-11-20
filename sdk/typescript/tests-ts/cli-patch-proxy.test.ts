@@ -78,6 +78,26 @@ test.each(["compiled exec directory", "config separator in executable path"])(
   },
 );
 
+test("HTTPS preflight rejects a checkout-relative Git exec directory without a push hook", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const host = "127.0.0.1:1";
+  git("remote", "set-url", "origin", `https://${host}/team/repository.git`);
+  const result = await runWorkflow(
+    ["patch", "Synthetic issue", "--create-pr"],
+    {
+      currentDirectory: join(directory, "src"),
+      environment: { GITLAB_HOST: host, GIT_EXEC_PATH: "tools" },
+      onRepositoryCommand: (tool, args, cwd, options) => {
+        if (tool !== "git") return "";
+        if (args.includes("ls-remote")) throw new Error("Reached transport");
+        return runGitRepositoryCommand(tool, args, cwd, options);
+      },
+    },
+    { localHosting: false },
+  );
+  expect(result.stderr).toContain("outside patch-writable directories");
+});
+
 test("one native push uses the configured proxy for each destination", () =>
   checkNativePush("approved"));
 test("one native push uses the configured SSH launcher for its second destination", () =>
