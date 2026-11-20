@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -368,6 +368,12 @@ def saved_checkout_available(
         return False
 
 
+def _ssh_uses_login_home(path: str) -> bool:
+    # Git treats /~/ as ~/ in both URL and scp syntax. ~owner names a specific home.
+    first = path.removeprefix("/").partition("/")[0]
+    return first == "~" or not path.startswith(("/", "~"))
+
+
 def repository_origin(target: Path) -> tuple[str, str] | None:
     remote = git_output(target, "remote", "get-url", "origin")
     if remote is None:
@@ -383,26 +389,25 @@ def repository_origin(target: Path) -> tuple[str, str] | None:
             return None
         if parsed.query or parsed.fragment:
             return None
-        if parsed.scheme == "ssh" and (parsed.path == "/~" or parsed.path.startswith("/~/")):
-            account = parsed.username
         host = parsed.hostname
         if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
             host = f"{host}:{port}"
         path = parsed.path
+        if parsed.scheme == "ssh":
+            path = unquote(path, errors="surrogateescape")
+            if _ssh_uses_login_home(path):
+                account = unquote(parsed.username or "", errors="surrogateescape")
     else:
         authority, separator, path = remote.partition(":")
         if not separator or "?" in path or "#" in path:
             return None
-        account, at, host = authority.rpartition("@")
-        if not at:
-            account, host = None, authority
-        elif path.startswith("/") or (
-            path.startswith("~") and path != "~" and not path.startswith("~/")
-        ):
-            account = None
+        username, _, host = authority.rpartition("@")
+        if _ssh_uses_login_home(path):
+            account = username
     path = path.strip("/").removesuffix(".git")
     host = host.lower()
-    if account and not (account == "git" and host in {"github.com", "gitlab.com", "bitbucket.org"}):
+    hosted = host in {"github.com", "gitlab.com", "bitbucket.org"}
+    if account is not None and not (hosted and account in ("", "git")):
         host = f"{account}@{host}"
     return (host, path) if host and path else None
 
