@@ -756,6 +756,11 @@ test.each([
       OPENSSL_CONF_INCLUDE: directory,
       OPENSSL_MODULES: directory,
       OPENSSL_ENGINES: directory,
+      TCL_LIBRARY: directory,
+      TK_LIBRARY: directory,
+      TCLLIBPATH: directory,
+      TCL8_6_TM_PATH: directory,
+      "TCL8.6_TM_PATH": directory,
     };
     await writeFile(startup.OPENSSL_CONF, "");
     const script =

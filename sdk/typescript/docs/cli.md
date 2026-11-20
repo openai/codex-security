@@ -3096,6 +3096,8 @@ On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
 `OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
 OpenSSL configuration and module directories. Configure required cryptographic
 policies in those defaults.
+For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
+versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.
