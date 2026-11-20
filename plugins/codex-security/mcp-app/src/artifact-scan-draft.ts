@@ -3338,29 +3338,25 @@ function compareFindingStrength(
 }
 
 function findingEvidenceStrength(finding: JsonObject): number {
-  const catalog = new Map<string, JsonObject>();
+  const seenIds = new Set<string>();
+  const seenCodes = new Set<string>();
   for (const field of ["codeEvidence", "code_evidence"]) {
     const evidence = finding[field];
     if (!Array.isArray(evidence)) continue;
-    for (const item of evidence)
+    for (const item of evidence) {
       if (
-        isObject(item) &&
-        typeof item.id === "string" &&
-        item.id &&
-        !catalog.has(item.id)
+        !isObject(item) ||
+        typeof item.id !== "string" ||
+        !item.id ||
+        seenIds.has(item.id)
       )
-        catalog.set(item.id, item);
+        continue;
+      seenIds.add(item.id);
+      if (typeof item.code === "string" && item.code.trim())
+        seenCodes.add(item.code);
+    }
   }
-  const evidence = [...catalog.values()];
-  const seenIds = new Set(
-    evidence.map((item) => item.id as string).filter((id) => id.trim()),
-  );
-  const seenCodes = new Set(
-    evidence.flatMap((item) =>
-      typeof item.code === "string" && item.code.trim() ? [item.code] : [],
-    ),
-  );
-  let strength = evidence.length;
+  let strength = seenIds.size;
   for (const field of ["rootCause", "root_cause"]) {
     const section = finding[field];
     if (!isObject(section)) continue;
@@ -3488,6 +3484,11 @@ function coalesceCandidateObservations(
       if (!qualified) observation.indexes.push(index);
     }
   }
+  function matchesContent(first: DraftFinding) {
+    const expected = observationContent(first);
+    return (index: number) =>
+      isDeepStrictEqual(expected, observationContent(raw[index]!));
+  }
   const identified = assignFindingIdentities(raw, mode);
   const result: (DraftFinding | undefined)[] = [
     ...(published ? raw : identified),
@@ -3506,18 +3507,11 @@ function coalesceCandidateObservations(
       const other = matches[0]!;
       if (!other.indexes.length) continue;
       const first = raw[item.indexes[0]!]!;
-      if (
-        !item.candidate &&
-        !other.indexes.some((index) =>
-          item.indexes.every((unknown) =>
-            isDeepStrictEqual(
-              observationContent(raw[unknown]!),
-              observationContent(raw[index]!),
-            ),
-          ),
-        )
-      )
-        continue;
+      if (!item.candidate) {
+        const agrees = matchesContent(first);
+        if (!item.indexes.every(agrees) || !other.indexes.some(agrees))
+          continue;
+      }
       const strengthChanged = [...item.indexes, ...other.indexes].some(
         (index) => compareFindingStrength(raw[index]!, first) !== 0,
       );
@@ -3545,13 +3539,7 @@ function coalesceCandidateObservations(
       const first = selected[0]!;
       if (
         (!candidate || selected !== indexes) &&
-        selected.some(
-          (index) =>
-            !isDeepStrictEqual(
-              observationContent(raw[first]!),
-              observationContent(raw[index]!),
-            ),
-        )
+        !selected.every(matchesContent(raw[first]!))
       )
         continue;
       if (explicit.length) {

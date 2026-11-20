@@ -64,6 +64,39 @@ const findingFor = (candidateId: string): FixtureFinding => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+for (const mode of ["standard", "diff"] as const) {
+  for (const priorReport of [undefined, "report-a", "no-history"] as const) {
+    test(`${mode} report-backed siblings after ${priorReport ?? "unqualified saved candidate"}`, async (t) => {
+      const f = await fixture(t, mode);
+      const candidateId = "candidate-shared";
+      const row = (reportId?: string) => {
+        const finding = findingFor(candidateId);
+        finding.provenance.workerId = "discovery-worker-1";
+        finding.extensions = { candidateId, ...(reportId ? { reportId } : {}) };
+        return finding;
+      };
+      if (priorReport !== "no-history")
+        await f.writeFindings([row(priorReport)]);
+      await f.writeFindings([row("report-a"), row("report-b")]);
+      const saved = (await readJson(f.root, "findings.json")).findings as {
+        extensions: Record<string, unknown>;
+        identity: unknown;
+      }[];
+      const rows = saved.filter((row) => row.extensions.reportId);
+      assert.equal(
+        rows.length,
+        2,
+        "both report-backed rows remain represented",
+      );
+      assert.equal(
+        new Set(rows.map((row) => JSON.stringify(row.identity))).size,
+        2,
+        "distinct stable report-backed instances stay distinct",
+      );
+    });
+  }
+}
+
 for (const uncertain of [
   "same observation",
   "authored instance",

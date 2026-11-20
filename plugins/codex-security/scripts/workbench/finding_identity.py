@@ -132,8 +132,15 @@ def bind_saved_candidate_identities(
             ],
         }
 
-    def same_observation_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        return same_raw_value(observation_content(left), observation_content(right))
+    def contents_agree(rows, known=None):
+        expected = observation_content(rows[0][1])
+
+        def matches(row):
+            return same_raw_value(expected, observation_content(row[1]))
+
+        return all(matches(row) for row in rows[1:]) and (
+            known is None or any(matches(row) for row in known)
+        )
 
     exact = {}
     for source, raw, owner in observations.values():
@@ -183,9 +190,7 @@ def bind_saved_candidate_identities(
             other = groups[matches[0]]
             if not rows or not other:
                 continue
-            if candidate is None and not any(
-                all(same_observation_content(raw, known) for _, raw in rows) for _, known in other
-            ):
+            if candidate is None and not contents_agree(rows, other):
                 continue
             strengths = {_finding_strength(value) for _, value in (*rows, *other)}
             if len(strengths) > 1 or (
@@ -196,16 +201,13 @@ def bind_saved_candidate_identities(
             if len(rows) < 2:
                 continue
             explicit = [(index, value) for index, value in rows if "identity" in value]
-            if len({_semantic_identity_key(row) for _, row in explicit}) > 1:
+            conflicting = len({_semantic_identity_key(row) for _, row in explicit}) > 1
+            if conflicting:
                 rows = [(index, value) for index, value in rows if "identity" not in value]
                 if not candidate or len(rows) < 2:
                     continue
                 explicit = []
-                if any(not same_observation_content(raw, rows[0][1]) for _, raw in rows[1:]):
-                    continue
-            if not candidate and any(
-                not same_observation_content(raw, rows[0][1]) for _, raw in rows[1:]
-            ):
+            if (conflicting or not candidate) and not contents_agree(rows):
                 continue
             known = [(index, raw) for index, raw in rows if _identity_candidate(raw) == candidate]
             first, _ = min(explicit or known or rows, key=lambda item: item[0])
