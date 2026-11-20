@@ -95,9 +95,13 @@ test("patch discovery does not execute a workspace fsmonitor rewritten by the mo
   expect(await readFile(effect, "utf8")).toBe("model-rewritten");
 });
 
-test.each(["scan", "patch"])(
-  "%s publication preflight and commit do not execute a checkout's fsmonitor",
-  async (command) => {
+test.each([
+  ["scan", "checkout"],
+  ["patch", "checkout"],
+  ["patch", "inherited"],
+])(
+  "%s publication skips the %s fsmonitor during preflight and commit",
+  async (command, source) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
     const support = await fixtures.create("patch-publication-fsmonitor-");
     const effect = join(support, "callback");
@@ -108,11 +112,15 @@ test.each(["scan", "patch"])(
     git("add", "monitor.cjs");
     git("commit", "-m", "Synthetic filesystem monitor");
     const quoted = (path: string) => JSON.stringify(path.replaceAll("\\", "/"));
-    git(
-      "config",
-      "core.fsmonitor",
-      `${quoted(process.execPath)} ${quoted(hook)}`,
-    );
+    const monitor = `${quoted(process.execPath)} ${quoted(hook)}`;
+    git("config", "core.fsmonitor", monitor);
+    const environment =
+      source === "inherited"
+        ? {
+            GIT_CONFIG_PARAMETERS: `'core.fsmonitor'='${monitor.replaceAll("'", "'\\''")}'`,
+            GIT_ALLOW_PROTOCOL: "file",
+          }
+        : {};
     git("status", "--porcelain");
     expect(await readFile(effect, "utf8")).toBe("preflight");
     await rm(effect);
@@ -123,6 +131,7 @@ test.each(["scan", "patch"])(
         : ["scan", directory, "--patch", "--create-pr", "--json"],
       {
         currentDirectory: directory,
+        environment,
         result: resultWithFindings(["high"]),
         onCodex: async (args, output) => {
           beforeTurn = await readFile(effect, "utf8").catch(() => undefined);
@@ -135,7 +144,10 @@ test.each(["scan", "patch"])(
         },
         onRepositoryCommand: (tool, args, cwd, options) =>
           tool === "git"
-            ? runGitRepositoryCommand(tool, args, cwd, options)
+            ? runGitRepositoryCommand(tool, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              })
             : args[1] === "list"
               ? "[]"
               : "https://github.example.test/example/repository/pull/1",

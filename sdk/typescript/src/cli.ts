@@ -3917,18 +3917,23 @@ export async function main(
           [`GIT_CONFIG_KEY_${count}`]: "core.fsmonitor",
           [`GIT_CONFIG_VALUE_${count}`]: "false",
         };
+        let parameters = currentGitParameters(
+          options.environment,
+          parentDependencies.environment,
+        );
         if (unavailableFilters.length && publicationHookCommand(args)) {
           // Only Git knows which drivers are selected, including after a patch
           // changes attributes or switches branches. Fail if one actually runs.
-          options.environment["GIT_CONFIG_PARAMETERS"] = patchFilterParameters(
+          parameters = patchFilterParameters(
             unavailableFilters,
             true,
-            currentGitParameters(
-              options.environment,
-              parentDependencies.environment,
-            ),
+            parameters,
           );
         }
+        // Git applies inherited -c settings after numbered configuration.
+        if (parameters)
+          options.environment["GIT_CONFIG_PARAMETERS"] =
+            parameters + " 'core.fsmonitor'='false'";
       }
       options = {
         ...options,
