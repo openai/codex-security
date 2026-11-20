@@ -15,7 +15,7 @@ import {
   type OsvProcessResult,
   type OsvScanResult,
 } from "../src/sca-osv.js";
-import type { ScaInput } from "../src/sca-types.js";
+import type { DependencyScanProgress, ScaInput } from "../src/index.js";
 import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -115,6 +115,117 @@ async function scanFixture(
     },
   );
 }
+
+async function matchingFixture() {
+  const { repository, output, root } = await setup();
+  await mkdir(join(repository, "nested"));
+  await writeFile(join(repository, "package-lock.json"), npmLock());
+  await writeFile(join(repository, "nested", "package-lock.json"), npmLock());
+  const events: DependencyScanProgress[] = [];
+  const scan = (dependencies: Parameters<typeof runOsvScan>[1]) =>
+    runOsvScan(
+      {
+        repositoryPath: repository,
+        outputDir: output,
+        onProgress: (event) => events.push(event),
+      },
+      dependencies,
+    );
+  return { events, scan, root };
+}
+
+test("matching progress counts finished invocations, including failures, independently of input selection", async () => {
+  const { events, scan } = await matchingFixture();
+  const observedDuringProcess: DependencyScanProgress[] = [];
+  const result = await scan({
+    executable: process.execPath,
+    runProcess: async (_executable, argv) => {
+      if (argv[0] === "--version")
+        return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+      observedDuringProcess.push(events.at(-1)!);
+      return observedDuringProcess.length === 1
+        ? {
+            stdout: JSON.stringify(
+              rawOutput(argv.at(-1)!, [advisory("SYNTHETIC-1")]),
+            ),
+            stderr: "",
+            exitCode: 1,
+          }
+        : { stdout: "", stderr: "synthetic scanner failure", exitCode: 2 };
+    },
+  });
+  expect(events[0]).toEqual({ phase: "discovering" });
+  expect(observedDuringProcess).toHaveLength(2);
+  for (const [index, event] of observedDuringProcess.entries())
+    expect(event).toMatchObject({
+      phase: "matching",
+      inputsTotal: 2,
+      inputsProcessed: index,
+      inputsFailed: 0,
+      currentInput: expect.any(String),
+    });
+  expect(events.at(-1)).toEqual({
+    phase: "matching",
+    inputsTotal: 2,
+    inputsProcessed: 2,
+    inputsFailed: 1,
+    currentInput: null,
+    components: result.components.length,
+    matches: result.matches.length,
+  });
+  expect(result.matches).toHaveLength(1);
+  expect(result.status).toBe("partial");
+});
+
+test.each(["throw", "reject", "pending"] as const)(
+  "OSV work continues when its progress observer is %s",
+  async (behavior) => {
+    const { repository, output } = await setup();
+    const lockfile = join(repository, "package-lock.json");
+    await writeFile(lockfile, npmLock());
+    const result = await runOsvScan(
+      {
+        repositoryPath: repository,
+        outputDir: output,
+        onProgress: () => {
+          if (behavior === "throw") throw new Error("progress unavailable");
+          if (behavior === "reject")
+            return Promise.reject(new Error("progress unavailable"));
+          return new Promise<void>(() => {});
+        },
+      },
+      scannerReturning(rawOutput(lockfile)),
+    );
+    expect(result.status).toBe("completed");
+    expect(result.components).toHaveLength(1);
+  },
+);
+
+test.each(["missing", "version", "invocation"] as const)(
+  "matching progress includes inputs that fail before processing: %s",
+  async (failure) => {
+    const { events, scan, root } = await matchingFixture();
+    const result = await scan({
+      executable:
+        failure === "missing"
+          ? join(root, "missing-scanner")
+          : process.execPath,
+      runProcess: async (_executable, argv) => {
+        if (failure === "version" || argv[0] !== "--version")
+          throw new Error("synthetic scanner failure");
+        return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(events.at(-1)).toMatchObject({
+      phase: "matching",
+      inputsTotal: 2,
+      inputsProcessed: failure === "invocation" ? 1 : 0,
+      inputsFailed: 2,
+      currentInput: null,
+    });
+  },
+);
 
 function git(cwd: string, ...args: string[]) {
   return execFile("git", [
@@ -1119,8 +1230,15 @@ describe("SCA input selection", () => {
         await symlink(outside, unsafeConfig);
       } else await mkdir(unsafeConfig);
       let scannerCalls = 0;
+      const progress: DependencyScanProgress[] = [];
       const result = await runOsvScan(
-        { repositoryPath: repository, outputDir: output },
+        {
+          repositoryPath: repository,
+          outputDir: output,
+          onProgress: (event) => {
+            progress.push(event);
+          },
+        },
         {
           executable: process.execPath,
           runProcess: async () => {
@@ -1162,6 +1280,15 @@ describe("SCA input selection", () => {
       expect(saved.scanner.invocations).toEqual([]);
       expect(saved.components).toEqual([]);
       expect(saved.coverage.limitations.length).toBeGreaterThan(0);
+      expect(progress.at(-1)).toEqual({
+        phase: "matching",
+        inputsTotal: 2,
+        inputsProcessed: 0,
+        inputsFailed: 2,
+        currentInput: null,
+        components: 0,
+        matches: 0,
+      });
     },
   );
 

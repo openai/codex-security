@@ -7,6 +7,8 @@ import {
   type OsvScanResult,
 } from "./sca-osv.js";
 import {
+  assessmentProgress,
+  type DependencyScanProgress,
   dependencyScanResult,
   dependencyRepositoryDirty,
   saveDependencyScan,
@@ -496,9 +498,19 @@ export interface ScanOptions extends ScanSettings {
 
 export interface DependencyScanOptions extends Pick<
   ScanOptions,
-  "auth" | "outputDir" | "signal" | "maxCostUsd"
+  | "auth"
+  | "outputDir"
+  | "signal"
+  | "maxCostUsd"
+  | "onActivity"
+  | "onCost"
+  | "onUsage"
+  | "onOutputDirReady"
+  | "onObserverError"
 > {
   repositoryPath: string;
+  /** Best-effort observations; callbacks are not awaited and cannot gate work. */
+  onProgress?: (progress: DependencyScanProgress) => void;
 }
 export type DependencyScanResult = ScaResult;
 
@@ -1060,6 +1072,11 @@ export class CodexSecurity {
   async #scanDependencies(
     options: DependencyScanOptions,
   ): Promise<DependencyScanResult> {
+    const { onProgress, ...scanOptions } = options;
+    const reportProgress = onProgress && notifyObserver(options, "onProgress");
+    const onActivity =
+      options.onActivity && notifyObserver(options, "onActivity");
+    const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
     const signal = AbortSignal.any([
       this.#abortController.signal,
@@ -1070,9 +1087,10 @@ export class CodexSecurity {
     let result: ScaResult | undefined;
     try {
       throwIfAborted(signal);
+      reportProgress?.({ phase: "preparing" });
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
-        options,
+        scanOptions,
         signal,
       );
       const temporaryRoot = await realpath(tmpdir());
@@ -1102,6 +1120,7 @@ export class CodexSecurity {
       );
       result.diagnostics.push("Dependency inventory has not started.");
       await saveDependencyScan(result);
+      notifyObserver(options, "onOutputDirReady")(outputDir);
       let sourceWorkflow: FindingWorkflow | undefined;
       const snapshotSource = async (): Promise<JsonObject> => {
         if (this.#dependencies.sourceSnapshot !== undefined)
@@ -1156,6 +1175,7 @@ export class CodexSecurity {
           outputDir,
           environment: this.#dependencies.environment,
           signal,
+          onProgress: reportProgress,
         });
         result = dependencyScanResult(scan, repository, outputDir);
       } catch (error) {
@@ -1168,11 +1188,13 @@ export class CodexSecurity {
         }
         throw error;
       }
+      if (result.matches.length === 0) reportProgress?.({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
+        reportProgress?.({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
         const auth =
           this.#dependencies.chooseDependencyAuthentication === undefined
@@ -1292,12 +1314,18 @@ export class CodexSecurity {
           repository: inputs.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
-          onCost: reportCost,
+          onCost: (cost, complete) => {
+            reportCost(cost, complete);
+            if (complete) onCost(cost, options.maxCostUsd);
+          },
+          onUsage: notifyObserver(options, "onUsage"),
           onError: reportTrackingError,
         });
+
         try {
           for (const [index, match] of result.matches.entries()) {
             throwIfAborted(signal, outputDir);
+            reportProgress?.(assessmentProgress(result, match));
             const thread = codex.startThread(threadOptions);
             let assessment: ScaAssessment;
             try {
@@ -1318,6 +1346,15 @@ export class CodexSecurity {
                     tracker.recordUsage(null, event["thread_id"]);
                     tracker.start(event["thread_id"]);
                   }
+                  if (onActivity)
+                    for (const activity of scanActivitiesFromEvent(
+                      event,
+                      inputs.repository,
+                    ))
+                      onActivity({
+                        ...activity,
+                        id: `${match.id}:${activity.id}`,
+                      });
                   throwIfAborted(signal, outputDir);
                   // The SDK can continue draining its stream after the terminal event.
                   if (
@@ -1371,6 +1408,7 @@ export class CodexSecurity {
             result.assessments[index] = assessment;
             await saveDependencyScan(result);
             finishCheckpoint();
+            reportProgress?.(assessmentProgress(result, null));
             const snapshot = await tracker.refresh().catch((error: unknown) => {
               reportTrackingError(error);
               if (options.maxCostUsd !== undefined) throw error;
@@ -1411,8 +1449,11 @@ export class CodexSecurity {
         }
         await saveDependencyScan(result);
         throwIfAborted(signal, outputDir);
+        reportProgress?.(assessmentProgress(result, null));
+        reportProgress?.({ phase: "saving" });
         return result;
       }
+      reportProgress?.({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       return result;
@@ -1429,6 +1470,7 @@ export class CodexSecurity {
             "Dependency scan interrupted; completed scanner facts are retained.",
           );
         } else result.diagnostics.push(errorMessage(error));
+        reportProgress?.({ phase: "saving" });
         await saveDependencyScan(result);
       }
       throwIfAborted(signal, outputDir);
@@ -6613,13 +6655,7 @@ export async function runScanEvents(
         }
         options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(
-            {
-              onProgress: (update) => options.onProgress?.(update, { event }),
-              onObserverError: options.onObserverError,
-            },
-            "onProgress",
-          )(progress);
+          notifyObserver(options, "onProgress")(progress, { event });
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
@@ -7584,11 +7620,12 @@ function observeSettledScan(
   }
 }
 
-function notifyObserver<Name extends ScanObserverName>(
-  options: Pick<ScanOptions & SecurityPolicyOptions, Name | "onObserverError">,
-  observerName: Name,
-) {
-  type Arguments = Parameters<NonNullable<(typeof options)[Name]>>;
+function notifyObserver<
+  Name extends ScanObserverName,
+  Options extends Pick<ScanOptions, "onObserverError"> &
+    Partial<Record<Name, (...args: never[]) => void>>,
+>(options: Options, observerName: Name) {
+  type Arguments = Parameters<NonNullable<Options[Name]>>;
   const observer = options[observerName] as
     ((...args: Arguments) => void) | undefined;
   const onObserverError = options.onObserverError;
