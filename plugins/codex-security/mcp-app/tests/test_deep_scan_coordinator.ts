@@ -20,13 +20,18 @@ import type {
 } from "../src/deep-scan/types.js";
 import { after, mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmod,
+  lstat,
   mkdir,
   readFile,
   readdir,
   realpath,
   rm,
+  symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -793,6 +798,53 @@ async function testGenericDiagnosticsPreserveMissingResultRetries() {
   }
 }
 
+function trackRetrySnapshot(executor: FakeExecutor) {
+  const savedTime = new Date("2020-01-02T03:04:05.000Z");
+  const contents = "Synthetic saved analysis.\n";
+  const noteName = "saved-analysis.txt";
+  const note = (dir: string) => path.join(dir, noteName);
+  const link = (dir: string) => path.join(dir, "analysis-link");
+  const blocked = (dir: string) => path.join(dir, "private-note");
+  const pipe = (dir: string) => path.join(dir, "worker.pipe");
+
+  async function assertSaved(dir: string) {
+    assert.equal(await readFile(note(dir), "utf8"), contents);
+    assert.equal((await lstat(note(dir))).mtimeMs, savedTime.getTime());
+    assert.ok((await lstat(link(dir))).isSymbolicLink());
+    assert.equal(await readFile(link(dir), "utf8"), contents);
+  }
+
+  const run = executor.run.bind(executor);
+  executor.run = async (request) => {
+    if (request.kind !== "discovery") return run(request);
+    const dir = request.workingDirectory;
+    if (request.resumeThreadId) {
+      await assertSaved(dir);
+    } else {
+      await writeFile(note(dir), contents);
+      await utimes(note(dir), savedTime, savedTime);
+      await writeFile(blocked(dir), contents);
+      await chmod(blocked(dir), 0);
+      await symlink(noteName, link(dir));
+      execFileSync("mkfifo", [pipe(dir)]);
+    }
+    return run(request);
+  };
+
+  return async (workspace: string, archive: string) => {
+    await assertSaved(workspace);
+    await assertSaved(archive);
+    const resumed = "Synthetic resumed analysis.\n";
+    await writeFile(note(workspace), resumed);
+    assert.equal(await readFile(link(workspace), "utf8"), resumed);
+    await assertSaved(archive);
+    if (process.getuid?.() !== 0)
+      await assert.rejects(lstat(blocked(archive)), { code: "ENOENT" });
+    assert.ok((await lstat(pipe(workspace))).isFIFO());
+    await assert.rejects(lstat(pipe(archive)), { code: "ENOENT" });
+  };
+}
+
 async function testMissingDiscoveryResultResumesExistingThread(
   withToolFailure = false,
 ) {
@@ -812,6 +864,10 @@ async function testMissingDiscoveryResultResumesExistingThread(
       : {}),
   });
   withCumulativeUsage(executor, fixture.run.workerUsageDirectory);
+  const checkSnapshot =
+    !withToolFailure && process.platform !== "win32"
+      ? trackRetrySnapshot(executor)
+      : undefined;
   const events: DeepScanLogEvent[] = [];
   const sleeps: number[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
@@ -856,6 +912,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
     1,
     "same-thread completion preserves its live workspace beside the retry snapshot",
   );
+  await checkSnapshot?.(workspace, attempt);
 }
 
 async function testInvalidArtifactsRetry() {

@@ -1147,7 +1147,6 @@ function inferSavedIds<T extends JsonObject>(
   snapshots: T[][],
   normalize: (rows: T[]) => T[],
   identity: (row: T) => JsonObject | undefined,
-  same: (left: JsonObject, right: JsonObject) => boolean = isDeepStrictEqual,
   originalId?: (rows: T[], index: number) => string | undefined,
 ) {
   const known: { id: string; content: JsonObject }[] = [];
@@ -1169,7 +1168,7 @@ function inferSavedIds<T extends JsonObject>(
       const content = identity(row);
       if (!content) continue;
       const matches = (saved: (typeof known)[number]) =>
-        !reserved.has(saved.id) && same(saved.content, content);
+        !reserved.has(saved.id) && isDeepStrictEqual(saved.content, content);
       const preferred = originalId?.(rows, index);
       const matching =
         (preferred === undefined
@@ -1196,21 +1195,21 @@ async function mergeSavedDraft(
   input: ScanDraftInput,
   result: ScanDraftInput,
   savedSources: SavedScanDraft[],
-  publication?: {
-    sameSavedSurface: (left: JsonObject, right: JsonObject) => boolean;
+  {
+    sameSavedSurface,
+    checkpoint,
+    surfaceContent = (row) => ({ ...row, receiptRefs: row.receiptRefs ?? [] }),
+    previouslyAccepted = false,
+  }: {
+    sameSavedSurface?: (left: JsonObject, right: JsonObject) => boolean;
     checkpoint?: ArtifactContext;
+    surfaceContent?: (row: JsonObject) => JsonObject | undefined;
+    previouslyAccepted?: boolean;
   },
-  sameSurface: (left: JsonObject, right: JsonObject) => boolean = (
-    left,
-    right,
-  ) =>
-    isDeepStrictEqual(
-      { ...left, receiptRefs: left.receiptRefs ?? [] },
-      { ...right, receiptRefs: right.receiptRefs ?? [] },
-    ),
-  previouslyAccepted = false,
 ) {
-  const preserveSurfaceIds = publication === undefined;
+  const preserveSurfaceIds = sameSavedSurface === undefined;
+  const sameSurface = (left: JsonObject, right: JsonObject) =>
+    matchesSavedCoverageSource(surfaceContent(right), surfaceContent(left));
   const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const surfaceIdentities = new Map(
@@ -1225,8 +1224,7 @@ async function mergeSavedDraft(
   inferSavedIds(
     drafts.map((draft) => draft.reviewState.surfaces),
     normalizeSurfaces,
-    ({ id: _id, ...row }) => ({ ...row, receiptRefs: row.receiptRefs ?? [] }),
-    sameSurface,
+    ({ id: _id, ...row }) => surfaceContent(row),
     (rows, index) => surfaceIdentities.get(rows)?.[index]?.id,
   );
   inferSavedIds(
@@ -1407,8 +1405,7 @@ async function mergeSavedDraft(
     previouslyAccepted,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  if (publication?.checkpoint)
-    await saveScanDraftCheckpoint(publication.checkpoint, input, false);
+  if (checkpoint) await saveScanDraftCheckpoint(checkpoint, input, false);
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.reviewState.deferred;
     if (
@@ -1444,13 +1441,13 @@ async function mergeSavedDraft(
 
   for (const source of sources) {
     // Only a writer may assign new receipt ownership from another saved draft.
-    if (publication)
+    if (sameSavedSurface)
       retainSavedReceiptOwnership(
         result,
         source,
         ambiguousDeferredIds,
         resolvedSurfaces,
-        publication.sameSavedSurface,
+        sameSavedSurface,
       );
     const deferred = result.reviewState.deferred as JsonObject[];
     const dispositions = [
@@ -1966,28 +1963,16 @@ export async function reconcileAcceptedWorkerHistory(
       });
     }
   }
-  const merged = await mergeSavedDraft(
-    input,
-    initial,
-    savedSources,
-    undefined,
-    (left, right) =>
-      matchesSavedCoverageSource(
-        comparableSavedCoverageSource(
-          "surfaces",
-          right,
-          `${workerPrefix}output`,
-          receiptDigests,
-        ),
-        comparableSavedCoverageSource(
-          "surfaces",
-          left,
-          `${workerPrefix}output`,
-          receiptDigests,
-        ),
+  const merged = await mergeSavedDraft(input, initial, savedSources, {
+    surfaceContent: (row) =>
+      comparableSavedCoverageSource(
+        "surfaces",
+        row,
+        `${workerPrefix}output`,
+        receiptDigests,
       ),
     previouslyAccepted,
-  );
+  });
   await reconcileSavedReceipts(context, merged, { receiptDigests });
   const { result } = merged;
   result.findings = workerFindingsWithinScope(context, result.findings);
