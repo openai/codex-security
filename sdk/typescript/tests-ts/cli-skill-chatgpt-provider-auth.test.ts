@@ -136,6 +136,36 @@ describe("skill authentication at the subprocess boundary", () => {
     await rm(stateDirectory, { recursive: true, force: true });
   });
 
+  test.each([
+    [
+      "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+      1,
+    ],
+    ["Workspace routing discovery unauthorized (401)", 0],
+  ] as const)(
+    "patch handles a stored account lookup failure: %s",
+    async (detail, status) => {
+      const result = await runProviderSkill(stateDirectory, {
+        auth: "chatgpt",
+        overrides: [],
+        storedCredentials: true,
+        environment: { SYNTHETIC_ACCOUNT_ERROR: detail },
+      });
+      expect(
+        result.requests.find((request) => request.method === "account/read")
+          ?.params,
+      ).toEqual({ refreshToken: false });
+      expect(
+        result.requests.some((request) => request.method === "thread/start"),
+      ).toBe(status === 0);
+      expect(result.status, result.stderr).toBe(status);
+      if (status === 1) {
+        expect(result.stderr).toContain("codex-security login");
+        expect(result.stderr.split(detail)).toHaveLength(2);
+      }
+    },
+  );
+
   // Each command/config source still launches Codex with stored credentials.
   // Include both native credential forms together to verify neither leaks.
   test.each(commandSources)(
@@ -153,14 +183,6 @@ describe("skill authentication at the subprocess boundary", () => {
         storedCredentials: true,
       });
       expect(result.status, result.stderr).toBe(0);
-      if (command === "patch") {
-        expect(result.requests).toContainEqual({
-          id: "patch-account",
-          method: "account/read",
-          params: { refreshToken: false },
-        });
-      }
-
       expect(result.launch.environment).toEqual({});
       expect(parseToml(result.launch.config)["model_providers"]).toEqual({
         gateway: { ...providerConfig, requires_openai_auth: true },

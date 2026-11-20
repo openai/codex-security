@@ -12,65 +12,6 @@ import { writeCodexConfig } from "../src/config.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
-test.each(["refused", "unavailable", "missing", "authenticated", "apiKey"])(
-  "checks patch credentials before starting a thread: %s",
-  async (state) => {
-    const requests: {
-      id?: string | number;
-      method: string;
-      params?: unknown;
-    }[] = [];
-    const input = new Writable({
-      write(chunk, _encoding, done) {
-        requests.push(JSON.parse(chunk));
-        done();
-      },
-    });
-    async function* replies() {
-      yield JSON.stringify({ id: 1, result: {} }) + "\n";
-      yield JSON.stringify({
-        id: "patch-account",
-        ...(state === "refused" || state === "unavailable"
-          ? {
-              error: {
-                message: state === "refused" ? "Unauthorized" : "HTTP 503",
-              },
-            }
-          : {
-              result: {
-                account:
-                  state === "missing"
-                    ? null
-                    : { type: state === "apiKey" ? "apiKey" : "chatgpt" },
-              },
-            }),
-      }) + "\n";
-    }
-    const result = await readSkillCommandOutput(replies(), {
-      input,
-      checkPatchAccount: true,
-      prompt: "fixture",
-      threadSource: "security_remediation",
-    });
-    expect(requests).toContainEqual({
-      id: "patch-account",
-      method: "account/read",
-      params: { refreshToken: false },
-    });
-    expect(requests.some((r) => r.method === "config/read")).toBe(
-      state !== "refused",
-    );
-    if (state === "refused")
-      expect(result.error).toContain("retry the same patch");
-    if (state === "refused")
-      expect(result.accountDiagnostic).toContain("Unauthorized");
-    if (state === "unavailable")
-      expect(result.accountDiagnostic).toContain("503");
-    if (state === "missing")
-      expect(result.accountDiagnostic).toContain("login status");
-  },
-);
-
 test.each([
   [undefined, "patch"],
   ["untrusted", "patch"],
