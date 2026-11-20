@@ -166,6 +166,63 @@ def test_latest_scan_confirmation_uses_group_membership(
     assert finding["confirmedInLatestScan"] is False
 
 
+@pytest.mark.parametrize("same_target_match", [(0, 2), (2, 0)], ids=["legacy-root", "current-root"])
+def test_global_findings_split_linked_group(workbench_api, indexed_collections, same_target_match):
+    connection, targets = indexed_collections
+    legacy_target = stable_target_id(targets[0])
+    # Read saved generations after the original checkouts have been removed.
+    for target in targets:
+        target.rmdir()
+    replaced_scan = "00000000-0000-4000-8000-999999999999"
+    # A second generation keeps the first target's legacy scan in its own target group.
+    connection.execute(
+        "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, scope, "
+        "mode, scan_dir, status, phase, started_at, created_at, updated_at, repository_generation) "
+        "SELECT ?, workspace_id, target_id, target_path, target_revision, scope, mode, "
+        "scan_dir || '/replaced', status, phase, started_at, created_at, updated_at, "
+        "'synthetic-replaced-generation' FROM scans WHERE id = ?",
+        (replaced_scan, SCAN_IDS[0]),
+    )
+    connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (legacy_target, SCAN_IDS[2]))
+    connection.execute(
+        "UPDATE scans SET repository_generation = 'synthetic-linked-generation' WHERE id IN (?, ?)",
+        SCAN_IDS[1:],
+    )
+    connection.executemany(
+        "INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, "
+        "confidence, remediation, created_at) SELECT ?, finding_id, ?, title, "
+        "summary, severity, confidence, remediation, created_at FROM finding_occurrences "
+        "WHERE id = 'occurrence-2'",
+        [("occurrence-3", replaced_scan), ("unmatched", SCAN_IDS[0])],
+    )
+    # The legacy root bridges generations. Reversing the match gives a current
+    # root whose finding ID also belongs to the unmatched legacy occurrence.
+    scan_ids = [*SCAN_IDS, replaced_scan]
+    for before, after in [same_target_match, (0, 3), (2, 1)]:
+        connection.execute(
+            "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
+            (scan_ids[before], scan_ids[after]),
+        )
+        connection.execute(
+            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'same issue')",
+            (scan_ids[before], scan_ids[after], f"occurrence-{before}", f"occurrence-{after}"),
+        )
+    connection.executemany(
+        "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) "
+        "VALUES (?, 'closed', 'false_positive', 'Synthetic decision', '2026-08-01T00:00:00Z')",
+        [("occurrence-0",), ("occurrence-3",)],
+    )
+    findings = workbench_api["native_indexes"].list_global_findings(connection, query_args())[
+        "findings"
+    ]
+    assert {row["occurrenceId"]: (row["knownScanIds"], row["status"]) for row in findings} == {
+        "occurrence-0": ([SCAN_IDS[0]], "closed"),
+        "occurrence-2": (SCAN_IDS[1:], "open"),
+        "occurrence-3": ([replaced_scan], "closed"),
+        "unmatched": ([SCAN_IDS[0]], "open"),
+    }
+
+
 @pytest.mark.parametrize(
     ("completion", "status", "updated"),
     [
