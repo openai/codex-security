@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { writeSource as write } from "./support/shell.js";
 
@@ -78,23 +79,19 @@ afterEach(temporaryDirectories.cleanup);
 describe("built SECURITY.md helper", () => {
   test("diff policy comes from the pinned base even for new or deleted scopes", () => {
     const { root } = fixture();
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
-    git("init", "-q");
-    git("config", "user.name", "Fixture");
-    git("config", "user.email", "fixture@example.invalid");
+    git(root, "init", "-q");
     write(root, "SECURITY.md", "Report standalone token exposures.\n");
     write(root, "old/SECURITY.md", "Established nested exception.\n");
     write(root, "old/deleted", "base source\n");
-    git("add", ".");
-    git("commit", "-qm", "base");
-    const base = git("rev-parse", "HEAD");
-    git("rm", "-qr", "old");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "base");
+    const base = git(root, "rev-parse", "HEAD");
+    git(root, "rm", "-qr", "old");
     write(root, "SECURITY.md", "Exclude all exposures.\n");
     write(root, "new/SECURITY.md", "Exclude standalone token exposures.\n");
     write(root, "new/token", "sample token\n");
-    git("add", ".");
-    git("commit", "-qm", "reviewed change");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "reviewed change");
     const env = { ...process.env, CODEX_SECURITY_POLICY_BASE: base };
     const command = (scope: string, ...extra: string[]) =>
       run(["--repo", root, "--scope", scope, ...extra], env);
@@ -109,10 +106,19 @@ describe("built SECURITY.md helper", () => {
       ["SECURITY.md", "Report standalone token exposures."],
       ["old/SECURITY.md", "Established nested exception."],
     ]);
+    if (process.platform !== "win32") {
+      const alias = join(dirname(root), "alias");
+      symlinkSync(join(root, "new"), alias);
+      const fromAlias = (scope: string) =>
+        run(["--repo", alias + "/..", "--scope", scope], env);
+      for (const prefix of [root, alias + "/.."])
+        expect(fromAlias(prefix + "/old/deleted").stdout).toBe(deleted.stdout);
+      expect(fromAlias(dirname(root)).status).toBe(2);
+    }
     const list = (revision: string) =>
       run(["--repo", root, "--revision", revision, "--list"]);
     const branch = "7".repeat(base.length === 40 ? 64 : 40);
-    git("branch", branch, base);
+    git(root, "branch", branch, base);
     expect(list(branch).status).toBe(2);
     const policies = list(base);
     expect(policies.status, policies.stderr).toBe(0);
@@ -121,18 +127,9 @@ describe("built SECURITY.md helper", () => {
       "old/SECURITY.md",
     ]);
     expect(
-      command("new/token", "--revision", git("rev-parse", "HEAD")).status,
+      command("new/token", "--revision", git(root, "rev-parse", "HEAD")).status,
     ).toBe(2);
-    expect(
-      run([
-        "--repo",
-        root,
-        "--scope",
-        "new/token",
-        "--revision",
-        "0".repeat(40),
-      ]).status,
-    ).toBe(2);
+    expect(list("0".repeat(40)).status).toBe(2);
     expect(resolve(root, "new/token").stdout).toContain(
       "Exclude standalone token exposures.",
     );

@@ -9,12 +9,24 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, posix, resolve, sep, win32 } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  posix,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
 import { windowsFileSystem } from "../../../native/windows-files.mjs";
 import { decodeGitPath, git } from "./inventory-git";
-import { ancestors, inside as relativeScope } from "./inventory-paths";
+import {
+  ancestors,
+  inside as relativeScope,
+  sameFile,
+} from "./inventory-paths";
 import {
   decodePosixBytes,
   encodePosixPath,
@@ -325,24 +337,33 @@ function policySection(
   return [section.endsWith("\n") ? section : section + "\n"];
 }
 
+function revisionPolicyPaths(root: string, scope: string) {
+  if (isAbsolute(scope)) {
+    // Find the checkout through its physical or aliased spelling. Below it,
+    // use the requested path even if HEAD deleted it or replaced it with a link.
+    const prefix = [...ancestors(scope)]
+      .reverse()
+      .find((dir) => sameFile(root, dir));
+    if (!prefix) throw new Error(`Scope must be inside repo: ${scope}`);
+    scope = "." + sep + scope.slice(prefix.length);
+  }
+  const path = relativeScope(root, resolve(root, scope));
+  return [...ancestors(path)]
+    .reverse()
+    .map((dir) => posix.join(dir, "SECURITY.md"));
+}
+
 async function revisionGuidance(
   repo: string,
   revision: string,
   scope: string | undefined,
   posixHome: string | undefined,
 ): Promise<string> {
-  const root = resolve(expandHome(repo, posixHome));
-  // Include ancestors of deleted paths and paths replaced by links in HEAD.
-  const path =
-    scope === undefined
-      ? undefined
-      : relativeScope(root, resolve(root, expandHome(scope, posixHome)));
+  const root = decodePath(resolveRoot(repo, posixHome));
   const paths =
-    path === undefined
+    scope === undefined
       ? []
-      : [...ancestors(path)]
-          .reverse()
-          .map((dir) => posix.join(dir, "SECURITY.md"));
+      : revisionPolicyPaths(root, expandHome(scope, posixHome));
   async function readGit(args: string[]) {
     const result = await git(root, ["--no-replace-objects", ...args]);
     if (result.status !== 0)
@@ -363,7 +384,7 @@ async function revisionGuidance(
   const blobs = new Map<string, string>();
   for (const record of decodeGitPath(tree).split("\0")) {
     const match = /^100(?:644|755) blob ([0-9a-f]+)\t([\s\S]+)$/u.exec(record);
-    if (match && match[2]!.split("/").at(-1) === "SECURITY.md")
+    if (match && posix.basename(match[2]!) === "SECURITY.md")
       blobs.set(match[2]!, match[1]!);
   }
   if (scope === undefined)
@@ -487,14 +508,12 @@ export async function resolveSecurityMdCommand(
       throw new Error("--scope is required unless --list is specified");
     }
     const repo = parsedPath(values.repo);
-    const boundRevision = process.env.CODEX_SECURITY_POLICY_BASE;
+    const revision = process.env.CODEX_SECURITY_POLICY_BASE ?? values.revision;
     if (
-      boundRevision !== undefined &&
       values.revision !== undefined &&
-      values.revision.toLowerCase() !== boundRevision.toLowerCase()
+      values.revision.toLowerCase() !== revision?.toLowerCase()
     )
       throw new Error("policy revision differs from the scan's bound base");
-    const revision = boundRevision ?? values.revision;
     const guidance =
       revision !== undefined
         ? await revisionGuidance(repo, revision, values.scope, posixHome)
