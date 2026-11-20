@@ -1933,6 +1933,7 @@ type PatchTransportFile = {
 interface PatchTransportAccess {
   readonly writable: Set<string>;
   readonly invocations: Map<string, string>;
+  readonly implicitLaunchers: Map<string, string | null>;
   readonly afterHook: Set<string>;
   readonly pushHooks: boolean;
   external: boolean;
@@ -3702,6 +3703,7 @@ export async function main(
   const patchTransportAccess: PatchTransportAccess = {
     writable: new Set(),
     invocations: new Map(),
+    implicitLaunchers: new Map(),
     afterHook: new Set(),
     get pushHooks() {
       const events = publicationHooks?.events;
@@ -12163,26 +12165,27 @@ async function patchTransportDirectories(
   };
 }
 
+function patchTransportChanged(kind: PatchTransportFile["kind"]) {
+  const label = kind === "executable" ? "executable" : "file";
+  return new CodexSecurityError(
+    `Patch transport ${label} changed before publication. Inspect the selected transport settings and files before resuming.`,
+  );
+}
+
 async function patchTransportIdentity(
   path: string,
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
   options: { updatedHostKeys?: boolean; writers?: PatchTransportAccess } = {},
 ): Promise<PatchTransportFile> {
-  const changed = () =>
-    new CodexSecurityError(
-      "Patch transport " +
-        (kind === "executable" ? "executable" : "file") +
-        " changed before publication. Inspect the selected transport settings and files before resuming.",
-    );
   const target = await realpath(path);
-  if (selected && target !== selected.target) throw changed();
+  if (selected && target !== selected.target) throw patchTransportChanged(kind);
   const entry = await stat(target, { bigint: true });
   if (options.writers && entry.nlink > 1n && entry.isFile())
     await requireProtectedTransportLinks(target, entry, options.writers);
   const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
   if (selected && !options.updatedHostKeys && selected.stamp !== stamp)
-    throw changed();
+    throw patchTransportChanged(kind);
   if (
     kind === "executable" ||
     (target === "/dev/null" && entry.isCharacterDevice())
@@ -12204,7 +12207,7 @@ async function patchTransportIdentity(
       !options.updatedHostKeys &&
       selected.digest !== digest
     )
-      throw changed();
+      throw patchTransportChanged(kind);
     return { target, stamp, kind, digest };
   } finally {
     await file.close();
@@ -12401,13 +12404,21 @@ async function inspectPatchGitExecutable(
       gitTransportDirectory: transportDirectory,
     },
   );
+  const access = dependencies.patchTransportAccess;
   if (implicit) {
+    // A retargeted search directory can select a new launcher while the file
+    // bound during ls-remote remains intact.
+    const launcher = result.gitTransport?.launcher ?? null;
+    const previous = access?.implicitLaunchers.get(command);
+    if (previous !== undefined && previous !== launcher)
+      throw patchTransportChanged("executable");
+    access?.implicitLaunchers.set(command, launcher);
     // Git searches for its child by name. An absolute replacement command
     // cannot pin that lookup: a hook can replace an intermediate link or
     // install an earlier candidate in any writable search directory.
     const resolveHostPath = await trustedHostPathResolver(transportDirectory, [
       ...protectedRoots,
-      ...(dependencies.patchTransportAccess?.writable ?? []),
+      ...(access?.writable ?? []),
     ]);
     const windows = process.platform === "win32";
     const names = windows ? [command + ".exe", command] : [command];
@@ -12422,8 +12433,7 @@ async function inspectPatchGitExecutable(
         // chmod through a writable hard link.
         if ((await stat(physical).catch(() => undefined))?.isFile()) {
           await bindPatchTransportFile(physical, "executable", dependencies);
-          if (afterHook)
-            dependencies.patchTransportAccess?.afterHook.add(physical);
+          if (afterHook) access?.afterHook.add(physical);
         }
       }
     }
@@ -12431,13 +12441,10 @@ async function inspectPatchGitExecutable(
   if (!result.executable || !result.gitTransport) return result;
   const { launcher, target } = result.gitTransport;
   await bindPatchTransportFile(launcher, "executable", dependencies);
-  if (afterHook) dependencies.patchTransportAccess?.afterHook.add(launcher);
+  if (afterHook) access?.afterHook.add(launcher);
   const selected = dependencies.patchTransportFiles?.get(launcher);
   if (selected && selected.target !== target)
-    throw new CodexSecurityError(
-      "Patch transport executable changed before publication. Inspect the selected transport settings and files before resuming.",
-    );
-  const access = dependencies.patchTransportAccess;
+    throw patchTransportChanged("executable");
   requireStablePatchTransportTarget(target, access);
   if (
     launcher !== target &&

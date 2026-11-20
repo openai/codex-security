@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { link, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  link,
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter, join, relative } from "node:path";
 import {
   publicationRepository,
@@ -78,10 +87,21 @@ test.each(["compiled exec directory", "config separator in executable path"])(
   },
 );
 
-test("hook-free publication binds the native HTTPS helper before the patch turn", async () => {
+test("hook-free publication rejects a rewritten native HTTPS helper", () =>
+  checkNativeHttpsHelper("hard link"));
+test("hook-free publication rejects a retargeted HTTPS helper search directory", () =>
+  checkNativeHttpsHelper("directory"));
+
+async function checkNativeHttpsHelper(change: "hard link" | "directory") {
   const { directory, git } = await publicationRepository(fixtures);
   const tools = await fixtures.create("patch-https-helper-");
-  const helper = join(tools, "git-remote-https");
+  const original = join(tools, "original");
+  const selected = join(tools, "selected");
+  const alternate = join(tools, "alternate");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await mkdir(original);
+  await symlink(original, selected, linkType);
+  const helper = join(original, "git-remote-https");
   const alias = join(directory, "launcher");
   const marker = join(tools, "invoked");
   // Answer the remote-helper protocol with an empty ref list for ls-remote.
@@ -98,7 +118,12 @@ done
 `,
     { mode: 0o700 },
   );
-  await link(helper, alias);
+  if (change === "directory") {
+    await mkdir(alternate);
+    const other = join(alternate, "git-remote-https");
+    await copyFile(helper, other);
+    await link(other, alias);
+  } else await link(helper, alias);
   git("add", "launcher");
   git("commit", "-m", "Add synthetic launcher");
   const host = "127.0.0.1:1";
@@ -106,7 +131,7 @@ done
   const environment = {
     GIT_CONFIG_GLOBAL: join(tools, "gitconfig"),
     GIT_CONFIG_NOSYSTEM: "1",
-    GIT_EXEC_PATH: relative(directory, tools),
+    GIT_EXEC_PATH: relative(directory, selected),
     GITLAB_HOST: host,
     PATCH_HELPER_LOG: marker,
   };
@@ -127,6 +152,10 @@ done
           alias,
           '#!/bin/sh\necho replacement > "$PATCH_HELPER_LOG"\nexit 1\n',
         );
+        if (change === "directory") {
+          await unlink(selected);
+          await symlink(alternate, selected, linkType);
+        }
         output?.stdout.write("Fixed and verified.");
         return 0;
       },
@@ -136,7 +165,7 @@ done
   expect(outcome.exitCode, outcome.stderr).toBe(2);
   expect(outcome.stderr).toContain("transport executable changed");
   expect(await readFile(marker, "utf8")).toBe("preflight\n");
-});
+}
 
 test("one native push uses the configured proxy for each destination", () =>
   checkNativePush("approved"));
