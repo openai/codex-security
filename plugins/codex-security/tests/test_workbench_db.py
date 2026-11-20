@@ -120,6 +120,28 @@ def budget_candidate(path: str = "app.py", **fields: Any) -> dict[str, Any]:
     }
 
 
+def test_cli_scan_exclusions_bind_scope_and_file_count(tmp_path: Path) -> None:
+    _, target = empty_target_paths(tmp_path)
+    (target / "examples").mkdir()
+    (target / "examples" / "vulnerable.py").write_text("fixture\n")
+    (target / "app.py").write_text("fixture\n")
+    db = load_script("workbench_db")
+    recipe = db.parse_scan_recipe(
+        json.dumps(
+            {
+                "config": {},
+                "mode": "deep",
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+                "excludePaths": ["examples"],
+            }
+        ),
+        target,
+    )
+    assert db.requested_exclude_paths({"recipe_json": json.dumps(recipe)}) == ["examples"]
+    assert db.scoped_regular_file_count(target, ["."], recipe["excludePaths"]) == 1
+
+
 def budget_scan_fixture(
     tmp_path: Path,
     *,

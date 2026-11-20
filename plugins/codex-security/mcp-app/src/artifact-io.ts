@@ -21,6 +21,7 @@ export interface ArtifactContext {
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
+  excludePaths?: readonly string[];
   filePaths?: readonly string[];
   pluginRoot?: string;
   pythonCommand?: string;
