@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { verifyClaimCitations, sourceReader } from "../grade.mjs";
+import { reviewerMode, verifyClaimCitations, sourceReader } from "../grade.mjs";
 
 // Each group needs one of its alternatives. A required absence across an entire
 // file may be covered by multiple verified ranges belonging to the same use.
@@ -236,7 +236,7 @@ export function gradeSnapshot(
   scenario,
   repo,
   commit,
-  grader = report.grader ?? "enabled",
+  reviewer = reviewerMode(report),
 ) {
   assert.equal(report.cve, scenario.cve);
   assert.equal(report.schemaVersion, 2);
@@ -244,9 +244,9 @@ export function gradeSnapshot(
     !Object.hasOwn(report, "status"),
     "v2 reports contain per-use verdicts",
   );
-  assert(["enabled", "disabled"].includes(grader), "unknown reviewer mode");
-  assert.equal(report.grader ?? "enabled", grader, "unexpected reviewer mode");
-  const reviewed = grader === "enabled";
+  assert(["enabled", "disabled"].includes(reviewer), "unknown reviewer mode");
+  assert.equal(reviewerMode(report), reviewer, "unexpected reviewer mode");
+  const reviewed = reviewer === "enabled";
   const read = sourceReader(repo, commit);
   const components =
     scenario.component === "glibc"

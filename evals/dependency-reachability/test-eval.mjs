@@ -173,7 +173,7 @@ test("the repository grader binds each service's verdict to its own checkout evi
   }
   assert.equal(gradeMixed(report, fixture).outcomes.length, 2);
   const disabled = structuredClone(report);
-  disabled.grader = "disabled";
+  disabled.reviewer = "disabled";
   for (const claim of disabled.claims) {
     claim.state = "unreviewed";
     delete claim.decision;
@@ -463,7 +463,7 @@ test("the evidence grader checks citations against the stdio server's original r
   }
   gradeEvidenceSource(report, compact, source);
   const disabled = structuredClone(report);
-  disabled.grader = "disabled";
+  disabled.reviewer = "disabled";
   disabled.claims[0].state = "unreviewed";
   delete disabled.claims[0].decision;
   gradeEvidenceSource(disabled, compact, source);
@@ -534,7 +534,7 @@ export async function prepare(scenario, repo, commitFixture) {
 export function validateSnapshot() { return { sites: 1 }; }
 export function gradeSnapshot(report, scenario, repo, sha, mode, { sourceReader }) {
   const { excerpt } = sourceReader(repo, sha)(report.citation);
-  return { pass: excerpt === scenario.revision && report.mode === mode };
+  return { pass: excerpt === scenario.revision && report.reviewer === mode };
 }
 `,
   );
@@ -545,7 +545,7 @@ export function gradeSnapshot(report, scenario, repo, sha, mode, { sourceReader 
     const dir = join(saved, mode, scenario.id);
     await mkdir(dir, { recursive: true });
     await jsonFile(join(dir, "report.json"), {
-      mode,
+      grader: mode,
       assumptions: [scenario.callerScope],
       citation: { commit, path: "handler", startLine: 1, endLine: 1 },
     });
@@ -585,7 +585,7 @@ export function gradeSnapshot(report, scenario, repo, sha, mode, { sourceReader 
     saved,
     "--case",
     scenario.id,
-    "--grader",
+    "--reviewer",
     "both",
     "--jobs",
     "2",
@@ -628,7 +628,7 @@ test("checkout provenance follows tracked entry points across worktrees", async 
   assert.equal(checkoutOf(scope, "directory").trackedDirty, true);
 });
 
-test("regrading a saved subset infers its cases and mode and can select one side", async () => {
+test("regrading a legacy manifest infers its cases and reviewer mode and can select one side", async () => {
   const saved = await mkdtemp(join(root, "paired-"));
   const selected = ["direct-links", "disabled-links", "queued-links"];
   const failure = {
@@ -678,13 +678,13 @@ test("regrading a saved subset infers its cases and mode and can select one side
   assert.deepEqual(all.checkouts, checkouts);
   assert.equal(all.regradeCheckouts.cli, null);
   assert.equal(all.model, "eval-model");
-  assert.equal(all.grader, "both");
+  assert.equal(all.reviewer, "both");
   assert.equal(all.comparison.enabled.executionErrors, 3);
   assert.equal(all.comparison.disabled.executionErrors, 3);
 
   const subset = await replay(
     "subset",
-    "--grader",
+    "--reviewer",
     "disabled",
     "--case",
     "direct-links",
@@ -693,10 +693,12 @@ test("regrading a saved subset infers its cases and mode and can select one side
   );
   assert.deepEqual(subset.selected, ["direct-links", "queued-links"]);
   const [stopped, missing] = subset.results;
+  assert.equal(stopped.reviewer, "disabled");
+  assert.equal(stopped.grader, undefined);
   assert.equal(stopped.error, failure.error);
   assert.equal(stopped.elapsedMs, failure.elapsedMs);
   assert.equal(stopped.exitCode, failure.exitCode);
-  assert.equal(missing.grader, "disabled");
+  assert.equal(missing.reviewer, "disabled");
   assert(
     missing.error.includes(
       join(saved, "disabled", "queued-links", "report.json"),
@@ -788,7 +790,7 @@ test("the optional suite grades a caller's actual route and config in the same a
     selectedEvidenceCorrect: false,
   });
   const disabled = structuredClone(report);
-  disabled.grader = "disabled";
+  disabled.reviewer = "disabled";
   disabled.claims[0].state = "unreviewed";
   delete disabled.claims[0].decision;
   const gradeDisabled = () =>
@@ -1005,7 +1007,7 @@ test("a reviewer-selected row verifies its linked reply, origin, exact selection
 
 test("pairs attempts by case, counts failures, and identifies changed inputs", () => {
   const enabled = {
-    grader: "enabled",
+    reviewer: "enabled",
     sourceSha: "same-source",
     advisorySha256: "same-advisory",
     elapsedMs: 200,
@@ -1015,7 +1017,7 @@ test("pairs attempts by case, counts failures, and identifies changed inputs", (
   };
   const disabled = {
     ...enabled,
-    grader: "disabled",
+    reviewer: "disabled",
     elapsedMs: 100,
     reviewBatches: 0,
   };

@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
 import { commitFixture, jsonFile, sha256 } from "./fixtures.mjs";
-import { sourceReader, verifyClaimCitations } from "./grade.mjs";
+import { reviewerMode, sourceReader, verifyClaimCitations } from "./grade.mjs";
 import { cases as pinnedCases, originalCases } from "./upstream/cases.mjs";
 import { checkoutOf } from "./upstream/checkout.mjs";
 import { compareRuns } from "./upstream/compare.mjs";
@@ -31,7 +31,7 @@ const { values } = parseArgs({
     suite: { type: "string" },
     case: { type: "string", multiple: true },
     cli: { type: "string" },
-    grader: { type: "string" },
+    reviewer: { type: "string" },
     "isolated-state": { type: "boolean" },
     jobs: { type: "string", default: "1" },
     "skill-baseline": { type: "boolean" },
@@ -63,12 +63,12 @@ const usage = `Usage: node upstream.mjs (--cache DIR | --case-module PATH) [--su
        (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
        Repeat --case ID to select several cases.
        --suite large-repo selects cases marked largeRepo: true across suites. Add --help to list their IDs.
-       With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled for live runs)
-       Regrading uses the cases and grader from results.json when available. Pass selectors to narrow the run.
+       With --cli or --grade-existing: [--reviewer enabled|disabled|both] (default enabled for live runs)
+       Regrading uses the cases and reviewer from results.json when available. Pass selectors to narrow the run.
        With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
        For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
 Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE
-Use --case-module PATH to load cases and their grader from a trusted local JavaScript module.`;
+Use --case-module PATH to load cases and their scoring function from a trusted local JavaScript module.`;
 const original = new Set(originalCases.map((c) => c.id));
 const matching = cases.filter((c) => {
   if (values.case && !values.case.includes(c.id)) return false;
@@ -82,6 +82,15 @@ if (values.help) {
   console.log(usage + "\nCases: " + matching.map((c) => c.id).join(", "));
   process.exit(0);
 }
+// Earlier saved manifests and reports called the reviewer setting "grader".
+function normalizeReviewer(record) {
+  if (record?.grader !== undefined) {
+    record.reviewer = reviewerMode(record);
+    delete record.grader;
+  }
+  return record;
+}
+
 const jobs = Number(values.jobs);
 const existing = values["grade-existing"] && resolve(values["grade-existing"]);
 let previous;
@@ -90,12 +99,14 @@ if (existing) {
     previous = JSON.parse(
       await readFile(join(existing, "results.json"), "utf8"),
     );
+    normalizeReviewer(previous);
+    previous?.results?.forEach(normalizeReviewer);
   } catch (error) {
     // A directory of reports can also be graded with explicit selectors.
     if (error.code !== "ENOENT") throw error;
   }
 }
-const grader = values.grader ?? previous?.grader ?? "enabled";
+const reviewer = values.reviewer ?? previous?.reviewer ?? "enabled";
 if (
   !Number.isSafeInteger(jobs) ||
   jobs < 1 ||
@@ -103,8 +114,8 @@ if (
     (!adapter.length || !values["skill-baseline"] || values.model)) ||
   Boolean(values.cache) === Boolean(caseModule) ||
   (caseModule && values["skill-baseline"]) ||
-  !["enabled", "disabled", "both"].includes(grader) ||
-  (values.grader && !values.cli && !existing) ||
+  !["enabled", "disabled", "both"].includes(reviewer) ||
+  (values.reviewer && !values.cli && !existing) ||
   (values["isolated-state"] && !values.cli) ||
   [
     values["prepare-only"],
@@ -115,11 +126,13 @@ if (
 )
   throw Error(usage);
 if (
-  previous?.grader &&
-  previous.grader !== "both" &&
-  previous.grader !== grader
+  previous?.reviewer &&
+  previous.reviewer !== "both" &&
+  previous.reviewer !== reviewer
 )
-  throw Error(`The saved run only contains grader ${previous.grader}.`);
+  throw Error(
+    `The saved run only contains results with the reviewer ${previous.reviewer}.`,
+  );
 
 const savedIds = previous?.selected ?? previous?.results?.map((r) => r.id);
 const selected = matching.filter((c) => !savedIds || savedIds.includes(c.id));
@@ -147,9 +160,9 @@ for (const signal of ["SIGINT", "SIGTERM"])
     abort.abort();
   });
 
-const paired = grader === "both";
-const pairedReports = (previous?.grader ?? grader) === "both";
-const modes = paired ? ["enabled", "disabled"] : [grader];
+const paired = reviewer === "both";
+const pairedReports = (previous?.reviewer ?? reviewer) === "both";
+const modes = paired ? ["enabled", "disabled"] : [reviewer];
 if (paired) {
   for (const mode of modes) await mkdir(join(out, mode), { mode: 0o700 });
 }
@@ -157,7 +170,7 @@ if (paired) {
 const tasks = selected.flatMap((scenario, index) =>
   (index % 2 ? modes.toReversed() : modes).map((mode) => ({
     scenario,
-    grader: cli || existing ? mode : undefined,
+    reviewer: cli || existing ? mode : undefined,
     path: paired ? join(mode, scenario.id) : scenario.id,
   })),
 );
@@ -206,7 +219,7 @@ async function checkRepository(task, repo, scratch, dest, result) {
   const progress = join(dest, "progress.jsonl");
   const reportFile = join(dest, "report.json");
   const args = ["check"];
-  if (task.grader === "disabled") args.push("--grader=disabled");
+  if (task.reviewer === "disabled") args.push("--reviewer=disabled");
   args.push(
     task.scenario.cve,
     "--config",
@@ -244,10 +257,10 @@ async function checkRepository(task, repo, scratch, dest, result) {
 async function readSavedReport(task, result) {
   const { id } = task.scenario;
   const dir = pairedReports
-    ? join(existing, task.grader, id)
+    ? join(existing, task.reviewer, id)
     : join(existing, id);
   const attempt = previous?.results?.find(
-    (r) => r.id === id && (!r.grader || r.grader === task.grader),
+    (r) => r.id === id && (!r.reviewer || r.reviewer === task.reviewer),
   );
   if (attempt?.status === "execution_error") {
     // Keep a failed investigation in the denominator with its original diagnostic.
@@ -257,7 +270,9 @@ async function readSavedReport(task, result) {
   result.elapsedMs = attempt?.elapsedMs;
   result.argv = attempt?.argv;
   result.reviewBatches = await reviewBatches(join(dir, "progress.jsonl"));
-  return JSON.parse(await readFile(join(dir, "report.json"), "utf8"));
+  return normalizeReviewer(
+    JSON.parse(await readFile(join(dir, "report.json"), "utf8")),
+  );
 }
 
 async function runCase(task, runSkill) {
@@ -269,7 +284,7 @@ async function runCase(task, runSkill) {
     suite: scenario.suite,
     cve: scenario.cve,
     upstreamRevision: scenario.revision,
-    grader: task.grader,
+    reviewer: task.reviewer,
     callerScope: scenario.callerScope,
     status: "execution_error",
   };
@@ -327,7 +342,7 @@ async function runCase(task, runSkill) {
         scenario,
         repo,
         sha,
-        task.grader,
+        task.reviewer,
         { sourceReader, verifyClaimCitations },
       );
       assert.equal(typeof result.grade.pass, "boolean", "Missing grade.pass");
@@ -359,7 +374,7 @@ async function saveResults() {
         regradedFrom: existing,
         jobs,
         isolatedState: cli ? !!values["isolated-state"] : undefined,
-        grader: cli || existing ? grader : undefined,
+        reviewer: cli || existing ? reviewer : undefined,
         selected: ids,
         complete: results.size === tasks.length && !abort.signal.aborted,
         comparison: paired ? comparison() : undefined,

@@ -1,3 +1,5 @@
+import { reviewerMode } from "../grade.mjs";
+
 function median(times) {
   if (!times.length) return null;
   times.sort((a, b) => a - b);
@@ -45,7 +47,7 @@ function score(results) {
 }
 
 export function compareRuns(ids, results) {
-  const byKey = new Map(results.map((r) => [r.grader + "/" + r.id, r]));
+  const byKey = new Map(results.map((r) => [reviewerMode(r) + "/" + r.id, r]));
   const enabled = [];
   const disabled = [];
   const pending = [];
