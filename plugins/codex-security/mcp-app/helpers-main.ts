@@ -1,4 +1,3 @@
-export { startDependencyToolServer } from "./src/dependency-trace/host-server.js";
 import { fileURLToPath } from "node:url";
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 export {
