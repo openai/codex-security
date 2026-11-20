@@ -1,3 +1,4 @@
+import { ActivityObservations } from "../src/observed-activities.js";
 import { execFile } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -167,6 +168,22 @@ async function workerSessionFixture() {
   return { home, usage, parent, worker };
 }
 
+function driveObservations(
+  home: string,
+  verify?: ActivityObservations["verifyDirectory"],
+) {
+  const repository = "C:/Work/Repo";
+  return {
+    repository,
+    activityObservations: new ActivityObservations(
+      home,
+      "scan-example",
+      repository,
+      verify,
+    ),
+  };
+}
+
 function costTracker(
   home: string,
   options: Omit<
@@ -190,13 +207,23 @@ function activityTracker(home: string) {
   return { activities, tracker };
 }
 
+function readFileCall(id: string, args: string | { path: string }) {
+  return {
+    type: "function_call",
+    name: "read_file",
+    call_id: id,
+    arguments: args,
+  };
+}
+
 async function appendSessionItem(
   path: string,
   payload: Readonly<Record<string, unknown>>,
+  timestamp?: string,
 ): Promise<void> {
   await appendFile(
     path,
-    `${JSON.stringify({ type: "response_item", payload })}\n`,
+    `${JSON.stringify({ timestamp, type: "response_item", payload })}\n`,
   );
 }
 
@@ -4328,9 +4355,7 @@ describe("live scan cost tracking", () => {
     const pending = new Set([parent, worker]);
     const totals: number[] = [];
     const tracker = costTracker(home, {
-      repository: "C:/Work/Repo",
-      activityObservations: { scanId: "scan-example" },
-      verifyActivityDirectory: () => false,
+      ...driveObservations(home, () => false),
       onUsage: (usage) => totals.push(usage.input_tokens),
     });
     const original = filesystem.open;
@@ -4371,24 +4396,15 @@ describe("live scan cost tracking", () => {
 
   test("observes a worker call when its rollout moves after the first read", async () => {
     const { home, worker } = await workerSessionFixture();
-    const tracker = costTracker(home, {
-      repository: "C:/Work/Repo",
-      activityObservations: { scanId: "scan-example" },
-      verifyActivityDirectory: () => true,
-    });
+    const tracker = costTracker(
+      home,
+      driveObservations(home, () => true),
+    );
     tracker.beginParentTurn();
-    await appendFile(
+    await appendSessionItem(
       worker,
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        type: "response_item",
-        payload: {
-          type: "function_call",
-          name: "read_file",
-          call_id: "owned",
-          arguments: { path: "c:/WORK/Repo/Src/owned.ts" },
-        },
-      }) + "\n",
+      readFileCall("owned", { path: "c:/WORK/Repo/Src/owned.ts" }),
+      new Date().toISOString(),
     );
     const archive = join(home, "archived_sessions");
     await filesystem.mkdir(archive);
@@ -4432,31 +4448,22 @@ describe("live scan cost tracking", () => {
     });
     const archived = join(archive, basename(archivedWorker));
     await filesystem.rename(archivedWorker, archived);
-    const options = {
-      repository: "C:/Work/Repo",
-      activityObservations: { scanId: "scan-example" },
-    };
     const checked: string[] = [];
-    const tracker = costTracker(home, {
-      ...options,
-      verifyActivityDirectory: (_repository, candidate) => {
+    const tracker = costTracker(
+      home,
+      driveObservations(home, (_repository, candidate) => {
         checked.push(candidate);
         return candidate === "c:/WORK/Repo";
-      },
-    });
+      }),
+    );
     // Resume replays existing rows before the new local turn is launched.
-    await appendFile(
+    await appendSessionItem(
       worker,
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        type: "response_item",
-        payload: {
-          type: "function_call",
-          name: "read_file",
-          call_id: "previous-turn",
-          arguments: JSON.stringify({ path: "c:/WORK/Repo/Src/previous.ts" }),
-        },
-      }) + "\n",
+      readFileCall(
+        "previous-turn",
+        JSON.stringify({ path: "c:/WORK/Repo/Src/previous.ts" }),
+      ),
+      new Date().toISOString(),
     );
     tracker.start("scan-thread");
     await tracker.refresh();
@@ -4472,16 +4479,11 @@ describe("live scan cost tracking", () => {
       [archived, "archived", "c:/WORK/Repo", timestamp],
       [unrelated, "unrelated", "c:/WORK/Repo", timestamp],
     ] as const) {
-      const payload = {
-        type: "function_call",
-        name: "read_file",
-        call_id: id,
-        arguments: JSON.stringify({ path: prefix + "/Src/" + id + ".ts" }),
-      };
-      await appendFile(
+      const path = `${prefix}/Src/${id}.ts`;
+      await appendSessionItem(
         file,
-        JSON.stringify({ timestamp: time, type: "response_item", payload }) +
-          "\n",
+        readFileCall(id, JSON.stringify({ path })),
+        time,
       );
       await appendSessionItem(file, {
         type: "function_call_output",
@@ -4502,15 +4504,16 @@ describe("live scan cost tracking", () => {
         .sort(),
     ).toEqual(["Src/owned.ts"]);
     // Same call ID, different native row. A receipt must not bleed into it.
-    await appendSessionItem(worker, {
-      type: "function_call",
-      name: "read_file",
-      call_id: "owned",
-      arguments: JSON.stringify({ path: "c:/WORK/Repo/unobserved.ts" }),
-    });
+    await appendSessionItem(
+      worker,
+      readFileCall(
+        "owned",
+        JSON.stringify({ path: "c:/WORK/Repo/unobserved.ts" }),
+      ),
+    );
     const replayed: ScanActivity[] = [];
     const replay = costTracker(home, {
-      ...options,
+      ...driveObservations(home),
       onActivity: (activity) => replayed.push(activity),
     });
     replay.start("scan-thread");

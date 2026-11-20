@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { runScanEvents } from "../src/api.js";
 import { ScanCostTracker } from "../src/cost.js";
-import { saveLiveActivityPaths } from "../src/observed-activities.js";
+import { ActivityObservations } from "../src/observed-activities.js";
 import { sameWindowsActivityDirectory } from "../src/scan-activity.js";
 import { readScanLogs } from "../src/scan-logs.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -63,17 +63,19 @@ async function checkActivityReplay(checkouts: string, distinct: boolean) {
   const scanId = "scan-activity";
   const threadId = "parent";
   const workerId = "worker";
+  const observe = (verify?: typeof sameWindowsActivityDirectory) =>
+    new ActivityObservations(home, scanId, repository, verify);
   const options = {
     codexHome: home,
     model: "gpt-5.6-sol",
     repository,
-    activityObservations: { scanId },
+    activityObservations: observe(),
   };
   const workerPaths: string[][] = [];
   const verifyWorker = mock(sameWindowsActivityDirectory);
   const tracker = new ScanCostTracker({
     ...options,
-    verifyActivityDirectory: verifyWorker,
+    activityObservations: observe(verifyWorker),
     onActivity: (activity) => workerPaths.push(activity.paths),
   });
   tracker.beginParentTurn();
@@ -138,9 +140,7 @@ async function checkActivityReplay(checkouts: string, distinct: boolean) {
         mode: "standard",
         pluginVersion: "0.1.0",
       },
-      verifyActivityDirectory: sameWindowsActivityDirectory,
-      recordActivityPaths: (liveThread, occurrence, activity) =>
-        saveLiveActivityPaths(home, scanId, liveThread, occurrence, activity),
+      activityObservations: observe(sameWindowsActivityDirectory),
       onActivity: (activity) => livePaths.push(activity.paths),
     }),
   ).rejects.toThrow("end of activity fixture");

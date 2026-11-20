@@ -11,17 +11,13 @@ import {
   realpath,
   stat,
 } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
-import {
-  observedEventKey,
-  readObservedActivities,
-  saveObservedActivity,
-} from "./observed-activities.js";
+import type { ActivityObservations } from "./observed-activities.js";
 import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
@@ -32,7 +28,6 @@ import {
 } from "./cost-model.js";
 import {
   isSessionToolCall,
-  isWindowsActivityDrive,
   scanActivityFromSessionEvent,
   sessionContentText,
   type ScanActivity,
@@ -349,11 +344,7 @@ interface ScanCostTrackerOptions {
   pricingContext?: ScanPricingContext;
   model: string;
   repository?: string;
-  activityObservations?: { scanId: string };
-  verifyActivityDirectory?: (
-    repository: string,
-    candidateRoot: string,
-  ) => boolean;
+  activityObservations?: ActivityObservations;
   scanDirectory?: string;
   /** Host-bound store outside model-writable scan artifacts, for Deep scans only. */
   workerReceipts?: { directory: string; scanId: string };
@@ -452,8 +443,6 @@ function createSessionUsage(observeUsage: boolean, aliasRepository?: string) {
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
-  #observingSince?: number;
-  #observedPaths?: Map<string, string[]>;
   #lastBudgetPoll = -Infinity;
   readonly #sessions = new Map<string, SessionUsage>();
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
@@ -562,7 +551,7 @@ export class ScanCostTracker {
 
   /** Called before launching a turn, after loading any resumed history. */
   public beginParentTurn(resumed = false): void {
-    this.#observingSince = Date.now();
+    this.#options.activityObservations?.beginParentTurn();
     this.#parentTurnFilesTotal = this.#expectedFilesTotal;
     this.#parentTurnStartKnown = this.#parentSession !== null || !resumed;
     for (const live of this.#liveParentItems) {
@@ -2370,7 +2359,7 @@ export class ScanCostTracker {
       this.#options.onMeasurement === undefined &&
       this.#options.onUsageObservation === undefined &&
       this.#options.onActivity === undefined &&
-      this.#options.verifyActivityDirectory === undefined &&
+      this.#options.activityObservations?.verifyDirectory === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
       this.#options.onWorkerEvent === undefined
@@ -2430,7 +2419,7 @@ export class ScanCostTracker {
     if (this.#threadId === null) return;
     if (
       this.#options.onActivity ||
-      this.#options.verifyActivityDirectory ||
+      this.#options.activityObservations?.verifyDirectory ||
       this.#options.onProgress ||
       this.#options.onWorkerEvent ||
       this.#options.onSessionEvent ||
@@ -2490,19 +2479,15 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    const aliasRepository =
-      this.#options.activityObservations &&
-      this.#options.repository &&
-      isWindowsActivityDrive(this.#options.repository)
-        ? this.#options.repository
-        : undefined;
+    const observations = this.#options.activityObservations;
+    const aliasRepository = observations?.repository;
     const collectionErrors: unknown[] = [];
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
     const observeHealthySessions =
       this.#options.maxCostUsd === undefined &&
       (this.#options.onActivity !== undefined ||
-        this.#options.verifyActivityDirectory !== undefined ||
+        this.#options.activityObservations?.verifyDirectory !== undefined ||
         this.#options.onProgress !== undefined ||
         this.#options.onSessionEvent !== undefined ||
         this.#options.onWorkerEvent !== undefined);
@@ -2748,12 +2733,17 @@ export class ScanCostTracker {
           source,
         } of session.activities.splice(0)) {
           if (position <= reported.activities) continue;
-          const paths = source
-            ? await this.#savedActivityPaths(threadId, path, activity, source)
-            : activity.paths;
+          if (source && observations) {
+            source.paths ??= await observations.workerPaths(
+              threadId,
+              path,
+              activity,
+              source.event,
+            );
+          }
           this.#options.onActivity?.({
             ...activity,
-            paths,
+            paths: source?.paths ?? activity.paths,
             id: `${threadId}:${activity.id}`,
             worker,
           });
@@ -3266,59 +3256,6 @@ export class ScanCostTracker {
         parent ? { reconciled: true } : undefined,
       );
     }
-  }
-
-  async #savedActivityPaths(
-    threadId: string,
-    path: string,
-    activity: ScanActivity,
-    source: NonNullable<SessionActivity["source"]>,
-  ): Promise<string[]> {
-    if (source.paths !== undefined) return source.paths;
-    const {
-      activityObservations,
-      codexHome,
-      repository,
-      verifyActivityDirectory,
-    } = this.#options;
-    if (!activityObservations || !repository) return activity.paths;
-    const { scanId } = activityObservations;
-    this.#observedPaths ??= new Map(
-      (await readObservedActivities(codexHome, scanId)).map(
-        ({ eventKey, paths }) => [eventKey, paths],
-      ),
-    );
-    const key = observedEventKey(threadId, source.event);
-    if (key === undefined) return activity.paths;
-    const saved = this.#observedPaths.get(key);
-    if (saved !== undefined) return (source.paths = saved);
-    const time = sessionStartedAt(source.event["timestamp"]);
-    // Historical, compressed, and archived rows can originate on another host.
-    if (
-      verifyActivityDirectory &&
-      activity.status === "running" &&
-      time !== null &&
-      this.#observingSince !== undefined &&
-      time >= this.#observingSince &&
-      time <= Date.now() &&
-      path.startsWith(join(codexHome, "sessions") + sep) &&
-      path.endsWith(".jsonl")
-    ) {
-      const verified = scanActivityFromSessionEvent(
-        source.event,
-        repository,
-        verifyActivityDirectory,
-      );
-      if (verified && !isDeepStrictEqual(verified.paths, activity.paths)) {
-        await saveObservedActivity(codexHome, scanId, {
-          eventKey: key,
-          paths: verified.paths,
-        });
-        this.#observedPaths.set(key, verified.paths);
-        return (source.paths = verified.paths);
-      }
-    }
-    return (source.paths = activity.paths);
   }
 
   #reportCost(cost: ScanCost | null, complete = true): void {

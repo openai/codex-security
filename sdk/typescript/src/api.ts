@@ -225,7 +225,7 @@ import {
   type SecurityPolicyStageResult,
   type SecurityPolicyTarget,
 } from "./security-policy.js";
-import { saveLiveActivityPaths } from "./observed-activities.js";
+import { ActivityObservations } from "./observed-activities.js";
 import { writeMockScanDraft } from "./mock-scan.js";
 import {
   isWindowsActivityDrive,
@@ -3085,10 +3085,18 @@ export class CodexSecurity {
         );
       }
       const scanId = registeredScanId;
-      const driveCheckout = isWindowsActivityDrive(repo);
-      const verifyActivityDirectory =
-        driveCheckout && !hosted && process.platform === "win32"
+      const verifyDirectory =
+        !hosted && process.platform === "win32"
           ? sameWindowsActivityDirectory
+          : undefined;
+      const activityObservations =
+        isWindowsActivityDrive(repo) && (verifyDirectory || resumeThreadId)
+          ? new ActivityObservations(
+              runtime.codexHome,
+              scanId,
+              repo,
+              verifyDirectory,
+            )
           : undefined;
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
@@ -3096,11 +3104,7 @@ export class CodexSecurity {
         pricingContext,
         repository: repo,
         scanDirectory: scanDir,
-        activityObservations:
-          driveCheckout && (verifyActivityDirectory || resumeThreadId)
-            ? { scanId }
-            : undefined,
-        verifyActivityDirectory,
+        activityObservations,
         ...(mode === "deep"
           ? {
               workerReceipts: {
@@ -3736,17 +3740,7 @@ export class CodexSecurity {
         authentication,
         modelProvider,
         workbenchValidated: true,
-        verifyActivityDirectory,
-        recordActivityPaths: verifyActivityDirectory
-          ? (threadId, key, activity) =>
-              saveLiveActivityPaths(
-                runtime.codexHome,
-                scanId,
-                threadId,
-                key,
-                activity,
-              )
-          : undefined,
+        activityObservations,
         model,
         pricingContext,
         onTurnStatus: (status, message) => {
@@ -6122,12 +6116,7 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 
 interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   scanId?: string;
-  verifyActivityDirectory?: typeof sameWindowsActivityDirectory;
-  recordActivityPaths?: (
-    threadId: string,
-    key: string,
-    activity: ScanActivity,
-  ) => Promise<void>;
+  activityObservations?: ActivityObservations;
   thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
@@ -6193,32 +6182,9 @@ export async function runScanEvents(
           typeof event["thread_id"] === "string"
         )
           activityThreadId = event["thread_id"];
-        let verifiedAlias = false;
-        const verify = options.verifyActivityDirectory;
-        const activities = scanActivitiesFromEvent(
-          event,
-          options.expectation.repository,
-          verify &&
-            ((repository, candidate) => {
-              const same = verify(repository, candidate);
-              if (same) verifiedAlias = true;
-              return same;
-            }),
-        );
-        if (verifiedAlias && activityThreadId && options.recordActivityPaths) {
-          const lexical = scanActivitiesFromEvent(
-            event,
-            options.expectation.repository,
-          );
-          for (const [i, activity] of activities.entries()) {
-            if (!isDeepStrictEqual(activity.paths, lexical[i]?.paths))
-              await options.recordActivityPaths(
-                activityThreadId,
-                randomUUID(),
-                activity,
-              );
-          }
-        }
+        const activities = options.activityObservations?.verifyDirectory
+          ? await options.activityObservations.primary(activityThreadId, event)
+          : scanActivitiesFromEvent(event, options.expectation.repository);
         for (const activity of activities) {
           notifyObserver(options, "onActivity")(activity);
         }
