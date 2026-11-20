@@ -1398,7 +1398,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
-  readonly onWorkerFailure?: (message: string) => void;
+  readonly failureOutput?: Writable;
   readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
   readonly directory?: string;
@@ -1442,7 +1442,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
   "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 interface SkillRunOptions {
-  readonly onWorkerFailure?: (message: string) => void;
+  readonly failureOutput?: Writable;
   readonly signal?: AbortSignal;
   context?: string;
   contextFile?: string;
@@ -2307,7 +2307,8 @@ async function runCodexSkillProcess(
         if (output === undefined || status === 130 || status === 143)
           return status;
         const fail = async (code: number, message: string): Promise<number> => {
-          if (output.onWorkerFailure) output.onWorkerFailure(message);
+          if (output.failureOutput)
+            await writeCliOutput(output.failureOutput, message);
           else
             await writeCliOutput(
               output.stderr,
@@ -2316,15 +2317,19 @@ async function runCodexSkillProcess(
           return code;
         };
         if (status !== 0) {
-          const detail = [
-            events?.error ?? diagnostic,
-            events?.accountDiagnostic,
-          ]
-            .filter(Boolean)
-            .join("\n");
+          const account = events?.accountDiagnostic;
+          const detail = (events?.error ?? diagnostic) || account || "";
+          const failure = skillCommandFailure(
+            output.command,
+            status,
+            detail,
+            authentication,
+          );
           return await fail(
             status,
-            skillCommandFailure(output.command, status, detail, authentication),
+            account && !detail.includes(account)
+              ? `${failure}\n${account}`
+              : failure,
           );
         }
         if (
@@ -7896,7 +7901,7 @@ export async function main(
             );
           }
           const report = captureOutput();
-          let workerFailure: string | undefined;
+          const workerFailure = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
@@ -7905,9 +7910,7 @@ export async function main(
             errorOutput,
             dependencies,
             {
-              onWorkerFailure: (message) => {
-                workerFailure = message;
-              },
+              failureOutput: workerFailure.stream,
               environment,
               auth: options.auth,
               externalSandbox: options.externalSandbox,
@@ -7930,7 +7933,8 @@ export async function main(
           if (exitCode !== 0) {
             throw new PatchCommandError(
               "PATCH_FAILED",
-              workerFailure ?? `Patch command exited with status ${exitCode}.`,
+              workerFailure.text() ||
+                `Patch command exited with status ${exitCode}.`,
             );
           }
           if (files.length === 0) {
@@ -10660,7 +10664,7 @@ async function runFindingPatches(
         void writeCliOutput(stderr, chunk).then(() => callback(), callback);
       },
     });
-    let workerFailure: string | undefined;
+    const workerFailure = captureOutput();
     let status: number;
     let changed: boolean;
     let observedTree: string | undefined;
@@ -10676,9 +10680,7 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
-          onWorkerFailure: (message) => {
-            workerFailure = message;
-          },
+          failureOutput: workerFailure.stream,
           directory: selected.repository,
           findings: [finding],
           findingInstructions: instruction?.trim()
@@ -10714,7 +10716,7 @@ async function runFindingPatches(
     let patch: FindingPatch;
     if (status !== 0) {
       patch = failed(
-        workerFailure ?? `Patch command exited with status ${status}.`,
+        workerFailure.text() || `Patch command exited with status ${status}.`,
       );
     } else {
       try {
@@ -11484,7 +11486,7 @@ async function runSkill(
             ]),
       ],
       {
-        onWorkerFailure: options.onWorkerFailure,
+        failureOutput: options.failureOutput,
         command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
         ...(assess ? { telemetryCommand: "assess-patch-risk" as const } : {}),
         signal: options.signal,
@@ -11750,16 +11752,13 @@ export async function readSkillCommandOutput(
         } catch {}
       }
       if (value["id"] !== undefined) {
+        const readingAccount = value["id"] === "patch-account";
+        const rpcError = value["error"] as { message: string } | undefined;
         if (value["id"] === daybreakRequest?.id) {
           const pending = daybreakRequest;
           daybreakRequest = undefined;
-          if (value["error"] !== undefined) {
-            pending.reject(
-              new Error((value["error"] as { message: string }).message),
-            );
-          } else {
-            pending.resolve(value["result"] as JsonObject);
-          }
+          if (rpcError) pending.reject(new Error(rpcError.message));
+          else pending.resolve(value["result"] as JsonObject);
           continue;
         }
         if (typeof value["method"] === "string") {
@@ -11768,35 +11767,30 @@ export async function readSkillCommandOutput(
             error: { code: -32601, message: "Unsupported client request" },
           });
         } else if (
-          value["error"] !== undefined &&
-          (value["id"] !== "patch-account" ||
-            isStoredSignInFailure(
-              (value["error"] as { message: string }).message,
-            ))
+          rpcError &&
+          (!readingAccount || isStoredSignInFailure(rpcError.message))
         ) {
-          error = (value["error"] as { message: string }).message;
+          error = rpcError.message;
           sandboxUnavailable = value["id"] === 5;
           appServer.input.end();
         } else if (
           value["id"] === 1 ||
           value["id"] === "login" ||
-          value["id"] === "patch-account"
+          readingAccount
         ) {
-          if (
-            value["id"] === "patch-account" &&
-            isJsonObject(value["result"]) &&
-            value["result"]["requiresOpenaiAuth"] === true &&
-            value["result"]["account"] === null
-          ) {
-            // A cached permanent refresh failure also clears the native account.
-            error = `Codex could not use the stored sign-in. ${PATCH_SIGN_IN_RECOVERY}`;
-            appServer.input.end();
-            continue;
-          }
-          // A routing lookup can fail even when the selected provider works.
-          // Retain its diagnostic in case the native worker subsequently fails.
-          if (value["id"] === "patch-account" && isJsonObject(value["error"])) {
-            accountDiagnostic = value["error"]["message"] as string;
+          if (readingAccount) {
+            const account = value["result"];
+            if (
+              isJsonObject(account) &&
+              account["requiresOpenaiAuth"] === true &&
+              account["account"] === null
+            ) {
+              error = `Codex could not use the stored sign-in. ${PATCH_SIGN_IN_RECOVERY}`;
+              appServer.input.end();
+              continue;
+            }
+            // Routing can fail independently of the worker's selected provider.
+            accountDiagnostic = rpcError?.message;
           }
           if (value["id"] === 1) {
             send({ method: "initialized" });

@@ -90,7 +90,7 @@ describe("patch outcomes", () => {
           join(fixture.directory, "app.ts"),
           "partially changed\n",
         );
-        output?.onWorkerFailure?.(detail);
+        output?.failureOutput?.write(detail);
         return 1;
       },
     });

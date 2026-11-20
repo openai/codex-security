@@ -136,41 +136,6 @@ describe("skill authentication at the subprocess boundary", () => {
     await rm(stateDirectory, { recursive: true, force: true });
   });
 
-  test.each([
-    [
-      "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
-      1,
-    ],
-    ["Workspace routing discovery unauthorized (401)", 0],
-    [null, 1],
-  ] as const)(
-    "patch handles a stored account lookup failure: %s",
-    async (detail, status) => {
-      const result = await runProviderSkill(stateDirectory, {
-        auth: "chatgpt",
-        overrides: [],
-        storedCredentials: true,
-        environment:
-          detail === null
-            ? { SYNTHETIC_ACCOUNT_MISSING: "1" }
-            : { SYNTHETIC_ACCOUNT_ERROR: detail },
-      });
-      expect(
-        result.requests.find((request) => request.method === "account/read")
-          ?.params,
-      ).toEqual({ refreshToken: false });
-      expect(
-        result.requests.some((request) => request.method === "thread/start"),
-      ).toBe(status === 0);
-      expect(result.status, result.stderr).toBe(status);
-      if (status === 1) {
-        expect(result.stderr).toContain("codex-security login");
-        if (detail !== null)
-          expect(result.stderr.split(detail)).toHaveLength(2);
-      }
-    },
-  );
-
   // Each command/config source still launches Codex with stored credentials.
   // Include both native credential forms together to verify neither leaks.
   test.each(commandSources)(

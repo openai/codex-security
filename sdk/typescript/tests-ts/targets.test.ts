@@ -57,16 +57,12 @@ test("credential output exclusions retain an empty outer marker and enclosing wo
   const inner = join(masked, "inner");
   await mkdir(join(masked, ".git"), { recursive: true });
   for (const repo of [root, inner]) execFileSync("git", ["init", "-q", repo]);
-  const protectedRoots = () =>
-    enclosingGitWorktreeRoots(inner, undefined, {
+  const protectedRoots = (directory = inner) =>
+    enclosingGitWorktreeRoots(directory, undefined, {
       protectEmptyAncestorMarkers: true,
     });
   expect((await protectedRoots()).slice(0, 3)).toEqual([inner, masked, root]);
-  await expect(
-    enclosingGitWorktreeRoots(masked, undefined, {
-      protectEmptyAncestorMarkers: true,
-    }),
-  ).rejects.toThrow();
+  await expect(protectedRoots(masked)).rejects.toThrow();
   await writeFile(join(masked, ".git", "broken"), "fixture");
   await expect(protectedRoots()).rejects.toThrow();
 });
