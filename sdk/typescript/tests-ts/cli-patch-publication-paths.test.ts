@@ -9,23 +9,14 @@ import {
   resultWithFindings,
   runGitRepositoryCommand,
   runWorkflow,
+  completePatches,
+  runPublication,
+  runPublicationCommand,
   savedScan,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
-
-const runCommand: typeof runGitRepositoryCommand = (
-  command,
-  args,
-  cwd,
-  options,
-) =>
-  command === "git"
-    ? runGitRepositoryCommand(command, args, cwd, options)
-    : args[1] === "list"
-      ? "[]"
-      : "https://github.example.test/example/repository/pull/1";
 
 test.each(["issue", "saved"] as const)(
   "publishes a materialized tracked file outside the sparse checkout for a %s patch",
@@ -52,34 +43,10 @@ test.each(["issue", "saved"] as const)(
       "outside/finding.ts",
     );
     expect(git("--no-optional-locks", "status", "--porcelain")).toBe("");
-    const selection =
-      mode === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
-    const result = await runWorkflow(
-      ["patch", ...selection, "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          await writeFile(file, "fixed\n");
-          output!.stdout.write(
-            mode === "issue"
-              ? "Fixed the issue."
-              : JSON.stringify({
-                  patches: [
-                    {
-                      occurrenceId: "occ_1",
-                      status: "verified",
-                      files: ["outside/finding.ts"],
-                      verification: "Checked the edited file.",
-                    },
-                  ],
-                }),
-          );
-          return 0;
-        },
-      },
+    const result = await runPublication(
+      directory,
+      mode === "issue" ? "issue" : ["outside/finding.ts"],
+      () => writeFile(file, "fixed\n"),
     );
     expect(result.exitCode, result.stderr).toBe(0);
     const remoteGit = repositoryGit(remote);
@@ -100,19 +67,10 @@ test.skipIf(process.platform !== "linux")(
     await writeFile(alias, "alias before\n");
     git("add", "--all");
     git("commit", "-m", "Synthetic byte-path baseline");
-    const result = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          await writeFile(raw, "raw after\n");
-          await writeFile(alias, "alias after\n");
-          output!.stdout.write("Fixed both files.");
-          return 0;
-        },
-      },
-    );
+    const result = await runPublication(directory, "issue", async () => {
+      await writeFile(raw, "raw after\n");
+      await writeFile(alias, "alias after\n");
+    });
     expect(result.exitCode, result.stderr).toBe(0);
     const tip = repositoryGit(remote)("for-each-ref", "--format=%(objectname)");
     const entries = Buffer.from(
@@ -160,35 +118,13 @@ test.skipIf(process.platform !== "linux").each([false, true])(
     ]);
     const raw = Buffer.concat([Buffer.from(`${directory}/`), rawName]);
     const alias = join(directory, "src/new-\ufffd");
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          await writeFile(
-            raw,
-            copied ? ignored : "Independent synthetic content\n",
-          );
-          await writeFile(alias, "Distinct Unicode alias\n");
-          output!.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["src"],
-                  verification: "Synthetic directory check.",
-                },
-              ],
-            }),
-          );
-          return 0;
-        },
-      },
-    );
+    const outcome = await runPublication(directory, ["src"], async () => {
+      await writeFile(
+        raw,
+        copied ? ignored : "Independent synthetic content\n",
+      );
+      await writeFile(alias, "Distinct Unicode alias\n");
+    });
     expect(outcome.exitCode, outcome.stderr).toBe(copied ? 2 : 0);
     if (copied) {
       expect(outcome.stderr).toContain("matches pre-existing ignored content");
@@ -248,8 +184,8 @@ test.skipIf(process.platform !== "linux")(
         currentDirectory: directory,
         onWorkbench: () =>
           savedScan(resultWithFindings(["high"]), "scan-1", directory),
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
+        onRepositoryCommand: runPublicationCommand,
+        onCodex: async (args, output) => {
           if (output?.appServer?.prompt.includes("immutable patch artifact")) {
             assessments++;
             const artifact = JSON.parse(
@@ -280,18 +216,7 @@ test.skipIf(process.platform !== "linux")(
             return 0;
           }
           await rename(raw, join(directory, "src/new.ts"));
-          output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["src/new.ts"],
-                  verification: "Synthetic check.",
-                },
-              ],
-            }),
-          );
+          completePatches(args, output, "verified", ["src/new.ts"]);
           return 0;
         },
       },
@@ -345,33 +270,12 @@ test.skipIf(process.platform !== "linux").each(["root", "src"])(
     await writeFile(join(directory, ".env"), "SYNTHETIC_IGNORED_CONTENT\n");
     const before = git("rev-parse", "HEAD");
     const cwd = scope === "root" ? directory : join(directory, "src");
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: cwd,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", cwd),
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          await writeFile(
-            join(directory, "src/nested/finding-1.ts"),
-            "fixed\n",
-          );
-          await writeFile(alias, await readFile(join(directory, ".env")));
-          output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: [scope === "root" ? "src/nested" : "nested"],
-                  verification: "Synthetic check.",
-                },
-              ],
-            }),
-          );
-          return 0;
-        },
+    const outcome = await runPublication(
+      cwd,
+      [scope === "root" ? "src/nested" : "nested"],
+      async () => {
+        await writeFile(join(directory, "src/nested/finding-1.ts"), "fixed\n");
+        await writeFile(alias, await readFile(join(directory, ".env")));
       },
     );
     expect(outcome.exitCode, outcome.stderr).toBe(0);
@@ -461,31 +365,9 @@ test.skipIf(process.platform !== "linux").each([false, true])(
     aliasGit("config", "user.name", "Synthetic User");
     aliasGit("config", "user.email", "synthetic@example.test");
     aliasGit("commit", "--allow-empty", "-m", "Synthetic alias");
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          await stage(after);
-          output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["src"],
-                  verification: "Synthetic check.",
-                },
-              ],
-            }),
-          );
-          return 0;
-        },
-      },
-    );
+    const outcome = await runPublication(directory, ["src"], async () => {
+      await stage(after);
+    });
     expect(outcome.exitCode, outcome.stderr).toBe(published ? 0 : 2);
     if (published)
       expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
@@ -520,19 +402,10 @@ test.skipIf(process.platform !== "linux").each([false, true])(
     const original = git("rev-parse", "HEAD");
     const index = await readFile(join(directory, ".git", "index"));
     let modelStarted = false;
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          modelStarted = true;
-          await writeFile(join(directory, "new.ts"), await readFile(alias));
-          output?.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
-      },
-    );
+    const outcome = await runPublication(directory, "issue", async () => {
+      modelStarted = true;
+      await writeFile(join(directory, "new.ts"), await readFile(alias));
+    });
     expect(modelStarted).toBe(true);
     expect(outcome.exitCode, outcome.stderr).toBe(sameContents ? 2 : 0);
     if (sameContents) {
@@ -566,17 +439,8 @@ test.skipIf(process.platform === "win32")(
     git("init", "--bare", mirror);
     git("config", "--add", "remote.origin.pushurl", remote);
     git("config", "--add", "remote.origin.pushurl", mirror);
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onRepositoryCommand: runCommand,
-        onCodex: async (_args, output) => {
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          output?.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
-      },
+    const outcome = await runPublication(directory, "issue", () =>
+      writeFile(join(directory, "src/finding-1.ts"), "fixed\n"),
     );
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     const branch = git("branch", "--show-current");

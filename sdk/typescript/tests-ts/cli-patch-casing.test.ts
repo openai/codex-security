@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import {
   publicationRepository,
   resultWithFindings,
-  runGitRepositoryCommand,
+  completePatches,
+  runPublication,
+  runPublicationCommand,
   runWorkflow,
   savedScan,
 } from "./cli-patch-fixtures.js";
@@ -27,18 +29,6 @@ function simulateAliases(aliases: ReadonlyMap<string, string>) {
   };
   mock.module("node:fs", () => ({ ...fs, default: fs, lstatSync: lookup }));
 }
-
-const runCommand: typeof runGitRepositoryCommand = (
-  command,
-  args,
-  cwd,
-  options,
-) =>
-  command === "git"
-    ? runGitRepositoryCommand(command, args, cwd, options)
-    : args[1] === "list"
-      ? "[]"
-      : "https://github.example.test/example/repository/pull/1";
 
 test.each([
   ["README.md", "README.md"],
@@ -82,25 +72,14 @@ test.each([
           const translated = args.map((arg, i) =>
             separator >= 0 && i > separator && arg === reported ? stored : arg,
           );
-          return runCommand(command, translated, cwd, options);
+          return runPublicationCommand(command, translated, cwd, options);
         },
-        onCodex: async (_args, output) => {
+        onCodex: async (args, output) => {
           await writeFile(
             join(directory, stored),
             "fixed\nsynthetic local edit\n",
           );
-          output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: [reported],
-                  verification: "Synthetic regression passed.",
-                },
-              ],
-            }),
-          );
+          completePatches(args, output, "verified", [reported]);
           return 0;
         },
       },
@@ -145,18 +124,11 @@ test.each([
   const index = git("write-tree");
   let modelCalls = 0;
   try {
-    const result = resultWithFindings(["high"]);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        result,
-        onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: runCommand,
-        onCodex: () => {
-          modelCalls++;
-          return 0;
-        },
+    const outcome = await runPublication(
+      directory,
+      ["src/finding-1.ts"],
+      () => {
+        modelCalls++;
       },
     );
     expect(modelCalls).toBe(0);
@@ -193,22 +165,11 @@ test("keeps distinct native filesystem paths and refs publishable", async () => 
       currentDirectory: directory,
       result,
       onWorkbench: () => savedScan(result, "scan-1", directory),
-      onRepositoryCommand: runCommand,
-      onCodex: async (_args, output) => {
+      onRepositoryCommand: runPublicationCommand,
+      onCodex: async (args, output) => {
         modelCalls++;
         await writeFile(join(directory, "readme.md"), "fixed lower\n");
-        output?.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: "occ_1",
-                status: "verified",
-                files: ["readme.md"],
-                verification: "Synthetic regression passed.",
-              },
-            ],
-          }),
-        );
+        completePatches(args, output, "verified", ["readme.md"]);
         return 0;
       },
     },

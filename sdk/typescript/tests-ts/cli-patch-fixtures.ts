@@ -71,6 +71,7 @@ export function completePatches(
   args: readonly string[],
   output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
   status: "verified" | "blocked" = "verified",
+  reportedFiles?: readonly string[],
 ): Finding[] {
   const prompt = output?.appServer?.prompt ?? args.at(-1)!;
   const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
@@ -79,7 +80,10 @@ export function completePatches(
       patches: findings.map((finding) => ({
         occurrenceId: finding.occurrenceId,
         status,
-        files: status === "verified" ? [finding.locations[0]!.path] : [],
+        files:
+          status === "verified"
+            ? (reportedFiles ?? [finding.locations[0]!.path])
+            : [],
         ...(status === "verified"
           ? { verification: "The exploit fails and focused tests pass." }
           : { reason: "The required service is unavailable." }),
@@ -357,4 +361,41 @@ export async function publicationRepository(
   git("init", ...format, "--bare", remote);
   git("remote", "add", "origin", remote);
   return { directory, git, remote };
+}
+
+export const runPublicationCommand: typeof runGitRepositoryCommand = (
+  command,
+  args,
+  cwd,
+  options,
+) =>
+  command === "git"
+    ? runGitRepositoryCommand(command, args, cwd, options)
+    : args[1] === "list"
+      ? "[]"
+      : "https://github.example.test/example/repository/pull/1";
+
+// A saved-finding turn reports its verified paths. Supplied issues reply in prose.
+export function runPublication(
+  directory: string,
+  target: "issue" | readonly string[],
+  edit: () => void | Promise<void>,
+) {
+  const selection =
+    target === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
+  return runWorkflow(["patch", ...selection, "--create-pr", "--json"], {
+    currentDirectory: directory,
+    onWorkbench:
+      target === "issue"
+        ? undefined
+        : () => savedScan(resultWithFindings(["high"]), "scan-1", directory),
+    onRepositoryCommand: runPublicationCommand,
+    onCodex: async (args, output) => {
+      await edit();
+      if (target === "issue")
+        output!.stdout.write("Synthetic patch complete.\n");
+      else completePatches(args, output, "verified", target);
+      return 0;
+    },
+  });
 }
