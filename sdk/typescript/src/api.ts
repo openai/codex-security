@@ -7,6 +7,8 @@ import {
   type OsvScanResult,
 } from "./sca-osv.js";
 import {
+  assessmentProgress,
+  type DependencyScanProgress,
   dependencyScanResult,
   dependencyRepositoryDirty,
   saveDependencyScan,
@@ -15,12 +17,7 @@ import {
   dependencyTriageContract,
   dependencyTriagePrompt,
 } from "./sca-triage.js";
-import type {
-  DependencyScanProgress,
-  ScaAssessment,
-  ScaMatch,
-  ScaResult,
-} from "./sca-types.js";
+import type { ScaAssessment, ScaResult } from "./sca-types.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   explicitlyCanceled,
@@ -7621,33 +7618,6 @@ function observeSettledScan(
   } catch {
     // Preserve the original failure when its persisted outcome cannot be read.
   }
-}
-
-function assessmentProgress(
-  result: ScaResult,
-  match: ScaMatch | null,
-): DependencyScanProgress {
-  let assessmentsCompleted = 0;
-  let assessmentsFailed = 0;
-  for (const assessment of result.assessments) {
-    if (assessment.status === "completed") assessmentsCompleted++;
-    else if (assessment.status === "failed") assessmentsFailed++;
-  }
-  const component =
-    match && result.components.find((item) => item.id === match.componentId);
-  return {
-    phase: "assessing",
-    assessmentsTotal: result.matches.length,
-    assessmentsCompleted,
-    assessmentsFailed,
-    current: match && {
-      matchId: match.id,
-      componentId: match.componentId,
-      packageName: component?.name ?? null,
-      packageVersion: component?.version ?? null,
-      advisoryIds: [...match.advisoryIds],
-    },
-  };
 }
 
 function notifyObserver<

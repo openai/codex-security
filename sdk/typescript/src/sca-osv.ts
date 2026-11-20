@@ -34,8 +34,8 @@ import {
   type ScaUnresolvedReference,
 } from "./sca-inputs.js";
 import { executablePathForSpawn } from "./runtime.js";
+import type { DependencyScanProgress } from "./sca.js";
 import type {
-  DependencyScanProgress,
   ScaComponent,
   ScaCoverage,
   ScaFile,

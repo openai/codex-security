@@ -24,7 +24,7 @@ import {
   type OsvProcessResult,
   type OsvScanResult,
 } from "../src/sca-osv.js";
-import type { DependencyScanProgress, ScaInput } from "../src/sca-types.js";
+import type { DependencyScanProgress, ScaInput } from "../src/index.js";
 import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 

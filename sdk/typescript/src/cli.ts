@@ -17,7 +17,7 @@ import {
 } from "./provider-profile.js";
 import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
-import type { DependencyScanProgress } from "./sca-types.js";
+import type { DependencyScanProgress } from "./sca.js";
 
 import {
   execFile as execFileCallback,
