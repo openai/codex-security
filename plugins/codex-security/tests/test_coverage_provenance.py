@@ -181,17 +181,55 @@ def test_retry_recovery_restores_original_attempt_and_retained_deferral(
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
-@pytest.mark.parametrize("archived_id", [None, "separate-review"])
+@pytest.mark.parametrize(
+    ("archived_id", "archived_origin", "receipt_state"),
+    [
+        (None, False, "none"),
+        ("separate-review", False, "none"),
+        (None, True, "none"),
+        ("separate-review", True, "none"),
+        (None, False, "copied"),
+        (None, False, "changed"),
+    ],
+)
 def test_recovered_surface_with_assigned_id_keeps_legacy_attempt(
-    workbench_api, workbench_db, publication_scan, monkeypatch, archived_id
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    archived_id,
+    archived_origin,
+    receipt_state,
 ):
     scan = publication_scan()
     worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
-    surface = {"label": "Synthetic surface", "disposition": "no_issue_found", "receiptRefs": []}
-    old_surface = surface if archived_id is None else {**surface, "id": archived_id}
+    surface = {
+        "label": "Synthetic surface",
+        "disposition": "no_issue_found",
+        "receiptRefs": [] if receipt_state == "none" else ["artifacts/review.txt"],
+    }
+    old_surface = dict(surface)
+    if archived_id is not None:
+        old_surface["id"] = archived_id
+    if archived_origin:
+        old_surface["provenance"] = {
+            "workerId": "stale-worker",
+            "attempt": 9,
+            "sourceId": "stale-source",
+            "candidateId": "stale-candidate",
+        }
     coverage = {"completeness": "complete", "explicitExclusions": [], "deferred": []}
     archived = result.parent.parent / "attempts/attempt-01"
     archived.mkdir(parents=True)
+    if receipt_state != "none":
+        for directory in (archived, result.parent):
+            receipt = directory / "artifacts/review.txt"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                "Synthetic changed evidence.\n"
+                if receipt_state == "changed" and directory == result.parent
+                else "Synthetic original evidence.\n"
+            )
     draft = {"scanId": scan.scan_id, "findings": []}
     old = {**draft, "complete": False, "coverage": {**coverage, "surfaces": [old_surface]}}
     (archived / "result.json").write_text(json.dumps(old))
@@ -200,16 +238,19 @@ def test_recovered_surface_with_assigned_id_keeps_legacy_attempt(
     current = {**surface, "id": "surface-d148c73d937026e2"}
     accepted = {**draft, "complete": True, "reviewState": {**coverage, "surfaces": [current]}}
     result.write_text(json.dumps(accepted))
+    originals = {path: path.read_bytes() for path in (result, archived / "result.json", checkpoint)}
     recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
     (retained,) = recovered["surfaces"]
+    expected = 1 if archived_id is None and receipt_state != "changed" else 2
     assert retained["provenance"] == {
         "workerId": worker_id,
-        "attempt": 1 if archived_id is None else 2,
+        "attempt": expected,
         "sourceId": current["id"],
     }
     assert {review["attempt"] for review in recovered["reviews"]} == (
-        {1, 2} if archived_id is None else {2}
+        {1, 2} if expected == 1 else {2}
     )
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
 @pytest.mark.parametrize("retry", [False, True])

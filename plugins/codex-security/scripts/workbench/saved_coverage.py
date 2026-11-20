@@ -378,6 +378,8 @@ class SavedCoverageOrigins:
                     del row["provenance"]
         if field != "surfaces" or not isinstance(left, dict) or not isinstance(right, dict):
             return left == right
+        if "id" not in left:
+            right.pop("id", None)
         left_refs = self.receipt_resolver(left_path, left, owner)
         right_refs = self.receipt_resolver(right_path, right, owner)
         shared_refs = []

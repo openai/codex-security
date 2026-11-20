@@ -758,11 +758,6 @@ def merge_saved_results(
         and worker["result_manifest_path"] == str(scan_dir / relative)
         and draft.get("complete") is not False
     }
-    reviewed_attempts.update(
-        (worker_id, workers_by_id[worker_id]["attempt"])
-        for relative, _, worker_id in sources
-        if relative in accepted_sources
-    )
     project_worker_coverage, legacy_surface_links = prepare_saved_coverage_projection(
         sources,
         parent,
