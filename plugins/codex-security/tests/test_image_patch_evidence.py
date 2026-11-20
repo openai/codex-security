@@ -42,6 +42,7 @@ def reports(package_type="apk"):
         "matches": [
             {
                 "artifact": package,
+                "relatedVulnerabilities": [{"id": "alias"}],
                 "vulnerability": {
                     "id": "test-advisory",
                     "fix": {"state": "fixed", "versions": ["2"]},
@@ -57,12 +58,13 @@ def reports(package_type="apk"):
     return sbom, scan, after, scanned
 
 
-def run(inputs):
-    return compare(*inputs, "test-advisory", "example", "apk")
+def run(inputs, package_type="apk", advisory="test-advisory"):
+    return compare(*inputs, advisory, "example", package_type)
 
 
-def test_installed_fix_and_disappeared_match():
-    result = run(reports())
+@pytest.mark.parametrize("advisory", ["test-advisory", "alias"])
+def test_installed_fix_and_disappeared_match(advisory):
+    result = run(reports(), advisory=advisory)
     assert result["scanner_evidence"] == "reported_fix_present"
     assert result["before"]["total_matches"] == 1
     assert result["after"]["distinct_advisories"] == 0
@@ -70,13 +72,15 @@ def test_installed_fix_and_disappeared_match():
 
 
 @pytest.mark.parametrize(
-    "case", ["missing package", "unlisted version", "suppressed", "still active"]
+    "case", ["missing package", "namespace", "unlisted version", "suppressed", "still active"]
 )
 def test_no_false_closure(case):
     items = reports()
     _, scan, after, scanned = items
     if case == "missing package":
         after["artifacts"] = []
+    elif case == "namespace":
+        after["artifacts"][0]["purl"] = "pkg:apk/other/example@2"
     elif case == "unlisted version":
         after["artifacts"][0]["version"] = "3"
     elif case == "suppressed":
@@ -110,10 +114,16 @@ def test_comparison_requires_matching_inputs(case):
         run(items)
 
 
-def test_other_package_namespace_cannot_supply_fix():
+def test_platform_variants_and_removed_layers():
     items = reports()
-    items[2]["artifacts"][0]["purl"] = "pkg:apk/other/example@2"
-    assert run(items)["scanner_evidence"] == "inconclusive"
+    items[2]["source"]["metadata"]["architectureVariant"] = "v7"
+    with pytest.raises(ValueError, match="platform"):
+        run(items)
+    items = reports()
+    for sbom in (items[0], items[2]):
+        sbom["descriptor"]["configuration"]["search"]["scope"] = "all-layers"
+    with pytest.raises(ValueError, match="squashed"):
+        run(items)
 
 
 @pytest.mark.parametrize(
@@ -128,43 +138,17 @@ def test_fixed_version_applies_to_its_distribution(package_type, distro, next_di
     items = reports(package_type)
     items[0]["artifacts"][0]["purl"] += f"?distro={distro}"
     package = items[2]["artifacts"][0]
-    args = (*items, "test-advisory", "example", package_type)
     purl = package["purl"]
-    assert compare(*args)["scanner_evidence"] == "inconclusive"
+    assert run(items, package_type)["scanner_evidence"] == "inconclusive"
     package["purl"] = f"{purl}?arch=x86_64&distro={distro}"
-    assert compare(*args)["scanner_evidence"] == "reported_fix_present"
+    assert run(items, package_type)["scanner_evidence"] == "reported_fix_present"
+    fixed = dict(package)
+    package["purl"] += f"&Distro={next_distro}"
+    assert run(items, package_type)["scanner_evidence"] == "inconclusive"
     package["purl"] = f"{purl}?distro={next_distro}"
-    assert compare(*args)["scanner_evidence"] == "inconclusive"
+    assert run(items, package_type)["scanner_evidence"] == "inconclusive"
     items[3]["matches"] = [{**items[1]["matches"][0], "artifact": package}]
-    assert compare(*args)["scanner_evidence"] == "still_reported"
-
-
-def test_related_advisory_selects_native_match():
-    items = reports()
-    match = items[1]["matches"][0]
-    match["vulnerability"]["id"] = "other-primary"
-    match["relatedVulnerabilities"] = [{"id": "test-advisory"}]
-    assert run(items)["scanner_evidence"] == "reported_fix_present"
-
-
-def test_platform_variants_and_removed_layers():
-    items = reports()
-    items[2]["source"]["metadata"]["architectureVariant"] = "v7"
-    with pytest.raises(ValueError, match="platform"):
-        run(items)
-    items = reports()
-    for sbom in (items[0], items[2]):
-        sbom["descriptor"]["configuration"]["search"]["scope"] = "all-layers"
-    with pytest.raises(ValueError, match="squashed"):
-        run(items)
-
-
-def test_other_distro_copy_with_residual_match():
-    items = reports()
-    artifact = {
-        **items[1]["matches"][0]["artifact"],
-        "purl": "pkg:apk/vendor/example@1?distro=other",
-    }
-    items[2]["artifacts"].append(artifact)
-    items[3]["matches"].append({**items[1]["matches"][0], "artifact": artifact})
-    assert run(items)["scanner_evidence"] == "still_reported"
+    assert run(items, package_type)["scanner_evidence"] == "still_reported"
+    items[2]["artifacts"].append(fixed)
+    package.update(version="1", purl=f"pkg:{package_type}/vendor/example@1?distro={next_distro}")
+    assert run(items, package_type)["scanner_evidence"] == "still_reported"

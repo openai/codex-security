@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 
 def required_text(value, field):
@@ -28,15 +28,19 @@ def image_identity(source):
 def package_identity(artifact):
     purl = required_text(artifact["purl"], "package URL")
     path = purl.partition("?")[0]
-    name, version_separator, _ = path.rpartition("@")
-    if not version_separator or not name.startswith("pkg:"):
+    name, _, version = path.rpartition("@")
+    if not version or not name.startswith("pkg:"):
         raise ValueError("Expected a versioned package URL")
     return name
 
 
-def package_distro(artifact):
-    query = urlsplit(artifact["purl"]).query
-    return parse_qs(query).get("distro", [None])[0]
+def package_distros(artifacts):
+    distros = set()
+    for artifact in artifacts:
+        query = parse_qsl(urlsplit(artifact["purl"]).query, keep_blank_values=True)
+        values = {value for key, value in query if key.lower() == "distro"}
+        distros.update(values or {None})
+    return distros
 
 
 def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=None):
@@ -48,13 +52,18 @@ def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=Non
     if sbom["descriptor"]["configuration"]["search"]["scope"] != "squashed":
         raise ValueError("Use a squashed SBOM covering the final image filesystem")
 
+    def selected_package(artifact):
+        return (
+            artifact["name"] == package
+            and artifact["type"] == package_type
+            and (identity_key is None or package_identity(artifact) == identity_key)
+        )
+
     def selected(match):
-        artifact = match["artifact"]
-        ids = [
-            match["vulnerability"]["id"],
-            *(v["id"] for v in match.get("relatedVulnerabilities", [])),
-        ]
-        return advisory in ids and artifact["name"] == package and artifact["type"] == package_type
+        return (
+            match["vulnerability"]["id"] == advisory
+            or any(v["id"] == advisory for v in match.get("relatedVulnerabilities", []))
+        ) and selected_package(match["artifact"])
 
     matches = scan["matches"]
     active = [m for m in matches if selected(m)]
@@ -63,33 +72,41 @@ def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=Non
         if len(keys) != 1:
             raise ValueError("Select one baseline advisory and package identity")
         identity_key = keys.pop()
-    active = [m for m in active if package_identity(m["artifact"]) == identity_key]
-    ignored = [
-        m
-        for m in scan.get("ignoredMatches", [])
-        if selected(m) and package_identity(m["artifact"]) == identity_key
-    ]
-    installed = [
-        a
-        for a in sbom["artifacts"]
-        if a["name"] == package
-        and a["type"] == package_type
-        and package_identity(a) == identity_key
-    ]
+    installed = [a for a in sbom["artifacts"] if selected_package(a)]
     versions = sorted({required_text(a["version"], "installed version") for a in installed})
-    distros = {package_distro(a) for a in installed}
-    distros.update(package_distro(match["artifact"]) for match in active)
+    distros = package_distros(installed) | package_distros(m["artifact"] for m in active)
     summary = {
         "manifest_digest": identity[0],
         "platform": identity[1],
         "package_identity": identity_key,
         "installed_versions": versions,
         "selected_matches": len(active),
-        "selected_ignored_matches": len(ignored),
+        "selected_ignored_matches": sum(selected(m) for m in scan.get("ignoredMatches", [])),
         "total_matches": len(matches),
         "distinct_advisories": len({m["vulnerability"]["id"] for m in matches}),
     }
     return summary, active, distros
+
+
+def database_identity(scan):
+    db = scan["descriptor"]["db"]
+    status = db["status"]
+    if status["valid"] is not True:
+        raise ValueError("Invalid Grype database")
+    return {
+        "built": required_text(status["built"], "Grype DB built"),
+        "schemaVersion": required_text(status["schemaVersion"], "Grype DB schemaVersion"),
+        "from": status["from"],
+        "providers": db["providers"],
+    }
+
+
+def reported_fixes(match):
+    fix = match["vulnerability"].get("fix") or {}
+    versions = fix.get("versions") if fix.get("state") == "fixed" else []
+    if not isinstance(versions, list):
+        raise ValueError("Expected a list of reported fixed versions")
+    return {required_text(v, "fixed version") for v in versions}
 
 
 def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package, package_type):
@@ -101,16 +118,8 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
             value = before["descriptor"][key]
             if value != after["descriptor"][key] or (key == "name" and value != tool):
                 raise ValueError(f"Incomparable {tool} {key}")
-    db = before_scan["descriptor"]["db"]
-    status = db["status"]
-    for key in ("built", "schemaVersion"):
-        required_text(status[key], f"Grype DB {key}")
-    other_db = after_scan["descriptor"]["db"]
-    if (
-        any(status[k] != other_db["status"][k] for k in ("built", "schemaVersion", "from"))
-        or db["providers"] != other_db["providers"]
-        or any(d["status"]["valid"] is not True for d in (db, other_db))
-    ):
+    database = database_identity(before_scan)
+    if database != database_identity(after_scan):
         raise ValueError("Incomparable Grype databases")
 
     before, active, before_distros = image_snapshot(
@@ -121,18 +130,9 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
     )
     if before["platform"] != after["platform"]:
         raise ValueError("Image platforms differ")
-    if not active or any(
-        m["artifact"]["version"] not in before["installed_versions"] for m in active
-    ):
+    if any(m["artifact"]["version"] not in before["installed_versions"] for m in active):
         raise ValueError("Selected match must be present in the baseline report and inventory")
-    fixes = None
-    for match in active:
-        fix = match["vulnerability"].get("fix") or {}
-        versions = fix.get("versions") if fix.get("state") == "fixed" else []
-        if not isinstance(versions, list):
-            raise ValueError("Expected a list of reported fixed versions")
-        reported = {required_text(v, "fixed version") for v in versions}
-        fixes = reported if fixes is None else fixes & reported
+    fixes = set.intersection(*(reported_fixes(match) for match in active))
     if after["selected_matches"]:
         outcome = "still_reported"
     elif (
@@ -152,7 +152,7 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
         "package_type": package_type,
         "scanner_evidence": outcome,
         "reported_fixed_versions": sorted(fixes),
-        "database_built": status["built"],
+        "database_built": database["built"],
         "before": before,
         "after": after,
         "deployment": "unverified",
@@ -165,7 +165,7 @@ def scan_sbom(path):
     scan = subprocess.run(
         ["grype", "--file", "", "-o", "json"], input=contents, stdout=subprocess.PIPE, check=True
     )
-    return sbom, json.loads(scan.stdout), hashlib.sha256(contents).hexdigest()
+    return (sbom, json.loads(scan.stdout)), hashlib.sha256(contents).hexdigest()
 
 
 def main():
@@ -176,17 +176,9 @@ def main():
         parser.add_argument(f"--{key}", required=True)
     args = parser.parse_args()
     try:
-        before_sbom, before_scan, before_hash = scan_sbom(args.before_sbom)
-        after_sbom, after_scan, after_hash = scan_sbom(args.after_sbom)
-        result = compare(
-            before_sbom,
-            before_scan,
-            after_sbom,
-            after_scan,
-            args.advisory,
-            args.package,
-            args.package_type,
-        )
+        before, before_hash = scan_sbom(args.before_sbom)
+        after, after_hash = scan_sbom(args.after_sbom)
+        result = compare(*before, *after, args.advisory, args.package, args.package_type)
         result["before"]["sbom_sha256"] = before_hash
         result["after"]["sbom_sha256"] = after_hash
         print(json.dumps(result, indent=2))
