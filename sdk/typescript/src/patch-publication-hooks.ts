@@ -114,6 +114,7 @@ export function withoutUrlCredentials(value: string): string {
 }
 
 export interface WindowsGitConfig {
+  selector?: { file: string; number: number };
   prefix: string;
   binding: string;
   coordinator: string;
