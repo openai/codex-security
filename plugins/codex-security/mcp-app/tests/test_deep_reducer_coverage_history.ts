@@ -179,6 +179,83 @@ for (const archived of [false, true]) {
   }
 }
 
+for (const currentIds of ["duplicates", "reordered", "explicit"]) {
+  test(`legacy same-ID task links follow their matched occurrences: ${currentIds}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const surfaces = ["First", "Second"].map((label, index) => ({
+      id: index === 0 ? "api" : "api-2",
+      label,
+      disposition: "needs_follow_up",
+      receiptRefs: [],
+    }));
+    await writeFile(
+      f.resultPath,
+      JSON.stringify(
+        reviewDraft(true, {
+          surfaces,
+          deferred: surfaces.map((surface) => ({
+            id: "legacy",
+            reason: `${surface.label} follow-up`,
+            surfaceIds: [surface.id],
+          })),
+        }),
+      ),
+    );
+    await f.archive();
+    await mkdir(f.output, { recursive: true });
+    const current = structuredClone(surfaces);
+    if (currentIds !== "explicit") current[1]!.id = "api";
+    if (currentIds === "reordered") current.reverse();
+    await writeFile(
+      f.resultPath,
+      JSON.stringify(
+        reviewDraft(true, {
+          surfaces: current,
+          deferred: [
+            {
+              id: "current",
+              reason: "Current follow-up",
+              surfaceIds: ["api", "unknown"],
+            },
+          ],
+        }),
+      ),
+    );
+    const before = await artifactTree(f.workerRoot);
+    const accepted = await f.readAccepted();
+    const resumed = await readAcceptedDiscovery(
+      f.artifacts,
+      f.worker,
+      scanId,
+      {},
+      "previously-accepted",
+    );
+    assert.deepEqual(resumed.coverage, accepted.coverage);
+    assert.deepEqual(accepted.result.reviewState.surfaces, current);
+    const published = scanUnionToDraft(await publishAndReplay(f)).reviewState;
+    assert.equal(published.surfaces.length, 2);
+    assert.equal(published.deferred.length, 3);
+    for (const label of ["First", "Second"])
+      assert.deepEqual(
+        published.deferred.find(
+          (row: { reason: string }) => row.reason === `${label} follow-up`,
+        ).surfaceIds,
+        [
+          published.surfaces.find(
+            (row: { label: string }) => row.label === label,
+          ).id,
+        ],
+      );
+    assert.deepEqual(
+      published.deferred.find(
+        (row: { reason: string }) => row.reason === "Current follow-up",
+      ).surfaceIds,
+      [published.surfaces[0].id, "unknown"],
+    );
+    assert.deepEqual(await artifactTree(f.workerRoot), before);
+  });
+}
+
 for (const close of [false, true]) {
   test(`accepted worker ${close ? "closure" : "pending control"} survives aggregation and replay`, async (t) => {
     const f = await workerHistoryFixture(t, 2);

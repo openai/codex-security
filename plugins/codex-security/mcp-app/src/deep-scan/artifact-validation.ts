@@ -236,7 +236,7 @@ export async function readAcceptedDiscovery(
     usableCheckpoint,
   );
   const snapshots = [...current, ...archived];
-  // Same-thread retries copy checkpoints without creating a new observation.
+  // Same-thread retries copy saved files without creating a new observation.
   // Match the raw file's copy time separately from a later head selection.
   const history = snapshots.filter(
     (source, index) =>
@@ -245,9 +245,10 @@ export async function readAcceptedDiscovery(
         (earlier, earlierIndex) =>
           earlierIndex > index &&
           earlier.attempt !== source.attempt &&
+          (earlier.result ?? false) === (source.result ?? false) &&
           sameCheckpointCopyTime(
-            source.checkpointModifiedMs,
-            earlier.checkpointModifiedMs,
+            source.sourceModifiedMs,
+            earlier.sourceModifiedMs,
           ) &&
           (source.modifiedMs <= earlier.modifiedMs ||
             sameCheckpointCopyTime(source.modifiedMs, earlier.modifiedMs)) &&

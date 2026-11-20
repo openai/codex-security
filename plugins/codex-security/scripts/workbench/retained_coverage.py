@@ -80,7 +80,7 @@ from workbench.saved_sources import (
     _parent_publication_ancestors,
     _read_saved_parent_result,
     _read_saved_result,
-    _retain_checkpoint_observation_order,
+    _retain_saved_observation_order,
     _unselected_root_order,
     _worker_outputs,
 )
@@ -495,7 +495,7 @@ def merge_saved_results(
     source_order.update(selected_observations)
     source_order.update(registered_result_orders)
 
-    _retain_checkpoint_observation_order(
+    _retain_saved_observation_order(
         sources, source_digests, source_times, source_order, selected_observations, current_results
     )
 
@@ -843,7 +843,7 @@ def merge_saved_results(
                 worker_id,
                 worker["attempt"],
             ):
-                if worker is not None and field == "surfaces":
+                if worker is not None and field in {"surfaces", "deferred"}:
                     retained = coverage_origins.retained_record(
                         field, item, index, worker, source, coverage, reviewed_attempts
                     )

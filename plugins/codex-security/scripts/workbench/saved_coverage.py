@@ -457,7 +457,7 @@ class SavedCoverageOrigins:
         self.receipt_resolver = receipt_resolver
         self.scan_dir = scan_dir
         self.receipt_digests = {}
-        self.attempts = {}
+        self.origins = {}
         self.origin_sources = {}
         self.relinked_deferred = []
 
@@ -582,8 +582,8 @@ class SavedCoverageOrigins:
         if relative is None:
             return worker["attempt"]
         key = (relative, field, index)
-        if key in self.attempts:
-            return self.attempts[key]
+        if key in self.origins:
+            return self.origins[key][0]
         attempt = self.worker_attempts.get(
             self.directory(relative).as_posix(), (worker["id"], worker["attempt"])
         )[1]
@@ -695,6 +695,7 @@ class SavedCoverageOrigins:
                         "row_path": path,
                         "attempt": snapshot_attempt,
                         "source_path": path,
+                        "source_index": offset,
                         "surface": surface,
                     }
                     added.append(origin)
@@ -705,11 +706,15 @@ class SavedCoverageOrigins:
                         origin["row"], origin["row_path"] = current, path
                         origin["surface"] = surface
                 current_key = (path, field, offset)
-                self.attempts[current_key] = origin["attempt"]
+                self.origins[current_key] = (
+                    origin["attempt"],
+                    origin["source_path"],
+                    origin["source_index"],
+                )
                 if origin["attempt"] < snapshot_attempt:
                     self.origin_sources[current_key] = origin["source_path"]
             occurrences.extend(added)
-        return self.attempts[key]
+        return self.origins[key][0]
 
     def project_closure(self, closure, worker, source, published, reviewed, coverage):
         relative = self.paths.get(id(source))
@@ -772,9 +777,9 @@ class SavedCoverageOrigins:
         if not isinstance(provenance, dict) or (
             provenance.get("workerId"),
             provenance.get("attempt"),
-        ) != (worker["id"], self.attempts[key]):
+        ) != (worker["id"], self.origins[key][0]):
             return
-        attempt = self.attempts[key]
+        attempt = self.origins[key][0]
         if add_review(coverage, worker["id"], attempt, self.sources[origin][0]):
             reviewed.add((worker["id"], attempt))
 
@@ -791,7 +796,25 @@ class SavedCoverageOrigins:
         if not published_rows:
             return None
 
-        def comparable(value, projected=False, inferred_identity=False):
+        linked_surfaces = {}
+        if (
+            field == "deferred"
+            and isinstance(item, dict)
+            and isinstance(item.get("surfaceIds"), list)
+        ):
+            links = {link for link in item["surfaceIds"] if isinstance(link, str)}
+            for offset, surface in enumerate(_coverage_rows(source, "surfaces"), 1):
+                identity = surface.get("id") if isinstance(surface, dict) else None
+                if not isinstance(identity, str) or identity not in links:
+                    continue
+                links.remove(identity)
+                retained = self.retained_record(
+                    "surfaces", surface, offset, worker, source, published, reviewed
+                )
+                if retained is not None and isinstance(retained.get("id"), str):
+                    linked_surfaces[retained["id"]] = identity
+
+        def comparable(value, projected=False, inferred_identity=False, source_path=relative):
             original = value
             value = self.row(field, value)
             if not isinstance(value, dict):
@@ -814,6 +837,7 @@ class SavedCoverageOrigins:
                             and "sourceId" in metadata
                         ):
                             aliases[surface["id"]] = metadata["sourceId"]
+                    aliases.update(linked_surfaces)
                     for offset, surface in enumerate(_coverage_rows(source, "surfaces"), 1):
                         if isinstance(surface, dict) and isinstance(surface.get("id"), str):
                             aliases.setdefault(
@@ -844,40 +868,64 @@ class SavedCoverageOrigins:
             if field == "surfaces":
                 refs = value.get("receiptRefs", [])
                 if not projected:
-                    refs = self.receipt_resolver(relative, original, worker["id"])
+                    refs = self.receipt_resolver(source_path, original, worker["id"])
                 value["receiptRefs"] = refs
             return value
 
-        expected = comparable(
-            item, inferred_identity=(relative, field, index) in self.inferred_rows
-        )
-        original_rows = _coverage_rows(self.sources[relative][0], field)
-        occurrence = sum(
-            comparable(row, inferred_identity=(relative, field, offset) in self.inferred_rows)
-            == expected
-            for offset, row in enumerate(original_rows[:index], 1)
-        )
-        matches = []
-        for row in published_rows:
-            if not isinstance(row, dict):
-                continue
-            provenance = row.get("provenance")
-            if (
-                isinstance(provenance, dict)
-                and provenance.get("workerId") == worker["id"]
-                and isinstance(provenance.get("attempt"), int)
-                and (worker["id"], provenance["attempt"]) in reviewed
-                and comparable(row, True) == expected
-            ):
-                matches.append(row)
-        if not 0 < occurrence <= len(matches):
-            return None
-        retained = matches[occurrence - 1]
-        # An older parent path can now contain different retry receipt bytes.
-        # Keep newer accepted copies, but do not assign newer evidence to an older review.
-        if retained["provenance"]["attempt"] < self.attempt(field, index, worker, source):
-            return None
-        return retained
+        def retained_at(path, offset, value):
+            expected = comparable(
+                value,
+                inferred_identity=(path, field, offset) in self.inferred_rows,
+                source_path=path,
+            )
+            original_rows = _coverage_rows(self.sources[path][0], field)
+            occurrence = sum(
+                comparable(
+                    row,
+                    inferred_identity=(path, field, position) in self.inferred_rows,
+                    source_path=path,
+                )
+                == expected
+                for position, row in enumerate(original_rows[:offset], 1)
+            )
+            matches = []
+            for row in published_rows:
+                if not isinstance(row, dict):
+                    continue
+                provenance = row.get("provenance")
+                if (
+                    isinstance(provenance, dict)
+                    and provenance.get("workerId") == worker["id"]
+                    and isinstance(provenance.get("attempt"), int)
+                    and (worker["id"], provenance["attempt"]) in reviewed
+                    and comparable(row, True) == expected
+                ):
+                    matches.append(row)
+            if not 0 < occurrence <= len(matches):
+                return None
+            retained = matches[occurrence - 1]
+            # An older parent path can now contain different retry receipt bytes.
+            # Keep newer accepted copies, but do not assign newer evidence to an older review.
+            if retained["provenance"]["attempt"] < self.attempt(field, index, worker, source):
+                return None
+            return retained
+
+        retained = retained_at(relative, index, item)
+        if retained is not None or field != "surfaces":
+            return retained
+        self.attempt(field, index, worker, source)
+        origin = self.origins.get((relative, field, index))
+        if origin is not None:
+            for (path, kind, offset), matched in self.origins.items():
+                if kind != field or path == relative or matched != origin:
+                    continue
+                # Reuse the exact occurrence match; names alone cannot establish an alias.
+                retained = retained_at(
+                    path, offset, _coverage_rows(self.sources[path][0], field)[offset - 1]
+                )
+                if retained is not None:
+                    return retained
+        return None
 
 
 class SavedCoverageProjection:

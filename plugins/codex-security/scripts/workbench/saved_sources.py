@@ -296,7 +296,7 @@ def _same_checkpoint_time(left: int, right: int) -> bool:
     )
 
 
-def _retain_checkpoint_observation_order(
+def _retain_saved_observation_order(
     sources: list[tuple[str, dict[str, Any], str | None]],
     source_digests: dict[str, str],
     source_times: dict[str, int],
@@ -308,16 +308,18 @@ def _retain_checkpoint_observation_order(
     # fs.cp passes Date values through the platform's utimes conversion.
     # Recognize that conversion, rather than treating every same-millisecond
     # observation as a copy of an earlier selection.
-    checkpoint_observations: dict[tuple[str, str], list[tuple[str, tuple[int, int]]]] = {}
+    observations: dict[tuple[str, str, str], list[tuple[str, tuple[int, int]]]] = {}
     for relative, _, owner in sorted(sources, key=lambda source: source_order[source[0]]):
+        path = Path(relative)
+        kind = "checkpoint" if path.parent.name == "checkpoints" else path.name
         if (
             owner is None
             or relative in current_results
-            or Path(relative).parent.name != "checkpoints"
+            or kind not in {"checkpoint", "result.json"}
         ):
             continue
         order = source_order[relative]
-        previous = checkpoint_observations.setdefault((owner, source_digests[relative]), [])
+        previous = observations.setdefault((owner, kind, source_digests[relative]), [])
         for prior, original_order in reversed(previous):
             if (
                 original_order[0] < order[0]

@@ -1230,6 +1230,80 @@ for (const copies of [1, 2]) {
   }
 }
 
+for (const closure of ["copied", "republished", "current"]) {
+  test(`retry preserves a reopening after an older ${closure} result`, async (t) => {
+    const f = await workerHistoryFixture(t, 3);
+    await f.record(
+      reviewDraft(false, {
+        deferred: [{ id: "task", reason: "Complete the synthetic review" }],
+      }),
+    );
+    const headPath = path.join(f.output, "checkpoint-head.json");
+    const head = JSON.parse(await readFile(headPath, "utf8"));
+    const checkpoint = path.join(f.output, "checkpoints", head.checkpoint);
+    await utimes(checkpoint, 2.00025, 2.00025);
+    await utimes(headPath, 2.00025, 2.00025);
+    const closed = JSON.stringify(
+      reviewDraft(true, {
+        resolvedDeferred: [{ id: "task", reason: "Review completed" }],
+      }),
+    );
+    // The checkpoint/head was saved, but replacement of the older result was interrupted.
+    await writeFile(f.resultPath, closed);
+    await utimes(f.resultPath, 1.00025, 1.00025);
+    for (const attempt of [1, 2]) {
+      const archive = path.join(f.workerRoot, `attempts/attempt-0${attempt}`);
+      await mkdir(path.dirname(archive), { recursive: true });
+      await cp(f.output, archive, {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+      if (attempt === 2 && closure === "republished")
+        await utimes(path.join(archive, "result.json"), 3, 3);
+    }
+    await writeFile(
+      f.resultPath,
+      closure === "current" ? closed : JSON.stringify(reviewDraft(true)),
+    );
+    await utimes(f.resultPath, 4, 4);
+    const files = [
+      checkpoint,
+      headPath,
+      f.resultPath,
+      ...[1, 2].flatMap((attempt) => {
+        const archive = path.join(f.workerRoot, `attempts/attempt-0${attempt}`);
+        return [
+          path.join(archive, "result.json"),
+          path.join(archive, "checkpoint-head.json"),
+          path.join(archive, "checkpoints", head.checkpoint),
+        ];
+      }),
+    ];
+    const before = await Promise.all(files.map((file) => readFile(file)));
+    for (const admission of ["new", "previously-accepted"] as const) {
+      const accepted = await readAcceptedDiscovery(
+        f.artifacts,
+        f.worker,
+        scanId,
+        {},
+        admission,
+      );
+      assert.equal(
+        accepted.coverage.deferred.length,
+        closure === "copied" ? 1 : 0,
+      );
+      assert.equal(
+        (accepted.coverage.resolvedDeferred ?? []).length,
+        closure === "copied" ? 0 : 1,
+      );
+    }
+    assert.deepEqual(
+      await Promise.all(files.map((file) => readFile(file))),
+      before,
+    );
+  });
+}
+
 for (const [count, selected, current] of [
   [2, 1, false],
   [3, 2, false],

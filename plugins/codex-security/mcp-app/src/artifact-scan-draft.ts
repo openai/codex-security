@@ -215,7 +215,7 @@ interface SavedScanDraft {
   input: ScanDraftInput;
   surfaceIdentities?: SurfaceNormalization[];
   modifiedMs: number;
-  checkpointModifiedMs?: number;
+  sourceModifiedMs?: number;
   snapshot?: JsonObject;
   head?: boolean;
   attempt?: string;
@@ -1418,16 +1418,17 @@ async function mergeSavedDraft(
   }
   const currentCandidateIds = completedCandidateIds(result);
   const resolvedCandidateIds = completedCandidateIds(result, sources);
-  const { closedDeferredIds, resolvedSurfaces } = reconcileResolvedDeferred(
-    result,
-    resolvedDeferred(input.reviewState),
-    sources,
-    savedSources,
-    resolvedCandidateIds,
-    ambiguousDeferredIds,
-    retainedFinal?.input,
-    previouslyAccepted,
-  );
+  const { closedDeferredIds, resolvedSurfaces, retainedDeferredSources } =
+    reconcileResolvedDeferred(
+      result,
+      resolvedDeferred(input.reviewState),
+      sources,
+      savedSources,
+      resolvedCandidateIds,
+      ambiguousDeferredIds,
+      retainedFinal?.input,
+      previouslyAccepted,
+    );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
   if (checkpoint) await saveScanDraftCheckpoint(checkpoint, input, false);
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
@@ -1730,21 +1731,19 @@ async function mergeSavedDraft(
       previousCoverage,
       ambiguousDeferredIds,
     );
-    if (
-      preserveSurfaceIds &&
-      result.reviewState.deferred.length > deferredCount
-    ) {
+    if (preserveSurfaceIds) {
       // Keep retained links bound to the matched occurrence, including after reordering.
       const sourceTargets = new Map<unknown, number | undefined>();
       for (const surface of source.reviewState.surfaces) {
         if (!sourceTargets.has(surface.id))
           sourceTargets.set(surface.id, surfaceTargets.get(surface));
       }
-      for (
-        let index = deferredCount;
-        index < result.reviewState.deferred.length;
-        index++
-      ) {
+      for (let index = 0; index < result.reviewState.deferred.length; index++) {
+        if (
+          index < deferredCount &&
+          retainedDeferredSources.get(index) !== source
+        )
+          continue;
         const links = result.reviewState.deferred[index]!.surfaceIds as
           string[] | undefined;
         if (links !== undefined)
@@ -2186,8 +2185,13 @@ function reconcileResolvedDeferred(
   ambiguousIds: Set<string>,
   retainedFinal?: ScanDraftInput,
   previouslyAccepted = false,
-): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
+): {
+  closedDeferredIds: Set<string>;
+  resolvedSurfaces: Set<JsonObject>;
+  retainedDeferredSources: Map<number, ScanDraftInput>;
+} {
   const activeDeferred = result.reviewState.deferred;
+  const retainedDeferredSources = new Map<number, ScanDraftInput>();
   // Legacy aliases cannot identify which independent task was completed.
   // Keep generic work separate from candidate outcomes and ambiguous closures.
   for (const source of sources) {
@@ -2195,8 +2199,10 @@ function reconcileResolvedDeferred(
       if (
         ambiguousGenericEntry(row, ambiguousIds) &&
         !activeDeferred.some((current) => isDeepStrictEqual(current, row))
-      )
+      ) {
+        retainedDeferredSources.set(activeDeferred.length, source);
         activeDeferred.push(structuredClone(row));
+      }
     }
   }
   const observedIds = new Set(
@@ -2344,7 +2350,7 @@ function reconcileResolvedDeferred(
     retainedFinal,
     reopenedIds,
   );
-  return { closedDeferredIds, resolvedSurfaces };
+  return { closedDeferredIds, resolvedSurfaces, retainedDeferredSources };
 }
 
 function reconcileDeferredSurfaces(
@@ -2630,7 +2636,7 @@ async function readSavedCheckpoints(
         ...surfaceNormalization(input.reviewState.surfaces).values(),
       ],
       snapshot: draft,
-      checkpointModifiedMs: Number(checkpointMetadata.mtimeMs),
+      sourceModifiedMs: Number(checkpointMetadata.mtimeMs),
       modifiedMs:
         entry.name === checkpointHead
           ? head!.modifiedMs
@@ -2849,11 +2855,13 @@ export async function readArchivedWorkerCheckpoints(
           "archived scan result",
         );
         let result: ScanDraftInput | undefined;
+        let snapshot: JsonObject | undefined;
         try {
           const stored = parseJsonObject(
             saved.contents,
             "archived scan result",
           );
+          snapshot = structuredClone(stored);
           await retainRecordedReceiptOwnership(attemptContext, stored);
           result = parsePersistedScanDraft(stored);
         } catch {
@@ -2867,6 +2875,8 @@ export async function readArchivedWorkerCheckpoints(
               ...surfaceNormalization(result.reviewState.surfaces).values(),
             ],
             modifiedMs: saved.modifiedMs,
+            sourceModifiedMs: saved.modifiedMs,
+            snapshot,
             result: true,
             name: "result.json",
           });
