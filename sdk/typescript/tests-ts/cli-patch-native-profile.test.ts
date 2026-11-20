@@ -91,10 +91,12 @@ async function resolvePatchProfile(
   // Native Windows grants persist on disk. Keep config files and temp write
   // roots inside this fixture, away from the shard's shared temporary directory.
   const selectedConfig = join(root, "selected.gitconfig");
+  const selector = join(root, "lfs.gitconfig");
   const gitEnvironment = {
     HOME: home,
     USERPROFILE: home,
     GIT_CONFIG_GLOBAL: selectedConfig,
+    ...(optionalStorage === "selected" && { GIT_CONFIG: selector }),
     GIT_CONFIG_NOSYSTEM: "1",
     XDG_CONFIG_HOME: join(home, ".config"),
   };
@@ -127,6 +129,7 @@ async function resolvePatchProfile(
         process.platform === "win32" ? "junction" : "dir",
       );
     if (optionalStorage === "selected") {
+      await writeFile(selector, "[include]\n path = included.gitconfig\n");
       await writeFile(
         selectedConfig,
         '[http]\n extraHeader = "Authorization: Synthetic fixture"\n' +
@@ -141,7 +144,6 @@ async function resolvePatchProfile(
       "git",
       [
         "config",
-        ...(optionalStorage === "selected" ? ["--file", selectedConfig] : []),
         "lfs.storage",
         optionalStorage === "selected" ||
         optionalStorage === "direct-administration"
@@ -165,12 +167,13 @@ async function resolvePatchProfile(
         }),
       {
         environment: gitEnvironment,
+        automaticPublication: optionalStorage === "selected",
       },
     );
     expect(controls).toBeDefined();
     expect([...controls!.externalConfigPaths].sort()).toEqual(
       optionalStorage === "selected"
-        ? [selectedConfig, join(root, "included.gitconfig")].sort()
+        ? [selectedConfig, selector, join(root, "included.gitconfig")].sort()
         : [],
     );
     expect(controls!.snapshotStoragePaths).toEqual(
@@ -593,10 +596,11 @@ test("patch model cannot read external Git configuration used by snapshots", asy
     async (context, inspectModel) => {
       const root = dirname(context.repository);
       const selected = join(root, "selected.gitconfig");
+      const selector = join(root, "lfs.gitconfig");
       const included = join(root, "included.gitconfig");
       const readConfigs = `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const paths = ${JSON.stringify([selected, included])};
+const paths = ${JSON.stringify([selected, included, selector])};
 for (const path of paths) {
   try { process.stdout.write(fs.readFileSync(path)); }
   catch (error) { process.stdout.write(error.code); }
@@ -607,6 +611,7 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         const reads = await inspectModel(readConfigs);
         expect(reads).not.toContain("Synthetic fixture");
         expect(reads).not.toContain("Included fixture");
+        expect(reads).not.toContain("[lfs]");
       };
       const gitEnvironment = {
         GIT_CONFIG_GLOBAL: selected,
@@ -625,14 +630,23 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         gitEnvironment,
       };
       await expectModelDenied();
-      expect(
-        await runRepositoryCommand(
+      const config = (key: string, file?: string) =>
+        runRepositoryCommand(
           "git",
-          ["config", "--get", "synthetic.source"],
+          ["config", "--includes", "--get", key],
           context.repository,
-          { sandbox },
-        ),
-      ).toBe("Included fixture");
+          {
+            sandbox: {
+              ...sandbox,
+              gitEnvironment: { ...gitEnvironment, GIT_CONFIG: file },
+            },
+          },
+        );
+      expect(await config("synthetic.source")).toBe("Included fixture");
+      expect(await config("synthetic.source", selector)).toBe(
+        "Included fixture",
+      );
+      expect(await config("lfs.storage", selector)).toBe(context.storage);
       if (process.platform === "win32") {
         // Exercise repeated and simultaneous Git reads before giving another
         // command the exact live endpoint under the same sandbox account.
