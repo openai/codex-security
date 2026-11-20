@@ -5,8 +5,8 @@ import type { PatchPublicationHooks } from "./patch-git-controls.js";
 
 export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 
-export const gitPasswordSetting =
-  /^(?:imap\.pass|sendemail(?:\..*)?\.smtppass|gitcvs(?:\..*)?\.dbpass)$/isu;
+export const gitSecretSetting =
+  /^(?:imap\.pass|sendemail(?:\..*)?\.smtppass|gitcvs(?:\..*)?\.dbpass|receive\.certnonceseed)$/isu;
 
 export const httpCredentialFile =
   /^http(?:\..*)?\.(?:cookiefile|(?:proxy)?ssl(?:key|cert))$/iu;
@@ -73,7 +73,7 @@ export function filterCommandConfig(
   stripUrlCredentials = withoutUrlCredentials,
   proxyCredentials = proxyUserinfo,
   credentialFile = httpCredentialFile,
-  passwordSetting = gitPasswordSetting,
+  secretSetting = gitSecretSetting,
 ): void {
   function include(key: string, value: string) {
     if (
@@ -90,7 +90,7 @@ export function filterCommandConfig(
     return (
       stripUrlCredentials(key) !== key ||
       stripUrlCredentials(value) !== value ||
-      (value !== "" && passwordSetting.test(key)) ||
+      (value !== "" && secretSetting.test(key)) ||
       credentialFile.test(key) ||
       /^credential\.|^http(?:\..*)?\.(?:extraheader|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
         key,
@@ -246,7 +246,7 @@ environment.CODEX_HOME = plan.home;
 const windowsConfig = plan.windowsConfig;
 if (windowsConfig)
   windowsConfig.prefix = (${gitConfigPipePrefix})(require("node:crypto").randomUUID());
-filterCommandConfig(environment, plan.git, plan.marker, windowsConfig, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile}, ${gitPasswordSetting});
+filterCommandConfig(environment, plan.git, plan.marker, windowsConfig, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile}, ${gitSecretSetting});
 const bindings = Object.entries(environment).filter(([name]) =>
   /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS|_COUNT|_(?:KEY|VALUE)_\d+)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
     name,

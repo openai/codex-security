@@ -3070,9 +3070,11 @@ affect conditions that match a remote URL containing credentials.
 When a snapshot filter or publication hook can run, keep inline Git credentials
 out of external configuration files, including conditional includes. A patch
 stops before running a delegate with an authorization header, credential-bearing
-URL or proxy, or inline password available in those files. Password settings
-include `imap.pass`, `sendemail.smtpPass`, and `gitcvs.dbPass`, including
-identity-specific SMTP and access-method-specific CVS settings.
+URL or proxy, or inline secret available in those files. The check covers
+`imap.pass`, `sendemail.smtpPass`, `gitcvs.dbPass`, and `receive.certNonceSeed`,
+including SMTP passwords for individual identities and CVS passwords for
+specific access methods. The CLI also removes these secrets from the command
+configuration that Git delegates inherit.
 
 HTTPS publication runs named Git credential helpers and executable wrappers
 outside the checkout. Operator settings can also select `!gh auth git-credential`

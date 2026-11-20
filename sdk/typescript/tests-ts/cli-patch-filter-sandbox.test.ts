@@ -35,6 +35,7 @@ test.each([
   ["filter", "http.extraHeader", "X-Routing-Tag: synthetic", false],
   ["filter", "imap.pass", "synthetic", true],
   ["filter", "imap.pass", "", false],
+  ["filter", "receive.certNonceSeed", "synthetic", true],
   ["filter", "sendemail.work.smtpPass", "synthetic", true],
   ["resume hook", "gitcvs.pserver.dbPass", "synthetic", true],
   ["no delegate", "http.extraHeader", authHeader, false],

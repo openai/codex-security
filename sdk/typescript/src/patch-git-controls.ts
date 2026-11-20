@@ -28,7 +28,7 @@ import {
 } from "node:path";
 import {
   credentialFileVariable,
-  gitPasswordSetting,
+  gitSecretSetting,
   httpCredentialFile,
   proxyUserinfo,
   withoutUrlCredentials,
@@ -277,7 +277,7 @@ async function readConfiguredHooks(
 // These settings can hold authentication material in the file itself. A
 // credential helper name or ordinary SSH command alone is not an inline secret.
 function hasInlineGitAuthentication(key: string, value: string): boolean {
-  if (value && gitPasswordSetting.test(key)) return true;
+  if (value && gitSecretSetting.test(key)) return true;
   if (
     withoutUrlCredentials(key) !== key ||
     withoutUrlCredentials(value) !== value
