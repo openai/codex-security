@@ -23,6 +23,7 @@ import {
   draftApi,
   draftFixture,
   fixture,
+  interruptDraftAfterRaw,
   interruptDraftWrite,
   surfaceDisposition,
 } from "./scan-draft-recovery-fixture.ts";
@@ -3331,6 +3332,33 @@ for (const layout of ["standard", "diff"] as const) {
 }
 
 for (const layout of ["standard", "diff"] as const) {
+  test(`${layout}: an unlabelled observation cannot lend a published identity to a different candidate`, async (t) => {
+    const f = await fixture(t, layout);
+    const original = {
+      ...findingFor("candidate-a"),
+      severity: { level: "high" },
+    };
+    await f.write({ ...f.draft(), findings: [original] });
+    const prior = (await readJson(f.root, "findings.json")).findings[0];
+    await f.write({
+      ...f.draft({}, true),
+      findings: [
+        findingFor("candidate-b"),
+        { ...original, provenance: { source: "local_plugin" } },
+      ],
+    });
+    const { findings } = await readJson(f.root, "findings.json");
+    const byCandidate = new Map(
+      findings.map(
+        (row: FixtureFinding) =>
+          [row.provenance.candidateId, row.identity] as const,
+      ),
+    );
+    assert.equal(findings.length, 2);
+    assert.deepEqual(byCandidate.get("candidate-a"), prior.identity);
+    assert.ok(byCandidate.has("candidate-b"));
+    assert.notDeepEqual(byCandidate.get("candidate-b"), prior.identity);
+  });
   test(`${layout}: conflicting saved instances do not select the last candidate identity`, async (t) => {
     const f = await fixture(t, layout);
     const first = {
@@ -3653,6 +3681,31 @@ for (const layout of ["standard", "diff"] as const) {
     }
   }
 }
+
+test("deep: interrupted progress can tie canonical files written after their terminal head", async (t) => {
+  const f = await fixture(t, "deep");
+  await f.write(f.draft({}, true));
+  const checkpointRoot = path.join(f.root, "checkpoints");
+  const terminal = await readdir(checkpointRoot);
+  const deferred = [{ id: "pending", ...generic }];
+  await interruptDraftAfterRaw(() =>
+    f.write({
+      ...f.draft({ deferred }),
+      findings: [findingFor("later-finding")],
+    }),
+  );
+  await dateDraftFiles(f.root, 200);
+  for (const name of terminal)
+    await utimes(path.join(checkpointRoot, name), 100, 100);
+  await utimes(path.join(f.root, "checkpoint-head.json"), 100, 100);
+
+  await f.write(f.draft());
+  assert.deepEqual((await f.read()).deferred, deferred);
+  assert.equal(await f.readComplete(), false);
+  const { findings } = await readJson(f.root, "findings.json");
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].provenance.candidateId, "later-finding");
+});
 
 for (const [layout, history] of [
   ["deep", "empty"],

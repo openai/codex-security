@@ -885,15 +885,22 @@ async function preserveScanDraft(
       ? history.find((source) => source.input.complete !== false)
       : undefined;
   const retainedIndex = retainedFinal ? history.indexOf(retainedFinal) : -1;
-  const savedSources =
-    retainedFinal && context.layout === "scan" && context.mode === "deep"
-      ? history.filter(
-          (source, index) =>
-            index <= retainedIndex ||
-            (retainedFinal.name !== undefined &&
-              source.previousCheckpoint === retainedFinal.name),
-        )
-      : history;
+  let savedSources = history;
+  if (retainedFinal && context.layout === "scan" && context.mode === "deep") {
+    // The canonical files can be newer than their head when publication spans a clock tick.
+    const terminalCheckpoint =
+      retainedFinal.name ??
+      current.find(
+        (source) =>
+          source.head && isDeepStrictEqual(source.input, retainedFinal.input),
+      )?.name;
+    savedSources = history.filter(
+      (source, index) =>
+        index <= retainedIndex ||
+        (terminalCheckpoint !== undefined &&
+          source.previousCheckpoint === terminalCheckpoint),
+    );
+  }
   const sources = savedSources.map(({ input }) => input);
   const ambiguousSurfaceIds = new Set<string>();
   for (const draft of [result, ...sources]) {
@@ -3465,7 +3472,7 @@ function coalesceCandidateObservations(
       )
         other.indexes.push(...item.indexes.splice(0));
     }
-    for (const { candidate, indexes } of observations) {
+    for (const { candidate, owner, indexes } of observations) {
       if (indexes.length < 2) continue;
       indexes.sort((a, b) => a - b);
       let selected = indexes;
@@ -3520,11 +3527,16 @@ function coalesceCandidateObservations(
       // A saved singleton can acquire siblings during a retry. Its published
       // identity still belongs to the same raw observation in this batch.
       if (!explicit.length) {
-        const matches = published.filter(
-          (prior) =>
+        const matches = published.filter((prior) => {
+          const priorCandidate = findingCandidateId(prior);
+          const priorOwner = prior.provenance.workerId;
+          return (
             prior.identity !== undefined &&
-            selected.some((index) => containsSavedFinding(prior, raw[index]!)),
-        );
+            (!candidate || !priorCandidate || priorCandidate === candidate) &&
+            (!owner || !priorOwner || priorOwner === owner) &&
+            selected.some((index) => containsSavedFinding(prior, raw[index]!))
+          );
+        });
         if (
           matches.length === 1 &&
           !raw.some(
