@@ -101,3 +101,18 @@ def test_stopped_recovery_uses_accepted_bytes_after_replaceable_output_disappear
     )
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
     assert accepted.read_bytes() == contents
+
+
+def test_archived_stopped_scan_recovers_multiple_accepted_reducers(workbench_db, publication_scan):
+    scan = publication_scan()
+    for _ in range(2):
+        accept_reducer(workbench_db, scan)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    assert scan.fail()["findingCount"] == 1
+    archive = scan.scan_dir.with_name(f"{scan.scan_dir.name}.previous-synthetic")
+    scan.scan_dir.rename(archive)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET scan_dir = ? WHERE id = ?", (str(archive), scan.scan_id)
+        )
+    assert scan.recover()["findingCount"] == 1

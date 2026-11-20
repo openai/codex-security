@@ -80,16 +80,12 @@ def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> lis
 def archived_worker_paths(workers: list[Any], scan_dir: Path) -> list[Any]:
     if ".previous-" not in scan_dir.name:
         return workers
-    return [
-        {
-            **worker,
-            **{
-                key: archived_deep_path(scan_dir, worker[key])
-                for key in ("artifact_dir", "prompt_path", "result_manifest_path")
-            },
-        }
-        for worker in workers
-    ]
+    archived = [dict(worker) for worker in workers]
+    for worker in archived:
+        for key in ("artifact_dir", "prompt_path", "result_manifest_path", "accepted_result_path"):
+            if key in worker:
+                worker[key] = archived_deep_path(scan_dir, worker[key])
+    return archived
 
 
 def create_private_directory(path: Path, *, scan_output: bool = False) -> None:
