@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
 import { planComponents } from "../src/component-plan.js";
@@ -8,7 +9,14 @@ import type { JsonObject } from "../src/config.js";
 import { resolveScanCyberAccessProgram } from "../src/scan-cyber-access.js";
 import * as runtime from "../src/runtime.js";
 import catalogFixture from "./fixtures/native-skill-model-catalog.json" with { type: "json" };
-import { writeJson } from "./support/json.js";
+import { TestClient } from "./support/api-client.js";
+import {
+  codexFactory,
+  preparedRuntime,
+  scanRuntimeDependencies,
+} from "./support/api-events.js";
+import { rejecting } from "./support/errors.js";
+import { jsonLines, parseJsonLines, writeJson } from "./support/json.js";
 import { chatGptTokens } from "./support/chatgpt-credentials.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -46,8 +54,11 @@ afterEach(cleanup);
 
 function keyEnvironment() {
   return {
-    PATH: process.env["PATH"] ?? "",
-    ...(process.env["SystemRoot"] && { SystemRoot: process.env["SystemRoot"] }),
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([name]) =>
+        /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
+      ),
+    ),
     HOME: home,
     USERPROFILE: home,
     CODEX_HOME: home,
@@ -256,12 +267,11 @@ test("catalog reads and component planning use the saved login for workspace pol
     "daybreak_blue",
   );
   await writeFile(join(home, "auth.json"), login, { mode: 0o600 });
-  expect(
-    await select("gpt-test", {
-      chatgpt_base_url: origin + "/project",
-      openai_base_url: origin + "/project/v1",
-    }),
-  ).toBeUndefined();
+  const projectRoutes = {
+    chatgpt_base_url: origin + "/project",
+    openai_base_url: origin + "/project/v1",
+  };
+  expect(await select("gpt-test", projectRoutes)).toBeUndefined();
   expect(servedPolicy).toBe(true);
   expect(paths.some((path) => path.startsWith("/project"))).toBe(false);
   expect(paths.filter((path) => path.includes("/plugins/"))).toEqual([]);
@@ -274,8 +284,7 @@ test("catalog reads and component planning use the saved login for workspace pol
       config: {
         codexOverrides: {
           model: "gpt-test",
-          chatgpt_base_url: origin + "/project",
-          openai_base_url: origin + "/project/v1",
+          ...projectRoutes,
           model_providers: {
             extra: { name: "Synthetic", wire_api: "responses" },
           },
@@ -319,4 +328,75 @@ test("custom executables and launch arguments skip discovery", async () => {
   ]) {
     expect(await select("red", {}, { command })).toBeUndefined();
   }
+});
+
+test("automatically selected Blue reaches fresh and resumed direct workers", async () => {
+  const repository = await temporaryDirectory();
+  const scanDir = await temporaryDirectory();
+  const environment = {
+    ...keyEnvironment(),
+    CODEX_SECURITY_STATE_DIR: join(home, "state"),
+  };
+  const prompt = join(repository, "prompt.md");
+  await writeFile(prompt, "Test scan.");
+  const fixture = (relative: string) =>
+    fileURLToPath(new URL(relative, import.meta.url));
+  await using client = new TestClient(
+    {
+      codexOverrides: { model: "gpt-test", model_catalog_json: catalog },
+    },
+    {
+      ...scanRuntimeDependencies(home, scanDir),
+      environment,
+      prepareRuntime: async () => ({
+        ...preparedRuntime(home),
+        environment,
+        configPath: join(home, "scan.toml"),
+      }),
+      canRunDirectDeepScan: () => true,
+      resolveScanCyberAccessProgram,
+      createCodex: codexFactory(rejecting("unexpected parent turn")),
+      runDeepScan: async function* ({ codexOptions, preflightCommand }) {
+        const output = execFileSync(
+          process.execPath,
+          [
+            fixture("./fixtures/stored-daybreak-workers.mjs"),
+            fixture(
+              "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+            ),
+            prompt,
+            "--local-provider",
+          ],
+          {
+            cwd: repository,
+            env: {
+              ...codexOptions.env,
+              CODEX_CLI_PATH: preflightCommand.command,
+              CODEX_API_KEY: codexOptions.apiKey,
+            },
+            input:
+              jsonLines([
+                { kind: "discovery" },
+                { kind: "discovery", resumePrevious: true },
+              ]) + "\n",
+            encoding: "utf8",
+          },
+        );
+        const [, fresh, resumed] = parseJsonLines(output);
+        expect(fresh).toMatchObject({
+          program: "daybreak_blue",
+          resumed: false,
+        });
+        expect(resumed).toMatchObject({
+          program: "daybreak_blue",
+          resumed: true,
+          threadId: fresh.threadId,
+        });
+        throw new Error("worker launches verified");
+      },
+    },
+  );
+  await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+    "worker launches verified",
+  );
 });

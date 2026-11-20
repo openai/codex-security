@@ -6,6 +6,7 @@ import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   withReadOnlyCodex,
   type ReadOnlyCodexOptions,
+  type StartReadOnlyThread,
 } from "./scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
@@ -89,10 +90,8 @@ export async function planComponents(
       threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
     },
     z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
-    (startThread, turnOptions) =>
-      planBatches(repository, files, options.signal, (prompt) =>
-        startThread().run(prompt, turnOptions),
-      ),
+    (startThread) =>
+      planBatches(repository, files, options.signal, startThread),
   );
 }
 
@@ -100,16 +99,16 @@ async function planBatches(
   repository: string,
   files: string[],
   signal: AbortSignal | undefined,
-  run: (prompt: string) => Promise<{ finalResponse: string }>,
+  startThread: StartReadOnlyThread,
 ): Promise<ComponentPlan> {
   const counts = directoryCounts(files);
   const plan: ComponentPlan = { components: [] };
   for (const batch of componentPlanningBatches(files, signal)) {
     signal?.throwIfAborted();
-    const { finalResponse } = await run(batch.prompt);
+    const response = await startThread().run(batch.prompt);
     const proposed = await normalizeComponentPlan(
       repository,
-      JSON.parse(finalResponse),
+      JSON.parse(response),
       signal,
     );
     const batchCounts = directoryCounts(batch.files);

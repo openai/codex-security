@@ -35,6 +35,16 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
+/** Saved-login policy checks use the workspace's routes when inference uses a separate key. */
+export function workspacePolicyConfig<T extends Record<string, unknown>>(
+  config: T,
+  projectKey: string | undefined,
+) {
+  if (!projectKey) return config;
+  const { chatgpt_base_url, openai_base_url, ...workspace } = config;
+  return workspace;
+}
+
 /** Match the flags the selected launcher will pass to Codex. */
 export async function preflightConfigOverrides(
   config: JsonObject,

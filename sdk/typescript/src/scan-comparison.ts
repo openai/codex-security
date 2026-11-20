@@ -42,7 +42,6 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   structuredCodexConfig,
-  workspacePolicyConfig,
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
@@ -54,6 +53,7 @@ import {
   createProviderProfile,
   preflightReadOnlyProfileCodex,
   providerPreflightCommand,
+  workspacePolicyConfig,
 } from "./provider-profile.js";
 import {
   compactFinding,
@@ -199,8 +199,16 @@ interface ReadOnlyCodex {
   };
 }
 
+interface ReadOnlyCodexRuntime {
+  surface: CodexSecuritySurface;
+  command: string;
+  threadSource: ReadOnlyCodexThreadSource;
+}
+
 /** @internal */
-type StartReadOnlyThread = () => ReturnType<ReadOnlyCodex["startThread"]>;
+export type StartReadOnlyThread = () => {
+  run(prompt: string): Promise<string>;
+};
 
 export interface ReadOnlyCodexOptions {
   /** @internal Repository being scanned when this helper plans or matches components. */
@@ -396,16 +404,13 @@ export async function matchScanFindingsInternal(
       }),
     );
   };
-  const compare = async (
-    startThread: StartReadOnlyThread,
-    turnOptions: TurnOptions,
-  ) => {
+  const compare = async (startThread: StartReadOnlyThread) => {
     const thread = startThread();
     let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
     progress("catalogue", 1);
     for (;;) {
       options.signal?.throwIfAborted();
-      const { finalResponse } = await thread.run(prompt, turnOptions);
+      const finalResponse = await thread.run(prompt);
       let response: unknown;
       try {
         response = JSON.parse(finalResponse);
@@ -597,14 +602,11 @@ export async function matchScanFindingsInternal(
 /** @internal Prepare one read-only client. Each new thread starts with an empty conversation. */
 export async function withReadOnlyCodex<T>(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+  runtimeOptions: ReadOnlyCodexRuntime & {
     nativeProviderEnvironment?: Record<string, string>;
   },
   outputSchema: unknown,
-  use: (
-    startThread: StartReadOnlyThread,
-    turnOptions: TurnOptions,
-  ) => Promise<T>,
+  use: (startThread: StartReadOnlyThread) => Promise<T>,
 ): Promise<T> {
   let source: NodeJS.ProcessEnv = {
     ...(options.environment ?? process.env),
@@ -634,12 +636,20 @@ export async function withReadOnlyCodex<T>(
   const useClient = (
     client: ReadOnlyCodex,
     cyberAccessProgram?: CyberAccessProgram,
-  ) =>
-    use(() => client.startThread(threadOptions), {
+  ) => {
+    const turnOptions = {
       outputSchema,
       cyberAccessProgram,
       signal: options.signal,
+    };
+    return use(() => {
+      const thread = client.startThread(threadOptions);
+      return {
+        run: async (prompt) =>
+          (await thread.run(prompt, turnOptions)).finalResponse,
+      };
     });
+  };
   if (options.codex !== undefined)
     return useClient(options.codex, options.cyberAccessProgram);
   const { componentRepository } = options;
@@ -864,19 +874,14 @@ export async function runReadOnlyCodex(
   prompt: string,
   outputSchema: unknown,
   options: ReadOnlyCodexOptions,
-  runtimeOptions: {
-    surface: CodexSecuritySurface;
-    command: string;
-    threadSource: ReadOnlyCodexThreadSource;
-  },
+  runtimeOptions: ReadOnlyCodexRuntime,
 ): Promise<string> {
-  const turn = await withReadOnlyCodex(
+  return withReadOnlyCodex(
     options,
     runtimeOptions,
     outputSchema,
-    (startThread, turnOptions) => startThread().run(prompt, turnOptions),
+    (startThread) => startThread().run(prompt),
   );
-  return turn.finalResponse;
 }
 
 export async function disabledMcpServers(

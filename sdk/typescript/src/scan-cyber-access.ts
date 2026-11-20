@@ -22,7 +22,6 @@ import {
   hasCommandAuth,
   inlineToml,
   resolveCodexProfile,
-  workspacePolicyConfig,
   writeCodexConfig,
   type JsonObject,
   type JsonValue,
@@ -32,6 +31,7 @@ import {
   nativePermissionPreflight,
   preflightConfigOverrides,
   providerPreflightCommand,
+  workspacePolicyConfig,
 } from "./provider-profile.js";
 import { asRecord, isRecord } from "./record.js";
 import {
