@@ -458,6 +458,7 @@ export const originalCases = [
   },
   {
     id: "task-parameter",
+    largeRepo: true,
     target: "starter-template-task",
     identityEvidence: [
       excerpts("portal/app-config.yaml", "target: /app/catalog/template.yaml"),

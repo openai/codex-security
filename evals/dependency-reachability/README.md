@@ -4,15 +4,15 @@ Given a CVE and a caller, can `codex-security exploitability check` identify whi
 
 ## Compare the reviewer on and off
 
-The pinned suite runs the repository command in a fresh Git checkout for every investigation. The CLI looks up the advisory and the investigator traces the caller through the application. By default, an independent model reviews claims and can ask the investigator to correct them. With `--grader=disabled`, the host checks the claims and their source references and labels the result unreviewed. To try both modes in your own checkout, use a build with the grader option.
+The pinned suite runs the repository command in a fresh Git checkout for every investigation. The CLI looks up the advisory and the investigator traces the caller through the application. By default, an independent model reviews claims and can ask the investigator to correct them. With `--reviewer=disabled`, the host checks the claims and their source references and labels the result unreviewed. To try both modes in your own checkout, use a build with the reviewer option.
 
 ```sh
 export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
 codex-security exploitability check CVE-2026-54283 --json
-codex-security exploitability check --grader=disabled CVE-2026-54283 --json
+codex-security exploitability check --reviewer=disabled CVE-2026-54283 --json
 ```
 
-The **eval grader** runs after the CLI exits. It scores both reports against the same expected use, version, verdict and evidence. The expected answer stays outside the checkout. The CLI gets the CVE and a project config with the caller’s scope in `exploitability.scope.instructions`. The runner records the actual command, progress events and report for each attempt.
+The **eval scorer** runs after the CLI exits. It scores both reports against the same expected use, version, verdict and evidence. The expected answer stays outside the checkout. The CLI gets the CVE and a project config with the caller’s scope in `exploitability.scope.instructions`. The runner records the actual command, progress events and report for each attempt.
 
 ### Start from a fresh checkout
 
@@ -47,14 +47,24 @@ CLI=sdk/typescript/bin/codex-security.mjs
 model=gpt-6.1-sol
 opengrep --version
 node "$runner" --cache "$cache" --cli "$CLI" --model "$model" --isolated-state \
-  --case clips-handler-validation --grader both --out "$outputs/clip"
+  --case clips-handler-validation --reviewer both --out "$outputs/clip"
 ```
 
-`--grader both` launches two independent investigations per case, alternating which mode starts first. To reproduce a single failure, supply its `--case ID` and `--grader enabled` (the default) or `--grader disabled` with a fresh `--out` directory. Repeat `--case` to select several IDs. `--help` lists them. Select `--suite original` for the historical 23 cases, `--suite added` for the additions, or a suite from the table. Omit the selectors for a full run. `--jobs` limits concurrent CLI processes and defaults to one.
+`--reviewer both` launches two independent investigations per case, alternating which mode starts first. To reproduce a single failure, supply its `--case ID` and `--reviewer enabled` (the default) or `--reviewer disabled` with a fresh `--out` directory. Repeat `--case` to select several IDs. `--help` lists them. Select `--suite original` for the historical 23 cases, `--suite added` for the additions, or a suite from the table. Omit the selectors for a full run. `--jobs` limits concurrent CLI processes and defaults to one.
 
 ```sh
 node "$runner" --cache "$cache" --cli "$CLI" --model "$model" --isolated-state \
-  --grader both --jobs 4 --out "$outputs/pairs"
+  --reviewer both --jobs 4 --out "$outputs/pairs"
+```
+
+### Run the large application cases
+
+`--suite large-repo` selects cases marked `largeRepo: true` across suites, including in a local case module. In the public corpus this selects `task-parameter`. Its checkout contains the complete pinned Backstage source tree (8,794 files) plus four synthetic portal configuration files. An authenticated caller supplies a task parameter. The investigation follows it from the real scaffolder router through the workflow and template renderer to decide whether the caller controls the code passed to vm2. The expected verdict is `ruled_out` because the caller controls a value passed to a fixed template. [Pinned application](https://github.com/backstage/backstage/tree/99d7a6f42d71e86578c89c0669a3d962088ed8ae) · [Portal configuration](upstream/fixtures/backstage)
+
+```sh
+node "$runner" --suite large-repo --help
+node "$runner" --suite large-repo --cache "$cache" --cli "$CLI" --model "$model" \
+  --isolated-state --reviewer both --jobs 2 --out "$outputs/large-pair"
 ```
 
 ### What the cases test
@@ -85,7 +95,7 @@ In a paired run, open `results.json` for the comparison and `enabled/<case>/` an
 - `gainedWithReview` and `lostWithReview` name cases that passed in only one condition. The comparison checks the Git commit, scope, CVE and available advisory digests. It lists unfinished pairs and input mismatches separately. The process exits nonzero for an execution error, failed grade or mismatched inputs.
 - `medianPairedElapsedDeltaMs` is the median of the per-case time with review minus the time without review. `reviewBatches` counts review events in complete progress logs. Each batch can cover multiple claims and may require another model turn. Token totals cover the reports with usage. One pair per case gives a sample that includes variation between independent investigations.
 
-Regrade saved reports offline after changing the rubric. The runner infers the cases and reviewer modes from the saved `results.json`, reads the original report bytes and re-creates the pinned Git commits. You can narrow the replay with `--case` and `--grader`. The new results reference the original output directory, which holds the reports and logs.
+Regrade saved reports offline after changing the rubric. The runner infers the cases and reviewer modes from the saved `results.json`, reads the original report bytes and re-creates the pinned Git commits. You can narrow the replay with `--case` and `--reviewer`. The new results reference the original output directory, which holds the reports and logs.
 
 ```sh
 node "$runner" --cache "$cache" --grade-existing "$outputs/clip" --out "$outputs/regraded"
@@ -101,7 +111,7 @@ For a CLI change, build the candidate in its worktree. From the baseline root, r
 
 ```sh
 node "$runner" --cache "$cache" --cli "../reachability-candidate/$CLI" --model "$model" --isolated-state \
-  --case clips-handler-validation --grader both --out "$outputs/clip-candidate"
+  --case clips-handler-validation --reviewer both --out "$outputs/clip-candidate"
 ```
 
 Compare each mode with the corresponding baseline mode at the same model and job count. Check the source, caller scope and advisory fingerprints, then read the changed reports. Repeat a changed case to see if the result recurs. The pinned cases measure the configured caller path and its evidence. The local service cases also exercise confirmation that the affected copy ran and a caller reached it. [Local service cases](#local-service-and-captured-stack-checks)
@@ -116,7 +126,7 @@ Use `--case-module PATH` in place of `--cache` to supply your own cases, fixture
 module=/path/to/cases.mjs
 node "$runner" --case-module "$module" --help
 node "$runner" --case-module "$module" --prepare-only --out "$outputs/local-prepared"
-node "$runner" --case-module "$module" --cli "$CLI" --model "$model" --isolated-state --grader both --out "$outputs/local"
+node "$runner" --case-module "$module" --cli "$CLI" --model "$model" --isolated-state --reviewer both --out "$outputs/local"
 node "$runner" --case-module "$module" --grade-existing "$outputs/local" --out "$outputs/local-regraded"
 ```
 
@@ -125,7 +135,7 @@ Provide four named exports. Each function may be async. [Module example](test-ev
 - `cases` is an array of records with `id`, `suite`, `revision`, `cve` and `callerScope`. Use unique IDs containing letters, digits, underscores or hyphens. Only the CVE and caller scope go to the CLI.
 - `prepare(scenario, scratch, commitFixture)` creates a repository under `scratch` and returns `{ repo, sha }`. Call `commitFixture(repo)` on a fresh fixture directory to obtain a deterministic commit. The runner removes `scratch` after each attempt, including regrades.
 - `validateSnapshot(scenario, repo, sha)` verifies the fixture, throws on invalid inputs and returns JSON evidence metadata for `results.json`.
-- `gradeSnapshot(report, scenario, repo, sha, grader, { verifyClaimCitations, sourceReader })` returns `{ pass: boolean, ... }`. For each assessed use, call `verifyClaimCitations(report, use, sourceReader(repo, sha), sha, grader === "enabled")` to verify its citations. Return individual correctness fields to populate the comparison metrics.
+- `gradeSnapshot(report, scenario, repo, sha, reviewer, { verifyClaimCitations, sourceReader })` returns `{ pass: boolean, ... }`. For each assessed use, call `verifyClaimCitations(report, use, sourceReader(repo, sha), sha, reviewer === "enabled")` to verify its citations. Return individual correctness fields to populate the comparison metrics.
 
 ### Run the historical skill
 
@@ -161,7 +171,7 @@ The runtime controls hold the CVE and Git checkout fixed. Three configure a read
 | `mixed-evidence-sibling`   | The notes release matches. Querying for a notes request returns a request to reviews at the same revision.              | `potentially_exploitable` |
 | `mixed-evidence`           | The affected version ran at the target revision. An anonymous caller sent text to its parser and received parsed links. | `exploitable`             |
 
-The grader checks the cited service, tool, arguments, and exact response against the server's independent transcript in `source-calls.json`. Each response includes a freshly generated record ID so a report from an earlier run cannot stand in for a new lookup.
+The eval checks the cited service, tool, arguments, and exact response against the server's independent transcript in `source-calls.json`. Each response includes a freshly generated record ID so a report from an earlier run cannot stand in for a new lookup.
 
 The mixed-services project uses the published linkify-it CVE-2026-48801, npm distribution URLs and integrity digests. Each service runs a shared handler using its own lockfile and Docker build argument. [Published advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
 
@@ -180,7 +190,7 @@ node "$runner" contracts --cli "$CLI" --packets "$outputs/observed/packets" --ou
 node --test evals/dependency-reachability/test-eval.mjs
 ```
 
-The offline contract drives the public `run` commands from a scripted caller and checks a finalized fixed-version report against the original binding. It also alters the returned evidence and checks that the grader detects it. This measures the host and grader. The live run measures the model's investigation.
+The offline contract drives the public `run` commands from a scripted caller and checks a finalized fixed-version report against the original binding. It also alters the returned evidence and checks that the eval detects it. This measures the host and scoring code. The live run measures the model's investigation.
 
 Run all cases through actual CLI sessions or select one with `--case positive`. Set `--model MODEL` to use the same model across builds. Supplying `--packets` reuses the original input bytes, frame order and timestamps. Each investigator still gets its own clean checkout. Without that option the suite takes new measurements.
 
@@ -195,12 +205,12 @@ Select a `mixed-*` case to compare the two modes of the regular repository CLI. 
 
 ```sh
 for control in mixed-services mixed-evidence-no-access mixed-evidence-sibling mixed-evidence; do
-  for grader in enabled disabled; do
-    node "$runner" live --cli "$CLI" --case "$control" --grader "$grader" --out "$outputs/$control-$grader"
+  for reviewer in enabled disabled; do
+    node "$runner" live --cli "$CLI" --case "$control" --reviewer "$reviewer" --out "$outputs/$control-$reviewer"
   done
 done
 ```
 
-Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The grader checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks each service's selected lockfile and the claim's review state. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
+Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The eval checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks each service's selected lockfile and the claim's review state. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
 
 The benchmark initializes five fresh SQLite attempts. Each timed trial writes one batch of ten source-backed claims and reads them back in another CLI process. It checks all ten IDs, revisions, hashes and payloads and records the median, including CLI startup time. Fixture preparation and state initialization take place before timing.
