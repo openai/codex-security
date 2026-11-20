@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -274,15 +275,39 @@ def _is_source_order_snapshot(relative: str) -> bool:
     )
 
 
+def _copied_checkpoint_time(value: int) -> int:
+    seconds, nanoseconds = divmod(value, 1_000_000_000)
+    milliseconds = math.floor(seconds * 1000 + nanoseconds / 1_000_000 + 0.5)
+    timestamp = milliseconds / 1000
+    if os.name == "nt":
+        return (
+            int(timestamp * 10_000_000 + 116_444_736_000_000_000) - 116_444_736_000_000_000
+        ) * 100
+    whole = int(timestamp)
+    fraction = int((timestamp - whole) * 1_000_000_000)
+    return whole * 1_000_000_000 + int(fraction / 1000) * 1000
+
+
+def _same_checkpoint_time(left: int, right: int) -> bool:
+    return (
+        left == right
+        or left == _copied_checkpoint_time(right)
+        or right == _copied_checkpoint_time(left)
+    )
+
+
 def _retain_checkpoint_observation_order(
     sources: list[tuple[str, dict[str, Any], str | None]],
     source_digests: dict[str, str],
+    source_times: dict[str, int],
     source_order: dict[str, tuple[int, int]],
     selected_observations: dict[str, tuple[int, int]],
     current_results: set[str],
 ) -> None:
     """Keep retry copies at their original observation, not their new directory's attempt."""
-    # fs.cp preserves times through millisecond-precision Date values.
+    # fs.cp passes Date values through the platform's utimes conversion.
+    # Recognize that conversion, rather than treating every same-millisecond
+    # observation as a copy of an earlier selection.
     checkpoint_observations: dict[tuple[str, str], list[tuple[str, tuple[int, int]]]] = {}
     for relative, _, owner in sorted(sources, key=lambda source: source_order[source[0]]):
         if (
@@ -296,7 +321,11 @@ def _retain_checkpoint_observation_order(
         for prior, original_order in reversed(previous):
             if (
                 original_order[0] < order[0]
-                and (order[1] + 500_000) // 1_000_000 <= (original_order[1] + 500_000) // 1_000_000
+                and _same_checkpoint_time(source_times[relative], source_times[prior])
+                and (
+                    order[1] <= original_order[1]
+                    or _same_checkpoint_time(order[1], original_order[1])
+                )
             ):
                 source_order[relative] = source_order[prior]
                 if relative in selected_observations:

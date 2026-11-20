@@ -496,7 +496,7 @@ def merge_saved_results(
     source_order.update(registered_result_orders)
 
     _retain_checkpoint_observation_order(
-        sources, source_digests, source_order, selected_observations, current_results
+        sources, source_digests, source_times, source_order, selected_observations, current_results
     )
 
     # Keep frozen source digests over the original data, before discarding markers
