@@ -42,6 +42,51 @@ const cargo = (version: string, local = false) =>
   `version=3\n[[package]]\nname="synthetic-crate"\nversion="${version}"\n${local ? "" : 'source="registry+https://github.com/rust-lang/crates.io-index"\n'}`;
 const bundler = (version: string, local = false) =>
   `${local ? "PATH\n  remote: vendor/synthetic-gem" : "GEM\n  remote: https://rubygems.org/"}\n  specs:\n    synthetic-gem (${version})\n`;
+export function* pnpmTarballFixtures() {
+  for (const [origin, resolution] of [
+    ["local", "file:../synthetic-lib.tgz"],
+    ["direct-url", "https://example.invalid/synthetic-lib.tgz"],
+  ] as const) {
+    for (const [layout, alias, packageKey, peer] of [
+      ["named", "synthetic-lib", `synthetic-lib@${resolution}`, ""],
+      [
+        "scoped-alias-peer",
+        "@synthetic/alias",
+        `@synthetic/alias@${resolution}`,
+        "(peer-lib@2.0.0)",
+      ],
+      ["bare-reference", "local-alias", resolution, ""],
+    ] as const) {
+      const lockfile = JSON.stringify({
+        lockfileVersion: "9.0",
+        importers: {
+          ".": {
+            dependencies: {
+              [alias]: {
+                specifier: resolution,
+                version: resolution + peer,
+              },
+            },
+          },
+        },
+        packages: {
+          [packageKey]: {
+            ...(layout === "named" ? {} : { name: "synthetic-lib" }),
+            version: "1.2.0",
+            resolution: { tarball: resolution },
+          },
+          "synthetic-registry@2.0.0": {},
+        },
+        snapshots: {
+          [packageKey + peer]: {},
+          "synthetic-registry@2.0.0": {},
+        },
+      });
+      yield { origin, layout, resolution, lockfile };
+    }
+  }
+}
+
 export function composerLock(
   version: string,
   origin: {
