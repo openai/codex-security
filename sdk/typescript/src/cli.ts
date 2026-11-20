@@ -13262,30 +13262,20 @@ async function captureHiddenPatchContent(
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv,
   digests: Set<string>,
-  selection: "flagged" | "ident",
   signal?: AbortSignal,
 ): Promise<void> {
   const source = ["-C", checkout, "-c", "core.fsmonitor=false"];
-  // With the built-in ident conversion, git add can leave both the worktree
-  // and the index looking clean after an expanded $Id$ was edited.
-  const ident = selection === "ident";
-  const pathspecs = ident ? ["--", ":(attr:ident)"] : [];
+  // Git's index stat cache can hide worktree bytes discarded by a clean
+  // filter, even after its attribute has been removed.
   const tracked = await patchGitRecords(
     root,
-    [...source, "ls-files", "-v", "--stage", "-z", ...pathspecs],
+    [...source, "ls-files", "--stage", "-z"],
     dependencies,
-    {
-      environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
-      patchSnapshot: [],
-    },
+    { environment, patchSnapshot: [] },
   );
   const materialized = new Map<string, string>();
   for (const entry of tracked) {
-    // Lowercase tags mean assume-unchanged and S means skip-worktree.
-    if (entry.startsWith("H ") !== ident) continue;
-    const header = /^[a-zSH] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
-      entry,
-    );
+    const header = /^(?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(entry);
     if (!header) continue;
     const path = entry.slice(header[0].length);
     const digest = await hashPublicationFile(
@@ -13300,50 +13290,43 @@ async function captureHiddenPatchContent(
     if (digest !== undefined) materialized.set(path, digest);
   }
   if (!materialized.size) return;
-  let renderEnvironment = environment;
-  if (ident) {
-    // A staged attributes file can differ from the worktree attributes used
-    // by ls-files. Never run a new external driver to render these entries.
-    const settings = await patchGitRecords(
-      root,
-      [
-        ...source,
-        "config",
-        "--includes",
-        "--null",
-        "--get-regexp",
-        "^filter\\..*\\.(smudge|process|required)$",
-      ],
-      dependencies,
-      {
-        environment: { ...environment, GIT_CONFIG: undefined },
-        patchSnapshot: [],
-      },
-    ).catch((error: unknown) => {
-      if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
-        return [];
-      throw error;
-    });
-    // Compare against the built-in checkout representation even when a
-    // smudge driver exists. Any differing bytes still need a fingerprint.
-    const filters = settings
-      .filter(Boolean)
-      .map((entry) => patchPathText(entry.split("\n", 1)[0]!));
-    renderEnvironment = {
-      ...environment,
-      GIT_CONFIG_PARAMETERS: patchFilterParameters(
-        filters,
-        false,
-        currentGitParameters(environment, dependencies.environment),
-      ),
-    };
-  }
+  // A smudge driver can read the private bytes from the live worktree.
+  // Compare with the indexed data rendered using only built-in conversions.
+  const settings = await patchGitRecords(
+    root,
+    [
+      ...source,
+      "config",
+      "--includes",
+      "--null",
+      "--get-regexp",
+      "^filter\\..*\\.(smudge|process|required)$",
+    ],
+    dependencies,
+    {
+      environment: { ...environment, GIT_CONFIG: undefined },
+      patchSnapshot: [],
+    },
+  ).catch((error: unknown) => {
+    if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+      return [];
+    throw error;
+  });
+  const filters = settings
+    .filter(Boolean)
+    .map((entry) => patchPathText(entry.split("\n", 1)[0]!));
+  const renderEnvironment = {
+    ...environment,
+    GIT_CONFIG_PARAMETERS: patchFilterParameters(
+      filters,
+      false,
+      currentGitParameters(environment, dependencies.environment),
+    ),
+  };
   const directory = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-patch-checkout-"),
   );
   try {
-    // Compare raw bytes with what Git would check out. A clean filter can
-    // discard a local change, and a smudge filter can legitimately add bytes.
     await dependencies.runRepositoryCommand(
       "git",
       [
@@ -13634,16 +13617,14 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
-      for (const selection of ["ident", "flagged"] as const)
-        await captureHiddenPatchContent(
-          root,
-          checkout,
-          dependencies,
-          environment,
-          nestedRepositoryDigests,
-          selection,
-          signal,
-        );
+      await captureHiddenPatchContent(
+        root,
+        checkout,
+        dependencies,
+        environment,
+        nestedRepositoryDigests,
+        signal,
+      );
       // A conflict can also be reported as DD (both sides deleted).
       if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);

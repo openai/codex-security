@@ -3111,6 +3111,13 @@ File permissions are left unchanged. This adds reads proportional to the ignored
 data and does not detect arbitrary transformed or partial copies. Existing tracked
 edits are protected by path overlap and Git's rename/copy recognition.
 
+For initialized submodules, publication preflight also reads materialized
+tracked files. Git can report a clean submodule after a clean filter discards
+local bytes, even if the filter is later disabled. The CLI checks for exact
+copies of content that differs from the indexed blob and its built-in checkout
+representation. This adds reads proportional to the tracked data in those
+submodules. Copies of externally smudged content can require manual review.
+
 When `origin` pushes to multiple distinct URLs, select each effective
 `remote.origin.pushurl` explicitly in the system, user, or command scope.
 A conditional include in your user Git configuration can select mirrors

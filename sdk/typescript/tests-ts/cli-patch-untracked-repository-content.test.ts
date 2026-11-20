@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -122,6 +122,7 @@ for (const kind of [
   "metadata in initialized submodule",
   "untracked file in initialized submodule",
   "tracked edit in initialized submodule",
+  "clean filter edit in initialized submodule",
   "ident edit in initialized submodule",
   "filtered ident edit in initialized submodule",
   "empty driver ident edit in initialized submodule",
@@ -189,7 +190,22 @@ for (const kind of [
           for (const driver of ["unspecified", "unset"])
             nestedGit("config", "filter." + driver + ".smudge", "exit 1");
         }
+        const cleanFilter =
+          kind === "clean filter edit in initialized submodule";
+        if (cleanFilter) {
+          await writeFile(
+            join(nested, ".gitattributes"),
+            "local.txt -text filter=normalize\n",
+          );
+          nestedGit("add", ".gitattributes");
+          nestedGit(
+            "config",
+            "filter.normalize.clean",
+            "sed '/SYNTHETIC_LOCAL_ONLY_CONTENT/d'",
+          );
+        }
         const trackedEdit =
+          cleanFilter ||
           ordinaryIdent ||
           hiddenFlag !== undefined ||
           stagedEdit ||
@@ -226,6 +242,7 @@ for (const kind of [
         let content = ident
           ? "$Id: SYNTHETIC_LOCAL_ONLY_CONTENT $\n"
           : "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
+        if (cleanFilter) content = committedContent + content;
         let source: string | Buffer = join(nested, "local.txt");
         if (kind === "Subversion working copy") {
           await mkdir(join(nested, ".svn"));
@@ -314,14 +331,23 @@ for (const kind of [
               `$Id: ${nestedGit("rev-parse", ":.gitignore")} $`,
             );
             await writeFile(join(nested, ".gitignore"), rendered);
-            if (ordinaryIdent) {
-              nestedGit("add", "--", "local.txt", ".gitignore");
-              expect(nestedGit("status", "--porcelain=v1")).toBe("");
-              expect(nestedGit("diff", "--cached", "--name-only")).toBe("");
-              expect(nestedGit("ls-files", "-v", "--", "local.txt")).toBe(
-                "H local.txt",
-              );
+          }
+          // Stage the filtered bytes with an older mtime so Git trusts its
+          // index stat cache during the passive check with filters disabled.
+          if (cleanFilter) await utimes(source, 1_000_000_000, 1_000_000_000);
+          if (ordinaryIdent || cleanFilter) {
+            nestedGit("add", "--", "local.txt", ".gitignore");
+            if (cleanFilter) {
+              // The index stat cache remains valid if the filter is removed.
+              const info = join(nested, ".git", "info");
+              await mkdir(info, { recursive: true });
+              await writeFile(join(info, "attributes"), "local.txt !filter\n");
             }
+            expect(nestedGit("status", "--porcelain=v1")).toBe("");
+            expect(nestedGit("diff", "--cached", "--name-only")).toBe("");
+            expect(nestedGit("ls-files", "-v", "--", "local.txt")).toBe(
+              "H local.txt",
+            );
           }
           if (unmergedEdit) {
             // A DD conflict has only stage 1, with no stage-0 worktree match.
@@ -391,6 +417,7 @@ for (const kind of [
           kind === "scrubbed" || (kind === "untracked" && !copied);
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
           hiddenFlag ||
+            cleanFilter ||
             ordinaryIdent ||
             kind.startsWith("ignored") ||
             nestedConfig ||
