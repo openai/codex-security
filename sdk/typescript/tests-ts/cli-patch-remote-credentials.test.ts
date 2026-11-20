@@ -1,6 +1,9 @@
 import { expect, mock, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
+  copyFile,
+  link,
   readFile,
   realpath,
   symlink,
@@ -12,10 +15,12 @@ import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   completePatches,
+  fixSavedFinding,
   publicationRepository,
   repositoryGit,
   resultWithFindings,
   runGitRepositoryCommand,
+  runPublicationCommand,
   runWorkflow,
   savedScan,
   patchDirectories,
@@ -23,6 +28,50 @@ import {
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
+
+const windows = process.platform === "win32";
+test.each(windows ? ["selected"] : ["selected", "newly executable"])(
+  "a patch cannot replace its host client through a removed hard link: %s",
+  async (mode) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const bin = await fixtures.create("patch-host-client-");
+    const client = join(bin, windows ? "gh.exe" : "gh");
+    await copyFile(windows ? process.env["ComSpec"]! : "/bin/sh", client);
+    const bins = [bin];
+    if (mode === "newly executable") {
+      const fallback = await fixtures.create("patch-host-fallback-");
+      await copyFile(client, join(fallback, "gh"));
+      bins.push(fallback);
+      await chmod(client, 0o644);
+    }
+    const alias = join(directory, "linked-client");
+    await link(client, alias);
+    git("add", ".");
+    git("commit", "-m", "Track a synthetic client alias");
+    const previous = process.env["PATH"];
+    const exit = [windows ? "/c" : "-c", "exit"];
+    try {
+      process.env["PATH"] = [...bins, previous].join(delimiter);
+      const outcome = await runSavedPublication(directory, {
+        onCodex: fixSavedFinding(directory, async () => {
+          await writeFile(alias, "modified\n");
+          if (!windows) await chmod(alias, 0o755);
+          await unlink(alias);
+        }),
+        async onRepositoryCommand(command, args, cwd, options) {
+          if (command === "gh")
+            await runRepositoryCommand(command, exit, cwd, options);
+          return runPublicationCommand(command, args, cwd, options);
+        },
+      });
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("transport executable changed");
+    } finally {
+      if (previous === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previous;
+    }
+  },
+);
 
 test("later patch grants exclude writable directories from host and SSH command lookup", async () => {
   const { directory, git } = await publicationRepository(fixtures);

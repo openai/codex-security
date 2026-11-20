@@ -2095,6 +2095,7 @@ interface CliDependencies {
     options?: {
       directory?: string;
       protectedRoots?: readonly string[];
+      verifyHostExecutable?: (search: string, path: string) => Promise<void>;
       trim?: boolean;
       encoding?: "base64";
       environment?: NodeJS.ProcessEnv;
@@ -2391,13 +2392,18 @@ export async function runRepositoryCommand(
     ...(options?.loaderAccess?.writable ?? []),
     ...processRelativePaths,
   ];
-  const resolveTool = (name: string) =>
-    resolveTrustedExecutable(
-      name,
-      sandbox?.environment ?? process.env,
-      hostRoots,
-      { hostDirectory: options?.directory ?? repository },
-    );
+  const resolveTool = async (name: string) => {
+    const environment = sandbox?.environment ?? process.env;
+    const tool = await resolveTrustedExecutable(name, environment, hostRoots, {
+      hostDirectory: options?.directory ?? repository,
+    });
+    if (tool)
+      await options?.verifyHostExecutable?.(
+        JSON.stringify([name, environmentEntry(environment, "PATH")]),
+        tool.executable,
+      );
+    return tool;
+  };
   const executable = await resolveTool(command);
   if (executable === null) {
     throw new CodexSecurityError(
@@ -3986,6 +3992,21 @@ export async function main(
     afterHook: new Set(),
     external: false,
   };
+
+  const hostTools = new Map<string, PatchTransportFile & { grants: number }>();
+  const verifyHostExecutable = async (search: string, path: string) => {
+    const selected = hostTools.get(search);
+    const grants = loaderWriters.writable.size;
+    // A writer can edit a launcher through a hard link and remove the alias.
+    // Check its original stamp each time; count installation links once per grant set.
+    const file = await patchTransportIdentity(
+      path,
+      "executable",
+      selected,
+      grants && grants !== selected?.grants ? { writers: loaderWriters } : {},
+    );
+    hostTools.set(search, { ...file, grants });
+  };
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let unavailableFilters: readonly string[] = [];
   let patchPreparationSignal: AbortSignal | undefined;
@@ -4042,6 +4063,7 @@ export async function main(
     async runRepositoryCommand(command, args, repository, options) {
       options = {
         ...options,
+        verifyHostExecutable,
         signal: options?.signal ?? patchPreparationSignal,
         loaderAccess: loaderWriters,
       };
