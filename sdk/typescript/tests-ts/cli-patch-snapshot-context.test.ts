@@ -682,16 +682,12 @@ test.each([
       git("add", "--renormalize", "data");
       git("commit", "-m", "Synthetic worktree without attributes");
     }
-    const pool = join(root, "object-pool");
+    const pool = join(home, "object-pool");
     if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       const objects = join(repository, ".git", "objects");
       await rename(objects, pool);
       await mkdir(objects);
       environment[selector] = pool;
-      // Git stats each ancestor of an absolute alternate. The Windows sandbox
-      // uses USERPROFILE to grant access to the actual profile ancestor.
-      if (process.platform === "win32")
-        environment["USERPROFILE"] = process.env["USERPROFILE"];
     }
     const index = await readFile(join(repository, ".git", "index"));
     let snapshots = 0;
