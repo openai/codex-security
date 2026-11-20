@@ -19,22 +19,35 @@ function strictPass({ status, grade }) {
   );
 }
 
-function score(results) {
+function runStats(results) {
+  const batches = results.map((r) => r.reviewBatches).filter(Number.isFinite);
+  const usage = results.map((r) => r.usage).filter(Boolean);
+  return {
+    cases: results.length,
+    executionErrors: results.filter((r) => r.status === "execution_error")
+      .length,
+    medianMs: median(results.map((r) => r.elapsedMs).filter(Number.isFinite)),
+    reviewBatches: sum(batches),
+    progressLogs: batches.length,
+    reportsWithUsage: usage.length,
+    inputTokens: sum(usage.map((u) => u.input_tokens)),
+    cachedInputTokens: sum(usage.map((u) => u.cached_input_tokens)),
+    outputTokens: sum(usage.map((u) => u.output_tokens)),
+  };
+}
+
+function deterministicScores(results) {
   const correct = (field) =>
     results.some((r) => typeof r.grade?.[field] === "boolean")
       ? results.filter((r) => r.grade?.[field] === true).length
       : null;
   const identity = correct("identityCorrect");
   const verdict = correct("verdictLabelCorrect");
-  const batches = results.map((r) => r.reviewBatches).filter(Number.isFinite);
-  const usage = results.map((r) => r.usage).filter(Boolean);
   const strict = results.map(strictPass);
   return {
-    cases: results.length,
+    ...runStats(results),
     passed: results.filter((r) => r.status === "passed").length,
     strictPassed: strict.includes(null) ? null : strict.filter(Boolean).length,
-    executionErrors: results.filter((r) => r.status === "execution_error")
-      .length,
     verdict,
     identity,
     identityAndVerdict:
@@ -46,26 +59,77 @@ function score(results) {
     version: correct("versionCorrect"),
     decidingEvidence: correct("evidenceCorrect"),
     selectedEvidence: correct("selectedEvidenceCorrect"),
-    medianMs: median(results.map((r) => r.elapsedMs).filter(Number.isFinite)),
-    reviewBatches: sum(batches),
-    progressLogs: batches.length,
-    reportsWithUsage: usage.length,
-    inputTokens: sum(usage.map((u) => u.input_tokens)),
-    cachedInputTokens: sum(usage.map((u) => u.cached_input_tokens)),
-    outputTokens: sum(usage.map((u) => u.output_tokens)),
   };
 }
 
-export function compareRuns(ids, results) {
+function compareDeterministic(enabled, disabled) {
+  function wins(first, second, passed) {
+    return first
+      .filter((r, i) => passed(r) && passed(second[i]) === false)
+      .map((r) => r.id);
+  }
+  const pass = (r) => r.status === "passed";
+  return {
+    enabled: deterministicScores(enabled),
+    disabled: deterministicScores(disabled),
+    gainedWithReview: wins(enabled, disabled, pass),
+    lostWithReview: wins(disabled, enabled, pass),
+    strictGainedWithReview: wins(enabled, disabled, strictPass),
+    strictLostWithReview: wins(disabled, enabled, strictPass),
+  };
+}
+
+function compareReportScores(enabled, disabled) {
+  const matched = enabled
+    .map((r, i) => [r, disabled[i]])
+    .filter(([on, off]) => on.status === "scored" && off.status === "scored");
+  function scores(results, side) {
+    const mean = (field) =>
+      matched.length
+        ? sum(matched.map((pair) => pair[side].reportScore[field])) /
+          matched.length
+        : null;
+    const count = (status) => results.filter((r) => r.status === status).length;
+    const inputErrors = count("input_error");
+    const ratingErrors = count("rating_error");
+    return {
+      ...runStats(results),
+      inputErrors,
+      ratingErrors,
+      reportsScored: count("scored"),
+      pairedReports: matched.length,
+      accuracy: mean("accuracy"),
+      comprehensiveness: mean("comprehensiveness"),
+      blended: mean("blended"),
+      blendedPerAttempt:
+        results.length && !ratingErrors && !inputErrors
+          ? sum(results.map((r) => r.reportScore?.blended ?? 0)) /
+            results.length
+          : null,
+    };
+  }
+  const higherWithReview = [];
+  const lowerWithReview = [];
+  for (const [on, off] of matched) {
+    if (on.reportScore.blended > off.reportScore.blended)
+      higherWithReview.push(on.id);
+    if (on.reportScore.blended < off.reportScore.blended)
+      lowerWithReview.push(on.id);
+  }
+  return {
+    enabled: scores(enabled, 0),
+    disabled: scores(disabled, 1),
+    higherWithReview,
+    lowerWithReview,
+  };
+}
+
+export function compareRuns(ids, results, { blended = false } = {}) {
   const byKey = new Map(results.map((r) => [reviewerMode(r) + "/" + r.id, r]));
   const enabled = [];
   const disabled = [];
   const pending = [];
   const inputMismatch = [];
-  const gainedWithReview = [];
-  const lostWithReview = [];
-  const strictGainedWithReview = [];
-  const strictLostWithReview = [];
   const elapsedDeltas = [];
   let matchedAdvisories = 0;
   for (const id of ids) {
@@ -89,26 +153,16 @@ export function compareRuns(ids, results) {
     if (haveAdvisories) matchedAdvisories++;
     enabled.push(on);
     disabled.push(off);
-    if (on.status === "passed" && off.status !== "passed")
-      gainedWithReview.push(id);
-    if (off.status === "passed" && on.status !== "passed")
-      lostWithReview.push(id);
-    const strictOn = strictPass(on);
-    const strictOff = strictPass(off);
-    if (strictOn && strictOff === false) strictGainedWithReview.push(id);
-    if (strictOff && strictOn === false) strictLostWithReview.push(id);
     if (Number.isFinite(on.elapsedMs) && Number.isFinite(off.elapsedMs))
       elapsedDeltas.push(on.elapsedMs - off.elapsedMs);
   }
+  const grades = blended
+    ? compareReportScores(enabled, disabled)
+    : compareDeterministic(enabled, disabled);
   return {
-    enabled: score(enabled),
-    disabled: score(disabled),
+    ...grades,
     medianPairedElapsedDeltaMs: median(elapsedDeltas),
     matchedAdvisories,
-    gainedWithReview,
-    lostWithReview,
-    strictGainedWithReview,
-    strictLostWithReview,
     inputMismatch,
     pending,
   };

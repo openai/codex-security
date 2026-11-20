@@ -14,12 +14,15 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
-import { gradeMixed, gradeStack } from "./grade.mjs";
+import { gradeMixed, gradeStack, reviewerMode } from "./grade.mjs";
+import { rateReport } from "./grade-reports.mjs";
+import { mixedReportReference } from "./report-runtime.mjs";
 import {
   git,
   jsonFile,
   mixedFixture,
-  mixedServiceVersions,
+  mixedRecords,
+  mixedRequestService,
   restorePackets,
   reviewedCve,
   sha256,
@@ -31,7 +34,7 @@ const usage = `Usage: node run.mjs behavior [--out NEW_DIR]
        node run.mjs contracts --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs benchmark --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs live --cli /path/to/codex-security.mjs [--case CASE] [--model MODEL] [--out NEW_DIR]
-       With --case mixed-*: [--reviewer enabled|disabled] (default enabled)
+       With --case mixed-*: [--reviewer enabled|disabled] (default enabled) [--rater-model MODEL]
 Use --packets DIR to reuse an earlier run's packets/ directory.
 Cases: positive, fixed, unbound, missing-version, mixed-services, mixed-package, mixed-evidence, mixed-evidence-no-access, mixed-evidence-sibling, or all (default).`;
 const { positionals, values } = parseArgs({
@@ -42,6 +45,7 @@ const { positionals, values } = parseArgs({
     cli: { type: "string" },
     model: { type: "string" },
     reviewer: { type: "string" },
+    "rater-model": { type: "string" },
     case: { type: "string" },
     out: { type: "string" },
   },
@@ -51,6 +55,7 @@ if (values.help) {
   process.exit(0);
 }
 const [mode] = positionals;
+const raterModel = values["rater-model"];
 const allCases = [
   "positive",
   "fixed",
@@ -69,6 +74,8 @@ if (
   (values.case &&
     (mode !== "live" || ![...allCases, "all"].includes(values.case))) ||
   (values.model && mode !== "live") ||
+  (raterModel !== undefined &&
+    (!raterModel.trim() || !values.case?.startsWith("mixed-"))) ||
   (values.reviewer !== undefined &&
     (!["enabled", "disabled"].includes(values.reviewer) ||
       !values.case?.startsWith("mixed-"))) ||
@@ -294,25 +301,13 @@ try {
           args.push("--" + role, join(fixture.input, role + ".json"));
       }
       let transcript;
-      const requestService =
-        id === "mixed-evidence"
-          ? "notes"
-          : id === "mixed-evidence-sibling"
-            ? "reviews"
-            : undefined;
+      const requestService = mixedRequestService(id);
       if (id.startsWith("mixed-evidence")) {
         const records = join(answerDir, "records.json");
         transcript = join(answerDir, "calls.jsonl");
         const config = join(answerDir, "project.json");
         await writeFile(transcript, "", { mode: 0o600 });
-        await jsonFile(records, {
-          notes: {
-            release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version ${mixedServiceVersions.notes}.`,
-            ...(requestService && {
-              request_record: `An anonymous client sent its own text to POST /preview on service ${requestService} at revision ${fixture.sha}, and received the parsed links from its submitted body.`,
-            }),
-          },
-        });
+        await jsonFile(records, mixedRecords(id, fixture.sha));
         await jsonFile(config, {
           exploitability: {
             evidence_sources: [
@@ -373,7 +368,7 @@ try {
           result.exitCode = processResult.code;
           result.signal = processResult.signal;
         } else {
-          result.status = "grade_error";
+          result.status = raterModel ? "rating_error" : "grade_error";
           const reportBytes = await readFile(reportFile);
           await writeFile(join(runDir, "report.json"), reportBytes, {
             mode: 0o600,
@@ -385,16 +380,33 @@ try {
             report,
             "stdout equals saved report",
           );
-          result.grade = mixed
-            ? gradeMixed(
-                report,
-                fixture,
-                id === "mixed-package",
-                calls && { calls, requestService },
-                reviewer,
-              )
-            : gradeStack(report, fixture, { reviewed: true });
-          result.status = "passed";
+          if (raterModel) {
+            assert.equal(reviewerMode(report), reviewer);
+            assert.equal(report.target?.sha, fixture.sha);
+            if (id === "mixed-package")
+              assert.equal(report.package?.name, "linkify-it");
+            else assert.equal(report.cve, reviewedCve);
+            result.reportScore = await rateReport({
+              report,
+              reference: mixedReportReference(id, fixture, calls),
+              ...fixture,
+              dest: runDir,
+              model: raterModel,
+              signal: abort.signal,
+            });
+            result.status = "scored";
+          } else {
+            result.grade = mixed
+              ? gradeMixed(
+                  report,
+                  fixture,
+                  id === "mixed-package",
+                  calls && { calls, requestService },
+                  reviewer,
+                )
+              : gradeStack(report, fixture, { reviewed: true });
+            result.status = "passed";
+          }
         }
       } catch (error) {
         result.elapsedMs ??= Math.round(performance.now() - start);
@@ -402,18 +414,26 @@ try {
         result.error = error.message;
       }
       results.push(result);
-      console.log(id + ": " + result.status + " (" + result.elapsedMs + " ms)");
+      const score = result.reportScore
+        ? " " + result.reportScore.blended.toFixed(1)
+        : "";
+      console.log(
+        id + ": " + result.status + score + " (" + result.elapsedMs + " ms)",
+      );
       if (result.error) console.error(result.error);
       await writeFile(
         join(out, "results.json"),
-        JSON.stringify({ model: values.model ?? null, results }, null, 2) +
-          "\n",
+        JSON.stringify(
+          { model: values.model ?? null, raterModel, results },
+          null,
+          2,
+        ) + "\n",
         { mode: 0o600 },
       );
     }
     if (
       results.length !== selected.length ||
-      results.some((r) => r.status !== "passed")
+      results.some((r) => r.status !== "passed" && r.status !== "scored")
     )
       process.exitCode ||= 1;
   }

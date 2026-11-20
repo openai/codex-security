@@ -70,6 +70,24 @@ export async function mixedFixture(root) {
   return { repo, sha: commitFixture(repo) };
 }
 
+export function mixedRequestService(id) {
+  if (id === "mixed-evidence") return "notes";
+  if (id === "mixed-evidence-sibling") return "reviews";
+}
+
+export function mixedRecords(id, sha) {
+  if (!id.startsWith("mixed-evidence")) return {};
+  const service = mixedRequestService(id);
+  return {
+    notes: {
+      release_record: `Service notes was running revision ${sha} and loaded npm package linkify-it version ${mixedServiceVersions.notes}.`,
+      ...(service && {
+        request_record: `An anonymous client sent its own text to POST /preview on service ${service} at revision ${sha}, and received the parsed links from its submitted body.`,
+      }),
+    },
+  };
+}
+
 async function summaryRepo(root, version) {
   const repo = await mkdtemp(join(root, "project-"));
   const pkg = join(repo, "sample-summary");

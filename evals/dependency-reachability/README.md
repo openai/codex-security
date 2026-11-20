@@ -12,7 +12,7 @@ codex-security exploitability check CVE-2026-54283 --json
 codex-security exploitability check --reviewer=disabled CVE-2026-54283 --json
 ```
 
-The **eval scorer** runs after the CLI exits. It scores both reports against the same expected use, version, verdict and evidence. The expected answer stays outside the checkout. The CLI gets the CVE and a project config with the caller’s scope in `exploitability.scope.instructions`. The runner records the actual command, progress events and report for each attempt.
+The **eval rater** reads each final report after the CLI exits. In a live paired run it scores accuracy and comprehensiveness against the caller’s question and pinned source. The rater receives one report at a time with the reviewer setting hidden. The investigator gets the CVE and the caller’s scope in `exploitability.scope.instructions`. Reference questions and source selections stay outside the investigation. The runner records the actual command, progress events and report for each attempt.
 
 ### Start from a fresh checkout
 
@@ -50,7 +50,7 @@ node "$runner" --cache "$cache" --cli "$CLI" --model "$model" --isolated-state \
   --case clips-handler-validation --reviewer both --out "$outputs/clip"
 ```
 
-`--reviewer both` launches two independent investigations per case, alternating which mode starts first. To reproduce a single failure, supply its `--case ID` and `--reviewer enabled` (the default) or `--reviewer disabled` with a fresh `--out` directory. Repeat `--case` to select several IDs. `--help` lists them. Select `--suite original` for the historical 23 cases, `--suite added` for the additions, or a suite from the table. Omit the selectors for a full run. `--jobs` limits concurrent CLI processes and defaults to one.
+`--reviewer both` launches two independent investigations per case, alternating which mode starts first. The rater uses the investigation model by default. Set `--rater-model MODEL` to choose the rater independently or to score a single mode. Repeat `--case` to select several IDs. `--help` lists them. Select `--suite original` for the historical 23 cases, `--suite added` for the additions, or a suite from the table. Omit the selectors for a full run. `--jobs` limits concurrent tasks and defaults to one.
 
 ```sh
 node "$runner" --cache "$cache" --cli "$CLI" --model "$model" --isolated-state \
@@ -89,12 +89,36 @@ In `clips-gateway-validation` the launch config enables a multipart gate. The sa
 
 In a paired run, open `results.json` for the comparison and `enabled/<case>/` and `disabled/<case>/` for the underlying reports. In a single run the path is `<case>/`. Each successful command saves `report.json`. Inspect `progress.jsonl` for investigation and review events and `stderr.log` for diagnostics. A failed command also saves `stdout.log`.
 
+**The blended score gives accuracy and comprehensiveness equal weight.** Each judgment gets 0 for missing or unsound, 1 for partial, or 2 for sound and complete. The rater assesses every target in the reference individually. Their mean is the target coverage score. It assesses the other five dimensions across the report. Each component is the sum of its three scores divided by six, expressed on a 0–100 scale. The blend is the mean of the two components. [Rubric and scoring](report-rubric.mjs)
+
+| Component         | What the rater checks                                                                                                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Accuracy          | Are the facts correct for this copy and caller? Does the report’s evidence support the reasoning? Is the conclusion appropriately scoped and certain?                                                             |
+| Comprehensiveness | Does the report account for the relevant callers and alternatives? Does it trace the input through the important handoffs and guards? Does it identify what remains unresolved and what evidence would settle it? |
+
+For example, a report can earn full credit with `unknown` when it traces both possible copies, explains which one has the fix and identifies the external setting that selects between them. Skipping the available copy selection loses coverage credit. An `exploitable` claim needs evidence that the affected copy ran and the caller could reach it. An unsupported confirmation or exclusion gets zero on calibration. Equivalent evidence anywhere in the report counts if the reasoning ties it to the right caller. The rater receives the caller question, reference excerpts, and a projection of the report including uses, exclusions, supporting evidence, searches and limitations. The projection omits review decisions, mode, timing and usage. Each grade runs in a fresh read-only SDK session with the selected model provider. [Reference construction](report-reference.mjs) · [Report projection](report-packet.mjs)
+
+- `reportScore` contains both components, the blend and a reason for each judgment. Check `reportScore.rating.targets` to see how the report addresses each part of the scoped question. Follow each `reportPointer` and `referencePointer` into the saved `rating-input.json` to check the reasoning. The result records the input and rubric hashes. `scored` means the rater returned a valid assessment. The score is continuous with no pass threshold. The runner exits nonzero on investigation, input or rating errors.
+- `comparison.enabled` and `comparison.disabled` average `accuracy`, `comprehensiveness` and `blended` over the same `pairedReports` with two valid scores. `higherWithReview` and `lowerWithReview` identify differences. `blendedPerAttempt` includes failed CLI attempts at zero and is unavailable for a mode with an input or rating error. Investigate `executionErrors`, `inputErrors`, `ratingErrors`, `pending` and `inputMismatch` alongside the scores.
+- `medianPairedElapsedDeltaMs` is the median per-case time difference between CLI invocations. `reviewBatches` and token totals describe investigation cost. Rater calls happen after those measurements.
+
+Use `--grade-existing` with `--rater-model` to score saved reports without launching investigators. Repeat into a fresh directory to measure variation in the rater on identical reports. A fresh live pair measures variation in the investigations too. The rater sees selected source context and the report’s cited evidence. Its assessment of coverage depends on how well the reference describes the relevant paths. Validate consequential score differences against the saved source and report pointers.
+
+```sh
+node "$runner" --cache "$cache" --grade-existing "$outputs/pairs" \
+  --rater-model "$model" --jobs 4 --out "$outputs/rated"
+jq '.comparison | {enabled, disabled, higherWithReview, lowerWithReview}' "$outputs/rated/results.json"
+```
+
+### Reproduce the deterministic scores
+
+Single-mode runs and saved-report replays without `--rater-model` use the historical deterministic checks. These test exact target and verdict expectations and a fixed set of source facts. Their pass counts let you reproduce older experiments. The blended score uses the whole-report rubric above.
+
 - `passed` requires one assessed use to satisfy the full rubric. The eval checks the search audit, claim provenance and source citations against pinned Git blobs. It measures the citations attached to the assessed use in both conditions. Inspect the per-case errors to see which facts are missing.
 - `strictPassed` counts cases with `grade.strictPass`. In the pinned suite at least one use must satisfy the full rubric and have its required identity, deciding facts and call site covered by the citations marked as deciding for **that use**. The scorer checks every eligible use and enforces the report-wide audit and claim checks. `strictGainedWithReview` and `strictLostWithReview` list cases that meet this rule in only one mode. The exit code uses the ordinary grade.
 - `verdict`, `identity`, `version` and `decidingEvidence` count individual requirements on the best matching use. A verdict label can be correct while the report misses the application binding. `identityAndVerdict` requires both. Execution errors count in the denominator, and a completed `unknown` is graded against its case.
 - `selectedEvidence` checks whether the citations marked as deciding cover the identity, decisive facts and required call site. With review enabled, the reviewer selects these citations. With review disabled, this set contains all host-validated citations. Earlier CLI scores required the selected set and additional intermediate citations. Regrade saved reports to compare with the current rubric.
 - `gainedWithReview` and `lostWithReview` name cases that passed in only one condition. The comparison checks the Git commit, scope, CVE and available advisory digests. It lists unfinished pairs and input mismatches separately. The process exits nonzero for an execution error, failed grade or mismatched inputs.
-- `medianPairedElapsedDeltaMs` is the median of the per-case time with review minus the time without review. `reviewBatches` counts review events in complete progress logs. Each batch can cover multiple claims and may require another model turn. Token totals cover the reports with usage. One pair per case gives a sample that includes variation between independent investigations.
 
 Regrade saved reports offline after changing the rubric. The runner infers the cases and reviewer modes from the saved `results.json`, reads the original report bytes and re-creates the pinned Git commits. You can narrow the replay with `--case` and `--reviewer`. The new results reference the original output directory, which holds the reports and logs.
 
@@ -115,7 +139,7 @@ node "$runner" --cache "$cache" --cli "../reachability-candidate/$CLI" --model "
   --case clips-handler-validation --reviewer both --out "$outputs/clip-candidate"
 ```
 
-Compare each mode with the corresponding baseline mode at the same model and job count. Check the source, caller scope and advisory fingerprints, then read the changed reports. Repeat a changed case to see if the result recurs. The pinned cases measure the configured caller path and its evidence. The local service cases also exercise confirmation that the affected copy ran and a caller reached it. [Local service cases](#local-service-and-captured-stack-checks)
+Use the same rater model, rubric and job count for the candidate and baseline. Check the source, caller scope and advisory fingerprints, then read the changed reports. Repeat a changed case to see if the result recurs. The pinned cases measure the configured caller path and its evidence. The local service cases also exercise confirmation that the affected copy ran and a caller reached it. [Local service cases](#local-service-and-captured-stack-checks)
 
 For a new case, start with a neighboring case definition, add its fixture and register it in `cases`. Keep the caller question separate from the expected answer. Identify the exact source excerpts that decide the verdict. Run `--prepare-only --case ID` and then a live pair for that ID. [Case definitions](upstream/cases.mjs) · [Example with two callers](upstream/application-cases.mjs)
 
@@ -131,7 +155,7 @@ node "$runner" --case-module "$module" --cli "$CLI" --model "$model" --isolated-
 node "$runner" --case-module "$module" --grade-existing "$outputs/local" --out "$outputs/local-regraded"
 ```
 
-Provide four named exports. Each function may be async. [Module example](test-eval.mjs) · [Runner](upstream.mjs) · [Citation helpers](grade.mjs) · [Comparison fields](upstream/compare.mjs)
+Provide the four required exports below. For blended scoring also export `reportReference(scenario, repo, sha, { sourceExcerpts })`. Return a JSON object with the scoped question, material targets and independent evidence from the pinned checkout. `sourceExcerpts(repo, sha, selectors)` reads a whole file (`{ path }`), a range (`{ path, startLine, endLine }`) or context around a literal (`{ path, contains }`). Build the reference independently of the report and omit the expected verdict label. Live paired runs use blended scoring when this hook is present. Each function may be async. [Reference example](report-reference.mjs) · [Module example](test-eval.mjs) · [Runner](upstream.mjs)
 
 - `cases` is an array of records with `id`, `suite`, `revision`, `cve` and `callerScope`. Use unique IDs containing letters, digits, underscores or hyphens. Only the CVE and caller scope go to the CLI.
 - `prepare(scenario, scratch, commitFixture)` creates a repository under `scratch` and returns `{ repo, sha }`. Call `commitFixture(repo)` on a fresh fixture directory to obtain a deterministic commit. The runner removes `scratch` after each attempt, including regrades.
@@ -202,16 +226,21 @@ node "$runner" live --case mixed-evidence-no-access --cli "$CLI" --out "$outputs
 node "$runner" benchmark --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/benchmark"
 ```
 
-Select a `mixed-*` case to compare the two modes of the regular repository CLI. Each command runs in a fresh copy of the fixture. The independent eval checks service-specific source citations and verifies runtime records against that run’s MCP transcript in both modes. Check `progress.jsonl` for reviewer batches and `results.json` for the exact arguments.
+Select a `mixed-*` case to compare the two modes of the regular repository CLI. Each command runs in a fresh copy of the fixture. Use `--rater-model MODEL` to score the final report for accuracy and comprehensiveness. The rater gets the seven tracked files, the known advisory conditions, the available synthetic runtime records and the actual replies to this investigator. It assesses both services and, for `mixed-package`, the advisory checks together. It can credit an answer that traces the configured path and explains exactly why deployment or access remains unresolved. The `mixed-evidence-sibling` control tests whether the answer identifies the service in the request record even when the lookup asked for a different service.
 
 ```sh
-for control in mixed-services mixed-evidence-no-access mixed-evidence-sibling mixed-evidence; do
+for control in mixed-services mixed-package mixed-evidence-no-access mixed-evidence-sibling mixed-evidence; do
   for reviewer in enabled disabled; do
-    node "$runner" live --cli "$CLI" --case "$control" --reviewer "$reviewer" --out "$outputs/$control-$reviewer"
+    node "$runner" live --cli "$CLI" --case "$control" --reviewer "$reviewer" \
+      --rater-model "${RATER_MODEL:?Set RATER_MODEL to an available model}" --out "$outputs/$control-$reviewer"
   done
 done
 ```
 
-Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The eval checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks each service's selected lockfile and the claim's review state. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
+Read `results.json` for the exact CLI arguments and `results[].reportScore`. Each rating includes both component scores, their mean, and the reasons with pointers into `rating-input.json`. The exit code signals whether the investigation and rating completed. Check `progress.jsonl` for reviewer batches.
+
+Omitting `--rater-model` on `run.mjs` selects the deterministic checks. These verify verdicts, scope, Git source and capture citations, exact claim revisions, and the deciding evidence. Stack checks verify original frame indices, the reviewed draft’s digest and the approval. Service checks verify the selected lockfiles, the claim review state and the runtime records against that run’s MCP transcript. A failed deterministic check exits nonzero.
+
+Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
 
 The benchmark initializes five fresh SQLite attempts. Each timed trial writes one batch of ten source-backed claims and reads them back in another CLI process. It checks all ten IDs, revisions, hashes and payloads and records the median, including CLI startup time. Fixture preparation and state initialization take place before timing.

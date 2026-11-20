@@ -16,6 +16,7 @@ import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
 import { commitFixture, jsonFile, sha256 } from "./fixtures.mjs";
 import { reviewerMode, sourceReader, verifyClaimCitations } from "./grade.mjs";
+import { reportReference, sourceExcerpts } from "./report-reference.mjs";
 import { cases as pinnedCases, originalCases } from "./upstream/cases.mjs";
 import { checkoutOf } from "./upstream/checkout.mjs";
 import { compareRuns } from "./upstream/compare.mjs";
@@ -37,6 +38,7 @@ const { values } = parseArgs({
     "skill-baseline": { type: "boolean" },
     out: { type: "string" },
     model: { type: "string" },
+    "rater-model": { type: "string" },
     "prepare-only": { type: "boolean" },
     "grade-existing": { type: "string" },
     help: { type: "boolean", short: "h" },
@@ -45,7 +47,13 @@ const { values } = parseArgs({
 const caseModule = values["case-module"] && resolve(values["case-module"]);
 const corpus = caseModule
   ? await import(pathToFileURL(caseModule).href)
-  : { cases: pinnedCases, prepare, validateSnapshot, gradeSnapshot };
+  : {
+      cases: pinnedCases,
+      prepare,
+      validateSnapshot,
+      gradeSnapshot,
+      reportReference,
+    };
 const { cases } = corpus;
 assert(Array.isArray(cases), "Expected an array of cases");
 for (const hook of ["prepare", "validateSnapshot", "gradeSnapshot"])
@@ -64,6 +72,9 @@ const usage = `Usage: node upstream.mjs (--cache DIR | --case-module PATH) [--su
        Repeat --case ID to select several cases.
        --suite large-repo selects cases marked largeRepo: true across suites. Add --help to list their IDs.
        With --cli or --grade-existing: [--reviewer enabled|disabled|both] (default enabled for live runs)
+       --rater-model MODEL scores whole reports for accuracy and comprehensiveness, including on replay.
+       Live --reviewer both uses whole-report scoring with the investigation model when the corpus supports it.
+       Single runs and offline replay use deterministic grading unless --rater-model is supplied.
        Regrading uses the cases and reviewer from results.json when available. Pass selectors to narrow the run.
        With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
        For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
@@ -116,6 +127,8 @@ if (
   (caseModule && values["skill-baseline"]) ||
   !["enabled", "disabled", "both"].includes(reviewer) ||
   (values.reviewer && !values.cli && !existing) ||
+  (values["rater-model"] !== undefined &&
+    (!values["rater-model"].trim() || (!values.cli && !existing))) ||
   (values["isolated-state"] && !values.cli) ||
   [
     values["prepare-only"],
@@ -161,6 +174,17 @@ for (const signal of ["SIGINT", "SIGTERM"])
   });
 
 const paired = reviewer === "both";
+const blended = Boolean(
+  values["rater-model"] || (cli && paired && corpus.reportReference),
+);
+const raterModel = values["rater-model"] ?? values.model;
+if (blended)
+  assert.equal(
+    typeof corpus.reportReference,
+    "function",
+    "Missing reportReference in case module",
+  );
+const { rateReport } = blended ? await import("./grade-reports.mjs") : {};
 const pairedReports = (previous?.reviewer ?? reviewer) === "both";
 const modes = paired ? ["enabled", "disabled"] : [reviewer];
 if (paired) {
@@ -286,7 +310,7 @@ async function runCase(task, runSkill) {
     upstreamRevision: scenario.revision,
     reviewer: task.reviewer,
     callerScope: scenario.callerScope,
-    status: "execution_error",
+    status: blended ? "input_error" : "execution_error",
   };
   try {
     await mkdir(dest, { mode: 0o700 });
@@ -319,16 +343,17 @@ async function runCase(task, runSkill) {
       await jsonFile(join(dest, "answer.json"), answer);
       result.status = grade.pass ? "passed" : "grade_error";
     } else {
+      result.status = "execution_error";
       const report = existing
         ? savedReport
         : await checkRepository(task, repo, scratch, dest, result);
-      result.status = "grade_error";
+      result.status = blended ? "input_error" : "grade_error";
       if (report.advisoryDetails)
         result.advisorySha256 = sha256(JSON.stringify(report.advisoryDetails));
       result.usage = report.usage ?? null;
-      if (report.target?.sha)
+      if (blended || report.target?.sha)
         assert.equal(
-          report.target.sha,
+          report.target?.sha,
           sha,
           "report used a different checkout",
         );
@@ -337,30 +362,58 @@ async function runCase(task, runSkill) {
           report.assumptions?.some((s) => s.includes(scenario.callerScope)),
           "report is missing the supplied caller scope",
         );
-      result.grade = await corpus.gradeSnapshot(
-        report,
-        scenario,
-        repo,
-        sha,
-        task.reviewer,
-        { sourceReader, verifyClaimCitations },
-      );
-      assert.equal(typeof result.grade.pass, "boolean", "Missing grade.pass");
-      if (result.grade.pass) result.status = "passed";
+      if (blended) {
+        assert.equal(
+          reviewerMode(report),
+          task.reviewer,
+          "unexpected reviewer mode",
+        );
+        assert.equal(report.cve, scenario.cve, "unexpected advisory");
+        const reference = await corpus.reportReference(scenario, repo, sha, {
+          sourceExcerpts,
+        });
+        result.status = "rating_error";
+        result.reportScore = await rateReport({
+          report,
+          reference,
+          repo,
+          sha,
+          dest,
+          model: raterModel,
+          signal: abort.signal,
+        });
+        result.status = "scored";
+      } else {
+        result.grade = await corpus.gradeSnapshot(
+          report,
+          scenario,
+          repo,
+          sha,
+          task.reviewer,
+          { sourceReader, verifyClaimCitations },
+        );
+        assert.equal(typeof result.grade.pass, "boolean", "Missing grade.pass");
+        if (result.grade.pass) result.status = "passed";
+      }
     }
   } catch (error) {
     result.error = error.message;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
-  console.log(task.path + ": " + result.status);
+  console.log(
+    task.path +
+      ": " +
+      result.status +
+      (result.reportScore ? " " + result.reportScore.blended.toFixed(1) : ""),
+  );
   results.set(task.path, result);
   saved = saved.then(saveResults);
   await saved;
 }
 
 function comparison() {
-  return compareRuns(ids, [...results.values()]);
+  return compareRuns(ids, [...results.values()], { blended });
 }
 async function saveResults() {
   const tmp = join(out, "results.tmp");
@@ -375,6 +428,8 @@ async function saveResults() {
         jobs,
         isolatedState: cli ? !!values["isolated-state"] : undefined,
         reviewer: cli || existing ? reviewer : undefined,
+        grading: blended ? "blended" : "deterministic",
+        raterModel: blended ? (raterModel ?? null) : undefined,
         selected: ids,
         complete: results.size === tasks.length && !abort.signal.aborted,
         comparison: paired ? comparison() : undefined,
@@ -421,19 +476,25 @@ if (paired) {
     };
   console.table(table);
   for (const field of [
+    "higherWithReview",
+    "lowerWithReview",
     "gainedWithReview",
     "lostWithReview",
     "strictGainedWithReview",
     "strictLostWithReview",
     "inputMismatch",
   ])
-    console.log(field + ": " + (score[field].join(", ") || "none"));
+    if (score[field])
+      console.log(field + ": " + (score[field].join(", ") || "none"));
   if (score.inputMismatch.length) process.exitCode ||= 1;
 }
+const success = values["prepare-only"]
+  ? "prepared"
+  : blended
+    ? "scored"
+    : "passed";
 if (
   results.size !== tasks.length ||
-  [...results.values()].some(
-    (r) => r.status !== (values["prepare-only"] ? "prepared" : "passed"),
-  )
+  [...results.values()].some((r) => r.status !== success)
 )
   process.exitCode ||= 1;

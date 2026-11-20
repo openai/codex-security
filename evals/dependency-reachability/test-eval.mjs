@@ -29,6 +29,59 @@ import {
   gradeEvidenceSource,
   gradeMixed,
 } from "./grade.mjs";
+import { scoreRating } from "./report-rubric.mjs";
+import { buildReportPacket } from "./report-packet.mjs";
+import { mixedReportReference } from "./report-runtime.mjs";
+
+test("the report score gives equal weight to accuracy and comprehensiveness", () => {
+  const packet = {
+    report: { limitations: ["Worker A’s deployed copy is unknown."] },
+    reference: { targets: ["Worker A", "Worker B"] },
+  };
+  const sound = {
+    score: 2,
+    reason: "Worker A’s exposure is accurately qualified.",
+    reportPointer: "/report/limitations/0",
+    referencePointer: "/reference/targets/0",
+  };
+  const partial = {
+    ...sound,
+    score: 1,
+    reason: "The report leaves Worker B unassessed.",
+    referencePointer: "/reference/targets/1",
+  };
+  const rating = {
+    factualAccuracy: sound,
+    evidentiarySupport: sound,
+    calibration: sound,
+    targets: [sound, { ...partial, score: 0 }],
+    pathCoverage: partial,
+    uncertaintyCoverage: partial,
+  };
+  assert.deepEqual(scoreRating(rating, packet), {
+    accuracy: 100,
+    comprehensiveness: 50,
+    blended: 75,
+  });
+  const checkTargets = (targets) => scoreRating({ ...rating, targets }, packet);
+  assert.throws(
+    () => checkTargets([sound]),
+    /one judgment per reference target/u,
+  );
+  assert.throws(() => checkTargets([sound, sound]), /expected target pointer/u);
+  const check = (change) =>
+    scoreRating({ ...rating, pathCoverage: { ...partial, ...change } }, packet);
+  assert.throws(() => check({ score: 3 }), /invalid score/u);
+  assert.throws(() => check({ reason: " " }), /missing reason/u);
+  assert.throws(
+    () => check({ reportPointer: partial.referencePointer }),
+    /pointer into report/u,
+  );
+  assert.throws(
+    () => check({ referencePointer: "/reference/targets/2" }),
+    /unresolved pointer/u,
+  );
+});
 
 let root;
 before(async () => {
@@ -36,6 +89,63 @@ before(async () => {
 });
 after(async () => {
   await rm(root, { recursive: true, force: true });
+});
+
+test("the report rater sees the same published evidence in both reviewer modes", async () => {
+  const repo = await mkdtemp(join(root, "cited-"));
+  await writeFile(join(repo, "route.js"), "parse(request.body)\n");
+  const sha = commitFixture(repo);
+  await writeFile(join(repo, "route.js"), "return null\n");
+  const citation = { path: "route.js", startLine: 1, endLine: 1, commit: sha };
+  const use = {
+    reason: "The route passes caller input to parse.",
+    evidence: [citation],
+    observations: [{ record: "Release A is active." }],
+  };
+  const lead = "Unassessed caller in route.js:1.";
+  const limitation = "Caller access remains unverified.";
+  const reference = { question: "Can an anonymous caller reach parse?" };
+  function packet(reviewer) {
+    const enabled = reviewer === "enabled";
+    const check = {
+      advisoryId: "test-advisory",
+      reviewer,
+      uses: [
+        {
+          ...use,
+          conclusionClaim: { id: reviewer },
+          decidingEvidence: enabled ? [] : [citation],
+        },
+      ],
+      coverage: [
+        { kind: "unresolved", reason: lead },
+        { kind: "dismissed", reason: "The test imports a different parser." },
+      ],
+      limitations: [
+        lead,
+        enabled
+          ? limitation
+          : "Independent grading was disabled. " + limitation,
+      ],
+    };
+    return buildReportPacket({
+      report: { checks: [check] },
+      reference,
+      repo,
+      sha,
+    });
+  }
+  const on = packet("enabled");
+  assert.deepEqual(on, packet("disabled"));
+  const [report] = on.report.checks;
+  assert.deepEqual(report.uses[0], { ...use, evidence: ["route.js:1"] });
+  assert.equal(report.sources["route.js:1"], "parse(request.body)");
+  assert.deepEqual(report.unassessedLeads, [lead]);
+  assert.deepEqual(report.limitations, [limitation]);
+  assert.equal(
+    report.coverage[0].reason,
+    "The test imports a different parser.",
+  );
 });
 
 test("a failed investigation keeps its stdout diagnostic in the case directory", async () => {
@@ -124,6 +234,42 @@ function approvedUseClaim(use, sources) {
     evidence: { sourceIds },
   };
 }
+
+test("service references distinguish an available sibling request from what the investigator saw", async () => {
+  const fixture = await mixedFixture(root);
+  const sibling = mixedReportReference("mixed-evidence-sibling", fixture);
+  assert.match(
+    sibling.availableRecords.notes.request_record,
+    /on service reviews/u,
+  );
+  assert.deepEqual(sibling.recordedReplies, []);
+  const call = {
+    tool: "release_record",
+    arguments: { service: "notes" },
+    result: {
+      content: [
+        {
+          type: "text",
+          text: "Record 1: " + sibling.availableRecords.notes.release_record,
+        },
+      ],
+    },
+  };
+  const partial = mixedReportReference("mixed-evidence-sibling", fixture, [
+    call,
+  ]);
+  assert.deepEqual(partial.recordedReplies, [call]);
+  assert.deepEqual(partial.availableRecords, sibling.availableRecords);
+  const pkg = mixedReportReference("mixed-package", fixture);
+  assert.deepEqual(pkg.availableRecords, {});
+  assert.equal(pkg.targets.length, 4);
+  assert.deepEqual(
+    pkg.advisories.map((a) => a.cve),
+    [reviewedCve, "CVE-2026-59887"],
+  );
+  for (const service of ["notes", "reviews"])
+    assert(pkg.sources.some((s) => s.path === service + "/package-lock.json"));
+});
 
 test("the repository grader binds each service's verdict to its own checkout evidence and approved revision", async () => {
   const fixture = await mixedFixture(root);
@@ -1107,4 +1253,46 @@ test("pairs strict passes independently of ordinary passes and supports earlier 
   const incomplete = compareRuns(["a"], rows);
   assert.equal(incomplete.disabled.strictPassed, null);
   assert.deepEqual(incomplete.strictGainedWithReview, []);
+});
+
+test("blended comparisons separate paired report quality from publication and rating failures", () => {
+  const ids = ["gained", "no-report", "changed"];
+  const scored = (id, reviewer, accuracy, comprehensiveness) => ({
+    id,
+    reviewer,
+    status: "scored",
+    sourceSha: "same",
+    reportScore: {
+      accuracy,
+      comprehensiveness,
+      blended: (accuracy + comprehensiveness) / 2,
+    },
+  });
+  const missing = {
+    id: "no-report",
+    reviewer: "enabled",
+    status: "execution_error",
+  };
+  const rows = [
+    scored("gained", "enabled", 100, 100),
+    scored("gained", "disabled", 100, 50),
+    missing,
+    scored("no-report", "disabled", 50, 0),
+    scored("changed", "enabled", 0, 0),
+    { ...scored("changed", "disabled", 100, 100), sourceSha: "different" },
+  ];
+  const compare = () => compareRuns(ids, rows, { blended: true });
+  const result = compare();
+  assert.deepEqual(result.inputMismatch, ["changed"]);
+  assert.deepEqual(result.higherWithReview, ["gained"]);
+  assert.deepEqual(result.lowerWithReview, []);
+  assert.equal(result.enabled.pairedReports, 1);
+  assert.equal(result.enabled.blended, 100);
+  assert.equal(result.disabled.blended, 75);
+  assert.equal(result.disabled.accuracy, 100);
+  assert.equal(result.disabled.comprehensiveness, 50);
+  assert.equal(result.enabled.blendedPerAttempt, 50);
+  assert.equal(result.disabled.blendedPerAttempt, 50);
+  missing.status = "rating_error";
+  assert.equal(compare().enabled.blendedPerAttempt, null);
 });
