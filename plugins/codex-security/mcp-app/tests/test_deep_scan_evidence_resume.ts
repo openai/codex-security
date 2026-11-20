@@ -233,7 +233,6 @@ const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const owner = "selected-evidence-owner";
 const { permissionProfile } = readOnlyParentSandboxState(pluginRoot);
 const bundleRoot = await temporaryDirectory("selected-evidence-bundle-");
-after(() => rm(bundleRoot, { recursive: true, force: true }));
 const serverPath = path.join(bundleRoot, "server.cjs");
 await buildServer(serverPath, {
   define: {
@@ -606,3 +605,5 @@ with sqlite3.connect(sys.argv[1]) as db:
     assert.equal(await readFile(before.manifestPath, "utf8"), sealed);
   });
 }
+
+after(() => rm(bundleRoot, { recursive: true, force: true }));
