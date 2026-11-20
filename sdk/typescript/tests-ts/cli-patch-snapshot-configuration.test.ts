@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
@@ -6,14 +6,13 @@ import {
   patchRiskAssessment,
   repositoryGit,
   resultWithFindings,
-  runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
+  gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 async function configuredRepository(selector: string, absolute: boolean) {
   const directory = await fixtures.create("patch-snapshot-settings-");
@@ -84,11 +83,7 @@ for (const selector of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]) {
           {
             currentDirectory: directory,
             environment,
-            onRepositoryCommand: (command, args, cwd, options) =>
-              runGitRepositoryCommand(command, args, cwd, {
-                ...options,
-                environment: { ...environment, ...options?.environment },
-              }),
+            onRepositoryCommand: gitWithEnvironment(environment),
             onCodex: async (_args, output, childEnvironment) => {
               if (
                 output!.appServer!.prompt.includes("immutable patch artifact")
@@ -186,11 +181,7 @@ test.each(["implicit", "explicit relative"])(
       {
         currentDirectory: kind === "implicit" ? alias : directory,
         environment,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          }),
+        onRepositoryCommand: gitWithEnvironment(environment),
         onCodex: (_args, output, childEnvironment) => {
           expect(output!.appServer!.prompt).not.toContain(
             "immutable patch artifact",
@@ -234,11 +225,7 @@ test.each(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])(
       {
         currentDirectory: component,
         environment,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          }),
+        onRepositoryCommand: gitWithEnvironment(environment),
         onCodex: async (_args, output, childEnvironment) => {
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
             assessments++;
@@ -298,11 +285,7 @@ test("saved findings rebaseline with the same nested filter configuration", asyn
       environment,
       result,
       onWorkbench: () => savedScan(result, "scan-1", directory),
-      onRepositoryCommand: (command, args, cwd, options) =>
-        runGitRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: { ...environment, ...options?.environment },
-        }),
+      onRepositoryCommand: gitWithEnvironment(environment),
       onCodex: async (args, output, childEnvironment) => {
         if (output!.appServer!.prompt.includes("immutable patch artifact")) {
           assessments++;

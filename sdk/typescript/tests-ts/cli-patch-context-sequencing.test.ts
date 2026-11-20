@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmod, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -11,14 +11,16 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
+  runIssuePatch,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchSnapshotEnvironment,
   patchSnapshotWindowsConfig,
 } from "./support/patch-snapshot-environment.js";
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+
+const fixtures = patchDirectories();
 const preparedSnapshotTimeout = process.platform === "win32" ? 180_000 : 90_000;
 for (const policy of ["set", "exclude", "control"] as const) {
   for (const action of [
@@ -352,36 +354,30 @@ test("publication keeps mixed valid and missing selected-path errors before bran
   const { directory, remote, git } = await publicationRepository(fixtures);
   const original = git("rev-parse", "HEAD");
   const index = await readFile(join(directory, ".git", "index"));
-  const outcome = await runWorkflow(
-    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-    {
-      currentDirectory: directory,
-      onWorkbench: () =>
-        savedScan(resultWithFindings(["high"]), "scan-1", directory),
-      onRepositoryCommand: (command, args, cwd, options) =>
-        command === "git"
-          ? runGitRepositoryCommand(command, args, cwd, options)
-          : args[1] === "list"
-            ? "[]"
-            : "https://github.example.test/example/repository/pull/1",
-      onCodex: async (_args, output) => {
-        await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-        output!.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: "occ_1",
-                status: "verified",
-                files: ["src/finding-1.ts", "src/missing.ts"],
-                verification: "Synthetic edit verified.",
-              },
-            ],
-          }),
-        );
-        return 0;
-      },
+  const outcome = await runSavedPublication(directory, {
+    onRepositoryCommand: (command, args, cwd, options) =>
+      command === "git"
+        ? runGitRepositoryCommand(command, args, cwd, options)
+        : args[1] === "list"
+          ? "[]"
+          : "https://github.example.test/example/repository/pull/1",
+    onCodex: async (_args, output) => {
+      await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+      output!.stdout.write(
+        JSON.stringify({
+          patches: [
+            {
+              occurrenceId: "occ_1",
+              status: "verified",
+              files: ["src/finding-1.ts", "src/missing.ts"],
+              verification: "Synthetic edit verified.",
+            },
+          ],
+        }),
+      );
+      return 0;
     },
-  );
+  });
   expect(outcome.exitCode).toBe(2);
   expect(outcome.stderr).toContain(
     `pathspec '${join("src", "missing.ts")}' did not match any files`,
@@ -402,20 +398,15 @@ test.skipIf(process.platform === "win32")(
     const source = join(directory, "src/finding-1.ts");
     let turns = 0;
     try {
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: directory,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            turns++;
-            await writeFile(source, "fixed\n");
-            await chmod(source, 0);
-            output!.stdout.write("Synthetic edit complete.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(directory, {
+        onCodex: async (_args, output) => {
+          turns++;
+          await writeFile(source, "fixed\n");
+          await chmod(source, 0);
+          output!.stdout.write("Synthetic edit complete.\n");
+          return 0;
         },
-      );
+      });
       expect(turns).toBe(1);
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stdout + outcome.stderr).toContain("Permission denied");

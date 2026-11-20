@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { hash } from "node:crypto";
 import {
   chmod,
@@ -22,7 +22,6 @@ import {
   sep,
 } from "node:path";
 import { dependencies } from "./cli-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   readAppliedText,
   resultWithFindings,
@@ -33,11 +32,14 @@ import {
   repositoryGit,
   runGitRepositoryCommand,
   publicationRepository as createPublicationRepository,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
 
 describe("patch change tracking", () => {
-  const fixtures = createTemporaryDirectories(true);
-  afterEach(fixtures.cleanup);
+  const fixtures = patchDirectories();
   const publicationRepository = () => createPublicationRepository(fixtures);
 
   test.each([
@@ -813,10 +815,7 @@ describe("patch change tracking", () => {
       const external = join(parent, "external");
       for (const checkout of [root, nested, external]) {
         await mkdir(checkout, { recursive: true });
-        const git = repositoryGit(checkout);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(checkout);
         await writeFile(join(checkout, "app.ts"), "original\n");
         git("add", ".");
         git("commit", "-m", "Synthetic baseline");
@@ -857,20 +856,15 @@ describe("patch change tracking", () => {
       const rootIndex = await readFile(join(root, ".git", "index"));
       const externalIndex = await readFile(join(external, ".git", "index"));
       let modelCalls = 0;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            modelCalls += 1;
-            if (kind.endsWith("during")) await linkExternal();
-            await writeFile(join(root, "app.ts"), "fixed\n");
-            output?.stdout.write("Fixed and checked.");
-            return 0;
-          },
+      const outcome = await runIssuePatch(root, {
+        onCodex: async (_args, output) => {
+          modelCalls += 1;
+          if (kind.endsWith("during")) await linkExternal();
+          await writeFile(join(root, "app.ts"), "fixed\n");
+          output?.stdout.write("Fixed and checked.");
+          return 0;
         },
-      );
+      });
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain(
         kind.includes("ancestor")
@@ -918,10 +912,7 @@ describe("patch change tracking", () => {
         ? await fixtures.create("synthetic-submodule-leaf-")
         : undefined;
       for (const directory of [root, origin, ...(leaf ? [leaf] : [])]) {
-        const git = repositoryGit(directory);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(directory);
         await writeFile(join(directory, "app.ts"), "baseline\n");
         if (commitChange) {
           await writeFile(join(directory, "gone.ts"), "remove\n");
@@ -1207,8 +1198,7 @@ describe("patch change tracking", () => {
     await writeFile(join(nested, "outside/removed"), "original\n");
     const operatorIndex = await readFile(join(nested, ".git/index"));
     const nestedTrees: string[] = [];
-    const run = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: root,
+    const run = await runIssuePatch(root, {
       onRepositoryCommand: async (tool, args, cwd, options) => {
         const result = await runGitRepositoryCommand(tool, args, cwd, options);
         if (args.includes("write-tree") && args.includes(nested))
@@ -1299,8 +1289,7 @@ describe("patch change tracking", () => {
         path,
       );
       let tree = "";
-      const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-        currentDirectory: root,
+      const result = await runIssuePatch(root, {
         onRepositoryCommand: async (tool, args, cwd, options) => {
           const output = await runGitRepositoryCommand(
             tool,
@@ -1453,10 +1442,7 @@ describe("patch change tracking", () => {
       const directory = join(root, "package");
       const nested = join(directory, "nested");
       await mkdir(nested, { recursive: true });
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       const inner = repositoryGit(nested);
       inner("init", "--initial-branch=main");
       inner("config", "user.name", "Synthetic User");
@@ -1541,176 +1527,172 @@ describe("patch change tracking", () => {
       let afterTurn = false;
       let retiredAdministration: string | undefined;
       const bookkeeping: string[][] = [];
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: target,
-          environment: gitEnvironment,
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (
-              afterTurn &&
-              !args.includes("core.hooksPath=/dev/null") &&
-              args.some((value) =>
-                ["add", "read-tree", "update-index", "write-tree"].includes(
-                  value,
-                ),
-              )
+      const outcome = await runIssuePatch(target, {
+        environment: gitEnvironment,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (
+            afterTurn &&
+            !args.includes("core.hooksPath=/dev/null") &&
+            args.some((value) =>
+              ["add", "read-tree", "update-index", "write-tree"].includes(
+                value,
+              ),
             )
-              bookkeeping.push([...args]);
-            expect(cwd).not.toBe(nested);
-            const selectedWorktree = args.includes("--work-tree")
-              ? args[args.indexOf("--work-tree") + 1]!
-              : args[0] === "-C"
-                ? args[1]!
-                : cwd;
-            if (args[0] === "-C") {
-              expect(cwd).toBe(root);
-              expect([root, directory, nested]).toContain(resolve(args[1]!));
-            }
-            const index = options?.environment?.["GIT_INDEX_FILE"];
-            if (index !== undefined) {
-              expect(cwd).toBe(root);
-              const checkout = selectedWorktree;
-              if (args.includes("core.hooksPath=/dev/null")) {
-                expect(args).toContain("core.fsmonitor=false");
-                if (args.includes("read-tree") || args.includes("update-index"))
-                  expect(index).not.toBe(
-                    checkout === nested
-                      ? childIndexPath
-                      : join(checkout, ".git", "index"),
-                  );
-                if (args.includes("read-tree") || args.includes("update-index"))
-                  expect(index).not.toBe(alternateIndex);
-              } else if (
-                gitEnvironment.GIT_INDEX_FILE === undefined ||
-                resolve(options?.directory ?? cwd, index) !==
-                  resolve(target, gitEnvironment.GIT_INDEX_FILE)
-              ) {
-                const indices = snapshots.get(checkout) ?? new Set<string>();
-                indices.add(index);
-                snapshots.set(checkout, indices);
-              }
-            }
-            const environment = { ...gitEnvironment, ...options?.environment };
-            if (
-              selectedWorktree === nested ||
-              (args[0] === "rev-parse" &&
-                args[1] === "--resolve-git-dir" &&
-                resolve(args[2]!) === join(nested, ".git"))
+          )
+            bookkeeping.push([...args]);
+          expect(cwd).not.toBe(nested);
+          const selectedWorktree = args.includes("--work-tree")
+            ? args[args.indexOf("--work-tree") + 1]!
+            : args[0] === "-C"
+              ? args[1]!
+              : cwd;
+          if (args[0] === "-C") {
+            expect(cwd).toBe(root);
+            expect([root, directory, nested]).toContain(resolve(args[1]!));
+          }
+          const index = options?.environment?.["GIT_INDEX_FILE"];
+          if (index !== undefined) {
+            expect(cwd).toBe(root);
+            const checkout = selectedWorktree;
+            if (args.includes("core.hooksPath=/dev/null")) {
+              expect(args).toContain("core.fsmonitor=false");
+              if (args.includes("read-tree") || args.includes("update-index"))
+                expect(index).not.toBe(
+                  checkout === nested
+                    ? childIndexPath
+                    : join(checkout, ".git", "index"),
+                );
+              if (args.includes("read-tree") || args.includes("update-index"))
+                expect(index).not.toBe(alternateIndex);
+            } else if (
+              gitEnvironment.GIT_INDEX_FILE === undefined ||
+              resolve(options?.directory ?? cwd, index) !==
+                resolve(target, gitEnvironment.GIT_INDEX_FILE)
             ) {
-              expect(environment["GIT_DIR"]).toBeUndefined();
-              expect(environment["GIT_WORK_TREE"]).toBeUndefined();
-              const objects = environment["GIT_OBJECT_DIRECTORY"];
-              const setupDirectoryProbe =
-                args.slice(-4).join(" ") ===
+              const indices = snapshots.get(checkout) ?? new Set<string>();
+              indices.add(index);
+              snapshots.set(checkout, indices);
+            }
+          }
+          const environment = { ...gitEnvironment, ...options?.environment };
+          if (
+            selectedWorktree === nested ||
+            (args[0] === "rev-parse" &&
+              args[1] === "--resolve-git-dir" &&
+              resolve(args[2]!) === join(nested, ".git"))
+          ) {
+            expect(environment["GIT_DIR"]).toBeUndefined();
+            expect(environment["GIT_WORK_TREE"]).toBeUndefined();
+            const objects = environment["GIT_OBJECT_DIRECTORY"];
+            const setupDirectoryProbe =
+              args.slice(-4).join(" ") ===
+                "rev-parse --path-format=absolute --git-path objects" &&
+              options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
+            expect(
+              objects === undefined || setupDirectoryProbe
+                ? objects
+                : resolve(options?.directory ?? cwd, objects),
+            ).toBe(
+              setupDirectoryProbe ? "." : gitEnvironment.GIT_OBJECT_DIRECTORY,
+            );
+            expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
+          } else {
+            if (index === undefined)
+              expect(environment["GIT_INDEX_FILE"]).toBe(
+                gitEnvironment.GIT_INDEX_FILE,
+              );
+            const commandDirectory = options?.directory ?? cwd;
+            for (const name of [
+              "GIT_OBJECT_DIRECTORY",
+              "GIT_COMMON_DIR",
+            ] as const) {
+              const value = environment[name];
+              const objectDirectoryProbe =
+                name === "GIT_OBJECT_DIRECTORY" &&
+                args.join(" ") ===
                   "rev-parse --path-format=absolute --git-path objects" &&
                 options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
               expect(
-                objects === undefined || setupDirectoryProbe
-                  ? objects
-                  : resolve(options?.directory ?? cwd, objects),
-              ).toBe(
-                setupDirectoryProbe ? "." : gitEnvironment.GIT_OBJECT_DIRECTORY,
+                value === undefined || objectDirectoryProbe
+                  ? value
+                  : resolve(commandDirectory, value),
+              ).toBe(objectDirectoryProbe ? "." : gitEnvironment[name]);
+            }
+            expect(commandDirectory).toBe(target);
+            if (environment["GIT_DIR"] !== undefined)
+              expect(resolve(commandDirectory, environment["GIT_DIR"])).toBe(
+                join(root, ".git"),
               );
-              expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
-            } else {
-              if (index === undefined)
-                expect(environment["GIT_INDEX_FILE"]).toBe(
-                  gitEnvironment.GIT_INDEX_FILE,
-                );
-              const commandDirectory = options?.directory ?? cwd;
-              for (const name of [
-                "GIT_OBJECT_DIRECTORY",
-                "GIT_COMMON_DIR",
-              ] as const) {
-                const value = environment[name];
-                const objectDirectoryProbe =
-                  name === "GIT_OBJECT_DIRECTORY" &&
-                  args.join(" ") ===
-                    "rev-parse --path-format=absolute --git-path objects" &&
-                  options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
-                expect(
-                  value === undefined || objectDirectoryProbe
-                    ? value
-                    : resolve(commandDirectory, value),
-                ).toBe(objectDirectoryProbe ? "." : gitEnvironment[name]);
-              }
-              expect(commandDirectory).toBe(target);
-              if (environment["GIT_DIR"] !== undefined)
-                expect(resolve(commandDirectory, environment["GIT_DIR"])).toBe(
-                  join(root, ".git"),
-                );
-              if (environment["GIT_WORK_TREE"] !== undefined)
-                expect(
-                  resolve(commandDirectory, environment["GIT_WORK_TREE"]),
-                ).toBe(root);
-            }
-            expect(environment).toMatchObject({
-              GIT_CONFIG_COUNT: "2",
-              GIT_CONFIG_KEY_1: "core.fsmonitor",
-              GIT_CONFIG_VALUE_1: "false",
-              SYNTHETIC_GIT_SETTING: "preserved",
-            });
-            return runGitRepositoryCommand(command, args, cwd, {
-              ...options,
-              environment,
-            });
-          },
-          onCodex: async (_args, output) => {
-            expect(output?.appServer?.directory).toBe(target);
-            if (operation === "ignored") {
-              await writeFile(join(nested, "build.log"), "ignored changed\n");
-              output?.stdout.write("No source change needed.");
-              return 0;
-            }
-            if (operation === "new-ignored") {
-              await writeFile(join(root, "outer-generated.txt"), "outer fix\n");
-              await runGitRepositoryCommand(
-                "git",
-                ["add", "-f", "outer-generated.txt"],
-                root,
-                { environment: gitEnvironment },
-              );
-              expectedAlternateIndex = await readFile(alternateIndex);
-              await writeFile(join(nested, "generated.txt"), "generated fix\n");
-              inner("add", "-f", "generated.txt");
-              childIndex = await readFile(childIndexPath);
-              output?.stdout.write("Fixed and checked.");
-              return 0;
-            }
-            await writeFile(join(directory, "app.ts"), "fixed\n");
-            if (operation === "replace") {
-              retiredAdministration = join(
-                await fixtures.create("patch-retired-administration-"),
-                "git",
-              );
-              await rename(join(nested, ".git"), retiredAdministration);
-            }
-            if (operation !== "modify") await rm(nested, { recursive: true });
-            if (operation === "replace") {
-              await mkdir(nested);
-              inner("init", "--initial-branch=main");
-              inner("config", "user.name", "Synthetic User");
-              inner("config", "user.email", "synthetic@example.test");
-            }
-            if (operation !== "remove")
-              await writeFile(join(nested, "app.ts"), "fixed\n");
-            if (operation === "replace") {
-              inner("add", ".");
-              inner("commit", "-m", "Synthetic replacement checkout");
-              await writeFile(
-                join(nested, "staged-child.txt"),
-                "staged child content\n",
-              );
-              inner("add", "staged-child.txt");
-              childIndex = await readFile(childIndexPath);
-            }
-            output?.stdout.write("Fixed and checked.");
-            afterTurn = true;
-            return 0;
-          },
+            if (environment["GIT_WORK_TREE"] !== undefined)
+              expect(
+                resolve(commandDirectory, environment["GIT_WORK_TREE"]),
+              ).toBe(root);
+          }
+          expect(environment).toMatchObject({
+            GIT_CONFIG_COUNT: "2",
+            GIT_CONFIG_KEY_1: "core.fsmonitor",
+            GIT_CONFIG_VALUE_1: "false",
+            SYNTHETIC_GIT_SETTING: "preserved",
+          });
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment,
+          });
         },
-      );
+        onCodex: async (_args, output) => {
+          expect(output?.appServer?.directory).toBe(target);
+          if (operation === "ignored") {
+            await writeFile(join(nested, "build.log"), "ignored changed\n");
+            output?.stdout.write("No source change needed.");
+            return 0;
+          }
+          if (operation === "new-ignored") {
+            await writeFile(join(root, "outer-generated.txt"), "outer fix\n");
+            await runGitRepositoryCommand(
+              "git",
+              ["add", "-f", "outer-generated.txt"],
+              root,
+              { environment: gitEnvironment },
+            );
+            expectedAlternateIndex = await readFile(alternateIndex);
+            await writeFile(join(nested, "generated.txt"), "generated fix\n");
+            inner("add", "-f", "generated.txt");
+            childIndex = await readFile(childIndexPath);
+            output?.stdout.write("Fixed and checked.");
+            return 0;
+          }
+          await writeFile(join(directory, "app.ts"), "fixed\n");
+          if (operation === "replace") {
+            retiredAdministration = join(
+              await fixtures.create("patch-retired-administration-"),
+              "git",
+            );
+            await rename(join(nested, ".git"), retiredAdministration);
+          }
+          if (operation !== "modify") await rm(nested, { recursive: true });
+          if (operation === "replace") {
+            await mkdir(nested);
+            inner("init", "--initial-branch=main");
+            inner("config", "user.name", "Synthetic User");
+            inner("config", "user.email", "synthetic@example.test");
+          }
+          if (operation !== "remove")
+            await writeFile(join(nested, "app.ts"), "fixed\n");
+          if (operation === "replace") {
+            inner("add", ".");
+            inner("commit", "-m", "Synthetic replacement checkout");
+            await writeFile(
+              join(nested, "staged-child.txt"),
+              "staged child content\n",
+            );
+            inner("add", "staged-child.txt");
+            childIndex = await readFile(childIndexPath);
+          }
+          output?.stdout.write("Fixed and checked.");
+          afterTurn = true;
+          return 0;
+        },
+      });
       if (operation === "replace") {
         expect(outcome.exitCode).toBe(2);
         expect(outcome.stderr).toContain(
@@ -1793,10 +1775,7 @@ describe("patch change tracking", () => {
     "preserves a newly ignored %s while publishing the ignore rule",
     async (kind) => {
       const root = await fixtures.create("synthetic-ignore-transition-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       await writeFile(join(root, ".gitignore"), "# baseline\n");
       git("add", ".");
       git("commit", "-m", "Synthetic baseline");
@@ -1815,25 +1794,21 @@ describe("patch change tracking", () => {
       git("remote", "add", "origin", remote);
       const result = resultWithFindings(["high"]);
       result.findings.findings[0]!.locations[0]!.path = ".gitignore";
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
-          currentDirectory: root,
-          result,
-          onWorkbench: () => savedScan(result, "scan-1", root),
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
-          onCodex: async (args, output) => {
-            await writeFile(join(root, ".gitignore"), "local.env\n");
-            completePatches(args, output);
-            return 0;
-          },
+      const outcome = await runSavedPublication(root, {
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", root),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (args, output) => {
+          await writeFile(join(root, ".gitignore"), "local.env\n");
+          completePatches(args, output);
+          return 0;
         },
-      );
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(git("show", "HEAD:.gitignore")).toBe("local.env");
       if (kind === "regular")

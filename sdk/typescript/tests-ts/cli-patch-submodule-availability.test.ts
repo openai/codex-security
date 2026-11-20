@@ -1,20 +1,18 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { appendFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   publicationRepository,
   readAppliedText,
-  resultWithFindings,
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
-  savedScan,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 describe("deinitialized patch submodule availability", () => {
-  const fixtures = createTemporaryDirectories(true);
-  afterEach(fixtures.cleanup);
+  const fixtures = patchDirectories();
 
   async function fixture(published = false, initialized = false) {
     const outer = await publicationRepository(fixtures);
@@ -151,51 +149,42 @@ describe("deinitialized patch submodule availability", () => {
       const inner = repositoryGit(child);
       const before = git("rev-parse", "HEAD");
       let commit = "";
-      const result = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
-          currentDirectory: directory,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onRepositoryCommand: (tool, args, cwd, options) =>
-            tool === "git"
-              ? runGitRepositoryCommand(tool, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
-          onCodex: async (_args, output) => {
-            await writeFile(
-              join(directory, "outside.ts"),
-              "verified outer file\n",
-            );
-            await writeFile(join(child, "app.ts"), "verified child file\n");
-            if (selection !== "complete")
-              await writeFile(
-                join(child, "extra.ts"),
-                "unreported child file\n",
-              );
-            inner("add", ".");
-            inner("commit", "-m", "Synthetic published child change");
-            commit = inner("rev-parse", "HEAD");
-            inner("push", "origin", "HEAD:refs/heads/main");
-            if (selection === "masked committed sibling")
-              await rm(join(child, "extra.ts"));
-            output!.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: "verified",
-                    files: ["nested/app.ts", "outside.ts"],
-                    verification: "Checked both selected files.",
-                  },
-                ],
-              }),
-            );
-            return 0;
-          },
+      const result = await runSavedPublication(directory, {
+        onRepositoryCommand: (tool, args, cwd, options) =>
+          tool === "git"
+            ? runGitRepositoryCommand(tool, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+        onCodex: async (_args, output) => {
+          await writeFile(
+            join(directory, "outside.ts"),
+            "verified outer file\n",
+          );
+          await writeFile(join(child, "app.ts"), "verified child file\n");
+          if (selection !== "complete")
+            await writeFile(join(child, "extra.ts"), "unreported child file\n");
+          inner("add", ".");
+          inner("commit", "-m", "Synthetic published child change");
+          commit = inner("rev-parse", "HEAD");
+          inner("push", "origin", "HEAD:refs/heads/main");
+          if (selection === "masked committed sibling")
+            await rm(join(child, "extra.ts"));
+          output!.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["nested/app.ts", "outside.ts"],
+                  verification: "Checked both selected files.",
+                },
+              ],
+            }),
+          );
+          return 0;
         },
-      );
+      });
       const receiver = repositoryGit(remote);
       const tip = receiver("for-each-ref", "--format=%(objectname)");
       if (selection === "complete") {

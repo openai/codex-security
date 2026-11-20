@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -12,11 +12,11 @@ import {
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 test("streams captured blob bytes through the selected Git context", async () => {
   const { directory, git } = await publicationRepository(fixtures);
@@ -291,31 +291,27 @@ process.stdout.write(input === "model edit\\n" ? Buffer.from(fs.readFileSync(${J
     const head = git("rev-parse", "HEAD");
     const operations: string[] = [];
     const result = resultWithFindings(["high"]);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        result,
-        onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand(command, args, cwd, options) {
-          if (command !== "git")
-            return args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1";
-          if (args[0] === "push") {
-            operations.push("push");
-            return "";
-          }
-          return runGitRepositoryCommand(command, args, cwd, options);
-        },
-        async onCodex(_args, output) {
-          operations.push("turn");
-          await writeFile(join(directory, file), "model edit\n");
-          completePatches(_args, output);
-          return 0;
-        },
+    const outcome = await runSavedPublication(directory, {
+      result,
+      onWorkbench: () => savedScan(result, "scan-1", directory),
+      onRepositoryCommand(command, args, cwd, options) {
+        if (command !== "git")
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        if (args[0] === "push") {
+          operations.push("push");
+          return "";
+        }
+        return runGitRepositoryCommand(command, args, cwd, options);
       },
-    );
+      async onCodex(_args, output) {
+        operations.push("turn");
+        await writeFile(join(directory, file), "model edit\n");
+        completePatches(_args, output);
+        return 0;
+      },
+    });
     if (mode === "clean") {
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(operations).toEqual(["turn", "push"]);

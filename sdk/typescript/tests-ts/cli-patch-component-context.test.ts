@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import {
   cp,
   mkdir,
@@ -19,11 +19,13 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
+  runIssuePatch,
+  runSavedPublication,
+  gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 test.each([
   { scope: "root", siblingOnly: false, literal: false },
@@ -247,11 +249,7 @@ test.each(
         environment,
         result,
         onWorkbench: () => savedScan(result, "scan-1", target),
-        onRepositoryCommand: (command, args, cwd, options) =>
-          runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          }),
+        onRepositoryCommand: gitWithEnvironment(environment),
         onCodex: async (_args, output) => {
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
             assessments++;
@@ -360,72 +358,68 @@ test.each([
     result.findings.findings[0]!.locations[0]!.path = "app.ts";
     let patches = 0;
     let pushes = 0;
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: component,
-        environment,
-        result,
-        onWorkbench: () => savedScan(result, "scan-1", component),
-        onRepositoryCommand: (command, args, cwd, options) => {
-          const context = {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          };
-          if (command !== "git") {
-            if (configured !== undefined)
-              expect(
-                runGitRepositoryCommand(
-                  "git",
-                  ["config", "--get", "synthetic.marker"],
-                  cwd,
-                  context,
-                ),
-              ).toBe(configured);
-            return args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1";
-          }
-          if (args[0] === "push") {
-            if (mode === "NUL configuration") {
-              for (const key of [
-                "GIT_CONFIG_GLOBAL",
-                "GIT_CONFIG_SYSTEM",
-              ] as const) {
-                const entry = context.environment[key]!;
-                if (process.platform === "win32")
-                  expect(entry).toBe(environment[key]!);
-                else {
-                  expect(isAbsolute(entry)).toBe(true);
-                  expect(basename(entry)).toBe(environment[key]!);
-                }
+    const outcome = await runSavedPublication(component, {
+      environment,
+      result,
+      onWorkbench: () => savedScan(result, "scan-1", component),
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const context = {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        };
+        if (command !== "git") {
+          if (configured !== undefined)
+            expect(
+              runGitRepositoryCommand(
+                "git",
+                ["config", "--get", "synthetic.marker"],
+                cwd,
+                context,
+              ),
+            ).toBe(configured);
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        }
+        if (args[0] === "push") {
+          if (mode === "NUL configuration") {
+            for (const key of [
+              "GIT_CONFIG_GLOBAL",
+              "GIT_CONFIG_SYSTEM",
+            ] as const) {
+              const entry = context.environment[key]!;
+              if (process.platform === "win32")
+                expect(entry).toBe(environment[key]!);
+              else {
+                expect(isAbsolute(entry)).toBe(true);
+                expect(basename(entry)).toBe(environment[key]!);
               }
             }
-            pushes++;
-            return "";
           }
-          return runGitRepositoryCommand(command, args, cwd, context);
-        },
-        onCodex: async (_args, output) => {
-          patches++;
-          expect(output!.appServer!.directory).toBe(component);
-          await writeFile(join(component, "app.ts"), "fixed\n");
-          output!.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["app.ts"],
-                  verification: "Synthetic component check.",
-                },
-              ],
-            }),
-          );
-          return 0;
-        },
+          pushes++;
+          return "";
+        }
+        return runGitRepositoryCommand(command, args, cwd, context);
       },
-    );
+      onCodex: async (_args, output) => {
+        patches++;
+        expect(output!.appServer!.directory).toBe(component);
+        await writeFile(join(component, "app.ts"), "fixed\n");
+        output!.stdout.write(
+          JSON.stringify({
+            patches: [
+              {
+                occurrenceId: "occ_1",
+                status: "verified",
+                files: ["app.ts"],
+                verification: "Synthetic component check.",
+              },
+            ],
+          }),
+        );
+        return 0;
+      },
+    });
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(patches).toBe(1);
     expect(pushes).toBe(1);
@@ -778,11 +772,7 @@ for (const linked of [false, true]) {
       {
         currentDirectory: component,
         environment,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          }),
+        onRepositoryCommand: gitWithEnvironment(environment),
         onCodex: async (_args, output) => {
           turns++;
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
@@ -883,14 +873,9 @@ test("isolates relative credential stores selected from an external Git caller",
     expect(credential).toContain("username=caller");
   }
   let protectedStores: readonly string[] | undefined;
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: caller,
+  const outcome = await runIssuePatch(caller, {
     environment,
-    onRepositoryCommand: (command, args, cwd, options) =>
-      runGitRepositoryCommand(command, args, cwd, {
-        ...options,
-        environment: { ...environment, ...options?.environment },
-      }),
+    onRepositoryCommand: gitWithEnvironment(environment),
     onCodex: async (_args, output) => {
       protectedStores = output!.appServer!.permissions!.credentialStorePaths;
       await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");

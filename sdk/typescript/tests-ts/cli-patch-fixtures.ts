@@ -320,6 +320,63 @@ export async function runWorkflow(
   };
 }
 
+export function patchDirectories() {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  return fixtures;
+}
+
+export function initializePatchGit(directory: string) {
+  const git = repositoryGit(directory);
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  return git;
+}
+
+export function runIssuePatch(
+  directory: string,
+  fixtures: Parameters<typeof runWorkflow>[1],
+  options?: Parameters<typeof runWorkflow>[2],
+) {
+  return runWorkflow(
+    ["patch", "Synthetic issue", "--json"],
+    {
+      currentDirectory: directory,
+      onRepositoryCommand: runGitRepositoryCommand,
+      ...fixtures,
+    },
+    options,
+  );
+}
+
+export function runSavedPublication(
+  directory: string,
+  fixtures: Parameters<typeof runWorkflow>[1],
+  options?: Parameters<typeof runWorkflow>[2],
+) {
+  return runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", directory),
+      ...fixtures,
+    },
+    options,
+  );
+}
+
+export function gitWithEnvironment(
+  environment: NodeJS.ProcessEnv,
+): typeof runGitRepositoryCommand {
+  return (command, args, cwd, options) =>
+    runGitRepositoryCommand(command, args, cwd, {
+      ...options,
+      environment: { ...environment, ...options?.environment },
+    });
+}
+
 export function repositoryGit(repository: string) {
   return (...args: string[]) =>
     execFileSync("git", args, {

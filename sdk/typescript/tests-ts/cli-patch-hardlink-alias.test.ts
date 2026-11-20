@@ -1,5 +1,5 @@
-import { afterEach, expect, mock, test } from "bun:test";
 import fs from "node:fs";
+import { expect, mock, test } from "bun:test";
 import { link, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,14 +7,13 @@ import {
   publicationRepository,
   resultWithFindings,
   runGitRepositoryCommand,
-  runWorkflow,
   savedScan,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 // Keep native hardlinks, directory enumeration, and Git publication. Emulate
 // only filesystem alias lookup/native spelling so every host covers ambiguity.
@@ -123,57 +122,53 @@ for (const mode of [
     try {
       const result = resultWithFindings(["high"]);
       result.findings.findings[0]!.locations[0]!.path = reported;
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
-          currentDirectory: directory,
-          result,
-          onWorkbench: () => savedScan(result, "scan-1", directory),
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (command === "git") {
-              const operation = args[0] === "-C" ? args[2] : args[0];
-              if (["switch", "commit", "push"].includes(operation ?? ""))
-                publicationCommands.push(operation!);
-              // macOS Git precomposes literal pathspec arguments before lookup.
-              const separator = args.indexOf("--");
-              const gitArgs =
-                precomposed &&
-                separator >= 0 &&
-                args.includes("--literal-pathspecs")
-                  ? args.map((arg, i) =>
-                      i > separator && arg === nativeName ? storedName : arg,
-                    )
-                  : args;
-              return runGitRepositoryCommand(command, gitArgs, cwd, options);
-            }
-            forgeCalls++;
-            return args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1";
-          },
-          onCodex: async (_args, output) => {
-            await writeFile(join(directory, storedName), "fixed\n");
-            if (precomposed || retainedCase)
-              await writeFile(join(directory, "other"), "second edit\n");
-            output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: "verified",
-                    files:
-                      precomposed || retainedCase
-                        ? [reported, "other"]
-                        : [reported],
-                    verification: "Synthetic regression passed.",
-                  },
-                ],
-              }),
-            );
-            return 0;
-          },
+      const outcome = await runSavedPublication(directory, {
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command === "git") {
+            const operation = args[0] === "-C" ? args[2] : args[0];
+            if (["switch", "commit", "push"].includes(operation ?? ""))
+              publicationCommands.push(operation!);
+            // macOS Git precomposes literal pathspec arguments before lookup.
+            const separator = args.indexOf("--");
+            const gitArgs =
+              precomposed &&
+              separator >= 0 &&
+              args.includes("--literal-pathspecs")
+                ? args.map((arg, i) =>
+                    i > separator && arg === nativeName ? storedName : arg,
+                  )
+                : args;
+            return runGitRepositoryCommand(command, gitArgs, cwd, options);
+          }
+          forgeCalls++;
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
         },
-      );
+        onCodex: async (_args, output) => {
+          await writeFile(join(directory, storedName), "fixed\n");
+          if (precomposed || retainedCase)
+            await writeFile(join(directory, "other"), "second edit\n");
+          output?.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files:
+                    precomposed || retainedCase
+                      ? [reported, "other"]
+                      : [reported],
+                  verification: "Synthetic regression passed.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      });
       expect(await readFile(join(directory, storedName), "utf8")).toBe(
         "fixed\n",
       );

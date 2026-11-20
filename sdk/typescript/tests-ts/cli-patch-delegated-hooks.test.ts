@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,15 +12,14 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
 } from "./cli-patch-fixtures.js";
 import {
   patchSnapshotEnvironment,
   patchSnapshotWindowsConfig,
 } from "./support/patch-snapshot-environment.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 const shell = (value: string) =>
   "'" + value.split(sep).join("/").replaceAll("'", "'\"'\"'") + "'";
 

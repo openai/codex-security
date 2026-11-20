@@ -1,12 +1,22 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { PATCH_GIT_ENVIRONMENT_RUNNER as runner } from "../src/cli.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { writeFile, lstat, mkdir, readFile, rename } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import {
+  PATCH_GIT_ENVIRONMENT_RUNNER as runner,
+  runRepositoryCommand,
+} from "../src/cli.js";
+import {
+  patchSnapshotEnvironment,
+  patchSnapshotWindowsConfig,
+} from "./support/patch-snapshot-environment.js";
+import {
+  runGitRepositoryCommand,
+  patchDirectories,
+  runIssuePatch,
+} from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 function bindingFrame(environment: Record<string, string> = {}): Buffer {
   return Buffer.from(JSON.stringify({ bindings: Object.entries(environment) }));
@@ -279,4 +289,296 @@ test("snapshot Git launch failures retain diagnostics with a non-emitting stderr
   expect(results[0]!.stderr).toContain(`spawn ${missingGit} ENOENT`);
   expect(results[0]!.stderr).toContain("spawnargs: [ 'status' ]");
   expect(results[1]).toEqual(results[0]);
+});
+
+test("snapshot filters receive safe command config from both Git encodings", async () => {
+  const cwd = await fixtures.create("snapshot-command-config-");
+  const credentials = "synthetic-config-marker";
+  const run = (command: string, args: string[], options = {}) =>
+    execFileSync(command, args, { cwd, encoding: "utf8", ...options });
+  run("git", ["init", "--quiet"]);
+  await writeFile(join(cwd, ".gitattributes"), "*.txt filter=check\n");
+  await writeFile(join(cwd, "note.txt"), "input\n");
+  await writeFile(
+    join(cwd, "check.cjs"),
+    [
+      'const raw = Object.values(process.env).join("\\n");',
+      "process.stdout.write(JSON.stringify({",
+      '  secret: raw.includes("synthetic-config-marker"),',
+      '  input: require("node:fs").readFileSync(0, "utf8"),',
+      "}));",
+    ].join("\n"),
+  );
+
+  const env = {
+    ...process.env,
+    CODEX_HOME: await fixtures.create("snapshot-config-home-"),
+    GIT_CONFIG_COUNT: "5",
+    GIT_CONFIG_KEY_0: "demo.value",
+    GIT_CONFIG_VALUE_0: "first",
+    GIT_CONFIG_KEY_1: "http.extraHeader",
+    GIT_CONFIG_VALUE_1: "Authorization: " + credentials,
+    GIT_CONFIG_KEY_2: "http.proxy",
+    GIT_CONFIG_VALUE_2: "https://proxy.example.test/?route=a@b",
+    GIT_CONFIG_KEY_3: "http.proxySSLKey",
+    GIT_CONFIG_VALUE_3: "proxy-" + credentials,
+    GIT_CONFIG_KEY_4: "imap.pass",
+    GIT_CONFIG_VALUE_4: credentials,
+    GIT_CONFIG_VALUE_9: credentials,
+  };
+  const parameters = [
+    "'sendemail.smtpPass'='" + credentials + "'",
+    "'gitcvs.dbPass'='" + credentials + "'",
+    "'receive.certNonceSeed'='" + credentials + "'",
+    "'demo.value'='second with spaces'",
+    "'demo.a=b.flag'=",
+    "'demo.empty'=''",
+    "'http.https://example.test/.proxySSLKey'='" + credentials + "'",
+    "'demo.value'='third'\\''s'",
+    "'remote.origin.proxy'='https:/user:" +
+      credentials +
+      "@proxy.example.test'",
+    "'url.https://user:" + credentials + "@example.test/.insteadOf'='example:'",
+  ].join(" ");
+  await writeFile(
+    join(env.CODEX_HOME, "config.toml"),
+    patchSnapshotWindowsConfig() +
+      `[shell_environment_policy.set]
+GIT_CONFIG_PARAMETERS="'http.extraHeader'='Authorization: synthetic-config-marker'"
+`,
+  );
+  const objects = await fixtures.create("snapshot-config-objects-");
+  const filtered = await runRepositoryCommand(
+    "git",
+    [
+      "-c",
+      "filter.check.clean=git config --get-all demo.value && git config --type=bool demo.a=b.flag && git config demo.empty && git config http.proxy && node check.cjs",
+      "hash-object",
+      "-w",
+      "--path=note.txt",
+      "note.txt",
+    ],
+    cwd,
+    {
+      sandbox: {
+        directory: cwd,
+        environment: patchSnapshotEnvironment(
+          await fixtures.create("snapshot-config-temp-"),
+          env,
+        ),
+        gitEnvironment: {
+          GIT_CONFIG_PARAMETERS: parameters,
+          GIT_OBJECT_DIRECTORY: objects,
+        },
+        profile: {
+          extends: ":workspace",
+          network: { enabled: false },
+          filesystem: { [objects]: { ".": "write" } },
+        },
+      },
+    },
+  );
+  const blob = run("git", ["cat-file", "blob", filtered], {
+    env: { ...process.env, GIT_OBJECT_DIRECTORY: objects },
+  });
+  const lines = blob.split("\n");
+  expect(lines.slice(0, 6)).toEqual([
+    "first",
+    "second with spaces",
+    "third's",
+    "true",
+    "",
+    env.GIT_CONFIG_VALUE_2,
+  ]);
+  expect(JSON.parse(lines.slice(6).join("\n"))).toEqual({
+    secret: false,
+    input: "input\n",
+  });
+});
+
+test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
+  "patch discovery preserves %s while treating ordinary nested source as data",
+  async (setting) => {
+    const root = await fixtures.create("patch-probe-environment-");
+    const support = await fixtures.create("patch-probe-administration-");
+    const globalConfig = join(support, "global-config");
+    await writeFile(globalConfig, "");
+    const environment = {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: globalConfig,
+      LC_ALL: "C",
+    };
+    const git = (args: string[], overrides: NodeJS.ProcessEnv = {}) =>
+      execFileSync("git", args, {
+        cwd: root,
+        env: { ...process.env, ...environment, ...overrides },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    git(["init", "--initial-branch=main"]);
+    git(["config", "user.name", "Synthetic User"]);
+    git(["config", "user.email", "synthetic@example.test"]);
+    const marker = join(root, "source", ".git");
+    await mkdir(marker, { recursive: true });
+    const markerHead = "ref: refs/heads/main\n";
+    await writeFile(join(marker, "HEAD"), markerHead);
+    if (setting === "GIT_OBJECT_DIRECTORY") await mkdir(join(marker, "refs"));
+    const source = join(root, "source", "app.ts");
+    await writeFile(source, "before\n");
+    git(["add", "source/app.ts"]);
+    git(["commit", "-m", "Synthetic environment baseline"]);
+    const head = git(["rev-parse", "HEAD"]);
+    const index = await readFile(join(root, ".git", "index"));
+    const selectedPath =
+      setting === "GIT_COMMON_DIR"
+        ? join(root, ".git")
+        : join(support, "selected-objects");
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      await rename(join(root, ".git", "objects"), selectedPath);
+    }
+    const selectedEnvironment: NodeJS.ProcessEnv = {
+      ...environment,
+      [setting]: selectedPath,
+    };
+    if (setting === "GIT_OBJECT_DIRECTORY")
+      expect(() => git(["rev-parse", "HEAD"])).toThrow();
+    expect(git(["rev-parse", "HEAD"], selectedEnvironment)).toBe(head);
+    expect(() => git(["rev-parse", "--resolve-git-dir", marker])).toThrow();
+    expect(
+      resolve(
+        git(["rev-parse", "--resolve-git-dir", marker], selectedEnvironment),
+      ),
+    ).toBe(marker);
+
+    const nested = join(root, "source");
+    let nestedHead: string | undefined;
+    let nestedIndex: Buffer<ArrayBuffer> | undefined;
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      git(
+        ["-C", nested, "config", "user.name", "Synthetic User"],
+        selectedEnvironment,
+      );
+      git(
+        ["-C", nested, "config", "user.email", "synthetic@example.test"],
+        selectedEnvironment,
+      );
+      git(["-C", nested, "add", "app.ts"], selectedEnvironment);
+      git(
+        ["-C", nested, "commit", "-m", "Synthetic shared object baseline"],
+        selectedEnvironment,
+      );
+      nestedHead = git(
+        ["-C", nested, "rev-parse", "HEAD"],
+        selectedEnvironment,
+      );
+      nestedIndex = await readFile(join(marker, "index"));
+      expect(() => git(["-C", nested, "rev-parse", "HEAD"])).toThrow();
+      await expect(lstat(join(marker, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+
+    let launches = 0;
+    let rootCommands = 0;
+    const outcome = await runIssuePatch(root, {
+      environment: selectedEnvironment,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const effectiveEnvironment = {
+          ...selectedEnvironment,
+          ...options?.environment,
+        };
+        const objectDirectoryProbe =
+          args.join(" ") ===
+            "rev-parse --path-format=absolute --git-path objects" &&
+          options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
+        if (
+          !args.includes("--resolve-git-dir") &&
+          !args.includes("-C") &&
+          !objectDirectoryProbe
+        ) {
+          expect(effectiveEnvironment[setting]).toBeDefined();
+          expect(
+            resolve(options?.directory ?? cwd, effectiveEnvironment[setting]!),
+          ).toBe(selectedPath);
+          rootCommands++;
+        }
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: effectiveEnvironment,
+        });
+      },
+      onCodex: async (_args, output) => {
+        launches++;
+        const controls = output?.appServer?.permissions?.readOnlyPaths;
+        expect(controls).toBeDefined();
+        expect(controls).not.toContain(marker);
+        await writeFile(source, "after\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(launches).toBe(1);
+    expect(rootCommands).toBeGreaterThan(0);
+    expect(await readFile(source, "utf8")).toBe("after\n");
+    expect(await readFile(join(marker, "HEAD"), "utf8")).toBe(markerHead);
+    expect(git(["rev-parse", "HEAD"], selectedEnvironment)).toBe(head);
+    expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      expect(
+        git(["-C", nested, "rev-parse", "HEAD"], selectedEnvironment),
+      ).toBe(nestedHead!);
+      expect(await readFile(join(marker, "index"))).toEqual(nestedIndex!);
+      await expect(lstat(join(marker, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+  },
+);
+
+test("snapshot fixture children use private temporary directories without changing the parent", async () => {
+  const shared = await fixtures.create("patch-shared-temp-");
+  const directories = await Promise.all([
+    fixtures.create("patch-private-temp-"),
+    fixtures.create("patch-private-temp-"),
+  ]);
+  const environment = Object.freeze({
+    ...process.env,
+    Temp: shared,
+    tMp: shared,
+    TMPDIR: shared,
+    SNAPSHOT_FIXTURE_VALUE: "preserved",
+  });
+  const parentTemporarySettings = ["TEMP", "TMP", "TMPDIR"].map(
+    (name) => process.env[name],
+  );
+  for (const directory of directories) {
+    const selected = patchSnapshotEnvironment(directory, environment);
+    const child = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          "-e",
+          'process.stdout.write(JSON.stringify({directory:require("node:os").tmpdir(),temp:process.env.TEMP,tmp:process.env.TMP,tmpdir:process.env.TMPDIR,value:process.env.SNAPSHOT_FIXTURE_VALUE}))',
+        ],
+        { env: selected, encoding: "utf8" },
+      ),
+    );
+    expect(child).toEqual({
+      directory,
+      temp: directory,
+      tmp: directory,
+      tmpdir: directory,
+      value: "preserved",
+    });
+    expect(selected).not.toHaveProperty("Temp");
+    expect(selected).not.toHaveProperty("tMp");
+  }
+  expect(environment.Temp).toBe(shared);
+  expect(environment.tMp).toBe(shared);
+  expect(environment.TMPDIR).toBe(shared);
+  expect(["TEMP", "TMP", "TMPDIR"].map((name) => process.env[name])).toEqual(
+    parentTemporarySettings,
+  );
 });

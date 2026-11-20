@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmod,
@@ -14,23 +14,21 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { capturePatchGitControls } from "../src/patch-git-controls.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchRiskAssessment,
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 async function repository(prefix: string) {
   const root = await fixtures.create(prefix);
-  const git = repositoryGit(root);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
+  const git = initializePatchGit(root);
   await mkdir(join(root, "source", "deep"), { recursive: true });
   await writeFile(join(root, "app.ts"), "before\n");
   await writeFile(join(root, "source", "deep", "input.ts"), "fixture source\n");
@@ -81,8 +79,7 @@ test("patch cannot run a promisor remote while capturing Git controls", async ()
   expect(await readFile(marker, "utf8")).toBe("executed");
   await rm(marker);
   let launches = 0;
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: root,
+  const outcome = await runIssuePatch(root, {
     environment,
     onRepositoryCommand(command, args, cwd, options) {
       return runGitRepositoryCommand(command, args, cwd, {
@@ -731,7 +728,6 @@ async function captureControls(directory: string) {
             : { GIT_INDEX_FILE: options.indexFile }),
         },
       }),
-    true,
   );
 }
 
@@ -785,10 +781,7 @@ test.each(
           await mkdir(replacement);
           await writeFile(join(replacement, "input.ts"), "replacement\n");
           if (nestedRepository) {
-            const git = repositoryGit(replacement);
-            git("init", "--initial-branch=main");
-            git("config", "user.name", "Synthetic User");
-            git("config", "user.email", "synthetic@example.test");
+            const git = initializePatchGit(replacement);
             git("add", ".");
             git("commit", "-m", "Synthetic nested baseline");
             nestedIndex = await readFile(join(replacement, ".git", "index"));
@@ -835,10 +828,7 @@ test("rejects replacement of tracked directories with new Git administration", a
   const controls = await captureControls(selected.root);
   const nested = join(selected.root, "source");
   await rm(join(nested, "deep"), { recursive: true });
-  const git = repositoryGit(nested);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
+  const git = initializePatchGit(nested);
   await writeFile(join(nested, "replacement.ts"), "replacement\n");
   git("add", ".");
   git("commit", "-m", "Synthetic replacement baseline");

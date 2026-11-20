@@ -1,24 +1,21 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   completePatches,
   publicationRepository,
   resultWithFindings,
-  repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 async function initialize(directory: string) {
-  const git = repositoryGit(directory);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
+  const git = initializePatchGit(directory);
   git("add", ".");
   git("commit", "-m", "Synthetic callback baseline");
   return git;
@@ -54,8 +51,7 @@ test("patch discovery does not execute a workspace fsmonitor rewritten by the mo
   const nestedInventory: string[][] = [];
   let launches = 0;
   let beforeTurnEffect: string | undefined;
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: root,
+  const outcome = await runIssuePatch(root, {
     onRepositoryCommand: (command, args, cwd, options) => {
       if (args.includes(nested) && args.includes("ls-files"))
         nestedInventory.push([...args]);

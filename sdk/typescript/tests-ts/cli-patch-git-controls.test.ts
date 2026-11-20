@@ -1,5 +1,3 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import filesystem, {
   appendFile,
   chmod,
@@ -15,6 +13,8 @@ import filesystem, {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { describe, expect, mock, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCodexSkillCommand } from "../src/cli.js";
@@ -24,13 +24,16 @@ import {
   snapshotConfigBytes,
 } from "../src/patch-git-controls.js";
 import { capture } from "./cli-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
+  gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
 
 function patchReadOnlyPaths(args: readonly string[], permissions: unknown) {
@@ -52,8 +55,7 @@ const externalAdministrationError =
   "requires an explicitly selected Git directory or a registered worktree";
 
 describe("patch Git administration", () => {
-  const fixtures = createTemporaryDirectories(true);
-  afterEach(fixtures.cleanup);
+  const fixtures = patchDirectories();
 
   test.skipIf(process.platform !== "win32")(
     "empty APPDATA protects the external ADC selected through a checkout junction",
@@ -68,7 +70,6 @@ describe("patch Git administration", () => {
         repository,
         async (_root, checkout, args, options) =>
           runGitRepositoryCommand("git", args, checkout, options),
-        true,
       );
       const stores = await controls!.protectShellCredentialFiles({
         APPDATA: "",
@@ -96,8 +97,10 @@ describe("patch Git administration", () => {
             ...options,
             environment: { ...environment, ...options?.environment },
           }),
-        false,
-        false,
+        {
+          usesWorktreeMarker: false,
+          usesCommonDirectoryMarker: false,
+        },
       );
       expect(controls).toBeDefined();
       await controls!.validateCapturedSelection();
@@ -169,10 +172,10 @@ describe("patch Git administration", () => {
                 ...options?.environment,
               },
             }),
-          true,
-          false,
-          undefined,
-          references,
+          {
+            usesCommonDirectoryMarker: false,
+            administrationReferences: references,
+          },
         );
       const controls = await capture();
       expect(controls!.snapshotStoragePaths).toEqual([
@@ -273,28 +276,11 @@ describe("patch Git administration", () => {
           trim: false,
           environment: { ...environment, ...options?.environment },
         }),
-      true,
-      true,
-      undefined,
-      [],
       {
-        global: undefined,
-        system,
-        noSystem: "0",
-        xdgConfigHome: home,
-        objectDirectory: undefined,
-        alternateObjectDirectories: undefined,
+        environment: { ...environment, USERPROFILE: home },
+        // Exercise the Windows graph on every platform.
+        onSnapshotConfig: () => {},
       },
-      false,
-      "sandbox",
-      new Set(),
-      null,
-      home,
-      null,
-      environment,
-      undefined,
-      // Exercise the Windows graph on every platform.
-      () => {},
     );
     const config = controls!.snapshotConfig!;
     await controls!.protectShellCredentialFiles({ PGSERVICEFILE: service });
@@ -350,7 +336,9 @@ describe("patch Git administration", () => {
           }
           return result;
         },
-        false,
+        {
+          usesWorktreeMarker: false,
+        },
       );
     await expect(capture()).rejects.toThrow("include outside");
     expect(switched).toBe(true);
@@ -367,10 +355,7 @@ describe("patch Git administration", () => {
         join(repository, "cache"),
         process.platform === "win32" ? "junction" : "dir",
       );
-      const git = repositoryGit(repository);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(repository);
       const filter = join(repository, "clean.cjs");
       await writeFile(
         filter,
@@ -480,7 +465,7 @@ const controls = await capturePatchGitControls(repository, async (_root, checkou
     },
   });
   return result.toString(options?.encoding === "base64" ? "base64" : "utf8");
-}, false);
+}, { usesWorktreeMarker: false });
 await controls.validate();
 console.log(JSON.stringify(controls.snapshotStoragePaths));
 `,
@@ -534,9 +519,10 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           ...options,
           environment: { ...environment, ...options?.environment },
         }),
-      false,
-      true,
-      selected,
+      {
+        usesWorktreeMarker: false,
+        selectedGitDirectory: selected,
+      },
     );
     const paths = [join(metadata, "lfs")];
     expect(controls!.snapshotStoragePaths).toEqual(sameEntry ? paths : []);
@@ -611,7 +597,9 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
               ...options,
               environment: { ...environment, ...options?.environment },
             }),
-          false,
+          {
+            usesWorktreeMarker: false,
+          },
         );
         const paths = [join(await realpath(metadata), "lfs")];
         expect(controls!.snapshotStoragePaths).toEqual(
@@ -642,10 +630,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       async () => {
         const repository = await fixtures.create("patch-storage-checkout-");
         const target = await fixtures.create("patch-storage-target-");
-        const git = repositoryGit(repository);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(repository);
         git(
           "config",
           "lfs.storage",
@@ -693,7 +678,6 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           repository,
           async (_root, checkout, args, options) =>
             runGitRepositoryCommand("git", args, checkout, options),
-          true,
         );
         const canonical = await realpath(target);
         expect(controls).toBeDefined();
@@ -716,18 +700,13 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         if (location === "indirect-separators")
           expect(await readdir(join(target, "storage"))).toEqual([]);
         await controls!.validate();
-        const outcome = await runWorkflow(
-          ["patch", "Synthetic issue", "--json"],
-          {
-            currentDirectory: repository,
-            onRepositoryCommand: runGitRepositoryCommand,
-            onCodex: async (_args, output) => {
-              await writeFile(join(repository, "app.txt"), "after\n");
-              output?.stdout.write("Synthetic patch complete.\n");
-              return 0;
-            },
+        const outcome = await runIssuePatch(repository, {
+          onCodex: async (_args, output) => {
+            await writeFile(join(repository, "app.txt"), "after\n");
+            output?.stdout.write("Synthetic patch complete.\n");
+            return 0;
           },
-        );
+        });
         expect(outcome.exitCode, outcome.stderr).toBe(0);
         expect(await readdir(target)).toEqual(targetContents);
         if (location === "indirect-separators")
@@ -767,10 +746,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
     test(`preserves selected storage aliases outside checkout data: ${location}`, async () => {
       const repository = await fixtures.create("patch-storage-selected-");
       const external = await fixtures.create("patch-storage-external-");
-      const git = repositoryGit(repository);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(repository);
       await writeFile(join(repository, "app.txt"), "before\n");
       git("add", ".");
       git("commit", "-m", "Synthetic selected storage");
@@ -917,9 +893,12 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
               ...options,
               environment: { ...environment, ...options?.environment },
             }),
-          environment["GIT_DIR"] === undefined,
-          environment["GIT_COMMON_DIR"] === undefined,
-          environment["GIT_DIR"],
+          {
+            usesWorktreeMarker: environment["GIT_DIR"] === undefined,
+            usesCommonDirectoryMarker:
+              environment["GIT_COMMON_DIR"] === undefined,
+            selectedGitDirectory: environment["GIT_DIR"],
+          },
         );
       if (location === "metadata-alias" || location === "gitfile-alias") {
         const metadata = join(
@@ -973,10 +952,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
     const main = await fixtures.create("patch-main-registration-");
     const registered = await fixtures.create("patch-registered-checkout-");
     const unregistered = await fixtures.create("patch-unregistered-checkout-");
-    const git = repositoryGit(main);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(main);
     await writeFile(join(main, "app.txt"), "original\n");
     git("add", "app.txt");
     git("commit", "-m", "Synthetic linked worktree");
@@ -998,11 +974,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         {
           currentDirectory: unregistered,
           environment,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            runGitRepositoryCommand(command, args, cwd, {
-              ...options,
-              environment: { ...environment, ...options?.environment },
-            }),
+          onRepositoryCommand: gitWithEnvironment(environment),
           onCodex: launch,
         },
       );
@@ -1013,9 +985,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
     expect(await readdir(common)).toEqual(metadata);
     expect(await readFile(join(administration, "index"))).toEqual(index);
     expect(await readFile(join(unregistered, ".git"))).toEqual(marker);
-    const accepted = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: registered,
-      onRepositoryCommand: runGitRepositoryCommand,
+    const accepted = await runIssuePatch(registered, {
       onCodex: async (args, output) => {
         const paths = patchReadOnlyPaths(args, output?.appServer?.permissions);
         expect(paths).toContain(administration);
@@ -1038,9 +1008,10 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           ...options,
           environment: { ...environment, ...options?.environment },
         }),
-      false,
-      true,
-      administration,
+      {
+        usesWorktreeMarker: false,
+        selectedGitDirectory: administration,
+      },
     );
     expect(controls?.readOnlyPaths).toContain(common);
     const back = join(administration, "gitdir");
@@ -1065,10 +1036,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
     const storage = await fixtures.create("patch-separate-common-storage-");
     const local = join(checkout, ".git");
     const shared = join(storage, "shared.git");
-    const git = repositoryGit(checkout);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(checkout);
     await writeFile(join(checkout, "app.txt"), "before\n");
     git("add", "app.txt");
     git("commit", "-m", "Synthetic separate common directory");
@@ -1085,29 +1053,21 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         ...(explicit && { GIT_COMMON_DIR: shared }),
       };
       let launched = false;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: checkout,
-          environment,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            runGitRepositoryCommand(command, args, cwd, {
-              ...options,
-              environment: { ...environment, ...options?.environment },
-            }),
-          onCodex: async (args, output) => {
-            launched = true;
-            const paths = patchReadOnlyPaths(
-              args,
-              output?.appServer?.permissions,
-            );
-            expect(paths).toContain(shared);
-            expect(paths).not.toContain(storage);
-            await writeFile(join(checkout, "app.txt"), "after\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(checkout, {
+        environment,
+        onRepositoryCommand: gitWithEnvironment(environment),
+        onCodex: async (args, output) => {
+          launched = true;
+          const paths = patchReadOnlyPaths(
+            args,
+            output?.appServer?.permissions,
+          );
+          expect(paths).toContain(shared);
+          expect(paths).not.toContain(storage);
+          await writeFile(join(checkout, "app.txt"), "after\n");
+          return 0;
         },
-      );
+      });
       expect(launched, outcome.stderr).toBe(explicit);
       expect(outcome.exitCode, outcome.stderr).toBe(explicit ? 0 : 2);
       if (!explicit) {
@@ -1132,9 +1092,11 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           environment: { ...environment, ...options?.environment },
         });
       },
-      false,
-      false,
-      local,
+      {
+        usesWorktreeMarker: false,
+        usesCommonDirectoryMarker: false,
+        selectedGitDirectory: local,
+      },
     );
     expect(controls?.readOnlyPaths).toContain(shared);
     expect(controls?.readOnlyPaths).not.toContain(unrelated);
@@ -1171,7 +1133,6 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           repository,
           async (_root, checkout, args, options) =>
             runGitRepositoryCommand("git", args, checkout, options),
-          true,
         ),
       ).rejects.toThrow("conditional include outside the selected Git roots");
     },
@@ -1182,10 +1143,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       `requires access to conditional Git includes only when active: ${active}`,
       async () => {
         const root = await fixtures.create("patch-inaccessible-include-");
-        const git = repositoryGit(root);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(root);
         await writeFile(join(root, "app.txt"), "before\n");
         git("add", ".");
         git("commit", "-m", "Synthetic inaccessible include baseline");
@@ -1220,24 +1178,16 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           if (active) expect(ordinaryGit).toThrow("Permission denied");
           else expect(ordinaryGit()).toBe("");
           let launches = 0;
-          const outcome = await runWorkflow(
-            ["patch", "Synthetic issue", "--json"],
-            {
-              currentDirectory: root,
-              environment,
-              onRepositoryCommand: (command, args, cwd, options) =>
-                runGitRepositoryCommand(command, args, cwd, {
-                  ...options,
-                  environment: { ...environment, ...options?.environment },
-                }),
-              onCodex: async (_args, output) => {
-                launches++;
-                await writeFile(join(root, "app.txt"), "after\n");
-                output?.stdout.write("Fixed.\n");
-                return 0;
-              },
+          const outcome = await runIssuePatch(root, {
+            environment,
+            onRepositoryCommand: gitWithEnvironment(environment),
+            onCodex: async (_args, output) => {
+              launches++;
+              await writeFile(join(root, "app.txt"), "after\n");
+              output?.stdout.write("Fixed.\n");
+              return 0;
             },
-          );
+          });
           expect(outcome.exitCode, outcome.stderr).toBe(active ? 2 : 0);
           expect(launches).toBe(active ? 0 : 1);
           if (active) expect(outcome.stderr).toContain("Permission denied");
@@ -1255,10 +1205,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
     "expands unknown-user includes only when their Git condition is active: %p",
     async (active) => {
       const root = await fixtures.create("patch-conditional-include-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       await writeFile(join(root, "app.txt"), "before\n");
       git("add", ".");
       git("commit", "-m", "Synthetic conditional include baseline");
@@ -1269,19 +1216,14 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       );
       if (!active) expect(git("status", "--porcelain")).toBe("");
       let launches = 0;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            launches++;
-            await writeFile(join(root, "app.txt"), "after\n");
-            output?.stdout.write("Fixed.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(root, {
+        onCodex: async (_args, output) => {
+          launches++;
+          await writeFile(join(root, "app.txt"), "after\n");
+          output?.stdout.write("Fixed.\n");
+          return 0;
         },
-      );
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(active ? 2 : 0);
       expect(launches).toBe(active ? 0 : 1);
       if (active)
@@ -1297,10 +1239,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       `does not discover an ignored replacement-character shadow of a raw source path: valid checkout ${validShadow}`,
       async () => {
         const root = await fixtures.create("patch-raw-source-shadow-");
-        const git = repositoryGit(root);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(root);
         await writeFile(join(root, "outer.txt"), "before\n");
         const rawDirectory = Buffer.concat([
           Buffer.from(`${root}/source-`),
@@ -1322,22 +1261,17 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         await writeFile(join(shadow, "app.ts"), "ignored shadow\n");
         const shadowMarker = await realpath(join(shadow, ".git"));
         let launches = 0;
-        const outcome = await runWorkflow(
-          ["patch", "Synthetic issue", "--json"],
-          {
-            currentDirectory: root,
-            onRepositoryCommand: runGitRepositoryCommand,
-            onCodex: async (args, output) => {
-              launches++;
-              expect(
-                patchReadOnlyPaths(args, output?.appServer?.permissions),
-              ).not.toContain(shadowMarker);
-              await writeFile(join(root, "outer.txt"), "after\n");
-              output?.stdout.write("Fixed.\n");
-              return 0;
-            },
+        const outcome = await runIssuePatch(root, {
+          onCodex: async (args, output) => {
+            launches++;
+            expect(
+              patchReadOnlyPaths(args, output?.appServer?.permissions),
+            ).not.toContain(shadowMarker);
+            await writeFile(join(root, "outer.txt"), "after\n");
+            output?.stdout.write("Fixed.\n");
+            return 0;
           },
-        );
+        });
         expect(outcome.exitCode, outcome.stderr).toBe(0);
         expect(launches).toBe(1);
         expect(await readFile(join(root, "outer.txt"), "utf8")).toBe("after\n");
@@ -1455,10 +1389,7 @@ lines.on("line", (line) => {
     "checks %s Git control state before bookkeeping after turn exit %d",
     async (mode, status) => {
       const root = await fixtures.create("patch-git-administration-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       const nestedPath =
         mode === "recursive"
           ? "nested/child"
@@ -1531,55 +1462,51 @@ lines.on("line", (line) => {
       const index = await readFile(join(root, ".git", "index"));
       let afterTurn = false;
       const bookkeeping: string[][] = [];
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (args.includes("read-tree") || args.includes("update-index")) {
-              if (args.includes("core.hooksPath=/dev/null")) {
-                expect(args).toContain("core.fsmonitor=false");
-                expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
-                  join(root, ".git", "index"),
-                );
-                expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
-              }
+      const outcome = await runIssuePatch(root, {
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (args.includes("read-tree") || args.includes("update-index")) {
+            if (args.includes("core.hooksPath=/dev/null")) {
+              expect(args).toContain("core.fsmonitor=false");
+              expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
+                join(root, ".git", "index"),
+              );
+              expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
             }
-            if (
-              afterTurn &&
-              !args.includes("core.hooksPath=/dev/null") &&
-              args.some((value) =>
-                ["add", "read-tree", "update-index", "write-tree"].includes(
-                  value,
-                ),
-              )
+          }
+          if (
+            afterTurn &&
+            !args.includes("core.hooksPath=/dev/null") &&
+            args.some((value) =>
+              ["add", "read-tree", "update-index", "write-tree"].includes(
+                value,
+              ),
             )
-              bookkeeping.push([...args]);
-            return runGitRepositoryCommand(command, args, cwd, options);
-          },
-          onCodex: async (args, output) => {
-            expect(
-              patchReadOnlyPaths(args, output?.appServer?.permissions),
-            ).toContain(await realpath(git("rev-parse", "--absolute-git-dir")));
-            beforeHooks = await readFile(join(root, ".git", "hook-ran")).catch(
-              () => null,
-            );
-            if (mode === "replacement") {
-              const retired = join(root, "data", "retired");
-              await rename(metadata, retired);
-              await cp(retired, metadata, { recursive: true });
-            }
-            await writeFile(join(nested, ".git"), `gitdir: ${marker}\n`);
-            await writeFile(join(nested, "app.txt"), "fixed\n");
-            await writeFile(join(root, "outer.txt"), "fixed\n");
-            if (status !== 0)
-              output?.stderr.write(`Synthetic turn exited ${status}.\n`);
-            output?.stdout.write("Synthetic patch completed.\n");
-            afterTurn = true;
-            return status;
-          },
+          )
+            bookkeeping.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, options);
         },
-      );
+        onCodex: async (args, output) => {
+          expect(
+            patchReadOnlyPaths(args, output?.appServer?.permissions),
+          ).toContain(await realpath(git("rev-parse", "--absolute-git-dir")));
+          beforeHooks = await readFile(join(root, ".git", "hook-ran")).catch(
+            () => null,
+          );
+          if (mode === "replacement") {
+            const retired = join(root, "data", "retired");
+            await rename(metadata, retired);
+            await cp(retired, metadata, { recursive: true });
+          }
+          await writeFile(join(nested, ".git"), `gitdir: ${marker}\n`);
+          await writeFile(join(nested, "app.txt"), "fixed\n");
+          await writeFile(join(root, "outer.txt"), "fixed\n");
+          if (status !== 0)
+            output?.stderr.write(`Synthetic turn exited ${status}.\n`);
+          output?.stdout.write("Synthetic patch completed.\n");
+          afterTurn = true;
+          return status;
+        },
+      });
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain(
         "Git metadata outside the pre-patch administration directories",
@@ -1600,10 +1527,7 @@ lines.on("line", (line) => {
     "protects hooks in %s while keeping unrelated source writable",
     async (hookDirectory) => {
       const root = await fixtures.create("patch-referenced-[literal]-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       const hooks = join(root, hookDirectory);
       const target = join(root, "hook-target");
       await mkdir(hooks, { recursive: true });
@@ -1626,38 +1550,33 @@ lines.on("line", (line) => {
       git("add", ".");
       git("commit", "-m", "Synthetic trusted hook configuration");
       let before = "";
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (args, output) => {
-            const controls = patchReadOnlyPaths(
-              args,
-              output?.appServer?.permissions,
-            );
-            for (const path of [
-              configuration,
-              hook,
-              ...(process.platform === "win32" ? [] : [target]),
-            ])
-              expect(controls).toContain(await realpath(path));
-            expect(controls).not.toContain(
-              join(await realpath(root), "missing-config"),
-            );
-            expect(controls).not.toContain(await realpath(root));
-            expect(controls).not.toContain(await realpath(hooks));
-            expect(controls).not.toContain(
-              await realpath(join(hooks, "source.txt")),
-            );
-            before = await readFile(join(root, ".git", "trusted-hook"), "utf8");
-            await writeFile(join(root, "app.txt"), "after\n");
-            await writeFile(join(hooks, "source.txt"), "after\n");
-            output?.stdout.write("Fixed.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(root, {
+        onCodex: async (args, output) => {
+          const controls = patchReadOnlyPaths(
+            args,
+            output?.appServer?.permissions,
+          );
+          for (const path of [
+            configuration,
+            hook,
+            ...(process.platform === "win32" ? [] : [target]),
+          ])
+            expect(controls).toContain(await realpath(path));
+          expect(controls).not.toContain(
+            join(await realpath(root), "missing-config"),
+          );
+          expect(controls).not.toContain(await realpath(root));
+          expect(controls).not.toContain(await realpath(hooks));
+          expect(controls).not.toContain(
+            await realpath(join(hooks, "source.txt")),
+          );
+          before = await readFile(join(root, ".git", "trusted-hook"), "utf8");
+          await writeFile(join(root, "app.txt"), "after\n");
+          await writeFile(join(hooks, "source.txt"), "after\n");
+          output?.stdout.write("Fixed.\n");
+          return 0;
         },
-      );
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       const after = await readFile(join(root, ".git", "trusted-hook"), "utf8");
       expect(after.startsWith(before)).toBe(true);
@@ -1671,10 +1590,7 @@ lines.on("line", (line) => {
     async () => {
       for (const marker of [false, true]) {
         const root = await fixtures.create("patch-raw-administration-");
-        const git = repositoryGit(root);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(root);
         await writeFile(join(root, "outer.txt"), "before\n");
         const child = join(root, "child");
         await mkdir(child);
@@ -1720,51 +1636,45 @@ lines.on("line", (line) => {
         git("commit", "-m", "Synthetic raw path baseline");
         let afterTurn = false;
         const bookkeeping: string[][] = [];
-        const outcome = await runWorkflow(
-          ["patch", "Synthetic issue", "--json"],
-          {
-            currentDirectory: root,
-            onRepositoryCommand: (command, args, cwd, options) => {
-              if (args.includes("read-tree") || args.includes("update-index")) {
-                if (args.includes("core.hooksPath=/dev/null")) {
-                  expect(args).toContain("core.fsmonitor=false");
-                  expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
-                    join(root, ".git", "index"),
-                  );
-                  expect(
-                    options?.environment?.["GIT_INDEX_FILE"],
-                  ).toBeDefined();
-                }
-              }
-              if (
-                afterTurn &&
-                !args.includes("core.hooksPath=/dev/null") &&
-                args.some((value) =>
-                  ["add", "read-tree", "update-index", "write-tree"].includes(
-                    value,
-                  ),
-                )
-              )
-                bookkeeping.push([...args]);
-              return runGitRepositoryCommand(command, args, cwd, options);
-            },
-            onCodex: async (_args, output) => {
-              if (marker)
-                await writeFile(
-                  Buffer.concat([directory, Buffer.from("/.git")]),
-                  "gitdir: ../metadata\n",
+        const outcome = await runIssuePatch(root, {
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (args.includes("read-tree") || args.includes("update-index")) {
+              if (args.includes("core.hooksPath=/dev/null")) {
+                expect(args).toContain("core.fsmonitor=false");
+                expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
+                  join(root, ".git", "index"),
                 );
-              await writeFile(
-                Buffer.concat([directory, Buffer.from("/app.txt")]),
-                "after\n",
-              );
-              await writeFile(join(root, "outer.txt"), "after\n");
-              output?.stdout.write("Fixed.\n");
-              afterTurn = true;
-              return 0;
-            },
+                expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
+              }
+            }
+            if (
+              afterTurn &&
+              !args.includes("core.hooksPath=/dev/null") &&
+              args.some((value) =>
+                ["add", "read-tree", "update-index", "write-tree"].includes(
+                  value,
+                ),
+              )
+            )
+              bookkeeping.push([...args]);
+            return runGitRepositoryCommand(command, args, cwd, options);
           },
-        );
+          onCodex: async (_args, output) => {
+            if (marker)
+              await writeFile(
+                Buffer.concat([directory, Buffer.from("/.git")]),
+                "gitdir: ../metadata\n",
+              );
+            await writeFile(
+              Buffer.concat([directory, Buffer.from("/app.txt")]),
+              "after\n",
+            );
+            await writeFile(join(root, "outer.txt"), "after\n");
+            output?.stdout.write("Fixed.\n");
+            afterTurn = true;
+            return 0;
+          },
+        });
         if (marker) {
           expect(outcome.exitCode).toBe(2);
           expect(outcome.stderr).toContain("checkout path is not valid UTF-8");
@@ -1786,10 +1696,7 @@ lines.on("line", (line) => {
     "keeps unrelated raw-byte Git subsection names available for patching",
     async () => {
       const root = await fixtures.create("patch-raw-remote-name-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       await writeFile(join(root, "app.txt"), "before\n");
       git("add", ".");
       git("commit", "-m", "Synthetic raw subsection baseline");
@@ -1802,19 +1709,14 @@ lines.on("line", (line) => {
         ]),
       );
       let launches = 0;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            launches++;
-            await writeFile(join(root, "app.txt"), "after\n");
-            output?.stdout.write("Fixed.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(root, {
+        onCodex: async (_args, output) => {
+          launches++;
+          await writeFile(join(root, "app.txt"), "after\n");
+          output?.stdout.write("Fixed.\n");
+          return 0;
         },
-      );
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(launches).toBe(1);
       expect(await readFile(join(root, "app.txt"), "utf8")).toBe("after\n");
@@ -1831,10 +1733,7 @@ lines.on("line", (line) => {
         `checks ${raw ? "raw-byte" : "literal replacement-character"} ${reference} control references before patch launch`,
         async () => {
           const root = await fixtures.create("patch-control-reference-");
-          const git = repositoryGit(root);
-          git("init", "--initial-branch=main");
-          git("config", "user.name", "Synthetic User");
-          git("config", "user.email", "synthetic@example.test");
+          const git = initializePatchGit(root);
           await writeFile(join(root, "app.txt"), "before\n");
           git("add", ".");
           git("commit", "-m", "Synthetic control reference baseline");
@@ -1896,24 +1795,19 @@ lines.on("line", (line) => {
             }
           }
           let launches = 0;
-          const outcome = await runWorkflow(
-            ["patch", "Synthetic issue", "--json"],
-            {
-              currentDirectory: root,
-              onRepositoryCommand: runGitRepositoryCommand,
-              onCodex: async (args, output) => {
-                launches++;
-                if (!raw) {
-                  expect(
-                    patchReadOnlyPaths(args, output?.appServer?.permissions),
-                  ).toContain(await realpath(expectedControl.toString("utf8")));
-                }
-                await writeFile(join(root, "app.txt"), "after\n");
-                output?.stdout.write("Fixed.\n");
-                return 0;
-              },
+          const outcome = await runIssuePatch(root, {
+            onCodex: async (args, output) => {
+              launches++;
+              if (!raw) {
+                expect(
+                  patchReadOnlyPaths(args, output?.appServer?.permissions),
+                ).toContain(await realpath(expectedControl.toString("utf8")));
+              }
+              await writeFile(join(root, "app.txt"), "after\n");
+              output?.stdout.write("Fixed.\n");
+              return 0;
             },
-          );
+          });
           if (raw) {
             expect(outcome.exitCode, outcome.stderr).toBe(2);
             expect(outcome.stderr).toContain("not valid UTF-8");
@@ -1937,10 +1831,7 @@ lines.on("line", (line) => {
     "retains literal Unicode and quoted bytes in trusted nested checkout names",
     async () => {
       const root = await fixtures.create("patch-quoted-administration-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       const child = join(root, "nested-\ufffd-é-\\377-tail");
       await mkdir(child);
       const nested = repositoryGit(child);
@@ -1959,7 +1850,7 @@ lines.on("line", (line) => {
         import { capturePatchGitControls } from ${JSON.stringify(await buildPatchGitControlsForNode(bundle))};
         const root = ${JSON.stringify(root)};
         const child = ${JSON.stringify(child)};
-        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}), ...options?.environment }}).toString(options?.encoding ?? "utf8"), true);
+        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}), ...options?.environment }}).toString(options?.encoding ?? "utf8"));
         await writeFile(child + "/app.txt", "after\\n");
         await controls.validate();
         process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));
@@ -1983,8 +1874,7 @@ lines.on("line", (line) => {
       LC_ALL: "de_DE.UTF-8",
     };
     let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: root,
+    const outcome = await runIssuePatch(root, {
       environment,
       onRepositoryCommand: (command, args, cwd, options) => {
         if (args.includes("--show-toplevel"))
@@ -2010,10 +1900,7 @@ lines.on("line", (line) => {
     "checks newly created Git references while allowing ordinary source: %s",
     async (change) => {
       const root = await fixtures.create("patch-absent-references-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       git("config", "core.hooksPath", "hooks");
       git("config", "include.path", "../missing-config");
       await writeFile(join(root, "app.txt"), "before\n");
@@ -2022,35 +1909,31 @@ lines.on("line", (line) => {
       const index = await readFile(join(root, ".git/index"));
       let afterTurn = false;
       const laterCommands: string[][] = [];
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (afterTurn) laterCommands.push([...args]);
-            return runGitRepositoryCommand(command, args, cwd, options);
-          },
-          onCodex: async (_args, output) => {
-            await mkdir(join(root, "hooks"));
-            await writeFile(join(root, "hooks/source.ts"), "fixed\n");
-            await writeFile(join(root, "app.txt"), "after\n");
-            if (change === "hook")
-              await writeFile(
-                join(root, "hooks/post-index-change"),
-                "#!/bin/sh\nprintf unexpected > .git/hook-ran\n",
-                { mode: 0o755 },
-              );
-            if (change === "configuration")
-              await writeFile(
-                join(root, "missing-config"),
-                "[core]\n hooksPath = hooks\n",
-              );
-            output?.stdout.write("Fixed.\n");
-            afterTurn = true;
-            return 0;
-          },
+      const outcome = await runIssuePatch(root, {
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (afterTurn) laterCommands.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, options);
         },
-      );
+        onCodex: async (_args, output) => {
+          await mkdir(join(root, "hooks"));
+          await writeFile(join(root, "hooks/source.ts"), "fixed\n");
+          await writeFile(join(root, "app.txt"), "after\n");
+          if (change === "hook")
+            await writeFile(
+              join(root, "hooks/post-index-change"),
+              "#!/bin/sh\nprintf unexpected > .git/hook-ran\n",
+              { mode: 0o755 },
+            );
+          if (change === "configuration")
+            await writeFile(
+              join(root, "missing-config"),
+              "[core]\n hooksPath = hooks\n",
+            );
+          output?.stdout.write("Fixed.\n");
+          afterTurn = true;
+          return 0;
+        },
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(
         change === "ordinary" ? 0 : 2,
       );

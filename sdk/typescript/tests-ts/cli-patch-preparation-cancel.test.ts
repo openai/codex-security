@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import { constants, closeSync, openSync, writeSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -7,16 +7,15 @@ import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { readSkillCommandOutput } from "../src/cli.js";
 import {
-  repositoryGit,
   resultWithFindings,
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
+  initializePatchGit,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 test("cancelling patch preparation prevents a late turn/start", async () => {
   const controller = new AbortController();
@@ -61,10 +60,7 @@ test.each(["saved", "supplied"])(
   "does not snapshot after an interrupted %s patch turn",
   async (source) => {
     const repository = await fixtures.create("patch-interrupted-turn-");
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     await writeFile(join(repository, "app.ts"), "original\n");
     git("add", ".");
     git("commit", "-m", "Synthetic interruption baseline");
@@ -110,10 +106,7 @@ test.each([false, true])(
     for (const name of ["src/finding-1.ts", "src/finding-2.ts", "local.txt"])
       await writeFile(join(repository, name), "original\n");
     if (useGit) {
-      const git = repositoryGit(repository);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(repository);
       git("add", ".");
       git("commit", "-m", "Synthetic batch baseline");
     }
@@ -201,10 +194,7 @@ test
       home = join(root, "home");
     await Promise.all([mkdir(repository), mkdir(home)]);
     await writeFile(join(home, "config.toml"), "");
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     await writeFile(join(repository, "app.ts"), "original\n");
     git("add", ".");
     git("commit", "-m", "Synthetic cancellation baseline");
