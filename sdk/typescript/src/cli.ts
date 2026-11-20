@@ -17723,29 +17723,22 @@ export async function readSkillCommandOutput(
                     modelReadOnlyPaths.add(path);
               }
             }
+            const filesystem: JsonObject = { ...profile.filesystem };
+            for (const path of modelReadOnlyPaths) {
+              // Binding a missing cache read-only can race another Linux
+              // sandbox removing its temporary mount source.
+              const mask = process.platform === "linux" && !existsSync(path);
+              filesystem[path] = { ".": mask ? "deny" : "read" };
+            }
             // Snapshot Git still needs the operator configuration. The model
             // must not read those files through its inherited workspace policy.
+            for (const path of appServer.permissions.externalConfigPaths ?? [])
+              filesystem[path] = { ".": "deny" };
             startThread({
               ...workspaceOverride,
               default_permissions: permissionProfile!,
               permissions: {
-                [permissionProfile!]: {
-                  ...profile,
-                  filesystem: {
-                    ...profile.filesystem,
-                    ...Object.fromEntries(
-                      [...modelReadOnlyPaths].map((path) => [
-                        path,
-                        { ".": "read" },
-                      ]),
-                    ),
-                    ...Object.fromEntries(
-                      (appServer.permissions.externalConfigPaths ?? []).map(
-                        (path) => [path, { ".": "deny" }],
-                      ),
-                    ),
-                  },
-                },
+                [permissionProfile!]: { ...profile, filesystem },
               },
             });
             continue;

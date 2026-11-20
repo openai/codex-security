@@ -426,6 +426,8 @@ glob_scan_max_depth = 8
       ...profiles[name],
       filesystem: snapshotFilesystem,
     });
+    const cacheAccess =
+      process.platform === "linux" && !existingStorage ? "deny" : "read";
     expect(profiles[name]!["filesystem"]).toEqual({
       ...snapshotFilesystem,
       ...Object.fromEntries(
@@ -436,7 +438,7 @@ glob_scan_max_depth = 8
               (configured && dirname(path) === extra),
           ),
           ...(configured ? (permissions.externalCachePaths ?? []) : []),
-        ].map((path) => [path, { ".": "read" }]),
+        ].map((path) => [path, { ".": cacheAccess }]),
       ),
       ...Object.fromEntries(
         (permissions.externalConfigPaths ?? []).map((path) => [
