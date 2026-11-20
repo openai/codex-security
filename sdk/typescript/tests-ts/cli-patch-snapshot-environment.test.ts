@@ -162,6 +162,11 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
     TF_TOKEN_registry_example_test: "synthetic-terraform-token",
     TF_VAR_workspace: "example",
     SNAPSHOT_USER_SETTING: "preserved",
+    PIP_INDEX_URL: "https://fixture:synthetic@packages.example.test/simple",
+    pip_extra_index_url:
+      "https://public.example.test/simple https://synthetic@packages.example.test/simple",
+    UV_INDEX: "private=https://synthetic@packages.example.test/simple",
+    PIP_FIND_LINKS: "https://packages.example.test/archives/user@release",
     HTTP_PROXY: "http://fixture:synthetic@proxy.example.test:8080",
     https_proxy: "https://fixture:synthetic@proxy.example.test",
     ALL_PROXY: "socks5://proxy.example.test:1080#note@proxy.example.test",
@@ -179,8 +184,8 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
     `const input = require("node:fs").readFileSync(0, "utf8");
 process.stdout.write(JSON.stringify({
   input, setting: process.env.SNAPSHOT_USER_SETTING, proxy: process.env.ALL_PROXY,
-  workspace: process.env.TF_VAR_workspace,
-  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "TF_TOKEN_registry_example_test", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
+  workspace: process.env.TF_VAR_workspace, links: process.env.PIP_FIND_LINKS,
+  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "TF_TOKEN_registry_example_test", "PIP_INDEX_URL", "pip_extra_index_url", "UV_INDEX", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
 }));`,
   );
   const add = [
@@ -195,6 +200,7 @@ process.stdout.write(JSON.stringify({
     setting: "preserved",
     proxy: env.ALL_PROXY,
     workspace: env.TF_VAR_workspace,
+    links: env.PIP_FIND_LINKS,
   };
   git(...add);
   expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
@@ -203,6 +209,9 @@ process.stdout.write(JSON.stringify({
       "DOCKER_AUTH_CONFIG",
       "DATABASE_URL",
       "TF_TOKEN_registry_example_test",
+      "PIP_INDEX_URL",
+      "pip_extra_index_url",
+      "UV_INDEX",
       "HTTP_PROXY",
       "https_proxy",
     ],
