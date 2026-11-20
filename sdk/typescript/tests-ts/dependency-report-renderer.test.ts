@@ -127,7 +127,7 @@ describe("call site report", () => {
     expect(text(observed)).toContain("Which decoder mode ran?");
     expect(text(observed)).toContain("The guard is configurable.");
     expect(text(observed)).toContain("Query truncated Yes");
-    expect(text(html)).toContain("No independent review");
+    expect(text(html)).toContain("Finalized offline");
     expect(text(html)).toContain("omits the advisory description");
     expect(html).not.toContain("RAW_RECEIPT_CONTENT");
     const missing = panel(html, "stack-1-2");

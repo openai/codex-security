@@ -307,6 +307,17 @@ function questions(f: Finding) {
         : "")
     );
   });
+  if (f.kind === "stack")
+    for (const check of f.assessment.questionChecks ?? []) {
+      other.delete(check.question);
+      entries.push(
+        para(check.question) +
+          facts([
+            ["Checked", check.checked],
+            ["Missing evidence", check.missingEvidence],
+          ]),
+      );
+    }
   return group(
     "What would decide this",
     list([...entries, ...Array.from(other, prose)]),
@@ -560,6 +571,9 @@ export function findingAudit(section: Section, finding: Finding) {
   return audit(
     "Reasoning and evidence",
     reasons +
+      (finding.kind === "stack"
+        ? group("Independent review", para(finding.assessment.reviewReason))
+        : "") +
       questions(finding) +
       handoffHtml +
       context(finding) +
@@ -663,9 +677,9 @@ function sampleLimits(stack: StackReport, findings: Finding[]) {
     para(
       "Samples show what ran in one window. Missing samples do not rule out execution. Sample counts are not call counts.",
     ) +
-    para(
-      "This v1 stack report omits the advisory description and affected version range.",
-    ) +
+    (stack.advisoryLookupError
+      ? para("Advisory lookup failed · " + stack.advisoryLookupError)
+      : "") +
     limits +
     group("Other open questions", list(other.map(prose)))
   );
@@ -680,7 +694,8 @@ export function sectionAudit(section: Section) {
     const c = stack.coverage;
     limits = sampleLimits(stack, findings);
     scope = facts([
-      ["Reviewed by", "Single agent · No independent review"],
+      ["Review", stack.review ? "Independently reviewed" : "Finalized offline"],
+      ["Reviewed draft digest", stack.review?.draftDigest],
       [
         "Work items",
         `${c.assessed} of ${c.total} assessed · ${c.observed} observed · ${c.noMatch.length} no match · ${c.noCoverage.length} without coverage`,
@@ -689,7 +704,6 @@ export function sectionAudit(section: Section) {
       ["Attempt", stack.attemptId],
       ["Input digest", stack.inputDigest],
       ["Tool revision", stack.toolRevision],
-      ["Review policy", stack.reviewPolicy],
     ]);
   } else if (check) {
     limits = limitations(check, findings);
