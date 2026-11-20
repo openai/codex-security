@@ -23,7 +23,7 @@ import {
   capturePatchGitControls,
   snapshotConfigBytes,
 } from "../src/patch-git-controls.js";
-import { capture } from "./cli-fixtures.js";
+import { capture, type OnCodex } from "./cli-fixtures.js";
 import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
@@ -34,7 +34,42 @@ import {
   initializePatchGit,
   runIssuePatch,
   gitWithEnvironment,
+  runPublicationWorkflow,
 } from "./cli-patch-fixtures.js";
+
+async function patchWithIndexChecks(root: string, onCodex: OnCodex) {
+  let afterTurn = false;
+  const bookkeeping: string[][] = [];
+  const outcome = await runIssuePatch(root, {
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (
+        (args.includes("read-tree") || args.includes("update-index")) &&
+        args.includes("core.hooksPath=/dev/null")
+      ) {
+        expect(args).toContain("core.fsmonitor=false");
+        expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
+          join(root, ".git", "index"),
+        );
+        expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
+      }
+      if (
+        afterTurn &&
+        !args.includes("core.hooksPath=/dev/null") &&
+        args.some((value) =>
+          ["add", "read-tree", "update-index", "write-tree"].includes(value),
+        )
+      )
+        bookkeeping.push([...args]);
+      return runGitRepositoryCommand(command, args, cwd, options);
+    },
+    onCodex: async (...args) => {
+      const result = await onCodex(...args);
+      afterTurn = true;
+      return result;
+    },
+  });
+  return { outcome, bookkeeping };
+}
 
 function patchReadOnlyPaths(args: readonly string[], permissions: unknown) {
   expect(
@@ -966,15 +1001,12 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
     const index = await readFile(join(administration, "index"));
     const launch = mock(async () => 0);
     for (const environment of [{}, { GIT_COMMON_DIR: common }]) {
-      const rejected = await runWorkflow(
-        ["patch", "Synthetic issue", "--create-pr", "--json"],
-        {
-          currentDirectory: unregistered,
-          environment,
-          onRepositoryCommand: gitWithEnvironment(environment),
-          onCodex: launch,
-        },
-      );
+      const rejected = await runPublicationWorkflow("issue", {
+        currentDirectory: unregistered,
+        environment,
+        onRepositoryCommand: gitWithEnvironment(environment),
+        onCodex: launch,
+      });
       expect(rejected.exitCode, rejected.stderr).toBe(2);
       expect(rejected.stderr).toContain(externalAdministrationError);
     }
@@ -1451,32 +1483,9 @@ lines.on("line", (line) => {
       let beforeHooks: Buffer | null = null;
       const head = git("rev-parse", "HEAD");
       const index = await readFile(join(root, ".git", "index"));
-      let afterTurn = false;
-      const bookkeeping: string[][] = [];
-      const outcome = await runIssuePatch(root, {
-        onRepositoryCommand: (command, args, cwd, options) => {
-          if (args.includes("read-tree") || args.includes("update-index")) {
-            if (args.includes("core.hooksPath=/dev/null")) {
-              expect(args).toContain("core.fsmonitor=false");
-              expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
-                join(root, ".git", "index"),
-              );
-              expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
-            }
-          }
-          if (
-            afterTurn &&
-            !args.includes("core.hooksPath=/dev/null") &&
-            args.some((value) =>
-              ["add", "read-tree", "update-index", "write-tree"].includes(
-                value,
-              ),
-            )
-          )
-            bookkeeping.push([...args]);
-          return runGitRepositoryCommand(command, args, cwd, options);
-        },
-        onCodex: async (args, output) => {
+      const { outcome, bookkeeping } = await patchWithIndexChecks(
+        root,
+        async (args, output) => {
           expect(
             patchReadOnlyPaths(args, output?.appServer?.permissions),
           ).toContain(await realpath(git("rev-parse", "--absolute-git-dir")));
@@ -1494,10 +1503,9 @@ lines.on("line", (line) => {
           if (status !== 0)
             output?.stderr.write(`Synthetic turn exited ${status}.\n`);
           output?.stdout.write("Synthetic patch completed.\n");
-          afterTurn = true;
           return status;
         },
-      });
+      );
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain(
         "Git metadata outside the pre-patch administration directories",
@@ -1622,32 +1630,9 @@ lines.on("line", (line) => {
           });
         } else git("add", "--all");
         git("commit", "-m", "Synthetic raw path baseline");
-        let afterTurn = false;
-        const bookkeeping: string[][] = [];
-        const outcome = await runIssuePatch(root, {
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (args.includes("read-tree") || args.includes("update-index")) {
-              if (args.includes("core.hooksPath=/dev/null")) {
-                expect(args).toContain("core.fsmonitor=false");
-                expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
-                  join(root, ".git", "index"),
-                );
-                expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
-              }
-            }
-            if (
-              afterTurn &&
-              !args.includes("core.hooksPath=/dev/null") &&
-              args.some((value) =>
-                ["add", "read-tree", "update-index", "write-tree"].includes(
-                  value,
-                ),
-              )
-            )
-              bookkeeping.push([...args]);
-            return runGitRepositoryCommand(command, args, cwd, options);
-          },
-          onCodex: async (_args, output) => {
+        const { outcome, bookkeeping } = await patchWithIndexChecks(
+          root,
+          async (_args, output) => {
             if (marker)
               await writeFile(
                 Buffer.concat([directory, Buffer.from("/.git")]),
@@ -1659,10 +1644,9 @@ lines.on("line", (line) => {
             );
             await writeFile(join(root, "outer.txt"), "after\n");
             output?.stdout.write("Fixed.\n");
-            afterTurn = true;
             return 0;
           },
-        });
+        );
         if (marker) {
           expect(outcome.exitCode).toBe(2);
           expect(outcome.stderr).toContain("checkout path is not valid UTF-8");

@@ -21,6 +21,7 @@ import {
   patchDirectories,
   initializePatchGit,
   runIssuePatch,
+  patchArtifactFromPrompt,
 } from "./cli-patch-fixtures.js";
 import {
   patchSnapshotEnvironment,
@@ -461,11 +462,7 @@ process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
               output?.appServer?.prompt.includes("immutable patch artifact")
             ) {
               assessments++;
-              const artifact = JSON.parse(
-                output.appServer.prompt
-                  .split("\n")
-                  .find((line) => line.startsWith('{"path":'))!,
-              );
+              const artifact = patchArtifactFromPrompt(output.appServer.prompt);
               const patch = await readFile(artifact.path, "utf8");
               expect(patch).toContain("+FIXED");
               expect(patch).toContain("-ORIGINAL");

@@ -10,7 +10,14 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join, matchesGlob, relative } from "node:path";
+import {
+  delimiter,
+  dirname,
+  join,
+  matchesGlob,
+  relative,
+  resolve,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -334,12 +341,13 @@ glob_scan_max_depth = 8
       modelOnlyReadOnlyPaths,
       externalConfigPaths: controls?.externalConfigPaths,
       externalCachePaths,
-      // The configured workspace reopens a descendant of this denied directory.
-      credentialStorePaths:
-        controls?.credentialStorePaths ??
-        (process.platform === "linux"
+      // Cache tests include one representative Git store. Credential scenarios
+      // supply the full captured profile through captureFilterPermissions.
+      credentialStorePaths: controls
+        ? [join(home, ".config", "git", "credentials")]
+        : process.platform === "linux"
           ? [dirname(extra), join(extra, "session")]
-          : []),
+          : [],
     };
     const reader = await readSkillCommandOutput(stream, {
       directory: repository,
@@ -509,14 +517,15 @@ glob_scan_max_depth = 8
             ),
         ),
     );
-    expect(fileDenies).toHaveLength(mounts.length);
+    const unused = new Set(fileDenies);
     for (const file of mounts) {
-      expect(
-        fileDenies.filter(([key, access]) =>
-          access === "deny" ? matchesGlob(file, key) : key === file,
-        ),
-      ).toHaveLength(1);
+      const matches = fileDenies.filter(([key, access]) =>
+        access === "deny" ? matchesGlob(file, key) : key === file,
+      );
+      expect(matches, file).toHaveLength(1);
+      unused.delete(matches[0]!);
     }
+    expect([...unused]).toEqual([]);
     // Resolve the selected policy after exercising the normal snapshot/turn order.
     const selected = await rpc("thread/start", {
       cwd: repository,
@@ -882,70 +891,37 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
 
 test("patch model and clean filters cannot read selected authentication files", async () => {
   const operator = await fixtures.create("patch-http-auth-files-");
-  const config = join(operator, "selected.gitconfig");
-  const selectedNetrc = join(operator, "selected credentials");
-  const awsDirectory = join(operator, ".aws");
-  const awsConfig = join(operator, "selected aws config");
-  const awsCredentials = join(operator, "selected aws credentials");
+  const windows = process.platform === "win32";
+  const mac = process.platform === "darwin";
+  const at = (file: string) => join(operator, file);
+  const files = (dir: string, ...names: string[]) =>
+    names.map((name) => join(dir, name));
+  const ghFiles = (dir: string) => files(dir, "hosts.yml", "config.yml");
+  const config = at("selected.gitconfig");
+  const selectedNetrc = at("selected credentials");
+  const awsDirectory = at(".aws");
   const clusterFiles = [
-    join(
-      operator,
-      process.platform === "win32" ? "cluster;one" : "cluster one",
-    ),
-    join(operator, "cluster two"),
+    at(windows ? "cluster;one" : "cluster one"),
+    at("cluster two"),
   ];
-  const policyCluster = join(operator, "policy cluster");
-  const registry = join(operator, "selected registry");
+  const policyCluster = at("policy cluster");
   const gh = "selected gh";
-  const glab = join(operator, "selected glab");
-  const pgpass = join(operator, "selected pgpass");
-  const pgservice = join(operator, "selected pg service");
-  const pgKey = join(operator, "selected pg key");
-  const pgCert = join(operator, "selected pg cert");
-  const terraformConfig = join(operator, "selected terraform config");
-  const legacyTerraformConfig = join(operator, "legacy terraform config");
-  const defaultGh = join(operator, ".config", "gh");
-  const cloudConfig = join(operator, "selected gcloud");
-  const cloudKey = join(operator, "selected Google credentials.json");
-  const azure = join(operator, "selected azure");
-  const loginCache = join(operator, "selected login cache");
+  const cloudConfig = at("selected gcloud");
   const cloudDefault = "application_default_credentials.json";
-  const legacyCloud = join(cloudConfig, "legacy_credentials", "fixture");
-  await mkdir(legacyCloud, { recursive: true });
-  const appdata = join(operator, "Roaming");
-  const pythonConfig =
-    process.platform === "win32"
-      ? appdata
-      : join(
-          operator,
-          process.platform === "darwin"
-            ? "Library/Application Support"
-            : ".config",
-        );
-  const pythonLocal =
-    process.platform === "win32"
-      ? join(operator, "AppData/Local")
-      : pythonConfig;
-  const terraformDir =
-    process.platform === "win32"
-      ? join(appdata, "terraform.d")
-      : join(operator, ".terraform.d");
-  const pgTlsDir =
-    process.platform === "win32"
-      ? join(appdata, "postgresql")
-      : join(operator, ".postgresql");
-  const ssh = join(operator, ".ssh");
-  await mkdir(ssh);
-  await mkdir(defaultGh, { recursive: true });
-  await mkdir(terraformDir, { recursive: true });
-  const pipConfig = process.platform === "win32" ? "pip.ini" : "pip.conf";
-  const npm = join(operator, "selected npmrc");
-  const npmGlobal = join(operator, "selected global npmrc");
-  await mkdir(registry);
+  const azure = at("selected azure");
+  const appdata = at("Roaming");
+  const platformConfig = windows
+    ? appdata
+    : at(mac ? "Library/Application Support" : ".config");
+  const pythonLocal = windows ? at("AppData/Local") : platformConfig;
+  const terraformDir = windows
+    ? join(appdata, "terraform.d")
+    : at(".terraform.d");
+  const pgTlsDir = windows ? join(appdata, "postgresql") : at(".postgresql");
+  const pipConfig = windows ? "pip.ini" : "pip.conf";
+  const xdg = at("xdg");
   const clusterList = (files: string[]) =>
-    files
-      .map((file) => (process.platform === "win32" ? `"${file}"` : file))
-      .join(delimiter);
+    files.map((file) => (windows ? `"${file}"` : file)).join(delimiter);
   const selectedFiles = Object.fromEntries(
     [
       "GIT_SSL_KEY",
@@ -962,24 +938,24 @@ test("patch model and clean filters cannot read selected authentication files", 
       "SSL_CLIENT_CERT",
       "SOPS_AGE_KEY_FILE",
       "SOPS_AGE_SSH_PRIVATE_KEY_FILE",
-    ].map((name) => [name, join(operator, name)]),
+    ].map((name) => [name, at(name)]),
   );
   const pointers = {
     ...selectedFiles,
     KUBECONFIG: clusterList(clusterFiles),
-    DOCKER_CONFIG: registry,
-    DOCKER_CERT_PATH: join(operator, "docker tls"),
+    DOCKER_CONFIG: at("selected registry"),
+    DOCKER_CERT_PATH: at("docker tls"),
     GH_CONFIG_DIR: gh,
-    BINSTAR_CONFIG_DIR: join(operator, "selected binstar"),
+    BINSTAR_CONFIG_DIR: at("selected binstar"),
     ANACONDA_AUTH_KEYRING_PATH: "~/${LOGIN_CACHE_NAME}.keyring",
-    RATTLER_AUTH_FILE: join(operator, "selected rattler"),
-    GNUPGHOME: join(operator, "selected signing home"),
-    GLAB_CONFIG_DIR: glab,
-    GCM_PLAINTEXT_STORE_PATH: join(operator, "selected plaintext store"),
+    RATTLER_AUTH_FILE: at("selected rattler"),
+    GNUPGHOME: at("selected signing home"),
+    GLAB_CONFIG_DIR: at("selected glab"),
+    GCM_PLAINTEXT_STORE_PATH: at("selected plaintext store"),
     SOPS_AGE_KEY: "synthetic age identity",
-    PIP_CONFIG_FILE: join(operator, "selected pip config"),
-    POETRY_CONFIG_DIR: join(operator, "poetry"),
-    UV_CREDENTIALS_DIR: join(operator, "uv credentials"),
+    PIP_CONFIG_FILE: at("selected pip config"),
+    POETRY_CONFIG_DIR: at("poetry"),
+    UV_CREDENTIALS_DIR: at("uv credentials"),
     DEVPI_CLIENTDIR: "~/selected devpi",
     POETRY_PYPI_TOKEN_PRIVATE: "synthetic token",
     POETRY_HTTP_BASIC_PRIVATE_USERNAME: "synthetic auth",
@@ -989,18 +965,18 @@ test("patch model and clean filters cannot read selected authentication files", 
     AZURE_CONFIG_DIR: azure,
     AWS_LOGIN_CACHE_DIRECTORY: "~/${LOGIN_CACHE_NAME}",
     BOTO_CONFIG: "${HOME}/selected boto.cfg",
-    PGPASSFILE: pgpass,
-    PGSERVICEFILE: pgservice,
-    PGSSLKEY: pgKey,
-    PGSSLCERT: pgCert,
-    TF_CLI_CONFIG_FILE: terraformConfig,
-    TERRAFORM_CONFIG: legacyTerraformConfig,
-    GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
+    PGPASSFILE: at("selected pgpass"),
+    PGSERVICEFILE: at("selected pg service"),
+    PGSSLKEY: at("selected pg key"),
+    PGSSLCERT: at("selected pg cert"),
+    TF_CLI_CONFIG_FILE: at("selected terraform config"),
+    TERRAFORM_CONFIG: at("legacy terraform config"),
+    GOOGLE_APPLICATION_CREDENTIALS: at("selected Google credentials.json"),
     COMPOSER_AUTH: '{"bearer":{"example.invalid":"synthetic"}}',
     PNPM_CONFIG__AUTH: '{"example.invalid":{"authToken":"synthetic"}}',
     YARN_NPM_AUTH_IDENT: "operator:synthetic",
     DENO_AUTH_TOKENS: "synthetic@example.invalid",
-    NPM_CONFIG_USERCONFIG: npm,
+    NPM_CONFIG_USERCONFIG: at("selected npmrc"),
     npm_config_globalconfig: "${HOME}/selected global npmrc",
   };
   const policySet = {
@@ -1014,285 +990,206 @@ test("patch model and clean filters cannot read selected authentication files", 
     CODEX_SECURITY_STATE_DIR: operator,
     FILTER_FIXTURE_SETTING: "from host",
     LOGIN_CACHE_NAME: "selected login cache",
-    AWS_CONFIG_FILE: awsConfig,
-    AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
+    AWS_CONFIG_FILE: at("selected aws config"),
+    AWS_SHARED_CREDENTIALS_FILE: at("selected aws credentials"),
     CLOUDSDK_CONFIG: cloudConfig,
     APPDATA: appdata,
-    DOTNET_CLI_HOME: join(operator, "dotnet"),
-    CARGO_HOME: join(operator, "cargo"),
-    RYE_HOME: join(operator, "selected rye"),
+    DOTNET_CLI_HOME: at("dotnet"),
+    CARGO_HOME: at("cargo"),
+    RYE_HOME: at("selected rye"),
     COMPOSER_HOME: "$HOME/selected composer",
     NPM_CONFIG_PREFIX: "~/selected prefix",
     YARN_RC_FILENAME: ".operator-yarnrc.yml",
-    GRADLE_USER_HOME: join(operator, "gradle"),
-    MAVEN_HOME: join(operator, "maven"),
-    BUNDLE_USER_HOME: join(operator, "bundle"),
-    HELM_CONFIG_HOME: join(operator, "helm"),
-    XDG_DATA_HOME: join(operator, "data"),
-    XDG_RUNTIME_DIR: join(operator, "runtime"),
-    VIRTUAL_ENV: join(operator, "venv"),
+    GRADLE_USER_HOME: at("gradle"),
+    MAVEN_HOME: at("maven"),
+    BUNDLE_USER_HOME: at("bundle"),
+    HELM_CONFIG_HOME: at("helm"),
+    XDG_DATA_HOME: at("data"),
+    XDG_RUNTIME_DIR: at("runtime"),
+    VIRTUAL_ENV: at("venv"),
     PGSYSCONFDIR: operator,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
-    XDG_CONFIG_HOME: join(operator, "xdg"),
-    XDG_CONFIG_DIRS:
-      (process.platform === "win32" ? "%USERPROFILE%" : "$HOME") + "/xdg-extra",
+    XDG_CONFIG_HOME: xdg,
+    XDG_CONFIG_DIRS: (windows ? "%USERPROFILE%" : "$HOME") + "/xdg-extra",
     GIT_CONFIG_GLOBAL: config,
     GIT_CONFIG_NOSYSTEM: "1",
   };
-  await mkdir(join(environment.XDG_CONFIG_HOME, "git"), { recursive: true });
-  const settings = [
-    "http.cookieFile",
-    "http.sslKey",
-    "http.https://scoped.example.invalid/.cookieFile",
-    "http.https://scoped.example.invalid/.sslKey",
-  ];
-  const drive =
-    process.platform === "win32" ? /^[a-z]:/iu.exec(operator)?.[0] : undefined;
-  if (drive !== undefined)
-    settings.push(
-      "http.https://drive.example.invalid/.cookieFile",
-      "http.https://root.example.invalid/.sslKey",
-    );
-  const paths = settings.map((_, i) => join(operator, `auth ${i}.txt`));
-  const netrc = join(operator, ".netrc");
-  const signingKey = join(operator, "signing identity");
-  const proxyKey = join(operator, "proxy key.pem");
-  const scopedProxyKey = join(operator, "scoped proxy key.pem");
-  const clientCert = join(operator, "origin identity.pem");
-  const proxyCert = join(operator, "proxy identity.pem");
+  const drive = windows ? /^[a-z]:/iu.exec(operator)?.[0] : undefined;
+  const auth = (i: number) => at(`auth ${i}.txt`);
+  const inputs = new Map<string, string>();
+  const writeInput = (path: string, contents: string) =>
+    writeFile(path, contents, { mode: 0o600, flag: "wx" });
+  const createInput = async (
+    file: string,
+    contents = `synthetic auth input ${inputs.size}\n`,
+  ) => {
+    const path = resolve(operator, file);
+    await mkdir(dirname(path), { recursive: true });
+    await writeInput(path, contents);
+    inputs.set(path, contents);
+  };
+  const replaceInput = async (path: string, replacement: string) => {
+    await writeInput(replacement, inputs.get(path)!);
+    await rename(replacement, path);
+  };
+  const loginCache = at(environment.LOGIN_CACHE_NAME);
+  for (const dir of [
+    at(".ssh"),
+    at(".config/gh"),
+    pointers.DOCKER_CONFIG,
+    join(xdg, "git"),
+  ])
+    await mkdir(dir, { recursive: true });
+  const glabRoots = [".config", xdg, "xdg-extra"];
+  if (windows || mac) glabRoots.push(platformConfig);
+  const data = environment.XDG_DATA_HOME;
   const existing = [
-    ...paths.slice(0, 2),
-    netrc,
-    signingKey,
-    signingKey + ".pub",
-    proxyKey,
-    clientCert,
-    join(operator, ".pypirc"),
-    join(operator, ".anaconda", "keyring"),
-    join(operator, ".anaconda", "config.toml"),
-    join(operator, ".mamba", "auth", "authentication.json"),
-    join(operator, ".rattler", "credentials.json"),
-    join(operator, ".continuum", "anaconda-client", "tokens", "example.token"),
-    join(pointers.BINSTAR_CONFIG_DIR, "data", "example.token"),
-    join(operator, "selected login cache.keyring"),
+    [auth(0), auth(1), ".netrc"],
+    ["signing identity", "signing identity.pub"],
+    ["proxy key.pem", "origin identity.pem"],
+    ".pypirc",
+    files(".anaconda", "keyring", "config.toml"),
+    ".mamba/auth/authentication.json",
+    ".rattler/credentials.json",
+    ".continuum/anaconda-client/tokens/example.token",
+    join(pointers.BINSTAR_CONFIG_DIR, "data/example.token"),
+    loginCache + ".keyring",
     pointers.RATTLER_AUTH_FILE,
-    join(operator, ".gnupg", "private-keys-v1.d", "default.key"),
-    join(pointers.GNUPGHOME, "private-keys-v1.d", "selected.key"),
-    ...(process.platform === "win32"
-      ? [join(appdata, "gnupg", "private-keys-v1.d", "roaming.key")]
-      : []),
+    ".gnupg/private-keys-v1.d/default.key",
+    join(pointers.GNUPGHOME, "private-keys-v1.d/selected.key"),
+    windows ? [join(appdata, "gnupg/private-keys-v1.d/roaming.key")] : [],
     pointers.PIP_CONFIG_FILE,
-    join(operator, ".gcm", "store", "service", "account"),
-    join(operator, ".gcm", "msal.cache"),
-    join(operator, ".gcm", "msal", "app.cache"),
-    join(operator, ".local", ".IdentityService", "msal.cache"),
-    join(operator, "configured store", "service", "account"),
-    join(pointers.GCM_PLAINTEXT_STORE_PATH, "service", "account"),
+    files(".gcm", "store/service/account", "msal.cache", "msal/app.cache"),
+    ".local/.IdentityService/msal.cache",
+    "configured store/service/account",
+    join(pointers.GCM_PLAINTEXT_STORE_PATH, "service/account"),
     join(loginCache, "session.json"),
     join(azure, "msal_token_cache.json"),
-    join(cloudConfig, "credentials.db"),
-    join(cloudConfig, "credentials.db-wal"),
-    join(legacyCloud, ".boto"),
-    join(operator, "selected.config.toml"),
-    join(terraformDir, "registry.tfrc"),
-    join(terraformDir, "workspace.tfrc.json"),
-  ];
-  const glabDirectories = [
-    glab,
-    join(operator, ".config", "glab-cli"),
-    join(environment.XDG_CONFIG_HOME, "glab-cli"),
-    join(operator, "xdg-extra", "glab-cli"),
-  ];
-  if (process.platform === "win32")
-    glabDirectories.push(join(appdata, "glab-cli"));
-  if (process.platform === "darwin")
-    glabDirectories.push(
-      join(operator, "Library", "Application Support", "glab-cli"),
-    );
-  const ghFiles = (directory: string) =>
-    ["hosts.yml", "config.yml"].map((file) => join(directory, file));
-  const protectedPaths = [
-    ...existing,
-    ...paths.slice(2),
-    join(operator, "after-capture.config.toml"),
-    join(operator, "codex-home", "after-capture.config.toml"),
-    ...[".codex", ".", "codex-home"].flatMap((home) =>
-      ["auth.json", ".credentials.json", "config.toml"].map((file) =>
-        join(operator, home, file),
-      ),
+    files(cloudConfig, "credentials.db", "credentials.db-wal"),
+    join(cloudConfig, "legacy_credentials/fixture/.boto"),
+    "selected.config.toml",
+    files(terraformDir, "registry.tfrc", "workspace.tfrc.json"),
+  ].flat();
+  for (const file of existing) await createInput(file);
+
+  const lateFiles = [
+    [auth(2), auth(3), ...(drive ? [auth(4), auth(5)] : [])],
+    ["after-capture.config.toml", "codex-home/after-capture.config.toml"],
+    ...[".codex", ".", "codex-home"].map((home) =>
+      files(home, "auth.json", ".credentials.json", "config.toml"),
     ),
-    join(operator, "_netrc"),
-    scopedProxyKey,
-    proxyCert,
+    "_netrc",
+    ["scoped proxy key.pem", "proxy identity.pem"],
     selectedNetrc,
-    join(awsDirectory, "config"),
-    join(awsDirectory, "credentials"),
-    ...["cli", "sso", "login"].map((client) =>
-      join(awsDirectory, client, "cache", "session.json"),
+    files(awsDirectory, "config", "credentials"),
+    ["cli", "sso", "login"].map((client) =>
+      join(awsDirectory, client, "cache/session.json"),
     ),
     join(loginCache, "new session.json"),
-    join(operator, ".azure", "msal_token_cache.json"),
-    join(operator, ".azure", "service_principal_entries.json"),
-    join(azure, "accessTokens.json"),
-    join(azure, "msal_token_cache.bin"),
+    files(".azure", "msal_token_cache.json", "service_principal_entries.json"),
+    files(azure, "accessTokens.json", "msal_token_cache.bin"),
     join(azure, "service_principal_entries.json"),
     join(azure, "service_principal_entries.bin"),
-    awsConfig,
-    awsCredentials,
-    ...clusterFiles,
-    policyCluster,
-    join(registry, "config.json"),
-    join(operator, ".docker", "key.pem"),
+    [environment.AWS_CONFIG_FILE, environment.AWS_SHARED_CREDENTIALS_FILE],
+    [...clusterFiles, policyCluster],
+    join(pointers.DOCKER_CONFIG, "config.json"),
+    ".docker/key.pem",
     join(pointers.DOCKER_CERT_PATH, "key.pem"),
-    ...ghFiles(defaultGh),
-    ...ghFiles(join(environment.XDG_CONFIG_HOME, "gh")),
-    ...(process.platform === "win32"
-      ? ghFiles(join(appdata, "GitHub CLI"))
-      : []),
-    pgpass,
-    pgservice,
-    pgKey,
-    pgCert,
-    terraformConfig,
-    legacyTerraformConfig,
-    process.platform === "win32"
-      ? join(appdata, "terraform.rc")
-      : join(operator, ".terraformrc"),
+    ghFiles(".config/gh"),
+    ghFiles(join(xdg, "gh")),
+    windows ? ghFiles(join(appdata, "GitHub CLI")) : [],
+    [pointers.PGPASSFILE, pointers.PGSERVICEFILE],
+    [pointers.PGSSLKEY, pointers.PGSSLCERT],
+    [pointers.TF_CLI_CONFIG_FILE, pointers.TERRAFORM_CONFIG],
+    windows ? join(appdata, "terraform.rc") : ".terraformrc",
     join(terraformDir, "credentials.tfrc.json"),
-    join(pgTlsDir, "postgresql.key"),
-    join(pgTlsDir, "postgresql.crt"),
-    join(operator, "pg_service.conf"),
-    process.platform === "win32"
-      ? join(appdata, "postgresql", ".pg_service.conf")
-      : join(operator, ".pg_service.conf"),
-    process.platform === "win32"
-      ? join(appdata, "postgresql", "pgpass.conf")
-      : join(operator, ".pgpass"),
-    ...glabDirectories.map((directory) => join(directory, "config.yml")),
-    ...Object.values(selectedFiles),
-    join(operator, "pip client.pem"),
-    join(operator, "selected boto.cfg"),
-    join(environment.XDG_CONFIG_HOME, "pip", pipConfig),
-    join(environment.XDG_CONFIG_HOME, "sops", "age", "keys.txt"),
-    join(
-      process.platform === "win32"
-        ? appdata
-        : process.platform === "darwin"
-          ? join(operator, "Library", "Application Support")
-          : join(operator, ".config"),
-      "sops",
-      "age",
-      "keys.txt",
-    ),
+    files(pgTlsDir, "postgresql.key", "postgresql.crt"),
+    "pg_service.conf",
+    windows
+      ? files(pgTlsDir, ".pg_service.conf", "pgpass.conf")
+      : [".pg_service.conf", ".pgpass"],
+    join(pointers.GLAB_CONFIG_DIR, "config.yml"),
+    glabRoots.map((dir) => join(dir, "glab-cli/config.yml")),
+    Object.values(selectedFiles),
+    "pip client.pem",
+    "selected boto.cfg",
+    files(xdg, join("pip", pipConfig), "sops/age/keys.txt"),
+    join(platformConfig, "sops/age/keys.txt"),
     join(environment.VIRTUAL_ENV, pipConfig),
-    join(operator, process.platform === "win32" ? "pip" : ".pip", pipConfig),
-    cloudKey,
+    join(windows ? "pip" : ".pip", pipConfig),
+    pointers.GOOGLE_APPLICATION_CREDENTIALS,
     join(cloudConfig, cloudDefault),
-    join(cloudConfig, "access_tokens.db"),
-    join(cloudConfig, "access_tokens.db-journal"),
-    join(operator, ".config", "gcloud", "credentials.db"),
-    join(operator, ".config", "gcloud", cloudDefault),
-    ...(process.platform === "win32"
-      ? [
-          join(appdata, "gcloud", cloudDefault),
-          join(appdata, "gcloud", "access_tokens.db"),
-        ]
-      : []),
-    join(ssh, "id_rsa"),
-    join(operator, ".dockercfg"),
-    join(operator, ".cargo", "credentials"),
+    files(cloudConfig, "access_tokens.db", "access_tokens.db-journal"),
+    files(".config/gcloud", "credentials.db", cloudDefault),
+    windows
+      ? files(join(appdata, "gcloud"), cloudDefault, "access_tokens.db")
+      : [],
+    ".ssh/id_rsa",
+    ".dockercfg",
+    ".cargo/credentials",
     join(environment.CARGO_HOME, "credentials.toml"),
     join(pointers.POETRY_CONFIG_DIR, "auth.toml"),
     join(pointers.UV_CREDENTIALS_DIR, "credentials.toml"),
-    join(environment.XDG_CONFIG_HOME, "pypoetry", "auth.toml"),
-    join(environment.XDG_DATA_HOME, "uv", "credentials", "credentials.toml"),
-    join(environment.XDG_DATA_HOME, "python_keyring", "keyring_pass.cfg"),
-    join(operator, ".rye", "credentials"),
+    join(xdg, "pypoetry/auth.toml"),
+    join(data, "uv/credentials/credentials.toml"),
+    join(data, "python_keyring/keyring_pass.cfg"),
+    ".rye/credentials",
     join(environment.RYE_HOME, "credentials"),
-    join(operator, ".devpi/client/auth.json"),
-    join(operator, "selected devpi/auth.json"),
-    join(pythonConfig, "pypoetry/auth.toml"),
-    join(pythonConfig, "pypoetry/config.toml"),
-    join(pythonConfig, "uv/uv.toml"),
+    [".devpi/client/auth.json", "selected devpi/auth.json"],
+    files(platformConfig, "pypoetry/auth.toml", "pypoetry/config.toml"),
+    join(platformConfig, "uv/uv.toml"),
     join(pythonLocal, "hatch/config.toml"),
-    join(
-      pythonLocal,
-      process.platform === "win32" ? "pdm/pdm/config.toml" : "pdm/config.toml",
-    ),
-    ...(process.platform === "win32"
-      ? [join(appdata, "uv/data/credentials/credentials.toml")]
-      : []),
-    join(operator, ".gradle", "gradle.properties"),
+    join(pythonLocal, windows ? "pdm/pdm/config.toml" : "pdm/config.toml"),
+    windows ? [join(appdata, "uv/data/credentials/credentials.toml")] : [],
+    ".gradle/gradle.properties",
     join(environment.GRADLE_USER_HOME, "gradle.properties"),
-    join(operator, ".m2", "settings.xml"),
-    join(operator, ".m2", "settings-security.xml"),
-    join(operator, ".m2", "settings-security4.xml"),
-    join(environment.MAVEN_HOME, "conf", "settings.xml"),
-    join(operator, ".bundle", "config"),
+    files(
+      ".m2",
+      "settings.xml",
+      "settings-security.xml",
+      "settings-security4.xml",
+    ),
+    join(environment.MAVEN_HOME, "conf/settings.xml"),
+    ".bundle/config",
     join(environment.BUNDLE_USER_HOME, "config"),
-    join(operator, ".gem", "credentials"),
-    join(operator, ".local", "share", "gem", "credentials"),
-    join(environment.XDG_DATA_HOME, "gem", "credentials"),
-    join(
-      environment.XDG_DATA_HOME,
-      "MicrosoftCredentialProvider",
-      "SessionTokenCache.dat",
+    [".gem/credentials", ".local/share/gem/credentials"],
+    join(data, "gem/credentials"),
+    join(data, "MicrosoftCredentialProvider/SessionTokenCache.dat"),
+    ".nuget/NuGet/NuGet.Config",
+    join(environment.DOTNET_CLI_HOME, ".nuget/NuGet/NuGet.Config"),
+    join(environment.HELM_CONFIG_HOME, "registry/config.json"),
+    join(environment.XDG_RUNTIME_DIR, "containers/auth.json"),
+    ...[".config", xdg].map((dir) =>
+      files(
+        dir,
+        "gem/gemrc",
+        "NuGet/NuGet.Config",
+        "helm/repositories.yaml",
+        "containers/auth.json",
+      ),
     ),
-    join(operator, ".nuget", "NuGet", "NuGet.Config"),
-    join(environment.DOTNET_CLI_HOME, ".nuget", "NuGet", "NuGet.Config"),
-    join(environment.HELM_CONFIG_HOME, "registry", "config.json"),
-    join(environment.XDG_RUNTIME_DIR, "containers", "auth.json"),
-    ...[join(operator, ".config"), environment.XDG_CONFIG_HOME].flatMap(
-      (dir) => [
-        join(dir, "gem", "gemrc"),
-        join(dir, "NuGet", "NuGet.Config"),
-        join(dir, "helm", "repositories.yaml"),
-        join(dir, "containers", "auth.json"),
-      ],
-    ),
-    join(operator, ".docker", "config.json"),
-    join(operator, ".kube", "config"),
-    join(operator, ".npmrc"),
-    join(operator, "selected prefix", "etc", "npmrc"),
-    join(operator, ".yarnrc"),
-    join(operator, ".yarnrc.yml"),
-    join(operator, environment.YARN_RC_FILENAME),
-    join(environment.XDG_CONFIG_HOME, ".bunfig.toml"),
-    join(environment.XDG_CONFIG_HOME, "pnpm", "auth.ini"),
-    join(operator, ".config", "pnpm", "rc"),
-    join(operator, ".config", "pnpm", "config.yaml"),
-    join(operator, ".composer", "auth.json"),
-    join(operator, "selected composer", "auth.json"),
-    join(environment.XDG_CONFIG_HOME, "composer", "config.json"),
-    npm,
-    npmGlobal,
-  ];
-  const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
-  const createInput = async (i: number) => {
-    const path = protectedPaths[i]!;
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, contents[i]!, { mode: 0o600, flag: "wx" });
+    ".docker/config.json",
+    ".kube/config",
+    [".npmrc", "selected prefix/etc/npmrc"],
+    [".yarnrc", ".yarnrc.yml", environment.YARN_RC_FILENAME],
+    files(xdg, ".bunfig.toml", "pnpm/auth.ini"),
+    files(".config/pnpm", "rc", "config.yaml"),
+    [".composer/auth.json", "selected composer/auth.json"],
+    join(xdg, "composer/config.json"),
+    [pointers.NPM_CONFIG_USERCONFIG, "selected global npmrc"],
+  ].flat();
+  const siblings = new Map<string, string>();
+  const createSibling = async (path: string, contents: string) => {
+    await writeFile(path, contents);
+    siblings.set(path, contents);
   };
-  for (const i of existing.keys()) await createInput(i);
-  await writeFile(join(azure, "config"), "Azure settings");
-  const neighbor = join(registry, "ordinary-sibling.txt");
-  await writeFile(neighbor, "ordinary sibling");
-  const readFiles = () => `const fs = require("node:fs");
-if (fs.readFileSync(${JSON.stringify(join(azure, "config"))}, "utf8") !== "Azure settings") throw new Error("Cannot read ordinary Azure settings");
-if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
-if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
-  throw new Error("Cannot read the ordinary sibling");
-if (fs.readFileSync(${JSON.stringify(join(terraformDir, "ordinary.txt"))}, "utf8") !== "Terraform sibling")
-  throw new Error("Cannot read the ordinary Terraform sibling");
-const contents = [];
-const { resolve } = require("node:path");
-for (const file of ${JSON.stringify(protectedPaths.map((path) => relative(operator, path)))}) {
-  const path = resolve(${JSON.stringify(operator)}, file);
-  try { contents.push(fs.readFileSync(path, "utf8")); }
-  catch (error) { if (!["EACCES", "EPERM", "ENOENT"].includes(error.code)) throw error; }
-}`;
+  await createSibling(join(azure, "config"), "Azure settings");
+  await createSibling(
+    join(pointers.DOCKER_CONFIG, "ordinary-sibling.txt"),
+    "ordinary sibling",
+  );
   const program = "auth-filter.cjs";
   await resolvePatchProfile(
     false,
@@ -1302,18 +1199,36 @@ for (const file of ${JSON.stringify(protectedPaths.map((path) => relative(operat
       // An operator may have no AWS profile directory when the first model tool runs.
       expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
       await mkdir(awsDirectory);
-      await writeFile(join(terraformDir, "ordinary.txt"), "Terraform sibling");
-      await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
+      await createSibling(
+        join(terraformDir, "ordinary.txt"),
+        "Terraform sibling",
+      );
+      await createSibling(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
-      for (let i = existing.length; i < protectedPaths.length; i++)
-        await createInput(i);
-      const replacement = join(operator, "new-netrc");
-      await writeFile(replacement, contents[existing.indexOf(netrc)]!, {
-        mode: 0o600,
-        flag: "wx",
-      });
-      await rename(replacement, netrc);
       const repo = context.repository;
+      for (const file of lateFiles) await createInput(file);
+      const selectedGhFiles = ghFiles(join(repo, gh));
+      for (const file of selectedGhFiles)
+        await createInput(file, `synthetic selected gh input ${inputs.size}\n`);
+      await createInput(
+        join(repo, ".git/glab-cli/config.yml"),
+        "synthetic local glab login\n",
+      );
+      await replaceInput(at(".netrc"), at("new-netrc"));
+      const relativePaths = [...inputs.keys()].map((path) =>
+        relative(operator, path),
+      );
+      const readFiles = `const fs = require("node:fs");
+for (const [path, expected] of ${JSON.stringify([...siblings])}) {
+  if (fs.readFileSync(path, "utf8") !== expected) throw new Error("Cannot read ordinary file " + path);
+}
+const contents = [];
+const { resolve } = require("node:path");
+for (const file of ${JSON.stringify(relativePaths)}) {
+  const path = resolve(${JSON.stringify(operator)}, file);
+  try { contents.push(fs.readFileSync(path, "utf8")); }
+  catch (error) { if (!["EACCES", "EPERM", "ENOENT"].includes(error.code)) throw error; }
+}`;
       const input = "INTENDED PATCH BYTES\n";
       await writeFile(join(repo, "candidate.txt"), input);
       await writeFile(
@@ -1322,7 +1237,7 @@ for (const file of ${JSON.stringify(protectedPaths.map((path) => relative(operat
       );
       await writeFile(
         join(repo, program),
-        readFiles() +
+        readFiles +
           `\nprocess.stdout.write(process.env.FILTER_FIXTURE_SETTING + "\\n");
 for (const name of ${JSON.stringify(Object.keys(pointers))}) if (name in process.env) contents.push(name);
 process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n`,
@@ -1337,11 +1252,12 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
       const staged = ["cat-file", "blob", ":candidate.txt"];
       git(add);
       expect(git(staged)).toBe(
-        "from host\n" + contents.join("") + Object.keys(pointers).join(""),
+        "from host\n" +
+          [...inputs.values()].join("") +
+          Object.keys(pointers).join(""),
       );
       const modelRead =
-        readFiles() + "\nprocess.stdout.write(JSON.stringify(contents));";
-      const selectedGhFiles = ghFiles(join(repo, gh));
+        readFiles + "\nprocess.stdout.write(JSON.stringify(contents));";
       const probeWrites = `
 fs.writeFileSync(${JSON.stringify(join(repo, "write-control"))}, "writable");
 for (const path of ${JSON.stringify(selectedGhFiles)}) {
@@ -1350,13 +1266,11 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
 }`;
       expect(await inspectModel(modelRead + probeWrites)).toBe("[]");
       for (const path of selectedGhFiles)
-        expect(await readFile(path, "utf8")).toBe(
-          contents[protectedPaths.indexOf(path)]!,
-        );
+        expect(await readFile(path, "utf8")).toBe(inputs.get(path)!);
       if (patchSnapshotWindowsConfig().includes('"elevated"'))
         console.info(
           "Windows model denied selected authentication files before snapshot",
-          protectedPaths.length,
+          inputs.size,
         );
       const snapshot = {
         GIT_INDEX_FILE: join(repo, "snapshot-index"),
@@ -1385,14 +1299,10 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
           snapshotConfig: context.snapshotConfig,
         },
       });
-      const sharedCredentials = join(awsDirectory, "credentials");
-      const replacementCredentials = join(awsDirectory, "replacement");
-      await writeFile(
-        replacementCredentials,
-        contents[protectedPaths.indexOf(sharedCredentials)]!,
-        { mode: 0o600 },
+      await replaceInput(
+        join(awsDirectory, "credentials"),
+        join(awsDirectory, "replacement"),
       );
-      await rename(replacementCredentials, sharedCredentials);
       const modelReads = await inspectModel(modelRead);
       expect({ staged: git(staged, snapshot), modelReads }).toEqual({
         staged: "from shell policy\nintended patch bytes\n",
@@ -1404,47 +1314,39 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
     },
     async (repository) => {
       const literalTilde = join(repository, "~");
-      const selectedGh = join(repository, gh);
-      await mkdir(selectedGh);
-      for (const path of ghFiles(selectedGh)) {
-        protectedPaths.push(path);
-        contents.push("synthetic selected gh input " + contents.length + "\n");
-      }
-      const localGlabDir = join(repository, ".git", "glab-cli");
-      glabDirectories.push(localGlabDir);
-      protectedPaths.push(join(localGlabDir, "config.yml"));
-      contents.push("synthetic local glab login\n");
+      await mkdir(join(repository, gh));
       await mkdir(literalTilde);
       environment.NETRC = relative(repository, selectedNetrc);
-      const scopedCookie = relative(repository, paths[2]!).replaceAll(
-        "\\",
-        "/",
-      );
+      const relativePath = (file: string, dir = repository) =>
+        relative(dir, file).replaceAll("\\", "/");
+      const scopedCookie = relativePath(auth(2));
       expect(scopedCookie.startsWith("../")).toBe(true);
-      const values = [paths[0]!, "~/auth 1.txt", scopedCookie, paths[3]!];
-      if (drive !== undefined) {
+      const settings = {
+        "http.cookieFile": auth(0),
+        "http.sslKey": "~/auth 1.txt",
+        "http.https://scoped.example.invalid/.cookieFile": scopedCookie,
+        "http.https://scoped.example.invalid/.sslKey": auth(3),
+        ...(drive && {
+          "http.https://drive.example.invalid/.cookieFile":
+            drive + relative(repository, auth(4)),
+          "http.https://root.example.invalid/.sslKey": auth(5).slice(
+            drive.length,
+          ),
+        }),
+        "gpg.format": "ssh",
+        "user.signingKey": "~/signing identity.pub",
+        "credential.plaintextStorePath": at("configured store"),
+        "http.sslCert": "~/origin identity.pem",
+        "http.https://proxy.example.invalid/.proxySSLCert":
+          "~/" + relativePath(at("proxy identity.pem"), literalTilde),
+        "http.proxySSLKey": at("proxy key.pem"),
+        "http.https://proxy.example.invalid/.proxySSLKey": relativePath(
+          at("scoped proxy key.pem"),
+        ),
+      };
+      if (drive)
         expect(repository.slice(0, 2).toUpperCase()).toBe(drive.toUpperCase());
-        values.push(
-          drive + relative(repository, paths[4]!),
-          paths[5]!.slice(drive.length),
-        );
-      }
-      for (const [setting, value] of [
-        ...settings.map((setting, i) => [setting, values[i]!] as const),
-        ["gpg.format", "ssh"],
-        ["user.signingKey", "~/signing identity.pub"],
-        ["credential.plaintextStorePath", join(operator, "configured store")],
-        ["http.sslCert", "~/origin identity.pem"],
-        [
-          "http.https://proxy.example.invalid/.proxySSLCert",
-          "~/" + relative(literalTilde, proxyCert).replaceAll("\\", "/"),
-        ],
-        ["http.proxySSLKey", proxyKey],
-        [
-          "http.https://proxy.example.invalid/.proxySSLKey",
-          relative(repository, scopedProxyKey).replaceAll("\\", "/"),
-        ],
-      ] as const)
+      for (const [setting, value] of Object.entries(settings))
         execFileSync("git", ["config", "--file", config, setting, value]);
       return captureFilterPermissions(
         repository,

@@ -1050,6 +1050,7 @@ async function collectCredentialPointers(
   }
   if (process.platform !== "win32") {
     selectFile("/etc", pipConfig);
+    selectFile("/etc", join("uv", "uv.toml"));
     selectFile("/etc", "boto.cfg");
   }
   for (const prefix of [

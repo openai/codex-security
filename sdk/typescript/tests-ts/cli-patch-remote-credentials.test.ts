@@ -680,9 +680,12 @@ test.each([
   "checkout-relative",
   "operator-absolute",
   "checkout-include",
+  "checkout-provider",
   "checkout-proxy",
   "checkout-match",
-  ...(process.platform === "win32" ? [] : ["checkout-shell"]),
+  ...(process.platform === "win32"
+    ? []
+    : ["checkout-shell", "checkout-nested-ssh"]),
   "changed-config",
 ] as const)(
   "binds %s OpenSSH configuration during hostname lookup and transport",
@@ -727,8 +730,20 @@ test.each([
         : join(external, name).replaceAll("\\", "/");
     const checkoutProxy = location === "checkout-proxy";
     const checkoutMatch = location === "checkout-match";
-    const proxy =
-      checkoutProxy && process.platform !== "win32"
+    const nested = location === "checkout-nested-ssh";
+    const next = join(external, "nested config");
+    if (nested)
+      await writeFile(next, `ProxyCommand node "${checkoutScript}" proxy\n`, {
+        mode: 0o600,
+      });
+    const match = checkoutMatch ? checkoutScript : target;
+    const matchPath =
+      process.platform === "win32" && !match.includes(" ")
+        ? match
+        : `'${match}'`;
+    const proxy = nested
+      ? `ssh -F "${next}" 127.0.0.1`
+      : checkoutProxy && process.platform !== "win32"
         ? `"${checkoutScript}"`
         : `node "${checkoutProxy ? checkoutScript : target}"`;
     const proxyArgs =
@@ -738,8 +753,11 @@ test.each([
       [
         "Host *",
         "  BatchMode yes",
+        ...(location === "checkout-provider"
+          ? [`  PKCS11Provider "${checkoutScript}"`]
+          : []),
         `  ProxyCommand ${proxy} proxy${proxyArgs}`,
-        `Match exec "node \\\"${checkoutMatch ? checkoutScript : target}\\\" match"`,
+        `Match exec "node ${matchPath} match"`,
         "  LogLevel ERROR",
         "",
       ].join("\n"),
@@ -813,7 +831,13 @@ test.each([
       expect(invoked, stderr).not.toContain(":-c");
       return;
     }
-    if (checkoutInclude || checkoutProxy || checkoutMatch) {
+    if (
+      checkoutInclude ||
+      checkoutProxy ||
+      checkoutMatch ||
+      nested ||
+      location === "checkout-provider"
+    ) {
       expect(invoked, stderr).toBe("");
       expect(hostnameCommand, stderr).toBeUndefined();
       expect(stderr).toMatch(/SSH|transport/iu);

@@ -16,6 +16,7 @@ import {
   runWorkflow,
   patchDirectories,
   runSavedPublication,
+  runPublicationWorkflow,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -151,8 +152,8 @@ done
     GITLAB_HOST: host,
     PATCH_HELPER_LOG: marker,
   };
-  const outcome = await runWorkflow(
-    ["patch", "Synthetic issue", "--create-pr", "--json"],
+  const outcome = await runPublicationWorkflow(
+    "issue",
     {
       currentDirectory: directory,
       environment,

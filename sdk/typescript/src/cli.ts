@@ -1652,15 +1652,6 @@ async function managedCodexHomes(environment: NodeJS.ProcessEnv) {
   ];
 }
 
-function windowsMissingStorePattern(path: string): string {
-  const escaped = escapeCredentialGlob(path);
-  const file = basename(escaped);
-  // A missing literal can become a directory during native Windows ACL setup.
-  // Braces alone do not select a native glob. The other alternative is a literal
-  // question mark, which cannot name a Windows file.
-  return join(dirname(escaped), `{${file},[?]}`);
-}
-
 async function patchWorkspaceProfile(
   directory: string,
   environment: NodeJS.ProcessEnv,
@@ -1711,29 +1702,41 @@ async function patchWorkspaceProfile(
     }
     return false;
   };
+  const windows = process.platform === "win32";
+  const missing = new Map<string, string[]>();
   for (const path of stores) {
     // Bubblewrap cannot mount a second deny inside a masked directory.
     // A writable carveout reopens its subtree and needs its own denies.
     if (hasDeniedParent(path)) continue;
-    if (process.platform === "win32" && !existsSync(path)) {
-      filesystem[windowsMissingStorePattern(path)] = "deny";
-    } else if (
-      (process.platform === "linux" || process.platform === "darwin") &&
-      !existsSync(dirname(path))
-    ) {
-      // Bubblewrap cannot mount below a missing parent. Seatbelt can compile
-      // the same subtree pattern without resolving every absent literal root.
-      // The impossible [.] filename starts the native glob at the parent.
-      const leaf = escapeCredentialGlob(basename(path));
-      const pattern = join(
-        escapeCredentialGlob(dirname(path)),
-        `{[.],${leaf},${leaf}/**}`,
-      );
-      filesystem[pattern] = "deny";
-      // Bound the native walk by Linux PATH_MAX, which exceeds the component count.
-      filesystem["glob_scan_max_depth"] = 4096;
-    } else filesystem[path] = { ".": "deny" };
+    const needsGlob = windows
+      ? !existsSync(path)
+      : (process.platform === "linux" || process.platform === "darwin") &&
+        !existsSync(dirname(path));
+    if (!needsGlob) {
+      filesystem[path] = { ".": "deny" };
+      continue;
+    }
+    // Keep the immediate scan root, including when it later becomes a directory link.
+    const escaped = escapeCredentialGlob(path);
+    const parent = dirname(escaped);
+    const names = missing.get(parent) ?? [];
+    names.push(basename(escaped));
+    missing.set(parent, names);
   }
+  for (const [parent, names] of missing) {
+    // Windows ACL setup materializes absent literal paths. Bubblewrap cannot
+    // mount below a missing parent and its glob walk matches regular files,
+    // so include descendants as well. Seatbelt compiles the same subtree rule.
+    // An impossible filename ensures the native parser treats this as a glob.
+    const leaves = names.join(",");
+    const group = windows ? `{${leaves},[?]}` : `{[.],${leaves}}`;
+    // Seatbelt emits an ancestor rule per separator. Share one descendant
+    // suffix across the sibling names to keep those rules linear in size.
+    const pattern = windows ? group : `{${group},${group}/**}`;
+    filesystem[join(parent, pattern)] = "deny";
+  }
+  // Linux PATH_MAX exceeds the possible component count for either POSIX backend.
+  if (missing.size && !windows) filesystem["glob_scan_max_depth"] = 4096;
   return profile;
 }
 
@@ -13560,46 +13563,25 @@ function unsupportedSshCommand() {
   );
 }
 
-function sshMatchCommands(line: string, commands: string[]) {
-  // Match uses OpenSSH's argv_split before passing an exec operand to the shell.
-  const words: string[] = [];
-  let quote = "";
-  let word: string | undefined;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i]!;
-    if (!quote && (char === " " || char === "\t")) {
-      if (word !== undefined) words.push(word);
-      word = undefined;
+// Accept the common syntax of OpenSSH's older strdelim and newer argv_split.
+// Escapes and adjoining quoted parts can select different words across versions.
+const sshConfigWord = /^(?:"([^"\\\r\f]*)"|([^'"\\= \t\r\f]+))(?:[ \t]+|$)/u;
+
+function sshMatchCommands(args: string, commands: string[]) {
+  if (!/exec/iu.test(args.replace(/['"]/gu, ""))) return;
+  while (args && !args.startsWith("#")) {
+    const criterion = /^!?([a-z]+)(=|[ \t]+|$)/iu.exec(args);
+    if (!criterion) throw unsupportedSshCommand();
+    args = args.slice(criterion[0].length);
+    if (/^(?:canonical|final|all)$/iu.test(criterion[1]!)) {
+      if (criterion[2] === "=") throw unsupportedSshCommand();
       continue;
     }
-    if (char === "#" && word === undefined) break;
-    word ??= "";
-    const next = line[i + 1];
-    if (
-      char === "\\" &&
-      (next === "'" ||
-        next === '"' ||
-        next === "\\" ||
-        (!quote && next === " "))
-    )
-      word += line[++i];
-    else if (!quote && (char === "'" || char === '"')) quote = char;
-    else if (char === quote) quote = "";
-    else word += char;
-  }
-  if (quote) throw unsupportedSshCommand();
-  if (word !== undefined) words.push(word);
-  for (let i = 0; i < words.length; i++) {
-    const criterion = words[i]!.replace(/^!/u, "");
-    if (/^(?:all|canonical|final)$/iu.test(criterion)) continue;
-    const equals = criterion.indexOf("=");
-    const arg = equals < 0 ? words[++i] : criterion.slice(equals + 1);
-    // Older Match readers split '=' inside tokens and after whitespace.
-    if (/^exec(?:=|$)/iu.test(criterion)) {
-      if (!arg || arg.startsWith("=")) throw unsupportedSshCommand();
-      commands.push(arg);
-    } else if (arg && /=!?exec(?:[ \t=]|$)/iu.test(arg))
-      throw unsupportedSshCommand();
+    const arg = sshConfigWord.exec(args);
+    if (!arg) throw unsupportedSshCommand();
+    if (criterion[1]!.toLowerCase() === "exec")
+      commands.push((arg[1] ?? arg[2])!);
+    args = args.slice(arg[0].length);
   }
 }
 
@@ -13613,17 +13595,46 @@ function sshConfigReferences(
     // OpenSSH's keyword reader accepts double quotes and an optional '='.
     // Detect unusual spellings too, then require unambiguous static syntax.
     const keyword =
-      /^[\s=]*(include|match|proxycommand|localcommand|knownhostscommand)/iu
+      /^[\s=]*(include|match|proxycommand|localcommand|knownhostscommand|pkcs11provider|smartcarddevice|securitykeyprovider|xauthlocation)/iu
         .exec(line.replaceAll('"', ""))?.[1]
         ?.toLowerCase();
     if (!keyword) continue;
     const directive =
-      /^[ \t\r]*([a-z]+)(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
+      /^[ \t\r]*([a-z\d]+)(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
     if (!directive || directive[1]!.toLowerCase() !== keyword)
       throw keyword === "include"
         ? unsupportedSshInclude()
         : unsupportedSshCommand();
     let args = directive[2]!;
+    if (
+      /^(?:pkcs11provider|smartcarddevice|securitykeyprovider|xauthlocation)$/u.test(
+        keyword,
+      )
+    ) {
+      const word = sshConfigWord.exec(args);
+      if (
+        !word ||
+        (word[0].length < args.length &&
+          !args.slice(word[0].length).startsWith("#"))
+      )
+        throw unsupportedSshCommand();
+      const file = (word[1] ?? word[2])!;
+      if (
+        keyword === "securitykeyprovider" &&
+        (file.toLowerCase() === "internal" || file === "$SSH_SK_PROVIDER")
+      )
+        continue;
+      if (keyword !== "xauthlocation" && file.toLowerCase() === "none")
+        continue;
+      if (
+        !isAbsolute(file) ||
+        /[%$\x60\ufffd]/u.test(file) ||
+        (keyword === "xauthlocation" && !/^[a-zA-Z0-9_./:+-]+$/u.test(file))
+      )
+        throw unsupportedSshCommand();
+      commands.push(quoteGitArgument(file));
+      continue;
+    }
     if (keyword !== "include") {
       if (keyword === "match") sshMatchCommands(args, commands);
       else {
@@ -13674,6 +13685,33 @@ async function bindSshConfiguration(
     const words = literalTransportWords(command);
     if (!words?.[0] || (process.platform === "win32" && command.includes("\\")))
       throw unsupportedSshCommand();
+    const [program, first, ...rest] = words;
+    // A nested SSH client selects a new configuration. Interpreter options
+    // and dispatchers can select a second program by name or inline code.
+    if (
+      /^(?:ssh|eval|source|\.)$/iu.test(
+        basename(program!).replace(/\.exe$/iu, ""),
+      )
+    )
+      throw unsupportedSshCommand();
+    const stockProxy =
+      /^\/usr\/(?:lib|libexec)\/systemd\/systemd-ssh-proxy (?:%h|unix\/run\/ssh-unix-local\/socket) %p$/u.test(
+        command,
+      ) ||
+      command === "/usr/bin/sss_ssh_knownhostsproxy -p %p %h" ||
+      command === "/usr/bin/sss_ssh_knownhosts %H";
+    if (stockProxy) words.length = 1;
+    else if (first !== undefined) {
+      const netcat = /^(?:nc|ncat|netcat)(?:\.exe)?$/iu.test(
+        basename(program!),
+      );
+      if (
+        (!netcat && !first.includes("/")) ||
+        first.startsWith("-") ||
+        rest.some((arg) => arg.startsWith("-"))
+      )
+        throw unsupportedSshCommand();
+    }
     for (const [index, word] of words.entries()) {
       if (index === 0 && /^[a-z\d_.+-]+$/iu.test(word)) {
         invocation.launchers.add(word);
@@ -14009,10 +14047,21 @@ async function pinPublicationCommand(
 
   const sshEnvironment: NodeJS.ProcessEnv = {};
   if (kind === "ssh") {
-    for (const name of ["SSH_ASKPASS", "SHELL"]) {
+    for (const name of [
+      "SSH_ASKPASS",
+      "SHELL",
+      "SSH_SK_PROVIDER",
+      "SSH_SK_HELPER",
+      "SSH_PKCS11_HELPER",
+    ]) {
       const value = environmentEntry(dependencies.environment, name);
       if (!value) {
         sshEnvironment[name] = value;
+        continue;
+      }
+      if (name === "SSH_SK_PROVIDER") {
+        sshEnvironment[name] =
+          value.toLowerCase() === "internal" ? value : await bindFile(value);
         continue;
       }
       // OpenSSH searches PATH for its prompt. It executes SHELL directly
