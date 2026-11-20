@@ -3135,7 +3135,7 @@ and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `PIP_CONFIG_FILE`, `PIP_CLIENT_CERT`, and pip configuration in standard user and
 system locations, `VIRTUAL_ENV`, or `CONDA_PREFIX`. Git delegates also strip
 `MYSQL_PWD`, `PGPASSWORD`, `DATABASE_URL` and environment values containing
-authenticated HTTP URLs. For credential file
+URLs with embedded passwords or HTTP and FTP user credentials. For credential file
 selectors such as `GIT_SSL_KEY`, `REGISTRY_AUTH_FILE`, and
 `AWS_WEB_IDENTITY_TOKEN_FILE`, delegates lose the selector and filesystem
 access to the selected file. The rules protect

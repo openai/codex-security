@@ -126,6 +126,7 @@ import {
   filterCommandConfig,
   proxyUserinfo,
   removePatchCredentials,
+  withoutUrlCredentials,
   writePublicationHooks,
   type WindowsGitConfig,
   gitConfigPipePrefix,
@@ -2154,7 +2155,7 @@ for (const [name, value] of bindings) {
   else process.env[name] = value;
 }
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${patchCredentialKind});
+removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${patchCredentialKind}, ${withoutUrlCredentials});
 if (windowsConfig) {
   const { prefix, binding, coordinator, config } = windowsConfig;
   const files = (${snapshotConfigBytes})(config.files, prefix);

@@ -82,6 +82,7 @@ export function removePatchCredentials(
   stripAwsCredentials?: boolean,
   proxyCredentials = proxyUserinfo,
   credentialKind = patchCredentialKind,
+  stripUrlCredentials = withoutUrlCredentials,
 ): void {
   for (const [name, value] of Object.entries(environment)) {
     if (
@@ -92,7 +93,7 @@ export function removePatchCredentials(
       // Git command config is filtered as key/value pairs by filterCommandConfig.
       (!/^GIT_CONFIG_(?:PARAMETERS|(?:KEY|VALUE)_\d+)$/iu.test(name) &&
         value !== undefined &&
-        /\bhttps?:\/{1,3}[^/@?#\s]+@/iu.test(value)) ||
+        stripUrlCredentials(value) !== value) ||
       (/^(?:https?|all|pip)_proxy$/i.test(name) &&
         value !== undefined &&
         proxyCredentials.test(value))
@@ -101,15 +102,13 @@ export function removePatchCredentials(
   }
 }
 
-// HTTP credentials can be a username alone. SSH usernames select the remote
-// account and remain available to validators unless a password is present.
+// HTTP and FTP can carry a token as the username. For other URI schemes,
+// preserve username-only account selectors such as ssh://git@host.
 export function withoutUrlCredentials(value: string): string {
   return value.replace(
-    /((?:https?|ftps?|ssh(?:\+git)?|git(?:\+ssh)?|socks(?:4a?|5h?)?):\/\/)([^/?#\s]+@)/gi,
-    (authority, scheme, userinfo) =>
-      /^(?:https?|ftps?):/i.test(scheme) || userinfo.includes(":")
-        ? scheme
-        : authority,
+    /((?:https?|ftps?):\/{1,3}|:\/\/)([^/?#\s]+@)/gi,
+    (authority, prefix, userinfo) =>
+      prefix !== "://" || userinfo.includes(":") ? prefix : authority,
   );
 }
 
@@ -303,7 +302,7 @@ const plan = JSON.parse(
 );
 const environment = { ...process.env };
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo}, ${patchCredentialKind});
+removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo}, ${patchCredentialKind}, withoutUrlCredentials);
 environment.CODEX_HOME = plan.home;
 
 const windowsConfig = plan.windowsConfig;

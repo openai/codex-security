@@ -154,6 +154,8 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
       },
     }),
     DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
+    MONGODB_URI: "mongodb+srv://fixture:synthetic@db.example.test/fixture",
+    REDIS_URI: "redis://:synthetic@cache.example.test",
     MYSQL_PWD: "synthetic-database-password",
     AWS_BEARER_TOKEN_BEDROCK: "synthetic-service-token",
     TF_TOKEN_registry_example_test: "synthetic-terraform-token",
@@ -172,7 +174,7 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
     ),
     ...credentials,
     TF_VAR_workspace: "example",
-    SNAPSHOT_USER_SETTING: "preserved",
+    SNAPSHOT_USER_SETTING: "ssh://git@repository.example.test/project",
     PIP_FIND_LINKS: "https://packages.example.test/archives/user@release",
     ALL_PROXY: "socks5://proxy.example.test:1080#note@proxy.example.test",
   };
@@ -202,7 +204,7 @@ process.stdout.write(JSON.stringify({
   ];
   const expected = {
     input: "safe patch\n",
-    setting: "preserved",
+    setting: env.SNAPSHOT_USER_SETTING,
     proxy: env.ALL_PROXY,
     workspace: env.TF_VAR_workspace,
     links: env.PIP_FIND_LINKS,
