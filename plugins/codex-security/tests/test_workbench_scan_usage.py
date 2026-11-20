@@ -3737,3 +3737,17 @@ def test_delayed_receipt_replaces_only_its_own_turn_counters(scan_usage, tmp_pat
     assert usage.tokens == _counts(150, 7 + second_cache, 0)
     assert models == {"model-a": _counts(100, 7, 0), "model-b": _counts(50, second_cache, 0)}
     assert usage.warnings == set()
+
+
+def test_receipt_does_not_resolve_another_turns_counter_regression(scan_usage, tmp_path):
+    at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    events = [
+        _event(at, "turn_context", {"turn_id": "first"}),
+        _token_event(at, 100, 0),
+        _response_event(at, "scan-parent", "first", 100, 0, turn_id="first"),
+        _event(at, "turn_context", {"turn_id": "second"}),
+        _token_event(at, 150, 0),
+        _token_event(at, 30, 0),
+    ]
+    usage = _measure_rollout(scan_usage, _rollout(tmp_path, "scan-parent", events), at, at)
+    assert usage.warnings == {"token_counter_regressed"}

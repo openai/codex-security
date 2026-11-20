@@ -1330,6 +1330,7 @@ class _TurnUsage:
         self.has_turn_total = False
         self.ambiguous_cache = False
         self.ambiguous_model = False
+        self.counter_regressed = False
 
 
 def _read_rollout_usage_with_extent(
@@ -1665,7 +1666,7 @@ def _read_rollout_usage_with_extent(
                 and in_window
                 and (owner_turn_id is None or current_turn_id == owner_turn_id)
             ):
-                warnings.add("token_counter_regressed")
+                turn.counter_regressed = True
                 continue
             if reset:
                 prefix_unclassified = 0
@@ -1810,8 +1811,8 @@ def _read_rollout_usage_with_extent(
                 warnings.add("token_receipts_incomplete")
             _add_token_usage(turn.total, remainder)
             _add_token_usage(turn.models.setdefault(None, _empty_token_usage()), remainder)
-        if turn.has_receipts:
-            warnings.discard("token_counter_regressed")
+        if turn.counter_regressed and not turn.has_receipts:
+            warnings.add("token_counter_regressed")
         _add_token_usage(finished_total, turn.total)
         for model, usage in turn.models.items():
             _add_token_usage(finished_models.setdefault(model, _empty_token_usage()), usage)
