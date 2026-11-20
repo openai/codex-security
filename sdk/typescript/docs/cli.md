@@ -2980,7 +2980,9 @@ URL-specific values. Delegates also have deny rules for the account's `.ssh`
 directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
 `.kube/config`, and `.npmrc`. The rules cover the home-directory defaults
 and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, and
-`NPM_CONFIG_USERCONFIG`. They also cover Google Cloud Application Default
+`NPM_CONFIG_USERCONFIG`. They protect `auth.json` in the default Codex home,
+the selected `CODEX_HOME` and the Codex Security credential home.
+They also cover Google Cloud Application Default
 Credentials in the standard gcloud directory, the same file under
 `CLOUDSDK_CONFIG`, and the file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
@@ -2990,6 +2992,10 @@ PostgreSQL password and service file protection covers `PGPASSFILE`,
 the directory selected by `PGSYSCONFDIR`.
 TLS client identity protection covers `PGSSLKEY`, `PGSSLCERT`, and the
 standard per-user `postgresql.key` and `postgresql.crt` files.
+Terraform protection covers `TF_CLI_CONFIG_FILE`, `TERRAFORM_CONFIG`, the
+standard CLI configuration and login files, and existing `*.tfrc` and
+`*.tfrc.json` fragments in the user's Terraform configuration directory.
+Git delegates also run with Terraform's `TF_TOKEN_*` variables removed.
 The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows

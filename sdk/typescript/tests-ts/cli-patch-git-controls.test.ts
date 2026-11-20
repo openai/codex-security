@@ -179,6 +179,115 @@ describe("patch Git administration", () => {
     });
   }
 
+  test("snapshot config preserves native scopes and conditional includes after the original files become unavailable", async () => {
+    const root = await fixtures.create("patch-config-graph-");
+    const home = join(root, "operator [é]");
+    const repository = join(home, "checkout");
+    const system = join(home, "system");
+    const command = join(home, "command");
+    const staged = join(root, "staged");
+    await mkdir(repository, { recursive: true });
+    await mkdir(join(home, "git"));
+    await mkdir(join(home, ".ssh"));
+    await mkdir(staged);
+    const sources = {
+      system: "[fixture]\nvalue = system\xff\n",
+      command: "[include]\npath = branch\n",
+      "git/config": "[fixture]\nvalue = xdg\n",
+      ".gitconfig":
+        "[fixture]\nvalue = home\nboolean\nempty =\n" +
+        '[includeIf "gitdir:./checkout/.git"]\npath = nested\n' +
+        '[includeIf "onbranch:alternate"]\npath = branch\n' +
+        '[includeIf "onbranch:dormant"]\npath = .ssh/settings\npath = service.ini\n' +
+        "[http]\nextraHeader = Authorization: synthetic-value\n",
+      nested: '[fixture "quoted.\\\"subsection"]\nraw = " a #; \\\\ \\n\\t "\n',
+      branch: "[fixture]\nvalue = branch\n",
+      ".ssh/settings": "[fixture]\nvalue = synthetic-value-ssh\n",
+      "service.ini": "[database]\npassword = synthetic-value-pg\n",
+    };
+    for (const [name, text] of Object.entries(sources))
+      await writeFile(join(home, name), Buffer.from(text, "latin1"));
+    const service = join(home, "pg_service.conf");
+    await link(join(home, "service.ini"), service);
+    const environment: NodeJS.ProcessEnv = {
+      HOME: home,
+      XDG_CONFIG_HOME: home,
+      GIT_CONFIG_NOSYSTEM: "0",
+      GIT_CONFIG_GLOBAL: undefined,
+      GIT_CONFIG_SYSTEM: system,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "include.path",
+      GIT_CONFIG_VALUE_0: command,
+    };
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        env: { ...process.env, ...environment },
+      });
+    git("init", "--initial-branch=main");
+    git("config", "fixture.value", "local");
+    const values = (branch: string) => {
+      git("symbolic-ref", "HEAD", "refs/heads/" + branch);
+      return git(
+        "config",
+        "--null",
+        "--show-scope",
+        "--get-regexp",
+        "^fixture\\.",
+      );
+    };
+    const alternate = values("alternate");
+    const main = values("main");
+    expect(main.includes(0xff)).toBe(true);
+    expect(main.includes("subsection")).toBe(true);
+    expect(main.equals(alternate)).toBe(false);
+    const controls = await capturePatchGitControls(
+      repository,
+      async (_root, cwd, args, options) =>
+        runGitRepositoryCommand("git", args, cwd, {
+          ...options,
+          trim: false,
+          environment: { ...environment, ...options?.environment },
+        }),
+      true,
+      true,
+      undefined,
+      [],
+      {
+        global: undefined,
+        system,
+        noSystem: "0",
+        xdgConfigHome: home,
+        objectDirectory: undefined,
+        alternateObjectDirectories: undefined,
+      },
+      false,
+      "sandbox",
+      new Set(),
+      null,
+      home,
+      null,
+      environment,
+      undefined,
+      // Exercise the Windows graph on every platform.
+      () => {},
+    );
+    const config = controls!.snapshotConfig!;
+    await controls!.protectShellCredentialFiles({ PGSERVICEFILE: service });
+    const file = (index: number) => join(staged, String(index));
+    for (const [index, bytes] of config.files.entries()) {
+      const contents = Buffer.from(bytes, "base64");
+      expect(contents.includes("synthetic-value")).toBe(false);
+      await writeFile(file(index), contents);
+    }
+    for (const name of Object.keys(sources)) await rm(join(home, name));
+    environment["GIT_CONFIG_GLOBAL"] = file(config.global!);
+    environment["GIT_CONFIG_SYSTEM"] = file(config.system!);
+    environment["GIT_CONFIG_VALUE_0"] = file(config.commands[command]!);
+    expect(values("main")).toEqual(main);
+    expect(values("alternate")).toEqual(alternate);
+  });
+
   test("checks an active origin against the include edge that supplied it", async () => {
     const directory = await fixtures.create("patch-include-origin-");
     const external = join(
