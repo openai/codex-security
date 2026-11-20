@@ -256,11 +256,13 @@ export async function readAcceptedDiscovery(
     }
   }
   if (history.length) {
+    const prefix = workerArtifactPrefix(artifacts.scanDir, worker.resultPath);
     result = await reconcileAcceptedWorkerHistory(
       context,
       result,
       history,
       receiptDigests,
+      (row) => comparableSurface(row, prefix, receiptDigests),
     );
     if (admission === "new") validateWorkerReport(result);
     validateRetainedCoverage(result.reviewState);
@@ -283,6 +285,10 @@ export async function readAcceptedDiscovery(
   };
 }
 
+function workerArtifactPrefix(scanDir: string, resultPath: string): string {
+  return relative(scanDir, dirname(resultPath)).split(sep).join("/");
+}
+
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function scanCoverage(
   worker: AcceptedDiscovery,
@@ -291,9 +297,7 @@ export function scanCoverage(
   receiptDigests: ReadonlyMap<string, string> = new Map(),
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
-  const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
-    .split(sep)
-    .join("/");
+  const artifactPrefix = workerArtifactPrefix(scanDir, worker.resultPath);
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
     workerId: worker.id,
@@ -310,7 +314,9 @@ export function scanCoverage(
   function originFor(field: string, item: Row) {
     if (!history.length) return provenance;
     const comparable = (row: Row) =>
-      comparableCoverageRow(field, row, artifactPrefix, receiptDigests);
+      field === "surfaces"
+        ? comparableSurface(row, artifactPrefix, receiptDigests)
+        : row;
     let snapshots = remaining.get(field);
     if (!snapshots) {
       snapshots = history.map(({ attempt, coverage }) => {
@@ -442,13 +448,11 @@ export function scanCoverage(
 }
 
 /** Compare accepted content and readable receipt bytes once per saved occurrence. */
-function comparableCoverageRow(
-  field: string,
+function comparableSurface(
   item: Record<string, unknown>,
   artifactPrefix: string,
   receiptDigests: ReadonlyMap<string, string>,
 ) {
-  if (field !== "surfaces") return item;
   const row = structuredClone(item);
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = row.provenance as Record<string, unknown> | undefined;

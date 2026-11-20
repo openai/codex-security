@@ -1121,9 +1121,14 @@ async function mergeSavedDraft(
   input: ScanDraftInput,
   result: ScanDraftInput,
   savedSources: SavedScanDraft[],
-  publication?: {
-    sameSavedSurface: (left: JsonObject, right: JsonObject) => boolean;
+  {
+    sameSavedSurface,
+    checkpoint,
+    surfaceContent = (row) => ({ ...row, receiptRefs: row.receiptRefs ?? [] }),
+  }: {
+    sameSavedSurface?: (left: JsonObject, right: JsonObject) => boolean;
     checkpoint?: ArtifactContext;
+    surfaceContent?: (row: JsonObject) => JsonObject;
   },
 ) {
   const sources = savedSources.map(({ input }) => input);
@@ -1132,7 +1137,7 @@ async function mergeSavedDraft(
   inferSavedIds(
     drafts.map((draft) => draft.reviewState.surfaces),
     normalizeSurfaces,
-    ({ id: _id, ...row }) => ({ ...row, receiptRefs: row.receiptRefs ?? [] }),
+    ({ id: _id, ...row }) => surfaceContent(row),
   );
   inferSavedIds(
     drafts.map((draft) => draft.reviewState.deferred),
@@ -1311,8 +1316,7 @@ async function mergeSavedDraft(
     retainedFinal?.input,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  if (publication?.checkpoint)
-    await saveScanDraftCheckpoint(publication.checkpoint, input, false);
+  if (checkpoint) await saveScanDraftCheckpoint(checkpoint, input, false);
   const resolvedFollowUpSurfaces = sources.flatMap((source) => {
     const pending = source.reviewState.deferred;
     if (
@@ -1348,13 +1352,13 @@ async function mergeSavedDraft(
 
   for (const source of sources) {
     // Only a writer may assign new receipt ownership from another saved draft.
-    if (publication)
+    if (sameSavedSurface)
       retainSavedReceiptOwnership(
         result,
         source,
         ambiguousDeferredIds,
         resolvedSurfaces,
-        publication.sameSavedSurface,
+        sameSavedSurface,
       );
     const deferred = result.reviewState.deferred as JsonObject[];
     const dispositions = [
@@ -1792,6 +1796,7 @@ export async function reconcileAcceptedWorkerHistory(
   input: ScanDraftInput,
   history: SavedScanDraft[],
   receiptDigests: ReadonlyMap<string, string>,
+  surfaceContent: (row: JsonObject) => JsonObject,
 ): Promise<ScanDraftInput> {
   requireFiniteNumbers(input);
   const savedSources = structuredClone(history);
@@ -1831,7 +1836,9 @@ export async function reconcileAcceptedWorkerHistory(
       });
     }
   }
-  const merged = await mergeSavedDraft(input, initial, savedSources);
+  const merged = await mergeSavedDraft(input, initial, savedSources, {
+    surfaceContent,
+  });
   await reconcileSavedReceipts(context, merged, { receiptDigests });
   const { result } = merged;
   result.findings = workerFindingsWithinScope(context, result.findings);

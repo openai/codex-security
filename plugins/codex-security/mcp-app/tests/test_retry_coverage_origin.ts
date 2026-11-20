@@ -55,11 +55,22 @@ test("an accepted retry reconciles each occurrence of legacy ID-less surfaces an
   const f = await workerHistoryFixture(t, 2);
   const task = { reason: "Synthetic pending review" };
   const single = { label: "Single review", disposition: "no_issue_found" };
+  const receipt = {
+    ...single,
+    label: "Archived evidence",
+    receiptRefs: ["artifacts/review.txt"],
+  };
   const repeated = { ...single, label: "Repeated review" };
   const named = { ...single, label: "Named review" };
   const mixed = { ...single, label: "Mixed IDs" };
   const archive = path.join(f.workerRoot, "attempts/attempt-01");
-  await mkdir(archive, { recursive: true });
+  for (const root of [archive, f.output]) {
+    await mkdir(path.join(root, "artifacts"), { recursive: true });
+    await writeFile(
+      path.join(root, "artifacts/review.txt"),
+      "Synthetic evidence",
+    );
+  }
   await writeFile(
     path.join(archive, "result.json"),
     JSON.stringify({
@@ -70,6 +81,7 @@ test("an accepted retry reconciles each occurrence of legacy ID-less surfaces an
         completeness: "partial",
         surfaces: [
           single,
+          { ...receipt, id: "saved-evidence" },
           repeated,
           repeated,
           { ...named, id: "prior" },
@@ -87,6 +99,7 @@ test("an accepted retry reconciles each occurrence of legacy ID-less surfaces an
       reviewDraft(true, {
         surfaces: [
           { ...single, receiptRefs: [] },
+          receipt,
           ...["first", "second", "third"].map((id) => ({ ...repeated, id })),
           { ...named, id: "current" },
           { ...mixed, id: "known" },
@@ -114,6 +127,7 @@ test("an accepted retry reconciles each occurrence of legacy ID-less surfaces an
     ),
     [
       [single.label, 1],
+      [receipt.label, 1],
       [repeated.label, 1],
       [repeated.label, 1],
       [repeated.label, 2],
@@ -129,7 +143,16 @@ test("an accepted retry reconciles each occurrence of legacy ID-less surfaces an
       .map(
         (row: { provenance: { sourceId: string } }) => row.provenance.sourceId,
       ),
-    ["first", "second", "third", "current", "known", "assigned", "prior"],
+    [
+      "saved-evidence",
+      "first",
+      "second",
+      "third",
+      "current",
+      "known",
+      "assigned",
+      "prior",
+    ],
   );
 });
 
