@@ -2173,7 +2173,9 @@ export async function runRepositoryCommand(
       windowsMessageStages.push(stage);
       configRoot = stage.directory;
       windowsConfig = {
-        directory: join(configRoot, randomUUID()),
+        // Each hook opens a fresh stage. Its ancestor handles cannot be
+        // reopened beneath the coordinator's carrier pinned for deletion.
+        directory: join(hooks ? temp : configRoot, randomUUID()),
         coordinator: stage.coordinator,
         binding: stage.binding,
         config: sandbox.snapshotConfig,
@@ -12574,7 +12576,9 @@ async function inspectPatchGitExecutable(
   {
     afterHook,
     implicit,
-    invocationDirectory = dependencies.patchCallerDirectory ?? repository,
+    invocationDirectory = dependencies.patchTransportContext?.caller ??
+      dependencies.patchCallerDirectory ??
+      repository,
   }: {
     afterHook?: boolean;
     implicit?: boolean;
