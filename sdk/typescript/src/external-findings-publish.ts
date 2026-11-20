@@ -22,6 +22,7 @@ import type { LocalExternalImportOptions } from "./external-findings-import.js";
 import { armorCodeRepositoryUrl } from "./armorcode-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { tenableReportFormat } from "./tenable-findings.js";
+import { grypeReportFormat } from "./grype-findings.js";
 import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
 import {
   guardianFindingId,
@@ -596,6 +597,7 @@ function checkFindingProvider(
       requireCloudReader({ provider: "tenable" });
     if (format === crowdstrikeReportFormat)
       requireCloudReader({ provider: "crowdstrike" });
+    if (format === grypeReportFormat) requireCloudReader({ provider: "grype" });
     if (format === guardianSelectionFormat && provider !== "semgrep")
       throw new CodexSecurityError(
         "Use the semgrep provider for Guardian findings.",

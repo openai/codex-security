@@ -8,6 +8,7 @@ import type { Provider } from "./external-import-models.js";
 import { CodexSecurityError } from "./errors.js";
 import { readTenableFindings } from "./tenable-findings.js";
 import { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
+import { readGrypeFindings } from "./grype-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -42,6 +43,7 @@ import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 export const LOCAL_ONLY_PROVIDERS = {
   tenable: "Tenable",
   crowdstrike: "CrowdStrike",
+  grype: "Grype",
 } as const;
 type LocalOnlyProvider = keyof typeof LOCAL_ONLY_PROVIDERS;
 
@@ -66,6 +68,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   checkmarx: "checkmarx",
   tenable: "tenable",
   crowdstrike: "crowdstrike",
+  grype: "grype",
 } as const satisfies Record<string, LocalFindingProvider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -207,6 +210,14 @@ export async function readExternalFindings(
         options.sourceRepositoryUrl,
       ),
     };
+  }
+  if (provider === "grype") {
+    if (target === "cloud") requireCloudReader(options);
+    if (options.sourceRepositoryUrl !== undefined)
+      throw new CodexSecurityError(
+        "Grype reports record no source repository; do not supply --source-repository-url.",
+      );
+    return { findings: await readGrypeFindings(path) };
   }
   if (provider === "sonar") {
     const findings = await readSonarFindings(path, url, target);

@@ -1,6 +1,6 @@
-# Import Trivy and Guardian findings offline
+# Import Trivy, Grype and Guardian findings offline
 
-Run this from the repository root with the SDK and plugin built. Set `TMPDIR` to a directory outside any Git worktree. The example uses a saved Trivy report and a recorded Guardian tool response, so it needs no vendor credentials.
+Run this from the repository root with the SDK and plugin built. Set `TMPDIR` to a directory outside any Git worktree. The example uses a saved Trivy report, a synthetic Grype JSON fixture and a recorded Guardian tool response, so it needs no vendor credentials.
 
 ```sh
 demo=$(mktemp -d "${TMPDIR:-/tmp}/stored-findings.XXXXXXXX")
@@ -12,6 +12,17 @@ cd sdk/typescript
 node bin/codex-security.mjs publish findings ../../examples/normalized-import/trivy-report.json \
   --to local --repository "$DEMO_REPOSITORY" --provider trivy \
   --source-key example/project/main --trivy-scan-root . --yes --format json
+
+grype=../../examples/normalized-import/grype-report.json
+node bin/codex-security.mjs publish findings "$grype" --to local \
+  --repository "$DEMO_REPOSITORY" --provider grype \
+  --source-key example/grype/project --dry-run --format json
+node bin/codex-security.mjs publish findings "$grype" --to local \
+  --repository "$DEMO_REPOSITORY" --provider grype \
+  --source-key example/grype/project --yes --format json
+node bin/codex-security.mjs publish findings "$grype" --to local \
+  --repository "$DEMO_REPOSITORY" --provider grype \
+  --source-key example/grype/project --yes --format json
 
 node --input-type=module <<'JS'
 import { readFile } from "node:fs/promises";
@@ -36,6 +47,8 @@ console.table(await listLocalExternalImports({ repository }));
 JS
 ```
 
-The history shows two imports. The Guardian request selected string ID `9007199254740993` from a response containing two findings. A live MCP connection supplies the same collector's `callTool`.
+The Grype step previews two dependency findings, saves them (`created`), then saves the same report again and reports them `unchanged`. Grype is local only and records no repository, so the findings bind to the selected checkout.
 
-In Codex, open the same checkout with the same workbench state and say **“Preview the high-severity findings from these two imports for publication to my Cloud repository.”** Codex reads the stored versions and shows the source groups and exclusions for review. [User walkthrough](../../docs/scanner-imports/workbench.md) · [SDK selection and publication](../../sdk/typescript/docs/sdk.md#import-external-findings)
+The Guardian request selected string ID `9007199254740993` from a response containing two findings. A live MCP connection supplies the same collector's `callTool`.
+
+In Codex, open the same checkout with the same workbench state and say **“Preview the high-severity findings from the Trivy and Guardian imports for publication to my Cloud repository.”** Codex reads the stored versions and shows the source groups and exclusions for review. [User walkthrough](../../docs/scanner-imports/workbench.md) · [SDK selection and publication](../../sdk/typescript/docs/sdk.md#import-external-findings)
