@@ -142,6 +142,7 @@ describe("skill authentication at the subprocess boundary", () => {
       1,
     ],
     ["Workspace routing discovery unauthorized (401)", 0],
+    [null, 1],
   ] as const)(
     "patch handles a stored account lookup failure: %s",
     async (detail, status) => {
@@ -149,7 +150,10 @@ describe("skill authentication at the subprocess boundary", () => {
         auth: "chatgpt",
         overrides: [],
         storedCredentials: true,
-        environment: { SYNTHETIC_ACCOUNT_ERROR: detail },
+        environment:
+          detail === null
+            ? { SYNTHETIC_ACCOUNT_MISSING: "1" }
+            : { SYNTHETIC_ACCOUNT_ERROR: detail },
       });
       expect(
         result.requests.find((request) => request.method === "account/read")
@@ -161,7 +165,7 @@ describe("skill authentication at the subprocess boundary", () => {
       expect(result.status, result.stderr).toBe(status);
       if (status === 1) {
         expect(result.stderr).toContain("codex-security login");
-        expect(result.stderr.split(detail)).toHaveLength(2);
+        if (detail !== null) expect(result.stderr.split(detail)).toHaveLength(2);
       }
     },
   );

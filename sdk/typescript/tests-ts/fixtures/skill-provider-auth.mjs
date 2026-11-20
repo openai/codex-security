@@ -35,7 +35,12 @@ if (process.env.SYNTHETIC_SKILL_COMMAND === "validate") {
     } else if (request.method === "account/read") {
       const message = process.env.SYNTHETIC_ACCOUNT_ERROR;
       if (message) send({ id: request.id, error: { code: -32000, message } });
-      else send({ id: request.id, result: { account: { type: "apiKey" } } });
+      else {
+        const account = process.env.SYNTHETIC_ACCOUNT_MISSING
+          ? null
+          : { type: "apiKey" };
+        send({ id: request.id, result: { requiresOpenaiAuth: true, account } });
+      }
     } else if (request.method === "config/read") {
       send({ id: request.id, result: { layers: [] } });
     } else if (request.method === "experimentalFeature/list") {

@@ -11782,6 +11782,17 @@ export async function readSkillCommandOutput(
           value["id"] === "login" ||
           value["id"] === "patch-account"
         ) {
+          if (
+            value["id"] === "patch-account" &&
+            isJsonObject(value["result"]) &&
+            value["result"]["requiresOpenaiAuth"] === true &&
+            value["result"]["account"] === null
+          ) {
+            // A cached permanent refresh failure also clears the native account.
+            error = `Codex could not use the stored sign-in. ${PATCH_SIGN_IN_RECOVERY}`;
+            appServer.input.end();
+            continue;
+          }
           // A routing lookup can fail even when the selected provider works.
           // Retain its diagnostic in case the native worker subsequently fails.
           if (value["id"] === "patch-account" && isJsonObject(value["error"])) {
@@ -12052,6 +12063,8 @@ export async function readSkillCommandOutput(
   };
 }
 
+const PATCH_SIGN_IN_RECOVERY =
+  "Run codex-security login, then retry the same patch command from the selected checkout.";
 const NATIVE_REFRESH_RECOVERY =
   /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu;
 const NATIVE_REFRESH_FAILURE =
@@ -12096,8 +12109,7 @@ export function skillCommandFailure(
     authentication?.method === "stored_credentials" &&
     isStoredSignInFailure(diagnosticDetail)
   ) {
-    advice =
-      "Run codex-security login, then retry the same patch command from the selected checkout.";
+    advice = PATCH_SIGN_IN_RECOVERY;
   } else if (
     classification === "unauthorized" ||
     /\bauthorizationrequired\b/iu.test(classificationDetail)
