@@ -3233,6 +3233,22 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
     assert stats == {"additions": 2, "deletions": 2, "fileCount": 2, "previewTruncated": False}
 
 
+def test_zero_padded_hunk_spanning_preview_reads_counts_header_like_edits(tmp_path: Path) -> None:
+    count = b"0" * (1024 * 1024) + b"1"
+    patch = b"--- a/file\n+++ b/file\n@@ -1," + count + b" +1 @@\n--- old\n+++ new\n"
+    (tmp_path / "file").write_bytes(b"-- old\n")
+    (tmp_path / "patch.diff").write_bytes(patch)
+    subprocess.run(
+        ["git", "-c", "core.autocrlf=false", "apply", "--check", "patch.diff"],
+        cwd=tmp_path,
+        check=True,
+    )
+    _, stats = runpy.run_path(str(SCRIPT))["patch_artifact_preview"](
+        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    )
+    assert stats == {"additions": 1, "deletions": 1, "fileCount": 1, "previewTruncated": True}
+
+
 @pytest.mark.parametrize("padded", [False, True])
 def test_saved_scan_remains_readable_with_large_hunk_counts(
     tmp_path: Path, padded: bool, monkeypatch

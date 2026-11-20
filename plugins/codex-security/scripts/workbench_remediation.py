@@ -71,20 +71,32 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
+    chunk_size = 1024 * 1024
+    pending_header = b""
     at_line_start = True
     hunk_lines = 0
     try:
         with open_scan_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
+            while chunk := patch.readline(chunk_size):
                 digest.update(chunk)
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
                 if at_line_start:
+                    if pending_header:
+                        chunk = pending_header + chunk
+                        pending_header = b""
                     if chunk.startswith(b"diff --git "):
                         file_count += 1
                         hunk_lines = 0
                     elif hunk := _HUNK_HEADER.match(chunk):
                         hunk_lines = sum(_hunk_counts(hunk))
+                    elif chunk.startswith(b"@@ -") and not chunk.endswith(b"\n"):
+                        # A valid zero-padded range can span reads. Carry its compact
+                        # prefix into the next read, keeping preview memory bounded.
+                        compact = re.sub(rb"(?<=[+-])[0-9]+|(?<=,)0+", b"0", chunk)
+                        if len(compact) < chunk_size:
+                            pending_header = compact
+                            continue
                     elif hunk_lines == 0 and chunk.startswith(b"+++ "):
                         new_headers += 1
                     elif hunk_lines == 0 and chunk.startswith(b"--- "):
