@@ -85,9 +85,10 @@ result validation finished; it does not imply that a patch fixed the finding:
 
 - `patch` contains `occurrenceId`, `status` (`verified`, `no_change`, `blocked`,
   or `failed`), `files`, and optional `verification`/`reason`. Verified and
-  no-change outcomes require verification evidence; blocked and failed outcomes
-  require a reason. The host must inspect the actual changes, collect the
-  canonical diff, and run separate verification.
+  no-change outcomes require verification evidence. A verified patch must list
+  its modified files, and a no-change result must have an empty file list.
+  Blocked and failed outcomes require a reason. The host must inspect the
+  actual changes, collect the canonical diff, and run separate verification.
 - `verification` contains `id`, `status` (`fixed`, `still_vulnerable`, or
   `inconclusive`), and nonempty `evidence`, the same fields used by local
   `verify-fix`. The finding ID must match the request. A `fixed` verdict needs

@@ -243,7 +243,17 @@ test.each([true, false])(
 );
 
 test.each([
-  { status: "verified", verification: "Only source cleanup was verified." },
+  {
+    status: "verified",
+    verification: "Only source cleanup was verified.",
+    files: ["app.ts"],
+  },
+  ...[[], [""]].map((files) => ({
+    status: "verified",
+    verification: "Checked the guard.",
+    files,
+    credentialRevocationPending: false,
+  })),
   {
     status: "no_change",
     verification: "Already configured.",

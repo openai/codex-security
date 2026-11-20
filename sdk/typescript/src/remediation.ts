@@ -206,6 +206,13 @@ export function parseFindingPatch(
       throw new CodexSecurityError(
         "Credential retirement status was not reported.",
       );
+    if (
+      patch.status === "verified" &&
+      (patch.files.length === 0 || patch.files.includes(""))
+    )
+      throw new CodexSecurityError(
+        "A verified patch must list its modified files.",
+      );
     if (patch.status === "no_change" && patch.files.length > 0)
       throw new CodexSecurityError("A no-change patch listed modified files.");
   } else if (!patch.reason?.trim()) {
