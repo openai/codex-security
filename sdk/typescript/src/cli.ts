@@ -2070,6 +2070,7 @@ interface CliDependencies {
     repository: string,
     options?: {
       protectedRoots?: readonly string[];
+      verifyHostExecutable?: (search: string, path: string) => Promise<void>;
       trim?: boolean;
       encoding?: "base64";
       environment?: NodeJS.ProcessEnv;
@@ -2227,13 +2228,21 @@ export async function runRepositoryCommand(
     ...(options?.protectedRoots ?? []),
     ...processRelativePaths,
   ];
-  const resolveTool = (name: string) =>
-    resolveTrustedExecutable(
+  const resolveTool = async (name: string) => {
+    const environment = sandbox?.environment ?? process.env;
+    const tool = await resolveTrustedExecutable(
       name,
-      sandbox?.environment ?? process.env,
+      environment,
       protectedRoots,
       { hostDirectory: repository },
     );
+    if (tool)
+      await options?.verifyHostExecutable?.(
+        JSON.stringify([name, environmentEntry(environment, "PATH")]),
+        tool.executable,
+      );
+    return tool;
+  };
   const executable = await resolveTool(command);
   if (executable === null) {
     throw new CodexSecurityError(
@@ -3816,6 +3825,22 @@ export async function main(
   };
 
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
+  const hostTools = new Map<string, PatchTransportFile & { grants: number }>();
+  const verifyHostExecutable = async (search: string, path: string) => {
+    const selected = hostTools.get(search);
+    const grants = patchTransportAccess.writable.size;
+    // A writer can edit a launcher through a hard link and remove the alias.
+    // Check its original stamp each time; count installation links once per grant set.
+    const file = await patchTransportIdentity(
+      path,
+      "executable",
+      selected,
+      grants && grants !== selected?.grants
+        ? { writers: patchTransportAccess }
+        : {},
+    );
+    hostTools.set(search, { ...file, grants });
+  };
   let gitRepository: string | undefined;
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let unavailableFilters: readonly string[] = [];
@@ -3869,6 +3894,7 @@ export async function main(
     async runRepositoryCommand(command, args, repository, options) {
       options = {
         ...options,
+        verifyHostExecutable,
         protectedRoots: [
           ...(options?.protectedRoots ?? []),
           ...patchTransportAccess.writable,
@@ -3939,6 +3965,7 @@ export async function main(
             environment: gitEnvironment,
             signal: options.signal,
             protectedRoots: options.protectedRoots,
+            verifyHostExecutable,
           };
           if (parentDependencies.environment["GIT_WORK_TREE"] === undefined) {
             gitEnvironment["GIT_WORK_TREE"] = await patchGitOutput(
