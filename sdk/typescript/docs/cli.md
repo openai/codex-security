@@ -3068,8 +3068,13 @@ the current operator settings. With `--external-sandbox`, the operator supplies
 the filesystem isolation.
 For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
 publication also rechecks the selected executable before starting Git.
-For multiple push URLs, use a proxy executable with a single hard link.
-Git can run a pre-push hook between connections in the same process.
+A pre-push hook can run before Git launches another process for packing
+or authentication, or between connections to multiple push URLs. Publication
+checks hard links on the executables and input files Git can use after a hook.
+It accepts links confined to the protected installation directories, including
+Git's `libexec/git-core` and `bin`. On Unix it also accepts files owned by
+another account when their permissions prevent modification. If a launcher
+has an alias in a writable checkout, select a separate external executable.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
 
