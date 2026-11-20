@@ -481,6 +481,7 @@ import {
   enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
   gitMarkerRoot,
+  isGitLoaderOverride,
   normalizeRepository,
   resolveRepositoryPath,
   trustedGitCommand,
@@ -2182,12 +2183,11 @@ child.on("exit", (code, signal) => {
 
 function isPatchStartupOverride(name: string): boolean {
   return (
-    (process.platform === "linux" && name === "GCONV_PATH") ||
+    isGitLoaderOverride(name) ||
     /^OPENSSL_(?:CONF(?:_INCLUDE)?|MODULES|ENGINES)$/iu.test(name) ||
     /^(?:TCL_LIBRARY|TK_LIBRARY|TCLLIBPATH|TCL\d+[._]\d+_TM_PATH)$/iu.test(
       name,
     ) ||
-    (process.platform !== "win32" && /^(?:LD|DYLD)_/u.test(name)) ||
     /^(?:PYTHON(?:HOME|PATH|USERBASE|NOUSERSITE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
       name,
     ) ||

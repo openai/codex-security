@@ -1107,6 +1107,14 @@ async function walkGitMarkers(
   }
 }
 
+// glibc can load a module while Git translates even a rev-parse diagnostic.
+export function isGitLoaderOverride(name: string): boolean {
+  return (
+    (process.platform === "linux" && name === "GCONV_PATH") ||
+    (process.platform !== "win32" && /^(?:LD|DYLD)_/u.test(name))
+  );
+}
+
 function isolatedGitEnvironment(
   preserveGitConfiguration: boolean,
   source: Readonly<Record<string, string | undefined>> = process.env,
@@ -1115,6 +1123,7 @@ function isolatedGitEnvironment(
   for (const name of Object.keys(environment)) {
     const normalized = name.toUpperCase();
     if (
+      isGitLoaderOverride(name) ||
       GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
       normalized === "GIT_ALLOW_PROTOCOL" ||
       (!preserveGitConfiguration && normalized.startsWith("GIT_"))

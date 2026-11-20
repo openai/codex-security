@@ -3091,14 +3091,15 @@ to disable Python’s default user site-packages directory. If your wrapper uses
 `python -E` to ignore environment settings, add `-s` to skip that directory.
 They point `ZDOTDIR` at the system null device so Zsh wrappers skip user startup
 files such as `~/.zshenv`. Put required settings in the trusted wrapper.
-On Unix they also clear native loader overrides (`LD_*` and `DYLD_*`).
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
 `OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
 OpenSSL configuration and module directories. Configure required cryptographic
 policies in those defaults.
 For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
 versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
-On Linux they clear `GCONV_PATH` so glibc uses its default conversion modules.
+On Unix, Git target discovery and patch commands clear native loader overrides
+(`LD_*` and `DYLD_*`). On Linux they also clear `GCONV_PATH` so glibc uses its
+default conversion modules.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.
