@@ -466,6 +466,24 @@ class SavedCoverageOrigins:
             if owner == worker["id"]
         )
         occurrences = []
+
+        def matches(origin, current, path, reserved):
+            previous, previous_path = origin["row"], origin["row_path"]
+            comparison = current
+            if (
+                isinstance(current, dict)
+                and "id" not in current
+                and isinstance(previous, dict)
+                and isinstance(previous.get("id"), str)
+                and previous["id"] not in reserved
+                and (
+                    field == "surfaces"
+                    or (field == "deferred" and not _has_candidate_metadata(current))
+                )
+            ):
+                comparison = {**current, "id": previous["id"]}
+            return self.same_row(field, previous, previous_path, comparison, path, worker["id"])
+
         for snapshot_attempt, _, path, coverage in snapshots:
             if snapshot_attempt <= 0:
                 continue
@@ -485,27 +503,14 @@ class SavedCoverageOrigins:
             )
             added = []
             for offset, current in enumerate(current_rows, 1):
-
-                def matches(origin):
-                    previous, previous_path = origin["row"], origin["row_path"]
-                    comparison = current
-                    if (
-                        isinstance(current, dict)
-                        and "id" not in current
-                        and isinstance(previous, dict)
-                        and isinstance(previous.get("id"), str)
-                        and previous["id"] not in reserved
-                        and (
-                            field == "surfaces"
-                            or (field == "deferred" and not _has_candidate_metadata(current))
-                        )
-                    ):
-                        comparison = {**current, "id": previous["id"]}
-                    return self.same_row(
-                        field, previous, previous_path, comparison, path, worker["id"]
-                    )
-
-                match = next((i for i, origin in enumerate(unmatched) if matches(origin)), None)
+                match = next(
+                    (
+                        i
+                        for i, origin in enumerate(unmatched)
+                        if matches(origin, current, path, reserved)
+                    ),
+                    None,
+                )
                 if match is None:
                     origin = {
                         "row": current,
