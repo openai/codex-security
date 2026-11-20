@@ -639,10 +639,22 @@ export async function retainRecordedReceiptOwnership(
   for (const owner of owners) delete owner.scanReceiptRefs;
 }
 
-export function recordedScanReceiptRefs(surface: JsonObject): string[] {
-  return isObject(surface.provenance)
-    ? ((surface.provenance.scanReceiptRefs as string[] | undefined) ?? [])
-    : [];
+export function recordedScanReceiptRefs(surface?: JsonObject): string[] {
+  const refs = isObject(surface?.provenance)
+    ? surface.provenance.scanReceiptRefs
+    : undefined;
+  return Array.isArray(refs) ? refs : [];
+}
+
+function setRecordedScanReceiptRefs(surface: JsonObject, refs: string[]) {
+  if (refs.length === 0) {
+    if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
+    return;
+  }
+  surface.provenance = {
+    ...(isObject(surface.provenance) ? surface.provenance : {}),
+    scanReceiptRefs: exactUnion(refs),
+  };
 }
 
 function savedReceiptOwners(drafts: ScanDraftInput[]): Map<string, JsonObject> {
@@ -732,11 +744,7 @@ async function qualifyWorkerReceipts(
     const previousRefs = (
       (previous?.receiptRefs as string[] | undefined) ?? []
     ).map((ref) => posix.normalize(ref));
-    const previousShared =
-      isObject(previous?.provenance) &&
-      Array.isArray(previous.provenance.scanReceiptRefs)
-        ? previous.provenance.scanReceiptRefs
-        : [];
+    const previousShared = recordedScanReceiptRefs(previous);
     const shared = new Set<string>();
     surface.receiptRefs = await Promise.all(
       (surface.receiptRefs as string[]).map(async (value) => {
@@ -787,15 +795,10 @@ async function qualifyWorkerReceipts(
         return ref;
       }),
     );
-    if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
-    if (shared.size > 0) {
-      surface.provenance = {
-        ...(isObject(surface.provenance) ? surface.provenance : {}),
-        scanReceiptRefs: exactUnion(
-          (surface.receiptRefs as string[]).filter((ref) => shared.has(ref)),
-        ),
-      };
-    }
+    setRecordedScanReceiptRefs(
+      surface,
+      (surface.receiptRefs as string[]).filter((ref) => shared.has(ref)),
+    );
   }
   return qualified;
 }
@@ -1424,9 +1427,9 @@ function retainSavedReceiptOwnership(
         coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
         (sameSavedSurface(surface, previous) || resolvedSurfaces.has(previous)),
     );
-    if (!current || !isObject(previous.provenance)) continue;
-    const inherited = previous.provenance.scanReceiptRefs;
-    if (!Array.isArray(inherited)) continue;
+    if (!current) continue;
+    const inherited = recordedScanReceiptRefs(previous);
+    if (!inherited.length) continue;
     const refs = new Set(
       ((current.receiptRefs as string[] | undefined) ?? []).map((ref) =>
         posix.normalize(ref),
@@ -1436,16 +1439,10 @@ function retainSavedReceiptOwnership(
       (ref) => typeof ref === "string" && refs.has(ref),
     );
     if (retained.length === 0) continue;
-    const provenance = isObject(current.provenance) ? current.provenance : {};
-    current.provenance = {
-      ...provenance,
-      scanReceiptRefs: exactUnion(
-        Array.isArray(provenance.scanReceiptRefs)
-          ? provenance.scanReceiptRefs
-          : [],
-        retained,
-      ),
-    };
+    setRecordedScanReceiptRefs(current, [
+      ...recordedScanReceiptRefs(current),
+      ...retained,
+    ]);
   }
 }
 
@@ -2731,16 +2728,11 @@ export async function readArchivedWorkerCheckpoints(
       // Archive moves receipts with their attempt; preserve the checkpoint bytes.
       for (const surface of draft.input.reviewState.surfaces as JsonObject[]) {
         if (!Array.isArray(surface.receiptRefs)) continue;
-        surface.receiptRefs = await Promise.all(
+        const shared = new Set(recordedScanReceiptRefs(surface));
+        const refs = await Promise.all(
           (surface.receiptRefs as string[]).map(async (value) => {
             const ref = posix.normalize(value);
-            if (ref.startsWith(archivePrefix)) return ref;
-            if (
-              isObject(surface.provenance) &&
-              Array.isArray(surface.provenance.scanReceiptRefs) &&
-              surface.provenance.scanReceiptRefs.includes(ref)
-            )
-              return ref;
+            if (ref.startsWith(archivePrefix) || shared.has(ref)) return ref;
             if (!ref.startsWith(activePrefix)) {
               try {
                 await requireRegularFile(
@@ -2762,24 +2754,17 @@ export async function readArchivedWorkerCheckpoints(
                 return ref;
               }
               if (fallback === "shared") {
-                const provenance = isObject(surface.provenance)
-                  ? surface.provenance
-                  : {};
-                surface.provenance = {
-                  ...provenance,
-                  scanReceiptRefs: [
-                    ...new Set([
-                      ...((provenance.scanReceiptRefs as
-                        string[] | undefined) ?? []),
-                      ref,
-                    ]),
-                  ],
-                };
+                shared.add(ref);
                 return ref;
               }
             }
             return `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`;
           }),
+        );
+        surface.receiptRefs = refs;
+        setRecordedScanReceiptRefs(
+          surface,
+          refs.filter((ref) => shared.has(ref)),
         );
       }
       if (!unboundSharedReceipt)
