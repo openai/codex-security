@@ -10,7 +10,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +48,12 @@ COMMANDS = {
     "set-finding-remediation",
 }
 SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
+_HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
+
+
+def _hunk_counts(header: re.Match[bytes]) -> Iterator[int]:
+    for count in header.groups(default=b"1"):
+        yield int(count.lstrip(b"0") or b"0")
 
 
 def patch_artifact_preview(
@@ -65,22 +71,32 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
+    chunk_size = 1024 * 1024
+    pending_header = b""
     at_line_start = True
     hunk_lines = 0
     try:
         with open_scan_file(scan_dir, relative_path) as patch:
-            while chunk := patch.readline(1024 * 1024):
+            while chunk := patch.readline(chunk_size):
                 digest.update(chunk)
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
                 if at_line_start:
+                    if pending_header:
+                        chunk = pending_header + chunk
+                        pending_header = b""
                     if chunk.startswith(b"diff --git "):
                         file_count += 1
                         hunk_lines = 0
-                    elif match := re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", chunk):
-                        hunk_lines = sum(
-                            int(count) if count is not None else 1 for count in match.groups()
-                        )
+                    elif hunk := _HUNK_HEADER.match(chunk):
+                        hunk_lines = sum(_hunk_counts(hunk))
+                    elif chunk.startswith(b"@@ -") and not chunk.endswith(b"\n"):
+                        # A valid zero-padded range can span reads. Carry its compact
+                        # prefix into the next read, keeping preview memory bounded.
+                        compact = re.sub(rb"(?<=[+-])[0-9]+|(?<=,)0+", b"0", chunk)
+                        if len(compact) < chunk_size:
+                            pending_header = compact
+                            continue
                     elif hunk_lines == 0 and chunk.startswith(b"+++ "):
                         new_headers += 1
                     elif hunk_lines == 0 and chunk.startswith(b"--- "):
@@ -231,7 +247,6 @@ def latest_attempt(connection: sqlite3.Connection, occurrence_id: str) -> sqlite
     ).fetchone()
 
 
-_HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 _QUOTED_GIT_PATH = rb'"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)"'
 _SUBMODULE_SUMMARY_END = re.compile(
     rb" (?:contains (?:modified|untracked) content|"
@@ -389,8 +404,10 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
                 continue
             git_paths = b""
         if hunk:
-            old_lines = int(hunk[1] or b"1")
-            new_lines = int(hunk[2] or b"1")
+            try:
+                old_lines, new_lines = _hunk_counts(hunk)
+            except ValueError as exc:
+                raise SystemExit(incomplete) from exc
         elif (
             line.startswith((b"Binary files ", b"Files "))
             and line.endswith(b" differ")

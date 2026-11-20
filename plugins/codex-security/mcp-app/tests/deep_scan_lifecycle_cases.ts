@@ -912,7 +912,7 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     }
   }
 
-  async function shutdownStopsReplacementObservation() {
+  async function shutdownStopsReplacementObservation(t: TestContext) {
     const fixture = await fixtureRun(config);
     fixture.run.coordinatorGeneration = 1;
     const store = new FakeStore(fixture.run);
@@ -931,12 +931,16 @@ with tempfile.TemporaryDirectory(prefix="deep-scan-completion-contract-") as roo
     store.run.coordinatorGeneration = 2;
     const heartbeat = coordinator.renewHeartbeat();
     await new Promise(setImmediate);
+    const activeAtShutdown = registry.get(fixture.run.scanId);
+    const replacementReads = t.mock.method(store, "get");
     registry.shutdown("fixture transport closed");
-    const terminal = await coordinator.wait(undefined, 100);
-    // Release the old implementation's detached observer even on failure.
+    // A detached observer would return the replacement's result after shutdown.
     store.run.status = "succeeded";
     await heartbeat;
-    assert.equal(terminal?.status, "canceled");
+    const terminal = await coordinator.settled();
+    assert.equal(activeAtShutdown, undefined);
+    assert.equal(terminal.status, "canceled");
+    assert.equal(replacementReads.mock.callCount(), 0);
   }
 
   async function failedCancellationStillPreservesResults() {
