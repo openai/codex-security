@@ -105,7 +105,8 @@ export type Report = {
   sections: Section[];
 };
 export function useCountLabel(section: Section, count: number | "No"): string {
-  const state = section.check?.reviewer === "disabled" ? "reported" : "reviewed";
+  const state =
+    section.check?.reviewer === "disabled" ? "reported" : "reviewed";
   return `${count} ${state} ${count === 1 ? "use" : "uses"}`;
 }
 export const verdictOrder: DependencyVerdict[] = [
