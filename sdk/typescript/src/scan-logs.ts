@@ -260,19 +260,23 @@ export async function readScanLogs(options: ScanLogOptions) {
   // turn's remaining events, then stop before a post-completion turn starts.
   for (const session of sessions) {
     let replaying = false;
+    let finishingOwnerTurn = false;
+    const completedAt = sessionStartedAt(attribution?.completedAt);
     let turnId: string | null = null;
     for await (const event of sessionEvents(session.path)) {
       const payload = event["payload"];
+      const turnMarker =
+        event["type"] === "turn_context" ||
+        (isRecord(payload) && payload["type"] === "task_started");
       if (
+        turnMarker &&
         isRecord(payload) &&
-        (event["type"] === "turn_context" ||
-          payload["type"] === "task_started") &&
         typeof payload["turn_id"] === "string"
-      ) {
+      )
         turnId = payload["turn_id"];
-      }
       if (event["type"] === "session_meta" && isRecord(payload)) {
         replaying = payload["id"] !== session.threadId;
+        finishingOwnerTurn = false;
       }
       const taskStarted =
         event["type"] === "event_msg" &&
@@ -283,9 +287,30 @@ export async function readScanLogs(options: ScanLogOptions) {
         replaying = false;
       }
       if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
+      const time = sessionStartedAt(event["timestamp"]);
+      if (turnMarker) {
+        finishingOwnerTurn =
+          completedAt !== null &&
+          time !== null &&
+          (finishingOwnerTurn || time <= completedAt) &&
+          attribution?.owner.threadId === session.threadId &&
+          typeof attribution.owner.turnId === "string" &&
+          isRecord(payload) &&
+          payload["turn_id"] === attribution.owner.turnId;
+      }
+      // Publication can precede the completion tool response and final message.
+      // Extend the log only for the already-active, explicitly bound owner turn.
+      const ownerTail =
+        finishingOwnerTurn &&
+        time !== null &&
+        completedAt !== null &&
+        time > completedAt &&
+        isRecord(payload) &&
+        (payload["turn_id"] === undefined || payload["turn_id"] === turnId);
       if (
         !attribution ||
         event["type"] === "session_meta" ||
+        ownerTail ||
         isAttributedScanEvent(
           attribution,
           session.threadId,
@@ -299,6 +324,13 @@ export async function readScanLogs(options: ScanLogOptions) {
       ) {
         events.push({ threadId: session.threadId, event });
       }
+      if (
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        (payload["type"] === "task_complete" ||
+          payload["type"] === "turn_aborted")
+      )
+        finishingOwnerTurn = false;
     }
   }
 
