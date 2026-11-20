@@ -94,9 +94,9 @@ test.skipIf(process.platform === "win32")(
   "a pre-push hook cannot replace the HTTPS helper for the next destination",
   () => checkNativePush("linked launcher", "https"),
 );
-test.skipIf(process.platform === "win32")(
-  "a pre-push hook cannot replace the Git child launcher for a single destination",
-  () => checkNativePush("linked launcher", "single"),
+test.skipIf(process.platform === "win32").each([0o700, 0o600])(
+  "a pre-push hook cannot replace the Git child launcher (initial mode %d) for a single destination",
+  (mode) => checkNativePush("linked launcher", "single", mode),
 );
 test.skipIf(process.platform === "win32")(
   "a single destination with a pre-push hook accepts Git installation hard links",
@@ -106,6 +106,7 @@ test.skipIf(process.platform === "win32")(
 async function checkNativePush(
   scenario: "approved" | "unapproved mirror" | "linked launcher",
   route: "proxy" | "ssh" | "ssh-script" | "https" | "single" = "proxy",
+  childMode = 0o700,
 ) {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-proxy-routes-");
@@ -201,11 +202,10 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
       await mkdir(execPath, { recursive: true });
       environment["GIT_EXEC_PATH"] = execPath;
       launcher = join(execPath, "git");
-      await writeFile(
-        launcher,
-        `#!/bin/sh\nexec ${JSON.stringify(Bun.which("git"))} "$@"\n`,
-        { mode: 0o700 },
-      );
+      const gitPath = Bun.which("git")!.replaceAll("'", "'\\''");
+      await writeFile(launcher, `#!/bin/sh\nexec '${gitPath}' "$@"\n`, {
+        mode: childMode,
+      });
       const bin = join(external, "bin");
       await mkdir(bin);
       await link(launcher, join(bin, "git"));
@@ -214,7 +214,8 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
       await link(launcher, join(directory, "launcher-alias"));
     await writeFile(
       join(directory, ".git", "hooks", "pre-push"),
-      "#!/bin/sh\nprintf '%s\\n' '#!/bin/sh' 'echo changed-launcher \"$1\" >&2; exit 1' > launcher-alias\n",
+      "#!/bin/sh\nprintf '%s\\n' '#!/bin/sh' 'echo changed-launcher \"$1\" >&2; exit 1' > launcher-alias\n" +
+        (route === "single" ? "chmod 700 launcher-alias\n" : ""),
       { mode: 0o700 },
     );
   }
