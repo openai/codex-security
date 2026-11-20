@@ -1337,8 +1337,8 @@ test("publication preserves empty global and system configuration paths", async 
       environment,
       (command, _args, _cwd, options) => {
         if (command === "git") {
-          expect(options?.environment?.GIT_CONFIG_GLOBAL).toBe("");
-          expect(options?.environment?.GIT_CONFIG_SYSTEM).toBe("");
+          expect(options?.environment?.["GIT_CONFIG_GLOBAL"]).toBe("");
+          expect(options?.environment?.["GIT_CONFIG_SYSTEM"]).toBe("");
         }
       },
     ),
