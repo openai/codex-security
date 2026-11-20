@@ -896,6 +896,10 @@ describe("multiscan", () => {
       for (const _ of [1, 2]) {
         expect(
           await runMultiscan({
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+            },
             inputPath: paths.input,
             outputDir: paths.output,
             mode: "standard",

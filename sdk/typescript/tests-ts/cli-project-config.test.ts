@@ -614,7 +614,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     "--json",
   ];
   const output = captureCli(main, "stdout");
-  expect(await output.run(args, deps)).toBe(1);
+  expect(await output.run(args, deps), output.text()).toBe(1);
   expect(JSON.parse(output.text())).toMatchObject({
     completed: 2,
     failed: 0,
