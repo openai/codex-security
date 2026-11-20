@@ -89,6 +89,12 @@ const directPricing: Readonly<Record<string, ReturnType<typeof directRate>>> = {
     [2_000, 100, 2_500, 10_000],
     [4_000, 200, 5_000, 15_000],
   ),
+  "gpt-6.2-sol": directRate(
+    "2026-11-19",
+    [2_000, 100, 2_500, 10_000],
+    [4_000, 200, 5_000, 15_000],
+    "https://developers.openai.com/api/docs/models/gpt-6.2-sol",
+  ),
   "gpt-6-astra": directRate(
     "2026-09-14",
     [10_000, 1_000, 12_500, 50_000],
