@@ -8752,17 +8752,6 @@ export async function main(
     return frameworkFlags.tokenError;
   }
   const scanCommand = command === "scan" && !scanImport;
-  let outputArgv = argv;
-  if (scanCommand) {
-    for (const name of ["json", "full-output", "token-count"]) {
-      const disabled = outputArgv.lastIndexOf(`--no-${name}`);
-      if (disabled < 0) continue;
-      outputArgv = outputArgv.filter(
-        (arg, index) =>
-          arg !== `--no-${name}` && (arg !== `--${name}` || index > disabled),
-      );
-    }
-  }
   // The report-file option marks the exploitability operations that publish a
   // completed report (check and run finalize).
   const dependencyReport =
@@ -8770,7 +8759,10 @@ export async function main(
     !!selected &&
     "options" in selected &&
     !!selected.options?.shape["reportFile"];
-  const frameworkFlags = parseFrameworkArguments(outputArgv, dependencyReport);
+  const frameworkFlags = parseFrameworkArguments(argv, {
+    scanCommand,
+    dependencyReport,
+  });
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
   const policyFullOutput =
@@ -8825,9 +8817,7 @@ export async function main(
     }
     return 2;
   };
-  // Keep command and verb offsets valid while checking the original positionals.
   const argumentError = validateCliArguments();
-  argv = outputArgv;
   if (argumentError !== undefined && (!policyFullOutput || envelopeFormat))
     return reportError(argumentError);
   if (protocol) {
@@ -8996,13 +8986,10 @@ export async function main(
           const detail =
             typeof field["message"] === "string" ? field["message"] : message;
           if (options && Object.hasOwn(options, field["path"])) {
-            const flag = field["path"].replace(
-              /[A-Z]/g,
-              (letter) => `-${letter.toLowerCase()}`,
-            );
+            const flag = cliOptionFlag(field["path"]);
             return field["missing"]
-              ? `Missing required option --${flag}.`
-              : `Invalid value for --${flag}: ${detail}`;
+              ? `Missing required option ${flag}.`
+              : `Invalid value for ${flag}: ${detail}`;
           }
           return detail;
         });
@@ -9523,8 +9510,21 @@ function normalizeImportArguments(
 
 function parseFrameworkArguments(
   argv: readonly string[],
-  dependencyReport: boolean,
+  {
+    scanCommand,
+    dependencyReport,
+  }: { scanCommand: boolean; dependencyReport: boolean },
 ) {
+  if (scanCommand) {
+    for (const name of ["json", "full-output", "token-count"]) {
+      const disabled = argv.lastIndexOf(`--no-${name}`);
+      if (disabled < 0) continue;
+      argv = argv.filter(
+        (arg, index) =>
+          arg !== `--no-${name}` && (arg !== `--${name}` || index > disabled),
+      );
+    }
+  }
   const args: string[] = [];
   const formats: string[] = [];
   const filters: (string | undefined)[] = [];
@@ -12211,25 +12211,20 @@ async function incurErrorMessage(
   scanArguments = false,
 ): Promise<string> {
   if (!scanArguments && output.startsWith("{")) return output.trim();
-  type IncurFailure = {
-    error?: { code?: string; message?: string };
-    code?: string;
-    message?: string;
-  };
-  let parsed = parseJson(() => output) as IncurFailure | null;
+  let parsed = asRecord(parseJson(() => output));
   // YAML folds long strings across lines; parse it before extracting diagnostics.
-  if (parsed === null && !output.startsWith("{")) {
+  if (!parsed && !output.startsWith("{")) {
     try {
       const { parse } = await import("yaml");
-      const yaml: unknown = parse(output);
-      if (isJsonObject(yaml)) parsed = yaml as IncurFailure;
+      parsed = asRecord(parse(output));
     } catch {
       // Other rendered formats retain the line-based fallback below.
     }
   }
-  const error = parsed?.error ?? parsed;
-  let message = error?.message;
-  let validation = error?.code === "VALIDATION_ERROR";
+  const error = asRecord(parsed?.["error"]) ?? parsed;
+  let message =
+    typeof error?.["message"] === "string" ? error["message"] : undefined;
+  let validation = error?.["code"] === "VALIDATION_ERROR";
   if (message === undefined) {
     message = output
       .split("\n")
@@ -12254,10 +12249,7 @@ async function incurErrorMessage(
         .map(({ path, message }) => {
           const name = path[0];
           if (typeof name !== "string") return message;
-          const label =
-            name === "repository"
-              ? name
-              : `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
+          const label = name === "repository" ? name : cliOptionFlag(name);
           return `${label}: ${message}`;
         })
         .join("\n");

@@ -2,6 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
+async function runInvalid(args: string[]) {
+  const stdout = capture();
+  const stderr = capture();
+  let initialized = false;
+  const deps = dependencies({
+    onConfig: () => {
+      initialized = true;
+      throw new Error("Invalid arguments reached the scanner.");
+    },
+  });
+  expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(2);
+  expect(initialized).toBe(false);
+  return { stdout: stdout.text(), stderr: stderr.text() };
+}
+
 describe("scan argument errors", () => {
   test.each([
     { args: ["--mode", "bogus"], message: "--mode" },
@@ -19,28 +34,14 @@ describe("scan argument errors", () => {
       ["--format", "jsonl"],
     ]) {
       for (const fullOutput of [false, true]) {
-        const stdout = capture();
-        const stderr = capture();
-        const deps = dependencies({
-          onConfig: () => {
-            throw new Error("Argument errors must not initialize the scanner.");
-          },
-        });
-        expect(
-          await main(
-            [
-              "scan",
-              "--dry-run",
-              ...format,
-              ...(fullOutput ? ["--full-output"] : []),
-              ...args,
-            ],
-            stdout.stream,
-            stderr.stream,
-            deps,
-          ),
-        ).toBe(2);
-        const value = JSON.parse(stdout.text());
+        const { stdout, stderr } = await runInvalid([
+          "scan",
+          "--dry-run",
+          ...format,
+          ...(fullOutput ? ["--full-output"] : []),
+          ...args,
+        ]);
+        const value = JSON.parse(stdout);
         const error = fullOutput ? value.error : value;
         expect(error.code).toBe("SCAN_FAILED");
         expect(error.message).toContain(message);
@@ -48,7 +49,7 @@ describe("scan argument errors", () => {
           expect(value.ok).toBe(false);
           expect(value).not.toHaveProperty("data");
         } else expect(value.status).toBe("failed");
-        expect(stderr.text()).toContain(message);
+        expect(stderr).toContain(message);
       }
     }
   });
@@ -66,28 +67,17 @@ describe("scan argument errors", () => {
     "preserves structured errors around malformed format arguments: $args",
     async ({ args }) => {
       for (const fullOutput of [false, true]) {
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            ["scan", ...args, ...(fullOutput ? ["--full-output"] : [])],
-            stdout.stream,
-            stderr.stream,
-            dependencies({
-              onConfig: () => {
-                throw new Error(
-                  "Argument errors must not initialize the scanner.",
-                );
-              },
-            }),
-          ),
-        ).toBe(2);
-        const value = JSON.parse(stdout.text());
+        const { stdout, stderr } = await runInvalid([
+          "scan",
+          ...args,
+          ...(fullOutput ? ["--full-output"] : []),
+        ]);
+        const value = JSON.parse(stdout);
         expect(fullOutput ? value.ok : value.status).toBe(
           fullOutput ? false : "failed",
         );
         expect((fullOutput ? value.error : value).code).toBe("SCAN_FAILED");
-        expect(stderr.text()).toContain("format");
+        expect(stderr).toContain("format");
       }
     },
   );
@@ -97,20 +87,11 @@ describe("scan argument errors", () => {
       [["--mode", "bogus"], "--mode", "standard"],
       [["--max-cost", "0"], "--max-cost", ">0"],
     ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          ["scan", ...args],
-          stdout.stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(flag);
-      expect(stderr.text()).toContain(detail);
-      expect(stderr.text()).not.toContain("Details:");
+      const { stdout, stderr } = await runInvalid(["scan", ...args]);
+      expect(stdout).toBe("");
+      expect(stderr).toContain(flag);
+      expect(stderr).toContain(detail);
+      expect(stderr).not.toContain("Details:");
     }
   });
 
@@ -119,11 +100,8 @@ describe("scan argument errors", () => {
       ["scan", "--json", "--format", "yaml", "--path"],
       ["scan", "import", "--json", "input.json", "--unknown-option"],
     ]) {
-      const stdout = capture();
-      expect(
-        await main(args, stdout.stream, capture().stream, dependencies()),
-      ).toBe(2);
-      expect(stdout.text()).toBe("");
+      const { stdout } = await runInvalid(args);
+      expect(stdout).toBe("");
     }
   });
 });
@@ -133,24 +111,15 @@ test.each([{ invalid: ["--mode", "bogus"] }, { invalid: ["--path"] }])(
   async ({ invalid }) => {
     for (const fullOutput of [false, true]) {
       for (const transform of [["--token-count"], ["--token-limit=2"]]) {
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            [
-              "scan",
-              "--json",
-              ...(fullOutput ? ["--full-output"] : []),
-              ...transform,
-              ...invalid,
-            ],
-            stdout.stream,
-            stderr.stream,
-            dependencies(),
-          ),
-        ).toBe(2);
-        expect(stderr.text()).toContain(invalid[0]!);
-        const rendered = JSON.parse(stdout.text());
+        const { stdout, stderr } = await runInvalid([
+          "scan",
+          "--json",
+          ...(fullOutput ? ["--full-output"] : []),
+          ...transform,
+          ...invalid,
+        ]);
+        expect(stderr).toContain(invalid[0]!);
+        const rendered = JSON.parse(stdout);
         if (fullOutput)
           expect(rendered).toMatchObject({
             ok: false,
@@ -167,92 +136,60 @@ test.each([{ invalid: ["--mode", "bogus"] }, { invalid: ["--path"] }])(
 test.each(["json", "full-output", "token-count"])(
   "negating a prefix --%s preserves scan positional validation",
   async (flag) => {
-    const stderr = capture();
-    let initialized = false;
-    expect(
-      await main(
-        [`--${flag}`, "scan", ".", "second", `--no-${flag}`, "--headless"],
-        capture().stream,
-        stderr.stream,
-        dependencies({
-          onConfig: () => {
-            initialized = true;
-          },
-        }),
-      ),
-    ).toBe(2);
-    expect(initialized).toBe(false);
-    expect(stderr.text()).toContain("Unexpected positional argument for scan");
+    const { stderr } = await runInvalid([
+      `--${flag}`,
+      "scan",
+      ".",
+      "second",
+      `--no-${flag}`,
+      "--headless",
+    ]);
+
+    expect(stderr).toContain("Unexpected positional argument for scan");
   },
 );
 
 test("output option negation and invalid token ranges never start a scan", async () => {
-  const deps = dependencies({
-    onConfig: () => {
-      throw new Error("Scanner initialized for invalid arguments");
-    },
-  });
   for (const flag of ["--token-limit", "--token-offset"]) {
-    const stdout = capture();
-    const stderr = capture();
-    expect(
-      await main(
-        ["scan", ".", "--json", "--token-count", flag, "-1"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain(`${flag} requires a nonnegative integer`);
+    const { stderr } = await runInvalid([
+      "scan",
+      ".",
+      "--json",
+      "--token-count",
+      flag,
+      "-1",
+    ]);
+    expect(stderr).toContain(`${flag} requires a nonnegative integer`);
   }
-  const compact = capture();
-  expect(
-    await main(
-      [
-        "scan",
-        "--json",
-        "--full-output",
-        "--no-full-output",
-        "--token-count",
-        "--no-token-count",
-        "--unknown-option",
-      ],
-      compact.stream,
-      capture().stream,
-      deps,
-    ),
-  ).toBe(2);
-  expect(JSON.parse(compact.text()).status).toBe("failed");
 
-  const plain = capture();
-  expect(
-    await main(
-      ["scan", "--json", "--no-json", "--unknown-option"],
-      plain.stream,
-      capture().stream,
-      deps,
-    ),
-  ).toBe(2);
-  expect(plain.text()).toBe("");
+  const { stdout: compact } = await runInvalid([
+    "scan",
+    "--json",
+    "--full-output",
+    "--no-full-output",
+    "--token-count",
+    "--no-token-count",
+    "--unknown-option",
+  ]);
+  expect(JSON.parse(compact).status).toBe("failed");
+
+  const { stdout: plain } = await runInvalid([
+    "scan",
+    "--json",
+    "--no-json",
+    "--unknown-option",
+  ]);
+  expect(plain).toBe("");
 });
 
 test("recognizes scans preceded by the global JSON flag", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  expect(
-    await main(
-      ["--json", "scan", "--unknown-option"],
-      stdout.stream,
-      stderr.stream,
-      dependencies({
-        onConfig: () => {
-          throw new Error("Argument errors must not initialize the scanner.");
-        },
-      }),
-    ),
-  ).toBe(2);
-  expect(stderr.text()).toContain("unknown-option");
-  expect(JSON.parse(stdout.text())).toMatchObject({
+  const { stdout, stderr } = await runInvalid([
+    "--json",
+    "scan",
+    "--unknown-option",
+  ]);
+  expect(stderr).toContain("unknown-option");
+  expect(JSON.parse(stdout)).toMatchObject({
     status: "failed",
     code: "SCAN_FAILED",
   });
