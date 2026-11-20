@@ -15,6 +15,8 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   repositoryGit,
+  publicationRepository,
+  patchRiskAssessment,
   patchDirectories,
   initializePatchGit,
   runIssuePatch,
@@ -208,8 +210,6 @@ test.each([
 );
 
 test("publication preflight uses the native remote with an unrelated GIT_CONFIG selector", async () => {
-  const { publicationRepository, resultWithFindings, savedScan } =
-    await import("./cli-patch-fixtures.js");
   const { directory, git, remote } = await publicationRepository(fixtures);
   const support = await fixtures.create("patch-selector-remote-");
   const decoy = join(support, "decoy.git");
@@ -252,8 +252,6 @@ test("publication preflight uses the native remote with an unrelated GIT_CONFIG 
 test.each([false, true])(
   "nested snapshot ignores the config-only selector (linked worktree: %p)",
   async (linked) => {
-    const { publicationRepository, patchRiskAssessment, repositoryGit } =
-      await import("./cli-patch-fixtures.js");
     const { directory, git } = await publicationRepository(fixtures);
     const support = await fixtures.create("patch-selector-nested-");
     const nested = join(directory, "nested");
@@ -311,7 +309,6 @@ test.each([false, true])(
 test.each(["unset", "missing", "unrelated", "decoy remote"] as const)(
   "publication preflight reads effective Git configuration with selector: %s",
   async (mode) => {
-    const { publicationRepository } = await import("./cli-patch-fixtures.js");
     const { directory, git } = await publicationRepository(fixtures);
     const support = await fixtures.create("patch-publication-selector-");
     const selector = join(support, "selected-config");
