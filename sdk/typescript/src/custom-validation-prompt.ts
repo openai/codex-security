@@ -101,18 +101,13 @@ export async function customDiscoveryPrompt(
         "references/core-scan.md",
         "references/investigation-time-budget.md",
       ];
-      const snapshots = await Promise.all(
-        paths.map(async (name) => {
-          const bytes = await readFile(join(pluginRoot, name)).catch(
-            () => undefined,
-          );
-          return bytes === undefined
-            ? undefined
-            : ([name, hash("sha256", bytes)] as const);
-        }),
+      const files = await Promise.allSettled(
+        paths.map((name) => readFile(join(pluginRoot, name))),
       );
-      if (snapshots.every((snapshot) => snapshot !== undefined))
-        Object.assign(sourceDigests, Object.fromEntries(snapshots));
+      if (files.every((file) => file.status === "fulfilled")) {
+        for (const [index, file] of files.entries())
+          sourceDigests[paths[index]!] = hash("sha256", file.value);
+      }
       workflow = [
         "Use <plugin_dir>/references/core-scan.md for source discovery. This caller supplies the validation handoff: the SDK runs independent final validation in a separate turn. Check source evidence and counterevidence now, but do not run the default validation pass.",
         "Keep any supplied investigation time allowance unchanged. Only for an explicit time request with no existing allowance, render <plugin_dir>/references/investigation-time-budget.md once before source review.",
