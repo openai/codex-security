@@ -1373,76 +1373,126 @@ describe("CLI workbench", () => {
       expect(stderr.text()).toContain("MCP configuration");
     });
 
-    test("stops on a corrupt helper lock after saving an empty pair", async () => {
-      await using home = await scopedTemporaryDirectory("match-all-lock-");
-      await using work = await scopedTemporaryDirectory("match-all-work-");
-      const lock = join(home.path, ".codex-security-preflight");
-      await mkdir(lock, { mode: 0o700 });
-      await writeFile(
-        join(lock, ".codex-security-scan.sqlite3"),
-        "synthetic corrupt SQLite database",
-        { mode: 0o600 },
-      );
-      await writeFile(
-        join(home.path, "config.toml"),
-        'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nwire_api = "responses"\n[model_providers.synthetic.auth]\ncommand = "synthetic-auth"\n',
-      );
-      const preload = join(home.path, "mcp-list.mjs");
-      await writeFile(
-        preload,
-        'if (!process.argv.includes("mcp")) throw new Error("Unexpected native request");\nconsole.log("[]");\nprocess.exit(0);\n',
-      );
-      const { batches, saved, onWorkbench } = batchWithInitialSave();
-      batches[2]!.afterFindings.length = 0;
-      const { stdout, stderr, runCli } = createCliTest(main);
-      let failure: unknown;
-      const executable = nodeCommand().command;
-      const originalSpawn = childProcess.spawn;
-      const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
-        ...input: Parameters<typeof originalSpawn>
-      ) => {
-        const [command, args, options] = input;
-        return command === executable ||
-          command === executablePathForSpawn(executable)
-          ? originalSpawn(executable, [preload, ...(args ?? [])], options ?? {})
-          : originalSpawn(...input);
-      }) as typeof originalSpawn);
-      let code: number;
-      try {
-        code = await runCli(
-          argv,
-          dependencies({
-            currentDirectory: work.path,
-            environment: {
-              CODEX_HOME: home.path,
-              CODEX_CLI_PATH: executable,
-            },
-            onWorkbench,
-            onMatch: (input, options) =>
-              matchScanFindings(input, options).catch((error: unknown) => {
-                failure = error;
-                throw error;
-              }),
-          }),
+    test.each(["corrupt lock", "transient preflight"])(
+      "handles a %s helper failure after saving an empty pair",
+      async (failureKind) => {
+        const fatal = failureKind === "corrupt lock";
+        await using home = await scopedTemporaryDirectory("match-all-lock-");
+        await using work = await scopedTemporaryDirectory("match-all-work-");
+        const lock = join(home.path, ".codex-security-preflight");
+        if (fatal) {
+          await mkdir(lock, { mode: 0o700 });
+          await writeFile(
+            join(lock, ".codex-security-scan.sqlite3"),
+            "synthetic corrupt SQLite database",
+            { mode: 0o600 },
+          );
+        }
+        await writeFile(
+          join(home.path, "config.toml"),
+          'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nwire_api = "responses"\n[model_providers.synthetic.auth]\ncommand = "synthetic-auth"\n',
         );
-      } finally {
-        spawnSpy.mockRestore();
-      }
-      expect(code, stderr.text()).toBe(2);
-      expect(saved).toEqual([["source", "empty"]]);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).not.toContain("warning:");
-      expect(failure).toBeInstanceOf(ConfigurationError);
-      const cause = (failure as Error).cause;
-      expect(cause).toBeInstanceOf(Error);
-      expect((failure as Error).message).toBe((cause as Error).message);
-      expect((cause as Error).message).toContain("file is not a database");
-      expect(
-        (await readdir(home.path)).filter((name) =>
-          name.startsWith("codex_security_"),
-        ),
-      ).toEqual([]);
-    });
+        const preload = join(home.path, "mcp-list.mjs");
+        await writeFile(
+          preload,
+          `
+        import { createInterface } from "node:readline";
+        if (process.argv.includes("mcp")) { console.log("[]"); process.exit(0); }
+        if (!process.argv.includes("app-server")) throw new Error("Unexpected native request");
+        const id = "codex_security_deep_scan_worker";
+        const profile = {
+          extends: ":read-only",
+          filesystem: { ":root": "read", [process.env.CODEX_HOME]: { ".": "deny" } },
+          network: { enabled: false },
+        };
+        for await (const line of createInterface({ input: process.stdin })) {
+          const request = JSON.parse(line);
+          if (request.id === undefined) continue;
+          if (request.method === "permissionProfile/list") {
+            console.log(JSON.stringify({ id: request.id, error: { code: -32000, message: "Temporarily unavailable" } }));
+            continue;
+          }
+          const result = request.method === "config/read"
+            ? { config: { default_permissions: id, permissions: { [id]: profile } } }
+            : {};
+          console.log(JSON.stringify({ id: request.id, result }));
+        }
+        `,
+        );
+        const { batches, saved, onWorkbench } = batchWithInitialSave();
+        batches[2]!.afterFindings.length = 0;
+        const { stdout, stderr, runCli } = createCliTest(main);
+        let failure: unknown;
+        const executable = nodeCommand().command;
+        const originalSpawn = childProcess.spawn;
+        const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+          ...input: Parameters<typeof originalSpawn>
+        ) => {
+          const [command, args, options] = input;
+          return command === executable ||
+            command === executablePathForSpawn(executable)
+            ? originalSpawn(
+                executable,
+                [preload, ...(args ?? [])],
+                options ?? {},
+              )
+            : originalSpawn(...input);
+        }) as typeof originalSpawn);
+        let code: number;
+        try {
+          code = await runCli(
+            argv,
+            dependencies({
+              currentDirectory: work.path,
+              environment: {
+                CODEX_HOME: home.path,
+                CODEX_CLI_PATH: executable,
+              },
+              onWorkbench,
+              onMatch: (input, options) =>
+                matchScanFindings(input, options).catch((error: unknown) => {
+                  failure = error;
+                  throw error;
+                }),
+            }),
+          );
+        } finally {
+          spawnSpy.mockRestore();
+        }
+        expect(code, stderr.text()).toBe(fatal ? 2 : 0);
+        expect(saved).toEqual([
+          ["source", "empty"],
+          ...(fatal ? [] : [["source", "later"]]),
+        ]);
+        if (fatal) {
+          expect(stdout.text()).toBe("");
+          expect(stderr.text()).not.toContain("warning:");
+          expect(failure).toBeInstanceOf(ConfigurationError);
+          const cause = (failure as Error).cause;
+          expect(cause).toBeInstanceOf(Error);
+          expect((failure as Error).message).toBe((cause as Error).message);
+          expect((cause as Error).message).toContain("file is not a database");
+        } else {
+          expect(failure).toBeInstanceOf(Error);
+          expect(failure).not.toBeInstanceOf(ConfigurationError);
+          expect(failure).toMatchObject({
+            message: expect.stringContaining("Temporarily unavailable"),
+            cause: { code: -32000, message: "Temporarily unavailable" },
+          });
+          expect(stderr.text()).toContain("warning:");
+          expect(stderr.text()).toContain("Temporarily unavailable");
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            matchedPairs: 2,
+            unmatchedBatches: 1,
+          });
+        }
+        expect(
+          (await readdir(home.path)).filter((name) =>
+            name.startsWith("codex_security_"),
+          ),
+        ).toEqual([]);
+      },
+    );
 
     test("returns the first matcher error if every batch fails", async () => {
       const { saved, onWorkbench } = batchWorkbench(["first", "second"]);

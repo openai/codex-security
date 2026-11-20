@@ -1019,9 +1019,10 @@ describe("semantic scan comparison", () => {
           });
           expect(startThread).toHaveBeenCalledTimes(1);
         } else if (mode === "unavailable") {
+          await expect(matching).rejects.not.toBeInstanceOf(ConfigurationError);
           await expect(matching).rejects.toMatchObject({
-            constructor: Error,
             message: expect.stringContaining("Temporarily unavailable"),
+            cause: { code: -32000, message: "Temporarily unavailable" },
           });
           expect(startThread).not.toHaveBeenCalled();
         } else {
