@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve, win32 } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { dependencies, fakeResult } from "./cli-fixtures.js";
+import { dependencies, fakeResult, type OnCodex } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -95,6 +95,7 @@ export function completePatches(
 
 export function patchArtifactFromPrompt(prompt: string): {
   path: string;
+  sourceType: string;
   base: string;
   changedFiles: string[];
   sha256: string;
@@ -351,20 +352,67 @@ export async function observeIssuePatch(
   return { outcome, launches, controls, afterTurn };
 }
 
-export function runSavedPublication(
-  directory: string,
+export function runPublicationWorkflow(
+  target: "issue" | "scan",
   fixtures: Parameters<typeof runWorkflow>[1],
   options?: Parameters<typeof runWorkflow>[2],
 ) {
+  const selection =
+    target === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
   return runWorkflow(
-    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-    {
-      currentDirectory: directory,
-      onWorkbench: () =>
-        savedScan(resultWithFindings(["high"]), "scan-1", directory),
-      ...fixtures,
-    },
+    ["patch", ...selection, "--create-pr", "--json"],
+    fixtures,
     options,
+  );
+}
+
+export function runSavedPublication(
+  directory: string,
+  fixtures: Parameters<typeof runWorkflow>[1],
+  {
+    resumeBranch,
+    ...options
+  }: Parameters<typeof runWorkflow>[2] & {
+    resumeBranch?: string | undefined;
+  } = {},
+) {
+  const saved = {
+    currentDirectory: directory,
+    onWorkbench: () =>
+      savedScan(resultWithFindings(["high"]), "scan-1", directory),
+    ...fixtures,
+  };
+  return resumeBranch === undefined
+    ? runPublicationWorkflow("scan", saved, options)
+    : runWorkflow(
+        ["patch", "--resume-pr", resumeBranch, "--json"],
+        saved,
+        options,
+      );
+}
+
+export function fixSavedFinding(
+  directory: string,
+  before?: () => void | Promise<void>,
+): OnCodex {
+  return async (args, output) => {
+    if (before) await before();
+    await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+    completePatches(args, output);
+    return 0;
+  };
+}
+
+export function createSavedPatchBranch(
+  git: ReturnType<typeof repositoryGit>,
+  branch: string,
+  commit?: string,
+) {
+  git("branch", branch);
+  git(
+    "config",
+    `branch.${branch}.codexSecurityPatchCommit`,
+    commit ?? git("rev-parse", "HEAD"),
   );
 }
 
@@ -436,6 +484,29 @@ export const runLocalHostingTransport: typeof runGitRepositoryCommand = (
   options,
 ) => runGitRepositoryCommand(command, args, cwd, localHostingOptions(options));
 
+export function runHostedGit(
+  remote: string,
+  args: readonly string[],
+  cwd: string,
+  options?: Parameters<typeof runGitRepositoryCommand>[3],
+) {
+  if (args.includes("ls-remote"))
+    return runLocalHostingTransport(
+      "git",
+      ["ls-remote", "--heads", "--", remote],
+      cwd,
+      options,
+    );
+  if (args[0] === "push")
+    return runLocalHostingTransport(
+      "git",
+      args.map((arg) => (arg === "origin" ? remote : arg)),
+      cwd,
+      options,
+    );
+  return runGitRepositoryCommand("git", args, cwd, options);
+}
+
 export async function addPublicationOrigin(
   fixtures: ReturnType<typeof createTemporaryDirectories>,
   git: ReturnType<typeof repositoryGit>,
@@ -483,9 +554,7 @@ export function runPublication(
   target: "issue" | readonly string[],
   edit: () => void | Promise<void>,
 ) {
-  const selection =
-    target === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
-  return runWorkflow(["patch", ...selection, "--create-pr", "--json"], {
+  return runPublicationWorkflow(target === "issue" ? "issue" : "scan", {
     currentDirectory: directory,
     onWorkbench:
       target === "issue"

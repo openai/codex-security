@@ -15,6 +15,7 @@ import {
   patchDirectories,
   runSavedPublication,
   initializePatchGit,
+  runPublicationWorkflow,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -196,31 +197,28 @@ test.each(["root", "nested", "disabled"])(
     }
     await writeFile(join(checkout, "local-note.txt"), "Ordinary local note.\n");
     const operations: string[] = [];
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onRepositoryCommand(command, args, cwd, options) {
-          if (command !== "git")
-            return args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1";
-          for (const operation of ["add", "status", "push"])
-            if (args.includes(operation)) operations.push(operation);
-          if (args[0] === "push") return "";
-          return runGitRepositoryCommand(command, args, cwd, options);
-        },
-        async onCodex(_args, output) {
-          operations.push("model");
-          await writeFile(
-            join(directory, "src/finding-1.ts"),
-            "Independent edit.\n",
-          );
-          output!.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
+    const outcome = await runPublicationWorkflow("issue", {
+      currentDirectory: directory,
+      onRepositoryCommand(command, args, cwd, options) {
+        if (command !== "git")
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        for (const operation of ["add", "status", "push"])
+          if (args.includes(operation)) operations.push(operation);
+        if (args[0] === "push") return "";
+        return runGitRepositoryCommand(command, args, cwd, options);
       },
-    );
+      async onCodex(_args, output) {
+        operations.push("model");
+        await writeFile(
+          join(directory, "src/finding-1.ts"),
+          "Independent edit.\n",
+        );
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
     if (mode === "disabled") {
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(operations).toContain("push");
@@ -414,54 +412,51 @@ test.each([
           { trim: false },
         ),
       ).toBe("filtered baseline\n");
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        environment,
-        onRepositoryCommand(command, args, cwd, options) {
-          if (command !== "git")
-            return args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1";
-          // Exercise the production host Git command boundary for publication.
-          const hostPublication =
-            !options?.sandbox &&
-            (args.includes("switch") || args.includes("commit"));
-          const runGit = hostPublication
-            ? runRepositoryCommand
-            : runGitRepositoryCommand;
-          return runGit(command, args, cwd, {
-            ...options,
-            environment: {
-              ...environment,
-              ...options?.environment,
-              SYNTHETIC_HOST_MARKER: hostPublication
-                ? marker.replaceAll("\\", "/")
-                : undefined,
-            },
-          });
-        },
-        async onCodex(_args, output) {
-          if (scenario === "late netrc") await writeNetrc();
-          // Simulate the external filter input becoming unavailable after baseline capture.
-          if (missingInput) await unlink(filterRules);
-          await writeFile(
-            script,
-            [
-              'if test -n "${SYNTHETIC_HOST_MARKER-}"; then',
-              '  printf invoked > "$SYNTHETIC_HOST_MARKER"',
-              "fi",
-              transform,
-              "",
-            ].join("\n"),
-          );
-          await writeFile(join(directory, file), "model edit\n");
-          output!.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
+    const outcome = await runPublicationWorkflow("issue", {
+      currentDirectory: directory,
+      environment,
+      onRepositoryCommand(command, args, cwd, options) {
+        if (command !== "git")
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        // Exercise the production host Git command boundary for publication.
+        const hostPublication =
+          !options?.sandbox &&
+          (args.includes("switch") || args.includes("commit"));
+        const runGit = hostPublication
+          ? runRepositoryCommand
+          : runGitRepositoryCommand;
+        return runGit(command, args, cwd, {
+          ...options,
+          environment: {
+            ...environment,
+            ...options?.environment,
+            SYNTHETIC_HOST_MARKER: hostPublication
+              ? marker.replaceAll("\\", "/")
+              : undefined,
+          },
+        });
       },
-    );
+      async onCodex(_args, output) {
+        if (scenario === "late netrc") await writeNetrc();
+        // Simulate the external filter input becoming unavailable after baseline capture.
+        if (missingInput) await unlink(filterRules);
+        await writeFile(
+          script,
+          [
+            'if test -n "${SYNTHETIC_HOST_MARKER-}"; then',
+            '  printf invoked > "$SYNTHETIC_HOST_MARKER"',
+            "fi",
+            transform,
+            "",
+          ].join("\n"),
+        );
+        await writeFile(join(directory, file), "model edit\n");
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
     expect(outcome.exitCode, outcome.stderr).toBe(missingInput ? 2 : 0);
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
     const receiver = repositoryGit(remote);

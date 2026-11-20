@@ -23,9 +23,25 @@ import {
   patchDirectories,
   initializePatchGit,
   runIssuePatch,
+  observeIssuePatch,
+  runPublicationWorkflow,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
+
+async function expectOnlyAppPatched(
+  root: string,
+  beforeEdit?: () => Promise<void>,
+) {
+  const { outcome, launches } = await observeIssuePatch(root, async () => {
+    if (beforeEdit) await beforeEdit();
+    await writeFile(join(root, "app.ts"), "after\n");
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(launches).toBe(1);
+  expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+  expect(await readFile(join(root, "app.ts"), "utf8")).toBe("after\n");
+}
 
 async function repository(prefix: string) {
   const root = await fixtures.create(prefix);
@@ -131,30 +147,27 @@ test.each(["snapshot", "copy detection"])(
     };
     if (stage === "snapshot") await rm(looseObject);
     let copyDiff: readonly string[] | undefined;
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: root,
-        environment,
-        onCodex: async (_args, output) => {
-          await writeFile(join(root, "copy.txt"), original + "new line\n");
-          output?.stdout.write("Fixed and verified.");
-          return 0;
-        },
-        async onRepositoryCommand(command, args, cwd, options) {
-          if (command !== "git") return args[1] === "list" ? "[]" : "";
-          if (args.includes("--find-copies-harder")) {
-            copyDiff = [...args];
-            // Inject object loss exactly after both snapshot trees have been captured.
-            if (stage === "copy detection") await rm(looseObject);
-          }
-          return runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          });
-        },
+    const outcome = await runPublicationWorkflow("issue", {
+      currentDirectory: root,
+      environment,
+      onCodex: async (_args, output) => {
+        await writeFile(join(root, "copy.txt"), original + "new line\n");
+        output?.stdout.write("Fixed and verified.");
+        return 0;
       },
-    );
+      async onRepositoryCommand(command, args, cwd, options) {
+        if (command !== "git") return args[1] === "list" ? "[]" : "";
+        if (args.includes("--find-copies-harder")) {
+          copyDiff = [...args];
+          // Inject object loss exactly after both snapshot trees have been captured.
+          if (stage === "copy detection") await rm(looseObject);
+        }
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    });
     if (stage === "copy detection")
       expect(copyDiff, outcome.stderr).toBeDefined();
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
@@ -188,9 +201,7 @@ test.each([true, false])(
     }
     selected.git("add", "nested");
     selected.git("commit", "-m", "Synthetic linked worktree");
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected.root,
-      onRepositoryCommand: runGitRepositoryCommand,
+    const outcome = await runIssuePatch(selected.root, {
       onCodex: async () => {
         await writeFile(join(selected.root, "app.ts"), "after\n");
         return 0;
@@ -222,8 +233,7 @@ test("patch rejects an external object store selected by a checkout symlink befo
   const blob = selected.git("hash-object", "app.ts");
   let snapshots = 0;
   let turns = 0;
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: selected.root,
+  const outcome = await runIssuePatch(selected.root, {
     onRepositoryCommand: (command, args, cwd, options) => {
       if (options?.patchSnapshot) snapshots++;
       return runGitRepositoryCommand(command, args, cwd, options);
@@ -279,23 +289,7 @@ for (const raw of [false, true]) {
         process.platform === "win32" ? "junction" : "dir",
       );
       const originalLink = await readlink(link);
-      let launches = 0;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: selected.root,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            launches++;
-            await writeFile(join(selected.root, "app.ts"), "after\n");
-            output?.stdout.write("Synthetic patch complete.\n");
-            return 0;
-          },
-        },
-      );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(launches).toBe(1);
-      expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      await expectOnlyAppPatched(selected.root);
       expect(await readlink(link)).toBe(originalLink);
       expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
         selectedIndex,
@@ -310,9 +304,6 @@ for (const raw of [false, true]) {
       );
       expect(await readFile(join(nestedPath, "input.ts"), "utf8")).toBe(
         "foreign source\n",
-      );
-      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
-        "after\n",
       );
     },
   );
@@ -353,25 +344,9 @@ test.each([
       );
     await writeFile(marker, contents);
     const index = await readFile(join(selected.root, ".git", "index"));
-    let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected.root,
-      onRepositoryCommand: runGitRepositoryCommand,
-      onCodex: async (_args, output) => {
-        launches++;
-        await writeFile(join(selected.root, "app.ts"), "after\n");
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
-      },
-    });
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(launches).toBe(1);
-    expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+    await expectOnlyAppPatched(selected.root);
     expect(await readFile(marker, "utf8")).toBe(contents);
     expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
-    expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
-      "after\n",
-    );
   },
 );
 
@@ -396,29 +371,11 @@ for (const [kind, contents] of [
       if (contents === null) await mkdir(marker);
       else await writeFile(marker, contents);
       const index = await readFile(join(selected.root, ".git", "index"));
-      let launches = 0;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: selected.root,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            launches++;
-            await writeFile(join(selected.root, "app.ts"), "after\n");
-            output?.stdout.write("Synthetic patch complete.\n");
-            return 0;
-          },
-        },
-      );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(launches).toBe(1);
-      expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      await expectOnlyAppPatched(selected.root);
       expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
         index,
       );
-      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
-        "after\n",
-      );
+
       expect(
         await readFile(
           Buffer.concat([source, Buffer.from("/deep/input.ts")]),
@@ -443,25 +400,9 @@ test.skipIf(process.platform !== "linux")(
     ]);
     await writeFile(marker, contents);
     const index = await readFile(join(selected.root, ".git", "index"));
-    let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected.root,
-      onRepositoryCommand: runGitRepositoryCommand,
-      onCodex: async (_args, output) => {
-        launches++;
-        await writeFile(join(selected.root, "app.ts"), "after\n");
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
-      },
-    });
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(launches).toBe(1);
-    expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+    await expectOnlyAppPatched(selected.root);
     expect(await readFile(marker)).toEqual(contents);
     expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
-    expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
-      "after\n",
-    );
   },
 );
 
@@ -491,8 +432,7 @@ test.each([false, true])(
     const contents = `gitdir: ${join(foreign.root, ".git")}\n`;
     let launches = 0;
     const bookkeeping: string[][] = [];
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected.root,
+    const outcome = await runIssuePatch(selected.root, {
       onRepositoryCommand: (command, args, cwd, options) => {
         if (
           launches > 0 &&
@@ -564,24 +504,20 @@ for (const hostileConfig of ["malformed", "hook"] as const) {
       }
       let launches = 0;
       const probes: { cwd: string; args: string[] }[] = [];
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: selected.root,
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (args.includes("--resolve-git-dir"))
-              probes.push({ cwd, args: [...args] });
-            return runGitRepositoryCommand(command, args, cwd, options);
-          },
-          onCodex: async (_args, output) => {
-            launches++;
-            await writeFile(join(selected.root, "app.ts"), "after\n");
-            await writeFile(marker, `gitdir: ${foreignAdmin}\n`);
-            output?.stdout.write("Synthetic patch complete.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(selected.root, {
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (args.includes("--resolve-git-dir"))
+            probes.push({ cwd, args: [...args] });
+          return runGitRepositoryCommand(command, args, cwd, options);
         },
-      );
+        onCodex: async (_args, output) => {
+          launches++;
+          await writeFile(join(selected.root, "app.ts"), "after\n");
+          await writeFile(marker, `gitdir: ${foreignAdmin}\n`);
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain(
         "Git metadata outside the pre-patch administration directories",
@@ -623,26 +559,11 @@ test.each([false, true])(
     const marker = join(selected.root, "source", ".git");
     if (existing) await mkdir(marker);
     const index = await readFile(join(selected.root, ".git", "index"));
-    let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected.root,
-      onRepositoryCommand: runGitRepositoryCommand,
-      onCodex: async (_args, output) => {
-        launches++;
-        if (!existing) await mkdir(marker);
-        await writeFile(join(selected.root, "app.ts"), "after\n");
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
-      },
+    await expectOnlyAppPatched(selected.root, async () => {
+      if (!existing) await mkdir(marker);
     });
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(launches).toBe(1);
-    expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
     expect(await readdir(marker)).toEqual([]);
     expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
-    expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
-      "after\n",
-    );
   },
 );
 

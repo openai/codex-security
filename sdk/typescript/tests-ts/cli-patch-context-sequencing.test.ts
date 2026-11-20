@@ -14,6 +14,7 @@ import {
   runIssuePatch,
   runSavedPublication,
   runPublicationCommand,
+  patchArtifactFromPrompt,
 } from "./cli-patch-fixtures.js";
 import {
   patchSnapshotEnvironment,
@@ -194,10 +195,8 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                 output?.appServer?.prompt.includes("immutable patch artifact")
               ) {
                 assessments++;
-                const artifact = JSON.parse(
-                  output.appServer.prompt
-                    .split("\n")
-                    .find((line) => line.startsWith('{"path":'))!,
+                const artifact = patchArtifactFromPrompt(
+                  output.appServer.prompt,
                 );
                 const patch = await readFile(artifact.path, "utf8");
                 assessedPatch = patch;

@@ -17,12 +17,8 @@ import { delimiter, dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
-import { dependencies } from "./cli-fixtures.js";
 import { throwing } from "./support/errors.js";
 import {
-  resultWithFindings,
-  savedScan,
-  completePatches,
   runWorkflow,
   runGitRepositoryCommand,
   runLocalHostingTransport,
@@ -30,7 +26,14 @@ import {
   patchDirectories,
   runSavedPublication,
   runPublicationCommand,
+  fixSavedFinding,
+  createSavedPatchBranch,
+  runHostedGit,
+  gitWithEnvironment,
+  runPublicationWorkflow,
 } from "./cli-patch-fixtures.js";
+
+const branch = "codex-security/patch-scan-1";
 
 describe("patch change tracking", () => {
   const fixtures = patchDirectories();
@@ -113,7 +116,6 @@ describe("patch change tracking", () => {
     "native Git transport honors the %s proxy boundary",
     async (source, resume) => {
       const { directory, git } = await publicationRepository();
-      const branch = "codex-security/patch-scan-1";
       const external = await fixtures.create("patch-native-proxy-");
       const globalConfig = join(external, "operator.gitconfig");
       const marker = join(external, "invocations");
@@ -143,14 +145,7 @@ describe("patch change tracking", () => {
         "origin",
         "git://127.0.0.1:1/example/repository.git",
       );
-      if (resume) {
-        git("branch", branch);
-        git(
-          "config",
-          `branch.${branch}.codexSecurityPatchCommit`,
-          git("rev-parse", "HEAD"),
-        );
-      }
+      if (resume) createSavedPatchBranch(git, branch);
       const addProxy = (command: string) =>
         git(
           "config",
@@ -185,25 +180,16 @@ describe("patch change tracking", () => {
       }
 
       const onCodex = mock(() => 0);
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const runGit = gitWithEnvironment(environment);
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment,
           onCodex,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
           onRepositoryCommand: (tool, args, cwd, options) =>
-            tool === "git"
-              ? runGitRepositoryCommand(tool, args, cwd, {
-                  ...options,
-                  environment: { ...environment, ...options?.environment },
-                })
-              : "",
+            tool === "git" ? runGit(tool, args, cwd, options) : "",
         },
-        { localHosting: false },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(onCodex).not.toHaveBeenCalled();
@@ -278,8 +264,9 @@ exit 1
           GIT_CONFIG_GLOBAL: join(external, "gitconfig"),
           GIT_CONFIG_NOSYSTEM: "1",
         };
-        const outcome = await runWorkflow(
-          ["patch", "Synthetic issue", "--create-pr", "--json"],
+        const runGit = gitWithEnvironment(environment);
+        const outcome = await runPublicationWorkflow(
+          "issue",
           {
             currentDirectory: directory,
             environment,
@@ -298,12 +285,7 @@ exit 1
               return 0;
             },
             onRepositoryCommand: (command, args, cwd, options) =>
-              command === "git"
-                ? runGitRepositoryCommand(command, args, cwd, {
-                    ...options,
-                    environment: { ...environment, ...options?.environment },
-                  })
-                : "",
+              command === "git" ? runGit(command, args, cwd, options) : "",
           },
           { localHosting: false },
         );
@@ -343,15 +325,7 @@ exit 1
       const remote = "https://gitlab.example.test/team/repository.git";
       git("remote", "set-url", "origin", remote);
       git("config", "--file", global, "credential.useHttpPath", "true");
-      const branch = "codex-security/patch-scan-1";
-      if (source === "resume") {
-        git("branch", branch);
-        git(
-          "config",
-          `branch.${branch}.codexSecurityPatchCommit`,
-          git("rev-parse", "HEAD"),
-        );
-      }
+      if (source === "resume") createSavedPatchBranch(git, branch);
       if (source !== "branch include") {
         git("config", key, value);
       } else {
@@ -370,20 +344,12 @@ exit 1
         );
       }
       const transports: string[] = [];
-      const outcome = await runWorkflow(
-        source === "resume"
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const runGit = gitWithEnvironment(environment);
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onCodex: async (args, output) => {
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          onCodex: fixSavedFinding(directory),
           onRepositoryCommand: (tool, args, cwd, options) => {
             if (tool !== "git") return "";
             if (args.includes("ls-remote") || args[0] === "push") {
@@ -392,13 +358,13 @@ exit 1
               );
               return "";
             }
-            return runGitRepositoryCommand(tool, args, cwd, {
-              ...options,
-              environment: { ...environment, ...options?.environment },
-            });
+            return runGit(tool, args, cwd, options);
           },
         },
-        { localHosting: false },
+        {
+          localHosting: false,
+          resumeBranch: source === "resume" ? branch : undefined,
+        },
       );
       expect(transports).toEqual(
         source === "branch include" ? ["ls-remote"] : [],
@@ -587,17 +553,13 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           directory,
           {
             environment,
-
-            onCodex: async (args, output) => {
+            onCodex: fixSavedFinding(directory, async () => {
               modelCalls++;
               if (retarget) {
                 await unlink(alias);
                 await symlink(directory, alias, linkType);
               }
-              await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-              completePatches(args, output);
-              return 0;
-            },
+            }),
             onRepositoryCommand: (tool, args, cwd, options) => {
               if (tool !== "git") return "";
               if (stage === "push" && !retarget && args.includes("ls-remote"))
@@ -744,19 +706,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         environment,
         onRepositoryCommand,
       };
-      const branch = "codex-security/patch-scan-1";
       const fixture = { localHosting: false };
-      const fresh = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const fresh = await runSavedPublication(
+        directory,
         {
           ...common,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onCodex: async (args, output) => {
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          onCodex: fixSavedFinding(directory),
         },
         fixture,
       );
@@ -827,19 +782,14 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         "git@github.example.test:example/repository.git",
       );
       const model = mock(async () => 0);
+      const runGit = gitWithEnvironment(environment);
       const outcome = await runSavedPublication(
         directory,
         {
           environment,
-
           onCodex: model,
           onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, {
-                  ...options,
-                  environment: { ...environment, ...options?.environment },
-                })
-              : "[]",
+            command === "git" ? runGit(command, args, cwd, options) : "[]",
         },
         { localHosting: false },
       );
@@ -890,16 +840,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       SSH_ASKPASS: askPass,
       SSH_ASKPASS_REQUIRE: "force",
     };
+    const runGit = gitWithEnvironment(environment);
     const outcome = await runSavedPublication(
       directory,
       {
         environment,
-
-        onCodex: async (args, output) => {
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          completePatches(args, output);
-          return 0;
-        },
+        onCodex: fixSavedFinding(directory),
         onRepositoryCommand: (tool, args, cwd, options) => {
           if (tool === "glab") return "";
           if (args.includes("ls-remote")) {
@@ -909,10 +855,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             );
             return "";
           }
-          return runGitRepositoryCommand(tool, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          });
+          return runGit(tool, args, cwd, options);
         },
       },
       { localHosting: false },
@@ -927,7 +870,6 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     "automatic publication pushes without signing certificates, resume=%p",
     async (resume) => {
       const { directory, git, remote } = await publicationRepository();
-      const branch = "codex-security/patch-scan-1";
       git(
         "-C",
         remote,
@@ -943,29 +885,14 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         join(directory, "nonexistent-test-signer"),
       );
       git("config", "user.signingKey", "synthetic-test-key");
-      if (resume) {
-        git("branch", branch);
-        git(
-          "config",
-          `branch.${branch}.codexSecurityPatchCommit`,
-          git("rev-parse", "HEAD"),
-        );
-      }
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      if (resume) createSavedPatchBranch(git, branch);
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onCodex: async (args, output) => {
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          onCodex: fixSavedFinding(directory),
           onRepositoryCommand: runPublicationCommand,
         },
+        { resumeBranch: resume ? branch : undefined },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(git("-C", remote, "rev-parse", `refs/heads/${branch}`)).toBe(
@@ -988,18 +915,15 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     git("commit", "-m", "Synthetic signer fixture");
     git("config", "commit.gpgSign", "true");
     git("config", "gpg.program", "./signer");
-    const outcome = await runWorkflow(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onCodex: async (_args, output) => {
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          output?.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
-        onRepositoryCommand: runPublicationCommand,
+    const outcome = await runPublicationWorkflow("issue", {
+      currentDirectory: directory,
+      onCodex: async (_args, output) => {
+        await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
       },
-    );
+      onRepositoryCommand: runPublicationCommand,
+    });
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
@@ -1033,23 +957,14 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         expect(git("ls-remote", pushUrl)).toBe("");
       }
       git("remote", "set-url", "--push", "origin", pushUrl);
-      const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
-      if (resume) {
-        git("branch", branch);
-        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
-      }
+      if (resume) createSavedPatchBranch(git, branch, commit);
       const model = mock(async () => 0);
       const hosting = mock(() => "[]");
       let pushes = 0;
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
           onCodex: model,
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command !== "git") return hosting();
@@ -1057,7 +972,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             return runGitRepositoryCommand(command, args, cwd, options);
           },
         },
-        { localHosting: false },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain("network push URL");
@@ -1093,47 +1008,16 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             : `https://github.example.test/${path}`;
       git("remote", "set-url", "origin", `${base}.git`);
       git("remote", "set-url", "--push", "origin", push);
-      const branch = "codex-security/patch-scan-1";
-      if (resume) {
-        git("branch", branch);
-        git(
-          "config",
-          `branch.${branch}.codexSecurityPatchCommit`,
-          git("rev-parse", "HEAD"),
-        );
-      }
+      if (resume) createSavedPatchBranch(git, branch);
       let creates = 0;
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment: { GH_REPO: "example/repository" },
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onCodex: async (args, output) => {
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          onCodex: fixSavedFinding(directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (args.includes("ls-remote"))
-                return runLocalHostingTransport(
-                  command,
-                  ["ls-remote", "--heads", "--", remote],
-                  cwd,
-                  options,
-                );
-              if (args[0] === "push")
-                return runLocalHostingTransport(
-                  command,
-                  args.map((arg) => (arg === "origin" ? remote : arg)),
-                  cwd,
-                  options,
-                );
-              return runGitRepositoryCommand(command, args, cwd, options);
+              return runHostedGit(remote, args, cwd, options);
             }
             expect(command).toBe("gh");
             if (args[1] === "list") return "[]";
@@ -1156,7 +1040,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             return `${base}/pull/1`;
           },
         },
-        { localHosting: false },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(creates).toBe(1);
@@ -1182,19 +1066,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       const head = git("rev-parse", "HEAD");
       const before = git("ls-remote", remote);
       const blocked = existing !== "codex-security/patch-scan-10";
-      const result = resultWithFindings(["high"]);
-      const onCodex = mock(
-        async (
-          args: readonly string[],
-          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-        ) => {
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          completePatches(args, output);
-          return 0;
-        },
-      );
+      const onCodex = mock(fixSavedFinding(directory));
       const outcome = await runSavedPublication(directory, {
-        onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
         onRepositoryCommand: runPublicationCommand,
       });
@@ -1227,7 +1100,6 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       git("remote", "set-url", "origin", alias);
       git("config", `url.${destination}.${rewrite}`, alias);
       git("config", `url.${decoy}.insteadOf`, destination);
-      const branch = "codex-security/patch-scan-1";
       const head = git("rev-parse", "HEAD");
       if (collision !== "free")
         git(
@@ -1240,19 +1112,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       const decoyRefs = git("--git-dir", decoy, "show-ref");
       const configuration = git("config", "--get-regexp", "^(remote|url)\\.");
       expect(git("remote", "get-url", "--push", "origin")).toBe(destination);
-      const result = resultWithFindings(["high"]);
-      const onCodex = mock(
-        async (
-          args: readonly string[],
-          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-        ) => {
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          completePatches(args, output);
-          return 0;
-        },
-      );
+      const onCodex = mock(fixSavedFinding(directory));
       const outcome = await runSavedPublication(directory, {
-        onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
         onRepositoryCommand: runPublicationCommand,
       });
@@ -1533,39 +1394,36 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         }
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
-        const outcome = await runWorkflow(
-          ["patch", "Synthetic issue", "--create-pr", "--json"],
-          {
-            currentDirectory: directory,
-            environment,
-            onRepositoryCommand: async (command, args, cwd, options) => {
-              if (command !== "git")
-                return args[1] === "list"
-                  ? "[]"
-                  : "https://github.example.test/example/repository/pull/1";
-              const child = promisify(execFile)("git", [...args], {
-                cwd,
-                env: { ...environment, ...options?.environment },
-                maxBuffer: options?.maxBuffer,
-                encoding: options?.encoding === "base64" ? "buffer" : "utf8",
-              });
-              child.child.stdin?.end(options?.input);
-              const { stdout } = await child;
-              const text = Buffer.isBuffer(stdout)
-                ? stdout.toString(options?.encoding ?? "utf8")
-                : stdout;
-              return options?.trim === false ? text : text.trim();
-            },
-            onCodex: async (_args, output) => {
-              models++;
-              if (credentials === "askpass")
-                await writeFile(askPass + ".calls", "");
-              await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-              output?.stdout.write("Fixed and verified.");
-              return 0;
-            },
+        const outcome = await runPublicationWorkflow("issue", {
+          currentDirectory: directory,
+          environment,
+          onRepositoryCommand: async (command, args, cwd, options) => {
+            if (command !== "git")
+              return args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1";
+            const child = promisify(execFile)("git", [...args], {
+              cwd,
+              env: { ...environment, ...options?.environment },
+              maxBuffer: options?.maxBuffer,
+              encoding: options?.encoding === "base64" ? "buffer" : "utf8",
+            });
+            child.child.stdin?.end(options?.input);
+            const { stdout } = await child;
+            const text = Buffer.isBuffer(stdout)
+              ? stdout.toString(options?.encoding ?? "utf8")
+              : stdout;
+            return options?.trim === false ? text : text.trim();
           },
-        );
+          onCodex: async (_args, output) => {
+            models++;
+            if (credentials === "askpass")
+              await writeFile(askPass + ".calls", "");
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            output?.stdout.write("Fixed and verified.");
+            return 0;
+          },
+        });
         expect(outcome.exitCode, outcome.stderr).toBe(collision ? 2 : 0);
         expect(models).toBe(collision ? 0 : 1);
         expect(tunnels).toBeGreaterThan(0);
@@ -1610,7 +1468,6 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-destination-secondary-");
       git("clone", "--bare", directory, secondary);
-      const branch = "codex-security/patch-scan-1";
       const original = git("rev-parse", "HEAD");
       const occupy = () =>
         git(
@@ -1639,20 +1496,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           : secondary,
       );
       const before = git("ls-remote", secondary, `refs/heads/${branch}`);
-      const result = resultWithFindings(["high"]);
       const onCodex = mock(
-        async (
-          args: readonly string[],
-          output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-        ) => {
+        fixSavedFinding(directory, () => {
           if (destination === "race") occupy();
-          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-          completePatches(args, output);
-          return 0;
-        },
+        }),
       );
       const outcome = await runSavedPublication(directory, {
-        onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
         onRepositoryCommand: (command, args, cwd, options) =>
           command === "git"
@@ -1745,8 +1594,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     );
     const branch = "codex-security/saved-patch";
     const commit = git("rev-parse", "HEAD");
-    git("branch", branch);
-    git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+    createSavedPatchBranch(git, branch, commit);
     const url = "https://github.com/example/repository/pull/1";
     let repositoryLookups = 0;
     const outcome = await runWorkflow(
@@ -2066,32 +1914,25 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       }
       if (transport.endsWith("push-only"))
         git("config", "--unset-all", "remote.origin.url");
-      const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
       if (resume) {
-        git("branch", branch);
-        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+        createSavedPatchBranch(git, branch, commit);
         git(
           "config",
           `branch.${branch}.codexSecurityPatchPullRequestBody`,
           "Synthetic body",
         );
       }
-      const result = resultWithFindings(["high"]);
       let modelCalls = 0;
       let pushes = 0;
       let repositoryLookups = 0;
       let sshLookups = 0;
       const ownUrl = `${hostingUrl}/upstream/repository/pull/8`;
       const createdUrl = `${hostingUrl}/upstream/repository/pull/9`;
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment,
-          onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (args.at(-1) === "^remote\\.origin\\.pushurl$") {
@@ -2241,14 +2082,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             }
             return createdUrl;
           },
-          onCodex: async (args, output) => {
+          onCodex: fixSavedFinding(directory, () => {
             modelCalls++;
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          }),
         },
-        { localHosting: false },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
       const localPushes = transport === "local" || localOnly || localFirst;
       if (localPushes) {

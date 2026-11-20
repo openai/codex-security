@@ -2,17 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  completePatches,
   publicationRepository,
-  resultWithFindings,
-  runGitRepositoryCommand,
-  runLocalHostingTransport,
   runPublicationCommand,
-  runWorkflow,
-  savedScan,
   patchDirectories,
+  fixSavedFinding,
+  createSavedPatchBranch,
+  runHostedGit,
+  runPublicationWorkflow,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
 import { pathToFileURL } from "node:url";
+
+const branch = "codex-security/patch-scan-1";
 
 describe("GitHub patch destinations", () => {
   const fixtures = patchDirectories();
@@ -38,8 +39,8 @@ describe("GitHub patch destinations", () => {
       }
       let edited = false;
       let providerCallsAfterEdit = 0;
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--create-pr", "--json"],
+      const outcome = await runPublicationWorkflow(
+        "issue",
         {
           currentDirectory: directory,
           environment: gitlab
@@ -135,50 +136,24 @@ describe("GitHub patch destinations", () => {
       const push = `https://${host}${pushPort}/synthetic-user/repository.git`;
       git("remote", "set-url", "origin", `${base}.git`);
       git("remote", "set-url", "--push", "origin", push);
-      const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
-      if (resume) {
-        git("branch", branch);
-        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
-      }
+      if (resume) createSavedPatchBranch(git, branch, commit);
       const selectorHost = new URL(base).host;
       const selectors: string[] = [];
       let pushes = 0;
       let creations = 0;
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment: { GH_REPO: `${host}${basePort}/example/repository` },
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onCodex: async (args, output) => {
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          onCodex: fixSavedFinding(directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (args.includes("ls-remote"))
-                return runLocalHostingTransport(
-                  command,
-                  ["ls-remote", "--heads", "--", remote],
-                  cwd,
-                  options,
-                );
               if (args[0] === "push") {
                 pushes++;
                 expect(git("remote", "get-url", "--push", "origin")).toBe(push);
-                return runLocalHostingTransport(
-                  command,
-                  args.map((arg) => (arg === "origin" ? remote : arg)),
-                  cwd,
-                  options,
-                );
               }
-              return runGitRepositoryCommand(command, args, cwd, options);
+              return runHostedGit(remote, args, cwd, options);
             }
             expect(command).toBe("gh");
             if (args[1] === "list")
@@ -213,7 +188,7 @@ describe("GitHub patch destinations", () => {
             return `${base}/pull/8`;
           },
         },
-        { localHosting: false },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(matches ? 0 : 2);
       expect(pushes).toBe(matches ? 1 : 0);
@@ -387,12 +362,8 @@ describe("GitLab patch destinations", () => {
                 : upstream,
       );
       git("remote", "set-url", "--push", "origin", push);
-      const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
-      if (resume) {
-        git("branch", branch);
-        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
-      }
+      if (resume) createSavedPatchBranch(git, branch, commit);
       const existing =
         mode === "existing fork request" || mode === "different saved commit";
       const requestSource =
@@ -409,12 +380,9 @@ describe("GitLab patch destinations", () => {
       let patches = 0;
       let pushes = 0;
       let lookups = 0;
-      const outcome = await runWorkflow(
-        resume
-          ? ["patch", "--resume-pr", branch, "--json"]
-          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment: sshConfig
             ? {
                 GITLAB_HOST: host,
@@ -426,35 +394,14 @@ describe("GitLab patch destinations", () => {
             : mode === "self-managed fork" || portCase
               ? { GITLAB_HOST: host }
               : {},
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onCodex: async (args, output) => {
+          onCodex: fixSavedFinding(directory, () => {
             patches++;
-            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
-          },
+          }),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (args.includes("ls-remote")) {
-                preflights++;
-                return runLocalHostingTransport(
-                  command,
-                  ["ls-remote", "--heads", "--", remote],
-                  cwd,
-                  options,
-                );
-              }
-              if (args[0] === "push") {
-                pushes++;
-                return runLocalHostingTransport(
-                  command,
-                  args.map((arg) => (arg === "origin" ? remote : arg)),
-                  cwd,
-                  options,
-                );
-              }
-              return runGitRepositoryCommand(command, args, cwd, options);
+              if (args.includes("ls-remote")) preflights++;
+              else if (args[0] === "push") pushes++;
+              return runHostedGit(remote, args, cwd, options);
             }
             expect(command).toBe("glab");
             if (args[0] === "repo") {
@@ -496,7 +443,7 @@ describe("GitLab patch destinations", () => {
             return url;
           },
         },
-        { localHosting: false },
+        { localHosting: false, resumeBranch: resume ? branch : undefined },
       );
       if (mode === "explicit HTTP port fork") {
         expect(outcome.exitCode).toBe(2);
