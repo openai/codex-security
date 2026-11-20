@@ -66,6 +66,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
+import { fileURLToPath } from "node:url";
 
 import type {
   CodexWorkerDiagnostic,
@@ -3103,15 +3104,12 @@ async function testZeroSubagentsPreservesHostRestrictions() {
 }
 
 async function testLargeScopeTransport() {
+  const engineSource = new URL("../src/deep-scan/engine.ts", import.meta.url);
   const { startDeepScanEngine } = await importSource(
-    "src/deep-scan/engine.ts",
+    fileURLToPath(engineSource),
     {
       loader: { ".md": "text" },
-      define: {
-        "import.meta.url": JSON.stringify(
-          new URL("../src/deep-scan/engine.ts", import.meta.url).href,
-        ),
-      },
+      define: { "import.meta.url": JSON.stringify(engineSource.href) },
     },
   );
   const names = [
