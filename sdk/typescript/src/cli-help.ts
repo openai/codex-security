@@ -1,3 +1,4 @@
+import { cliOutputFormats } from "./cli-integrations.js";
 import { DEEP_SCAN_SETTINGS, DeepScanSettingsSchema } from "./scan-settings.js";
 
 type Row = { label: string; description: string };
@@ -239,7 +240,7 @@ function globalRows(
     formats.label = formats.label.replace("|md", "");
   }
   if (formats && dependencyReport)
-    formats.label = formats.label.replace(">", "|html>");
+    formats.label = `--format <${cliOutputFormats(dependencyReport).join("|")}>`;
   if (formats) {
     visible.push({
       label: "--json",

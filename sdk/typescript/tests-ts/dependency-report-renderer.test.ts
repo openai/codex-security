@@ -17,11 +17,10 @@ import {
 } from "./support/dependency-report-fixtures.js";
 
 function text(html: string) {
-  return html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/giu, "")
-    .replace(/<[^>]*>/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
+  const content =
+    elements(html, ".workspace")[0] ?? elements(html, "article")[0];
+  if (!content) throw new Error("Missing report or finding");
+  return content.text;
 }
 function elements(html: string, selector: string, attrs: string[] = []) {
   const result: { text: string; attrs: Record<string, string | null> }[] = [];
@@ -541,15 +540,32 @@ describe("call site report", () => {
     const html = renderDependencyReport(r);
     expect(html).not.toContain(raw);
     expect(html).toContain("&lt;svg");
-    const script = html.match(/<script>([\s\S]*?)<\/script>/u)![1]!;
-    expect(html).toContain(
+    const scripts: string[] = [];
+    new HTMLRewriter()
+      .on("script", {
+        element() {
+          scripts.push("");
+        },
+        text(node) {
+          scripts[scripts.length - 1] += node.text;
+        },
+      })
+      .transform(html);
+    expect(scripts).toHaveLength(1);
+    const script = scripts[0]!;
+    const policy = elements(
+      html,
+      'meta[http-equiv="Content-Security-Policy"]',
+      ["content"],
+    )[0]?.attrs["content"];
+    expect(policy).toContain(
       `script-src 'sha256-${createHash("sha256").update(script).digest("base64")}'`,
     );
-    expect(html).toContain("default-src 'none'");
+    expect(policy).toContain("default-src 'none'");
     expect(html).toContain("@media print");
     expect(html).toContain(":focus-visible");
-    expect(html).not.toContain("<script src=");
-    expect(html).not.toContain("<link rel=");
+    expect(elements(html, "script[src]")).toHaveLength(0);
+    expect(elements(html, "link[rel]")).toHaveLength(0);
   });
   test("does not activate or display credential-bearing URLs", () => {
     const suspicious =
