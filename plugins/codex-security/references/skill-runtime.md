@@ -10,3 +10,4 @@ For file-only access, read the applicable sections under `<plugin_root>/template
 
 - For a shell command, read the quoting instructions and the named topic in `windows.md` (PowerShell) or `posix.md` (POSIX shell).
 - In `scans.md`, read the scan topic, using `standard-scan-<surface>` for Standard. Standard and Diff also use `checkpoints`. Desktop scans use `review-comments` for the final response.
+- For a workbench remediation, read `workbench` in `scans.md` followed by the authorized stage topic.

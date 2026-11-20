@@ -61,6 +61,16 @@ test("packaged MCP and standalone reader select runtime instructions", async (t)
       }
     }
   }
+  for (const stage of ["generate", "apply", "verify"]) {
+    const response = await instructions(`workbench-${stage}`);
+    assertNoError(response);
+    const text: string = response.result.content[0].text;
+    assert.match(text, /set_codex_security_finding_remediation/);
+    assert.deepEqual(
+      text.toLowerCase().match(/^### (generate|apply|verify)\b/gm),
+      [`### ${stage}`],
+    );
+  }
   const command = await instructions("scope-binding", "desktop");
   assertNoError(command);
   const text: string = command.result.content[0].text;

@@ -2,8 +2,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const scanTopics = ["standard-scan", "diff-scan", "deep-scan"];
+const remediationTopics = [
+  "workbench-generate",
+  "workbench-apply",
+  "workbench-verify",
+];
 export const skillRuntimeTopics = [
   ...scanTopics,
+  ...remediationTopics,
   "build-explorer",
   "copy-worklist",
   "diff-local-patch",
@@ -29,6 +35,9 @@ export async function readSkillRuntimeInstructions(
   }
   if (clientSurface !== "desktop" && clientSurface !== "headless") {
     throw new Error(`Unknown skill client surface: ${clientSurface}`);
+  }
+  if (remediationTopics.includes(topic)) {
+    return readSections(pluginRoot, "scans", ["workbench", topic]);
   }
   if (scanTopics.includes(topic)) {
     const startup =

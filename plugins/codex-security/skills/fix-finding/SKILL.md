@@ -17,7 +17,7 @@ Classify the current state from evidence, close the broken security boundary, pr
 
 Use the bundled verification method included in the request. When its contents are not supplied, read [standard verification](references/verification-standard.md) unless the caller explicitly selects [static verification](../../references/verification-static.md). Pass the selected mode to delegated reviewers and workbench workers.
 
-For a workbench handoff with a scan ID, occurrence ID, remediation request ID, action token, and expected version, read [workbench remediation](references/workbench.md) before any action. The authorized stage governs writes and the terminal state update.
+For a workbench handoff with a scan ID, occurrence ID, remediation request ID, action token, and expected version, resolve [runtime instructions](../../references/skill-runtime.md) for the authorized stage before any action. Select `workbench-generate` for Generate or Regenerate, `workbench-apply` for Apply, or `workbench-verify` for Verify. The authorized stage governs writes and the terminal state update.
 
 ## Patch Contract
 
