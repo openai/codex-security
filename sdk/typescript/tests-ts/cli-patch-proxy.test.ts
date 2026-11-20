@@ -95,7 +95,7 @@ test.skipIf(process.platform === "win32")(
   () => checkNativePush("linked launcher", "single"),
 );
 test.skipIf(process.platform === "win32")(
-  "a single destination with a pre-push hook uses a separate Git child launcher",
+  "a single destination with a pre-push hook accepts Git installation hard links",
   () => checkNativePush("approved", "single"),
 );
 
@@ -187,8 +187,8 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
     );
     let launcher = join(external, "transport-2");
     if (route === "single") {
-      const execPath = join(external, "git-core");
-      await mkdir(execPath);
+      const execPath = join(external, "libexec", "git-core");
+      await mkdir(execPath, { recursive: true });
       environment["GIT_EXEC_PATH"] = execPath;
       launcher = join(execPath, "git");
       await writeFile(
@@ -196,6 +196,9 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
         `#!/bin/sh\nexec ${JSON.stringify(Bun.which("git"))} "$@"\n`,
         { mode: 0o700 },
       );
+      const bin = join(external, "bin");
+      await mkdir(bin);
+      await link(launcher, join(bin, "git"));
     }
     if (scenario === "linked launcher")
       await link(launcher, join(directory, "launcher-alias"));
