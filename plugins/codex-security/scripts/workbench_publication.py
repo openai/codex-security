@@ -30,6 +30,9 @@ from snapshot_sqlite import readonly_sqlite_uri
 from validate_scan_contract import validate_contract
 from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
+# SQLite's default Win32 VFS has MAX_PATH * 4 bytes; the pager reserves eight for "-journal".
+_WIN32_SQLITE_FILENAME_BYTES = 260 * 4 - 8
+
 
 def destination_key(destination: Any) -> str:
     """Encode exact provider-specific destination IDs into a stable key for matching issue receipts."""
@@ -211,10 +214,15 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "storeExists": True,
         "receipts": [],
     }
-    path = db.database_path()
     if payload["action"] == "inspect" or require_history:
+        path = db.database_path()
+        stat_path = path
+        if os.name == "nt":
+            from windows_scan_local_files import _extended_path
+
+            stat_path = Path(_extended_path(path))
         try:
-            path.stat()
+            stat_path.stat()
         except FileNotFoundError:
             if require_history:
                 raise SystemExit(
@@ -226,8 +234,15 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
     if payload["action"] == "inspect":
+        sqlite_path = stat_path
+        if os.name == "nt" and (
+            len(str(path).encode("utf-8"))
+            <= _WIN32_SQLITE_FILENAME_BYTES
+            < len(str(stat_path).encode("utf-8"))
+        ):
+            sqlite_path = path
         try:
-            connection = sqlite3.connect(readonly_sqlite_uri(path), uri=True, timeout=5)
+            connection = sqlite3.connect(readonly_sqlite_uri(sqlite_path), uri=True, timeout=5)
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True
