@@ -1242,6 +1242,7 @@ with ExitStack() as stack:
         scan_dir = root / "scan-output"
         scan_dir.mkdir()
         stack.enter_context(patch.object(workbench, "require_target", return_value=Path(paths["requested"])))
+        stack.enter_context(patch.object(scan_start, "require_target", return_value=Path(paths["requested"])))
         stack.enter_context(patch.object(workbench, "require_scannable_target"))
         stack.enter_context(patch.object(workbench, "require_canonical_scan_directory", return_value=scan_dir))
         stack.enter_context(patch.object(workbench, "directory_snapshot_regular_file_count", return_value=0))

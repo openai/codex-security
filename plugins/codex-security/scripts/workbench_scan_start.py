@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
@@ -28,12 +28,13 @@ from workbench.storage import (
     state_dir,
 )
 from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
+from workbench_setup import require_target
 from workbench_target import (
     directory_content_digest,
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, read_json_object
+from workbench_validation import optional_text, read_json_object, reject_non_finite_json
 
 
 def safe_segment(value: str) -> str:
@@ -499,6 +500,68 @@ def insert_running_scan(
                 (json.dumps(false_positives, allow_nan=False) + "\n").encode(),
             )
     return scan_id
+
+
+def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
+    try:
+        recipe = json.loads(value, parse_constant=reject_non_finite_json)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
+    if not isinstance(recipe, dict):
+        raise SystemExit("Scan launch recipe must be a JSON object.")
+    requested_repository = recipe.get("repository")
+    if (
+        not isinstance(requested_repository, str)
+        or require_target(requested_repository) != repository
+    ):
+        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
+    if recipe.get("mode") not in {"standard", "deep"}:
+        raise SystemExit("Scan launch recipe mode must be standard or deep.")
+    if not isinstance(recipe.get("config"), dict):
+        raise SystemExit("Scan launch recipe config must be a JSON object.")
+    target = recipe.get("target")
+    if not isinstance(target, dict) or target.get("kind") not in {
+        "repository",
+        "paths",
+        "refs",
+        "working_tree",
+    }:
+        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
+    paths = target.get("paths")
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
+    if target["kind"] == "paths" and not paths:
+        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
+    if target["kind"] != "paths" and paths:
+        raise SystemExit("Only scoped scan launch recipes can include target paths.")
+    for path in paths:
+        candidate = PurePosixPath(path)
+        if (
+            not path
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            or "\\" in path
+            or not (repository / candidate).exists()
+            or not (repository / candidate).resolve().is_relative_to(repository)
+        ):
+            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
+    exclusions = recipe.get("excludePaths", [])
+    if not isinstance(exclusions, list) or any(
+        not isinstance(path, str)
+        or not path
+        or any(ord(character) < 32 for character in path)
+        or re.match(r"^[A-Za-z]:", path)
+        or "\\" in path
+        or PurePosixPath(path).is_absolute()
+        or ".." in PurePosixPath(path).parts
+        or PurePosixPath(path).as_posix() != path
+        for path in exclusions
+    ):
+        raise SystemExit("Scan launch recipe exclusions must be literal repository-relative paths.")
+    if target["kind"] in {"refs", "working_tree"}:
+        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
+            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
+    return recipe
 
 
 if __name__ == "__main__":

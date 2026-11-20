@@ -3,9 +3,7 @@ import childProcess, { type SpawnOptions } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { importModule } from "./import-module.ts";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { readJson } from "./support/json.ts";
 import { assertConfigOverrides, assertFlagPair } from "./assertions.ts";
 import {
@@ -38,17 +36,6 @@ export async function testWorkerSelectedProfileFiles({
     codeMode?: { enabled: boolean; excluded_tool_namespaces: string[] },
   ) => void;
 }) {
-  const { mergedCodexConfig, resolveCodexProfile, writeCodexConfig } =
-    await importModule({
-      alias: {
-        "smol-toml": fileURLToPath(import.meta.resolve("smol-toml")),
-      },
-      entryPoints: [
-        fileURLToPath(
-          new URL("../../../../sdk/typescript/src/config.ts", import.meta.url),
-        ),
-      ],
-    });
   const cases: [string, string | undefined, boolean?][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
@@ -233,9 +220,18 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
         settings.map(async (_, index) => {
           if (!instructions && !codeMode) return configPath;
           const selected = path.join(fixture.root, `scan-${index}.toml`);
+          let workerConfig = configuration;
+          if (modelFiles && index % 2 === 0) {
+            // A replayed SDK profile omits file settings that the caller cleared.
+            const config = parseToml(workerConfig);
+            delete config.model_instructions_file;
+            delete config.model_catalog_json;
+            delete config.experimental_compact_prompt_file;
+            workerConfig = stringifyToml(config);
+          }
           await writeFile(
             selected,
-            configuration
+            workerConfig
               .replace(
                 '"profile-instructions.md"',
                 JSON.stringify(
@@ -270,30 +266,6 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                 `web_search = ${JSON.stringify(index % 2 === 0 ? "disabled" : "cached")}`,
               ),
           );
-          if (modelFiles && index % 2 === 0) {
-            // SDK replay clears file-profile values before the worker TOML is written.
-            const profile = `replay-${index}`;
-            await writeFile(
-              path.join(codexHome, `${profile}.config.toml`),
-              await readFile(selected, "utf8"),
-            );
-            await writeCodexConfig(
-              selected,
-              resolveCodexProfile(
-                await mergedCodexConfig(
-                  {
-                    codexOverrides: {
-                      profile,
-                      model_instructions_file: null,
-                      model_catalog_json: null,
-                      experimental_compact_prompt_file: null,
-                    },
-                  },
-                  codexHome,
-                ),
-              ),
-            );
-          }
           return selected;
         }),
       );

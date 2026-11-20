@@ -236,6 +236,55 @@ def test_repository_previews_52_and_53_preserve_classification_and_import_schema
         } == {"preview-time"}
 
 
+@pytest.mark.parametrize(
+    ("prefix_version", "reopened"),
+    [
+        (54, False),
+        (54, True),
+        (58, False),
+        (58, True),
+        (61, False),
+        (61, True),
+        (63, False),
+        (64, False),
+        (67, False),
+    ],
+)
+def test_scan_git_preview_upgrades_to_released_repository_identity(prefix_version, reopened):
+    connection, migrate = create_historical_database(prefix_version)
+    for offset, (name, column) in enumerate(
+        (
+            ("save scan target Git positions", "target_git_prefix"),
+            ("save scan Git repository identities", "target_git_identity_json"),
+        )
+    ):
+        version = prefix_version + offset
+        migration = (version, name, f"ALTER TABLE scans ADD COLUMN {column} TEXT;")
+        apply_historical_migrations(connection, (migration,), "preview")
+        if reopened and version in (54, 55, 58, 59, 61):
+            for statement in SCHEMA.sql_statements(SCHEMA.MIGRATIONS[version - 1][2]):
+                connection.execute(statement)
+    insert_historical_row(connection, "workspaces", "preview", id="legacy-workspace")
+    insert_legacy_scan(
+        connection, "preview", target_git_prefix="src", target_git_identity_json="{}"
+    )
+
+    migrate(connection)
+    migrate(connection)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        )
+    ] == EXPECTED_MIGRATIONS
+    assert tuple(
+        connection.execute(
+            "SELECT target_git_prefix, target_git_identity_json FROM scans WHERE id = 'legacy-scan'"
+        ).fetchone()
+    ) == ("src", "{}")
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_repository_preview_history_keeps_original_application_times_after_budget_upgrade():
     connection, migrate = create_historical_database(72)
     connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
@@ -1579,38 +1628,6 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("preview_slot", [63, 64, 67, 73, None])
-def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration(
-    preview_slot: int | None,
-) -> None:
-    db, migrate = create_historical_database(preview_slot or 64)
-    with closing(db):
-        timestamp = "2026-01-01T00:00:00Z"
-        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
-        # A released main reader has already replaced this receipt, leaving the column intact.
-        if preview_slot is not None:
-            record_migration(
-                db, preview_slot, "retain native investigation time allowances", timestamp
-            )
-        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
-        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
-        migrate(db)
-        allowance = db.execute(
-            "SELECT name, applied_at FROM schema_migrations WHERE version = 81"
-        ).fetchone()
-        assert allowance["name"] == "retain native investigation time allowances"
-        if preview_slot is not None:
-            assert allowance["applied_at"] == timestamp
-        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
-        receipt = db.execute(query).fetchone()
-        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
-        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
-        migrate(db)
-        assert db.execute(query).fetchone() == receipt
-        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:

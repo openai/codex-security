@@ -317,10 +317,11 @@ function readPolicy(path: Buffer, displayedPath: Buffer): string {
   }
 }
 
-function resolveSecurityMd(
+export function resolveSecurityMd(
   repo: string,
   scope: string,
   posixHome: string | undefined,
+  { requireResolvedLinks = false }: { requireResolvedLinks?: boolean } = {},
 ): string {
   const root = resolveRoot(repo, posixHome);
   const expandedScope = parsedPath(expandHome(scope, posixHome));
@@ -363,7 +364,22 @@ function resolveSecurityMd(
   const sections: string[] = [];
   for (const directory of directories) {
     const policy = appendPath(directory, encodePath("SECURITY.md"));
-    if (!fileStat(policy)?.isFile()) continue;
+    const metadata = fileStat(policy);
+    if (!metadata && requireResolvedLinks) {
+      // A dangling or looping link is present guidance with unknown content.
+      // Ordinary policy lookup keeps its existing missing-file behavior.
+      let entry: FileInfo | undefined;
+      try {
+        entry = windows
+          ? windowsFiles().stat(policy, false)
+          : lstatSync(policy, { throwIfNoEntry: false });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (entry)
+        throw new Error(`Could not resolve SECURITY.md: ${decodePath(policy)}`);
+    }
+    if (!metadata?.isFile()) continue;
     const resolvedPolicy = resolvedPath(policy);
     inside(resolvedPolicy, root, "SECURITY.md");
     const content = readPolicy(resolvedPolicy, policy);

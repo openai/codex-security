@@ -374,6 +374,22 @@ test(async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
       { path: "tests/example.ts" },
     ],
   });
+  const previous = process.env.CODEX_SECURITY_EXCLUDE_PATHS;
+  try {
+    process.env.CODEX_SECURITY_EXCLUDE_PATHS = JSON.stringify([
+      "tests",
+      "src/deleted.ts",
+    ]);
+    assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+      reviewItemsTotal: 2,
+    });
+    assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
+      items: [{ path: "src/changed.ts" }, { path: "src/new.ts" }],
+    });
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_SECURITY_EXCLUDE_PATHS;
+    else process.env.CODEX_SECURITY_EXCLUDE_PATHS = previous;
+  }
 });
 
 test(async function testPrepareIncludesPerlSourceWithMixedEncodings() {

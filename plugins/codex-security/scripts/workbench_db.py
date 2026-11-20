@@ -86,6 +86,7 @@ from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
     loaded_plugin_version,
+    parse_scan_recipe,
     prepare_cli_scan_target,
     register_windows_resume_output,
     restore_cli_scan_archive,
@@ -117,8 +118,8 @@ from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
     expected_target_kinds,
-    parse_scan_recipe,
     public_scan_recipe,
+    requested_exclude_paths,
     requested_scan_paths,
     safe_source_path,
 )
@@ -378,7 +379,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     return {
         "diffTarget": stored_diff_target(scan),
         "scope": {
-            "requiredExcludePaths": [],
+            "requiredExcludePaths": requested_exclude_paths(scan),
             "requestedPath": scan["scope"],
             "filePaths": requested_scan_file_paths(scan),
             **(
@@ -492,7 +493,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
     include_paths = scope.get("includePaths")
     if not isinstance(include_paths, list):
         raise SystemExit("scan-manifest.json scope includePaths must be an array.")
-    if scope.get("excludePaths") != []:
+    if scope.get("excludePaths") != expected_contract["scope"]["requiredExcludePaths"]:
         raise SystemExit(
             "scan-manifest.json scope excludePaths must match the workbench scan scope."
         )
@@ -1669,10 +1670,19 @@ def register_cli_scan(
         paths or ["."],
         diff_target_kind=diff_target["kind"] if diff_target is not None else None,
     )
+    exclusions = recipe.get("excludePaths", [])
     scope_file_count = (
-        scoped_regular_file_count(repository, paths)
-        if mode == "standard" and len(paths) > 1
-        else scan_scope_file_count(repository, paths or ["."], diff_target)
+        (
+            diff_scope_file_count(repository, diff_target, exclusions)
+            if diff_target is not None
+            else scoped_regular_file_count(repository, paths or ["."], exclusions)
+        )
+        if exclusions
+        else (
+            scoped_regular_file_count(repository, paths)
+            if mode == "standard" and len(paths) > 1
+            else scan_scope_file_count(repository, paths or ["."], diff_target)
+        )
     )
     require_working_tree_unchanged(repository, diff_target)
     parent_scan_id = (

@@ -2,6 +2,8 @@
 
 Start with the [deterministic triage checks](triage-finding/README.md#check-the-harness) or the harness tests linked below. These run locally without model calls. Model evaluations are opt-in and consume usage on the account you configure.
 
+- [Dependency reachability](dependency-reachability/README.md) grades local CVE and
+  package investigations against controlled application builds and measured stack evidence.
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
 - [Secret discovery](secret-discovery/README.md): checks whether the production

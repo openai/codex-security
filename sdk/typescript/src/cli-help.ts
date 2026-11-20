@@ -4,7 +4,10 @@ type Row = { label: string; description: string };
 type Group = readonly [title: string, names: readonly string[]];
 
 const COMMAND_GROUPS: readonly Group[] = [
-  ["Scan and remediate", ["scan", "policy", "validate", "patch", "verify-fix"]],
+  [
+    "Scan and remediate",
+    ["scan", "policy", "validate", "patch", "verify-fix", "exploitability"],
+  ],
   [
     "Review results",
     ["scans", "findings", "classify-severity", "dedupe", "suggest-owners"],

@@ -7,6 +7,7 @@ export interface DiscoveryPromptInput {
   targetPath: string;
   scope: string;
   includePaths?: readonly string[];
+  excludePaths?: readonly string[];
   userContext?: string;
   severityRubric?: DeepScanRunState["severityRubric"];
   workerLabel: string;
@@ -24,6 +25,9 @@ export function renderDiscoveryPrompt(
       pluginRoot: input.pluginRoot,
       targetPath: input.targetPath,
       includePaths: input.includePaths ?? [input.scope],
+      ...(input.excludePaths?.length
+        ? { excludePaths: input.excludePaths }
+        : {}),
       userContext: input.userContext ?? null,
       severityRubric: input.severityRubric,
       workerLabel: input.workerLabel,
