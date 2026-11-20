@@ -1750,16 +1750,13 @@ function currentGitParameters(
     : environmentEntry(inherited, "GIT_CONFIG_PARAMETERS");
 }
 
-function publicationHookCommand(args: readonly string[]): boolean {
+function gitSubcommand(args: readonly string[]) {
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (["-C", "-c", "--git-dir", "--work-tree"].includes(arg)) index++;
-    else if (!arg.startsWith("-")) {
-      // Configuration and git-path discovery must see the operator's hooks and filters.
-      return arg !== "config" && arg !== "rev-parse";
-    }
+    else if (!arg.startsWith("-")) return arg;
   }
-  return false;
+  return undefined;
 }
 
 function shellEnvironmentSettings(config: JsonObject): JsonObject | undefined {
@@ -1963,14 +1960,19 @@ interface PatchRiskAssessment extends PatchRiskReport {
   tree?: string;
 }
 
-type PatchHostingProvider = "gh" | "glab";
+const hostingConfigLabels = {
+  git: "Git configuration",
+  gh: "GitHub CLI configuration",
+  glab: "GitLab CLI configuration",
+};
+type PatchPublicationTool = keyof typeof hostingConfigLabels;
 
 type PatchTransportFile = {
   target: string;
   stamp: string;
   digest?: string;
   kind:
-    | PatchHostingProvider
+    | PatchPublicationTool
     | "ssh-input"
     | "executable"
     | "file"
@@ -1993,7 +1995,7 @@ interface PatchWriters {
 interface PatchTransportAccess extends PatchWriters {
   sshPatterns?: Map<string, () => Promise<void>>;
   verifyHostingConfig?: Record<
-    PatchHostingProvider,
+    PatchPublicationTool,
     () => Promise<NodeJS.ProcessEnv>
   >;
   // A null target represents a known-hosts file that SSH may create.
@@ -2072,7 +2074,7 @@ interface CliDependencies {
     input?: string,
   ): Promise<number>;
   runRepositoryCommand(
-    command: "git" | "gh" | "glab",
+    command: PatchPublicationTool,
     args: readonly string[],
     repository: string,
     options?: {
@@ -4009,6 +4011,10 @@ export async function main(
         loaderAccess: loaderWriters,
       };
       options.signal?.throwIfAborted();
+      const subcommand = command === "git" ? gitSubcommand(args) : undefined;
+      // Configuration and git-path discovery must see the operator's hooks and filters.
+      const useHooks =
+        subcommand && subcommand !== "config" && subcommand !== "rev-parse";
       if (command === "git") {
         // Any Git index read can run a checkout-selected fsmonitor as the CLI user.
         const count = Number(
@@ -4020,6 +4026,9 @@ export async function main(
             0,
         );
         options.environment = {
+          // Bookkeeping follows Git's effective settings. Tools that consult
+          // the legacy file selector opt into it for their own queries.
+          ...(subcommand === "config" && { GIT_CONFIG: undefined }),
           ...options.environment,
           ...(options.patchTransport
             ? { GIT_NO_LAZY_FETCH: "1" }
@@ -4032,7 +4041,7 @@ export async function main(
           options.environment,
           parentDependencies.environment,
         );
-        if (unavailableFilters.length && publicationHookCommand(args)) {
+        if (unavailableFilters.length && useHooks) {
           // Only Git knows which drivers are selected, including after a patch
           // changes attributes or switches branches. Fail if one actually runs.
           parameters = patchFilterParameters(
@@ -4104,11 +4113,10 @@ export async function main(
             }),
       };
       if (
-        command === "git" &&
         publicationHooks?.events.size &&
         patchSandbox &&
         options.patchSnapshot === undefined &&
-        publicationHookCommand(args)
+        useHooks
       ) {
         options.publicationHooks = publicationHooks;
         options.hookSandbox = {
@@ -4128,9 +4136,12 @@ export async function main(
         };
       }
       const verify = patchTransportAccess.verifyHostingConfig;
-      if (verify && (command === "gh" || command === "glab")) {
+      if (verify && command !== "git") {
+        const environment = options.environment ?? {};
         options.environment = {
-          ...options.environment,
+          ...environment,
+          ...(!Object.hasOwn(environment, "GIT_CONFIG") &&
+            (await verify.git())),
           ...(await verify[command]()),
         };
       }
@@ -9276,7 +9287,6 @@ export async function main(
                 const read = (args: string[]) =>
                   dependencies.runRepositoryCommand("git", args, directory, {
                     trim: false,
-                    environment: { GIT_CONFIG: undefined },
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
@@ -11798,7 +11808,7 @@ async function prepareSavedPatchPublication(
     "git",
     ["config", "--includes", "--null", "--name-only", "--list"],
     repository,
-    { trim: false, environment: { GIT_CONFIG: undefined } },
+    { trim: false },
   );
   const filterDrivers = new Set(
     keys.split("\0").flatMap((key) => {
@@ -12265,7 +12275,7 @@ async function patchPublicationDestination(
     await run(
       "git",
       ["config", "--null", "--get-regexp", "^remote\\.origin\\.(pushurl|url)$"],
-      { trim: false, environment: { GIT_CONFIG: undefined } },
+      { trim: false },
     ).catch((error: unknown) => {
       if (isJsonObject(error) && error["code"] === 1) return "";
       throw error;
@@ -12467,6 +12477,7 @@ async function patchPublicationDestination(
   // Branch-conditioned settings can select the other provider after checkout.
   if (dependencies.patchTransportAccess)
     dependencies.patchTransportAccess.verifyHostingConfig ??= {
+      git: await captureHostingConfig("git", repository, dependencies),
       gh: await captureHostingConfig("gh", repository, dependencies),
       glab: await captureHostingConfig("glab", repository, dependencies),
     };
@@ -12618,7 +12629,7 @@ async function patchScopedConfig(
           pattern,
         ],
         repository,
-        { trim: false, environment: { GIT_CONFIG: undefined } },
+        { trim: false },
       )
       .catch((error: unknown) => {
         if (
@@ -12631,15 +12642,18 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+function isHostingConfig(
+  kind: PatchTransportFile["kind"],
+): kind is PatchPublicationTool {
+  return Object.hasOwn(hostingConfigLabels, kind);
+}
+
 function patchTransportChanged(kind: PatchTransportFile["kind"]) {
-  const label =
-    kind === "gh"
-      ? "GitHub CLI configuration"
-      : kind === "glab"
-        ? "GitLab CLI configuration"
-        : kind === "executable"
-          ? "executable"
-          : "file";
+  const label = isHostingConfig(kind)
+    ? hostingConfigLabels[kind]
+    : kind === "executable"
+      ? kind
+      : "file";
   return new CodexSecurityError(
     `Patch transport ${label} changed before publication. Inspect the selected transport settings and files before resuming.`,
   );
@@ -12674,7 +12688,7 @@ async function patchTransportIdentity(
   }
   const target = await realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (
-      (kind === "gh" || kind === "glab" || kind === "ssh-input") &&
+      (isHostingConfig(kind) || kind === "ssh-input") &&
       !selected?.stamp &&
       ["ENOENT", "ENOTDIR"].includes(error.code ?? "")
     )
@@ -12724,7 +12738,7 @@ async function patchTransportIdentity(
 }
 
 async function captureHostingConfig(
-  provider: PatchHostingProvider,
+  provider: PatchPublicationTool,
   repository: string,
   dependencies: CliDependencies,
 ) {
@@ -12735,7 +12749,22 @@ async function captureHostingConfig(
       process.platform === "win32" ? caller : await canonicalConfigPath(caller);
     const pinned: NodeJS.ProcessEnv = {};
     const paths = new Set<string>();
-    if (provider === "gh") {
+    const files = new Map<string, PatchTransportFile>();
+    if (provider === "git") {
+      const selector = await publicationConfigSelector(cwd, environment);
+      if (selector) {
+        const file = await patchTransportIdentity(selector, provider);
+        pinned["GIT_CONFIG"] = file.target;
+        const local = await patchGitOutput(
+          repository,
+          ["rev-parse", "--path-format=absolute", "--git-path", "config"],
+          dependencies,
+        );
+        // Git administration is already protected and our checkpoints write it.
+        if (file.target !== (await realpath(local).catch(() => undefined)))
+          files.set(file.target, file);
+      }
+    } else if (provider === "gh") {
       const directory = resolve(cwd, githubConfigDirectory(environment));
       pinned["GH_CONFIG_DIR"] = directory;
       for (const name of githubConfigFiles) paths.add(join(directory, name));
@@ -12748,7 +12777,6 @@ async function captureHostingConfig(
       local.add(join(cwd, ".git"));
       for (const root of local) paths.add(join(root, "glab-cli", "config.yml"));
     }
-    const files = new Map<string, PatchTransportFile>();
     for (const path of paths)
       files.set(path, await patchTransportIdentity(path, provider));
     return async () => {
@@ -13315,7 +13343,7 @@ async function runPatchTransport(
           "--list",
         ],
         repository,
-        { trim: false, environment: { GIT_CONFIG: undefined } },
+        { trim: false },
       )
     ).split("\0");
     const systemFiles = new Set<string>();
@@ -14148,7 +14176,6 @@ async function publicationSshCommand(
     environmentEntry(dependencies.environment, "GIT_SSH") === undefined
       ? "ssh"
       : '"$GIT_SSH"';
-  // Git transport ignores the legacy config-file selector used by git config.
   const value = await dependencies.runRepositoryCommand(
     "git",
     [
@@ -14162,7 +14189,7 @@ async function publicationSshCommand(
       "core.sshCommand",
     ],
     repository,
-    { trim: false, environment: { GIT_CONFIG: undefined } },
+    { trim: false },
   );
   const [scope, origin, command] = value.split("\0");
   if (
@@ -14198,7 +14225,6 @@ async function patchSshEnvironment(
         "git",
         ["config", "--default", "auto", "--get", "ssh.variant"],
         repository,
-        { environment: { GIT_CONFIG: undefined } },
       )
     ).trim();
   return variant.toLowerCase() === "auto"
@@ -14338,12 +14364,14 @@ async function githubPatchBase(
     ...(hostname ? { GH_HOST: hostname } : {}),
   };
   // gh reads these markers with git config, including a caller's GIT_CONFIG.
-  const config = await run("git", [
-    "config",
-    "--null",
-    "--get-regexp",
-    "^remote\\..*\\.gh-resolved$",
-  ]).catch((error: unknown) => {
+  const config = await run(
+    "git",
+    ["config", "--null", "--get-regexp", "^remote\\..*\\.gh-resolved$"],
+    {
+      GIT_CONFIG: environmentEntry(dependencies.environment, "GIT_CONFIG"),
+      ...(await dependencies.patchTransportAccess?.verifyHostingConfig?.git()),
+    },
+  ).catch((error: unknown) => {
     if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
       return "";
     throw error;
@@ -14411,7 +14439,7 @@ async function githubPatchBase(
           ? fetchRemote
           : await run("git", ["remote", "get-url", "--", name]);
     } else {
-      const format = { trim: false, environment: { GIT_CONFIG: undefined } };
+      const format = { trim: false };
       const values = await dependencies
         .runRepositoryCommand(
           "git",
@@ -14652,11 +14680,6 @@ async function patchCommandContext(
       ? {}
       : { GIT_WORK_TREE: repository }),
   };
-  const selector = await publicationConfigSelector(
-    physicalDirectory,
-    dependencies.environment,
-  );
-  if (selector) environment["GIT_CONFIG"] = selector;
   // Git enters the worktree from a component, but keeps an external caller's cwd.
   const transportDirectory = isOutsidePath(
     relative(physicalRoot, physicalDirectory),
@@ -17182,11 +17205,6 @@ async function snapshotGitPatchState(
                 nested,
                 {
                   trim: false,
-                  // Match rev-parse: GIT_CONFIG selects a file only for git config.
-                  environment:
-                    args[0] === "config"
-                      ? { GIT_CONFIG: undefined }
-                      : undefined,
                 },
               )
             ).replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
@@ -17821,16 +17839,13 @@ async function requiredSnapshotFilterEnvironment(
   run: Parameters<typeof withPatchGitIndex>[0],
   inherited: NodeJS.ProcessEnv,
 ): Promise<NodeJS.ProcessEnv | undefined> {
-  const records = await run(
-    [
-      "config",
-      "--includes",
-      "--null",
-      "--get-regexp",
-      "^filter\\..*\\.(clean|process)$",
-    ],
-    { environment: { GIT_CONFIG: undefined } },
-  ).catch((error: unknown) => {
+  const records = await run([
+    "config",
+    "--includes",
+    "--null",
+    "--get-regexp",
+    "^filter\\..*\\.(clean|process)$",
+  ]).catch((error: unknown) => {
     if (isJsonObject(error) && (error["code"] === 1 || error["status"] === 1))
       return "";
     throw error;
@@ -17912,17 +17927,14 @@ async function snapshotPatchTree(
         await inspectIndex?.(indexFile);
         return tree;
       };
-      const sparseSetting = await run(
-        [
-          "config",
-          "--bool",
-          "--default",
-          "false",
-          "--get",
-          "core.sparseCheckout",
-        ],
-        { environment: { GIT_CONFIG: undefined } },
-      );
+      const sparseSetting = await run([
+        "config",
+        "--bool",
+        "--default",
+        "false",
+        "--get",
+        "core.sparseCheckout",
+      ]);
       const sparse = sparseSetting.trim() === "true";
       // An optional clean/process failure otherwise stages the unfiltered bytes.
       // Only the publication snapshot add needs to turn failures into errors.

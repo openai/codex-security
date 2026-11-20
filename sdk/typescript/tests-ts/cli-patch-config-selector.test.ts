@@ -15,9 +15,10 @@ import {
   mkdtemp,
   rm,
 } from "node:fs/promises";
-import { join, dirname, sep, relative, resolve } from "node:path";
+import { join, dirname, sep, relative } from "node:path";
 import {
   runGitRepositoryCommand,
+  runHostedGit,
   runWorkflow,
   repositoryGit,
   publicationRepository,
@@ -1392,36 +1393,80 @@ test.each(["HOME", "XDG_CONFIG_HOME"])(
   },
 );
 
-test("publication keeps GIT_CONFIG bound to a removed component", async () => {
-  const { directory } = await publicationRepository(fixtures);
-  const caller = join(directory, "src");
-  const selector = "selector-settings";
-  const environment = { GIT_CONFIG: selector };
-  const selections: string[] = [];
+test.each([
+  "removed component",
+  "selector created by hook",
+  "repository config",
+])("publication binds the caller's GIT_CONFIG: %s", async (mode) => {
+  const { directory, git, remote } = await publicationRepository(fixtures);
+  const component = join(directory, "src");
+  const local = mode === "repository config";
+  const hook = mode === "selector created by hook";
+  const host = "forge.example.test:8443";
+  const origin = "example/repository";
+  const marker = "remote.origin.gh-resolved";
+  const expected = local ? "upstream/repository" : origin;
+  const environment = {
+    GH_HOST: host,
+    GIT_CONFIG: local ? ".git/config" : "selector",
+  };
+  git("remote", "set-url", "origin", `https://${host}/${origin}.git`);
+  git("config", marker, "upstream/repository");
+  git("config", "push.recurseSubmodules", "false");
+  if (hook)
+    await writeFile(
+      join(directory, ".git/hooks/pre-commit"),
+      "#!/bin/sh\ncp selector src/selector\n",
+      { mode: 0o755 },
+    );
+  let push: readonly string[] = [];
+  const targets: string[][] = [];
   const outcome = await runPublicationWorkflow("issue", {
-    currentDirectory: caller,
+    currentDirectory: local ? directory : component,
     environment,
-    onRepositoryCommand: configuredPublicationCommand(
-      environment,
-      (command, args, cwd, options) => {
-        if (command === "gh" && args[1] === "create") {
-          const path = options?.environment?.["GIT_CONFIG"];
-          selections.push(resolve(options?.directory ?? cwd, path!));
-        }
-      },
-    ),
+    onRepositoryCommand: (command, args, cwd, options) => {
+      const env = { ...environment, ...options?.environment };
+      if (command === "git") {
+        if (args[0] === "push") push = args;
+        return runHostedGit(remote, args, cwd, {
+          ...options,
+          environment: env,
+        });
+      }
+      // gh reads the default repository through a Git child of its own.
+      const defaultRepository = () => {
+        const read = repositoryGit(options?.directory ?? cwd, env);
+        const name = read("config", "--default", "base", "--get", marker);
+        return name === "base" ? origin : name;
+      };
+      if (args[1] === "set-default") return defaultRepository();
+      if (args[1] === "create") {
+        const target = args[args.indexOf("--repo") + 1]!;
+        targets.push([target, defaultRepository()]);
+        return `https://${target}/pull/1`;
+      }
+      return "[]";
+    },
     onCodex: async (_args, output) => {
-      await rm(caller, { recursive: true });
-      await writeFile(
-        join(directory, selector),
-        '[remote "origin"]\n gh-resolved = decoy/repository\n',
-      );
+      if (!hook) await rm(component, { recursive: true });
+      git("config", "--file", "selector", marker, "decoy/repository");
       output?.stdout.write("Synthetic patch complete.");
       return 0;
     },
   });
-  expect(outcome.exitCode, outcome.stderr).toBe(0);
-  expect(selections).toEqual([join(caller, selector)]);
+  if (hook) {
+    expect(git("config", "--file", "src/selector", "--get", marker)).toBe(
+      "decoy/repository",
+    );
+    expect(targets).toEqual([]);
+    expect(push).toEqual([]);
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("Git configuration changed");
+  } else {
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(targets).toEqual([[`${host}/${expected}`, expected]]);
+    expect(push).toContain("--recurse-submodules=no");
+  }
 });
 
 test("assessment and publication protect the outside caller after rebinding Git", async () => {
@@ -1489,7 +1534,7 @@ const gh = Bun.which("gh");
 
 for (const mode of ["resume", "prepare"]) {
   for (const selector of mode === "resume"
-    ? ["unset"]
+    ? ["unset", "unrelated"]
     : ["unset", "unrelated", "missing", "source alias"]) {
     test.skipIf(gh === null)(
       `${mode} reuses the existing publication with ${selector} GIT_CONFIG`,

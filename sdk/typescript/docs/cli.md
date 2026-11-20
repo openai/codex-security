@@ -3290,6 +3290,9 @@ the saved commit. For SSH, publication binds the SSH client's own
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
+For hosting discovery, a relative `GIT_CONFIG` selects a file from the original
+caller directory. Publication checks that selection again after patching. Git
+stores the verified commit and branch settings in the repository configuration.
 For GitHub, `GH_REPO` selects the base repository. Otherwise, publication uses
 the repository selected by `gh`. For an enterprise endpoint on a custom HTTPS
 port, use the account configured for that endpoint or select the base explicitly

@@ -2965,16 +2965,24 @@ export async function capturePatchGitControls(
         const [common, storage] = await Promise.all([
           absolutePath(checkout, "--git-common-dir"),
           // Git LFS reads the selected config with includes enabled.
-          runControl(checkout, [
-            "config",
-            "--includes",
-            "--null",
-            "--show-scope",
-            "--show-origin",
-            "--default=",
-            "--get",
-            "lfs.storage",
-          ]).catch((error: unknown) => {
+          runControl(
+            checkout,
+            [
+              "config",
+              "--includes",
+              "--null",
+              "--show-scope",
+              "--show-origin",
+              "--default=",
+              "--get",
+              "lfs.storage",
+            ],
+            {
+              environment: {
+                GIT_CONFIG: environmentEntry(environment, "GIT_CONFIG"),
+              },
+            },
+          ).catch((error: unknown) => {
             const failure = error as Error & {
               code?: unknown;
               status?: unknown;
