@@ -355,7 +355,7 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
     const report = await call("finalize");
     expect(report).toMatchObject({
       verdict: "exploitable",
-      reviewPolicy: "single_agent",
+      review: null,
       coverage: { total: 1, assessed: 1 },
     });
     expect(report).toEqual(await readFinalStackReport(state));
@@ -670,7 +670,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
           await readFile(join(inputs, "manifest.json"), "utf8"),
         );
         expect(draft.inputDigest).toBe(manifest.inputDigest);
-        expect(draft.reviewPolicy).toBe("single_agent");
+        expect(draft.review).toBeNull();
         expect(draft.assessments).toHaveLength(2);
         const round = drafts.length;
         expect(draft.assessments[0]?.questionChecks?.[0]?.checked).toBe(
@@ -865,10 +865,10 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   const report = JSON.parse(io.stdout.text());
   expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(report);
   const approvedDraft = drafts[2]!;
+  expect({ ...report, review: null }).toEqual(approvedDraft);
   expect(report).toMatchObject({
     verdict: "unknown",
     coverage: { assessed: 2 },
-    reviewPolicy: "independent",
     review: {
       draftDigest: dependencyClaimHash(approvedDraft),
       decisions: approvedDraft.assessments.map(({ workItemId }) => ({
@@ -891,10 +891,10 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   }
 }
 
-test("offline finalize rechecks a stored unknown while preserving legacy attempts", async () => {
+test("offline finalize rejects a stored unknown without question checks", async () => {
   await using dir = await scopedTemporaryDirectory("stack-finalize-question-");
   const files = await sample(dir.path, true);
-  const { state, row, call, inputs } = await startProof(dir.path, files);
+  const { state, row, call } = await startProof(dir.path, files);
   const unknown = {
     workItemId: row.workItemId,
     verdict: "unknown",
@@ -910,23 +910,11 @@ test("offline finalize rechecks a stored unknown while preserving legacy attempt
   const store = new DependencyAttemptStore(state, { create: false });
   try {
     store.set("stack-assessment", row.workItemId, unknown);
-    await executeStackRun("init", { state, inputs, repo: files.repo });
     await expect(call("finalize")).rejects.toThrow(error);
     expect(store.get("report", "final")).toBeUndefined();
-    // Previously initialized attempts have the same packet and no checks marker.
-    const location = store.get<Record<string, unknown>>("manifest", "active")!;
-    delete location["requireQuestionChecks"];
-    store.set("manifest", "active", location);
   } finally {
     store.close();
   }
-  await executeStackRun("init", { state, inputs, repo: files.repo });
-  const legacy = await call("finalize");
-  expect(legacy).toMatchObject({
-    verdict: "unknown",
-    reviewPolicy: "single_agent",
-  });
-  expect(legacy).toEqual(await readFinalStackReport(state));
 });
 
 test("an explicitly dated observation outside the requested window stays an unresolved scope conflict", async () => {

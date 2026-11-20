@@ -129,7 +129,6 @@ interface RunLocation {
   repo: string;
   fingerprint: string;
   manifest: StackPacket["manifest"];
-  requireQuestionChecks?: true;
   hostReview?: true;
 }
 
@@ -167,9 +166,6 @@ async function initialize(
         repo: repoPath,
         fingerprint,
         manifest,
-        ...((!existing || existing.requireQuestionChecks) && {
-          requireQuestionChecks: true,
-        }),
         ...((hostReview || existing?.hostReview) && { hostReview: true }),
       });
       return manifest;
@@ -372,15 +368,8 @@ async function verifyFinal(
   packet: StackPacket,
   repository: string,
   claims: Ledger,
-  {
-    requireSaved,
-    signal,
-    requireQuestionChecks,
-  }: {
-    requireSaved: boolean;
-    signal?: AbortSignal | undefined;
-    requireQuestionChecks?: boolean | undefined;
-  },
+  requireSaved: boolean,
+  signal?: AbortSignal,
 ): Promise<StackInvestigationReport> {
   const saved = store.get("report", "final");
   if (requireSaved && !saved)
@@ -398,7 +387,7 @@ async function verifyFinal(
       byId.get(assessment.workItemId)!,
       packet,
       claims,
-      { signal, requireQuestionChecks },
+      signal,
     );
   }
   for (const ref of snapshot.claims) {
@@ -482,7 +471,6 @@ export async function readFinalStackReport(
     packet: StackPacket;
     repository: string;
     signal?: AbortSignal;
-    requireQuestionChecks?: boolean;
   },
 ): Promise<StackInvestigationReport> {
   const store = new DependencyAttemptStore(state, { create: false });
@@ -500,12 +488,8 @@ export async function readFinalStackReport(
       packet,
       expected?.repository ?? location.repo,
       openClaims(store, packet),
-      {
-        requireSaved: true,
-        signal: expected?.signal,
-        requireQuestionChecks:
-          expected?.requireQuestionChecks || location.requireQuestionChecks,
-      },
+      true,
+      expected?.signal,
     );
   } finally {
     store.close();
@@ -611,11 +595,14 @@ export async function executeStackRun(
       case "summarize-coverage":
         return summarizeStackCoverage(packet, assessments());
       case "finalize":
-        return await verifyFinal(store, packet, location.repo, claims, {
-          requireSaved: false,
+        return await verifyFinal(
+          store,
+          packet,
+          location.repo,
+          claims,
+          false,
           signal,
-          requireQuestionChecks: location.requireQuestionChecks,
-        });
+        );
       case "record-evidence": {
         const op = mutation(store, command, options.input);
         const previous = op.receipt();
@@ -675,7 +662,7 @@ export async function executeStackRun(
           item,
           packet,
           claims,
-          { signal, requireQuestionChecks: location.requireQuestionChecks },
+          signal,
         );
         return op.commit(() => {
           if (current()?.id !== item.id)

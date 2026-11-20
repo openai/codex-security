@@ -167,7 +167,7 @@ export const stackReviewDecisionSchema = z.strictObject({
   reason: text,
   followUp: text.nullable(),
 });
-const stackReport = z.strictObject({
+export const stackInvestigationReportSchema = z.strictObject({
   schemaVersion: z.literal("codex-security.pipeline-stacks.report/v1"),
   cve: text,
   advisoryDetails: stackManifestSchema.shape.advisoryDetails,
@@ -194,22 +194,15 @@ const stackReport = z.strictObject({
   claims: z.array(reportedClaim),
   coverage: coverageSchema,
   remainingQuestions: z.array(text),
+  review: z
+    .strictObject({
+      draftDigest: digest,
+      decisions: z.array(
+        stackReviewDecisionSchema.extend({ followUp: z.null() }),
+      ),
+    })
+    .nullable(),
 });
-export const stackInvestigationReportSchema = z.discriminatedUnion(
-  "reviewPolicy",
-  [
-    stackReport.extend({ reviewPolicy: z.literal("single_agent") }),
-    stackReport.extend({
-      reviewPolicy: z.literal("independent"),
-      review: z.strictObject({
-        draftDigest: digest,
-        decisions: z.array(
-          stackReviewDecisionSchema.extend({ followUp: z.null() }),
-        ),
-      }),
-    }),
-  ],
-);
 export type StackInvestigationReport = z.output<
   typeof stackInvestigationReportSchema
 >;
@@ -370,7 +363,8 @@ function assessProof(
         );
     }
   }
-  if (row.verdict === "unknown") return;
+  if (row.verdict === "unknown")
+    return verifyQuestionChecks(row, work, records);
   if (!observation) fail("A decided stack assessment needs an observed sink.");
   if (!records.length)
     fail("A decided assessment needs at least one exact supporting claim.");
@@ -616,7 +610,6 @@ function verifyQuestionChecks(
   records: readonly DependencyClaimRecord[],
 ) {
   if (
-    row.verdict !== "unknown" ||
     !work.observation ||
     work.scopeConflicts.length ||
     stackSinkMatches(work.observation).length === 0
@@ -653,21 +646,13 @@ export async function prepareStackAssessment(
   work: StackWorkItem,
   packet: StackPacket,
   claims: StackClaimReader,
-  {
-    signal,
-    requireQuestionChecks = false,
-  }: {
-    signal?: AbortSignal | undefined;
-    requireQuestionChecks?: boolean | undefined;
-  } = {},
+  signal?: AbortSignal,
 ): Promise<StackAssessment> {
   signal?.throwIfAborted();
   const row = bindCapturedEvidence(itemInput.parse(input), work);
   if (row.workItemId !== work.id)
     fail("Assessment work item does not match the selected observation.");
   const records = collectClaims(row, claims);
-  if (requireQuestionChecks || row.questionChecks)
-    verifyQuestionChecks(row, work, records);
   if (row.use) {
     if (row.use.verdict !== row.verdict)
       fail("The use and assessment verdicts must agree.");
@@ -776,7 +761,7 @@ export function finalizeStackReport(
     packet.manifest;
   return stackInvestigationReportSchema.parse({
     schemaVersion: "codex-security.pipeline-stacks.report/v1",
-    reviewPolicy: "single_agent",
+    review: null,
     runId,
     attemptId,
     inputDigest,

@@ -205,7 +205,6 @@ export async function runLocalStackInvestigation(options: {
         packet,
         repository: options.repository,
         signal: options.signal,
-        requireQuestionChecks: true,
       });
     };
     const review = async (draft: StackInvestigationReport) => {
@@ -246,7 +245,6 @@ export async function runLocalStackInvestigation(options: {
           status: "approved",
           report: stackInvestigationReportSchema.parse({
             ...draft,
-            reviewPolicy: "independent",
             review: { draftDigest: dependencyClaimHash(draft), decisions },
           }),
         };
