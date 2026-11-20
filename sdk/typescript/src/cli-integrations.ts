@@ -6,6 +6,10 @@ import { parseArgs } from "node:util";
 import { registerMcp } from "./cli-mcp.js";
 
 const cliName = "codex-security";
+const formats = ["toon", "json", "yaml", "md", "jsonl"] as const;
+export const cliOutputFormats = (
+  dependencyReport: boolean,
+): readonly string[] => (dependencyReport ? [...formats, "html"] : formats);
 export const completionShell = z.enum(["bash", "fish", "nushell", "zsh"]);
 const depth = z
   .number()
@@ -260,17 +264,23 @@ export function completeCli(
   if (!Number.isSafeInteger(index) || index < 0 || index > words.length)
     return "";
   integrationGroups(cli, cliOptions);
-  const candidates = Completions.complete(
-    Cli.toCommands.get(cli)!,
-    undefined,
-    words,
-    index,
-    {
-      schema: z.object({
-        format: z.enum(["toon", "json", "yaml", "md", "jsonl"]),
-      }),
-    },
-  );
+  const commands = Cli.toCommands.get(cli)!;
+  // Ask the completion engine which options the current leaf accepts.
+  // Only report-producing operations offer HTML as an output format.
+  const reportFormat =
+    words[index - 1] === "--format" &&
+    words.slice(0, index).includes("exploitability") &&
+    Completions.complete(
+      commands,
+      undefined,
+      [...words.slice(0, index), "--report-file"],
+      index,
+    ).some((candidate) => candidate.value === "--report-file");
+  const candidates = Completions.complete(commands, undefined, words, index, {
+    schema: z.object({
+      format: z.enum(cliOutputFormats(reportFormat)),
+    }),
+  });
   return Completions.format(shell, candidates);
 }
 

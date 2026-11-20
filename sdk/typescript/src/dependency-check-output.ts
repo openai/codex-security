@@ -15,8 +15,10 @@ import type { DependencyPackage } from "./dependency-advisory.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+import type { DependencyTarget } from "./dependency-source-identity.js";
 
 export type BlockedCheck = {
+  target?: DependencyTarget;
   status: "blocked";
   code: "INVESTIGATION_BLOCKED";
   reason: string;
@@ -53,9 +55,11 @@ export type DependencyProgressSink = (
 const stages: Record<string, string> = {
   osv: "Looking up advisories in OSV",
   advisory_lookup: "Looking up advisories",
+  advisory_analysis: "Identifying trigger conditions from advisories",
   supplied_advisory: "Using the supplied vulnerability description",
   investigate: "Starting source investigation",
   review: "Reviewing evidence",
+  review_follow_up: "Investigating questions raised by review",
 };
 const activities: Record<string, string> = {
   opengrep: "Searching with OpenGrep",
@@ -91,6 +95,8 @@ function progressLine(type: string, fields: Record<string, unknown>) {
       return "Preparing the checkout";
     case "stage":
       return stages[String(fields["stage"])];
+    case "advisory_lookup_failed":
+      return `Public advisory lookup failed: ${fields["error"]}. Continuing with the supplied advisory only`;
     case "advisories_loaded":
       return `Loaded ${fields["count"]} advisory records`;
     case "access_program":
@@ -188,12 +194,42 @@ function reportSummary(report: unknown) {
   return { verdicts, limitations };
 }
 
+export async function writeDependencyReportFile(
+  reportFile: string,
+  result: unknown,
+  signal: AbortSignal,
+  format: "html" | "json" = "json",
+) {
+  signal.throwIfAborted();
+  const content =
+    format === "html"
+      ? (
+          await import("./dependency-report-renderer.js")
+        ).renderDependencyReport(result)
+      : JSON.stringify(result, null, 2) + "\n";
+  const staging = await mkdtemp(
+    join(dirname(reportFile), ".dependency-report-"),
+  );
+  const path = join(staging, "report");
+  try {
+    await writeFile(path, content, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    signal.throwIfAborted();
+    await link(path, reportFile);
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export async function withDependencyCheckOutput<T>(
   options: {
     subject: string;
     checkout?: string;
     display?: (line: string) => void;
     reportFile?: string;
+    reportFormat?: "html" | "json";
     progressEvents?: string;
     signal: AbortSignal;
     warn: (message: string) => void;
@@ -305,22 +341,13 @@ export async function withDependencyCheckOutput<T>(
     });
     const result = await run(emit);
     signal.throwIfAborted();
-    if (reportFile) {
-      const staging = await mkdtemp(
-        join(dirname(reportFile), ".dependency-report-"),
+    if (reportFile)
+      await writeDependencyReportFile(
+        reportFile,
+        result,
+        signal,
+        options.reportFormat,
       );
-      const path = join(staging, "report.json");
-      try {
-        await writeFile(path, JSON.stringify(result, null, 2) + "\n", {
-          flag: "wx",
-          mode: 0o600,
-        });
-        signal.throwIfAborted();
-        await link(path, reportFile);
-      } finally {
-        await rm(staging, { recursive: true, force: true }).catch(() => {});
-      }
-    }
     emit("report_ready", options.subject, {
       ...reportSummary(result),
       ...(reportFile && { path: reportFile }),
