@@ -831,7 +831,9 @@ export function summarizeStackCoverage(
     outstanding: ids((w) => !assessed.has(w.id)),
     observed: items.filter((w) => w.status === "observed").length,
     noMatch: ids((w) => w.status === "no_match"),
-    noCoverage: ids((w) => w.status === "no_coverage"),
+    noCoverage: ids(
+      (w) => w.status === "no_coverage" || w.status === "no_indexed_match",
+    ),
     scopeConflicts: ids((w) => w.scopeConflicts.length > 0),
     truncated: ids(
       (w) => w.truncated === true || w.observation?.framesTruncated === true,
@@ -866,7 +868,7 @@ export function finalizeStackReport(
       ...saved,
       queryId: w.queryId,
       groupId: w.groupId,
-      status: w.status,
+      status: w.status === "no_indexed_match" ? "no_coverage" : w.status,
       queryScope: w.queryScope,
       scope: w.scope,
       scopeConflicts: w.scopeConflicts,
