@@ -3253,12 +3253,13 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 For a Git installation with private libraries, use absolute directories in
 `LD_LIBRARY_PATH` or the macOS library and framework search paths. Keep the
-libraries and their dependencies outside the patch's writable roots. The CLI
-checks each selected directory tree, including nested search locations. It
-omits the whole directory if it finds a link into a writable root or a writable
-hard link whose other names it cannot verify. Before launching a command, it
-checks for changes to files the patch could edit through new hard links. When
-Git delegates a publication hook, it omits directories containing such files.
+libraries and their dependencies outside the patch's writable roots, in an
+installation owned by a separate account. The CLI checks each directory tree,
+including nested search locations. It omits the entire directory if a path
+leads into a writable root or a file could be modified through a hard link.
+This includes files owned by the current account, which can change their
+permissions even if they are read-only. When the CLI runs as root, all regular
+files are considered mutable.
 It filters out relative entries and ELF loader tokens such as `$ORIGIN`, and
 clears other `LD_*` and `DYLD_*` overrides when launching repository commands.
 With an external sandbox or unknown write permissions, the CLI clears the

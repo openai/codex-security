@@ -2000,16 +2000,11 @@ type PatchTransportFile = {
     | "missing-known-hosts";
 };
 
-interface LibraryDirectory {
-  readonly roots: Set<string>;
-  readonly files: Map<string, string>;
-}
-
 interface PatchWriters {
   readonly writable: Set<string>;
   external?: boolean;
   unknownWriters?: boolean;
-  libraryDirectories?: Map<string, LibraryDirectory | null>;
+  libraryDirectories?: Map<string, Set<string> | null>;
 }
 
 interface PatchTransportAccess extends PatchWriters {
@@ -2210,27 +2205,13 @@ function patchFileStamp(entry: { dev: bigint; ino: bigint; ctimeNs: bigint }) {
   return [entry.dev, entry.ino, entry.ctimeNs].join(":");
 }
 
-function librariesUnchanged(files: Map<string, string>) {
-  try {
-    for (const [path, saved] of files) {
-      if (patchFileStamp(lstatSync(path, { bigint: true })) !== saved)
-        return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function trustedLibraryDirectory(
   directory: string,
   resolvePath: (path: string) => string | null,
   roots: readonly string[],
-  files: Map<string, string>,
 ): Promise<boolean> {
   const selected = resolvePath(directory);
   if (!selected || !selected.isWellFormed()) return false;
-  const writers = { writable: new Set(roots) };
   const directories = new Set([selected]);
   try {
     // Library lookup can descend into hardware-specific directories and frameworks.
@@ -2255,12 +2236,9 @@ async function trustedLibraryDirectory(
         }
         if (entry.isDirectory()) directories.add(path);
         if (!entry.isFile()) continue;
-        if (entry.nlink > 1n)
-          await requireProtectedTransportLinks(path, entry, writers);
-        // An editable alias can be created, used and removed between Git
-        // commands. Bind its inode before the turn, including single links.
-        if (!files.has(path) && (await mutableThroughLink(path, entry)))
-          files.set(path, patchFileStamp(entry));
+        // A patch writer can create a hard link even after our last check
+        // and modify the inode before the host loader opens it.
+        if (await mutableThroughLink(path, entry)) return false;
       }
     }
     return true;
@@ -2308,8 +2286,6 @@ async function restrictRepositoryLoader(
       "/proc",
       "/dev/fd",
     ]);
-    // Recheck new grants. Remember a writable alias even if the model
-    // removes its link after modifying a library.
     const checked = (writers.libraryDirectories ??= new Map());
     const elf = name === "LD_LIBRARY_PATH";
     const allowed: string[] = [];
@@ -2317,28 +2293,17 @@ async function restrictRepositoryLoader(
       // The ELF loader expands tokens such as $ORIGIN for each child.
       if (!isAbsolute(path)) continue;
       if (elf && /\n|\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(path)) continue;
-      let directory = checked.get(path);
-      if (directory === null) continue;
-      if (!directory) {
-        directory = { roots: new Set(), files: new Map() };
-        checked.set(path, directory);
-      }
-      const { roots: verified, files } = directory;
-      if (!verified.size || !roots.every((root) => verified.has(root))) {
-        if (!(await trustedLibraryDirectory(path, resolvePath, roots, files))) {
+      const verified = checked.get(path);
+      if (verified === null) continue;
+      if (!verified || !roots.every((root) => verified.has(root))) {
+        if (!(await trustedLibraryDirectory(path, resolvePath, roots))) {
           checked.set(path, null);
           continue;
         }
         if (checked.get(path) === null) continue;
-        for (const root of roots) verified.add(root);
+        checked.set(path, new Set(roots));
       }
-      if (!librariesUnchanged(files)) {
-        checked.set(path, null);
-        continue;
-      }
-      // A delegated hook can rewrite a mutable library through a hard link
-      // before this Git process launches its next host child.
-      if (!options?.publicationHooks || files.size === 0) allowed.push(path);
+      allowed.push(path);
     }
     if (allowed.length) environment[name] = allowed.join(":");
   }

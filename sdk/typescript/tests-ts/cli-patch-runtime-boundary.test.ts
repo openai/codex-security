@@ -59,8 +59,8 @@ test.skipIf(process.platform === "win32")(
     const viaDirectory = join(tools, "via-directory");
     const grant = join(tools, "grant");
     for (const path of [first, last, viaFile, grant, shared]) await mkdir(path);
-    await writeFile(join(first, "library.1"), "trusted");
-    await symlink("library.1", join(first, "library"));
+    await mkdir(join(first, "nested"));
+    await symlink("nested", join(first, "alias"));
     await writeFile(join(checkout, "library"), "writable");
     await link(join(checkout, "library"), join(shared, "library"));
     await symlink(checkout, viaDirectory);
@@ -101,7 +101,7 @@ test.skipIf(process.platform === "win32")(
 );
 
 test.skipIf(process.platform === "win32")(
-  "host Git detects a library rewritten through a temporary hard link",
+  "host Git excludes mutable libraries before a writer creates a hard link",
   async () => {
     const checkout = await fixtures.create("loader-checkout-");
     const tools = await fixtures.create("loader-tools-");
@@ -113,17 +113,7 @@ test.skipIf(process.platform === "win32")(
     const inspect = () =>
       inspectLoader(checkout, "LD_LIBRARY_PATH", paths, { loaderAccess });
     await writeFile(library, "original");
-    expect(await inspect()).toBe(paths);
-    expect(
-      await inspectLoader(checkout, "LD_LIBRARY_PATH", paths, {
-        loaderAccess,
-        publicationHooks: {
-          gitDirectory: join(checkout, ".git"),
-          configured: new Set(),
-          events: new Set(["pre-push"]),
-        },
-      }),
-    ).toBe(fallback);
+    expect(await inspect()).toBe(fallback);
     await link(library, alias);
     await writeFile(alias, "modified");
     await unlink(alias);
