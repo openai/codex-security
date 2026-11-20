@@ -412,7 +412,9 @@ glob_scan_max_depth = 8
       RpcMessage
     >;
     expect(Object.keys(profiles)).toEqual([name]);
-    const snapshotDenies = Object.entries(snapshotProfile!["filesystem"]).filter(
+    const snapshotDenies = Object.entries(
+      snapshotProfile!["filesystem"],
+    ).filter(
       ([, access]) =>
         access === "deny" || (access as RpcMessage)["."] === "deny",
     );
@@ -607,26 +609,33 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         ),
       ).toBe("Included fixture");
       if (process.platform === "win32") {
-        // A concurrent model command shares the sandbox account. Give it the
-        // exact pathname while the snapshot still has the projection open.
+        // Exercise repeated and simultaneous Git reads before giving another
+        // command the exact live endpoint under the same sandbox account.
         const marker = join(context.repository, "snapshot-path");
         const done = join(context.repository, "snapshot-done");
-        const running = runRepositoryCommand(
-          "git",
-          ["-c", "alias.config-reader=!node -", "config-reader"],
-          context.repository,
-          {
-            sandbox,
-            input: `const fs = require("node:fs");
-const file = process.env.GIT_CONFIG_GLOBAL;
-if (!fs.readFileSync(file).length) throw new Error("Empty snapshot config");
-fs.writeFileSync("path.tmp", file);
-fs.renameSync("path.tmp", "snapshot-path");
-const end = setTimeout(() => process.exit(1), 10000);
-const timer = setInterval(() => { if (fs.existsSync("snapshot-done")) { clearTimeout(end); clearInterval(timer); } }, 10);`,
-          },
-        );
-        let staged;
+        const launch = (input: string) =>
+          runRepositoryCommand(
+            "git",
+            ["-c", "alias.config-reader=!node -", "config-reader"],
+            context.repository,
+            { sandbox, input },
+          );
+        const running = launch(`const fs = require("node:fs");
+const git = require("node:util").promisify(require("node:child_process").execFile);
+async function read() {
+  const { stdout } = await git("git", ["config", "--get", "synthetic.source"]);
+  if (stdout.trim() !== "Included fixture") throw new Error("Missing snapshot config");
+}
+async function check() {
+  await Promise.all([read(), read(), read(), read()]);
+  fs.writeFileSync("path.tmp", process.env.GIT_CONFIG_GLOBAL);
+  fs.renameSync("path.tmp", "snapshot-path");
+  const end = setTimeout(() => process.exit(1), 10000);
+  while (!fs.existsSync("snapshot-done")) await new Promise(resolve => setTimeout(resolve, 10));
+  clearTimeout(end);
+  await read();
+}
+check().catch(error => { console.error(error); process.exitCode = 1; });`);
         try {
           while (
             !(await lstat(marker).then(
@@ -638,22 +647,31 @@ const timer = setInterval(() => { if (fs.existsSync("snapshot-done")) { clearTim
               running,
               new Promise((resolve) => setTimeout(resolve, 10)),
             ]);
-          staged = await readFile(marker, "utf8");
-          expect(staged).not.toBe(selected);
+          const endpoint = await readFile(marker, "utf8");
+          expect(endpoint).toStartWith("//./pipe/");
           expect(
-            await inspectModel(`try { require("node:fs").readFileSync(${JSON.stringify(staged)}); process.stdout.write("readable"); }
-catch (error) { process.stdout.write(error.code); }`),
-          ).toMatch(/^(?:EPERM|EACCES)$/);
+            await inspectModel(`const { spawnSync } = require("node:child_process");
+const result = spawnSync("git", ["config", "--file", ${JSON.stringify(endpoint)}, "--list"]);
+if (result.error) throw result.error;
+process.stdout.write(String(result.stdout.length));`),
+          ).toBe("0");
         } finally {
           await writeFile(done, "");
           await running;
         }
-        await expect(lstat(staged!)).rejects.toMatchObject({ code: "ENOENT" });
+        // Git can warn and skip a busy endpoint. Even a successful child must
+        // fail the snapshot if every listener was occupied at the same time.
+        await expect(
+          launch(`const fs = require("node:fs");
+const clients = [];
+for (let i = 0; i < 32; i++) clients.push(fs.openSync(process.env.GIT_CONFIG_GLOBAL, "r"));
+for (const fd of clients) fs.closeSync(fd);`),
+        ).rejects.toThrow("concurrent readers exhausted the pipe listeners");
       }
       await expectModelDenied();
     },
   );
-}, 30000);
+}, 60000);
 
 async function captureFilterPermissions(
   repository: string,

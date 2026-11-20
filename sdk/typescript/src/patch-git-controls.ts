@@ -383,12 +383,19 @@ export async function activePatchPublicationHooks(
 }
 
 export interface PatchSnapshotConfig {
-  root: string;
-  // The Windows Git runner stages each base64 config at its decimal index.
+  // Latin-1 maps each captured Git byte to one character. Git's NUL-delimited
+  // records leave NUL available to mark the prefix of an included file.
   files: string[];
   global?: number;
   system?: number;
   commands: Record<string, number>;
+}
+
+// Embedded in the sandbox bridge, where each invocation has its own endpoints.
+export function snapshotConfigBytes(files: string[], prefix: string): Buffer[] {
+  return files.map((text) =>
+    Buffer.from(text.replaceAll("\0", prefix), "latin1"),
+  );
 }
 
 const includeSetting = /^include(?:if\..*)?\.path$/u;
@@ -1946,7 +1953,7 @@ export async function capturePatchGitControls(
               if (expanded) {
                 const target = relativeFile(dirname(path), expanded);
                 const child = await numberFor(target);
-                value = child === undefined ? pathBytes(target) : String(child);
+                value = child === undefined ? pathBytes(target) : "\0" + child;
               }
             }
             text += serializeConfigEntry(key, value);
@@ -1992,15 +1999,8 @@ export async function capturePatchGitControls(
         if (!snapshotConfig && !files.length) return;
         // The launch context retains this object as shell policy can supply
         // additional credential paths before the native permissions resolve.
-        snapshotConfig ??= { root, files: [], commands };
-        Object.assign(snapshotConfig, {
-          files: files.map((text) =>
-            Buffer.from(text, "latin1").toString("base64"),
-          ),
-          global,
-          system,
-          commands,
-        });
+        snapshotConfig ??= { files, commands };
+        Object.assign(snapshotConfig, { files, global, system, commands });
         onSnapshotConfig?.(snapshotConfig);
       };
     if (mode === "resumed-hook") return;

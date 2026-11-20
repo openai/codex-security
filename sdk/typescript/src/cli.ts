@@ -106,6 +106,7 @@ import {
   type PatchGitControls,
   type PatchPublicationHooks,
   type PatchSnapshotConfig,
+  snapshotConfigBytes,
   withPatchGitIndex,
 } from "./patch-git-controls.js";
 import {
@@ -115,7 +116,7 @@ import {
   removePatchCredentials,
   writePublicationHooks,
   type WindowsGitConfig,
-  configWorkspaceArgs,
+  gitConfigPipePrefix,
 } from "./patch-publication-hooks.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -370,6 +371,7 @@ import {
   requirePrivateSnapshotProfileHome,
   requirePrivateSnapshotProfileFile,
   createWindowsHookMessageStage,
+  windowsGitConfigBinding,
   createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   writeCredentialHomeConfig,
@@ -2087,18 +2089,13 @@ for (const [name, value] of bindings) {
 const removeCredentials = ${removePatchCredentials};
 removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
 if (windowsConfig) {
-  const { directory, binding, coordinator, config } = windowsConfig;
-  const path = require("node:path");
-  const fs = require("node:fs");
-  if (require(binding).createWindowsGitConfigDirectory(
-    Buffer.from(path.toNamespacedPath(directory), "utf16le"), coordinator,
-  )) {
-    for (const [index, contents] of config.files.entries())
-      fs.writeFileSync(path.join(directory, String(index)), contents, { encoding: "base64", flag: "wx" });
+  const { prefix, binding, coordinator, config } = windowsConfig;
+  const files = (${snapshotConfigBytes})(config.files, prefix);
+  if (require(binding).serveWindowsGitConfigs(prefix, files, coordinator)) {
     if (config.system !== undefined)
-      process.env.GIT_CONFIG_SYSTEM = path.join(directory, String(config.system));
+      process.env.GIT_CONFIG_SYSTEM = prefix + config.system;
     if (config.global !== undefined)
-      process.env.GIT_CONFIG_GLOBAL = path.join(directory, String(config.global));
+      process.env.GIT_CONFIG_GLOBAL = prefix + config.global;
     Object.assign(process.env, windowsConfig.bindings);
   }
 }
@@ -2106,6 +2103,8 @@ if (windowsConfig) {
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
 child.on("exit", (code, signal) => {
+  if (code === 0 && windowsConfig)
+    require(windowsConfig.binding).checkWindowsGitConfigs();
   if (signal) process.kill(process.pid, signal);
   else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);
 });
@@ -2175,28 +2174,14 @@ export async function runRepositoryCommand(
   >[] = [];
   let hostArgs = args;
   try {
-    let windowsConfig: WindowsGitConfig | undefined;
-    let configRoot: string | undefined;
-    if (process.platform === "win32" && sandbox?.snapshotConfig?.files.length) {
-      const temp = await realpath(tmpdir());
-      if (!isOutsidePath(relative(sandbox.snapshotConfig.root, temp)))
-        throw new CodexSecurityError(
-          "Windows Git configuration needs temporary storage outside the patch worktree.",
-        );
-      const stage = await createWindowsHookMessageStage(
-        join(temp, "codex-security-git-config-" + randomUUID()),
-      );
-      windowsMessageStages.push(stage);
-      configRoot = stage.directory;
-      windowsConfig = {
-        // Each hook opens a fresh stage. Its ancestor handles cannot be
-        // reopened beneath the coordinator's carrier pinned for deletion.
-        directory: join(hooks ? temp : configRoot, randomUUID()),
-        coordinator: stage.coordinator,
-        binding: stage.binding,
-        config: sandbox.snapshotConfig,
-      };
-    }
+    const windowsConfig: WindowsGitConfig | undefined =
+      process.platform === "win32" && sandbox?.snapshotConfig?.files.length
+        ? {
+            ...(await windowsGitConfigBinding()),
+            prefix: gitConfigPipePrefix(randomUUID()),
+            config: sandbox.snapshotConfig,
+          }
+        : undefined;
     const home = sandbox && configuredCodexHome(sandbox.environment);
     if (
       home &&
@@ -2511,7 +2496,6 @@ export async function runRepositoryCommand(
             profile,
             "--permission-profile",
             profile,
-            ...configWorkspaceArgs(profile, configRoot),
             "--include-managed-config",
             "--",
             bridgeRuntime?.executable ?? process.execPath,

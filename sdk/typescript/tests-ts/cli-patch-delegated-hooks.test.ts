@@ -231,7 +231,10 @@ for (const outside of [true, false])
         "--json",
       ]);
       expect(outcome.exitCode, outcome.stderr).toBe(2);
-      expect(await readFile(join(allowed, "hook-ran"), "utf8")).toBe("reached");
+      expect(
+        await readFile(join(allowed, "hook-ran"), "utf8").catch(() => null),
+        outcome.stderr,
+      ).toBe("reached");
       expect(await readFile(privateFile).catch(() => null)).toBeNull();
       expect(trustedHostPush).toBe(false);
       const receiver = repositoryGit(remote);

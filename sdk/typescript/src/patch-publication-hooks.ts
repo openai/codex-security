@@ -52,26 +52,15 @@ export function withoutUrlCredentials(value: string): string {
 }
 
 export interface WindowsGitConfig {
-  directory: string;
+  prefix: string;
   binding: string;
   coordinator: string;
   bindings?: Record<string, string>;
   config: import("./patch-git-controls.js").PatchSnapshotConfig;
 }
 
-// A fresh pinned scratch root for each launch avoids re-provisioning files
-// left by an earlier delegate and keeps the reusable permission file stable.
-export function configWorkspaceArgs(profile: string, root?: string): string[] {
-  return root
-    ? [
-        "-c",
-        "permissions." +
-          profile +
-          ".workspace_roots={" +
-          JSON.stringify(root) +
-          "=true}",
-      ]
-    : [];
+export function gitConfigPipePrefix(id: string): string {
+  return "//./pipe/codex-security-git-" + id + "-";
 }
 
 // Executed by the coordinator and embedded in the standalone hook dispatcher.
@@ -93,11 +82,7 @@ export function filterCommandConfig(
       !Object.hasOwn(windowsConfig.config.commands, value)
     )
       return value;
-    return (
-      windowsConfig.directory.replaceAll("\\", "/") +
-      "/" +
-      windowsConfig.config.commands[value]
-    );
+    return windowsConfig.prefix + windowsConfig.config.commands[value];
   }
   function credentialSetting(key: string, value: string): boolean {
     if (/^(?:http|remote)(?:\..*)?\.proxy$/i.test(key))
@@ -259,15 +244,8 @@ removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, $
 environment.CODEX_HOME = plan.home;
 
 const windowsConfig = plan.windowsConfig;
-const configWorkspaceArgs = ${configWorkspaceArgs};
-let configStage;
-if (windowsConfig) {
-  const root = path.join(path.dirname(windowsConfig.directory), require("node:crypto").randomUUID());
-  configStage = require(windowsConfig.binding).createWindowsHookMessageStage(
-    Buffer.from(path.toNamespacedPath(root), "utf16le"),
-  );
-  windowsConfig.directory = path.join(root, "message", "config");
-}
+if (windowsConfig)
+  windowsConfig.prefix = (${gitConfigPipePrefix})(require("node:crypto").randomUUID());
 filterCommandConfig(environment, plan.git, plan.marker, windowsConfig, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile}, ${gitPasswordSetting});
 const bindings = Object.entries(environment).filter(([name]) =>
   /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS|_COUNT|_(?:KEY|VALUE)_\d+)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
@@ -513,7 +491,6 @@ try {
       plan.profile,
       "--permission-profile",
       permissionProfile,
-      ...configWorkspaceArgs(permissionProfile, windowsConfig && path.dirname(windowsConfig.directory)),
       "--include-managed-config",
       "--",
       plan.runtime,
@@ -536,7 +513,6 @@ try {
       windowsHide: true,
     },
   );
-  configStage?.close();
   if (result.error) throw result.error;
   // Git keeps a validator's message edits even when it vetoes the commit.
   let bytes;
