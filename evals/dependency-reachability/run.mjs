@@ -31,7 +31,7 @@ const usage = `Usage: node run.mjs behavior [--out NEW_DIR]
        node run.mjs contracts --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs benchmark --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs live --cli /path/to/codex-security.mjs [--case CASE] [--model MODEL] [--out NEW_DIR]
-       With --case mixed-*: [--grader enabled|disabled] (default enabled)
+       With --case mixed-*: [--reviewer enabled|disabled] (default enabled)
 Use --packets DIR to reuse an earlier run's packets/ directory.
 Cases: positive, fixed, unbound, missing-version, mixed-services, mixed-package, mixed-evidence, mixed-evidence-no-access, mixed-evidence-sibling, or all (default).`;
 const { positionals, values } = parseArgs({
@@ -41,7 +41,7 @@ const { positionals, values } = parseArgs({
     help: { type: "boolean", short: "h" },
     cli: { type: "string" },
     model: { type: "string" },
-    grader: { type: "string" },
+    reviewer: { type: "string" },
     case: { type: "string" },
     out: { type: "string" },
   },
@@ -69,8 +69,8 @@ if (
   (values.case &&
     (mode !== "live" || ![...allCases, "all"].includes(values.case))) ||
   (values.model && mode !== "live") ||
-  (values.grader !== undefined &&
-    (!["enabled", "disabled"].includes(values.grader) ||
+  (values.reviewer !== undefined &&
+    (!["enabled", "disabled"].includes(values.reviewer) ||
       !values.case?.startsWith("mixed-"))) ||
   (values.packets && mode === "behavior")
 ) {
@@ -284,9 +284,9 @@ try {
           : mixed
             ? reviewedCve
             : summaryCve;
-      const grader = values.grader ?? "enabled";
+      const reviewer = values.reviewer ?? "enabled";
       const args = ["check"];
-      if (grader === "disabled") args.push("--grader=disabled");
+      if (reviewer === "disabled") args.push("--reviewer=disabled");
       args.push(subject);
       if (mixed) args.push("--progress-events", join(runDir, "progress.jsonl"));
       if (!mixed) {
@@ -345,7 +345,7 @@ try {
       const result = {
         id,
         ...(mixed && {
-          grader,
+          reviewer,
           argv: [process.execPath, cli, "exploitability", ...args],
         }),
         sourceSha: mixed ? fixture.sha : fixture.target.sha,
@@ -391,7 +391,7 @@ try {
                 fixture,
                 id === "mixed-package",
                 calls && { calls, requestService },
-                grader,
+                reviewer,
               )
             : gradeStack(report, fixture, { reviewed: true });
           result.status = "passed";

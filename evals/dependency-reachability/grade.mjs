@@ -630,10 +630,15 @@ export function verifyClaimCitations(report, use, read, sha, reviewed) {
   };
 }
 
+// Earlier saved reports called the independent reviewer the grader.
+export function reviewerMode(report) {
+  return report.reviewer ?? report.grader ?? "enabled";
+}
+
 // Compare report citations with replies recorded by the independent MCP process.
 export function gradeEvidenceSource(report, use, { calls, requestService }) {
   const claim = exactClaim(report.claims, use.conclusionClaim);
-  const reviewed = report.grader !== "disabled";
+  const reviewed = reviewerMode(report) === "enabled";
   if (reviewed) {
     assert(
       claim.state === "approved" && claim.decision?.accepted === true,
@@ -745,10 +750,10 @@ export function gradeMixed(
   fixture,
   packageCheck = false,
   evidenceSource,
-  grader = "enabled",
+  reviewer = "enabled",
 ) {
   let report = response;
-  assert.equal(response.grader ?? "enabled", grader, "expected reviewer mode");
+  assert.equal(reviewerMode(response), reviewer, "expected reviewer mode");
   if (packageCheck) {
     assert.equal(response.package.name, "linkify-it");
     const checks = response.checks.filter(
@@ -768,7 +773,7 @@ export function gradeMixed(
     assert.equal(report.cve, reviewedCve);
   }
   assert.equal(report.schemaVersion, 2);
-  assert.equal(report.grader ?? "enabled", grader, "expected reviewer mode");
+  assert.equal(reviewerMode(report), reviewer, "expected reviewer mode");
   const validate = sourceReader(fixture.repo, fixture.sha);
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];
@@ -803,7 +808,7 @@ export function gradeMixed(
       use,
       validate,
       fixture.sha,
-      grader === "enabled",
+      reviewer === "enabled",
     );
     const lock = service + "/package-lock.json";
     const lines = git(fixture.repo, "show", fixture.sha + ":" + lock).split(
