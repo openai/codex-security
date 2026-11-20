@@ -506,7 +506,7 @@ test("the evidence grader checks citations against the stdio server's original r
   );
 });
 
-test("a local case module can regrade both conditions against its own pinned source", async () => {
+test("a local case module can prepare and regrade its large-repo cases across suites", async () => {
   const saved = await mkdtemp(join(root, "saved-"));
   const caseModule = join(saved, "local cases.mjs");
   const scenario = {
@@ -521,7 +521,12 @@ test("a local case module can regrade both conditions against its own pinned sou
     `
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-export const cases = [${JSON.stringify(scenario)}];
+const scenario = ${JSON.stringify(scenario)};
+export const cases = [
+  { ...scenario, largeRepo: true },
+  { ...scenario, id: "batch", suite: "worker", largeRepo: true },
+  { ...scenario, id: "focused" },
+];
 export async function prepare(scenario, repo, commitFixture) {
   await writeFile(join(repo, "handler"), scenario.revision);
   return { repo, sha: commitFixture(repo) };
@@ -545,23 +550,47 @@ export function gradeSnapshot(report, scenario, repo, sha, mode, { sourceReader 
       citation: { commit, path: "handler", startLine: 1, endLine: 1 },
     });
   }
+  const args = [
+    join(import.meta.dirname, "upstream.mjs"),
+    "--case-module",
+    caseModule,
+    "--suite",
+    "large-repo",
+  ];
+  function invoke(...options) {
+    return spawnSync(process.execPath, [...args, ...options], {
+      encoding: "utf8",
+    });
+  }
+  const help = invoke("--help");
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout.trimEnd(), /Cases: profile, batch$/u);
+  const prepared = join(saved, "prepared");
+  const prep = invoke("--prepare-only", "--out", prepared);
+  assert.equal(prep.status, 0, prep.stderr);
+  const manifest = JSON.parse(
+    await readFile(join(prepared, "results.json"), "utf8"),
+  );
+  assert.deepEqual(manifest.selected, ["profile", "batch"]);
+  const skipped = invoke("--case", "focused", "--prepare-only");
+  assert.equal(skipped.status, 1);
+  assert.match(
+    skipped.stderr,
+    /Cases unavailable for this selection: focused/u,
+  );
+
   const out = join(saved, "regraded");
-  const run = spawnSync(
-    process.execPath,
-    [
-      join(import.meta.dirname, "upstream.mjs"),
-      "--case-module",
-      caseModule,
-      "--grade-existing",
-      saved,
-      "--grader",
-      "both",
-      "--jobs",
-      "2",
-      "--out",
-      out,
-    ],
-    { encoding: "utf8" },
+  const run = invoke(
+    "--grade-existing",
+    saved,
+    "--case",
+    scenario.id,
+    "--grader",
+    "both",
+    "--jobs",
+    "2",
+    "--out",
+    out,
   );
   assert.ifError(run.error);
   const summary = JSON.parse(await readFile(join(out, "results.json"), "utf8"));

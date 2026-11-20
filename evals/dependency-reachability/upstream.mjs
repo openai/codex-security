@@ -57,18 +57,29 @@ for (const scenario of cases) {
   idsSeen.add(scenario.id);
 }
 const suites = new Set(caseModule ? [] : ["original", "added"]);
+suites.add("large-repo");
 for (const scenario of cases) suites.add(scenario.suite);
 const usage = `Usage: node upstream.mjs (--cache DIR | --case-module PATH) [--suite ${[...suites].join("|")}] [--case ID ...]
        (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
        Repeat --case ID to select several cases.
+       --suite large-repo selects cases marked largeRepo: true across suites. Add --help to list their IDs.
        With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled for live runs)
        Regrading uses the cases and grader from results.json when available. Pass selectors to narrow the run.
        With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
        For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
 Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE
 Use --case-module PATH to load cases and their grader from a trusted local JavaScript module.`;
+const original = new Set(originalCases.map((c) => c.id));
+const matching = cases.filter((c) => {
+  if (values.case && !values.case.includes(c.id)) return false;
+  if (values["skill-baseline"] && !original.has(c.id)) return false;
+  if (values.suite === "large-repo") return c.largeRepo === true;
+  if (!caseModule && values.suite === "original") return original.has(c.id);
+  if (!caseModule && values.suite === "added") return !original.has(c.id);
+  return !values.suite || c.suite === values.suite;
+});
 if (values.help) {
-  console.log(usage + "\nCases: " + cases.map((c) => c.id).join(", "));
+  console.log(usage + "\nCases: " + matching.map((c) => c.id).join(", "));
   process.exit(0);
 }
 const jobs = Number(values.jobs);
@@ -110,16 +121,8 @@ if (
 )
   throw Error(`The saved run only contains grader ${previous.grader}.`);
 
-const original = new Set(originalCases.map((c) => c.id));
 const savedIds = previous?.selected ?? previous?.results?.map((r) => r.id);
-const selected = cases.filter((c) => {
-  if (values.case && !values.case.includes(c.id)) return false;
-  if (savedIds && !savedIds.includes(c.id)) return false;
-  if (values["skill-baseline"] && !original.has(c.id)) return false;
-  if (!caseModule && values.suite === "original") return original.has(c.id);
-  if (!caseModule && values.suite === "added") return !original.has(c.id);
-  return !values.suite || c.suite === values.suite;
-});
+const selected = matching.filter((c) => !savedIds || savedIds.includes(c.id));
 const ids = selected.map((c) => c.id);
 const requested = values.case ?? (values.suite ? [] : savedIds) ?? [];
 const unmatched = requested.filter((id) => !ids.includes(id));
