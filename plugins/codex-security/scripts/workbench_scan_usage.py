@@ -434,11 +434,12 @@ def collect_scan_usage(
         "source": "codex_runtime" if runtime_receipts_used else "codex_rollout",
         **{key: sum(role[key] for role in by_role.values()) for key in TOKEN_FIELDS.values()},
         "threadCount": len(measured_threads),
+        # Receipt gaps keep the labels recorded in the receipt scope.
         "coverageScope": sorted(
             receipt_scope
             | {f"thread:{identity}" for identity in measured_threads}
             | {
-                identity if identity.startswith("worker-attempt:") else f"thread:{identity}"
+                identity if identity in receipt_scope else f"thread:{identity}"
                 for identity in missing_thread_ids
             }
         ),
