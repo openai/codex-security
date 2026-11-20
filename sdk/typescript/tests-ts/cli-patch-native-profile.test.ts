@@ -1155,7 +1155,7 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
       expect(await inspectModel(modelRead + probeWrites)).toBe("[]");
       for (const path of selectedGhFiles)
         expect(await readFile(path, "utf8")).toBe(
-          contents[protectedPaths.indexOf(path)],
+          contents[protectedPaths.indexOf(path)]!,
         );
       if (patchSnapshotWindowsConfig().includes('"elevated"'))
         console.info(

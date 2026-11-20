@@ -14,7 +14,6 @@ import {
 } from "node:fs/promises";
 import { join, parse, resolve } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { pathToFileURL } from "node:url";
 import { nodeCommand } from "./support/shell.js";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
@@ -476,12 +475,12 @@ test("native snapshot profile preserves file grants", async () => {
     [selected]: { ".": "read" },
     [sibling]: { ".": "deny" },
   };
-  const inspect = join(root, "profile.mjs");
+  // With Node as the launcher, its first argument selects the probe script.
   await writeFile(
-    inspect,
+    join(root, "sandbox"),
     `
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 const name = process.argv[process.argv.indexOf("--permission-profile") + 1];
 const path = join(process.env.CODEX_HOME, name + ".config.toml");
 process.stdout.write(JSON.stringify({ name, path, contents: readFileSync(path, "utf8") }));
@@ -492,7 +491,7 @@ process.exit(0);
     ...process.env,
     CODEX_HOME: home,
     CODEX_CLI_PATH: nodeCommand().command,
-    NODE_OPTIONS: `--import=${pathToFileURL(inspect).href}`,
+    NODE_OPTIONS: "--require=./unexpected-preload.cjs",
   };
   const output = await runRepositoryCommand("git", ["--version"], root, {
     sandbox: {
