@@ -6,6 +6,6 @@ Call `get_codex_security_daybreak_access` only if it is already available in the
 
 - Failed, `unknown`, or `stale: true`: continue silently without a speculative access warning.
 - Fresh `granted`: report the status and available Daybreak programs.
-- Fresh `not_granted`: before other scan-start progress, show a separate prominent warning that Daybreak access is not granted and protected scan outputs may not be displayable. Link the returned `enrollmentUrl`, falling back to `https://chatgpt.com/cyber`.
+- Fresh `not_granted`: before other scan-start progress, show a separate prominent warning that Daybreak access is not granted and protected scan outputs may not be displayable. Link the complete returned `enrollmentUrl`, including its query parameters. If it is absent, use `https://chatgpt.com/cyber?source=codex_security_plugin`.
 
 Continue regardless; the advisory never authorizes or gates a scan. Do not poll or repeat it between phases. If the user asks about access, report the result or its uncertainty. Recheck after an account/access change only when the user requests it and the tool is available.
