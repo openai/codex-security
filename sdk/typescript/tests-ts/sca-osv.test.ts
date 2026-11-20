@@ -181,7 +181,8 @@ test.each(["throw", "reject", "pending"] as const)(
   "OSV work continues when its progress observer is %s",
   async (behavior) => {
     const { repository, output } = await setup();
-    await writeFile(join(repository, "package-lock.json"), npmLock());
+    const lockfile = join(repository, "package-lock.json");
+    await writeFile(lockfile, npmLock());
     const result = await runOsvScan(
       {
         repositoryPath: repository,
@@ -193,17 +194,7 @@ test.each(["throw", "reject", "pending"] as const)(
           return new Promise<void>(() => {});
         },
       },
-      {
-        executable: process.execPath,
-        runProcess: async (_executable, argv) => ({
-          stdout:
-            argv[0] === "--version"
-              ? "2.6.0"
-              : JSON.stringify(rawOutput(argv.at(-1)!)),
-          stderr: "",
-          exitCode: 0,
-        }),
-      },
+      scannerReturning(rawOutput(lockfile)),
     );
     expect(result.status).toBe("completed");
     expect(result.components).toHaveLength(1);
