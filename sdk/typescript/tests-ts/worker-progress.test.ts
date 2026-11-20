@@ -422,6 +422,25 @@ describe("runtime worker dispatch monitor", () => {
     });
   });
 
+  test("reports the native diagnostic for an errored child", () => {
+    const monitor = createWorkerDispatchMonitor();
+    const reason = "worker initialization failed";
+    expect(
+      monitor.observe({
+        type: "item.completed",
+        item: {
+          type: "collab_tool_call",
+          id: "spawn-1",
+          tool: "spawn_agent",
+          status: "failed",
+          sender_thread_id: "parent",
+          receiver_thread_ids: ["child"],
+          agents_states: { child: { status: "errored", message: reason } },
+        },
+      }),
+    ).toEqual({ kind: "failed", attempt: 1, reason });
+  });
+
   test("reports a successful spawn when its start item was not observed", () => {
     const monitor = createWorkerDispatchMonitor();
     expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toEqual({

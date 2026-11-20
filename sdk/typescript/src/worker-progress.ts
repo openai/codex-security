@@ -1,4 +1,4 @@
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
 import { parseJson } from "./value.js";
 import { z } from "zod";
 
@@ -193,11 +193,13 @@ export function createWorkerDispatchMonitor() {
 }
 
 function spawnFailureReason(item: Readonly<Record<string, unknown>>): string {
-  const error = item["error"];
-  if (typeof error === "string" && error.trim() !== "") return error;
-  if (isRecord(error) && typeof error["message"] === "string") {
-    const message = error["message"].trim();
-    if (message !== "") return message;
-  }
-  return "Delegated worker failed to start.";
+  const error =
+    item["error"] ??
+    Object.values(asRecord(item["agents_states"]) ?? {}).find(
+      (state) => asRecord(state)?.["status"] === "errored",
+    );
+  const reason = isRecord(error) ? error["message"] : error;
+  return typeof reason === "string" && reason.trim() !== ""
+    ? reason
+    : "Delegated worker failed to start.";
 }
