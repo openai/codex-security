@@ -3761,6 +3761,21 @@ def test_lower_counter_after_new_turn_or_reconnect(scan_usage, tmp_path, kind, p
     assert usage.warnings == {"token_counter_regressed"}
 
 
+def test_same_turn_reconnect_keeps_usage_after_last_exact_receipt(scan_usage, tmp_path):
+    at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    events = [
+        _event(at, "turn_context", {"turn_id": "first"}),
+        _token_event(at, 100, 0),
+        _response_event(at, "scan-parent", "first", 110, 0, turn_id="first"),
+        _event(at, "session_meta", {"id": "scan-parent"}),
+        _token_event(at, 30, 0),
+        _token_event(at, 60, 0),
+    ]
+    usage = _measure_rollout(scan_usage, _rollout(tmp_path, "scan-parent", events), at, at)
+    assert usage.tokens == _counts(170, 0, 0)
+    assert usage.warnings == {"token_receipts_incomplete"}
+
+
 def test_receipt_does_not_resolve_another_turns_counter_regression(scan_usage, tmp_path):
     at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     events = [

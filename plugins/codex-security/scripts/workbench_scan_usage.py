@@ -1328,6 +1328,7 @@ class _TurnUsage:
         self.response_usage = _empty_token_usage()
         self.has_receipts = False
         self.has_turn_total = False
+        self.exact_at_reconnect: dict[str, int] | None = None
         self.ambiguous_cache = False
         self.ambiguous_model = False
         self.counter_regressed = False
@@ -1549,6 +1550,8 @@ def _read_rollout_usage_with_extent(
                 and (payload.get("id") or payload.get("session_id")) == session.thread_id
             ):
                 previous_counter_turn = None
+                if turn.has_turn_total:
+                    turn.exact_at_reconnect = turn.total.copy()
             if event.get("type") == "token_usage_record":
                 response_id = payload.get("response_id")
                 usage = _usage_counts(payload.get("usage"))
@@ -1607,6 +1610,7 @@ def _read_rollout_usage_with_extent(
                     continue
                 if turn_usage is not None:
                     receipt_turn.has_turn_total = True
+                    receipt_turn.exact_at_reconnect = None
                     if any(
                         turn_usage[key] > receipt_turn.response_usage[key]
                         for key in TOKEN_FIELDS.values()
@@ -1715,6 +1719,11 @@ def _read_rollout_usage_with_extent(
                 delta["cacheWriteInputTokensReported"] = False
             previous = baseline
             previous_counter_turn = current_turn_id
+            if reset and turn.exact_at_reconnect is not None:
+                # The previous turn total covers only work before the reconnect.
+                turn.counters = turn.exact_at_reconnect
+                turn.has_turn_total = False
+            turn.exact_at_reconnect = None
             if past_scan_end(timestamp, current_turn_id):
                 continue
             if owner_turn_id is not None and current_turn_id != owner_turn_id:
