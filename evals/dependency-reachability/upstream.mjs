@@ -17,6 +17,7 @@ import { invokeCli, writeCliLogs } from "./cli.mjs";
 import { commitFixture, jsonFile, sha256 } from "./fixtures.mjs";
 import { sourceReader, verifyClaimCitations } from "./grade.mjs";
 import { cases as pinnedCases, originalCases } from "./upstream/cases.mjs";
+import { checkoutOf } from "./upstream/checkout.mjs";
 import { compareRuns } from "./upstream/compare.mjs";
 import { gradeSnapshot, validateSnapshot } from "./upstream/grade.mjs";
 
@@ -126,6 +127,11 @@ if (unmatched.length)
   throw Error("Cases unavailable for this selection: " + unmatched.join(", "));
 if (!selected.length) throw Error("No matching cases.\n" + usage);
 const cli = values.cli && (await realpath(resolve(values.cli)));
+const checkouts = {
+  runner: checkoutOf(import.meta.filename),
+  cli: checkoutOf(cli),
+  caseModule: checkoutOf(caseModule, "directory"),
+};
 const cache = values.cache && resolve(values.cache);
 const out = values.out
   ? resolve(values.out)
@@ -345,6 +351,8 @@ async function saveResults() {
     JSON.stringify(
       {
         model: previous ? (previous.model ?? null) : (values.model ?? null),
+        checkouts: existing ? (previous?.checkouts ?? null) : checkouts,
+        regradeCheckouts: existing ? checkouts : undefined,
         regradedFrom: existing,
         jobs,
         isolatedState: cli ? !!values["isolated-state"] : undefined,

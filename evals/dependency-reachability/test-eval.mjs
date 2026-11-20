@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { checkoutOf } from "./upstream/checkout.mjs";
 import { compareRuns } from "./upstream/compare.mjs";
 import {
   commitFixture,
@@ -570,6 +571,34 @@ export function gradeSnapshot(report, scenario, repo, sha, mode, { sourceReader 
   assert.equal(summary.comparison.disabled.passed, 1);
 });
 
+test("checkout provenance follows tracked entry points across worktrees", async () => {
+  const source = await mkdtemp(join(root, "source-"));
+  await mkdir(join(source, "cases"));
+  await writeFile(join(source, "cases/module.mjs"), "");
+  await writeFile(join(source, "cli.mjs"), "");
+  const commit = commitFixture(source);
+  const copy = join(root, "cli-worktree");
+  git(source, "worktree", "add", "--quiet", "--detach", copy, commit);
+  const cli = join(copy, "cli.mjs");
+  const installed = join(copy, "installed.mjs");
+  await writeFile(installed, "");
+  assert.equal(checkoutOf(installed), null);
+  const clean = { commit, trackedDirty: false, dirtyScope: "worktree" };
+  assert.deepEqual(checkoutOf(cli), clean);
+
+  await writeFile(cli, "export const changed = true;");
+  assert.deepEqual(checkoutOf(cli), { ...clean, trackedDirty: true });
+  assert.deepEqual(checkoutOf(join(source, "cli.mjs")), clean);
+  const scope = join(copy, "cases/module.mjs");
+  assert.deepEqual(checkoutOf(scope, "directory"), {
+    ...clean,
+    dirtyScope: "directory",
+  });
+  await writeFile(scope, "export const cases = [];");
+  git(copy, "add", "cases/module.mjs");
+  assert.equal(checkoutOf(scope, "directory").trackedDirty, true);
+});
+
 test("regrading a saved subset infers its cases and mode and can select one side", async () => {
   const saved = await mkdtemp(join(root, "paired-"));
   const selected = ["direct-links", "disabled-links", "queued-links"];
@@ -581,7 +610,15 @@ test("regrading a saved subset infers its cases and mode and can select one side
     error: "investigation stopped",
     status: "execution_error",
   };
+  const checkouts = {
+    cli: {
+      commit: "a".repeat(40),
+      trackedDirty: false,
+      dirtyScope: "worktree",
+    },
+  };
   await jsonFile(join(saved, "results.json"), {
+    checkouts,
     model: "eval-model",
     grader: "both",
     selected,
@@ -609,6 +646,8 @@ test("regrading a saved subset infers its cases and mode and can select one side
 
   const all = await replay("both");
   assert.deepEqual(all.selected, selected);
+  assert.deepEqual(all.checkouts, checkouts);
+  assert.equal(all.regradeCheckouts.cli, null);
   assert.equal(all.model, "eval-model");
   assert.equal(all.grader, "both");
   assert.equal(all.comparison.enabled.executionErrors, 3);
