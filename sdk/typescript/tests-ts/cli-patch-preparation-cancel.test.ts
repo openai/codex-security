@@ -7,6 +7,7 @@ import { Writable, PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { readSkillCommandOutput, runCodexSkillCommand } from "../src/cli.js";
 import {
+  verifiedPatchResponse,
   resultWithFindings,
   runGitRepositoryCommand,
   runWorkflow,
@@ -137,16 +138,7 @@ test.each([false, true])(
           return 143;
         }
         output!.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: "occ_1",
-                status: "verified",
-                files: ["src/finding-1.ts"],
-                verification: "Synthetic check.",
-              },
-            ],
-          }),
+          verifiedPatchResponse(["src/finding-1.ts"], "Synthetic check."),
         );
         return 0;
       },

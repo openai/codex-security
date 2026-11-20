@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile, link } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  verifiedPatchResponse,
   publicationRepository,
   resultWithFindings,
   completePatches,
@@ -318,19 +319,10 @@ for (const mode of [
           if (precomposed || retainedCase)
             await writeFile(join(directory, "other"), "second edit\n");
           output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files:
-                    precomposed || retainedCase
-                      ? [reported, "other"]
-                      : [reported],
-                  verification: "Synthetic regression passed.",
-                },
-              ],
-            }),
+            verifiedPatchResponse(
+              precomposed || retainedCase ? [reported, "other"] : [reported],
+              "Synthetic regression passed.",
+            ),
           );
           return 0;
         },

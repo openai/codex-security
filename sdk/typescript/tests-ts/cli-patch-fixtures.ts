@@ -67,6 +67,24 @@ export function savedScan(
   };
 }
 
+function verifiedPatch(
+  occurrenceId: Finding["occurrenceId"],
+  files: readonly string[],
+  verification = "The exploit fails and focused tests pass.",
+) {
+  return { occurrenceId, status: "verified", files, verification };
+}
+
+export function verifiedPatchResponse(
+  files: readonly string[],
+  verification: string,
+  occurrenceId = "occ_1",
+) {
+  return JSON.stringify({
+    patches: [verifiedPatch(occurrenceId, files, verification)],
+  });
+}
+
 export function completePatches(
   args: readonly string[],
   output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
@@ -77,17 +95,19 @@ export function completePatches(
   const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
   output?.stdout.write(
     JSON.stringify({
-      patches: findings.map((finding) => ({
-        occurrenceId: finding.occurrenceId,
-        status,
-        files:
-          status === "verified"
-            ? (reportedFiles ?? [finding.locations[0]!.path])
-            : [],
-        ...(status === "verified"
-          ? { verification: "The exploit fails and focused tests pass." }
-          : { reason: "The required service is unavailable." }),
-      })),
+      patches: findings.map((finding) =>
+        status === "verified"
+          ? verifiedPatch(
+              finding.occurrenceId,
+              reportedFiles ?? [finding.locations[0]!.path],
+            )
+          : {
+              occurrenceId: finding.occurrenceId,
+              status,
+              files: [],
+              reason: "The required service is unavailable.",
+            },
+      ),
     }),
   );
   return findings;
