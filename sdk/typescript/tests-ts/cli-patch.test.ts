@@ -3369,6 +3369,7 @@ describe("patch publication integrity", () => {
                     : root,
             };
       const settingsBefore = JSON.stringify(gitSettings);
+      let environmentBefore: NodeJS.ProcessEnv | undefined;
       let inputDependencies: ReturnType<typeof dependencies> | undefined;
       let inputRunner:
         ReturnType<typeof dependencies>["runRepositoryCommand"] | undefined;
@@ -3427,6 +3428,7 @@ describe("patch publication integrity", () => {
         {
           configure: (current) => {
             inputDependencies = current;
+            environmentBefore = { ...current.environment };
             inputRunner = current.runRepositoryCommand;
             current.assessPatchRisk = async (request) => {
               expect(request.repository).toBe(root);
@@ -3449,9 +3451,7 @@ describe("patch publication integrity", () => {
         },
       );
       expect(inputDependencies!.runRepositoryCommand).toBe(inputRunner!);
-      expect(JSON.stringify(inputDependencies!.environment)).toBe(
-        settingsBefore,
-      );
+      expect(inputDependencies!.environment).toEqual(environmentBefore);
       expect(JSON.stringify(gitSettings)).toBe(settingsBefore);
       if (settings === "empty") {
         expect(outcome.exitCode).toBe(flag === undefined ? 0 : 2);
@@ -3742,12 +3742,13 @@ describe("patch publication integrity", () => {
         ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"],
         {
           onCodex,
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, cwd) => {
             if (command === "git") {
               if (args[0] === "config")
                 return args.at(-1)?.endsWith("PatchCommit")
                   ? "verified-commit"
                   : "Synthetic body";
+              if (args.includes("--show-toplevel")) return cwd;
               if (args[0] === "rev-parse") return "verified-commit";
               if (args[0] === "remote")
                 return `https://${client === "glab" ? "gitlab.com" : "github.example.test"}/example/repository.git`;
