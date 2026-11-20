@@ -430,6 +430,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_finding_remediation.add_argument("--base-revision")
     set_finding_remediation.add_argument("--verification-summary")
 
+    share_finding = add_command("get-finding-for-sharing", "--scan-id")
+    share_finding.add_argument("--occurrence-id", required=True)
+
     export_findings = add_command("export-findings", "--scan-id")
     export_findings.add_argument(
         "--artifact", choices=("findings", "threat-model"), default="findings"

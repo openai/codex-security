@@ -3416,6 +3416,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "attach-scan-continuation-thread": partial(
                 handoff.attach_scan_continuation_thread, command_context
             ),
+            "get-finding-for-sharing": partial(
+                publication.get_finding_for_sharing, _WORKBENCH_PUBLICATION_CONTEXT
+            ),
             "export-findings": partial(publication.export_findings, _WORKBENCH_PUBLICATION_CONTEXT),
         }
         if handler := handlers.get(args.command):
