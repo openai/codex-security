@@ -34,6 +34,8 @@ const authHeader = "Authorization: Bearer synthetic-fixture";
 
 test.each([
   ["filter", "http.extraHeader", authHeader, true],
+  ["GIT_CONFIG", "http.extraHeader", authHeader, true],
+  ["GIT_CONFIG include", "http.extraHeader", authHeader, true],
   ["filter", "http.extraHeader", "X-Routing-Tag: synthetic", false],
   ["filter", "imap.pass", "synthetic", true],
   ["filter", "imap.pass", "", false],
@@ -92,7 +94,15 @@ test.each([
         { mode: 0o755 },
       );
     }
-    const environment = { GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: "1" };
+    const environment: Record<string, string> = {
+      GIT_CONFIG_GLOBAL: config,
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    if (delegate === "GIT_CONFIG" || delegate === "GIT_CONFIG include") {
+      environment["GIT_CONFIG_GLOBAL"] = join(host, "unused");
+      environment["GIT_CONFIG"] = delegate === "GIT_CONFIG" ? included : config;
+      git("config", "filter.synthetic.clean", "cat");
+    }
     let model = false;
     let indexHookDisabled = false;
     const outcome = await runWorkflow(

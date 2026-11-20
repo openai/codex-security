@@ -12187,22 +12187,28 @@ async function withResolvedPatchRemote<T>(
   }
 }
 
-async function patchPreflightRemoteSettings(
+async function patchPreflightRemotes(
   repository: string,
   dependencies: CliDependencies,
-): Promise<string[]> {
+): Promise<{ urls: string[]; settings: string[] }> {
   const entries = await patchScopedConfig(
-    "^remote\\.origin\\.(vcs|uploadpack|receivepack|proxy|proxyauthmethod|serveroption)$",
+    "^remote\\.origin\\.(url|pushurl|vcs|uploadpack|receivepack|proxy|proxyauthmethod|serveroption)$",
     repository,
     dependencies,
   );
-  if (entries.length < 3) return [];
-  const directories = await patchTransportDirectories(repository, dependencies);
+  let directories;
+  const urls: string[] = [];
   const settings: string[] = [];
   for (let index = 0; index + 2 < entries.length; index += 3) {
-    const setting = entries[index + 2]!.slice("remote.origin.".length);
+    const entry = entries[index + 2]!;
+    const setting = entry.slice("remote.origin.".length);
     const separator = setting.indexOf("\n");
     const key = separator < 0 ? setting : setting.slice(0, separator);
+    if (key === "url" || key === "pushurl") {
+      urls.push(entry);
+      continue;
+    }
+    directories ??= await patchTransportDirectories(repository, dependencies);
     const value = separator < 0 ? undefined : setting.slice(separator + 1);
     if (key === "vcs")
       throw new CodexSecurityError(
@@ -12225,7 +12231,7 @@ async function patchPreflightRemoteSettings(
     if (key !== "receivepack")
       settings.push(value === undefined ? key : `${key}=${value}`);
   }
-  return settings;
+  return { urls, settings };
 }
 
 async function requireOperatorPatchMirrors(
@@ -12270,19 +12276,10 @@ async function patchPublicationDestination(
   ) => dependencies.runRepositoryCommand(command, args, repository, options);
   const getPushUrls = ["remote", "get-url", "--push", "--all", "origin"];
   const output = await run("git", getPushUrls, { trim: false });
-  const settings = await patchPreflightRemoteSettings(repository, dependencies);
-  const urls = (
-    await run(
-      "git",
-      ["config", "--null", "--get-regexp", "^remote\\.origin\\.(pushurl|url)$"],
-      { trim: false },
-    ).catch((error: unknown) => {
-      if (isJsonObject(error) && error["code"] === 1) return "";
-      throw error;
-    })
-  )
-    .split("\0")
-    .filter(Boolean);
+  const { urls, settings } = await patchPreflightRemotes(
+    repository,
+    dependencies,
+  );
   const push = urls.filter((entry) =>
     entry.startsWith("remote.origin.pushurl\n"),
   );

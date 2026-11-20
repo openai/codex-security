@@ -24,6 +24,7 @@ import {
 } from "node:path";
 import { dependencies } from "./cli-fixtures.js";
 import {
+  verifiedPatchResponse,
   readAppliedText,
   resultWithFindings,
   savedScan,
@@ -725,16 +726,7 @@ describe("patch change tracking", () => {
               );
             }
             output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: "verified",
-                    files: [reported],
-                    verification: "Synthetic regression passed.",
-                  },
-                ],
-              }),
+              verifiedPatchResponse([reported], "Synthetic regression passed."),
             );
             afterTurn = true;
             return 0;

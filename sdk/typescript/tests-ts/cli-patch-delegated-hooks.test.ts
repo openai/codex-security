@@ -6,6 +6,7 @@ import { join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import {
+  verifiedPatchResponse,
   publicationRepository,
   repositoryGit,
   resultWithFindings,
@@ -208,16 +209,10 @@ for (const outside of [true, false])
               "verified synthetic edit\n",
             );
             output!.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: "verified",
-                    files: ["src/finding-1.ts", "check.sh"],
-                    verification: "Synthetic regression passed.",
-                  },
-                ],
-              }),
+              verifiedPatchResponse(
+                ["src/finding-1.ts", "check.sh"],
+                "Synthetic regression passed.",
+              ),
             );
             return 0;
           },

@@ -11,6 +11,7 @@ import {
 import { join, basename, isAbsolute, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
+  verifiedPatchResponse,
   patchRiskAssessment,
   publicationRepository,
   repositoryGit,
@@ -248,21 +249,13 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
               }
               output!.stdout.write(
                 batch || inline
-                  ? JSON.stringify({
-                      patches: [
-                        {
-                          occurrenceId: `occ_${turns}`,
-                          status: "verified",
-                          files: inline
-                            ? ["src"]
-                            : [
-                                `src/finding-${turns}.ts`,
-                                `src/new-${turns}.txt`,
-                              ],
-                          verification: "Synthetic edit verified.",
-                        },
-                      ],
-                    })
+                  ? verifiedPatchResponse(
+                      inline
+                        ? ["src"]
+                        : [`src/finding-${turns}.ts`, `src/new-${turns}.txt`],
+                      "Synthetic edit verified.",
+                      `occ_${turns}`,
+                    )
                   : "Synthetic turn complete.\n",
               );
               return 0;
@@ -367,16 +360,10 @@ test("publication keeps mixed valid and missing selected-path errors before bran
     onCodex: async (_args, output) => {
       await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
       output!.stdout.write(
-        JSON.stringify({
-          patches: [
-            {
-              occurrenceId: "occ_1",
-              status: "verified",
-              files: ["src/finding-1.ts", "src/missing.ts"],
-              verification: "Synthetic edit verified.",
-            },
-          ],
-        }),
+        verifiedPatchResponse(
+          ["src/finding-1.ts", "src/missing.ts"],
+          "Synthetic edit verified.",
+        ),
       );
       return 0;
     },
@@ -651,16 +638,10 @@ test.each(
           } else {
             await writeFile(join(directory, "app.ts"), "fixed\n");
             output!.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: "verified",
-                    files: ["app.ts"],
-                    verification: "Synthetic conditional filter check.",
-                  },
-                ],
-              }),
+              verifiedPatchResponse(
+                ["app.ts"],
+                "Synthetic conditional filter check.",
+              ),
             );
           }
           return 0;
@@ -774,16 +755,7 @@ test.each([
         expect(output!.appServer!.directory).toBe(component);
         await writeFile(join(component, "app.ts"), "fixed\n");
         output!.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: "occ_1",
-                status: "verified",
-                files: ["app.ts"],
-                verification: "Synthetic component check.",
-              },
-            ],
-          }),
+          verifiedPatchResponse(["app.ts"], "Synthetic component check."),
         );
         return 0;
       },

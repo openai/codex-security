@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { appendFile, chmod, link, readFile, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import {
+  verifiedPatchResponse,
   publicationRepository,
   repositoryGit,
   resultWithFindings,
@@ -93,16 +94,11 @@ for (const source of ["supplied", "saved", "batch", "scan"] as const)
                 validationPending = true;
               }
               output?.stdout.write(
-                JSON.stringify({
-                  patches: [
-                    {
-                      occurrenceId: `occ_${calls}`,
-                      status: "verified",
-                      files: [`src/finding-${calls}.ts`],
-                      verification: "Synthetic check.",
-                    },
-                  ],
-                }),
+                verifiedPatchResponse(
+                  [`src/finding-${calls}.ts`],
+                  "Synthetic check.",
+                  `occ_${calls}`,
+                ),
               );
               return 0;
             },

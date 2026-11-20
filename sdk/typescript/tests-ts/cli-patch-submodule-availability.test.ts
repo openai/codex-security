@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { appendFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  verifiedPatchResponse,
   publicationRepository,
   readAppliedText,
   repositoryGit,
@@ -165,16 +166,10 @@ describe("deinitialized patch submodule availability", () => {
           if (selection === "masked committed sibling")
             await rm(join(child, "extra.ts"));
           output!.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["nested/app.ts", "outside.ts"],
-                  verification: "Checked both selected files.",
-                },
-              ],
-            }),
+            verifiedPatchResponse(
+              ["nested/app.ts", "outside.ts"],
+              "Checked both selected files.",
+            ),
           );
           return 0;
         },

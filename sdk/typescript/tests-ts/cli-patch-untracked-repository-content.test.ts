@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  verifiedPatchResponse,
   patchRiskAssessment,
   publicationRepository,
   repositoryGit,
@@ -82,16 +83,7 @@ for (const [indexState, stage] of [
                 ) + "\n",
         );
         output!.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: "occ_1",
-                status: "verified",
-                files: ["selected.txt"],
-                verification: "Synthetic verification.",
-              },
-            ],
-          }),
+          verifiedPatchResponse(["selected.txt"], "Synthetic verification."),
         );
         return 0;
       },
@@ -508,16 +500,10 @@ for (const kind of [
                   : independentContent,
               );
               output?.stdout.write(
-                JSON.stringify({
-                  patches: [
-                    {
-                      occurrenceId: "occ_1",
-                      status: "verified",
-                      files: ["selected.txt"],
-                      verification: "Synthetic verification.",
-                    },
-                  ],
-                }),
+                verifiedPatchResponse(
+                  ["selected.txt"],
+                  "Synthetic verification.",
+                ),
               );
               return 0;
             },

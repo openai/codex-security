@@ -1728,7 +1728,7 @@ export async function capturePatchGitControls(
   const configurationFiles = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
-  const inaccessibleIncludes = new Set<string>();
+  const inaccessibleConfigs = new Map<string, string>();
   const unreadableConfigurations = new Set<string>();
   const inaccessibleHooks = new Set<string>();
   const hookContents = new Map<
@@ -1789,17 +1789,18 @@ export async function capturePatchGitControls(
     optional = false,
   ): Promise<void> => {
     try {
-      // Absent and empty regular inputs have no --show-origin records. Devices
-      // such as /dev/null and unavailable optional inputs keep native behavior.
+      // Empty or unavailable inputs have no --show-origin records. Bind their
+      // location too, preserving native access to devices such as /dev/null.
       const metadata = await stat(path).catch(missing);
       if (metadata === undefined || metadata.isDirectory()) {
         await rememberControl(path, false);
         controlPaths.get(path)!.contents = null;
       } else if (metadata.isFile())
         await rememberConfiguration(path, true, optional);
+      else await rememberControl(path, false, false);
     } catch (error) {
-      if (optional && hasErrorCode(error, "EACCES", "EPERM")) return;
-      throw error;
+      if (!optional || !hasErrorCode(error, "EACCES", "EPERM")) throw error;
+      inaccessibleConfigs.set(path, "configuration");
     }
   };
   const expandConfigurationPath = async (
@@ -2330,21 +2331,39 @@ export async function capturePatchGitControls(
         await rememberHook(relativeFile(hooks, hook));
     };
     const inspectedIncludes = new Set<string>();
+    type ConfigSource = "active" | "conditional" | "selector";
     const captureInclude = async (
       relativeTo: string,
       value: string,
-      optional: boolean,
+      source: ConfigSource,
       userSelected: boolean,
     ): Promise<void> => {
       const rawPath = configPath(value);
       if (rawPath.length === 0) return;
-      const path = await expandConfigurationPath(rawPath, checkout, optional);
+      const path = await expandConfigurationPath(
+        rawPath,
+        checkout,
+        source !== "active",
+      );
       if (path === undefined) return;
-      const includePath = relativeFile(relativeTo, path);
-      if (projectConfig) expandedIncludes.set(value, path);
+      if (projectConfig && source !== "selector")
+        expandedIncludes.set(value, path);
+      await inspectFile(relativeFile(relativeTo, path), source, userSelected);
+    };
+    const inspectFile = async (
+      includePath: string,
+      source: ConfigSource,
+      userSelected: boolean,
+    ) => {
+      const optional = source !== "active";
+      const selector = source === "selector";
+      const origin = dirname(includePath);
+      let canonical: string;
+      let contents: Buffer | null | undefined;
       try {
+        canonical = await canonicalPath(includePath);
         if (
-          !insideSelectedRoots(await canonicalPath(includePath)) &&
+          !insideSelectedRoots(canonical) &&
           (!userSelected ||
             (await directoryLinks(includePath)).some((link) =>
               insideSelectedRoots(dirname(link)),
@@ -2353,39 +2372,47 @@ export async function capturePatchGitControls(
           throw new Error(
             `Checkout requested ${optional ? "a conditional" : "an active"} include outside the selected Git roots: ${includePath}`,
           );
-        await rememberConfiguration(includePath, !optional, optional);
+        if (selector) {
+          // GIT_CONFIG affects git-config consumers such as LFS. Inspect its
+          // credentials without freezing ordinary selected checkout files.
+          if (!(await stat(canonical).catch(missing))?.isFile()) return;
+          contents = await readFile(canonical);
+        } else {
+          await rememberConfiguration(includePath, !optional, optional);
+          contents = controlPaths.get(includePath)!.contents;
+        }
       } catch (error) {
         // Active includes already passed Git's normal --includes read above.
         if (optional && hasErrorCode(error, "EACCES", "ELOOP")) {
-          inaccessibleIncludes.add(includePath);
+          inaccessibleConfigs.set(includePath, "conditional include");
           return;
         }
         throw error;
       }
-      if (!optional) return;
-      const control = controlPaths.get(includePath)!;
-      if (!Buffer.isBuffer(control.contents)) return;
-      const origin = dirname(includePath);
-      const identity = `${control.canonical}\0${await canonicalPath(origin)}`;
+      if (!optional || !Buffer.isBuffer(contents)) return;
+      const identity = `${source}\0${canonical}\0${await canonicalPath(origin)}`;
       if (inspectedIncludes.has(identity)) return;
       inspectedIncludes.add(identity);
-      const entries = await readConfig(control.contents);
-      if (!entries) return;
+      const entries = await readConfig(contents);
+      if (!entries) {
+        if (selector) await protectStore(includePath);
+        return;
+      }
       for (const entry of entries) {
         const { key, value = "" } = parseConfigEntry(entry);
-        if (automaticPublication && snapshotFilter(key)) {
+        if (!selector && automaticPublication && snapshotFilter(key)) {
           // Leaving a branch can remove an empty override and activate a
           // nonempty command that was present earlier in Git's config order.
           conditionalFilters.add(key);
           if (value) nonemptyFilters.add(key);
         }
         sshSigning ||= key === "gpg.format" && value === "ssh";
-        if (!insideSelectedRoots(control.canonical)) {
+        if (selector || !insideSelectedRoots(canonical)) {
           if (key === "user.signingkey") signingKeys.add(value);
-          externalInlineAuthentication ||= hasInlineGitAuthentication(
-            key,
-            value,
-          );
+          if (hasInlineGitAuthentication(key, value)) {
+            externalInlineAuthentication = true;
+            if (selector) await protectStore(includePath);
+          }
           await captureCredentialSource(
             checkout,
             configurationDirectory,
@@ -2394,6 +2421,14 @@ export async function capturePatchGitControls(
             "file",
           );
         }
+        if (includeSetting.test(key))
+          await captureInclude(
+            origin,
+            value,
+            source,
+            userSelected && !insideSelectedRoots(canonical),
+          );
+        if (selector) continue;
         recordConfiguredHook(
           publicationHooks,
           configPath(key),
@@ -2405,20 +2440,30 @@ export async function capturePatchGitControls(
           /^filter\..*\.(clean|smudge|process)$/su.test(key)
         ) {
           hasConditionalFilters = true;
-          if (!userSelected || insideSelectedRoots(control.canonical))
+          if (!userSelected || insideSelectedRoots(canonical))
             branchFilterSettings.add(configPath(key));
         }
         if (key === "core.hookspath" && mode !== "resumed-hook")
           await captureHooks(configPath(value));
-        else if (includeSetting.test(key))
-          await captureInclude(
-            origin,
-            value,
-            true,
-            userSelected && !insideSelectedRoots(control.canonical),
-          );
       }
     };
+    const file = environmentEntry(environment, "GIT_CONFIG");
+    if (file && mode !== "external")
+      for (const base of new Set([
+        checkout,
+        requestedDirectory,
+        configurationDirectory,
+      ])) {
+        const path = gitConfigFile(base, file);
+        if (path) await inspectFile(path, "selector", true);
+      }
+    if (file && automaticPublication && checkout === root) {
+      const selector = await publicationConfigSelector(
+        requestedDirectory,
+        environment,
+      );
+      if (selector) await rememberSelectedConfiguration(selector);
+    }
     for (const { scope, origin, key, value } of settings) {
       if (!includeSetting.test(key)) continue;
       const relativeTo = origin.startsWith("file:")
@@ -2429,7 +2474,7 @@ export async function capturePatchGitControls(
       await captureInclude(
         relativeTo,
         value,
-        key.startsWith("includeif."),
+        key.startsWith("includeif.") ? "conditional" : "active",
         await userSelectedConfig(scope, origin, configurationDirectory),
       );
     }
@@ -2716,13 +2761,6 @@ export async function capturePatchGitControls(
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
     : selectedDirectories[1];
-  if (automaticPublication) {
-    const selector = await publicationConfigSelector(
-      requestedDirectory,
-      environment,
-    );
-    if (selector) await rememberSelectedConfiguration(selector);
-  }
   const selectorDirectory = await setupDirectory(root);
   for (const argument of [
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
@@ -2784,17 +2822,17 @@ export async function capturePatchGitControls(
             `Git hook became accessible during the patch: ${path}`,
           );
       }
-      for (const path of inaccessibleIncludes) {
+      for (const [path, kind] of inaccessibleConfigs) {
         try {
           const canonical = await canonicalPath(path);
           const metadata = await stat(canonical).catch(missing);
           if (metadata === undefined || metadata.isDirectory()) continue;
         } catch (error) {
-          if (hasErrorCode(error, "EACCES", "ELOOP")) continue;
+          if (hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) continue;
           throw error;
         }
         throw new Error(
-          `Git conditional include became accessible during the patch: ${path}`,
+          `Git ${kind} became accessible during the patch: ${path}`,
         );
       }
       for (const [path, expected] of controlPaths) {
@@ -3344,14 +3382,14 @@ export async function capturePatchGitControls(
       } catch (error) {
         // Locate opaque control paths without resolving their entries. The
         // native sandbox must enforce the literal exclusions or reject them.
-        if (!hasErrorCode(error, "EACCES", "ELOOP")) throw error;
+        if (!hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) throw error;
         const parent = dirname(ancestor);
         if (parent === ancestor) throw error;
         ancestor = parent;
       }
     }
   };
-  for (const path of inaccessibleIncludes) {
+  for (const path of inaccessibleConfigs.keys()) {
     const canonical = await snapshotControlLocation(path);
     if ([...snapshotStoragePaths].some((storage) => inside(storage, canonical)))
       snapshotControlPaths.push(canonical);

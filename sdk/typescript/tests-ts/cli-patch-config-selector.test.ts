@@ -383,7 +383,7 @@ for (const selected of [
   const states: Array<boolean | "directory"> =
     selected.startsWith("disabled") || selected === "empty global"
       ? [true]
-      : selected === "device" || selected.startsWith("lfs ")
+      : selected.startsWith("lfs ")
         ? [false]
         : [false, true];
   if (selected === "global" || selected === "administration global")
@@ -432,7 +432,8 @@ for (const selected of [
           environment["GIT_CONFIG_SYSTEM"] = control;
           if (selected === "system") environment["GIT_CONFIG_NOSYSTEM"] = "0";
         } else if (selected === "device") {
-          environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
+          if (create) await symlink("/dev/null", control);
+          environment["GIT_CONFIG_GLOBAL"] = create ? control : "/dev/null";
         } else if (selected !== "disabled global") {
           environment["GIT_CONFIG_GLOBAL"] =
             selected === "relative global"
@@ -493,6 +494,7 @@ for (const selected of [
             if (create === "directory") {
               await mkdir(control, { recursive: true });
             } else if (create) {
+              if (selected === "device") await unlink(control);
               await mkdir(hooks);
               await writeFile(
                 join(hooks, "post-checkout"),
@@ -1404,13 +1406,14 @@ test.each([
   const hook = mode === "selector created by hook";
   const host = "forge.example.test:8443";
   const origin = "example/repository";
+  const url = `https://${host}/${origin}.git`;
   const marker = "remote.origin.gh-resolved";
   const expected = local ? "upstream/repository" : origin;
   const environment = {
     GH_HOST: host,
     GIT_CONFIG: local ? ".git/config" : "selector",
   };
-  git("remote", "set-url", "origin", `https://${host}/${origin}.git`);
+  git("remote", "set-url", "origin", url);
   git("config", marker, "upstream/repository");
   git("config", "push.recurseSubmodules", "false");
   git("config", "--file", "selector", "lfs.storage", "filter-cache");
@@ -1423,6 +1426,7 @@ test.each([
       { mode: 0o755 },
     );
   let push: readonly string[] = [];
+  const urls = new Set<string>();
   const targets: string[][] = [];
   const outcome = await runPublicationWorkflow("issue", {
     currentDirectory: local ? directory : component,
@@ -1430,6 +1434,8 @@ test.each([
     onRepositoryCommand: (command, args, cwd, options) => {
       const env = { ...environment, ...options?.environment };
       if (command === "git") {
+        const selected = options?.environment?.["CODEX_SECURITY_PATCH_REMOTE"];
+        if (selected !== undefined) urls.add(selected);
         if (args[0] === "push") push = args;
         return runHostedGit(remote, args, cwd, {
           ...options,
@@ -1457,6 +1463,13 @@ test.each([
         );
       if (!hook) await rm(component, { recursive: true });
       git("config", "--file", "selector", marker, "decoy/repository");
+      git(
+        "config",
+        "--file",
+        "selector",
+        "remote.origin.url",
+        `https://${host}/decoy/repository.git`,
+      );
       output?.stdout.write("Synthetic patch complete.");
       return 0;
     },
@@ -1471,6 +1484,7 @@ test.each([
     expect(outcome.stderr).toContain("Git configuration changed");
   } else {
     expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect([...urls]).toEqual([url]);
     expect(targets).toEqual([[`${host}/${expected}`, expected]]);
     expect(push).toContain("--recurse-submodules=no");
   }

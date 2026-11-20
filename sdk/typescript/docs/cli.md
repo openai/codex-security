@@ -3150,6 +3150,10 @@ caches, and Azure CLI token files. Package-manager rules cover credential
 files in the standard and selected Cargo, Gradle, Maven, Bundler, RubyGems,
 NuGet, Helm, Docker and Podman directories. The host transport retains access
 to these files.
+For `GIT_CONFIG`, patching inspects the selected file and its includes for
+inline authentication and credential sources. A file containing inline
+authentication prevents managed Git filters and hooks from running. Git LFS
+can use ordinary selected settings, including `lfs.storage`.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can

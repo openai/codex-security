@@ -5,6 +5,7 @@ import { mkdir, readFile, rm, writeFile, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { SeverityLevel } from "../src/index.js";
 import {
+  verifiedPatchResponse,
   completePatches,
   patchRiskSummary,
   patchRiskAssessment,
@@ -170,16 +171,10 @@ describe("saved-finding Git publication", () => {
           git("-C", dependency, "checkout", "--detach", "FETCH_HEAD");
           await writeFile(join(repository, "src", "finding-1.ts"), "fixed  \n");
           output!.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["src", "unrelated.ts"],
-                  verification: "Focused checks pass.",
-                },
-              ],
-            }),
+            verifiedPatchResponse(
+              ["src", "unrelated.ts"],
+              "Focused checks pass.",
+            ),
           );
           return 0;
         },
@@ -397,16 +392,11 @@ describe("saved-finding Git publication", () => {
                 : ["readme", "other"];
           }
           output!.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: `occ_${turn}`,
-                  status: "verified",
-                  files,
-                  verification: "Verified the selected patch files.",
-                },
-              ],
-            }),
+            verifiedPatchResponse(
+              files,
+              "Verified the selected patch files.",
+              `occ_${turn}`,
+            ),
           );
           return 0;
         },
@@ -571,16 +561,11 @@ test.each([
         });
         if (when === "intent-to-add") git("add", "--", reported);
         output!.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: `occ_${turn}`,
-                status: "verified",
-                files: [reported],
-                verification: "Focused checks pass.",
-              },
-            ],
-          }),
+          verifiedPatchResponse(
+            [reported],
+            "Focused checks pass.",
+            `occ_${turn}`,
+          ),
         );
         return 0;
       },
@@ -729,16 +714,10 @@ async function checkVerifiedFiles(
             "unreported turn edit\n",
           );
         output?.stdout.write(
-          JSON.stringify({
-            patches: [
-              {
-                occurrenceId: "occ_1",
-                status: "verified",
-                files,
-                verification: "Synthetic focused verification passed.",
-              },
-            ],
-          }),
+          verifiedPatchResponse(
+            files,
+            "Synthetic focused verification passed.",
+          ),
         );
         return 0;
       },

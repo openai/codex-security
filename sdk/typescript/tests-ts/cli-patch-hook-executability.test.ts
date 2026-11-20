@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import { join, sep } from "node:path";
 import {
+  verifiedPatchResponse,
   repositoryGit,
   runGitRepositoryCommand,
   publicationRepository,
@@ -409,19 +410,10 @@ for (const change of [
           if (change === "execute permission") await chmod(alias, 0o644);
           await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
           output?.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: [
-                    "src/finding-1.ts",
-                    ...(mutate ? ["hook-source.sh"] : []),
-                  ],
-                  verification: "Synthetic regression passed.",
-                },
-              ],
-            }),
+            verifiedPatchResponse(
+              ["src/finding-1.ts", ...(mutate ? ["hook-source.sh"] : [])],
+              "Synthetic regression passed.",
+            ),
           );
           return 0;
         },
