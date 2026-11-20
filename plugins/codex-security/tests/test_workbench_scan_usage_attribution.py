@@ -31,6 +31,38 @@ from workbench_test_support import (
 from workbench_test_support import usage_counts as _counts
 
 
+def _tokens(input_tokens, output_tokens=0, **breakdown):
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        **breakdown,
+    }
+
+
+def _receipt(at, response_id, usage, *, thread_id="parent", model="gpt-5.6-sol", **details):
+    return _event(
+        at,
+        "token_usage_record",
+        {
+            "thread_id": thread_id,
+            "response_id": response_id,
+            "model": model,
+            "usage": usage,
+            **details,
+        },
+    )
+
+
+def _counted_receipt(at, response_id, count, cumulative):
+    return _receipt(
+        at,
+        response_id,
+        _tokens(count, cache_write_input_tokens=0),
+        thread_token_usage=_tokens(cumulative, cache_write_input_tokens=0),
+    )
+
+
 @pytest.mark.parametrize(
     "worker_state",
     ["absent", "measured", "missing_graph_child", "missing_registered_worker", "unmeasured"],
@@ -833,9 +865,8 @@ def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
         started_at=start,
         completed_at=None,
     )
-    counts, warnings = measurement.tokens, measurement.warnings
-    assert counts == _counts(200, 0, 20)
-    assert warnings == {"token_counter_regressed"}
+    assert measurement.tokens == _counts(200, 0, 20)
+    assert measurement.warnings == {"token_counter_regressed"}
     models = {}
     measurement = usage_reader._read_rollout_usage(
         usage_reader.RolloutSession("worker", None, rollout),
@@ -843,9 +874,8 @@ def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
         completed_at=None,
         model_usage=models,
     )
-    counts, warnings = measurement.tokens, measurement.warnings
-    assert counts == _counts(200, 0, 20)
-    assert warnings == {"token_counter_regressed"}
+    assert measurement.tokens == _counts(200, 0, 20)
+    assert measurement.warnings == {"token_counter_regressed"}
     assert models == {"gpt-5.6-sol": _counts(100, 0, 10), "gpt-6-astra": _counts(100, 0, 10)}
 
 
@@ -881,9 +911,8 @@ def test_shared_parent_usage_requires_original_turn_and_scan_interval(
         owner_turn_id="scan-turn",
         model_usage=models,
     )
-    counts, warnings = measurement.tokens, measurement.warnings
-    assert counts == _counts(10, 0, 2)
-    assert warnings == set()
+    assert measurement.tokens == _counts(10, 0, 2)
+    assert measurement.warnings == set()
     assert models == {"gpt-6-astra": _counts(10, 0, 2)}
 
 
@@ -911,26 +940,16 @@ def test_completion_handles_no_usage_counter_without_hiding_incomplete_receipts(
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    tokens = dict(
-        input_tokens=100,
-        cached_input_tokens=20,
-        cache_write_input_tokens=0,
-        output_tokens=10,
-        total_tokens=110,
-    )
-    response = _event(
+    tokens = _tokens(100, 10, cached_input_tokens=20, cache_write_input_tokens=0)
+    response = _receipt(
         counted,
-        "token_usage_record",
-        dict(
-            response_id="response-one",
-            thread_id="scan-parent",
-            model="gpt-5.6-sol",
-            usage=tokens,
-            thread_token_usage=(
-                {**tokens, "input_tokens": 150, "total_tokens": 160}
-                if receipt_state == "missing-response"
-                else tokens
-            ),
+        "response-one",
+        tokens,
+        thread_id="scan-parent",
+        thread_token_usage=(
+            {**tokens, "input_tokens": 150, "total_tokens": 160}
+            if receipt_state == "missing-response"
+            else tokens
         ),
     )
     counter = _event(
@@ -967,27 +986,22 @@ def test_response_receipts_count_compaction_once_across_resets(
     start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
 
     def usage(input_tokens, cached, output):
-        return dict(
-            input_tokens=input_tokens,
+        return _tokens(
+            input_tokens,
+            output,
             cached_input_tokens=cached,
             cache_write_input_tokens=0,
-            output_tokens=output,
             reasoning_output_tokens=0,
-            total_tokens=input_tokens + output,
         )
 
     def receipt(response, count, cumulative, model="gpt-5.6-sol", turn="scan-turn", second=1):
-        return _event(
+        return _receipt(
             start + timedelta(seconds=second),
-            "token_usage_record",
-            dict(
-                response_id=response,
-                thread_id="parent",
-                turn_id=turn,
-                model=model,
-                usage=count,
-                thread_token_usage=cumulative,
-            ),
+            response,
+            count,
+            model=model,
+            turn_id=turn,
+            thread_token_usage=cumulative,
         )
 
     first = receipt("first", usage(100, 80, 10), usage(100, 80, 10))
@@ -1013,9 +1027,8 @@ def test_response_receipts_count_compaction_once_across_resets(
         owner_turn_id="scan-turn",
         model_usage=models,
     )
-    total, warnings = measurement.tokens, measurement.warnings
-    assert total == _counts(270, 210, 27)
-    assert warnings == {"turn_in_progress"}
+    assert measurement.tokens == _counts(270, 210, 27)
+    assert measurement.warnings == {"turn_in_progress"}
     assert models == {"gpt-5.6-sol": _counts(220, 170, 22), "gpt-6-astra": _counts(50, 40, 5)}
 
 
@@ -1025,67 +1038,33 @@ def test_delayed_response_receipt_resolves_missing_cumulative_usage(
     reader = sys.modules["workbench_scan_usage"]
     start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
 
-    def receipt(response, tokens, cumulative):
-        def usage(value):
-            return dict(
-                input_tokens=value, cache_write_input_tokens=0, output_tokens=0, total_tokens=value
-            )
-
-        return _event(
-            start,
-            "token_usage_record",
-            dict(
-                response_id=response,
-                thread_id="parent",
-                model="gpt-5.6-sol",
-                usage=usage(tokens),
-                thread_token_usage=usage(cumulative),
-            ),
-        )
-
-    rollout = _rollout(tmp_path, "parent", [receipt("first", 100, 100), receipt("third", 50, 180)])
+    rollout = _rollout(
+        tmp_path,
+        "parent",
+        [_counted_receipt(start, "first", 100, 100), _counted_receipt(start, "third", 50, 180)],
+    )
     session = reader.RolloutSession("parent", None, rollout)
     measurement = reader._read_rollout_usage(session, started_at=start, completed_at=None)
-    total, warnings = measurement.tokens, measurement.warnings
-    assert total == _counts(150, 0, 0)
-    assert warnings == {"token_receipts_incomplete"}
+    assert measurement.tokens == _counts(150, 0, 0)
+    assert measurement.warnings == {"token_receipts_incomplete"}
     with rollout.open("a") as source:
-        source.write(json.dumps(receipt("second", 30, 130)) + "\n")
+        source.write(json.dumps(_counted_receipt(start, "second", 30, 130)) + "\n")
     measurement = reader._read_rollout_usage(session, started_at=start, completed_at=None)
-    total, warnings = measurement.tokens, measurement.warnings
-    assert total == _counts(180, 0, 0)
-    assert warnings == set()
+    assert measurement.tokens == _counts(180, 0, 0)
+    assert measurement.warnings == set()
 
 
 def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workbench_api) -> None:
     reader = sys.modules["workbench_scan_usage"]
     start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
 
-    def receipt(response, tokens, cumulative):
-        def usage(value):
-            return dict(
-                input_tokens=value, cache_write_input_tokens=0, output_tokens=0, total_tokens=value
-            )
-
-        return _event(
-            start,
-            "token_usage_record",
-            dict(
-                response_id=response,
-                thread_id="parent",
-                model="gpt-5.6-sol",
-                usage=usage(tokens),
-                thread_token_usage=usage(cumulative),
-            ),
-        )
-
     rollout = _rollout(
         tmp_path,
         "parent",
         [
             _token_event(start, 100, 0),
-            receipt("new", 10, 110),
-            receipt("old", 100, 100),
+            _counted_receipt(start, "new", 10, 110),
+            _counted_receipt(start, "old", 100, 100),
             _token_event(start, 10, 0),
         ],
     )
@@ -1096,9 +1075,8 @@ def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workb
         completed_at=None,
         model_usage=models,
     )
-    total, warnings = measurement.tokens, measurement.warnings
-    assert total == _counts(110, 0, 0)
-    assert warnings == set()
+    assert measurement.tokens == _counts(110, 0, 0)
+    assert measurement.warnings == set()
     assert models == {"gpt-5.6-sol": _counts(110, 0, 0)}
 
 
@@ -1113,16 +1091,13 @@ def test_rejected_receipt_preserves_priced_legacy_usage(tmp_path: Path, workbenc
     ]
     if receipt is not None:
         events.append(
-            _event(
+            _receipt(
                 at if receipt == "other-turn" else start + timedelta(seconds=11),
-                "token_usage_record",
-                {
-                    "thread_id": "owner",
-                    "turn_id": "other-turn" if receipt == "other-turn" else "owned-turn",
-                    "response_id": "foreign-response",
-                    "model": "synthetic-unpriced-model",
-                    "usage": {"input_tokens": 9000, "output_tokens": 0, "total_tokens": 9000},
-                },
+                "foreign-response",
+                _tokens(9000),
+                thread_id="owner",
+                turn_id="other-turn" if receipt == "other-turn" else "owned-turn",
+                model="synthetic-unpriced-model",
             )
         )
     models = {}
@@ -1133,9 +1108,8 @@ def test_rejected_receipt_preserves_priced_legacy_usage(tmp_path: Path, workbenc
         owner_turn_id="owned-turn",
         model_usage=models,
     )
-    total, warnings = measurement.tokens, measurement.warnings
-    assert total == _counts(1000, 0, 0)
-    assert warnings == set()
+    assert measurement.tokens == _counts(1000, 0, 0)
+    assert measurement.warnings == set()
     assert models == {"gpt-5.6-sol": _counts(1000, 0, 0)}
 
 
@@ -1157,24 +1131,12 @@ def test_completion_usage_matches_its_admitted_window_and_model_partition(tmp_pa
     def receipt(
         second, response, input_tokens, output_tokens, cumulative_input, cumulative_output=0
     ):
-        return _event(
+        return _receipt(
             start + timedelta(seconds=second),
-            "token_usage_record",
-            {
-                "thread_id": "scan-parent",
-                "response_id": response,
-                "model": "gpt-5.6-sol",
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": input_tokens + output_tokens,
-                },
-                "thread_token_usage": {
-                    "input_tokens": cumulative_input,
-                    "output_tokens": cumulative_output,
-                    "total_tokens": cumulative_input + cumulative_output,
-                },
-            },
+            response,
+            _tokens(input_tokens, output_tokens),
+            thread_id="scan-parent",
+            thread_token_usage=_tokens(cumulative_input, cumulative_output),
         )
 
     if case in {"history", "history-gap"}:
@@ -1233,26 +1195,12 @@ def test_foreign_response_cumulative_does_not_hide_an_earlier_owned_gap(
     start = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
 
     def receipt(second, response, count, cumulative, turn="scan-turn"):
-        return _event(
+        return _receipt(
             start + timedelta(seconds=second),
-            "token_usage_record",
-            {
-                "thread_id": "parent",
-                "turn_id": turn,
-                "response_id": response,
-                "model": "gpt-5.6-sol",
-                "usage": {
-                    "input_tokens": count,
-                    "cache_write_input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": count,
-                },
-                "thread_token_usage": {
-                    "input_tokens": cumulative,
-                    "output_tokens": 0,
-                    "total_tokens": cumulative,
-                },
-            },
+            response,
+            _tokens(count, cache_write_input_tokens=0),
+            turn_id=turn,
+            thread_token_usage=_tokens(cumulative),
         )
 
     history = receipt(-2, "history", 900, 900)
@@ -1273,9 +1221,8 @@ def test_foreign_response_cumulative_does_not_hide_an_earlier_owned_gap(
         owner_turn_id="scan-turn",
         model_usage=models,
     )
-    total, warnings = measurement.tokens, measurement.warnings
-    assert total == _counts(20, 0, 0)
-    assert warnings == {
+    assert measurement.tokens == _counts(20, 0, 0)
+    assert measurement.warnings == {
         "turn_in_progress",
         *([] if foreign_first else ["token_receipts_incomplete"]),
     }
@@ -1300,21 +1247,13 @@ def test_rollout_copies_retain_the_continuations_native_receipt_model(
     ]
     continuation = [
         *prefix,
-        _event(
+        _receipt(
             start + timedelta(seconds=2),
-            "token_usage_record",
-            {
-                "thread_id": "worker",
-                "turn_id": "turn",
-                "response_id": "response",
-                "model": "gpt-6-astra",
-                "usage": {
-                    "input_tokens": 150,
-                    "cache_write_input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 150,
-                },
-            },
+            "response",
+            _tokens(150, cache_write_input_tokens=0),
+            thread_id="worker",
+            turn_id="turn",
+            model="gpt-6-astra",
         ),
     ]
     events = {
