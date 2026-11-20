@@ -2515,7 +2515,11 @@ New records save the authentication mode, explicit safety
 identifier, and post-scan prompt; older records cannot reconstruct missing values.
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
-original producer version. Unsupported artifacts are rejected without rewriting them.
+original producer version. For newly registered Deep scans, sealed recovery
+reads token usage from the original Codex state database location to reconcile
+costs and verify the scan budget. For an older Deep scan that used a separate
+`sqlite_home`, set `CODEX_SQLITE_HOME` to the original directory when resuming.
+Unsupported artifacts are rejected without rewriting them.
 
 For bulk scans, use [bulk recovery](#recovering-failed-or-interrupted-bulk-scans)
 to update campaign receipts. Individual resume does not update `results.jsonl`.

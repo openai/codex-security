@@ -404,6 +404,41 @@ interface PreparedSession {
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
+const SCAN_USAGE_PATH_KEYS = [
+  "CODEX_HOME",
+  "CODEX_SQLITE_HOME",
+  "CODEX_STATE_DB",
+];
+
+function scanUsagePaths(environment: ProcessEnvironment): JsonObject {
+  const paths: JsonObject = {};
+  for (const key of SCAN_USAGE_PATH_KEYS) {
+    const path = environmentEntry(environment, key);
+    if (path?.trim())
+      paths[key] = resolveInputPath(path, process.cwd(), environment);
+  }
+  return paths;
+}
+
+function restoreSealedUsagePaths(
+  environment: ProcessEnvironment,
+  paths: unknown,
+): void {
+  if (!isRecord(paths)) {
+    // Earlier host scans ran under the managed Codex home.
+    environment["CODEX_HOME"] = codexSecurityCredentialHome(environment);
+    return;
+  }
+  for (const name of Object.keys(environment)) {
+    const key = process.platform === "win32" ? name.toUpperCase() : name;
+    if (SCAN_USAGE_PATH_KEYS.includes(key)) delete environment[name];
+  }
+  for (const key of SCAN_USAGE_PATH_KEYS) {
+    const path = paths[key];
+    if (typeof path === "string") environment[key] = path;
+  }
+}
+
 const savedPricingSchema = z.object({
   model: z.string(),
   context: z
@@ -2437,6 +2472,7 @@ export class CodexSecurity {
         );
       validateScanCostLimit(limit, model, pricingContext);
     }
+    restoreSealedUsagePaths(saved.environment, recipe["sealedUsagePaths"]);
     const measurement = await readScanBudgetUsage(
       saved,
       scanId,
@@ -3287,6 +3323,10 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
+      if (mode === "deep")
+        recipe["sealedUsagePaths"] = scanUsagePaths(
+          workbenchOptions.environment,
+        );
       checkOpen();
       const registration =
         options.resumeScanId !== undefined
