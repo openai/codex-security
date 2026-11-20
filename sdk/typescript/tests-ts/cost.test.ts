@@ -9319,64 +9319,78 @@ test("retains exact usage from before a legacy counter resets", async () => {
   });
 });
 
-test("reconciles exact receipts against counters from the same turn", async () => {
-  const home = await codexHome();
-  const path = await writeSession(home, "worker", {});
-  const at = "2026-09-01T00:00:02Z";
-  const turn = (turn_id: string, model: string) => ({
-    type: "turn_context",
-    timestamp: at,
-    payload: { turn_id, model },
-  });
-  const receipt = (turn_id: string, n: number, model: string) => ({
-    type: "token_usage_record",
-    timestamp: at,
-    payload: {
-      turn_id,
-      model,
-      response_id: turn_id,
-      usage: { input_tokens: n, output_tokens: 0 },
-      thread_token_usage: { input_tokens: 1_500, output_tokens: 0 },
-    },
-  });
-  await appendFile(
-    path,
-    jsonLines([
-      turn("a", "gpt-5.6-sol"),
-      {
-        ...legacyUsageRecord({ input_tokens: 1000, output_tokens: 0 }),
-        timestamp: at,
+test.each(["gpt-6-astra", null])(
+  "reconciles delayed receipts with their own turn's counters and model (%p)",
+  async (firstModel) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "worker", {});
+    const at = "2026-09-01T00:00:02Z";
+    const turn = (turn_id: string | undefined, model: string) => ({
+      type: "turn_context",
+      timestamp: at,
+      payload: { turn_id, model },
+    });
+    const receipt = (turn_id: string, n: number, model?: string) => ({
+      type: "token_usage_record",
+      timestamp: at,
+      payload: {
+        turn_id,
+        model,
+        response_id: turn_id,
+        usage: { input_tokens: n, output_tokens: 0 },
+        thread_token_usage: { input_tokens: 1_500, output_tokens: 0 },
       },
-      turn("b", "gpt-6-astra"),
-      receipt("b", 500, "gpt-6-astra"),
-    ]) + "\n",
-  );
-  const tracker = costTracker(home);
-  tracker.setAttributionReader(async () => ({
-    formatVersion: 1,
-    startedAt: at,
-    completedAt: null,
-    owner: { threadId: "worker", turnId: null, startedAt: at },
-    executionThreadIds: ["worker"],
-  }));
-  tracker.start("worker");
-  try {
-    const first = await tracker.refresh();
-    expect(first.measurement.usage?.input_tokens).toBe(1_500);
-    expect(first.measurement.coverage).toBe("complete");
-    expect(first.cost?.estimatedUsd).toBeGreaterThan(0);
+    });
     await appendFile(
       path,
-      jsonLines([receipt("a", 1000, "gpt-5.6-sol")]) + "\n",
+      jsonLines([
+        {
+          type: "event_msg",
+          timestamp: at,
+          payload: { type: "task_started", turn_id: "a" },
+        },
+        ...(firstModel === null ? [] : [turn(undefined, firstModel)]),
+        {
+          ...legacyUsageRecord({ input_tokens: 1000, output_tokens: 0 }),
+          timestamp: at,
+        },
+        turn("b", "gpt-6-luna"),
+        receipt("b", 500, "gpt-5.6-sol"),
+      ]) + "\n",
     );
-    const last = await tracker.stop();
-    expect(last.measurement.usage?.input_tokens).toBe(1_500);
-    expect(last.measurement.coverage).toBe("complete");
-    expect(last.cost?.estimatedUsd).toBe(first.cost?.estimatedUsd);
-  } finally {
-    await tracker.stop();
-  }
-});
+    const tracker = costTracker(home);
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      startedAt: at,
+      completedAt: null,
+      owner: { threadId: "worker", turnId: null, startedAt: at },
+      executionThreadIds: ["worker"],
+    }));
+    tracker.start("worker");
+    try {
+      const first = await tracker.refresh();
+      expect(first.measurement.usage?.input_tokens).toBe(1_500);
+      expect(first.measurement.coverage).toBe("complete");
+      if (firstModel !== null)
+        expect(first.cost?.estimatedUsd).toBeGreaterThan(0);
+      await appendFile(path, jsonLines([receipt("a", 1000)]) + "\n");
+      const last = await tracker.stop();
+      expect(last.measurement.usage?.input_tokens).toBe(1_500);
+      expect(last.measurement.coverage).toBe("complete");
+      expect(last.cost?.estimatedUsd).toBe(first.cost?.estimatedUsd);
+      expect(last.usage).toMatchObject({
+        modelUsage: expect.arrayContaining([
+          expect.objectContaining({ model: firstModel, input_tokens: 1000 }),
+          expect.objectContaining({ model: "gpt-5.6-sol", input_tokens: 500 }),
+        ]),
+      });
+      if (firstModel === null) expect(last.cost).toBeNull();
+      else expect(last.cost?.estimatedUsd).toBeCloseTo(0.012, 10);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
 
 test("includes host comparison receipts when Deep worker attribution is active", async () => {
   const home = await codexHome();
