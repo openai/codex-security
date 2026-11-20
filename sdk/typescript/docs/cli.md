@@ -3089,6 +3089,11 @@ Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
 to disable Python’s default user site-packages directory. If your wrapper uses
 `python -E` to ignore environment settings, add `-s` to skip that directory.
+They clear `BUNDLE_*` and `BUNDLER_*` so Ruby wrappers start outside the
+caller's bundle. Configure required Bundler settings in the trusted wrapper
+and set `BUNDLE_GEMFILE` to its absolute Gemfile path before loading
+`bundler/setup`. Bundler otherwise searches the working directory and its
+parents for a Gemfile, and hosting clients run in the checkout.
 They point `ZDOTDIR` at the system null device so Zsh wrappers skip user startup
 files such as `~/.zshenv`. Put required settings in the trusted wrapper.
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,

@@ -2191,6 +2191,9 @@ function isPatchStartupOverride(name: string): boolean {
     /^(?:PYTHON(?:HOME|PATH|USERBASE|NOUSERSITE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
       name,
     ) ||
+    // Bundler settings select Gemfiles and gem stores. BUNDLER_ORIG_* can
+    // also restore interpreter overrides in a wrapper's children.
+    /^BUNDLER?_/iu.test(name) ||
     /^(?:NODE_(?:OPTIONS|PATH)|BUN_OPTIONS|PERL(?:5?LIB|5OPT)|GITPERLLIB|RUBY(?:LIB|OPT)|RUBYGEMS_GEMDEPS|GEM_(?:HOME|PATH)|BASH_ENV|ENV|ZDOTDIR|BASH_FUNC_.+%%)$/iu.test(
       name,
     ) ||
