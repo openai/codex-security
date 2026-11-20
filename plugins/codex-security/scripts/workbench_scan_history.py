@@ -804,11 +804,14 @@ def _cross_mode_context(
     findings: dict[str, list[dict[str, Any]]],
     sites: dict[str, _FindingSites],
 ) -> dict[str, Any]:
-    # Different repository subdirectories can share both the Git revision and clean digest.
+    # The saved generation includes the relative target path in a linked worktree.
+    same_target = before["target_id"] is not None and before["target_id"] == after["target_id"]
+    if not same_target:
+        generation = scan_repository_generation(before)
+        same_target = generation is not None and generation == scan_repository_generation(after)
     if (
         {before["mode"], after["mode"]} != {"standard", "deep"}
-        or before["target_id"] is None
-        or before["target_id"] != after["target_id"]
+        or not same_target
         or before["target_revision"] != after["target_revision"]
         or before["target_snapshot_digest"] is None
         or before["target_snapshot_digest"] != after["target_snapshot_digest"]
@@ -854,7 +857,13 @@ def list_unmatched_scan_pairs(
         f"SELECT * FROM scans WHERE status = 'complete' AND {' AND '.join(clauses)}",
         values,
     ).fetchall()
-    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+
+    focus_scan_id = getattr(args, "after_scan_id", None)
+    if focus_scan_id is None:
+        selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+    else:
+        selected.sort(key=_scan_completion_order)
+    scan_ids = [scan["id"] for scan in selected]
 
     available = []
     for scan in selected:
@@ -868,14 +877,12 @@ def list_unmatched_scan_pairs(
         frozenset((row["before_scan_id"], row["after_scan_id"]))
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
-    focus_scan_id = getattr(args, "after_scan_id", None)
-    if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
+    if focus_scan_id is not None and focus_scan_id not in scan_ids:
         raise SystemExit("The scan to match is not a completed scan in this repository.")
-    if focus_scan_id is not None:
-        available.sort(key=_scan_completion_order)
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
+    compact = os.environ.get("CODEX_SECURITY_MATCHING_PLAN_FORMAT") == "compact"
     sites: dict[str, _FindingSites] = {}
     known_links: list[sqlite3.Row] | None = None
     for index, after in enumerate(available):
@@ -895,39 +902,27 @@ def list_unmatched_scan_pairs(
         if not previous:
             continue
         if known_links is None:
-            known_links = (
-                []
-                if args.force
-                else _saved_finding_links(connection, {scan["id"] for scan in selected})
-            )
+            known_links = [] if args.force else _saved_finding_links(connection, set(scan_ids))
         for scan in (*previous, after):
             if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
                 matching_findings[scan["id"]] = [
                     _matching_input(row) for row in _scan_findings(connection, scan["id"]).values()
                 ]
-        known_groups = _known_finding_groups(
-            known_links,
-            {
-                scan["id"]
-                for scan in selected
-                if (
-                    _scan_completion_order(scan) <= _scan_completion_order(after)
-                    if focus_scan_id is not None
-                    else (timestamp_key(scan["started_at"]), scan["id"])
-                    <= (timestamp_key(after["started_at"]), after["id"])
-                )
-            },
-        )
+        known_groups = []
+        if known_links:
+            # Unavailable scans can still contribute a saved finding identity.
+            through_after = set(scan_ids[: scan_ids.index(after["id"]) + 1])
+            known_groups = _known_finding_groups(known_links, through_after)
         batches.append(
             {
-                "afterFindings": matching_findings[after["id"]],
                 "afterScanId": after["id"],
+                **({} if compact else {"afterFindings": matching_findings[after["id"]]}),
                 "beforeScans": [
                     {
                         **_cross_mode_context(before, after, matching_findings, sites),
-                        "findings": matching_findings[before["id"]],
                         "scanId": before["id"],
+                        **({} if compact else {"findings": matching_findings[before["id"]]}),
                     }
                     for before in previous
                 ],
@@ -935,6 +930,7 @@ def list_unmatched_scan_pairs(
             }
         )
     return {
+        **({"findingsByScanId": matching_findings} if compact else {}),
         "batches": batches,
         "repository": str(repository),
         "scanCount": len(selected),
@@ -1538,41 +1534,6 @@ def finding_relations(
             }
         )
     return result
-
-
-def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) -> str | None:
-    return connection.execute(
-        """
-        SELECT MAX(updated_at)
-        FROM (
-            SELECT triage.updated_at
-            FROM finding_triage AS triage
-            JOIN finding_occurrences AS occurrences ON occurrences.id = triage.occurrence_id
-            WHERE occurrences.scan_id = ?
-            UNION ALL
-            SELECT remediation.updated_at
-            FROM finding_remediation_attempts AS remediation
-            JOIN finding_occurrences AS occurrences ON occurrences.id = remediation.occurrence_id
-            WHERE occurrences.scan_id = ?
-        )
-        """,
-        (scan_id, scan_id),
-    ).fetchone()[0]
-
-
-def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
-    row = connection.execute(
-        "SELECT status, close_reason, note, updated_at FROM finding_triage WHERE occurrence_id = ?",
-        (occurrence_id,),
-    ).fetchone()
-    if row is None:
-        return {"status": "open"}
-    return {
-        "closeReason": row["close_reason"],
-        "note": row["note"],
-        "status": row["status"],
-        "updatedAt": row["updated_at"],
-    }
 
 
 def finding_matches(
