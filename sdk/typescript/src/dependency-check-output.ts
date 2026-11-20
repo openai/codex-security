@@ -57,6 +57,7 @@ const stages: Record<string, string> = {
   supplied_advisory: "Using the supplied vulnerability description",
   investigate: "Starting source investigation",
   review: "Reviewing evidence",
+  review_follow_up: "Investigating questions raised by review",
 };
 const activities: Record<string, string> = {
   opengrep: "Searching with OpenGrep",

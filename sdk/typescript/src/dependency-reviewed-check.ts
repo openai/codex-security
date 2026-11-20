@@ -16,6 +16,7 @@ import {
   dependencyLookupSearch,
 } from "./dependency-search-audit.js";
 import { createDependencyBlockEvidence } from "./dependency-blocked-evidence.js";
+import { finishOneShotInvestigation } from "./dependency-investigation-correction.js";
 import {
   createInvestigationSession,
   evidencePreviews,
@@ -1540,7 +1541,7 @@ async function investigateIssue(
     let sameThreadSubmissions = 0;
     let finalReport: Awaited<ReturnType<typeof submit>>["report"];
     options.onProgress?.("investigation", subject);
-    let raw = await run(
+    const raw = await run(
       [...instructions, JSON.stringify(input)].join("\n\n"),
       true,
       async (answer) => {
@@ -1561,24 +1562,29 @@ async function investigateIssue(
         "The coordinator exited before correcting its final submission.",
       );
     }
-    // A one-shot agent adapter cannot continue a thread. Preserve its shorter
-    // correction allowance and include the prior answer in each fresh request.
-    for (let attempt = 1; ; attempt++) {
-      const result = await submit(raw, attempt < 3);
-      if (result.report) return result.report;
-      options.onProgress?.("investigation", subject);
-      raw = await run(
-        [
-          ...instructions,
-          JSON.stringify({
-            ...input,
-            feedback: { ...result.feedback, previousProposal: raw },
-            evidence: evidencePreviews(records.values()),
-          }),
-        ].join("\n\n"),
-        true,
-      );
-    }
+    return await finishOneShotInvestigation(
+      raw,
+      async (answer, canCorrect) => {
+        const result = await submit(answer, canCorrect);
+        return result.report
+          ? { status: "approved", report: result.report }
+          : { status: "correction", feedback: result.feedback };
+      },
+      (previousProposal, feedback) => {
+        options.onProgress?.("investigation", subject);
+        return run(
+          [
+            ...instructions,
+            JSON.stringify({
+              ...input,
+              feedback: { ...feedback, previousProposal },
+              evidence: evidencePreviews(records.values()),
+            }),
+          ].join("\n\n"),
+          true,
+        );
+      },
+    );
   } catch (error) {
     if (controller.signal.aborted) throw controller.signal.reason;
     throw error;

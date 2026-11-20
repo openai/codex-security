@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
+import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
 import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
 import { analyzeStackAdvisory } from "../src/dependency-stack-advisory.js";
 import { prepareStackPacket } from "../src/stack-packet.js";
@@ -12,7 +13,11 @@ import {
   readStackPacket,
   stackPacketWorkItems,
 } from "../src/dependency-stack-packet.js";
-import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
+import type { StackInvestigationReport } from "../src/dependency-stack-assessment.js";
+import {
+  dependencyClaimHash,
+  type DependencyClaimReference,
+} from "../src/dependency-stack-claims.js";
 import {
   executeStackRun,
   readFinalStackReport,
@@ -440,6 +445,15 @@ for (const [label, bindings, sinkFrames, ruledOut] of [
         verdict: "unknown",
         reason: "Missing copy identity.",
         remainingQuestions: ["Which copy supplied the sink?"],
+        questionChecks: [
+          {
+            question: "Which copy supplied the sink?",
+            checked: "Compared the captured versions and their frame indices.",
+            missingEvidence:
+              "Unambiguous fixed-version attribution to every sink frame.",
+            claims: row.supportingClaims,
+          },
+        ],
       };
       await call("record-assessments", { items: [unknown] });
       expect(await call("finalize")).toMatchObject({ verdict: "unknown" });
@@ -583,7 +597,16 @@ test("the stack process gets a private Codex home and can write only its workspa
   });
 });
 
-test("the gated check resolves and analyzes the advisory once for all captured calls", async () => {
+test("the gated check resolves the advisory once and reopens only the challenged path through two corrections", () =>
+  reviewedStackCheck("correct"));
+
+test("a third independent rejection exhausts the one-shot budget without publishing a report", () =>
+  reviewedStackCheck("exhausted"));
+
+test("a review that repeats one decision and omits another cannot publish a report", () =>
+  reviewedStackCheck("duplicate"));
+
+async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
   const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
@@ -602,7 +625,21 @@ test("the gated check resolves and analyzes the advisory once for all captured c
     },
   ];
   const gate = "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY";
+  const requests = [
+    "Inspect the captured frames to see if the argument values are recorded.",
+    "Check for a length guard before the call to decode.",
+    "Trace the request constructor for upstream validation.",
+  ];
+  const checks = [
+    "Read app.js. The argument is passed directly to decode.",
+    "Checked source and captured frames: the caller passes the bytes but the capture records no argument values.",
+    "Rechecked the caller: no length guard restricts the bytes, and the frames lack the actual values.",
+  ];
+  const missingEvidence = "The request payload for this captured call.";
+  const destination = join(dir.path, "report.json");
   let calls = 0;
+  const drafts: StackInvestigationReport[] = [];
+  let originalState: string | undefined;
   const d = dependencies({
     currentDirectory: files.repo,
     async onCodex(argv, out, _env, prompt) {
@@ -619,11 +656,49 @@ test("the gated check resolves and analyzes the advisory once for all captured c
         out!.stdout.write(JSON.stringify(triggerAnalysis));
         return 0;
       }
+      if (out?.readOnly) {
+        expect(argv).toContain('model_reasoning_effort="low"');
+        expect(out.stackTarget).toBe(files.repo);
+        const { reportFile, repo, inputs } = JSON.parse(
+          prompt!.split("\n").at(-1)!,
+        );
+        expect(repo).toBe(files.repo);
+        const draft: StackInvestigationReport = JSON.parse(
+          await readFile(reportFile, "utf8"),
+        );
+        const manifest = JSON.parse(
+          await readFile(join(inputs, "manifest.json"), "utf8"),
+        );
+        expect(draft.inputDigest).toBe(manifest.inputDigest);
+        expect(draft.reviewPolicy).toBe("single_agent");
+        expect(draft.assessments).toHaveLength(2);
+        const round = drafts.length;
+        expect(draft.assessments[0]?.questionChecks?.[0]?.checked).toBe(
+          checks[round]!,
+        );
+        expect(draft.assessments[0]?.supportingClaims).toHaveLength(round + 1);
+        if (round) {
+          expect(draft.assessments[1]).toEqual(drafts[0]!.assessments[1]);
+          expect(draft.assessments[0]!.supportingClaims.slice(0, -1)).toEqual(
+            drafts[round - 1]!.assessments[0]!.supportingClaims,
+          );
+        }
+        const challenge = round < 2 || mode === "exhausted";
+        const decisions = draft.assessments.map(({ workItemId }, index) => ({
+          workItemId,
+          reason: "Checked the source and captured evidence.",
+          followUp: challenge && index === 0 ? requests[round] : null,
+        }));
+        if (mode === "duplicate") decisions[1] = decisions[0]!;
+        drafts.push(draft);
+        out.stdout.write(JSON.stringify({ decisions }));
+        return 0;
+      }
       const { state, command } = JSON.parse(
         prompt!.split("\n").find((line) => line.startsWith('{"command":'))!,
       );
       expect(command.slice(-2)).toEqual(["exploitability", "run"]);
-      async function child(verb: string, input?: unknown) {
+      async function child(verb: string, input?: unknown, error?: RegExp) {
         const io = createCliTest(main);
         const deps = dependencies({ currentDirectory: files.repo });
         deps.environment[gate] = "1";
@@ -640,26 +715,104 @@ test("the gated check resolves and analyzes the advisory once for all captured c
           ],
           deps,
         );
+        if (error) {
+          expect(code).not.toBe(0);
+          expect(io.stderr.text()).toMatch(error);
+          return;
+        }
         expect(code, io.stderr.text()).toBe(0);
         return JSON.parse(io.stdout.text());
       }
-      for (let i = 0; i < observations.length; i++) {
-        const { workItem, openQuestions, advisoryDetails } =
+      const previousDraft = drafts.at(-1);
+      if (previousDraft) {
+        expect(state).toBe(originalState);
+        const rejected = previousDraft.assessments[0]!;
+        const { followUps } = JSON.parse(prompt!.split("\n").at(-1)!);
+        expect(followUps).toMatchObject([
+          {
+            workItemId: rejected.workItemId,
+            followUp: requests[drafts.length - 1],
+          },
+        ]);
+        expect((await child("summarize-coverage")).outstanding).toEqual([
+          rejected.workItemId,
+        ]);
+      } else originalState = state;
+      for (let i = 0; i < (previousDraft ? 1 : observations.length); i++) {
+        const previous = previousDraft?.assessments[i];
+        const { workItem, receiptId, openQuestions, advisoryDetails } =
           await child("next");
+        if (previous) {
+          expect(workItem.id).toBe(previous.workItemId);
+          await child("read-stacks", { workItemId: workItem.id });
+        }
         expect(openQuestions).toContain(condition);
         expect(openQuestions).toContain(trigger);
         expect(advisoryDetails[0].body).toBe(trigger);
+        const question = "Which bytes did the request supply?";
+        const row = {
+          workItemId: workItem.id,
+          verdict: "unknown",
+          reason: previous
+            ? "Neither the source nor the captured frames reveal the request bytes."
+            : "The caller forwards bytes whose runtime values are unknown.",
+          remainingQuestions: [question],
+        };
+        if (!previous && i === 0) {
+          await child(
+            "record-assessments",
+            { items: [row] },
+            /attempted check for each deciding question/,
+          );
+          expect((await child("next")).workItem.id).toBe(workItem.id);
+        }
+        const claim =
+          drafts.length === 2
+            ? {
+                id: "length-guard",
+                payload: "The caller has no length guard before decode.",
+                evidence: [callerEvidence],
+              }
+            : previous
+              ? {
+                  id: "captured-arguments",
+                  payload:
+                    "The captured frames list locations, not argument values.",
+                  receiptIds: [receiptId],
+                }
+              : {
+                  id: "caller-input-" + i,
+                  payload:
+                    "The caller forwards request bytes directly to decode.",
+                  evidence: [callerEvidence],
+                };
+        const { claims } = await child("record-claims", {
+          claims: [{ ...claim, scope: "sample caller" }],
+        });
+        const supportingClaims = [
+          ...(previous?.supportingClaims ?? []),
+          ...claims,
+        ];
+        const check = {
+          question,
+          checked: checks[drafts.length],
+          missingEvidence,
+          claims: supportingClaims,
+        };
+        if (!previous && i === 0) {
+          await child(
+            "record-assessments",
+            { items: [{ ...row, questionChecks: [check] }] },
+            /supporting claim with verified source or capture evidence/,
+          );
+        }
         await child("record-assessments", {
-          items: [
-            {
-              workItemId: workItem.id,
-              verdict: "unknown",
-              reason: "Source identity is missing.",
-              remainingQuestions: ["Which source commit ran?"],
-            },
-          ],
+          // Reuse the ID across rounds: the first receipt must not shadow the correction.
+          operationId: "assess-" + i,
+          items: [{ ...row, supportingClaims, questionChecks: [check] }],
         });
       }
+      expect((await child("next")).workItem).toBeNull();
       await child("finalize");
       out!.stdout.write("Investigation complete.\n");
       return 0;
@@ -685,19 +838,95 @@ test("the gated check resolves and analyzes the advisory once for all captured c
       files.sinksPath,
       "--stacks",
       files.stacksPath,
+      "--report-file",
+      destination,
       "--json",
     ],
     d,
   );
-  expect(code, io.stderr.text()).toBe(0);
   expect(lookup).toHaveBeenCalledTimes(1);
-  expect(calls).toBe(2);
-  expect(JSON.parse(io.stdout.text())).toMatchObject({
+  if (mode !== "duplicate") {
+    expect(drafts).toHaveLength(3);
+    expect(calls).toBe(7); // analysis, then three investigator/reviewer pairs
+  }
+  if (mode !== "correct") {
+    expect(code).not.toBe(0);
+    if (mode === "exhausted") {
+      expect(io.stderr.text()).toContain(drafts[2]!.assessments[0]!.workItemId);
+      expect(io.stderr.text()).toContain(requests[2]!);
+    } else
+      expect(io.stderr.text()).toContain("decide each work item exactly once");
+    await expect(readFile(destination)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    return;
+  }
+  expect(code, io.stderr.text()).toBe(0);
+  const report = JSON.parse(io.stdout.text());
+  expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(report);
+  const approvedDraft = drafts[2]!;
+  expect(report).toMatchObject({
     verdict: "unknown",
     coverage: { assessed: 2 },
+    reviewPolicy: "independent",
+    review: {
+      draftDigest: dependencyClaimHash(approvedDraft),
+      decisions: approvedDraft.assessments.map(({ workItemId }) => ({
+        workItemId,
+        followUp: null,
+      })),
+    },
     triggerAnalysis,
     advisoryDetails: [{ id: cve, body: trigger }],
   });
+  for (const [index, assessment] of report.assessments.entries()) {
+    expect(assessment.questionChecks).toEqual([
+      {
+        question: assessment.remainingQuestions[0],
+        checked: index === 0 ? checks[2] : checks[0],
+        missingEvidence,
+        claims: assessment.supportingClaims,
+      },
+    ]);
+  }
+}
+
+test("offline finalize rechecks a stored unknown while preserving legacy attempts", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-finalize-question-");
+  const files = await sample(dir.path, true);
+  const { state, row, call, inputs } = await startProof(dir.path, files);
+  const unknown = {
+    workItemId: row.workItemId,
+    verdict: "unknown",
+    reason: "Missing input provenance.",
+    remainingQuestions: ["Who supplies these bytes?"],
+    supportingClaims: row.supportingClaims,
+  };
+  const error = /attempted check for each deciding question/;
+  await expect(
+    call("record-assessments", { items: [unknown] }),
+  ).rejects.toThrow(error);
+  // Finalization must verify even an assessment written outside the CLI.
+  const store = new DependencyAttemptStore(state, { create: false });
+  try {
+    store.set("stack-assessment", row.workItemId, unknown);
+    await executeStackRun("init", { state, inputs, repo: files.repo });
+    await expect(call("finalize")).rejects.toThrow(error);
+    expect(store.get("report", "final")).toBeUndefined();
+    // Previously initialized attempts have the same packet and no checks marker.
+    const location = store.get<Record<string, unknown>>("manifest", "active")!;
+    delete location["requireQuestionChecks"];
+    store.set("manifest", "active", location);
+  } finally {
+    store.close();
+  }
+  await executeStackRun("init", { state, inputs, repo: files.repo });
+  const legacy = await call("finalize");
+  expect(legacy).toMatchObject({
+    verdict: "unknown",
+    reviewPolicy: "single_agent",
+  });
+  expect(legacy).toEqual(await readFinalStackReport(state));
 });
 
 test("an explicitly dated observation outside the requested window stays an unresolved scope conflict", async () => {
@@ -795,6 +1024,15 @@ test("claim identity and finalized reports retain every own key in opaque JSON e
         reason: "Missing input provenance.",
         remainingQuestions: ["Who controls the input?"],
         supportingClaims: claims,
+        questionChecks: [
+          {
+            question: "Who controls the input?",
+            checked:
+              "The captured stack identifies the caller but not its trust boundary.",
+            missingEvidence: "The origin of the request bytes.",
+            claims,
+          },
+        ],
       },
     ],
   });

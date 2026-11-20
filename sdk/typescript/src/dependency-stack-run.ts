@@ -129,6 +129,8 @@ interface RunLocation {
   repo: string;
   fingerprint: string;
   manifest: StackPacket["manifest"];
+  requireQuestionChecks?: true;
+  hostReview?: true;
 }
 
 type WorkItem = ReturnType<typeof stackPacketWorkItems>[number];
@@ -147,6 +149,7 @@ async function initialize(
   inputs?: string,
   repo?: string,
   signal?: AbortSignal,
+  hostReview?: boolean,
 ) {
   if (!inputs || !repo)
     throw new CodexSecurityError("run init requires --inputs and --repo.");
@@ -158,11 +161,16 @@ async function initialize(
   try {
     return store.transaction(() => {
       store.bindIdentity(manifest);
+      const existing = store.get<RunLocation>("manifest", "active");
       store.set("manifest", "active", {
         inputs: inputPath,
         repo: repoPath,
         fingerprint,
         manifest,
+        ...((!existing || existing.requireQuestionChecks) && {
+          requireQuestionChecks: true,
+        }),
+        ...((hostReview || existing?.hostReview) && { hostReview: true }),
       });
       return manifest;
     });
@@ -175,15 +183,21 @@ function mutation(store: DependencyAttemptStore, name: string, input: unknown) {
   if (!isRecord(input))
     throw new CodexSecurityError("Pass a JSON object on stdin.");
   const { operationId, ...body } = input;
-  const key =
+  const round = store.get<number>("review", "round") ?? 0;
+  const operation =
     operationId === undefined
       ? "input:" + dependencyClaimHash({ name, body })
       : "id:" + id.parse(operationId);
+  const key = round ? `review:${round}:${operation}` : operation;
   return {
     body,
     receipt: () => store.operation<unknown>(key, name, body),
     commit: (write: () => unknown) =>
       store.mutate(key, name, body, () => {
+        if ((store.get<number>("review", "round") ?? 0) !== round)
+          throw new CodexSecurityError(
+            "Independent review reopened the investigation. Run next again.",
+          );
         if (store.get("report", "final"))
           throw new CodexSecurityError(
             "This investigation has been finalized.",
@@ -191,6 +205,36 @@ function mutation(store: DependencyAttemptStore, name: string, input: unknown) {
         return write();
       }),
   };
+}
+
+/** Reopen a private draft while keeping the other assessments and the evidence ledger. */
+export function reviseLocalStackReport(
+  state: string,
+  draft: StackInvestigationReport,
+  workItemIds: readonly string[],
+): void {
+  const store = new DependencyAttemptStore(state, { create: false });
+  try {
+    store.transaction(() => {
+      const saved = store.get("report", "final");
+      if (
+        !runLocation(store).hostReview ||
+        !saved ||
+        dependencyClaimHash(saved) !== dependencyClaimHash(draft)
+      )
+        throw new CodexSecurityError(
+          "The report is not the current local review draft.",
+        );
+      const round = store.get<number>("review", "round") ?? 0;
+      store.set("review-draft", String(round), saved);
+      for (const workItemId of workItemIds)
+        store.delete("stack-assessment", workItemId);
+      store.delete("report", "final");
+      store.set("review", "round", round + 1);
+    });
+  } finally {
+    store.close();
+  }
 }
 
 function captureId(packet: StackPacket, item: WorkItem) {
@@ -328,8 +372,15 @@ async function verifyFinal(
   packet: StackPacket,
   repository: string,
   claims: Ledger,
-  requireSaved: boolean,
-  signal?: AbortSignal,
+  {
+    requireSaved,
+    signal,
+    requireQuestionChecks,
+  }: {
+    requireSaved: boolean;
+    signal?: AbortSignal | undefined;
+    requireQuestionChecks?: boolean | undefined;
+  },
 ): Promise<StackInvestigationReport> {
   const saved = store.get("report", "final");
   if (requireSaved && !saved)
@@ -347,7 +398,7 @@ async function verifyFinal(
       byId.get(assessment.workItemId)!,
       packet,
       claims,
-      signal,
+      { signal, requireQuestionChecks },
     );
   }
   for (const ref of snapshot.claims) {
@@ -427,7 +478,12 @@ async function verifyFinal(
 
 export async function readFinalStackReport(
   state: string,
-  expected?: { packet: StackPacket; repository: string; signal?: AbortSignal },
+  expected?: {
+    packet: StackPacket;
+    repository: string;
+    signal?: AbortSignal;
+    requireQuestionChecks?: boolean;
+  },
 ): Promise<StackInvestigationReport> {
   const store = new DependencyAttemptStore(state, { create: false });
   try {
@@ -444,8 +500,12 @@ export async function readFinalStackReport(
       packet,
       expected?.repository ?? location.repo,
       openClaims(store, packet),
-      true,
-      expected?.signal,
+      {
+        requireSaved: true,
+        signal: expected?.signal,
+        requireQuestionChecks:
+          expected?.requireQuestionChecks || location.requireQuestionChecks,
+      },
     );
   } finally {
     store.close();
@@ -460,11 +520,18 @@ export async function executeStackRun(
     repo?: string;
     input?: unknown;
     signal?: AbortSignal;
+    hostReview?: boolean;
   },
 ): Promise<unknown> {
   const { state, signal } = options;
   if (command === "init")
-    return initialize(state, options.inputs, options.repo, signal);
+    return initialize(
+      state,
+      options.inputs,
+      options.repo,
+      signal,
+      options.hostReview,
+    );
   const store = new DependencyAttemptStore(state, { create: false });
   try {
     const location = runLocation(store);
@@ -544,14 +611,11 @@ export async function executeStackRun(
       case "summarize-coverage":
         return summarizeStackCoverage(packet, assessments());
       case "finalize":
-        return await verifyFinal(
-          store,
-          packet,
-          location.repo,
-          claims,
-          false,
+        return await verifyFinal(store, packet, location.repo, claims, {
+          requireSaved: false,
           signal,
-        );
+          requireQuestionChecks: location.requireQuestionChecks,
+        });
       case "record-evidence": {
         const op = mutation(store, command, options.input);
         const previous = op.receipt();
@@ -611,7 +675,7 @@ export async function executeStackRun(
           item,
           packet,
           claims,
-          signal,
+          { signal, requireQuestionChecks: location.requireQuestionChecks },
         );
         return op.commit(() => {
           if (current()?.id !== item.id)
