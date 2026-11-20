@@ -1419,8 +1419,8 @@ export async function capturePatchGitControls(
       );
   };
   const snapshotFilter = (key: string) =>
-    /^filter\..+\.(?:clean|process)$/u.test(key) ||
-    (automaticPublication && /^filter\..+\.smudge$/u.test(key));
+    /^filter\..*\.(?:clean|process)$/su.test(key) ||
+    (automaticPublication && /^filter\..*\.smudge$/su.test(key));
   const activeCheckoutFilters = async (checkout: string): Promise<string[]> => {
     const entries = await runConfigFields(checkout, [
       "config",
@@ -1429,7 +1429,7 @@ export async function capturePatchGitControls(
       "--show-origin",
       "--includes",
       "--get-regexp",
-      "^filter\\..+\\.(clean|smudge|process)$",
+      "^filter\\..*\\.(clean|smudge|process)$",
     ]).catch((error: NodeJS.ErrnoException & { status?: number }) => {
       if (error.status === 1 || Number(error.code) === 1) return [];
       throw error;
@@ -1681,7 +1681,7 @@ export async function capturePatchGitControls(
         if (
           automaticPublication &&
           value &&
-          /^filter\..+\.(clean|smudge|process)$/u.test(key)
+          /^filter\..*\.(clean|smudge|process)$/su.test(key)
         ) {
           hasConditionalFilters = true;
           if (!userSelected || insideSelectedRoots(control.canonical))
@@ -1715,7 +1715,7 @@ export async function capturePatchGitControls(
     if (
       automaticPublication &&
       settings.some(({ key }) =>
-        /^filter\..+\.(clean|smudge|process)$/u.test(key),
+        /^filter\..*\.(clean|smudge|process)$/su.test(key),
       )
     ) {
       for (const key of await activeCheckoutFilters(checkout)) {

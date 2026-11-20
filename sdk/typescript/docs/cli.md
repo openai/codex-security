@@ -3056,7 +3056,9 @@ If they change, inspect them before retrying. A resumed publication selects
 the current operator settings. With `--external-sandbox`, the operator supplies
 the filesystem isolation.
 For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
-publication also rechecks the selected executable before each connection.
+publication also rechecks the selected executable before starting Git.
+For multiple push URLs, use a proxy executable with a single hard link.
+Git can run a pre-push hook between connections in the same process.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
 

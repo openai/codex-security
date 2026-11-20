@@ -124,6 +124,7 @@ for (const kind of [
   "tracked edit in initialized submodule",
   "ident edit in initialized submodule",
   "filtered ident edit in initialized submodule",
+  "empty driver ident edit in initialized submodule",
   "encoded ident edit in initialized submodule",
   "assume-unchanged edit in initialized submodule",
   "skip-worktree edit in initialized submodule",
@@ -175,10 +176,13 @@ for (const kind of [
         );
         const encodedIdent =
           kind === "encoded ident edit in initialized submodule";
-        const filteredIdent =
-          kind === "filtered ident edit in initialized submodule";
+        const driver =
+          kind === "filtered ident edit in initialized submodule"
+            ? "noop"
+            : kind === "empty driver ident edit in initialized submodule"
+              ? ""
+              : undefined;
         const nestedConfig = kind === "metadata in initialized submodule";
-        if (filteredIdent) nestedGit("config", "filter.noop.smudge", "cat");
         const encoding = encodedIdent ? "utf16le" : "utf8";
         if (ordinaryIdent) {
           // These names overlap Git's display of missing and boolean attributes.
@@ -202,8 +206,8 @@ for (const kind of [
             "local.txt ident " +
               (encodedIdent
                 ? "-text -filter working-tree-encoding=UTF-16LE"
-                : filteredIdent
-                  ? "-text filter=noop"
+                : driver !== undefined
+                  ? "-text filter=" + driver
                   : "-text") +
               "\n.gitignore ident -text\n",
           );
@@ -288,6 +292,14 @@ for (const kind of [
               : rendered;
           }
           if (trackedEdit) await writeFile(source, content, encoding);
+          // A smudge command can synthesize the private bytes from the live
+          // worktree, hiding them if it runs during provenance comparison.
+          if (driver !== undefined)
+            nestedGit(
+              "config",
+              "filter." + driver + ".smudge",
+              "cat local.txt",
+            );
           if (ident) {
             expect(nestedGit("hash-object", "--", "local.txt")).toBe(
               nestedGit("rev-parse", ":local.txt"),

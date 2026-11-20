@@ -11344,7 +11344,7 @@ async function prepareSavedPatchPublication(
   );
   const filterDrivers = new Set(
     keys.split("\0").flatMap((key) => {
-      const match = /^(filter\..+)\.(?:clean|process)$/u.exec(key);
+      const match = /^(filter\..*)\.(?:clean|process)$/su.exec(key);
       return match ? [match[1]!] : [];
     }),
   );
@@ -12355,7 +12355,14 @@ async function runPatchTransport(
       }
       proxyBindings.set(command, target);
     }
-    return proxyBindings.get(command)!;
+    const target = proxyBindings.get(command)!;
+    // A single git push can start a pre-push hook between destinations,
+    // after our last identity check. An alias could still write the inode.
+    if (target && remotes.length > 1 && (await stat(target)).nlink > 1)
+      throw new CodexSecurityError(
+        "Cannot publish to multiple destinations with a hard-linked Git proxy. Select a separate proxy executable outside the checkout.",
+      );
+    return target;
   };
   if (override !== undefined) {
     const executable = await pin(override);
@@ -13305,7 +13312,7 @@ async function captureHiddenPatchContent(
         "--includes",
         "--null",
         "--get-regexp",
-        "^filter\\..+\\.(smudge|process|required)$",
+        "^filter\\..*\\.(smudge|process|required)$",
       ],
       dependencies,
       {
@@ -15641,7 +15648,7 @@ async function requiredSnapshotFilterEnvironment(
       "--includes",
       "--null",
       "--get-regexp",
-      "^filter\\..+\\.(clean|process)$",
+      "^filter\\..*\\.(clean|process)$",
     ],
     { environment: { GIT_CONFIG: undefined } },
   ).catch((error: unknown) => {
