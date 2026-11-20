@@ -1063,11 +1063,13 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
     bound = close("--fixed-revision", sha1.upper(), "--note", note)
     assert bound["fixedRevision"] == sha1
     assert bound["note"] == note
-    assert close("--fixed-revision", sha1, "--note", note) == bound
-    assert close("--note", note) == bound
-    assert close() == bound
-    assert close("--fixed-revision", sha256, "--note", note)["fixedRevision"] == sha256
-    assert "fixedRevision" not in close("--note", "Updated unbound rationale")
+    for args in (("--fixed-revision", sha1, "--note", note), ("--note", note), ()):
+        replay = close(*args)
+        assert replay == bound
+    rebound = close("--fixed-revision", sha256, "--note", note)
+    assert rebound["fixedRevision"] == sha256
+    unbound = close("--note", "Updated unbound rationale")
+    assert "fixedRevision" not in unbound
     close("--fixed-revision", sha256, "--note", note)
     reopened = set_triage(state_dir, occurrence, "open")["scan"]["findings"][0]["triage"]
     assert reopened["status"] == "open"
