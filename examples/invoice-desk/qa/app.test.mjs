@@ -267,64 +267,49 @@ scenario("ID-008", async (t) => {
   );
 });
 
-scenario("ID-009", async (t) => {
+async function checkProfileEdit(t, account, fields, role) {
   const { login } = await app(t);
-  const alex = await login("alex");
-  const profile = await alex("/api/profile", {
-    method: "PATCH",
-    body: { name: "Alex Updated", role: "admin" },
-  });
-  assert.equal(profile.status, 200);
-  assert.deepEqual(profile.body.profile, {
-    name: "Alex Updated",
-    role: "member",
-  });
-  assert.deepEqual((await alex("/api/me")).body, profile.body);
+  const request = await login(account);
+  const { body: user } = await request("/api/me");
+  const expected = { ...user, profile: { name: fields.name, role } };
+  for (const body of [fields, { name: null }]) {
+    const updated = await request("/api/profile", { method: "PATCH", body });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(updated.body, expected);
+  }
+  assert.deepEqual((await request("/api/me")).body, expected);
+  const privilegedStatus = role === "admin" ? 200 : 403;
   assert.equal(
     (
-      await alex("/api/invoices/inv-north-1/approve", {
+      await request("/api/invoices/inv-north-1/approve", {
         method: "POST",
         body: {},
       })
     ).status,
-    403,
+    privilegedStatus,
   );
   assert.equal(
     (
-      await alex("/api/import-policy", {
+      await request("/api/import-policy", {
         method: "PATCH",
         body: { maxAmountCents: 200_000 },
       })
     ).status,
-    403,
+    privilegedStatus,
+  );
+}
+
+scenario("ID-009", async (t) => {
+  await checkProfileEdit(
+    t,
+    "alex",
+    { name: "Alex Updated", role: "admin" },
+    "member",
   );
 });
 
 test("administrator profile edits preserve permissions and ignore invalid names", async (t) => {
-  const { login } = await app(t);
-  const jules = await login("jules");
-  const updated = await jules("/api/profile", {
-    method: "PATCH",
-    body: { name: "", role: "member" },
-  });
-  assert.equal(updated.status, 200);
-  assert.deepEqual(updated.body.profile, { name: "", role: "admin" });
-
-  const unchanged = await jules("/api/profile", {
-    method: "PATCH",
-    body: { name: null },
-  });
-  assert.equal(unchanged.status, 200);
-  assert.deepEqual(unchanged.body, updated.body);
-  assert.equal(
-    (
-      await jules("/api/invoices/inv-north-1/approve", {
-        method: "POST",
-        body: {},
-      })
-    ).status,
-    200,
-  );
+  await checkProfileEdit(t, "jules", { name: "", role: "member" }, "admin");
 });
 
 scenario("ID-010", async (t) => {

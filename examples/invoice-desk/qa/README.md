@@ -70,7 +70,7 @@ that is absent from the ordinary invoice and connection views.
 Some controls and finding scenarios share application features. Read a report's
 claimed boundary carefully: an ownership check on preview requests does not
 remove the separate cache-isolation defect. Run the harness after changes to
-confirm that the nine remaining weaknesses and the ID-009 regression are covered.
+check the seeded weaknesses and repaired cases.
 
 No model scan runs as part of this HTTP suite, and no detection score is asserted
 until actual scanner output has been reviewed.

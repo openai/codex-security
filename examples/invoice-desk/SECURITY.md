@@ -106,9 +106,8 @@ use `textContent`. An escaping helper protects only values passed through it.
 ## 3. Threat scenarios and intended protections
 
 These are review scenarios and repair directions for a secure implementation.
-The [expected-findings manifest](qa/expected-findings.json) identifies nine
-seeded weaknesses and marks the profile scenario (ID-009) as remediated. The
-[HTTP harness](qa/app.test.mjs) also checks that profile edits preserve roles.
+The [expected-findings manifest](qa/expected-findings.json) tracks seeded
+weaknesses and repaired cases. The [HTTP harness](qa/app.test.mjs) checks both.
 Neither this model nor the number of rows establishes a scanner's detection score.
 
 | Boundary and potential failure                                                                      | Intended protection                                                                                                                             | Source to review                                                                          |
