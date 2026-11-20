@@ -217,6 +217,11 @@ export async function dependencyTriageContract(pluginRoot: string) {
 }
 
 export function dependencyTriageEvidence(result: ScaResult, match: ScaMatch) {
+  const related = new Set(
+    result.matches
+      .filter((item) => item.componentId === match.componentId)
+      .map((item) => item.id),
+  );
   const context = result.packageContexts?.find(
     (item) => item.componentId === match.componentId,
   );
@@ -227,13 +232,7 @@ export function dependencyTriageEvidence(result: ScaResult, match: ScaMatch) {
     match,
     packageContext: context ?? null,
     earlierAssessments: result.assessments.filter(
-      (item) =>
-        item.status === "completed" &&
-        result.matches.some(
-          (candidate) =>
-            candidate.id === item.matchId &&
-            candidate.componentId === match.componentId,
-        ),
+      (item) => item.status === "completed" && related.has(item.matchId),
     ),
   };
 }

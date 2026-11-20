@@ -1,14 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import {
-  chmod,
-  mkdir,
-  realpath,
-  rename,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { dependencyPackageContexts } from "../src/sca-context.js";
 import { discoverScaInputs, initialOsvScanResult } from "../src/sca-osv.js";
@@ -17,18 +9,30 @@ import {
   dependencyAssessmentSummary,
   dependencyInventorySummary,
   prioritizedDependencyMatches,
-} from "../src/sca-summary.js";
-import { renderScaReport } from "../src/sca-report.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+  renderScaReport,
+} from "../src/sca-report.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const { create, cleanup } = createTemporaryDirectories();
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "dependency-context-",
+);
 afterEach(cleanup);
+
+function linkDirectory(target: string, path: string) {
+  return symlink(
+    target,
+    path,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+}
 
 async function packageAt(
   path: string,
   name: string,
   version: string,
   dependencies: Record<string, string> = {},
+  field:
+    "dependencies" | "devDependencies" | "peerDependencies" = "dependencies",
 ) {
   await mkdir(path, { recursive: true });
   await writeFile(
@@ -36,7 +40,7 @@ async function packageAt(
     JSON.stringify({
       name,
       version,
-      dependencies,
+      [field]: dependencies,
       main: "index.js",
       private: true,
     }),
@@ -48,7 +52,7 @@ async function packageAt(
 }
 
 async function fixture() {
-  const root = await realpath(await create("dependency-context-"));
+  const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await packageAt(repository, "synthetic-project", "1.0.0", {
     "synthetic-parent": "2.0.0",
@@ -65,17 +69,12 @@ async function fixture() {
     "@synthetic/leaf": "3.0.0",
   });
   await packageAt(leaf, "@synthetic/leaf", "3.0.0");
-  await symlink(
+  await linkDirectory(
     parent,
     join(repository, "node_modules/synthetic-parent"),
-    process.platform === "win32" ? "junction" : "dir",
   );
   await mkdir(join(dirname(parent), "@synthetic"));
-  await symlink(
-    leaf,
-    join(dirname(parent), "@synthetic/leaf"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
+  await linkDirectory(leaf, join(dirname(parent), "@synthetic/leaf"));
   const result = dependencyScanResult(
     initialOsvScanResult(join(root, "output")),
     { path: repository, revision: "synthetic", dirty: false },
@@ -141,15 +140,12 @@ test.each(["npm", "pnpm", "pnpm-multidoc"] as const)(
     const { repository, result, leaf } = await fixture();
     await packageAt(repository, "synthetic-workspace", "1.0.0");
     const workspace = join(repository, "packages/app");
-    await packageAt(workspace, "synthetic-app", "1.0.0");
-    await writeFile(
-      join(workspace, "package.json"),
-      JSON.stringify({
-        name: "synthetic-app",
-        version: "1.0.0",
-        private: true,
-        devDependencies: { "synthetic-parent": "2.0.0" },
-      }),
+    await packageAt(
+      workspace,
+      "synthetic-app",
+      "1.0.0",
+      { "synthetic-parent": "2.0.0" },
+      "devDependencies",
     );
     const lockfile = manager === "npm" ? "package-lock.json" : "pnpm-lock.yaml";
     result.components[0]!.sourcePath = lockfile;
@@ -196,14 +192,12 @@ test.each(["root", "workspace"] as const)(
     await packageAt(repository, "synthetic-project", "1.0.0");
     const project =
       kind === "root" ? repository : join(repository, "packages/library");
-    await packageAt(project, "synthetic-library", "1.0.0");
-    await writeFile(
-      join(project, "package.json"),
-      JSON.stringify({
-        name: "synthetic-library",
-        version: "1.0.0",
-        peerDependencies: { "@synthetic/leaf": "3.0.0" },
-      }),
+    await packageAt(
+      project,
+      "synthetic-library",
+      "1.0.0",
+      { "@synthetic/leaf": "3.0.0" },
+      "peerDependencies",
     );
     const peer = join(repository, "node_modules/@synthetic/leaf");
     await packageAt(peer, "@synthetic/leaf", "3.0.0");
@@ -262,21 +256,18 @@ test("workspace peer seeds and incoming dependency chains remain available", asy
   await packageAt(repository, "synthetic-project", "1.0.0", {
     "synthetic-bridge": "2.0.0",
   });
-  await packageAt(workspace, "synthetic-bridge", "2.0.0");
-  await writeFile(
-    join(workspace, "package.json"),
-    JSON.stringify({
-      name: "synthetic-bridge",
-      version: "2.0.0",
-      peerDependencies: { "@synthetic/leaf": "3.0.0" },
-    }),
+  await packageAt(
+    workspace,
+    "synthetic-bridge",
+    "2.0.0",
+    { "@synthetic/leaf": "3.0.0" },
+    "peerDependencies",
   );
   const peer = join(repository, "node_modules/@synthetic/leaf");
   await packageAt(peer, "@synthetic/leaf", "3.0.0");
-  await symlink(
+  await linkDirectory(
     workspace,
     join(repository, "node_modules/synthetic-bridge"),
-    process.platform === "win32" ? "junction" : "dir",
   );
   await writeFile(
     join(repository, "package-lock.json"),
@@ -354,10 +345,9 @@ test("repository package links do not authorize reading a dependency outside the
   const { root, repository, result } = await fixture();
   const external = join(root, "external");
   await packageAt(external, "external-package", "1.0.0");
-  await symlink(
+  await linkDirectory(
     external,
     join(repository, "node_modules/external-package"),
-    process.platform === "win32" ? "junction" : "dir",
   );
   await packageAt(repository, "synthetic-project", "1.0.0", {
     "external-package": "1.0.0",
@@ -409,7 +399,7 @@ test("findings and next actions precede inventory and inconclusive results remai
 });
 
 test("identifies the local Cargo root without reclassifying an unresolved path dependency", async () => {
-  const repository = await create("dependency-cargo-context-");
+  const repository = await temporaryDirectory();
   await writeFile(
     join(repository, "Cargo.toml"),
     '[package]\nname="synthetic-root"\nversion="0.1.0"\n',
@@ -450,7 +440,7 @@ test("collects installed dependencies when the local project has no package name
 });
 
 test("invalid optional Cargo metadata does not prevent lockfile matching", async () => {
-  const repository = await create("dependency-cargo-context-");
+  const repository = await temporaryDirectory();
   await writeFile(join(repository, "Cargo.toml"), "invalid manifest [");
   await writeFile(
     join(repository, "Cargo.lock"),
@@ -491,7 +481,7 @@ test.skipIf(process.platform === "win32")(
 );
 
 test("registry-only Cargo matching does not depend on optional manifest parsing", async () => {
-  const repository = await create("dependency-cargo-context-");
+  const repository = await temporaryDirectory();
   await writeFile(join(repository, "Cargo.toml"), "invalid manifest [");
   await writeFile(
     join(repository, "Cargo.lock"),
@@ -509,17 +499,9 @@ test("an outside package link does not invent a chain through a hoisted copy", a
   await packageAt(external, "@synthetic/leaf", "9.0.0");
   const nearerLink = join(dirname(parent), "@synthetic/leaf");
   await rm(nearerLink, { recursive: true });
-  await symlink(
-    external,
-    nearerLink,
-    process.platform === "win32" ? "junction" : "dir",
-  );
+  await linkDirectory(external, nearerLink);
   await mkdir(join(repository, "node_modules/@synthetic"));
-  await symlink(
-    leaf,
-    join(repository, "node_modules/@synthetic/leaf"),
-    process.platform === "win32" ? "junction" : "dir",
-  );
+  await linkDirectory(leaf, join(repository, "node_modules/@synthetic/leaf"));
   await packageAt(
     join(repository, "node_modules/synthetic-dev"),
     "synthetic-dev",

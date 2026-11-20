@@ -1,12 +1,12 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { retryWindowsRename } from "./retry-windows-rename.js";
 import { renderScaReport } from "./sca-report.js";
 import type { OsvScanResult } from "./sca-osv.js";
-import type { ScaResult } from "./sca-types.js";
+import type { ScaAssessment, ScaMatch, ScaResult } from "./sca-types.js";
 import { gitMarkerRoot, isolatedGitEnvironment } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import Ajv from "ajv";
@@ -14,6 +14,68 @@ import { readScanFile } from "./contract.js";
 import { bundledPluginRoot } from "./runtime.js";
 
 const execFile = promisify(execFileCallback);
+
+/** Observed dependency scan work, independent of the persisted result status. */
+export type DependencyScanProgress =
+  | { phase: "preparing" | "discovering" | "preparing_assessment" | "saving" }
+  | {
+      phase: "matching";
+      inputsTotal: number;
+      /** OSV invocations that have finished, including failed invocations. */
+      inputsProcessed: number;
+      /** Failed selected inputs, including failures before an invocation starts. */
+      inputsFailed: number;
+      currentInput: string | null;
+      components: number;
+      matches: number;
+    }
+  | {
+      phase: "assessing";
+      assessmentsTotal: number;
+      /** Saved assessments, including needs_review verdicts. */
+      assessmentsCompleted: number;
+      assessmentsFailed: number;
+      /** Completed assessments whose available evidence was inconclusive. */
+      assessmentsInconclusive?: number;
+      current: {
+        matchId: string;
+        componentId: string;
+        packageName: string | null;
+        packageVersion: string | null;
+        advisoryIds: readonly string[];
+      } | null;
+    };
+
+export function assessmentProgress(
+  result: ScaResult,
+  match: ScaMatch | null,
+): DependencyScanProgress {
+  let assessmentsCompleted = 0;
+  let assessmentsFailed = 0;
+  let assessmentsInconclusive = 0;
+  for (const assessment of result.assessments) {
+    if (assessment.status === "completed") {
+      assessmentsCompleted++;
+      if (assessment.verdict === "needs_review") assessmentsInconclusive++;
+    } else if (assessment.status === "failed") assessmentsFailed++;
+  }
+  const component =
+    match && result.components.find((item) => item.id === match.componentId);
+  return {
+    phase: "assessing",
+    assessmentsTotal: result.matches.length,
+    assessmentsCompleted,
+    assessmentsFailed,
+    assessmentsInconclusive,
+    current: match && {
+      matchId: match.id,
+      componentId: match.componentId,
+      packageName: component?.name ?? null,
+      packageVersion: component?.version ?? null,
+      advisoryIds: [...match.advisoryIds],
+    },
+  };
+}
 
 export async function readDependencyScan(
   outputDir: string,
@@ -42,6 +104,39 @@ export async function readDependencyScan(
   return result;
 }
 
+/** Older checkpoints can contain matches with no assessment yet. */
+export function missingDependencyAssessments(result: ScaResult) {
+  const missing: ScaAssessment[] = [];
+  const existing = new Set(result.assessments.map((item) => item.matchId));
+  for (const match of result.matches) {
+    if (existing.has(match.id)) continue;
+    missing.push(pendingAssessment(match));
+    existing.add(match.id);
+  }
+  return missing;
+}
+
+export async function hasDependencyScan(outputDir: string): Promise<boolean> {
+  try {
+    await lstat(join(outputDir, "sca-result.json"));
+    return true;
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    throw error;
+  }
+}
+
+function pendingAssessment(match: ScaMatch): ScaAssessment {
+  return {
+    matchId: match.id,
+    status: "not_started",
+    verdict: null,
+    triage: null,
+    error: null,
+  };
+}
+
 export function dependencyScanResult(
   scan: OsvScanResult,
   repository: ScaResult["repository"],
@@ -58,13 +153,7 @@ export function dependencyScanResult(
     completedAt: scan.scanner.completedAt,
     repository,
     outputDir,
-    assessments: scan.matches.map((match) => ({
-      matchId: match.id,
-      status: "not_started",
-      verdict: null,
-      triage: null,
-      error: null,
-    })),
+    assessments: scan.matches.map(pendingAssessment),
     model: { model: null, skillDigest: null, threadId: null, costUsd: null },
   };
 }

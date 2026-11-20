@@ -12,12 +12,12 @@ import {
   readDependencyScan,
   saveDependencyScan,
 } from "../src/sca.js";
-import { dependencyInventorySummary } from "../src/sca-summary.js";
 import { dependencyTriageContract } from "../src/sca-triage.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   compareScaResults,
   createScaUpdateHandoff,
+  dependencyInventorySummary,
   renderScaReport,
 } from "../src/sca-report.js";
 import type {

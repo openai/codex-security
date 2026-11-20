@@ -1,8 +1,7 @@
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { parseAllDocuments } from "yaml";
 import { isRecord } from "./record.js";
-import { scaInputBasename } from "./sca-inputs.js";
+import { parseNodeLockfiles, scaInputBasename } from "./sca-inputs.js";
 import { relativePathIsOutside } from "./targets.js";
 import type { ScaPackageContext, ScaResult } from "./sca-types.js";
 
@@ -13,6 +12,20 @@ interface Package {
   manifest: Record<string, unknown>;
 }
 
+const dependencyFields = [
+  ["dependencies", "runtime"],
+  ["optionalDependencies", "optional"],
+  ["devDependencies", "dev"],
+  ["peerDependencies", "runtime"],
+] as const;
+
+async function readLocalFile(path: string, repository: string) {
+  const canonical = await realpath(path);
+  if (relativePathIsOutside(relative(repository, canonical))) return null;
+  if (!(await stat(canonical)).isFile()) return null;
+  return readFile(canonical, "utf8");
+}
+
 async function readPackage(
   path: string,
   repository: string,
@@ -21,10 +34,12 @@ async function readPackage(
   try {
     const directory = await realpath(path);
     if (relativePathIsOutside(relative(repository, directory))) return null;
-    const canonical = await realpath(join(directory, "package.json"));
-    if (relativePathIsOutside(relative(repository, canonical))) return null;
-    if (!(await stat(canonical)).isFile()) return null;
-    const manifest: unknown = JSON.parse(await readFile(canonical, "utf8"));
+    const content = await readLocalFile(
+      join(directory, "package.json"),
+      repository,
+    );
+    if (content === null) return null;
+    const manifest: unknown = JSON.parse(content);
     if (
       !isRecord(manifest) ||
       (!project && typeof manifest["name"] !== "string")
@@ -43,13 +58,11 @@ async function readPackage(
       manifest,
     };
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
     if (
-      (error as NodeJS.ErrnoException).code === "ENOENT" ||
-      (error as NodeJS.ErrnoException).code === "ENOTDIR" ||
-      (error as NodeJS.ErrnoException).code === "EISDIR" ||
-      (error as NodeJS.ErrnoException).code === "ELOOP" ||
-      (error as NodeJS.ErrnoException).code === "EACCES" ||
-      (error as NodeJS.ErrnoException).code === "EPERM" ||
+      ["ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "EACCES", "EPERM"].includes(
+        code ?? "",
+      ) ||
       error instanceof SyntaxError
     )
       return null;
@@ -90,19 +103,11 @@ async function workspacePaths(
   repository: string,
 ): Promise<string[]> {
   try {
-    const path = await realpath(join(repository, file));
-    if (relativePathIsOutside(relative(repository, path))) return [];
-    if (!(await stat(path)).isFile()) return [];
-    const content = await readFile(path, "utf8");
+    const path = join(repository, file);
+    const content = await readLocalFile(path, repository);
+    if (content === null) return [];
     const pnpm = scaInputBasename(file) === "pnpm-lock.yaml";
-    const locks: unknown[] = pnpm
-      ? parseAllDocuments(content).map((document) => {
-          for (const warning of document.warnings) process.emitWarning(warning);
-          if (document.errors.length > 0) throw document.errors[0];
-          return document.toJS();
-        })
-      : [JSON.parse(content)];
-    return locks.flatMap((lock) => {
+    return parseNodeLockfiles(content, pnpm).flatMap((lock) => {
       if (!isRecord(lock)) return [];
       const projects = lock[pnpm ? "importers" : "packages"];
       if (!isRecord(projects)) return [];
@@ -111,7 +116,7 @@ async function workspacePaths(
           ([path, value]) =>
             isRecord(value) && !path.split(/[\\/]/u).includes("node_modules"),
         )
-        .map(([path]) => join(dirname(join(repository, file)), path));
+        .map(([member]) => join(dirname(path), member));
     });
   } catch {
     // Optional workspace metadata can be absent or unreadable independently of installed source.
@@ -150,12 +155,11 @@ export async function dependencyPackageContexts(
       typeof project.manifest["name"] === "string" ? project.name : null;
     context.private = project.manifest["private"] === true;
   }
-  const files = new Set(
-    contexts
-      .filter(({ component }) => component.ecosystem === "npm")
-      .map(({ component }) => component.sourcePath),
+  const byFile = Map.groupBy(
+    contexts.filter(({ component }) => component.ecosystem === "npm"),
+    ({ component }) => component.sourcePath,
   );
-  for (const file of files) {
+  for (const [file, selected] of byFile) {
     signal?.throwIfAborted();
     const projectDirectory = dirname(join(repository, file));
     const projects: Package[] = [];
@@ -168,28 +172,24 @@ export async function dependencyPackageContexts(
       const candidate = await readPackage(path, repository, true);
       if (candidate !== null) projects.push(candidate);
     }
-    const selected = contexts.filter(
-      ({ component }) =>
-        component.sourcePath === file && component.ecosystem === "npm",
-    );
     if (projectPaths.size === 1 && projects[0])
       for (const { context } of selected) setProject(context, projects[0]);
     const queue: {
       pkg: Package;
       project: Package;
       chain: ScaPackageContext["dependencyChain"];
-      groups: string[];
+      group: string | null;
     }[] = projects.map((project) => ({
       pkg: project,
       project,
       chain: [],
-      groups: [],
+      group: null,
     }));
     const visited = new Set<string>();
     const visitedProjects = new Set<string>();
     for (let index = 0; index < queue.length; index++) {
       signal?.throwIfAborted();
-      const { pkg, project, chain, groups } = queue[index]!;
+      const { pkg, project, chain, group } = queue[index]!;
       const seen = chain.length === 0 ? visitedProjects : visited;
       if (seen.has(pkg.path)) continue;
       seen.add(pkg.path);
@@ -203,7 +203,7 @@ export async function dependencyPackageContexts(
       ];
       for (const { component, context } of selected) {
         if (
-          chain.length > 0 &&
+          group !== null &&
           context.installedPath === null &&
           component.name === pkg.name &&
           component.version === pkg.version
@@ -212,22 +212,14 @@ export async function dependencyPackageContexts(
           setProject(context, project);
           context.dependencyChain = current;
           context.dependencyGroups = [
-            ...new Set([...context.dependencyGroups, ...groups]),
+            ...new Set([...context.dependencyGroups, group]),
           ];
         }
       }
       if (selected.every(({ context }) => context.installedPath !== null))
         break;
-      const fields =
-        chain.length === 0
-          ? [
-              "dependencies",
-              "optionalDependencies",
-              "devDependencies",
-              "peerDependencies",
-            ]
-          : ["dependencies", "optionalDependencies", "peerDependencies"];
-      for (const field of fields) {
+      for (const [field, fieldGroup] of dependencyFields) {
+        if (group !== null && fieldGroup === "dev") continue;
         const dependencies = pkg.manifest[field];
         if (!isRecord(dependencies)) continue;
         for (const name of Object.keys(dependencies)) {
@@ -237,16 +229,7 @@ export async function dependencyPackageContexts(
               pkg: dependency,
               project,
               chain: current,
-              groups:
-                chain.length === 0
-                  ? [
-                      field === "devDependencies"
-                        ? "dev"
-                        : field === "optionalDependencies"
-                          ? "optional"
-                          : "runtime",
-                    ]
-                  : groups,
+              group: group ?? fieldGroup,
             });
         }
       }

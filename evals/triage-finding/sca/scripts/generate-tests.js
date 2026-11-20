@@ -1,7 +1,7 @@
 "use strict";
 
 const path = require("node:path");
-const { CORPUS } = require("./sca-result.js");
+const { CORPUS } = require("./fixtures.js");
 
 function generateTests() {
   const runtimeRoot = process.env.SCA_EVAL_RUNTIME_ROOT;

@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { SaxesParser } from "saxes";
+import { parseAllDocuments } from "yaml";
 import { parse as parseToml } from "smol-toml";
 
 import { isRecord as record } from "./record.js";
@@ -63,6 +64,15 @@ export function scaInputFormat(path: string): ScaInput["format"] | null {
   return null;
 }
 
+export function parseNodeLockfiles(content: string, pnpm: boolean): unknown[] {
+  if (!pnpm) return [JSON.parse(content)];
+  return parseAllDocuments(content).map((document) => {
+    for (const warning of document.warnings) process.emitWarning(warning);
+    if (document.errors.length > 0) throw document.errors[0];
+    return document.toJS();
+  });
+}
+
 function inspection(): InputInspection {
   return {
     status: "scanned",
@@ -77,38 +87,44 @@ function unsupported(reason: string): InputInspection {
   return { ...inspection(), status: "unsupported", reason };
 }
 
+function noteLimitation(result: InputInspection, reason: string) {
+  result.limitations.push(reason);
+  result.diagnostics.push(reason);
+}
+
 function text(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
-function addReference(
-  result: InputInspection,
-  sourcePath: string,
-  ecosystem: string,
-  name: string,
-  version: string | null,
-  resolution: string,
-  omittedCategory?: string,
-): void {
-  const normalizedName =
-    ecosystem === "PyPI" ? name.toLowerCase().replace(/[-_.]+/gu, "-") : name;
-  const previous = result.references.find(
-    (reference) =>
-      reference.sourcePath === sourcePath &&
-      reference.ecosystem === ecosystem &&
-      reference.name === normalizedName &&
-      reference.version === version &&
-      reference.omittedCategory === omittedCategory,
-  );
-  if (previous) return;
-  result.references.push({
-    sourcePath,
-    ecosystem,
-    name: normalizedName,
-    version,
-    resolution,
-    ...(omittedCategory === undefined ? {} : { omittedCategory }),
-  });
+export function scaPackageName(ecosystem: string | null, name: string): string {
+  if (ecosystem === "PyPI") return name.toLowerCase().replace(/[-_.]+/gu, "-");
+  if (ecosystem === "NuGet") return name.toLowerCase();
+  return name;
+}
+
+function referenceInspection(sourcePath: string, ecosystem: string) {
+  const result = inspection();
+  const seen = new Set<string>();
+  function addReference(
+    name: string,
+    version: string | null,
+    resolution: string,
+    omittedCategory?: string,
+  ) {
+    if (ecosystem === "PyPI") name = scaPackageName(ecosystem, name);
+    const key = JSON.stringify([name, version, omittedCategory]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.references.push({
+      sourcePath,
+      ecosystem,
+      name,
+      version,
+      resolution,
+      ...(omittedCategory === undefined ? {} : { omittedCategory }),
+    });
+  }
+  return { result, addReference };
 }
 
 function packagesInToml(content: string): Record<string, unknown>[] {
@@ -141,7 +157,7 @@ function inspectPythonToml(
   format: "uv" | "poetry",
   sourcePath: string,
 ): InputInspection {
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "PyPI");
   for (const pkg of packagesInToml(content)) {
     const name = packageName(pkg);
     const source = pkg["source"];
@@ -176,15 +192,7 @@ function inspectPythonToml(
       if (!isPublicPypiIndex(registry))
         origin = `registry:${registry ?? "unresolved"}`;
     }
-    if (origin !== null)
-      addReference(
-        result,
-        sourcePath,
-        "PyPI",
-        name,
-        text(pkg["version"]),
-        origin,
-      );
+    if (origin !== null) addReference(name, text(pkg["version"]), origin);
   }
   return result;
 }
@@ -192,7 +200,7 @@ function inspectPythonToml(
 function inspectPipenv(content: string, sourcePath: string): InputInspection {
   const parsed: unknown = JSON.parse(content);
   if (!record(parsed)) throw new Error("Expected a Pipfile.lock object.");
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "PyPI");
   const metadata = parsed["_meta"];
   const sources =
     record(metadata) && Array.isArray(metadata["sources"])
@@ -222,7 +230,7 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
           index === null
             ? sources[0]
             : sources.find((candidate) => candidate?.["name"] === index);
-        const url = source === undefined ? null : text(source["url"]);
+        const url = text(source?.["url"]);
         if (!isPublicPypiIndex(url))
           origin = `index:${index ?? text(source?.["name"]) ?? "default"};url:${url ?? "unresolved"}`;
       }
@@ -236,9 +244,6 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
         omittedCategory !== undefined
       )
         addReference(
-          result,
-          sourcePath,
-          "PyPI",
           name,
           version,
           omittedCategory === undefined
@@ -252,7 +257,7 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
 }
 
 function inspectCargo(content: string, sourcePath: string): InputInspection {
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "crates.io");
   const registry = "registry+https://github.com/rust-lang/crates.io-index";
   const sources = new Map<string, string | null>();
   for (const pkg of packagesInToml(content)) {
@@ -266,14 +271,7 @@ function inspectCargo(content: string, sourcePath: string): InputInspection {
     }
     // The upstream extractor drops source identity, including alternate registries.
     if (source !== registry)
-      addReference(
-        result,
-        sourcePath,
-        "crates.io",
-        name,
-        version,
-        source ?? "workspace-or-path",
-      );
+      addReference(name, version, source ?? "workspace-or-path");
   }
   if (result.references.some((ref) => ref.resolution === "workspace-or-path"))
     result.cargoSources = sources;
@@ -308,9 +306,10 @@ function inspectRequirements(
         `${sourcePath} requires fully pinned requirements without file includes, local references, or version ranges.`,
       );
   }
-  const limitation = `${sourcePath} supplies declared Python pins; transitive dependencies and environment markers are not resolved.`;
-  result.limitations.push(limitation);
-  result.diagnostics.push(limitation);
+  noteLimitation(
+    result,
+    `${sourcePath} supplies declared Python pins; transitive dependencies and environment markers are not resolved.`,
+  );
   return result;
 }
 
@@ -350,14 +349,16 @@ function inspectGo(content: string, sourcePath: string): InputInspection {
   // Toolchain precedence determines upstream's go.sum reads, but the original
   // go directive determines whether indirect requirements are comprehensive.
   if (!goVersionAtLeast117(goVersion)) {
-    const limitation = `${sourcePath} does not declare Go 1.17 or newer; its declared requirements may omit transitive dependencies despite the selected toolchain.`;
-    result.limitations.push(limitation);
-    result.diagnostics.push(limitation);
+    noteLimitation(
+      result,
+      `${sourcePath} does not declare Go 1.17 or newer; its declared requirements may omit transitive dependencies despite the selected toolchain.`,
+    );
   }
   if (/^\s*exclude\s/mu.test(content)) {
-    const limitation = `${sourcePath} contains exclude directives that OSV does not apply to its declared module inventory.`;
-    result.limitations.push(limitation);
-    result.diagnostics.push(limitation);
+    noteLimitation(
+      result,
+      `${sourcePath} contains exclude directives that OSV does not apply to its declared module inventory.`,
+    );
   }
   // Applied local replaces have no version in upstream output, so the normalizer
   // already counts them as unresolved; unused replace directives change nothing.
@@ -431,7 +432,7 @@ function inspectMaven(content: string, sourcePath: string): InputInspection {
       "Maven dependency declarations use unsupported structure.",
     );
   }
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "Maven");
   if (
     nodes.some((node) => node.name === "dependency" && !direct.includes(node))
   )
@@ -475,28 +476,20 @@ function inspectMaven(content: string, sourcePath: string): InputInspection {
     names.add(name);
     const systemPath = field("systemPath");
     if (systemPath || field("scope") === "system") {
-      addReference(
-        result,
-        sourcePath,
-        "Maven",
-        name,
-        version,
-        systemPath ?? "system dependency",
-      );
+      addReference(name, version, systemPath ?? "system dependency");
       result.limitations.push(
         "Maven system dependencies refer to local artifacts whose contents were not identified.",
       );
     }
   }
-  const limitation =
-    "Maven POMs describe direct dependency declarations; transitive dependencies and the resolved build graph were not inspected with --no-resolve.";
-  result.limitations.push(limitation);
-  result.diagnostics.push(limitation);
+  noteLimitation(
+    result,
+    "Maven POMs describe direct dependency declarations; transitive dependencies and the resolved build graph were not inspected with --no-resolve.",
+  );
   return result;
 }
 
-function inspectGradle(content: string, _sourcePath: string): InputInspection {
-  const result = inspection();
+function inspectGradle(content: string): InputInspection {
   for (const [index, raw] of content.split(/\r?\n/).entries()) {
     const line = raw.trim();
     if (!line || line.startsWith("#") || line.startsWith("empty=")) continue;
@@ -508,7 +501,7 @@ function inspectGradle(content: string, _sourcePath: string): InputInspection {
       );
     }
   }
-  return result;
+  return inspection();
 }
 
 function inspectBundler(content: string, sourcePath: string): InputInspection {
@@ -522,7 +515,7 @@ function inspectBundler(content: string, sourcePath: string): InputInspection {
     return unsupported(
       "Bundler lockfile exceeds OSV's 64 KiB line token size; its extractor would silently truncate the inventory.",
     );
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "RubyGems");
   const sourceNames = new Set(["GEM", "GIT", "PATH", "PLUGIN SOURCE"]);
   const knownNames = new Set([
     ...sourceNames,
@@ -552,14 +545,7 @@ function inspectBundler(content: string, sourcePath: string): InputInspection {
       return;
     const resolution = `${section.toLowerCase()}:${remotes.join(",")}${revision ? `#${revision}` : ""}`;
     for (const spec of specs) {
-      addReference(
-        result,
-        sourcePath,
-        "RubyGems",
-        spec.name,
-        spec.version,
-        resolution,
-      );
+      addReference(spec.name, spec.version, resolution);
     }
   };
   for (const [index, line] of content.split(/\r?\n/).entries()) {
@@ -628,7 +614,7 @@ function inspectComposer(content: string, sourcePath: string): InputInspection {
   ) {
     return unsupported("Composer lockfile has no package arrays.");
   }
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "Packagist");
   for (const key of ["packages", "packages-dev"]) {
     const packages = lock[key];
     if (packages === undefined) continue;
@@ -655,24 +641,12 @@ function inspectComposer(content: string, sourcePath: string): InputInspection {
         const sourceOnly = originKey === "source" && !record(value["dist"]);
         if (origin["type"] === "path" || local || sourceOnly) {
           const resolution =
-            typeof origin["url"] === "string" && origin["url"]
-              ? origin["url"]
-              : `${originKey}:${origin["type"]}`;
-          addReference(
-            result,
-            sourcePath,
-            "Packagist",
-            value["name"],
-            value["version"],
-            resolution,
-          );
+            text(origin["url"]) ?? `${originKey}:${origin["type"]}`;
+          addReference(value["name"], value["version"], resolution);
         }
       }
       if (/^(?:dev-)|(?:\.x)?-dev$/i.test(value["version"])) {
         addReference(
-          result,
-          sourcePath,
-          "Packagist",
           value["name"],
           value["version"],
           `development version:${value["version"]}`,
@@ -693,7 +667,7 @@ function inspectNuget(content: string, sourcePath: string): InputInspection {
   if (!record(lock) || !record(lock["dependencies"])) {
     return unsupported("NuGet lockfile has no dependency map.");
   }
-  const result = inspection();
+  const { result, addReference } = referenceInspection(sourcePath, "NuGet");
   for (const [framework, dependencies] of Object.entries(
     lock["dependencies"],
   )) {
@@ -704,17 +678,11 @@ function inspectNuget(content: string, sourcePath: string): InputInspection {
     for (const [name, value] of Object.entries(dependencies)) {
       if (!name || !record(value))
         return unsupported("NuGet dependency entry is malformed.");
-      const version =
-        typeof value["resolved"] === "string" && value["resolved"]
-          ? value["resolved"]
-          : null;
+      const version = text(value["resolved"]);
       // packageslockjson.go:76 does not retain type; :145-153 emits every entry's
       // resolved value, including an empty value for project references.
       if (value["type"] === "Project" || !version) {
         addReference(
-          result,
-          sourcePath,
-          "NuGet",
           name,
           version,
           `${value["type"] === "Project" ? "project" : "unresolved"}:${framework}`,
@@ -756,7 +724,7 @@ export function inspectAdditionalScaInput(
       case "maven":
         return inspectMaven(content, sourcePath);
       case "gradle":
-        return inspectGradle(content, sourcePath);
+        return inspectGradle(content);
       case "bundler":
         return inspectBundler(content, sourcePath);
       case "composer":

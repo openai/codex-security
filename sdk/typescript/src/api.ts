@@ -7,14 +7,18 @@ import {
   type OsvScanResult,
 } from "./sca-osv.js";
 import {
+  assessmentProgress,
+  type DependencyScanProgress,
   dependencyScanResult,
   dependencyRepositoryDirty,
   saveDependencyScan,
   readDependencyScan,
+  hasDependencyScan,
+  missingDependencyAssessments,
   writeDependencyArtifact,
 } from "./sca.js";
 import { dependencyPackageContexts } from "./sca-context.js";
-import { prioritizedDependencyMatches } from "./sca-summary.js";
+import { prioritizedDependencyMatches } from "./sca-report.js";
 import { acquireScanOutputLock } from "./multiscan.js";
 import {
   dependencyTriageContract,
@@ -22,10 +26,6 @@ import {
   dependencyTriageEvidence,
 } from "./sca-triage.js";
 import type { ScaAssessment, ScaResult } from "./sca-types.js";
-import {
-  assessmentProgress,
-  type DependencyScanProgress,
-} from "./sca-progress.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   explicitlyCanceled,
@@ -323,7 +323,6 @@ import {
   prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   prepareWindowsScanPluginZip,
-  validatePreparedOutputDir,
   probeCodexSandbox,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
@@ -1090,7 +1089,8 @@ export class CodexSecurity {
   ): Promise<DependencyScanResult> {
     const { onProgress, onInventory, ...scanOptions } = options;
     const reportProgress = onProgress && notifyObserver(options, "onProgress");
-    const onActivity = notifyObserver(options, "onActivity");
+    const onActivity =
+      options.onActivity && notifyObserver(options, "onActivity");
     const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
     const signal = AbortSignal.any([
@@ -1127,32 +1127,21 @@ export class CodexSecurity {
               basename(inputs.repository),
             )
           : temporaryRoot;
-      const savedResult =
-        inputs.outputDir === null
-          ? null
-          : await lstat(join(inputs.outputDir, "sca-result.json")).catch(
-              (error: NodeJS.ErrnoException) => {
-                if (error.code === "ENOENT" || error.code === "ENOTDIR")
-                  return null;
-                throw error;
-              },
-            );
-      continuing = savedResult !== null;
-      outputDir = continuing
-        ? await validatePreparedOutputDir(
-            inputs.outputDir!,
-            (path) =>
-              requireOutputOutsideRepository(inputs.protectedRoot, path),
-            true,
-          )
-        : await prepareOutputDir(
-            inputs.outputDir ?? undefined,
-            basename(inputs.repository),
-            outputRoot,
-            (path) =>
-              requireOutputOutsideRepository(inputs.protectedRoot, path),
-          );
+      const resume =
+        inputs.outputDir !== null &&
+        (await hasDependencyScan(inputs.outputDir));
+      outputDir = await prepareScanRegistrationOutput(
+        inputs.outputDir ?? undefined,
+        basename(inputs.repository),
+        outputRoot,
+        (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+        resume,
+      );
       releaseOutput = await acquireScanOutputLock(outputDir, "dependency scan");
+      // A competing run may have finished after we prepared the empty directory.
+      continuing =
+        resume ||
+        (inputs.outputDir !== null && (await hasDependencyScan(outputDir)));
       result = continuing
         ? await readDependencyScan(outputDir)
         : dependencyScanResult(
@@ -1160,6 +1149,11 @@ export class CodexSecurity {
             { path: inputs.repository, revision: null, dirty: null },
             outputDir,
           );
+      const missing = continuing ? missingDependencyAssessments(result) : [];
+      const fullyAssessed =
+        continuing &&
+        missing.length === 0 &&
+        result.assessments.every((item) => item.status === "completed");
       if (continuing) {
         if (result.repository.path !== inputs.repository)
           throw new CodexSecurityError(
@@ -1171,8 +1165,7 @@ export class CodexSecurity {
           );
         if (
           result.status === "completed" ||
-          (result.coverage.status !== "complete" &&
-            result.assessments.every((item) => item.status === "completed"))
+          (result.coverage.status !== "complete" && fullyAssessed)
         )
           throw new CodexSecurityError(
             "All advisory assessments are already complete. Start a new run in a new output directory to refresh matching.",
@@ -1211,29 +1204,19 @@ export class CodexSecurity {
         }
         return await sourceWorkflow.sourceSnapshot(inputs.repository);
       };
-      const sourceSnapshot = async () => {
+      const sourceSnapshot = async (saved?: ScaResult) => {
         const { repository, revision, content } = await snapshotSource();
-        return {
-          digest: workflowDigest({ repository, revision, content }),
-          revision,
-        };
+        const digest = workflowDigest({ repository, revision, content });
+        if (saved && digest !== saved.assessmentContext?.sourceDigest)
+          throw new CodexSecurityError(
+            `Cannot continue dependency assessment: source changed (saved revision ${saved.repository.revision ?? "unversioned"}, current revision ${String(revision)}). Restore the original source or start a new run.`,
+          );
+        return { digest, revision };
       };
-      // Bind triage to the source before inventory, including dirty and ignored files.
-      // A snapshot failure must not discard deterministic scanner evidence.
-      let source = await sourceSnapshot().then(
-        (snapshot) => snapshot,
-        (error: unknown) => ({ error }),
-      );
-      if (
-        continuing &&
-        ("error" in source ||
-          source.digest !== result.assessmentContext!.sourceDigest)
-      ) {
-        if ("error" in source) throw source.error;
-        throw new CodexSecurityError(
-          `Cannot continue dependency assessment: source changed (saved revision ${result.repository.revision ?? "unversioned"}, current revision ${String(source.revision)}). Restore the original source or start a new run.`,
-        );
-      }
+      // A fresh scan can retain its deterministic inventory if the snapshot fails.
+      let source = continuing
+        ? await sourceSnapshot(result)
+        : await sourceSnapshot().catch((error: unknown) => ({ error }));
       throwIfAborted(signal, outputDir);
       if (!continuing) {
         const repository = result.repository;
@@ -1298,15 +1281,7 @@ export class CodexSecurity {
         notifyObserver(options, "onInventory")(structuredClone(result));
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
-      const { assessments } = result;
-      if (
-        continuing &&
-        result.coverage.status === "complete" &&
-        assessments.every((item) => item.status === "completed") &&
-        result.matches.every((match) =>
-          assessments.some((assessment) => assessment.matchId === match.id),
-        )
-      ) {
+      if (fullyAssessed) {
         // No model work remains: finalize the saved evidence with its original
         // model, skill, and configuration rather than preparing a new session.
         const cost = result.model.costPending
@@ -1320,11 +1295,7 @@ export class CodexSecurity {
         );
         if (cost !== null) onCost(cost, options.maxCostUsd);
         notifyObserver(options, "onOutputDirReady")(outputDir);
-        const currentSource = await sourceSnapshot();
-        if (currentSource.digest !== result.assessmentContext!.sourceDigest)
-          throw new CodexSecurityError(
-            `Cannot continue dependency assessment: source changed (saved revision ${result.repository.revision ?? "unversioned"}, current revision ${String(currentSource.revision)}). Restore the original source or start a new run.`,
-          );
+        await sourceSnapshot(result);
         throwIfAborted(signal, outputDir);
         canSave = true;
         recordPreviousAttempt(result, cost === null);
@@ -1478,15 +1449,7 @@ export class CodexSecurity {
               assessment.error = null;
               delete assessment.threadId;
             }
-          for (const match of result.matches)
-            if (!result.assessments.some((item) => item.matchId === match.id))
-              result.assessments.push({
-                matchId: match.id,
-                status: "not_started",
-                verdict: null,
-                triage: null,
-                error: null,
-              });
+          for (const assessment of missing) result.assessments.push(assessment);
           notifyObserver(options, "onOutputDirReady")(outputDir);
         }
         result.model.skillDigest = contract.skillDigest;
@@ -1660,14 +1623,15 @@ export class CodexSecurity {
                     tracker.recordUsage(null, event["thread_id"]);
                     tracker.start(event["thread_id"]);
                   }
-                  for (const activity of scanActivitiesFromEvent(
-                    event,
-                    inputs.repository,
-                  ))
-                    onActivity({
-                      ...activity,
-                      id: `${match.id}:${activity.id}`,
-                    });
+                  if (onActivity)
+                    for (const activity of scanActivitiesFromEvent(
+                      event,
+                      inputs.repository,
+                    ))
+                      onActivity({
+                        ...activity,
+                        id: `${match.id}:${activity.id}`,
+                      });
                   throwIfAborted(signal, outputDir);
                   // The SDK can continue draining its stream after the terminal event.
                   if (

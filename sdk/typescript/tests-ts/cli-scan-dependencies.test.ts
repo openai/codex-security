@@ -1,5 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -26,6 +28,11 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
+const cost = estimateScanCost("gpt-5.6-sol", {
+  input_tokens: 1000,
+  output_tokens: 1000,
+})!;
+
 function trackIntervals(deps: ReturnType<typeof dependencies>) {
   const activeTimers = new Map<NodeJS.Timeout, () => void>();
   const start = mock((callback: () => void) => {
@@ -37,7 +44,10 @@ function trackIntervals(deps: ReturnType<typeof dependencies>) {
   deps.clearInterval = (handle) => {
     activeTimers.delete(handle);
   };
-  return { activeTimers, start };
+  const redraw = () => {
+    for (const tick of activeTimers.values()) tick();
+  };
+  return { activeTimers, start, redraw };
 }
 
 function dependencyResult(
@@ -183,181 +193,92 @@ describe("scan dependencies CLI", () => {
   });
 
   test.skipIf(process.platform === "win32").each([
-    {
-      label: "SIGINT with graceful cleanup",
-      first: "SIGINT",
-      repeated: null,
-      exitCode: 130,
-    },
-    {
-      label: "SIGTERM with graceful cleanup",
-      first: "SIGTERM",
-      repeated: null,
-      exitCode: 143,
-    },
-    {
-      label: "repeated SIGINT",
-      first: "SIGINT",
-      repeated: "SIGINT",
-      exitCode: null,
-    },
-    {
-      label: "repeated SIGTERM",
-      first: "SIGTERM",
-      repeated: "SIGTERM",
-      exitCode: null,
-    },
-    {
-      label: "SIGTERM after SIGINT",
-      first: "SIGINT",
-      repeated: "SIGTERM",
-      exitCode: null,
-    },
+    ["SIGINT", null, 130],
+    ["SIGTERM", null, 143],
+    ["SIGINT", "SIGINT", null],
+    ["SIGTERM", "SIGTERM", null],
+    ["SIGINT", "SIGTERM", null],
   ] as const)(
-    "handles real $label during dependency cancellation",
-    async ({ first, repeated, exitCode }) => {
+    "handles real %s followed by %s during dependency cancellation",
+    async (first, repeated, exitCode) => {
       const result = dependencyResult("partial");
-      const child = spawn(
-        process.execPath,
-        [
-          "--eval",
-          `
-            import { writeSync } from "node:fs";
-            import { main } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
-            import { dependencies } from ${JSON.stringify(new URL("./cli-fixtures.ts", import.meta.url).href)};
-            const notice = (value) => writeSync(1, "SYNTHETIC_SIGNAL_NOTICE:" + value + "\\n");
-            const finish = Promise.withResolvers();
-            let now = 0;
-            const timers = new Set();
-            process.stdin.setEncoding("utf8");
-            process.stdin.on("data", (command) => {
-              if (command.trim() === "repeat") {
-                now = 1000;
-                notice("repeat ready");
-              } else finish.resolve();
-            });
-            process.stderr.isTTY = true;
-            process.stderr.columns = 160;
-            const deps = dependencies({
-              onScanDependencies: async ({ signal }) => {
-                const aborted = Promise.withResolvers();
-                signal.addEventListener("abort", () => {
-                  notice("aborted:" + signal.reason);
-                  aborted.resolve();
-                }, { once: true });
-                notice("ready");
-                await aborted.promise;
-                await finish.promise;
-                return ${JSON.stringify(result)};
-              },
-              onClose: () => notice("closed"),
-            });
-            Object.assign(deps, {
-              now: () => now,
-              addSignalListener: (signal, listener) => process.on(signal, listener),
-              removeSignalListener: (signal, listener) => process.off(signal, listener),
-              setInterval: (callback, delay) => {
-                const timer = setInterval(callback, delay);
-                timers.add(timer);
-                return timer;
-              },
-              clearInterval: (timer) => { timers.delete(timer); clearInterval(timer); },
-              writeSynchronously: (_stream, value) => {
-                writeSync(2, value);
-                notice("cursor restored synchronously");
-              },
-              forceExit: (signal) => {
-                notice("forcing:" + signal + ":timers:" + timers.size);
-                process.kill(process.pid, signal);
-              },
-            });
-            const status = await main(["scan", "dependencies", "--json"], process.stdout, process.stderr, deps);
-            process.stdin.destroy();
-            process.exitCode = status;
-          `,
-        ],
-        { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
-      );
-      let stdout = "";
+      const child = spawn(process.execPath, [
+        "--eval",
+        `
+        import { writeSync } from "node:fs";
+        import { main } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+        import { dependencies } from ${JSON.stringify(new URL("./cli-fixtures.ts", import.meta.url).href)};
+        const notice = (text) => writeSync(1, "#" + text + "\\n");
+        let now = 0;
+        const timers = new Set();
+        process.stderr.isTTY = true;
+        const deps = dependencies({
+          onScanDependencies: async ({ signal }) => {
+            const aborted = Promise.withResolvers();
+            signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+            notice("ready");
+            await aborted.promise;
+            now = 1000;
+            notice("aborted:" + signal.reason);
+            if (${repeated !== null}) await new Promise(() => {});
+            return ${JSON.stringify(result)};
+          },
+          onClose: () => notice("closed"),
+        });
+        Object.assign(deps, {
+          now: () => now,
+          addSignalListener: process.on.bind(process),
+          removeSignalListener: process.off.bind(process),
+          setInterval: (callback, delay) => {
+            const timer = setInterval(callback, delay);
+            timers.add(timer);
+            return timer;
+          },
+          clearInterval: (timer) => { timers.delete(timer); clearInterval(timer); },
+          writeSynchronously: (_stream, value) => {
+            writeSync(2, value);
+            notice("cursor restored");
+          },
+          forceExit: (signal) => {
+            notice("forcing:" + signal + ":timers:" + timers.size);
+            process.kill(process.pid, signal);
+          },
+        });
+        process.exitCode = await main(["scan", "dependencies", "--json"], process.stdout, process.stderr, deps);
+      `,
+      ]);
+      const closed = once(child, "close");
+      const output: string[] = [];
+      const notices: string[] = [];
       let stderr = "";
-      let notices = "";
-      const received = new Map<
-        string,
-        ReturnType<typeof Promise.withResolvers<void>>
-      >();
-      const notice = (name: string) => {
-        let entry = received.get(name);
-        if (entry === undefined) {
-          entry = Promise.withResolvers<void>();
-          received.set(name, entry);
-        }
-        return entry;
-      };
-      child.stdout!.on("data", (chunk) => {
-        stdout += chunk;
-        notices =
-          stdout
-            .split("\n")
-            .slice(0, -1)
-            .filter((line) => line.startsWith("SYNTHETIC_SIGNAL_NOTICE:"))
-            .map((line) => line.slice("SYNTHETIC_SIGNAL_NOTICE:".length))
-            .join("\n") + "\n";
-        for (const line of notices.split("\n").slice(0, -1))
-          notice(line).resolve();
-      });
-      child.stderr!.on("data", (chunk) => {
+      child.stderr.setEncoding("utf8").on("data", (chunk) => {
         stderr += chunk;
       });
-      const closed = new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", (code, signal) => resolve({ code, signal }));
+      createInterface({ input: child.stdout }).on("line", (line) => {
+        if (!line.startsWith("#")) output.push(line);
+        else notices.push(line.slice(1));
+        if (line === "#ready") child.kill(first);
+        if (line === `#aborted:${first}` && repeated) child.kill(repeated);
       });
-      const waitFor = async (name: string) =>
-        await Promise.race([
-          notice(name).promise,
-          closed.then(() => {
-            throw new Error(`Child exited before ${name}: ${stderr}`);
-          }),
-        ]);
       const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
       try {
-        await waitFor("ready");
-        child.kill(first);
-        await waitFor(`aborted:${first}`);
-        if (repeated === null) child.stdin!.end("finish\n");
-        else {
-          child.stdin!.write("repeat\n");
-          await waitFor("repeat ready");
-          child.kill(repeated);
-        }
-        expect(await closed, stderr).toEqual({
-          code: exitCode,
-          signal: repeated,
-        });
+        expect(await closed, stderr).toEqual([exitCode, repeated]);
         expect(stderr).toContain("\u001B[?25l");
         expect(stderr).toContain("\u001B[?25h");
-        const output = stdout
-          .split("\n")
-          .filter((line) => !line.startsWith("SYNTHETIC_SIGNAL_NOTICE:"))
-          .join("\n");
-        if (repeated === null) {
-          expect(JSON.parse(output)).toEqual(result);
-          expect(notices).toContain("closed\n");
-          expect(notices).not.toContain("forcing:");
+        const start = ["ready", `aborted:${first}`];
+        if (repeated) {
+          expect(output).toEqual([]);
+          expect(notices).toEqual([
+            ...start,
+            "cursor restored",
+            `forcing:${repeated}:timers:0`,
+          ]);
         } else {
-          expect(output).toBe("");
-          expect(notices).toContain(
-            `cursor restored synchronously\nforcing:${repeated}:timers:0\n`,
-          );
-          expect(notices).not.toContain("closed\n");
+          expect(JSON.parse(output.join("\n"))).toEqual(result);
+          expect(notices).toEqual([...start, "closed"]);
         }
       } finally {
         clearTimeout(timeout);
-        child.kill("SIGKILL");
-        await closed;
       }
     },
   );
@@ -367,13 +288,8 @@ describe("scan dependencies CLI", () => {
     const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
     Object.assign(stderr.stream, { columns: 240 });
     let now = 0;
-    let redraw = () => {};
     let captured: DependencyScanOptions | undefined;
     let artifactReadyLine: string | undefined;
-    const cost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 1000,
-      output_tokens: 1000,
-    })!;
     const deps = dependencies({
       onScanDependencies: async (options) => {
         captured = options;
@@ -446,11 +362,7 @@ describe("scan dependencies CLI", () => {
       },
     });
     deps.now = () => now;
-    deps.setInterval = mock((callback) => {
-      redraw = callback;
-      return fakeInterval(callback);
-    });
-    deps.clearInterval = mock();
+    const { activeTimers, redraw } = trackIntervals(deps);
     expect(
       await runCli(["scan", "dependencies", "--json", "--show-cost"], deps),
     ).toBe(0);
@@ -458,9 +370,7 @@ describe("scan dependencies CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toContain("Saving dependency results");
     expect(stderr.text()).toContain("\u001b[?25h");
-    expect(deps.clearInterval).toHaveBeenCalledTimes(
-      (deps.setInterval as ReturnType<typeof mock>).mock.calls.length,
-    );
+    expect(activeTimers.size).toBe(0);
     const finished = stderr.text();
     captured!.onProgress?.({ phase: "discovering" });
     captured!.onActivity?.({
@@ -478,7 +388,6 @@ describe("scan dependencies CLI", () => {
     const { stderr, runCli } = createCliTest(main, { stderr: true });
     Object.assign(stderr.stream, { columns: 80 });
     let now = 0;
-    let redraw = () => {};
     const deps = dependencies({
       onScanDependencies: async (options) => {
         options.onProgress?.({
@@ -500,10 +409,6 @@ describe("scan dependencies CLI", () => {
           expect(line.length).toBeLessThan(80);
         };
         checkLine(600, "n/a");
-        const cost = estimateScanCost("gpt-5.6-sol", {
-          input_tokens: 1000,
-          output_tokens: 1000,
-        })!;
         options.onCost?.(cost, 5);
         checkLine(
           600,
@@ -513,10 +418,7 @@ describe("scan dependencies CLI", () => {
       },
     });
     deps.now = () => now;
-    deps.setInterval = (callback) => {
-      redraw = callback;
-      return fakeInterval(callback);
-    };
+    const { redraw } = trackIntervals(deps);
     expect(
       await runCli(["scan", "dependencies", "--max-cost", "5"], deps),
     ).toBe(0);
@@ -620,10 +522,6 @@ describe("scan dependencies CLI", () => {
   test("budget interruption stops live progress and preserves checkpointed JSON", async () => {
     const result = dependencyResult("partial");
     result.outputDir = await temporaryDirectory();
-    const cost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 1000,
-      output_tokens: 1000,
-    })!;
     result.model.costUsd = cost.estimatedUsd;
     await writeFile(
       join(result.outputDir, "sca-result.json"),
@@ -1396,7 +1294,7 @@ test.each([
       signals,
     });
     deps.now = () => now;
-    const { activeTimers, start } = trackIntervals(deps);
+    const { activeTimers, start, redraw } = trackIntervals(deps);
     deps.hasStoredChatGPTSignIn = async () => true;
     deps.scanAuthenticationPrompt = selectionPrompt(
       async (question, choices, _presentation, signal) => {
@@ -1421,7 +1319,7 @@ test.each([
         options.onProgress?.({ phase: "saving" });
         const before = stderr.text();
         now = 3_000;
-        for (const tick of activeTimers.values()) tick();
+        redraw();
         afterSelectionOutput = stderr.text().slice(before.length);
         return result;
       },
@@ -1434,7 +1332,7 @@ test.each([
     const timersDuringPrompt = activeTimers.size;
     const beforeTick = stderr.text();
     now = 2_000;
-    for (const tick of activeTimers.values()) tick();
+    redraw();
     const writesDuringPrompt = stderr.text().slice(beforeTick.length);
     if (ending === "rejection")
       answer.reject(new Error("Synthetic prompt rejection"));
