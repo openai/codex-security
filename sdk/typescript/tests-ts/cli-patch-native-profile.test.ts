@@ -933,6 +933,10 @@ test("patch model and clean filters cannot read selected authentication files", 
   const registry = join(operator, "selected registry");
   const gh = join(operator, "selected gh");
   const defaultGh = join(operator, ".config", "gh");
+  const cloudConfig = join(operator, "selected gcloud");
+  const cloudKey = join(operator, "selected Google credentials.json");
+  const cloudDefault = "application_default_credentials.json";
+  const appdata = join(operator, "Roaming");
   const ssh = join(operator, ".ssh");
   await mkdir(gh);
   await mkdir(ssh);
@@ -947,6 +951,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     KUBECONFIG: clusterList(clusterFiles),
     DOCKER_CONFIG: registry,
     GH_CONFIG_DIR: gh,
+    GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
   const policySet = {
@@ -959,6 +964,8 @@ test("patch model and clean filters cannot read selected authentication files", 
     FILTER_FIXTURE_SETTING: "from host",
     AWS_CONFIG_FILE: awsConfig,
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
+    CLOUDSDK_CONFIG: cloudConfig,
+    APPDATA: appdata,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -1003,6 +1010,12 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(registry, "config.json"),
     join(gh, "hosts.yml"),
     join(defaultGh, "hosts.yml"),
+    cloudKey,
+    join(cloudConfig, cloudDefault),
+    join(operator, ".config", "gcloud", cloudDefault),
+    ...(process.platform === "win32"
+      ? [join(appdata, "gcloud", cloudDefault)]
+      : []),
     join(ssh, "id_rsa"),
     join(operator, ".docker", "config.json"),
     join(operator, ".kube", "config"),
@@ -1035,6 +1048,10 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       await mkdir(awsDirectory);
       await mkdir(join(operator, ".docker"));
       await mkdir(join(operator, ".kube"));
+      await mkdir(cloudConfig);
+      await mkdir(join(operator, ".config", "gcloud"));
+      if (process.platform === "win32")
+        await mkdir(join(appdata, "gcloud"), { recursive: true });
       await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
       for (let i = existing.length; i < protectedPaths.length; i++)

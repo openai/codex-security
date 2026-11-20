@@ -512,6 +512,14 @@ function credentialPointerFiles(
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
+  const gcloudCredentials = "application_default_credentials.json";
+  const selectFile = (directory: string, file: string) => {
+    // A delegate can use the literal path or a client's normalized spelling.
+    selected.add(relativeFile(directory, file));
+    selected.add(join(directory, file));
+    if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
+      selected.add(directory + file);
+  };
   // A delegate can unset a client override or read the default file directly.
   // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
   const homes = new Set([
@@ -529,13 +537,12 @@ function credentialPointerFiles(
     if (home === undefined) continue;
     for (const file of [
       join(".config", "gh", "hosts.yml"),
+      join(".config", "gcloud", gcloudCredentials),
       join(".docker", "config.json"),
       join(".kube", "config"),
       ".npmrc",
-    ]) {
-      selected.add(relativeFile(home, file));
-      selected.add(join(home, file));
-    }
+    ])
+      selectFile(home, file);
     for (const { defaultPath, path } of awsProfileFiles(home, environment)) {
       selected.add(defaultPath);
       if (path) selected.add(path);
@@ -543,8 +550,15 @@ function credentialPointerFiles(
   }
   if (environment["XDG_CONFIG_HOME"])
     selected.add(join(environment["XDG_CONFIG_HOME"], "gh", "hosts.yml"));
-  if (process.platform === "win32" && environment["APPDATA"])
-    selected.add(join(environment["APPDATA"], "GitHub CLI", "hosts.yml"));
+  if (process.platform === "win32") {
+    const appData = environment["APPDATA"];
+    if (appData) selected.add(join(appData, "GitHub CLI", "hosts.yml"));
+    // google-auth uses the system drive when APPDATA is absent.
+    selectFile(
+      appData ?? (environment["SYSTEMDRIVE"] ?? "C:") + sep,
+      join("gcloud", gcloudCredentials),
+    );
+  }
   if (environment["GH_CONFIG_DIR"])
     selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
   for (const [name, value] of Object.entries(environment)) {
@@ -554,11 +568,14 @@ function credentialPointerFiles(
         for (const path of kubeConfigFiles(value)) if (path) selected.add(path);
         break;
       case "DOCKER_CONFIG":
-        // A filter can open the literal spelling. Docker cleans it before open.
-        selected.add(relativeFile(value, "config.json"));
-        selected.add(join(value, "config.json"));
-        if (process.platform === "win32" && /^[a-z]:$/iu.test(value))
-          selected.add(value + "config.json");
+        selectFile(value, "config.json");
+        break;
+      case "CLOUDSDK_CONFIG":
+        selectFile(value, gcloudCredentials);
+        break;
+      case "GOOGLE_APPLICATION_CREDENTIALS":
+        selected.add(value);
+        selected.add(normalize(value));
         break;
       case "NPM_CONFIG_USERCONFIG": {
         selected.add(value);

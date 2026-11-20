@@ -2975,7 +2975,10 @@ URL-specific values. Delegates also have deny rules for the account's `.ssh`
 directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
 `.kube/config`, and `.npmrc`. The rules cover the home-directory defaults
 and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, and
-`NPM_CONFIG_USERCONFIG`. The host transport retains access to these files.
+`NPM_CONFIG_USERCONFIG`. They also cover Google Cloud Application Default
+Credentials in the standard gcloud directory, the same file under
+`CLOUDSDK_CONFIG`, and the file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
+The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can
