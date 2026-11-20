@@ -221,6 +221,35 @@ def test_prompt_only_rejoin_follows_the_attached_continuation(tmp_path: Path) ->
     assert joined["scan"]["userContext"] == context
 
 
+def test_reading_context_from_stdin_leaves_workbench_writable(tmp_path: Path) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    started = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
+    scan_id = str(started["scan"]["scanId"])
+
+    def read_context() -> str:
+        with closing(sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0)) as other:
+            other.execute("BEGIN IMMEDIATE")
+        return "Review authentication."
+
+    argv = [
+        str(SCRIPT),
+        "update-scan-context",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "thread-prompt-only-scan",
+        "--user-context-stdin",
+    ]
+    with (
+        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
+        mock.patch("sys.argv", argv),
+        mock.patch("sys.stdin") as stdin,
+    ):
+        stdin.read.side_effect = read_context
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+    assert get_scan(state_dir, scan_id)["scan"]["userContext"] == "Review authentication."
+
+
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     tmp_path: Path,
 ) -> None:
