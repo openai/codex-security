@@ -3098,6 +3098,7 @@ OpenSSL configuration and module directories. Configure required cryptographic
 policies in those defaults.
 For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
 versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
+On Linux they clear `GCONV_PATH` so glibc uses its default conversion modules.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.

@@ -2182,6 +2182,7 @@ child.on("exit", (code, signal) => {
 
 function isPatchStartupOverride(name: string): boolean {
   return (
+    (process.platform === "linux" && name === "GCONV_PATH") ||
     /^OPENSSL_(?:CONF(?:_INCLUDE)?|MODULES|ENGINES)$/iu.test(name) ||
     /^(?:TCL_LIBRARY|TK_LIBRARY|TCLLIBPATH|TCL\d+[._]\d+_TM_PATH)$/iu.test(
       name,
