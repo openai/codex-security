@@ -964,14 +964,13 @@ const checkoutScannerNames = {
 async function requireScannerFetchRemote(
   source: ExternalSourceRepository,
   provider: keyof typeof checkoutScannerNames,
-  context: Awaited<ReturnType<typeof localContext>>,
-  signal?: AbortSignal,
+  { repository, options }: Awaited<ReturnType<typeof localContext>>,
 ) {
   const remotes = await hostedCheckoutRemotes(
-    context.repository,
-    context.options.protectedRoot,
-    context.options.environment,
-    signal,
+    repository,
+    options.protectedRoot,
+    options.environment,
+    options.signal,
   );
   if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
     throw new CodexSecurityError(
@@ -999,12 +998,7 @@ export async function prepareCrowdStrikeCloudReport(
     throw new CodexSecurityError(
       "CrowdStrike Cloud imports require a verified source repository URL.",
     );
-  await requireScannerFetchRemote(
-    source,
-    "crowdstrike",
-    context,
-    dependencies.signal,
-  );
+  await requireScannerFetchRemote(source, "crowdstrike", context);
   const root = await boundGitWorktree(
     context.repository,
     context.options.protectedRoot,
@@ -1097,12 +1091,7 @@ export async function prepareLocalImport(
       options.sourceRepositoryUrl,
       [...readerSources, ...parsedSources],
     );
-    await requireScannerFetchRemote(
-      source,
-      "tenable",
-      context,
-      dependencies.signal,
-    );
+    await requireScannerFetchRemote(source, "tenable", context);
     return preparedLocalStorage(current, options, context, dependencies, true, {
       sourceRepositories: [source],
     });
@@ -1118,13 +1107,7 @@ export async function prepareLocalImport(
     const bound =
       source !== undefined &&
       (await hasGitMetadata(context.repository, dependencies.signal));
-    if (bound)
-      await requireScannerFetchRemote(
-        source,
-        "crowdstrike",
-        context,
-        dependencies.signal,
-      );
+    if (bound) await requireScannerFetchRemote(source, "crowdstrike", context);
     return preparedLocalStorage(
       current,
       options,

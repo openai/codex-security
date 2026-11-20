@@ -36,6 +36,11 @@ for (const resumed of [false, true]) {
       { scope: "." },
       ["api", "jobs", "unrelated", "prefix", "file-descendant"],
     ],
+    [
+      "repository with exclusion",
+      { scope: ".", excludePaths: ["api"] },
+      ["jobs", "unrelated", "prefix"],
+    ],
   ] as const) {
     test(`${label} worker filters reconciled findings with resumed=${resumed}`, async (t) => {
       const f = await fixture(t, "worker");
@@ -77,6 +82,32 @@ for (const resumed of [false, true]) {
         );
     });
   }
+}
+
+for (const mode of ["deep", "standard"] as const) {
+  test(`${mode} parent excludes findings from requested directories`, async (t) => {
+    const f = await fixture(t, mode);
+    f.context.targetContract = {
+      ...f.context.targetContract,
+      scope: { requiredIncludePaths: ["."], requiredExcludePaths: ["api"] },
+    };
+    const mixed = finding("mixed", "api/source.py");
+    mixed.locations.push({
+      path: "background jobs/source.py",
+      startLine: 1,
+      endLine: 2,
+    });
+    await f.write({ ...f.draft({}, true), findings: [...findings, mixed] });
+    const result = await readJson(f.root, "findings.json");
+    assert.deepEqual(
+      result.findings.map(
+        (row: { identity: { anchor: string } }) => row.identity.anchor,
+      ),
+      ["jobs", "unrelated", "prefix", "mixed"],
+    );
+    const manifest = await readJson(f.root, "scan-manifest.json");
+    assert.deepEqual(manifest.scan.scope.excludePaths, ["api"]);
+  });
 }
 
 for (const mode of ["deep", "standard"] as const) {

@@ -68,9 +68,12 @@ function* nativeReaders(
       );
   if (row.provider === "continuum" && isRecord(data["finding"])) {
     // The list and detail APIs can return the same raw record with different SAST projections.
-    const detail = data["patches"]
-      ? { finding: data["finding"], patches: data["patches"] }
-      : data["finding"];
+    const detail = {
+      finding: data["finding"],
+      patches: data["patches"] ?? [],
+      evidenceArtifacts: data["evidence_artifacts"] ?? [],
+      validationIssue: data["validation_issue"],
+    };
     yield (target) => normalizeContinuumFindings(detail, url, target);
     yield (target) =>
       normalizeContinuumFindings({ items: [data["finding"]] }, url, target);
