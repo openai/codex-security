@@ -1031,6 +1031,7 @@ def stage_standard_file_reviews(
         connection.execute(
             "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?", (now, scan["id"])
         )
+    return None
 
 
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
