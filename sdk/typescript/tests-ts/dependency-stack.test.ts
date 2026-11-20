@@ -1,12 +1,23 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
+import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
+import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
+import { analyzeStackAdvisory } from "../src/dependency-stack-advisory.js";
 import { prepareStackPacket } from "../src/stack-packet.js";
-import { stackPacketWorkItems } from "../src/dependency-stack-packet.js";
-import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
+import {
+  prepareStackCheckPacket,
+  readStackPacket,
+  stackPacketWorkItems,
+} from "../src/dependency-stack-packet.js";
+import type { StackInvestigationReport } from "../src/dependency-stack-assessment.js";
+import {
+  dependencyClaimHash,
+  type DependencyClaimReference,
+} from "../src/dependency-stack-claims.js";
 import {
   executeStackRun,
   readFinalStackReport,
@@ -217,6 +228,103 @@ async function startProof(
   return { inputs, state, call, capture, claims, write, row };
 }
 
+test("trigger analysis checks quotations and addresses each supplied sink", async () => {
+  const quote = "The decoder must accept a caller-supplied length.";
+  const { advisories } = await lookupDependencyAdvisory(
+    cve,
+    undefined,
+    async () => Response.json({ id: cve, details: quote }),
+  );
+  const sink = {
+    function: "decode",
+    package: "codec",
+    versionScheme: "semver",
+    affectedVersions: ["<2"],
+    preconditions: [],
+  };
+  const input = {
+    cve,
+    advisoryDetails: advisories,
+    sinks: [
+      { ...sink, id: "decode" },
+      { ...sink, id: "another" },
+    ],
+  };
+  const condition = {
+    label: "Caller controls length.",
+    advisoryId: cve,
+    quote,
+  };
+  const first = { sinkId: "decode", conditions: [condition] };
+  const second = { sinkId: "another", conditions: [] };
+  const analyze = (output: unknown) =>
+    analyzeStackAdvisory(input, async () => JSON.stringify(output));
+  expect(await analyze([first, second])).toEqual([first, second]);
+  await expect(analyze([first])).rejects.toThrow(/Missing trigger analysis/);
+  await expect(analyze([first, first])).rejects.toThrow(/repeated sink/);
+  for (const changed of [
+    { quote: "Only under an invented configuration." },
+    { advisoryId: "other" },
+  ]) {
+    await expect(
+      analyze([
+        { ...first, conditions: [{ ...condition, ...changed }] },
+        second,
+      ]),
+    ).rejects.toThrow(/exact quote/);
+  }
+});
+
+test("a positive path must prove the supplied and derived conditions in the frozen worklist", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-criteria-");
+  const files = await sample(dir.path, true);
+  const quote = "The decoder must receive unvalidated bytes.";
+  const { advisories: advisoryDetails } = await lookupDependencyAdvisory(
+    cve,
+    undefined,
+    async () => Response.json({ id: cve, details: quote }),
+  );
+  const triggerAnalysis = [
+    {
+      sinkId: "decode",
+      conditions: [{ label: quote, quote, advisoryId: cve }],
+    },
+  ];
+  const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
+  await writeFile(
+    files.sinksPath,
+    JSON.stringify({ ...catalog, advisoryDetails, triggerAnalysis }),
+  );
+  const { call, row, state } = await startProof(dir.path, files);
+  expect(await call("next")).toMatchObject({
+    advisoryDetails,
+    triggerAnalysis,
+    openQuestions: [condition, quote],
+    sinks: [{ id: "decode", preconditions: [condition, quote] }],
+  });
+  const original = row.use.proof.conditions[0]!;
+  const derived = {
+    ...original,
+    label: quote,
+    explanation: "The caller invokes decode without validation.",
+  };
+  for (const proof of [original, derived]) {
+    row.use.proof.conditions = [proof];
+    await expect(call("record-assessments", { items: [row] })).rejects.toThrow(
+      /Each advisory precondition/,
+    );
+  }
+  row.use.proof.conditions = [original, derived];
+  await call("record-assessments", { items: [row] });
+  const report = await call("finalize");
+  expect(report).toMatchObject({
+    advisoryDetails,
+    triggerAnalysis,
+    verdict: "exploitable",
+  });
+  expect(report).toEqual(await readFinalStackReport(state));
+});
+
 for (const [label, bindSource, separateImage, expectedPositive] of [
   ["source and version in one binding", true, undefined, true],
   ["source not recorded", false, undefined, false],
@@ -247,7 +355,7 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
     const report = await call("finalize");
     expect(report).toMatchObject({
       verdict: "exploitable",
-      reviewPolicy: "single_agent",
+      review: null,
       coverage: { total: 1, assessed: 1 },
     });
     expect(report).toEqual(await readFinalStackReport(state));
@@ -337,6 +445,15 @@ for (const [label, bindings, sinkFrames, ruledOut] of [
         verdict: "unknown",
         reason: "Missing copy identity.",
         remainingQuestions: ["Which copy supplied the sink?"],
+        questionChecks: [
+          {
+            question: "Which copy supplied the sink?",
+            checked: "Compared the captured versions and their frame indices.",
+            missingEvidence:
+              "Unambiguous fixed-version attribution to every sink frame.",
+            claims: row.supportingClaims,
+          },
+        ],
       };
       await call("record-assessments", { items: [unknown] });
       expect(await call("finalize")).toMatchObject({ verdict: "unknown" });
@@ -480,11 +597,49 @@ test("the stack process gets a private Codex home and can write only its workspa
   });
 });
 
-test("the gated check gives one investigator a usable child CLI and publishes its verified report", async () => {
+test("the gated check resolves the advisory once and reopens only the challenged path through two corrections", () =>
+  reviewedStackCheck("correct"));
+
+test("a third independent rejection exhausts the one-shot budget without publishing a report", () =>
+  reviewedStackCheck("exhausted"));
+
+test("a review that repeats one decision and omits another cannot publish a report", () =>
+  reviewedStackCheck("duplicate"));
+
+async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
+  const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
+  const { observations } = stacks.queries[0].groups[0];
+  observations.push({ ...observations[0], id: "other", stackHash: "other" });
+  await writeFile(files.stacksPath, JSON.stringify(stacks));
+  const trigger =
+    "The declared length must exceed the number of bytes supplied.";
+  using lookup = spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({ id: cve, details: trigger }),
+  );
+  const triggerAnalysis = [
+    {
+      sinkId: "decode",
+      conditions: [{ label: trigger, advisoryId: cve, quote: trigger }],
+    },
+  ];
   const gate = "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY";
+  const requests = [
+    "Inspect the captured frames to see if the argument values are recorded.",
+    "Check for a length guard before the call to decode.",
+    "Trace the request constructor for upstream validation.",
+  ];
+  const checks = [
+    "Read app.js. The argument is passed directly to decode.",
+    "Checked source and captured frames: the caller passes the bytes but the capture records no argument values.",
+    "Rechecked the caller: no length guard restricts the bytes, and the frames lack the actual values.",
+  ];
+  const missingEvidence = "The request payload for this captured call.";
+  const destination = join(dir.path, "report.json");
   let calls = 0;
+  const drafts: StackInvestigationReport[] = [];
+  let originalState: string | undefined;
   const d = dependencies({
     currentDirectory: files.repo,
     async onCodex(argv, out, _env, prompt) {
@@ -495,11 +650,55 @@ test("the gated check gives one investigator a usable child CLI and publishes it
       expect(out?.investigationServers).toEqual({});
       expect(argv).toContain('model_provider="sample"');
       expect(argv.some((arg) => arg.includes(gate))).toBe(true);
+      if (calls === 1) {
+        expect(prompt).toContain(trigger);
+        expect(out?.readOnly).toBe(true);
+        out!.stdout.write(JSON.stringify(triggerAnalysis));
+        return 0;
+      }
+      if (out?.readOnly) {
+        expect(argv).toContain('model_reasoning_effort="low"');
+        expect(out.stackTarget).toBe(files.repo);
+        const { reportFile, repo, inputs } = JSON.parse(
+          prompt!.split("\n").at(-1)!,
+        );
+        expect(repo).toBe(files.repo);
+        const draft: StackInvestigationReport = JSON.parse(
+          await readFile(reportFile, "utf8"),
+        );
+        const manifest = JSON.parse(
+          await readFile(join(inputs, "manifest.json"), "utf8"),
+        );
+        expect(draft.inputDigest).toBe(manifest.inputDigest);
+        expect(draft.review).toBeNull();
+        expect(draft.assessments).toHaveLength(2);
+        const round = drafts.length;
+        expect(draft.assessments[0]?.questionChecks?.[0]?.checked).toBe(
+          checks[round]!,
+        );
+        expect(draft.assessments[0]?.supportingClaims).toHaveLength(round + 1);
+        if (round) {
+          expect(draft.assessments[1]).toEqual(drafts[0]!.assessments[1]);
+          expect(draft.assessments[0]!.supportingClaims.slice(0, -1)).toEqual(
+            drafts[round - 1]!.assessments[0]!.supportingClaims,
+          );
+        }
+        const challenge = round < 2 || mode === "exhausted";
+        const decisions = draft.assessments.map(({ workItemId }, index) => ({
+          workItemId,
+          reason: "Checked the source and captured evidence.",
+          followUp: challenge && index === 0 ? requests[round] : null,
+        }));
+        if (mode === "duplicate") decisions[1] = decisions[0]!;
+        drafts.push(draft);
+        out.stdout.write(JSON.stringify({ decisions }));
+        return 0;
+      }
       const { state, command } = JSON.parse(
         prompt!.split("\n").find((line) => line.startsWith('{"command":'))!,
       );
       expect(command.slice(-2)).toEqual(["exploitability", "run"]);
-      async function child(verb: string, input?: unknown) {
+      async function child(verb: string, input?: unknown, error?: RegExp) {
         const io = createCliTest(main);
         const deps = dependencies({ currentDirectory: files.repo });
         deps.environment[gate] = "1";
@@ -516,20 +715,104 @@ test("the gated check gives one investigator a usable child CLI and publishes it
           ],
           deps,
         );
+        if (error) {
+          expect(code).not.toBe(0);
+          expect(io.stderr.text()).toMatch(error);
+          return;
+        }
         expect(code, io.stderr.text()).toBe(0);
         return JSON.parse(io.stdout.text());
       }
-      const { workItem } = await child("next");
-      await child("record-assessments", {
-        items: [
+      const previousDraft = drafts.at(-1);
+      if (previousDraft) {
+        expect(state).toBe(originalState);
+        const rejected = previousDraft.assessments[0]!;
+        const { followUps } = JSON.parse(prompt!.split("\n").at(-1)!);
+        expect(followUps).toMatchObject([
           {
-            workItemId: workItem.id,
-            verdict: "unknown",
-            reason: "Source identity is missing.",
-            remainingQuestions: ["Which source commit ran?"],
+            workItemId: rejected.workItemId,
+            followUp: requests[drafts.length - 1],
           },
-        ],
-      });
+        ]);
+        expect((await child("summarize-coverage")).outstanding).toEqual([
+          rejected.workItemId,
+        ]);
+      } else originalState = state;
+      for (let i = 0; i < (previousDraft ? 1 : observations.length); i++) {
+        const previous = previousDraft?.assessments[i];
+        const { workItem, receiptId, openQuestions, advisoryDetails } =
+          await child("next");
+        if (previous) {
+          expect(workItem.id).toBe(previous.workItemId);
+          await child("read-stacks", { workItemId: workItem.id });
+        }
+        expect(openQuestions).toContain(condition);
+        expect(openQuestions).toContain(trigger);
+        expect(advisoryDetails[0].body).toBe(trigger);
+        const question = "Which bytes did the request supply?";
+        const row = {
+          workItemId: workItem.id,
+          verdict: "unknown",
+          reason: previous
+            ? "Neither the source nor the captured frames reveal the request bytes."
+            : "The caller forwards bytes whose runtime values are unknown.",
+          remainingQuestions: [question],
+        };
+        if (!previous && i === 0) {
+          await child(
+            "record-assessments",
+            { items: [row] },
+            /attempted check for each deciding question/,
+          );
+          expect((await child("next")).workItem.id).toBe(workItem.id);
+        }
+        const claim =
+          drafts.length === 2
+            ? {
+                id: "length-guard",
+                payload: "The caller has no length guard before decode.",
+                evidence: [callerEvidence],
+              }
+            : previous
+              ? {
+                  id: "captured-arguments",
+                  payload:
+                    "The captured frames list locations, not argument values.",
+                  receiptIds: [receiptId],
+                }
+              : {
+                  id: "caller-input-" + i,
+                  payload:
+                    "The caller forwards request bytes directly to decode.",
+                  evidence: [callerEvidence],
+                };
+        const { claims } = await child("record-claims", {
+          claims: [{ ...claim, scope: "sample caller" }],
+        });
+        const supportingClaims = [
+          ...(previous?.supportingClaims ?? []),
+          ...claims,
+        ];
+        const check = {
+          question,
+          checked: checks[drafts.length],
+          missingEvidence,
+          claims: supportingClaims,
+        };
+        if (!previous && i === 0) {
+          await child(
+            "record-assessments",
+            { items: [{ ...row, questionChecks: [check] }] },
+            /supporting claim with verified source or capture evidence/,
+          );
+        }
+        await child("record-assessments", {
+          // Reuse the ID across rounds: the first receipt must not shadow the correction.
+          operationId: "assess-" + i,
+          items: [{ ...row, supportingClaims, questionChecks: [check] }],
+        });
+      }
+      expect((await child("next")).workItem).toBeNull();
       await child("finalize");
       out!.stdout.write("Investigation complete.\n");
       return 0;
@@ -555,16 +838,142 @@ test("the gated check gives one investigator a usable child CLI and publishes it
       files.sinksPath,
       "--stacks",
       files.stacksPath,
+      "--report-file",
+      destination,
       "--json",
     ],
     d,
   );
+  expect(lookup).toHaveBeenCalledTimes(1);
+  if (mode !== "duplicate") {
+    expect(drafts).toHaveLength(3);
+    expect(calls).toBe(7); // analysis, then three investigator/reviewer pairs
+  }
+  if (mode !== "correct") {
+    expect(code).not.toBe(0);
+    if (mode === "exhausted") {
+      expect(io.stderr.text()).toContain(drafts[2]!.assessments[0]!.workItemId);
+      expect(io.stderr.text()).toContain(requests[2]!);
+    } else
+      expect(io.stderr.text()).toContain("decide each work item exactly once");
+    await expect(readFile(destination)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    return;
+  }
   expect(code, io.stderr.text()).toBe(0);
-  expect(calls).toBe(1);
-  expect(JSON.parse(io.stdout.text())).toMatchObject({
+  const report = JSON.parse(io.stdout.text());
+  expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(report);
+  const approvedDraft = drafts[2]!;
+  expect({ ...report, review: null }).toEqual(approvedDraft);
+  expect(report).toMatchObject({
     verdict: "unknown",
-    coverage: { assessed: 1 },
+    coverage: { assessed: 2 },
+    review: {
+      draftDigest: dependencyClaimHash(approvedDraft),
+      decisions: approvedDraft.assessments.map(({ workItemId }) => ({
+        workItemId,
+        followUp: null,
+      })),
+    },
+    triggerAnalysis,
+    advisoryDetails: [{ id: cve, body: trigger }],
   });
+  for (const [index, assessment] of report.assessments.entries()) {
+    expect(assessment.questionChecks).toEqual([
+      {
+        question: assessment.remainingQuestions[0],
+        checked: index === 0 ? checks[2] : checks[0],
+        missingEvidence,
+        claims: assessment.supportingClaims,
+      },
+    ]);
+  }
+}
+
+test("offline finalize renders the saved assessment and protects existing output", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-render-");
+  const files = await sample(dir.path, false);
+  const { state, call, row, claims } = await startProof(dir.path, files);
+  const question = "Which source commit ran?";
+  await call("record-assessments", {
+    items: [
+      {
+        workItemId: row.workItemId,
+        verdict: "unknown",
+        reason: "Source identity is missing.",
+        remainingQuestions: [question],
+        supportingClaims: claims,
+        questionChecks: [
+          {
+            question,
+            checked: "Read the captured package binding and the pinned caller.",
+            missingEvidence:
+              "The source revision used to build the captured image.",
+            claims,
+          },
+        ],
+      },
+    ],
+  });
+  await call("finalize");
+  const readDeps = dependencies({ currentDirectory: files.repo });
+  readDeps.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
+  const args = ["exploitability", "run", "finalize", "--state", state];
+  const markdown = createCliTest(main);
+  expect(await markdown.runCli([...args, "--format", "md"], readDeps)).toBe(0);
+  expect(markdown.stdout.text()).toContain(cve);
+  expect(markdown.stdout.text()).toContain("Source identity is missing.");
+  expect(markdown.stdout.text()).not.toContain("[object Object]");
+  const saved = createCliTest(main);
+  const htmlPath = join(dir.path, "saved.html");
+  expect(
+    await saved.runCli(
+      [...args, "--format=html", "--report-file", htmlPath],
+      readDeps,
+    ),
+  ).toBe(0);
+  expect(saved.stdout.text().trimEnd()).toEndWith(htmlPath);
+  expect(saved.stdout.text()).not.toContain("<!doctype html>");
+  expect(saved.stdout.text()).toContain("Next: Which source commit ran?");
+  const html = await readFile(htmlPath, "utf8");
+  expect(html).toStartWith("<!doctype html>");
+  expect(html).toContain("Source identity is missing.");
+  const duplicate = createCliTest(main);
+  expect(
+    await duplicate.runCli(
+      [...args, "--format", "html", "--report-file", htmlPath],
+      readDeps,
+    ),
+  ).not.toBe(0);
+  expect(duplicate.stdout.text()).toBe("");
+  expect(await readFile(htmlPath, "utf8")).toBe(html);
+});
+
+test("offline finalize rejects a stored unknown without question checks", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-finalize-question-");
+  const files = await sample(dir.path, true);
+  const { state, row, call } = await startProof(dir.path, files);
+  const unknown = {
+    workItemId: row.workItemId,
+    verdict: "unknown",
+    reason: "Missing input provenance.",
+    remainingQuestions: ["Who supplies these bytes?"],
+    supportingClaims: row.supportingClaims,
+  };
+  const error = /attempted check for each deciding question/;
+  await expect(
+    call("record-assessments", { items: [unknown] }),
+  ).rejects.toThrow(error);
+  // Finalization must verify even an assessment written outside the CLI.
+  const store = new DependencyAttemptStore(state, { create: false });
+  try {
+    store.set("stack-assessment", row.workItemId, unknown);
+    await expect(call("finalize")).rejects.toThrow(error);
+    expect(store.get("report", "final")).toBeUndefined();
+  } finally {
+    store.close();
+  }
 });
 
 test("an explicitly dated observation outside the requested window stays an unresolved scope conflict", async () => {
@@ -662,6 +1071,15 @@ test("claim identity and finalized reports retain every own key in opaque JSON e
         reason: "Missing input provenance.",
         remainingQuestions: ["Who controls the input?"],
         supportingClaims: claims,
+        questionChecks: [
+          {
+            question: "Who controls the input?",
+            checked:
+              "The captured stack identifies the caller but not its trust boundary.",
+            missingEvidence: "The origin of the request bytes.",
+            claims,
+          },
+        ],
       },
     ],
   });
@@ -723,4 +1141,141 @@ test("packet preparation and reopen preserve opaque endpoint and query metadata"
     sink = JSON.parse(await readFile(files.sinksPath, "utf8"));
   expect(JSON.stringify(next.sources)).toBe(JSON.stringify(source.sources));
   expect(JSON.stringify(next.sinks)).toBe(JSON.stringify(sink.sinks));
+});
+
+test("a check freezes advisory evidence without rewriting the catalog and can replay it offline", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-advisory-");
+  const files = await sample(dir.path, true);
+  const original = await readFile(files.sinksPath, "utf8");
+  const catalog = JSON.parse(original);
+  const options = {
+    cve,
+    ...files,
+    repository: files.repo,
+    toolRevision: "test",
+    inputsDir: join(dir.path, "first"),
+  };
+  const quote = "An invalid length must reach the decoder.";
+  const id = "SAMPLE-1";
+  const triggerAnalysis = [
+    {
+      sinkId: "decode",
+      conditions: [{ label: quote, advisoryId: id, quote }],
+    },
+  ];
+  let lookups = 0,
+    analyses = 0;
+  const host = {
+    async lookupCve(subject: string, signal?: AbortSignal) {
+      lookups++;
+      expect(subject).toBe(cve);
+      return lookupDependencyAdvisory(subject, signal, async (url) =>
+        url.endsWith(cve)
+          ? Response.json({
+              id: cve,
+              aliases: [id],
+              affected: [{ versions: ["1.0.0"] }],
+            })
+          : Response.json({ id, aliases: [cve], details: quote }),
+      );
+    },
+    async analyze() {
+      analyses++;
+      return triggerAnalysis;
+    },
+  };
+  const { manifest } = await prepareStackCheckPacket(options, host);
+  expect(manifest.advisory).toEqual(catalog.advisory);
+  expect(await readFile(join(options.inputsDir, "sinks.json"), "utf8")).toBe(
+    original,
+  );
+  const { advisoryDetails } = manifest;
+  expect(advisoryDetails?.[1]).toMatchObject({ id, body: quote });
+  expect(
+    (await readStackPacket(options.inputsDir, files.repo)).manifest,
+  ).toEqual(manifest);
+  // Changing even a well-quoted condition invalidates the frozen input identity.
+  const manifestPath = join(options.inputsDir, "manifest.json");
+  const edited = JSON.parse(await readFile(manifestPath, "utf8"));
+  edited.triggerAnalysis[0].conditions[0].label = "A different condition.";
+  await chmod(manifestPath, 0o600);
+  await writeFile(manifestPath, JSON.stringify(edited));
+  await expect(readStackPacket(options.inputsDir, files.repo)).rejects.toThrow(
+    /Manifest does not match/,
+  );
+  const replay = { ...catalog, advisoryDetails, triggerAnalysis };
+  await writeFile(files.sinksPath, JSON.stringify(replay));
+  const second = await prepareStackCheckPacket(
+    { ...options, inputsDir: join(dir.path, "second") },
+    host,
+  );
+  expect(second.manifest).toMatchObject({ advisoryDetails, triggerAnalysis });
+  const invalid = { ...options, inputsDir: join(dir.path, "invalid") };
+  await writeFile(
+    files.sinksPath,
+    JSON.stringify({ ...replay, cve: "CVE-2099-0002" }),
+  );
+  await expect(
+    prepareStackCheckPacket({ ...invalid, cve: "CVE-2099-0002" }, host),
+  ).rejects.toThrow(/does not identify/);
+  const modified = structuredClone(advisoryDetails!);
+  Object.assign(modified[0]!.affected[0]!, { extra: true });
+  await writeFile(
+    files.sinksPath,
+    JSON.stringify({ ...catalog, advisoryDetails: modified }),
+  );
+  await expect(prepareStackCheckPacket(invalid, host)).rejects.toThrow(
+    /Frozen advisoryDetails does not match/,
+  );
+  advisoryDetails![1]!.body = "Changed since lookup.";
+  await writeFile(files.sinksPath, JSON.stringify(replay));
+  await expect(prepareStackCheckPacket(invalid, host)).rejects.toThrow(
+    /Frozen advisory SHA-256 mismatch/,
+  );
+  expect({ lookups, analyses }).toEqual({ lookups: 1, analyses: 1 });
+});
+
+test("unavailable public advisories retain a visible catalog fallback, but cancellation is not a fallback", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-advisory-offline-");
+  const files = await sample(dir.path, true);
+  const options = {
+    cve,
+    ...files,
+    repository: files.repo,
+    toolRevision: "test",
+    inputsDir: join(dir.path, "inputs"),
+  };
+  const events: string[] = [];
+  const host = {
+    async lookupCve(): Promise<never> {
+      throw new Error("registry unavailable");
+    },
+    async analyze(): Promise<never> {
+      throw new Error("unexpected model call");
+    },
+    emit: (type: string) => {
+      events.push(type);
+    },
+  };
+  const { manifest } = await prepareStackCheckPacket(options, host);
+  expect(manifest.advisoryLookupError).toBe("registry unavailable");
+  expect(manifest.triggerAnalysis).toBeUndefined();
+  expect(events).toContain("advisory_lookup_failed");
+  const controller = new AbortController();
+  await expect(
+    prepareStackCheckPacket(
+      {
+        ...options,
+        inputsDir: join(dir.path, "abort"),
+        signal: controller.signal,
+      },
+      {
+        ...host,
+        async lookupCve(): Promise<never> {
+          controller.abort(new Error("cancelled"));
+          throw new Error("registry unavailable");
+        },
+      },
+    ),
+  ).rejects.toThrow("cancelled");
 });
