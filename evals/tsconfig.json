@@ -6,6 +6,8 @@
   },
   "include": [
     "../plugins/codex-security/mcp-app/src/assets.d.ts",
+    "dependency-reachability/*.mts",
+    "package-application-mapping/*.mts",
     "secret-discovery/*.mts",
     "standard-time-budget/*.mts",
     "workflow-routing/*.mts",

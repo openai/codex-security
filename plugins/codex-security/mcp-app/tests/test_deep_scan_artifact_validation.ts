@@ -1537,13 +1537,6 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
   }
 }
 
-function reduction<Finding extends Record<string, unknown>>(
-  findings: Finding[],
-  extra = {},
-) {
-  return { scanId, findings, ...extra };
-}
-
 function testCandidateCoverageAggregation(scanDir: string) {
   const candidate = {
     id: "pending",

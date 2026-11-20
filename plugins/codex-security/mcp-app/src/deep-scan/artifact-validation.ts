@@ -148,9 +148,10 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<ArtifactContext, "scope" | "includePaths" | "filePaths"> & {
-    workerId?: string;
-  } = {},
+  boundScope: Pick<
+    ArtifactContext,
+    "scope" | "includePaths" | "filePaths" | "excludePaths"
+  > & { workerId?: string } = {},
   admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
@@ -163,6 +164,7 @@ export async function validateDiscoveryArtifacts(
     scope: boundScope.scope,
     includePaths: boundScope.includePaths,
     filePaths: boundScope.filePaths,
+    excludePaths: boundScope.excludePaths,
   };
   const stored = await readJsonObject(resultPath);
   await retainRecordedReceiptOwnership(context, stored);

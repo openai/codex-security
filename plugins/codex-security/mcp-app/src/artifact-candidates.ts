@@ -1,11 +1,9 @@
-import { isRecord } from "./record.js";
+import { isRecord, isNonEmptyString } from "./record.js";
 
 type JsonObject = Record<string, unknown>;
 
 function candidateOwner(...values: unknown[]): string | undefined {
-  return values.find(
-    (value): value is string => typeof value === "string" && !!value.trim(),
-  );
+  return values.find(isNonEmptyString);
 }
 
 export function findingCandidateId(finding: JsonObject): string | undefined {
@@ -16,13 +14,11 @@ export function findingCandidateId(finding: JsonObject): string | undefined {
     extensions?.candidateId,
     extensions?.reportId,
     extensions?.ledgerRowId,
-  ].find(
-    (value): value is string => typeof value === "string" && !!value.trim(),
-  );
+  ].find(isNonEmptyString);
 }
 
 export function candidateKey(id: unknown, owner?: unknown): string | undefined {
-  return typeof id === "string" && id.trim()
+  return isNonEmptyString(id)
     ? JSON.stringify([candidateOwner(owner) ?? null, id])
     : undefined;
 }

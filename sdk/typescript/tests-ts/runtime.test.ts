@@ -7802,6 +7802,7 @@ test.each([
         "command.add_argument('--repository', required=True)",
         ...(supportsFocus ? ["command.add_argument('--after-scan-id')"] : []),
         "args = parser.parse_args()",
+        "assert os.environ['CODEX_SECURITY_MATCHING_PLAN_FORMAT'] == 'compact'",
         "if os.environ.get('FAIL_LIST'): sys.exit('Synthetic matching database failure')",
         "print(json.dumps({'batches': [{'afterScanId': 'current'}]}))",
       ].join("\n"),

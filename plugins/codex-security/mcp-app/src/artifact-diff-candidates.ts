@@ -1,3 +1,4 @@
+import { asRecord, isNonEmptyString } from "./record.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   candidateKey,
@@ -54,11 +55,11 @@ export type DiffCandidates = Awaited<ReturnType<typeof readDiffCandidates>>;
 function* currentFindingHistory(finding: JsonObject): Generator<JsonObject> {
   if (!isCurrentCandidateFinding(finding)) return;
   yield finding;
-  const provenance = object(finding.provenance);
+  const provenance = asRecord(finding.provenance);
   for (const previous of Array.isArray(provenance?.previousFindings)
     ? provenance.previousFindings
     : []) {
-    const retained = object(previous);
+    const retained = asRecord(previous);
     if (retained) yield* currentFindingHistory(retained);
   }
 }
@@ -102,7 +103,7 @@ function candidateHistory(
     for (const id of authored) if (!seen.has(id)) authoredResolutions.add(id);
     for (const pending of source.reviewState.deferred) {
       const key = coverageCandidateKey(pending);
-      const saved = object(pending.candidate);
+      const saved = asRecord(pending.candidate);
       const candidate = ledger.get(key ?? "");
       if (
         key &&
@@ -280,8 +281,8 @@ export function refreshDiffCandidateHistory(
     source.findings = source.findings.filter((finding) => {
       const pending = reopened.get(findingCandidateKey(finding) ?? "");
       if (!pending || !isCurrentCandidateFinding(finding)) return true;
-      if (object(pending.finding)) {
-        if (object((pending.finding as JsonObject).provenance))
+      if (asRecord(pending.finding)) {
+        if (asRecord((pending.finding as JsonObject).provenance))
           preserveFindingDetails(pending.finding as JsonObject, finding);
         else {
           const previous = Array.isArray(pending.previousFindings)
@@ -303,8 +304,8 @@ function isGeneratedFollowUp(
   deferred: JsonObject[],
   surfaces: JsonObject[],
 ): boolean {
-  const candidate = object(surface.candidate ?? pending?.candidate);
-  const finding = object(pending?.finding ?? surface.finding);
+  const candidate = asRecord(surface.candidate ?? pending?.candidate);
+  const finding = asRecord(pending?.finding ?? surface.finding);
   return (
     candidate !== undefined &&
     surface.label === candidate.summary &&
@@ -327,7 +328,7 @@ function isGeneratedFollowUp(
 }
 
 function isGeneratedDecision(surface: JsonObject): boolean {
-  const candidate = object(surface.candidate);
+  const candidate = asRecord(surface.candidate);
   return (
     candidate !== undefined &&
     isTerminalCandidateDecision(surface) &&
@@ -401,9 +402,9 @@ export function preserveDiffCandidateDecisions(
         isCurrentCandidateFinding(finding) &&
         !seen.has(key) &&
         candidate &&
-        (object(finding.provenance)?.diffCandidateDecision === undefined ||
+        (asRecord(finding.provenance)?.diffCandidateDecision === undefined ||
           isDeepStrictEqual(
-            object(finding.provenance)?.diffCandidateDecision,
+            asRecord(finding.provenance)?.diffCandidateDecision,
             candidateDecision(candidate),
           ))
       )
@@ -503,12 +504,10 @@ export function preserveDiffCandidateDecisions(
         const key = findingCandidateKey(finding);
         const candidate = ledger.get(key ?? "");
         if (!candidate || !currentFindingKeys.has(key)) return finding;
-        const { diffCandidateDecision: _previousDecision, ...provenance } =
-          object(finding.provenance) ?? {};
         return {
           ...finding,
           provenance: {
-            ...provenance,
+            ...finding.provenance,
             diffCandidateDecision: structuredClone(
               candidateDecision(candidate),
             ),
@@ -591,7 +590,7 @@ export function preserveUnresolvedDiffCandidates(
             structuredClone(pending.candidate),
           ];
       }
-      if (object(pending.finding))
+      if (asRecord(pending.finding))
         preserveFindingDetails(finding, pending.finding as JsonObject);
       if (Array.isArray(pending.originalCandidates))
         provenance.originalCandidates = exactUnion(
@@ -665,7 +664,7 @@ export function preserveUnresolvedDiffCandidates(
       const candidate =
         typeof candidateId === "string" ? pending.get(candidateId) : undefined;
       if (!candidate) return item;
-      const previous = object(item.candidate);
+      const previous = asRecord(item.candidate);
       const snapshot = candidateSnapshot(previous, candidate);
       return {
         ...item,
@@ -768,7 +767,7 @@ export function preserveUnresolvedDiffCandidates(
         };
       }
       const candidate = pending.get(key ?? "");
-      const oldCandidate = object(item?.candidate);
+      const oldCandidate = asRecord(item?.candidate);
       if (
         !candidate ||
         !oldCandidate ||
@@ -787,7 +786,7 @@ export function preserveUnresolvedDiffCandidates(
         return surface;
       return {
         ...surface,
-        ...(object(surface.candidate)
+        ...(asRecord(surface.candidate)
           ? {
               candidate: candidateSnapshot(surface.candidate, candidate),
               ...(!isDeepStrictEqual(
@@ -850,7 +849,7 @@ function changedFindingDecision(
   finding: JsonObject,
   candidate: JsonObject,
 ): boolean {
-  const previous = object(finding.provenance)?.diffCandidateDecision;
+  const previous = asRecord(finding.provenance)?.diffCandidateDecision;
   return (
     previous !== undefined &&
     !isDeepStrictEqual(previous, candidateDecision(candidate))
@@ -878,15 +877,15 @@ function candidateSnapshot(
     validation: _validation,
     attack_path: _attackPath,
     ...saved
-  } = object(previous) ?? {};
+  } = asRecord(previous) ?? {};
   return { ...saved, ...candidate };
 }
 
 function candidateDisposition(
   candidate: JsonObject,
 ): "rejected" | "not_applicable" | undefined {
-  const validation = object(candidate.validation)?.disposition;
-  const attackPath = object(candidate.attack_path)?.decision;
+  const validation = asRecord(candidate.validation)?.disposition;
+  const attackPath = asRecord(candidate.attack_path)?.decision;
   // Reportable ledger phases still need a matching saved finding.
   if (validation === "deferred" || attackPath === "deferred") return undefined;
   if (validation === "not_applicable") return "not_applicable";
@@ -895,8 +894,8 @@ function candidateDisposition(
 }
 
 function terminalReason(candidate: JsonObject, legacy = false): string {
-  const validation = object(candidate.validation);
-  const attackPath = object(candidate.attack_path);
+  const validation = asRecord(candidate.validation);
+  const attackPath = asRecord(candidate.attack_path);
   return (
     [
       ...((legacy || candidateDisposition(candidate) === "rejected") &&
@@ -904,15 +903,14 @@ function terminalReason(candidate: JsonObject, legacy = false): string {
         ? [attackPath.counterevidence, attackPath.severity_rationale]
         : []),
       validation?.counterevidence_or_proof_gap,
-    ].find(
-      (value): value is string => typeof value === "string" && !!value.trim(),
-    ) ?? `Candidate review concluded: ${candidate.summary}`
+    ].find(isNonEmptyString) ??
+    `Candidate review concluded: ${candidate.summary}`
   );
 }
 
 function candidateReason(candidate: JsonObject): string {
-  const validation = object(candidate.validation);
-  const attackPath = object(candidate.attack_path);
+  const validation = asRecord(candidate.validation);
+  const attackPath = asRecord(candidate.attack_path);
   if (
     validation?.disposition === "reportable" &&
     attackPath?.decision === "reportable"
@@ -924,17 +922,7 @@ function candidateReason(candidate: JsonObject): string {
       attackPath?.proof_gap,
       validation?.counterevidence_or_proof_gap,
       validation?.remaining_uncertainty,
-    ].find(
-      (value): value is string =>
-        typeof value === "string" && value.trim().length > 0,
-    ) ?? `Candidate review is incomplete: ${candidate.summary}`
+    ].find(isNonEmptyString) ??
+    `Candidate review is incomplete: ${candidate.summary}`
   );
-}
-
-function object<Value extends JsonObject>(value: Value): Value;
-function object(value: unknown): JsonObject | undefined;
-function object(value: unknown): JsonObject | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as JsonObject)
-    : undefined;
 }

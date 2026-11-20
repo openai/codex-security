@@ -11,7 +11,6 @@ import {
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import { asRecord } from "../src/record.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
-import type { JsonObject } from "../src/types.js";
 import type {
   DeepScanConfig,
   DeepScanRunState,
@@ -19,7 +18,6 @@ import type {
   PersistedDeepScanWorker,
   DeepScanLogEvent,
   CodexWorkerRequest,
-  CodexWorkerResult,
 } from "../src/deep-scan/types.js";
 import { after, mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -56,12 +54,10 @@ import {
   promptContext,
   standardScanDraft,
   eventually,
-  assertNoPublishedCandidates,
   immediateClock,
   createCoordinator,
   runCoordinator,
   recordingClock,
-  recordCodexSecurityWorkerScanDraft,
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
