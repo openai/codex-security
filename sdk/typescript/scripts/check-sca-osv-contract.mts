@@ -21,6 +21,7 @@ import {
   ecosystemAdvisoryId,
   ecosystemFixtures,
   localOriginFixtures,
+  pnpmTarballFixtures,
   unsupportedEcosystemInputs,
   type EcosystemFixture,
 } from "./sca-osv-ecosystem-fixtures.mjs";
@@ -497,68 +498,26 @@ snapshots:
     pnpmLocal.coverage.limitations,
     "linked-lib@link:../linked-lib",
   );
-  for (const [origin, resolution] of [
-    ["local", "file:../synthetic-lib.tgz"],
-    ["direct-url", "https://example.invalid/synthetic-lib.tgz"],
-  ] as const) {
-    for (const [layout, alias, packageKey, peer] of [
-      ["named", "synthetic-lib", `synthetic-lib@${resolution}`, ""],
-      [
-        "scoped-alias-peer",
-        "@synthetic/alias",
-        `@synthetic/alias@${resolution}`,
-        "(peer-lib@2.0.0)",
-      ],
-      ["bare-reference", "local-alias", resolution, ""],
-    ] as const) {
-      for (const excluded of [false, true]) {
-        const tarball = await scan(
-          `pnpm-${origin}-tarball-${layout}-${excluded ? "excluded" : "retained"}`,
-          {
-            "pnpm-lock.yaml": JSON.stringify({
-              lockfileVersion: "9.0",
-              importers: {
-                ".": {
-                  dependencies: {
-                    [alias]: {
-                      specifier: resolution,
-                      version: resolution + peer,
-                    },
-                  },
-                },
-              },
-              packages: {
-                [packageKey]: {
-                  ...(layout === "named" ? {} : { name: "synthetic-lib" }),
-                  version: "1.2.0",
-                  resolution: { tarball: resolution },
-                },
-                "synthetic-registry@2.0.0": {},
-              },
-              snapshots: {
-                [packageKey + peer]: {},
-                "synthetic-registry@2.0.0": {},
-              },
-            }),
-            ...(excluded
-              ? {
-                  "osv-scanner.toml": ignoreSyntheticPackage,
-                }
-              : {}),
-          },
+  for (const { origin, layout, lockfile } of pnpmTarballFixtures()) {
+    for (const excluded of [false, true]) {
+      const tarball = await scan(
+        `pnpm-${origin}-tarball-${layout}-${excluded ? "excluded" : "retained"}`,
+        {
+          "pnpm-lock.yaml": lockfile,
+          ...(excluded ? { "osv-scanner.toml": ignoreSyntheticPackage } : {}),
+        },
+      );
+      assert.equal(tarball.status, excluded ? "completed" : "partial");
+      assert.equal(tarball.coverage.unresolvedPackages, excluded ? 0 : 1);
+      assert.equal(tarball.components.length, excluded ? 1 : 2);
+      assert.equal(tarball.matches.length, excluded ? 0 : 1);
+      if (!excluded)
+        assert.equal(
+          tarball.components.find(
+            (component) => component.name === "synthetic-lib",
+          )?.version,
+          "1.2.0",
         );
-        assert.equal(tarball.status, excluded ? "completed" : "partial");
-        assert.equal(tarball.coverage.unresolvedPackages, excluded ? 0 : 1);
-        assert.equal(tarball.components.length, excluded ? 1 : 2);
-        assert.equal(tarball.matches.length, excluded ? 0 : 1);
-        if (!excluded)
-          assert.equal(
-            tarball.components.find(
-              (component) => component.name === "synthetic-lib",
-            )?.version,
-            "1.2.0",
-          );
-      }
     }
   }
   const alias = await scan("npm-alias-scoped-multiple", {
