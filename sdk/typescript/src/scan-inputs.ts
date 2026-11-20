@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants, open, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
@@ -47,6 +48,11 @@ const legacyModelFileDigests = {
   model_instructions_file: "modelInstructionsFileSha256",
 } as const;
 
+function inlineInstructions(config: JsonObject) {
+  const value = config["developer_instructions"];
+  return typeof value === "string" ? { sha256: textDigest(value) } : null;
+}
+
 async function modelFileInput(
   config: JsonObject,
   setting: (typeof modelFileSettings)[number],
@@ -75,7 +81,9 @@ export async function deepModelFileInputs(
   config: JsonObject,
   signal?: AbortSignal,
 ): Promise<JsonObject> {
-  const inputs: JsonObject = {};
+  const inputs: JsonObject = {
+    developer_instructions: inlineInstructions(config),
+  };
   for (const setting of modelFileSettings)
     inputs[setting] = await modelFileInput(config, setting, signal);
   return inputs;
@@ -91,6 +99,14 @@ export async function validateDeepModelFileInputs(
   if (inputs !== undefined && !isRecord(inputs))
     throw new CodexSecurityError(
       "Invalid model-file input receipt for the saved Deep Scan.",
+    );
+  const instructions = inputs?.["developer_instructions"];
+  if (
+    instructions !== undefined &&
+    !isDeepStrictEqual(instructions, inlineInstructions(config))
+  )
+    throw new CodexSecurityError(
+      "The saved Deep Scan's developer_instructions changed. Restore the original input and resume the scan, or start a new scan.",
     );
   for (const setting of modelFileSettings) {
     const saved = inputs?.[setting];

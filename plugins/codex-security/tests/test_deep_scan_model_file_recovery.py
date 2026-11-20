@@ -54,11 +54,13 @@ def model_inputs(path: Path, key: str) -> dict:
     return {**dict.fromkeys(MODEL_FILES), key: {"path": str(path), "sha256": "a" * 64}}
 
 
-@pytest.mark.parametrize("key", MODEL_FILES)
+@pytest.mark.parametrize("key", (*MODEL_FILES, "developer_instructions"))
 def test_only_matching_model_files_select_the_pending_host_result(tmp_path: Path, key: str) -> None:
     state, target = empty_target_paths(tmp_path)
     (target / "source.py").write_text("print('test')\n")
     inputs = model_inputs(tmp_path / "settings", key)
+    if key == "developer_instructions":
+        del inputs[key]["path"]
     unchanged = ("--model-file-inputs-json", json.dumps(inputs))
 
     def begin(owner: str, *extra: str, check: bool = True):
@@ -92,11 +94,10 @@ def test_only_matching_model_files_select_the_pending_host_result(tmp_path: Path
     # A pending native result, even for the original owner, requires the current inputs.
     assert begin("owner", "--probe-model-file-inputs") == {"newScanTarget": str(target)}
     assert begin("other", "--join-only", *unchanged)["deepScan"]["scanId"] == scan_id
-    for change in (
-        None,
-        {**inputs[key], "sha256": "b" * 64},
-        {**inputs[key], "path": str(tmp_path / "moved")},
-    ):
+    changes = [None, {**inputs[key], "sha256": "b" * 64}]
+    if key in MODEL_FILES:
+        changes.append({**inputs[key], "path": str(tmp_path / "moved")})
+    for change in changes:
         assert begin(
             "other", "--join-only", "--model-file-inputs-json", json.dumps({**inputs, key: change})
         ) == {"newScanTarget": str(target)}

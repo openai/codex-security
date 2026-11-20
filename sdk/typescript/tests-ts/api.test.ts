@@ -15339,6 +15339,10 @@ if __name__ == "__main__":
           resumeScanId: scanId,
           outputDir: scanDir,
         });
+      const overrides = client.config.codexOverrides!;
+      overrides["developer_instructions"] = "New instructions during resume";
+      await expect(resume()).rejects.toThrow("developer_instructions changed");
+      delete overrides["developer_instructions"];
       await writeFile(path, '{"models":[],"new":true}');
       await expect(resume()).rejects.toThrow(`${setting} changed`);
       expect(commands).not.toContain("fail-scan");

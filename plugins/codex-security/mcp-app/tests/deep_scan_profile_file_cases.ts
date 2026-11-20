@@ -69,7 +69,7 @@ export async function testWorkerSelectedProfileFiles({
       true,
     ],
     [
-      'model_reasoning_summary = "concise"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      'model_reasoning_summary = "concise"\ndeveloper_instructions = "Inline instructions"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
       "concise",
     ],
     [
@@ -239,6 +239,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           if (modelFiles && index % 2 === 0) {
             // A replayed SDK profile omits file settings that the caller cleared.
             const config = parseToml(workerConfig);
+            delete config.developer_instructions;
             delete config.model_instructions_file;
             delete config.model_catalog_json;
             delete config.experimental_compact_prompt_file;
@@ -262,6 +263,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                 JSON.stringify(
                   path.join(fixture.root, `catalog-${index}.json`),
                 ),
+              )
+              .replace(
+                '"Inline instructions"',
+                `"Inline instructions ${index}"`,
               )
               .replace(
                 '"profile-compact.md"',
@@ -397,6 +402,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           const clearedFiles = modelFiles && index % 2 === 0;
           assertConfigOverrides(invocation.argv, {
             model_reasoning_summary: expected,
+            developer_instructions:
+              modelFiles && !clearedFiles
+                ? `Inline instructions ${index}`
+                : undefined,
             model_catalog_json:
               modelFiles && !clearedFiles
                 ? path.join(fixture.root, `catalog-${index}.json`)

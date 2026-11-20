@@ -5,6 +5,10 @@ import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 
 const modelFileSettings = ["model_instructions_file"] as const;
+const modelInputSettings = [
+  ...modelFileSettings,
+  "developer_instructions",
+] as const;
 
 const fileInput = z
   .object({
@@ -14,7 +18,7 @@ const fileInput = z
   })
   .nullable();
 export const modelFileInputsSchema = z.partialRecord(
-  z.enum(modelFileSettings),
+  z.enum(modelInputSettings),
   fileInput,
 );
 export type ModelFileInputs = z.output<typeof modelFileInputsSchema>;
@@ -29,13 +33,20 @@ export function modelFilePath(value: string, directory: string): string {
 
 export async function readModelFileInputs(
   config: Record<string, unknown>,
-  settings: readonly (typeof modelFileSettings)[number][] = modelFileSettings,
+  settings: readonly (typeof modelInputSettings)[number][] = modelInputSettings,
   signal?: AbortSignal,
 ): Promise<ModelFileInputs> {
   const inputs: ModelFileInputs = {};
   for (const setting of settings) {
     signal?.throwIfAborted();
     const value = config[setting];
+    if (setting === "developer_instructions") {
+      inputs[setting] =
+        typeof value === "string"
+          ? { sha256: createHash("sha256").update(value).digest("hex") }
+          : null;
+      continue;
+    }
     if (typeof value !== "string" || value.length === 0) {
       inputs[setting] = null;
       continue;
@@ -64,7 +75,7 @@ export async function validateModelFileInputs(
   config: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<void> {
-  for (const setting of modelFileSettings) {
+  for (const setting of modelInputSettings) {
     const expected = saved[setting];
     if (expected === undefined) continue;
     let actual;
