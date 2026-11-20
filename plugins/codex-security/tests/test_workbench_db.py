@@ -3237,9 +3237,7 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
 def test_saved_scan_remains_readable_with_large_hunk_counts(
     tmp_path: Path, padded: bool, monkeypatch
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.txt").write_bytes(b"original\n")
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
@@ -3256,14 +3254,12 @@ def test_saved_scan_remains_readable_with_large_hunk_counts(
     request = RemediationRequest(state_dir, occurrence_id)
     token = str(uuid.uuid4())
     request.start(token)
-    if padded:
-        request.update(token, "1", "generated", "--patch-stdin", input_text=patch)
-    else:
-        rejected = request.update(
-            token, "1", "generated", "--patch-stdin", input_text=patch, check=False
-        )
-        assert rejected["returncode"] != 0
-        assert "omits file content" in rejected["stderr"]
+    result = request.update(
+        token, "1", "generated", "--patch-stdin", input_text=patch, check=padded
+    )
+    if not padded:
+        assert result["returncode"] != 0
+        assert "omits file content" in result["stderr"]
         # Older clients recorded the path and digest of an existing patch.
         request.generate(token, patch_path)
     saved = get_scan(state_dir, scan_id)

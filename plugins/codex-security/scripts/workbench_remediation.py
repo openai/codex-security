@@ -10,7 +10,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,15 +48,12 @@ COMMANDS = {
     "set-finding-remediation",
 }
 SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
-
-
 _HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 
 
-def _hunk_count(digits: bytes | None) -> int:
-    if digits is None:
-        return 1
-    return int(digits.lstrip(b"0") or b"0")
+def _hunk_counts(header: re.Match[bytes]) -> Iterator[int]:
+    for count in header.groups(default=b"1"):
+        yield int(count.lstrip(b"0") or b"0")
 
 
 def patch_artifact_preview(
@@ -87,7 +84,7 @@ def patch_artifact_preview(
                         file_count += 1
                         hunk_lines = 0
                     elif hunk := _HUNK_HEADER.match(chunk):
-                        hunk_lines = sum(map(_hunk_count, hunk.groups()))
+                        hunk_lines = sum(_hunk_counts(hunk))
                     elif hunk_lines == 0 and chunk.startswith(b"+++ "):
                         new_headers += 1
                     elif hunk_lines == 0 and chunk.startswith(b"--- "):
@@ -396,7 +393,7 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
             git_paths = b""
         if hunk:
             try:
-                old_lines, new_lines = map(_hunk_count, hunk.groups())
+                old_lines, new_lines = _hunk_counts(hunk)
             except ValueError as exc:
                 raise SystemExit(incomplete) from exc
         elif (
