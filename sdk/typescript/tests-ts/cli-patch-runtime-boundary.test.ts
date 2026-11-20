@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,13 +26,18 @@ function inspectLoader(
   name: string,
   value: string,
   protectedRoots: string[] = [],
+  loaderAccess = { writable: new Set<string>() },
 ) {
   const binding = `--config-env=probe.loader=${name}`;
   return runRepositoryCommand(
     "git",
     [binding, "config", "--get", "probe.loader"],
     checkout,
-    { environment: { [name]: value, LC_ALL: "C" }, protectedRoots },
+    {
+      environment: { [name]: value, LC_ALL: "C" },
+      protectedRoots,
+      loaderAccess,
+    },
   );
 }
 
@@ -95,6 +101,27 @@ test.skipIf(process.platform === "win32")(
       ]);
       expect(actual).toBe([first, last].join(":"));
     }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "host Git detects a library rewritten through a temporary hard link",
+  async () => {
+    const checkout = await fixtures.create("loader-checkout-");
+    const tools = await fixtures.create("loader-tools-");
+    const fallback = await fixtures.create("loader-fallback-");
+    const library = join(tools, "library");
+    const alias = join(checkout, "edit");
+    const loaderAccess = { writable: new Set([checkout]) };
+    const paths = [tools, fallback].join(":");
+    const inspect = () =>
+      inspectLoader(checkout, "LD_LIBRARY_PATH", paths, [], loaderAccess);
+    await writeFile(library, "original");
+    expect(await inspect()).toBe(paths);
+    await link(library, alias);
+    await writeFile(alias, "modified");
+    await unlink(alias);
+    expect(await inspect()).toBe(fallback);
   },
 );
 

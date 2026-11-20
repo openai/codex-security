@@ -1937,11 +1937,16 @@ type PatchTransportFile = {
   kind: "executable" | "file" | "known-hosts" | "missing-known-hosts";
 };
 
+interface LibraryDirectory {
+  readonly roots: Set<string>;
+  readonly files: Map<string, string>;
+}
+
 interface PatchWriters {
   readonly writable: Set<string>;
   external?: boolean;
   unknownWriters?: boolean;
-  libraryDirectories?: Map<string, Set<string> | null>;
+  libraryDirectories?: Map<string, LibraryDirectory | null>;
 }
 
 interface PatchTransportAccess extends PatchWriters {
@@ -2128,10 +2133,27 @@ child.on("exit", (code, signal) => {
 });
 `;
 
+function patchFileStamp(entry: { dev: bigint; ino: bigint; ctimeNs: bigint }) {
+  return [entry.dev, entry.ino, entry.ctimeNs].join(":");
+}
+
+function librariesUnchanged(files: Map<string, string>) {
+  try {
+    for (const [path, saved] of files) {
+      if (patchFileStamp(lstatSync(path, { bigint: true })) !== saved)
+        return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function trustedLibraryDirectory(
   directory: string,
   resolvePath: (path: string) => string | null,
   roots: readonly string[],
+  files: Map<string, string>,
 ): Promise<boolean> {
   const selected = resolvePath(directory);
   if (!selected || !selected.isWellFormed()) return false;
@@ -2159,8 +2181,13 @@ async function trustedLibraryDirectory(
           entry = resolved;
         }
         if (entry.isDirectory()) directories.add(path);
-        if (entry.isFile() && entry.nlink > 1n)
+        if (!entry.isFile()) continue;
+        if (entry.nlink > 1n)
           await requireProtectedTransportLinks(path, entry, writers);
+        // An editable alias can be created, used and removed between Git
+        // commands. Bind its inode before the turn, including single links.
+        if (!files.has(path) && (await mutableThroughLink(path, entry)))
+          files.set(path, patchFileStamp(entry));
       }
     }
     return true;
@@ -2214,15 +2241,24 @@ async function restrictRepositoryLoader(
       // The ELF loader expands tokens such as $ORIGIN for each child.
       if (!isAbsolute(path)) continue;
       if (elf && /\n|\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(path)) continue;
-      const previous = checked.get(path);
-      if (previous === null) continue;
-      if (!previous || !roots.every((root) => previous.has(root))) {
-        if (!(await trustedLibraryDirectory(path, resolvePath, roots))) {
+      let directory = checked.get(path);
+      if (directory === null) continue;
+      if (!directory) {
+        directory = { roots: new Set(), files: new Map() };
+        checked.set(path, directory);
+      }
+      const { roots: verified, files } = directory;
+      if (!verified.size || !roots.every((root) => verified.has(root))) {
+        if (!(await trustedLibraryDirectory(path, resolvePath, roots, files))) {
           checked.set(path, null);
           continue;
         }
         if (checked.get(path) === null) continue;
-        checked.set(path, new Set([...(previous ?? []), ...roots]));
+        for (const root of roots) verified.add(root);
+      }
+      if (!librariesUnchanged(files)) {
+        checked.set(path, null);
+        continue;
       }
       allowed.push(path);
     }
@@ -12536,7 +12572,7 @@ async function patchTransportIdentity(
   const entry = await stat(target, { bigint: true });
   if (options.writers && entry.nlink > 1n && entry.isFile())
     await requireProtectedTransportLinks(target, entry, options.writers);
-  const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
+  const stamp = patchFileStamp(entry);
   if (selected && !options.updatedHostKeys && selected.stamp !== stamp)
     throw patchTransportChanged(kind);
   if (
@@ -12583,10 +12619,9 @@ async function bindPatchTransportFile(
   }
 }
 
-async function requireProtectedTransportLinks(
+async function mutableThroughLink(
   target: string,
-  file: { uid: bigint; mode: bigint; dev: bigint; ino: bigint; nlink: bigint },
-  writers: PatchWriters,
+  file: { uid: bigint; mode: bigint },
 ) {
   // Git installations commonly hard-link their subcommands. An inode owned
   // by another user and unwritable from this account stays safe through every
@@ -12602,10 +12637,19 @@ async function requireProtectedTransportLinks(
       await access(target, constants.W_OK);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "EACCES" || code === "EROFS") return;
+      if (code === "EACCES" || code === "EROFS") return false;
       throw error;
     }
   }
+  return true;
+}
+
+async function requireProtectedTransportLinks(
+  target: string,
+  file: { uid: bigint; mode: bigint; dev: bigint; ino: bigint; nlink: bigint },
+  writers: PatchWriters,
+) {
+  if (!(await mutableThroughLink(target, file))) return;
   // Git for Windows and user-owned installations share one inode among
   // commands in libexec/git-core and bin. Count directory entries in the
   // protected installation, accepting it only if every link is accounted for.
