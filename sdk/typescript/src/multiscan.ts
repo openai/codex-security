@@ -460,12 +460,9 @@ async function runCampaign(
           }
         } catch {}
       }
-      const savedWarnings = Array.isArray(receipt.warnings)
-        ? receipt.warnings.filter((warning) => typeof warning === "string")
-        : [];
-      if (receipt.status !== "failed" && savedWarnings.length > 0) {
-        warnings.push({ repository: task.id, warnings: savedWarnings });
-        for (const warning of savedWarnings) {
+      if (receipt.status !== "failed" && receipt.warnings?.length) {
+        warnings.push({ repository: task.id, warnings: receipt.warnings });
+        for (const warning of receipt.warnings) {
           notifyProgress(options, {
             repository: task.id,
             status: "completed",
@@ -1288,6 +1285,7 @@ async function readReceipts(
       if (
         typeof saved.outputDir !== "string" ||
         !isAbsolute(saved.outputDir) ||
+        saved.outputDir.includes("\0") ||
         !saved.outputDir.endsWith(sep + attemptPath)
       )
         throw new Error(
@@ -1322,6 +1320,9 @@ async function readReceipts(
         { cause },
       );
     }
+    saved.warnings = Array.isArray(saved.warnings)
+      ? saved.warnings.filter((warning: unknown) => typeof warning === "string")
+      : undefined;
     const receipt = saved as MultiscanReceipt;
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
