@@ -21,7 +21,7 @@ The mixed-services project uses the published linkify-it CVE-2026-48801, npm dis
 
 ## Run
 
-Use Node.js 22.13 or later, Git and a built CLI with the `@openai/codex-security/stack-packet` export. Point `CLI` to the JavaScript entry point of the installed package to test packed resources. For a local build use `sdk/typescript/bin/codex-security.mjs`. The runner sets `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` on its CLI processes. The live repository cases also use OSV, OpenGrep and the CLI's normal model credentials.
+Use Node.js 22.13 or later, Git and a built CLI with the `@openai/codex-security/stack-packet` export. Point `CLI` to the JavaScript entry point of the installed package to test packed resources. For a local build use `sdk/typescript/bin/codex-security.mjs`. The runner sets `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` on its CLI processes. Live cases use OSV and the CLI's normal model credentials. Repository cases also use OpenGrep.
 
 From the repository root, capture the ground truth and run the offline host contracts. Every `--out` path must be new. Omitting it creates a temporary output directory.
 
@@ -45,7 +45,7 @@ node "$runner" live --case mixed-evidence-no-access --cli "$CLI" --out "$outputs
 node "$runner" benchmark --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/benchmark"
 ```
 
-Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The grader checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a package or CVE check it also checks independent claim approval and each service's selected lockfile. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
+Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The grader checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks independent claim approval and each service's selected lockfile. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
 
 The benchmark initializes five fresh SQLite attempts. Each timed trial writes one batch of ten source-backed claims and reads them back in another CLI process. It checks all ten IDs, revisions, hashes and payloads and records the median, including CLI startup time. Fixture preparation and state initialization take place before timing.
 

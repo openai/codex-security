@@ -92,14 +92,13 @@ export function exactClaim(claims, ref) {
   return matches[0];
 }
 
-export function gradeStack(report, fixture) {
+export function gradeStack(report, fixture, { reviewed }) {
   const { variant, target, repo, observation, scope, advisory, files, docs } =
     fixture;
   assert.equal(
     report.schemaVersion,
     "codex-security.pipeline-stacks.report/v1",
   );
-  assert.equal(report.reviewPolicy, "single_agent");
   assert.equal(report.cve, summaryCve);
   assert.deepEqual(report.target, target);
   assert(report.runId && report.attemptId && report.toolRevision);
@@ -108,12 +107,15 @@ export function gradeStack(report, fixture) {
     cve: summaryCve,
     target,
     advisory,
+    advisoryDetails: report.advisoryDetails,
+    advisoryLookupError: report.advisoryLookupError,
+    triggerAnalysis: report.triggerAnalysis,
     files,
     toolRevision: report.toolRevision,
   };
   assert.equal(
     report.inputDigest,
-    sha256(JSON.stringify(canonical(material))),
+    evidenceHash(material),
     "digest of frozen checked inputs",
   );
   assert.deepEqual(report.coverage, {
@@ -130,6 +132,20 @@ export function gradeStack(report, fixture) {
   assert.equal(report.assessments.length, 1);
   const [a] = report.assessments;
   assert.equal(a.workItemId, "request/service/sample");
+  if (reviewed) {
+    assert.equal(
+      report.review?.draftDigest,
+      evidenceHash({ ...report, review: null }),
+      "digest of reviewed draft",
+    );
+    const { decisions } = report.review;
+    assert.equal(decisions.length, 1, "one review decision");
+    assert.equal(decisions[0].workItemId, a.workItemId);
+    assert.equal(decisions[0].followUp, null);
+    assert.match(decisions[0].reason, /\S/u);
+  } else {
+    assert.equal(report.review, null, "offline finalization");
+  }
   assert.deepEqual(a.scope, scope);
   assert.deepEqual(a.queryScope, scope);
   assert.equal(a.status, "observed");
