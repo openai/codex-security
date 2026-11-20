@@ -179,11 +179,11 @@ async function contracts(fixture) {
   assert.equal(report.runId, manifest.runId);
   assert.equal(report.attemptId, manifest.attemptId);
   await jsonFile(join(out, "scripted-report.json"), report);
-  const grade = gradeStack(report, fixture);
+  const grade = gradeStack(report, fixture, { reviewed: false });
   const tampered = structuredClone(report);
   tampered.claims[0].receipts[0].result.version = "0.2.0";
   assert.throws(
-    () => gradeStack(tampered, fixture),
+    () => gradeStack(tampered, fixture, { reviewed: false }),
     /original capture selection/u,
   );
   return grade;
@@ -369,7 +369,7 @@ try {
                 id === "mixed-package",
                 calls && { calls, withAccess: id === "mixed-evidence" },
               )
-            : gradeStack(report, fixture);
+            : gradeStack(report, fixture, { reviewed: true });
           result.status = "passed";
         }
       } catch (error) {
