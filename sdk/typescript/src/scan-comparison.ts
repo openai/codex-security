@@ -26,6 +26,8 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  NATIVE_REFRESH_RECOVERY_PATTERN,
+  NATIVE_REFRESH_FAILURE_PATTERN,
   withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
@@ -414,15 +416,22 @@ export async function matchScanFindingsInternal(
       const turn = await thread
         .run(prompt, turnOptions)
         .catch((error: unknown) => {
+          if (!(error instanceof Error)) throw error;
+          if (error.name === "PermissionProfileFallbackError")
+            throw new ConfigurationError(error.message, { cause: error });
+          // Native clients expose failed turns and exec failures as ordinary Error messages.
+          const nativeMessage = error.message
+            .replace(/^Codex Exec exited with (?:code \d+|signal \S+): /u, "")
+            .replace(/^Error: /u, "");
           if (
-            error instanceof Error &&
-            error.name === "PermissionProfileFallbackError"
+            nativeMessage.startsWith("Error loading configuration:") ||
+            nativeMessage.startsWith("failed to load bootstrap configuration")
           )
             throw new ConfigurationError(error.message, { cause: error });
-          // Native thread clients expose failed turns as Error(message), without an HTTP status field.
           if (
-            error instanceof Error &&
-            error.message.startsWith("unexpected status 401 Unauthorized:")
+            nativeMessage.startsWith("unexpected status 401 Unauthorized:") ||
+            nativeMessage.match(NATIVE_REFRESH_RECOVERY_PATTERN)?.index === 0 ||
+            nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index === 0
           ) {
             throw new AuthenticationRequiredError(error.message, {
               cause: error,

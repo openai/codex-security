@@ -23,6 +23,14 @@ import {
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 
 /** @internal */
+export const NATIVE_REFRESH_RECOVERY_PATTERN =
+  /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu;
+
+/** @internal */
+export const NATIVE_REFRESH_FAILURE_PATTERN =
+  /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu;
+
+/** @internal */
 export function environmentEntry(
   environment: ProcessEnvironment,
   requested: string,

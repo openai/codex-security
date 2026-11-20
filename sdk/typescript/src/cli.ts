@@ -122,6 +122,8 @@ import {
 import {
   accountStatus,
   nativeLogoutArgs,
+  NATIVE_REFRESH_RECOVERY_PATTERN,
+  NATIVE_REFRESH_FAILURE_PATTERN,
   prepareLoginConfig,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
@@ -13636,16 +13638,14 @@ function scanFailureMessage(
   }
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
-    /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
+    NATIVE_REFRESH_RECOVERY_PATTERN,
   )?.[0];
   if (nativeRefreshRecovery !== undefined)
     return error instanceof IncompleteScanError
       ? diagnosticValue(error)
       : nativeRefreshRecovery;
   const detail = `${diagnosticValue(error)}\n`;
-  const refreshFailure = message.match(
-    /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu,
-  );
+  const refreshFailure = message.match(NATIVE_REFRESH_FAILURE_PATTERN);
   if (refreshFailure) {
     const recovery =
       refreshFailure[1]?.toLowerCase() === "was already used"

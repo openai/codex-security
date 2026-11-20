@@ -1,3 +1,4 @@
+import { Codex } from "@openai/codex-sdk";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
@@ -1443,9 +1444,58 @@ describe("CLI workbench", () => {
       },
     );
 
-    test.each(["401", "permission fallback"])(
-      "stops on a native matcher %s after preserving earlier batches",
-      async (failure) => {
+    test.each(
+      (
+        [
+          [
+            "401",
+            "turn",
+            "unexpected status 401 Unauthorized: synthetic authentication failure",
+          ],
+          [
+            "wrapped 401",
+            "exit",
+            "Error: unexpected status 401 Unauthorized: synthetic authentication failure",
+          ],
+          [
+            "configuration",
+            "exit",
+            "Error loading configuration: invalid synthetic matcher setting",
+          ],
+          [
+            "bootstrap configuration",
+            "exit",
+            "Error: failed to load bootstrap configuration",
+          ],
+          [
+            "refresh",
+            "turn",
+            "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+          ],
+          [
+            "wrapped refresh",
+            "exit",
+            "Error: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+          ],
+          [
+            "session",
+            "turn",
+            "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
+          ],
+          [
+            "permission fallback",
+            "fallback",
+            "Configured value for `permission_profile` is disallowed by requirements; falling back from `synthetic_read_only` to required value `:workspace`.",
+          ],
+        ] as const
+      ).flatMap(([failure, mode, message]) =>
+        (mode === "fallback" ? ["profile"] : ["sdk", "profile"]).map(
+          (backend) => [failure, backend, mode, message] as const,
+        ),
+      ),
+    )(
+      "stops on a native matcher %s through %s after preserving earlier batches",
+      async (_failure, backend, mode, fatalMessage) => {
         await using temp = await scopedTemporaryDirectory(
           "match-all-native-turn-",
         );
@@ -1455,7 +1505,8 @@ describe("CLI workbench", () => {
           [
             "for await (const _ of process.stdin) {}",
             "const message = process.env.TURN_ERROR;",
-            'console.log(JSON.stringify(process.env.FALLBACK === "1" ? { type: "item.completed", item: { type: "error", message } } : { type: "turn.failed", error: { message } }));',
+            'if (process.env.MODE === "exit") { console.error(message); process.exit(1); }',
+            'console.log(JSON.stringify(process.env.MODE === "fallback" ? { type: "item.completed", item: { type: "error", message } } : { type: "turn.failed", error: { message } }));',
             "process.exit(0);",
           ].join("\n"),
         );
@@ -1467,12 +1518,6 @@ describe("CLI workbench", () => {
         ]);
         batches[0]!.afterFindings.length = 0;
         batches[3]!.afterFindings.length = 0;
-        const unauthorized =
-          "unexpected status 401 Unauthorized: synthetic authentication failure, url: https://example.invalid/v1/responses";
-        const fatalMessage =
-          failure === "401"
-            ? unauthorized
-            : "Configured value for `permission_profile` is disallowed by requirements; falling back from `synthetic_read_only` to required value `:workspace`.";
         const { stdout, stderr, runCli } = createCliTest(main);
         const code = await runCli(
           argv,
@@ -1480,21 +1525,24 @@ describe("CLI workbench", () => {
             onWorkbench,
             onMatch: async (input, options) => {
               const retry = input.after[0]?.occurrenceId === "retry";
-              const codex = await createProfileCodex(
-                {
-                  codexPathOverride: nodeCommand().command,
-                  env: {
-                    NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-                    FALLBACK:
-                      !retry && failure === "permission fallback" ? "1" : "",
-                    TURN_ERROR: retry
-                      ? `unexpected status 503 Service Unavailable: ${unauthorized}`
-                      : fatalMessage,
-                  },
+              const clientOptions = {
+                codexPathOverride: nodeCommand().command,
+                env: {
+                  NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+                  MODE: retry ? "turn" : mode,
+                  TURN_ERROR: retry
+                    ? `unexpected status 503 Service Unavailable: ${fatalMessage}`
+                    : fatalMessage,
                 },
-                "synthetic",
-                "synthetic_read_only",
-              );
+              };
+              const codex =
+                backend === "sdk"
+                  ? new Codex(clientOptions)
+                  : await createProfileCodex(
+                      clientOptions,
+                      "synthetic",
+                      "synthetic_read_only",
+                    );
               return matchScanFindings(input, { ...options, codex });
             },
           }),
