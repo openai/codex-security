@@ -597,6 +597,35 @@ describe("Cloud publication", () => {
     expect(requests).toBe(0);
   });
 
+  test("rejects an unsafe Cloud publish URL override before reading credentials or sending a scan", async () => {
+    const { scan, home, environment } = await fixture();
+    await rm(join(home, "auth.json"));
+    let requests = 0;
+    for (const [publishUrl, message] of [
+      [
+        "http://cloud.example.test/publish",
+        "CODEX_SECURITY_CLOUD_PUBLISH_URL requires HTTPS",
+      ],
+      ["https://user:secret@cloud.example.test/publish", "without credentials"],
+      ["https://cloud.example.test/publish?token=1", "without credentials"],
+      ["ftp://cloud.example.test/publish", "without credentials"],
+    ] as const) {
+      await expect(
+        publishScanToCloud(scan, {
+          environment: {
+            ...environment,
+            CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
+          },
+          fetch: async () => {
+            requests++;
+            return Response.json(receipt);
+          },
+        }),
+      ).rejects.toThrow(message);
+    }
+    expect(requests).toBe(0);
+  });
+
   test("reuses the dedicated Codex Security login and honors an explicit logout", async () => {
     const { scan, environment } = await fixture();
     const home = codexSecurityCredentialHome(environment);
