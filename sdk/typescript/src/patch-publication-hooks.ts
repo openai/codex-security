@@ -31,7 +31,7 @@ export function patchCredentialKind(
   )
     return "file";
   const secret =
-    /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(_FILE)?$/iu.exec(
+    /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE|SOPS_AGE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(_FILE)?$/iu.exec(
       name,
     );
   if (secret) return secret[1] ? "file" : "value";
@@ -39,7 +39,10 @@ export function patchCredentialKind(
     /^(?:AWS_BEARER_TOKEN_|POETRY_PYPI_TOKEN_|TF_TOKEN_|NuGetPackageSourceCredentials_)/iu.test(
       name,
     ) ||
-    /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$/iu.test(
+    /^(?:AWS_LOGIN_CACHE_DIRECTORY|AZURE_CONFIG_DIR|GCM_PLAINTEXT_STORE_PATH|GNUPGHOME|SOPS_AGE_(?:SSH_PRIVATE_)?KEY_CMD)$/iu.test(
+      name,
+    ) ||
+    /^(?:DATABASE_URL|DOCKER_(?:CONFIG|CERT_PATH)|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$/iu.test(
       name,
     )
   )

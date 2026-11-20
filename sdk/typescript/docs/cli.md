@@ -3102,8 +3102,12 @@ and a drive letter for an explicit store on Windows. The same rules cover
 `.netrc` and `_netrc` in the host user's effective home directory, the file
 selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
-URL-specific values. Delegates also have deny rules for the account's `.ssh`
-directory, GitHub CLI’s `hosts.yml` and `config.yml`, `.docker/config.json`,
+URL-specific values. The rules protect the account's `.ssh` directory,
+file-based SSH signing keys selected by `user.signingKey`, and the default
+GnuPG homes (`~/.gnupg` and Roaming AppData on Windows). Set `GNUPGHOME`
+to identify a custom GnuPG home. Its directory is protected and the selector
+is removed from delegate environments.
+They also cover GitHub CLI’s `hosts.yml` and `config.yml`, `.docker/config.json`,
 `.kube/config`, `.npmrc`, and `.pypirc`. The rules cover home-directory defaults
 and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. For pip, they cover
@@ -3131,7 +3135,12 @@ Terraform protection covers `TF_CLI_CONFIG_FILE`, `TERRAFORM_CONFIG`, the
 standard CLI configuration and login files, and existing `*.tfrc` and
 `*.tfrc.json` fragments in the user's Terraform configuration directory.
 Git delegates also run with Terraform's `TF_TOKEN_*` variables removed.
-The host transport retains access to these files.
+Additional protected locations include Git Credential Manager’s plaintext
+store and token caches, SOPS age identities, AWS CLI role, login and SSO
+caches, and Azure CLI token files. Package-manager rules cover credential
+files in the standard and selected Cargo, Gradle, Maven, Bundler, RubyGems,
+NuGet, Helm, Docker and Podman directories. The host transport retains access
+to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can

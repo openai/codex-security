@@ -12051,6 +12051,12 @@ async function patchPublicationDestination(
     repository?: string | null;
     crossRepository?: boolean;
   }[];
+  // Capture after trusted provider reads, which can migrate or refresh credentials.
+  // A branch include may select GitHub only after the patch changes branches.
+  if (dependencies.patchTransportAccess)
+    dependencies.patchTransportAccess.verifyGitHubConfig ??=
+      await captureGitHubConfig(repository, dependencies.environment);
+
   if (gitlab || !candidates.length)
     return {
       remote: source,
@@ -12093,12 +12099,6 @@ async function patchPublicationDestination(
     }
     if (hosted) break;
   }
-  // Capture after trusted provider reads, which can migrate or refresh credentials.
-  // A branch include may select GitHub only after the patch changes branches.
-  if (dependencies.patchTransportAccess)
-    dependencies.patchTransportAccess.verifyGitHubConfig ??=
-      await captureGitHubConfig(repository, dependencies.environment);
-
   return {
     remote,
     target,
@@ -12220,15 +12220,13 @@ async function patchTransportIdentity(
   const target = await realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (
       kind === "github-config" &&
+      !selected?.stamp &&
       ["ENOENT", "ENOTDIR"].includes(error.code ?? "")
     )
       return undefined;
     throw error;
   });
-  if (target === undefined) {
-    if (selected?.stamp) throw patchTransportChanged(kind);
-    return { target: path, stamp: "", kind };
-  }
+  if (target === undefined) return { target: path, stamp: "", kind };
   if (selected && target !== selected.target) throw patchTransportChanged(kind);
   const entry = await stat(target, { bigint: true });
   if (options.writers && entry.nlink > 1n && entry.isFile())

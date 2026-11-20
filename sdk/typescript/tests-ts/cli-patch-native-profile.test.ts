@@ -878,6 +878,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
+  const azure = join(operator, "selected azure");
+  const loginCache = join(operator, "selected login cache");
   const cloudDefault = "application_default_credentials.json";
   const legacyCloud = join(cloudConfig, "legacy_credentials", "fixture");
   await mkdir(legacyCloud, { recursive: true });
@@ -912,16 +914,24 @@ test("patch model and clean filters cannot read selected authentication files", 
       "BUNDLE_USER_CONFIG",
       "REGISTRY_AUTH_FILE",
       "SSL_CLIENT_CERT",
+      "SOPS_AGE_KEY_FILE",
+      "SOPS_AGE_SSH_PRIVATE_KEY_FILE",
     ].map((name) => [name, join(operator, name)]),
   );
   const pointers = {
     ...selectedFiles,
     KUBECONFIG: clusterList(clusterFiles),
     DOCKER_CONFIG: registry,
+    DOCKER_CERT_PATH: join(operator, "docker tls"),
     GH_CONFIG_DIR: gh,
+    GNUPGHOME: join(operator, "selected signing home"),
     GLAB_CONFIG_DIR: glab,
+    GCM_PLAINTEXT_STORE_PATH: join(operator, "selected plaintext store"),
+    SOPS_AGE_KEY: "synthetic age identity",
     PIP_CONFIG_FILE: join(operator, "selected pip config"),
     PIP_CLIENT_CERT: "~/pip client.pem",
+    AZURE_CONFIG_DIR: azure,
+    AWS_LOGIN_CACHE_DIRECTORY: "~/${LOGIN_CACHE_NAME}",
     BOTO_CONFIG: "${HOME}/selected boto.cfg",
     PGPASSFILE: pgpass,
     PGSERVICEFILE: pgservice,
@@ -943,10 +953,19 @@ test("patch model and clean filters cannot read selected authentication files", 
     CODEX_HOME: operator,
     CODEX_SECURITY_STATE_DIR: operator,
     FILTER_FIXTURE_SETTING: "from host",
+    LOGIN_CACHE_NAME: "selected login cache",
     AWS_CONFIG_FILE: awsConfig,
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     CLOUDSDK_CONFIG: cloudConfig,
     APPDATA: appdata,
+    DOTNET_CLI_HOME: join(operator, "dotnet"),
+    CARGO_HOME: join(operator, "cargo"),
+    GRADLE_USER_HOME: join(operator, "gradle"),
+    MAVEN_HOME: join(operator, "maven"),
+    BUNDLE_USER_HOME: join(operator, "bundle"),
+    HELM_CONFIG_HOME: join(operator, "helm"),
+    XDG_DATA_HOME: join(operator, "data"),
+    XDG_RUNTIME_DIR: join(operator, "runtime"),
     VIRTUAL_ENV: join(operator, "venv"),
     PGSYSCONFDIR: operator,
     NETRC: selectedNetrc,
@@ -974,6 +993,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     );
   const paths = settings.map((_, i) => join(operator, `auth ${i}.txt`));
   const netrc = join(operator, ".netrc");
+  const signingKey = join(operator, "signing identity");
   const proxyKey = join(operator, "proxy key.pem");
   const scopedProxyKey = join(operator, "scoped proxy key.pem");
   const clientCert = join(operator, "origin identity.pem");
@@ -981,10 +1001,25 @@ test("patch model and clean filters cannot read selected authentication files", 
   const existing = [
     ...paths.slice(0, 2),
     netrc,
+    signingKey,
+    signingKey + ".pub",
     proxyKey,
     clientCert,
     join(operator, ".pypirc"),
+    join(operator, ".gnupg", "private-keys-v1.d", "default.key"),
+    join(pointers.GNUPGHOME, "private-keys-v1.d", "selected.key"),
+    ...(process.platform === "win32"
+      ? [join(appdata, "gnupg", "private-keys-v1.d", "roaming.key")]
+      : []),
     pointers.PIP_CONFIG_FILE,
+    join(operator, ".gcm", "store", "service", "account"),
+    join(operator, ".gcm", "msal.cache"),
+    join(operator, ".gcm", "msal", "app.cache"),
+    join(operator, ".local", ".IdentityService", "msal.cache"),
+    join(operator, "configured store", "service", "account"),
+    join(pointers.GCM_PLAINTEXT_STORE_PATH, "service", "account"),
+    join(loginCache, "session.json"),
+    join(azure, "msal_token_cache.json"),
     join(cloudConfig, "credentials.db"),
     join(cloudConfig, "credentials.db-wal"),
     join(legacyCloud, ".boto"),
@@ -1022,11 +1057,23 @@ test("patch model and clean filters cannot read selected authentication files", 
     selectedNetrc,
     join(awsDirectory, "config"),
     join(awsDirectory, "credentials"),
+    ...["cli", "sso", "login"].map((client) =>
+      join(awsDirectory, client, "cache", "session.json"),
+    ),
+    join(loginCache, "new session.json"),
+    join(operator, ".azure", "msal_token_cache.json"),
+    join(operator, ".azure", "service_principal_entries.json"),
+    join(azure, "accessTokens.json"),
+    join(azure, "msal_token_cache.bin"),
+    join(azure, "service_principal_entries.json"),
+    join(azure, "service_principal_entries.bin"),
     awsConfig,
     awsCredentials,
     ...clusterFiles,
     policyCluster,
     join(registry, "config.json"),
+    join(operator, ".docker", "key.pem"),
+    join(pointers.DOCKER_CERT_PATH, "key.pem"),
     ...ghFiles(defaultGh),
     ...ghFiles(join(environment.XDG_CONFIG_HOME, "gh")),
     ...(process.platform === "win32"
@@ -1056,6 +1103,17 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(operator, "pip client.pem"),
     join(operator, "selected boto.cfg"),
     join(environment.XDG_CONFIG_HOME, "pip", pipConfig),
+    join(environment.XDG_CONFIG_HOME, "sops", "age", "keys.txt"),
+    join(
+      process.platform === "win32"
+        ? appdata
+        : process.platform === "darwin"
+          ? join(operator, "Library", "Application Support")
+          : join(operator, ".config"),
+      "sops",
+      "age",
+      "keys.txt",
+    ),
     join(environment.VIRTUAL_ENV, pipConfig),
     join(operator, process.platform === "win32" ? "pip" : ".pip", pipConfig),
     cloudKey,
@@ -1071,6 +1129,37 @@ test("patch model and clean filters cannot read selected authentication files", 
         ]
       : []),
     join(ssh, "id_rsa"),
+    join(operator, ".dockercfg"),
+    join(operator, ".cargo", "credentials"),
+    join(environment.CARGO_HOME, "credentials.toml"),
+    join(operator, ".gradle", "gradle.properties"),
+    join(environment.GRADLE_USER_HOME, "gradle.properties"),
+    join(operator, ".m2", "settings.xml"),
+    join(operator, ".m2", "settings-security.xml"),
+    join(operator, ".m2", "settings-security4.xml"),
+    join(environment.MAVEN_HOME, "conf", "settings.xml"),
+    join(operator, ".bundle", "config"),
+    join(environment.BUNDLE_USER_HOME, "config"),
+    join(operator, ".gem", "credentials"),
+    join(operator, ".local", "share", "gem", "credentials"),
+    join(environment.XDG_DATA_HOME, "gem", "credentials"),
+    join(
+      environment.XDG_DATA_HOME,
+      "MicrosoftCredentialProvider",
+      "SessionTokenCache.dat",
+    ),
+    join(operator, ".nuget", "NuGet", "NuGet.Config"),
+    join(environment.DOTNET_CLI_HOME, ".nuget", "NuGet", "NuGet.Config"),
+    join(environment.HELM_CONFIG_HOME, "registry", "config.json"),
+    join(environment.XDG_RUNTIME_DIR, "containers", "auth.json"),
+    ...[join(operator, ".config"), environment.XDG_CONFIG_HOME].flatMap(
+      (dir) => [
+        join(dir, "gem", "gemrc"),
+        join(dir, "NuGet", "NuGet.Config"),
+        join(dir, "helm", "repositories.yaml"),
+        join(dir, "containers", "auth.json"),
+      ],
+    ),
     join(operator, ".docker", "config.json"),
     join(operator, ".kube", "config"),
     join(operator, ".npmrc"),
@@ -1084,9 +1173,11 @@ test("patch model and clean filters cannot read selected authentication files", 
     await writeFile(path, contents[i]!, { mode: 0o600, flag: "wx" });
   };
   for (const i of existing.keys()) await createInput(i);
+  await writeFile(join(azure, "config"), "Azure settings");
   const neighbor = join(registry, "ordinary-sibling.txt");
   await writeFile(neighbor, "ordinary sibling");
   const readFiles = () => `const fs = require("node:fs");
+if (fs.readFileSync(${JSON.stringify(join(azure, "config"))}, "utf8") !== "Azure settings") throw new Error("Cannot read ordinary Azure settings");
 if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
   throw new Error("Cannot read the ordinary sibling");
@@ -1235,6 +1326,9 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
       }
       for (const [setting, value] of [
         ...settings.map((setting, i) => [setting, values[i]!] as const),
+        ["gpg.format", "ssh"],
+        ["user.signingKey", "~/signing identity.pub"],
+        ["credential.plaintextStorePath", join(operator, "configured store")],
         ["http.sslCert", "~/origin identity.pem"],
         [
           "http.https://proxy.example.invalid/.proxySSLCert",

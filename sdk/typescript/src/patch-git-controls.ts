@@ -579,6 +579,11 @@ function clientConfigRoots(
   return roots;
 }
 
+function selectStoreDirectory(paths: Set<string>, path: string) {
+  paths.add(path);
+  paths.add(normalize(path));
+}
+
 function credentialPointers() {
   return { files: new Set<string>(), directories: new Set<string>() };
 }
@@ -621,6 +626,7 @@ async function collectCredentialPointers(
       paths.directories,
     );
   };
+  const awsCaches = new Set<string>();
   const selectPgDefaults = (home: string) => {
     selectFile(home, process.platform === "win32" ? "pgpass.conf" : ".pgpass");
     selectFile(home, ".pg_service.conf");
@@ -675,14 +681,35 @@ async function collectCredentialPointers(
         ? relativeFile(home, join("AppData", "Roaming", "postgresql"))
         : home,
     );
+    selectFile(home, ".gnupg", paths.directories);
+    if (process.platform === "win32")
+      selectFile(home, join("AppData", "Roaming", "gnupg"), paths.directories);
     protectCodexHome(home, ".codex");
+    selectFile(home, join(".gcm", "store"), paths.directories);
     selectGcloud(home, join(".config", "gcloud"));
+    for (const client of ["cli", "sso", "login"])
+      selectFile(home, join(".aws", client, "cache"), awsCaches);
+    const loginCache = environment["AWS_LOGIN_CACHE_DIRECTORY"];
+    if (loginCache !== undefined)
+      awsCaches.add(
+        expandCredentialPath(
+          "AWS_LOGIN_CACHE_DIRECTORY",
+          loginCache,
+          home,
+          environment,
+        ),
+      );
     selectGh(join(home, ".config", "gh"));
     for (const file of [
-      join(".docker", "config.json"),
+      ".dockercfg",
+      ".gemrc",
+      join(".gem", "credentials"),
       join(".kube", "config"),
       ".npmrc",
       ".pypirc",
+      join(".gcm", "msal.cache"),
+      join(".gcm", "msal", "app.cache"),
+      join(".local", ".IdentityService", "msal.cache"),
       ".boto",
       join(process.platform === "win32" ? "pip" : ".pip", pipConfig),
     ])
@@ -708,10 +735,85 @@ async function collectCredentialPointers(
       if (path) selected.add(path);
     }
   }
+  const nuget = "NuGet/NuGet.Config";
+  const nugetCache = "MicrosoftCredentialProvider/SessionTokenCache.dat";
+  const maven = [
+    "settings.xml",
+    "settings-security.xml",
+    "settings-security4.xml",
+  ];
+  const helm = ["registry/config.json", "repositories.yaml"];
+  const helmConfig = helm.map((file) => join("helm", file));
+  const podmanAuth = "containers/auth.json";
+  // Client homes also contain executables and caches. Protect just these
+  // files under each default and each directory selected by the operator.
+  const clientStores: [string | null, string[], ...string[]][] = [
+    [
+      ".azure",
+      ["AZURE_CONFIG_DIR"],
+      "accessTokens.json",
+      "msal_token_cache.json",
+      "msal_token_cache.bin",
+      "service_principal_entries.json",
+      "service_principal_entries.bin",
+    ],
+    [".docker", ["DOCKER_CONFIG"], "config.json", "cert.pem", "key.pem"],
+    [null, ["DOCKER_CERT_PATH"], "cert.pem", "key.pem"],
+    [".cargo", ["CARGO_HOME"], "credentials", "credentials.toml"],
+    [".gradle", ["GRADLE_HOME", "GRADLE_USER_HOME"], "gradle.properties"],
+    [".m2", [], ...maven],
+    [null, ["MAVEN_HOME", "M2_HOME"], "conf/settings.xml"],
+    [".bundle", ["BUNDLE_USER_HOME", "BUNDLE_APP_CONFIG"], "config"],
+    [".local/share", ["XDG_DATA_HOME"], "gem/credentials", nugetCache],
+    [".", ["DOTNET_CLI_HOME"], join(".nuget", nuget)],
+    [
+      ".config",
+      ["XDG_CONFIG_HOME"],
+      nuget,
+      "gem/gemrc",
+      podmanAuth,
+      ...helmConfig,
+    ],
+    [null, ["HELM_CONFIG_HOME"], ...helm],
+    [null, ["XDG_RUNTIME_DIR"], podmanAuth],
+  ];
+  if (process.platform === "win32")
+    clientStores.push(
+      ["AppData/Local", ["LOCALAPPDATA"], nugetCache],
+      ["AppData/Roaming", ["APPDATA"], nuget, ...helmConfig],
+    );
+  if (process.platform === "darwin")
+    clientStores.push(
+      ["Library/Preferences", [], ...helmConfig],
+      ["Library/Application Support", [], nugetCache],
+    );
+  const entries = Object.entries(environment);
+  for (const [subdir, selectors, ...files] of clientStores) {
+    for (const [name, dir] of entries) {
+      if (!dir || !selectors.includes(name.toUpperCase())) continue;
+      for (const file of files) selectFile(dir, normalize(file));
+    }
+    if (subdir === null) continue;
+    for (const home of homes) {
+      if (home === undefined) continue;
+      for (const file of files) selectFile(home, join(subdir, file));
+    }
+  }
+  for (const file of (environment["GEMRC"] ?? "").split(delimiter))
+    if (file) selected.add(file);
+  if (process.platform === "linux" && process.getuid) {
+    const uid = String(process.getuid());
+    selectFile(join("/run/containers", uid), "auth.json");
+    selectFile(join("/run/user", uid), podmanAuth);
+  }
   if (environment["XDG_CONFIG_HOME"])
     selectGh(join(environment["XDG_CONFIG_HOME"], "gh"));
   if (process.platform === "win32") {
     const appData = environment["APPDATA"];
+    // Native GnuPG asks Windows for Roaming AppData and falls back to C:/gnupg.
+    paths.directories.add("C:\\gnupg");
+    for (const roaming of [appData, process.env["APPDATA"]])
+      if (roaming) selectFile(roaming, "gnupg", paths.directories);
     if (appData) {
       terraformHomes.add(appData);
       selectGh(join(appData, "GitHub CLI"));
@@ -729,6 +831,9 @@ async function collectCredentialPointers(
   for (const root of clientConfigRoots(environment, homes)) {
     selectFile(root, join("glab-cli", "config.yml"));
     selectFile(root, join("pip", pipConfig));
+    selectFile(root, join("sops", "age", "keys.txt"));
+    if (process.platform === "win32")
+      selectFile(root, join(".IdentityService", "msal.cache"));
   }
   if (process.platform !== "win32") {
     selectFile("/etc", pipConfig);
@@ -740,6 +845,19 @@ async function collectCredentialPointers(
   ])
     if (prefix) selectFile(prefix, pipConfig);
   // Capture physical targets too when a profile is a link into a dotfile tree.
+  for (const dir of awsCaches) {
+    // An explicitly empty AWS_LOGIN_CACHE_DIRECTORY stores SHA-256 session files in cwd.
+    const local = resolve(checkout, dir) === resolve(checkout);
+    if (!local) paths.directories.add(dir);
+    try {
+      await selectFragments(
+        dir || ".",
+        local ? /^[0-9a-f]{64}\.json$/u : /\.json$/u,
+      );
+    } catch (error) {
+      if (!hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) throw error;
+    }
+  }
   for (const dir of profileDirs)
     await selectFragments(dir, /\.config\.toml(?:\.tmp)?$/iu);
   for (const home of terraformHomes) {
@@ -783,7 +901,7 @@ async function collectCredentialPointers(
     }
     return expanded && normalize(expanded);
   };
-  for (const [name, value] of Object.entries(environment)) {
+  for (const [name, value] of entries) {
     if (typeof value !== "string" || !value) continue;
     const variable = name.toUpperCase();
     if (patchCredentialKind(variable) === "file") {
@@ -797,14 +915,26 @@ async function collectCredentialPointers(
       continue;
     }
     switch (variable) {
+      case "GNUPGHOME": {
+        // GnuPG interprets C:name as C:\name on Windows.
+        const dir =
+          process.platform === "win32"
+            ? value.replace(/^([a-z]:)(?![\\/])/iu, "$1\\")
+            : value;
+        selectStoreDirectory(paths.directories, dir);
+        if (dir === "~" || dir.startsWith("~/"))
+          for (const home of homes)
+            if (home !== undefined) paths.directories.add(home + dir.slice(1));
+        break;
+      }
       case "KUBECONFIG":
         for (const path of goPathList(value)) if (path) selected.add(path);
         break;
+      case "GCM_PLAINTEXT_STORE_PATH":
+        selectStoreDirectory(paths.directories, value);
+        break;
       case "GLAB_CONFIG_DIR":
         selectFile(value, "config.yml");
-        break;
-      case "DOCKER_CONFIG":
-        selectFile(value, "config.json");
         break;
       case "CLOUDSDK_CONFIG":
         selectGcloud(value);
@@ -1638,6 +1768,12 @@ export async function capturePatchGitControls(
       if (file) await protectTransportFile(checkout, file);
       return;
     }
+    if (/^credential(?:\..*)?\.plaintextstorepath$/iu.test(key)) {
+      const pointers = credentialPointers();
+      selectStoreDirectory(pointers.directories, configPath(value));
+      await protectPointers(checkout, pointers);
+      return;
+    }
     if (!/^credential(?:\..*)?\.helper$/iu.test(key)) return;
     if (value === "store") {
       hostMayReadStore = true;
@@ -1713,6 +1849,15 @@ export async function capturePatchGitControls(
       if (process.platform !== "win32" && file === "/dev/null") continue;
       hostMayReadStore = true;
       const includeDirectory = directories.has(file);
+      // Like Git, GnuPG expands ~user through the Unix password database.
+      if (
+        includeDirectory &&
+        process.platform !== "win32" &&
+        /^~[^/]/u.test(file)
+      ) {
+        const expanded = await expandConfigurationPath(file);
+        if (expanded) await protectStore(expanded, true);
+      }
       await protectTransportFile(checkout, file, includeDirectory);
       // Commands may also inherit the original caller's subdirectory.
       if (checkout === root && directory !== root && !isAbsolute(file))
@@ -1775,6 +1920,10 @@ export async function capturePatchGitControls(
       });
     }
     const activeConfigurations = new Set<string>();
+    let sshSigning = settings.some(
+      ({ key, value }) => key === "gpg.format" && value === "ssh",
+    );
+    const signingKeys = new Set<string>();
     if (
       mode !== "resumed-hook" &&
       settings.some(({ key }) => /^hook\..+\.event$/u.test(key))
@@ -1792,6 +1941,11 @@ export async function capturePatchGitControls(
       if (value) delegateFilters.add(key);
     }
     for (const { scope, origin, key, value } of settings) {
+      if (
+        key === "user.signingkey" &&
+        (await userSelectedConfig(scope, configPath(origin), checkout))
+      )
+        signingKeys.add(value);
       if (automaticPublication && value && snapshotFilter(key))
         nonemptyFilters.add(key);
       if (origin.startsWith("file:")) {
@@ -1800,7 +1954,9 @@ export async function capturePatchGitControls(
           (inline ||
             key === "core.askpass" ||
             httpCredentialFile.test(key) ||
-            /^credential(?:\..*)?\.helper$/iu.test(key)) &&
+            /^credential(?:\..*)?\.(?:helper|plaintextstorepath)$/iu.test(
+              key,
+            )) &&
           (await userSelectedConfig(scope, configPath(origin), checkout))
         ) {
           externalInlineAuthentication ||= inline;
@@ -1890,7 +2046,9 @@ export async function capturePatchGitControls(
           conditionalFilters.add(key);
           if (value) nonemptyFilters.add(key);
         }
+        sshSigning ||= key === "gpg.format" && value === "ssh";
         if (!insideSelectedRoots(control.canonical)) {
+          if (key === "user.signingkey") signingKeys.add(value);
           externalInlineAuthentication ||= hasInlineGitAuthentication(
             key,
             value,
@@ -1933,6 +2091,20 @@ export async function capturePatchGitControls(
         key.startsWith("includeif."),
         await userSelectedConfig(scope, origin, checkout),
       );
+    }
+    // A branch switch can activate a conditional SSH format or key path.
+    if (sshSigning && mode !== "external") {
+      for (const key of signingKeys) {
+        if (!key || key.startsWith("key::") || key.startsWith("ssh-")) continue;
+        const file = await expandConfigurationPath(configPath(key), checkout);
+        if (!file) continue;
+        hostMayReadStore = true;
+        await protectTransportFile(checkout, file);
+        // ssh-keygen -Y sign strips the public key or certificate suffix.
+        const privateKey = file.replace(/(.)(?:-cert)?\.pub$/su, "$1");
+        if (privateKey !== file)
+          await protectTransportFile(checkout, privateKey);
+      }
     }
     if (mode === "resumed-hook" && !projectConfig) return;
     for (const path of activeConfigurations) await rememberConfiguration(path);
