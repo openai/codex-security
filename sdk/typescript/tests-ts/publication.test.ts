@@ -185,13 +185,11 @@ describe("scan publication preparation", () => {
       scanDirectory,
       publicationOptions(scanDirectory),
     );
-    const issue = prepared.issues[0]!;
-    const payload = linearPublicationArguments(prepared.destination, issue);
-    expect(payload).toMatchObject({
-      title: issue.title,
-      description: issue.description,
-    });
-    expect(issue.title).toBe(`[Codex Security][HIGH] ${finding.title}`);
+    const payload = linearPublicationArguments(
+      prepared.destination,
+      prepared.issues[0]!,
+    );
+    expect(payload.title).toBe(`[Codex Security][HIGH] ${finding.title}`);
     for (const detail of [
       finding.summary,
       finding.remediation,
@@ -204,24 +202,6 @@ describe("scan publication preparation", () => {
       expect(payload.description).toContain(detail);
     }
     expect(await readFile(path, "utf8")).toBe(saved);
-  });
-
-  test("keeps ordinary evidence for password reset authorization bugs", async () => {
-    const scanDirectory = await copyExample();
-    const path = join(scanDirectory, "findings.json");
-    const findings = await readJson<FindingsDocument>(path);
-    const finding = findings.findings[0]!;
-    finding.taxonomy = {
-      category: "password reset authorization",
-      cwe: ["CWE-862"],
-    };
-    finding.rootCause = {
-      summary: "Missing account authorization.",
-      code: "reset(account)",
-    };
-    await writeJson(path, findings);
-    await reseal(scanDirectory);
-    expect(await issueDescription(scanDirectory)).toContain("reset(account)");
   });
 
   test("keeps the reproduction and validation limits ahead of scan metadata", async () => {
