@@ -1310,6 +1310,18 @@ async function canonicalPath(path: string): Promise<string> {
   return `${await canonicalPath(parent)}${path.slice(parent.length)}`;
 }
 
+function gitConfigFile(directory: string, file: string | undefined) {
+  if (
+    !file ||
+    file === "-" ||
+    (process.platform === "win32" && file.toUpperCase() === "NUL")
+  )
+    return undefined;
+  return process.platform === "win32"
+    ? resolve(directory, file)
+    : relativeFile(directory, file);
+}
+
 async function directoryLinkEntry(
   path: string,
   identity: { dev: bigint; ino: bigint },
@@ -2200,21 +2212,39 @@ export async function capturePatchGitControls(
         await rememberHook(relativeFile(hooks, hook));
     };
     const inspectedIncludes = new Set<string>();
+    type ConfigSource = "active" | "conditional" | "selector";
     const captureInclude = async (
       relativeTo: string,
       value: string,
-      optional: boolean,
+      source: ConfigSource,
       userSelected: boolean,
     ): Promise<void> => {
       const rawPath = configPath(value);
       if (rawPath.length === 0) return;
-      const path = await expandConfigurationPath(rawPath, checkout, optional);
+      const path = await expandConfigurationPath(
+        rawPath,
+        checkout,
+        source !== "active",
+      );
       if (path === undefined) return;
-      const includePath = relativeFile(relativeTo, path);
-      if (projectConfig) expandedIncludes.set(value, path);
+      if (projectConfig && source !== "selector")
+        expandedIncludes.set(value, path);
+      await inspectFile(relativeFile(relativeTo, path), source, userSelected);
+    };
+    const inspectFile = async (
+      includePath: string,
+      source: ConfigSource,
+      userSelected: boolean,
+    ) => {
+      const optional = source !== "active";
+      const selector = source === "selector";
+      const origin = dirname(includePath);
+      let canonical: string;
+      let contents: Buffer | null | undefined;
       try {
+        canonical = await canonicalPath(includePath);
         if (
-          !insideSelectedRoots(await canonicalPath(includePath)) &&
+          !insideSelectedRoots(canonical) &&
           (!userSelected ||
             (await directoryLinks(includePath)).some((link) =>
               insideSelectedRoots(dirname(link)),
@@ -2223,7 +2253,15 @@ export async function capturePatchGitControls(
           throw new Error(
             `Checkout requested ${optional ? "a conditional" : "an active"} include outside the selected Git roots: ${includePath}`,
           );
-        await rememberConfiguration(includePath, !optional, optional);
+        if (selector) {
+          // GIT_CONFIG affects git-config consumers such as LFS. Inspect its
+          // credentials without freezing ordinary selected checkout files.
+          if (!(await stat(canonical).catch(missing))?.isFile()) return;
+          contents = await readFile(canonical);
+        } else {
+          await rememberConfiguration(includePath, !optional, optional);
+          contents = controlPaths.get(includePath)!.contents;
+        }
       } catch (error) {
         // Active includes already passed Git's normal --includes read above.
         if (optional && hasErrorCode(error, "EACCES", "ELOOP")) {
@@ -2232,32 +2270,40 @@ export async function capturePatchGitControls(
         }
         throw error;
       }
-      if (!optional) return;
-      const control = controlPaths.get(includePath)!;
-      if (!Buffer.isBuffer(control.contents)) return;
-      const origin = dirname(includePath);
-      const identity = `${control.canonical}\0${await canonicalPath(origin)}`;
+      if (!optional || !Buffer.isBuffer(contents)) return;
+      const identity = `${source}\0${canonical}\0${await canonicalPath(origin)}`;
       if (inspectedIncludes.has(identity)) return;
       inspectedIncludes.add(identity);
-      const entries = await readConfig(control.contents);
-      if (!entries) return;
+      const entries = await readConfig(contents);
+      if (!entries) {
+        if (selector) await protectStore(includePath);
+        return;
+      }
       for (const entry of entries) {
         const { key, value = "" } = parseConfigEntry(entry);
-        if (automaticPublication && snapshotFilter(key)) {
+        if (!selector && automaticPublication && snapshotFilter(key)) {
           // Leaving a branch can remove an empty override and activate a
           // nonempty command that was present earlier in Git's config order.
           conditionalFilters.add(key);
           if (value) nonemptyFilters.add(key);
         }
         sshSigning ||= key === "gpg.format" && value === "ssh";
-        if (!insideSelectedRoots(control.canonical)) {
+        if (selector || !insideSelectedRoots(canonical)) {
           if (key === "user.signingkey") signingKeys.add(value);
-          externalInlineAuthentication ||= hasInlineGitAuthentication(
-            key,
-            value,
-          );
+          if (hasInlineGitAuthentication(key, value)) {
+            externalInlineAuthentication = true;
+            if (selector) await protectStore(includePath);
+          }
           await captureCredentialSource(checkout, key, value, "file");
         }
+        if (includeSetting.test(key))
+          await captureInclude(
+            origin,
+            value,
+            source,
+            userSelected && !insideSelectedRoots(canonical),
+          );
+        if (selector) continue;
         recordConfiguredHook(
           publicationHooks,
           configPath(key),
@@ -2269,20 +2315,19 @@ export async function capturePatchGitControls(
           /^filter\..*\.(clean|smudge|process)$/su.test(key)
         ) {
           hasConditionalFilters = true;
-          if (!userSelected || insideSelectedRoots(control.canonical))
+          if (!userSelected || insideSelectedRoots(canonical))
             branchFilterSettings.add(configPath(key));
         }
         if (key === "core.hookspath" && mode !== "resumed-hook")
           await captureHooks(configPath(value));
-        else if (includeSetting.test(key))
-          await captureInclude(
-            origin,
-            value,
-            true,
-            userSelected && !insideSelectedRoots(control.canonical),
-          );
       }
     };
+    const file = environmentEntry(environment, "GIT_CONFIG");
+    if (file && mode !== "external")
+      for (const base of new Set([checkout, requestedDirectory])) {
+        const path = gitConfigFile(base, file);
+        if (path) await inspectFile(path, "selector", true);
+      }
     for (const { scope, origin, key, value } of settings) {
       if (!includeSetting.test(key)) continue;
       const relativeTo = origin.startsWith("file:")
@@ -2291,7 +2336,7 @@ export async function capturePatchGitControls(
       await captureInclude(
         relativeTo,
         value,
-        key.startsWith("includeif."),
+        key.startsWith("includeif.") ? "conditional" : "active",
         await userSelectedConfig(scope, origin, checkout),
       );
     }
