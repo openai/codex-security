@@ -43,6 +43,10 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     )?.status,
     "succeeded",
   );
+  const cause =
+    "The query uses request-controlled text without parameterization.";
+  // The persisted schema admits BOM-only text, which the evidence gate treats as blank.
+  const blank = "\uFEFF";
   for (const worker of [...store.workers.values()]) {
     if (!completedIteration && worker.kind === "dedup") {
       store.workers.delete(worker.id);
@@ -51,6 +55,7 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     const saved = await readJson(worker.resultManifestPath!);
     for (const finding of saved.findings) {
       finding.validation = {
+        method: blank,
         result: "Observed in the saved run.",
         evidenceRefs: ["query-sink"],
       };
@@ -60,6 +65,8 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
         evidenceRefs: ["query-sink"],
       };
       finding.rootCause.evidenceRefs = [finding.codeEvidence[0].id];
+      if (!completedIteration) finding.rootCause = blank;
+      else if (!withLaterBatch) finding.rootCause.summary = blank;
       finding.codeEvidence[0].endLine = finding.codeEvidence[0].startLine;
       if (withLaterBatch && worker.kind === "dedup") {
         // A pre-upgrade checkpoint can retain multiple source groups from one repair.
@@ -135,7 +142,7 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       assert.deepEqual(excludePaths, ["generated"]);
       return JSON.stringify({
         codeEvidence: [{ ...finding.codeEvidence[0], endLine: undefined }],
-        rootCause: finding.rootCause.summary,
+        rootCause: cause,
         attackPath: { dataflow: "The request reaches the query." },
         validation: {
           method: "Static analysis",
@@ -186,10 +193,12 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       : { summary: "The request reaches the query." }),
     evidenceRefs: ["query-sink"],
   });
-  assert.deepEqual(repaired.rootCause, {
-    summary: "The query uses request-controlled text without parameterization.",
-    evidenceRefs: ["query-sink"],
-  });
+  assert.deepEqual(
+    repaired.rootCause,
+    completedIteration
+      ? { summary: cause, evidenceRefs: ["query-sink"] }
+      : cause,
+  );
   assert.equal(repaired.codeEvidence?.[0].endLine, 1);
   assert.equal(
     store.iterations.at(-1)!.workerIds.length,
