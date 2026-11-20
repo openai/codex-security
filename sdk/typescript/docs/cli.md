@@ -3241,7 +3241,8 @@ Publication checks the source of `core.sshCommand` and binds its executable
 before Git probes a host or examines remote branches. Keep SSH launchers,
 identity files and explicit configuration files outside directories the patch
 can write. Use existing files and absolute paths for explicit file operands such
-as `-i` and `-F`. SSH and its configuration probes run from the filesystem
+as `-i` and `-F`. Keep each symlink in those paths outside the checkout.
+SSH and its configuration probes run from the filesystem
 volume root, with checkout directories excluded from their command search path. For a
 command that needs shell expansion, use an operator-owned wrapper on a trusted
 PATH. Virtualenv interpreters need a protected launcher path to retain their

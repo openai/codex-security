@@ -13595,14 +13595,11 @@ async function pinPublicationCommand(
   }
   const bindFile = async (file: string | undefined, knownHosts = false) => {
     if (!file || !isAbsolute(file)) throw unsupported();
+    // Check the path supplied by the operator before pinning its final file.
+    // A checkout link could otherwise hide an SSH config from credential discovery.
+    const host = await trustedHostPathResolver(directory, protectedRoots);
     const physical = await realpath(file).catch(() => undefined);
-    if (
-      !physical ||
-      protectedRoots.some(
-        (protectedRoot) => !isOutsidePath(relative(protectedRoot, physical)),
-      )
-    )
-      throw unsupported();
+    if (!physical || host(file) !== physical) throw unsupported();
     requireStablePatchTransportTarget(
       physical,
       dependencies.patchTransportAccess,
@@ -13615,11 +13612,6 @@ async function pinPublicationCommand(
     if (kind === "credential")
       dependencies.patchTransportAccess?.afterHook.add(physical);
     if (kind === "credential" && file !== physical) {
-      const resolveHostPath = await trustedHostPathResolver(
-        directory,
-        protectedRoots,
-      );
-      if (resolveHostPath(file) !== physical) throw unsupported();
       // Re-reading the Git settings on the patch branch must not retarget a
       // credential script through a directory that a model turn could edit.
       await bindPatchTransportFile(file, "file", dependencies);

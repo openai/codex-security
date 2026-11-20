@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   completePatches,
+  directoryLinkType,
   fixSavedFinding,
   publicationRepository,
   repositoryGit,
@@ -729,6 +730,8 @@ test.each([
   "checkout-relative",
   "operator-absolute",
   "checkout-include",
+  "checkout-linked-config",
+  "operator-linked-config",
   "checkout-provider",
   "checkout-proxy",
   "checkout-match",
@@ -742,7 +745,7 @@ test.each([
     const { directory, git } = await publicationRepository(fixtures);
     const external = await fixtures.create("patch-ssh-config-");
     const global = join(external, "gitconfig");
-    const config = join(external, "ssh_config");
+    let config = join(external, "ssh_config");
     const marker = join(external, "invoked");
     const name = "transport.cjs";
     const startup = {
@@ -830,6 +833,12 @@ test.each([
     git("commit", "-m", "Add synthetic repository SSH command");
     const sshCommand = (file: string) =>
       `ssh -F "${file.replaceAll("\\", "/")}"`;
+    if (location.endsWith("-linked-config")) {
+      const parent = location.startsWith("checkout-") ? directory : external;
+      const alias = join(parent, "ssh-settings");
+      await symlink(external, alias, directoryLinkType);
+      config = join(alias, "ssh_config");
+    }
     git("config", "--file", global, "core.sshCommand", sshCommand(config));
 
     // The raw SSH connection invokes both commands from this checkout.

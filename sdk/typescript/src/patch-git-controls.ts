@@ -786,12 +786,37 @@ function sshIdentityPaths(file: string, environment: NodeJS.ProcessEnv) {
   return paths;
 }
 
+async function sshTransportVolumes(
+  environment: NodeJS.ProcessEnv,
+  program?: string,
+) {
+  const roots = new Set([parse(process.execPath).root]);
+  if (process.platform !== "win32") return roots;
+  // Git for Windows can launch its own SSH instead of the one on PATH.
+  const programs = [program, environmentEntry(environment, "GIT_SSH")];
+  for (const dir of [
+    environmentEntry(environment, "GIT_EXEC_PATH"),
+    ...goPathList(environmentEntry(environment, "PATH") ?? ""),
+  ]) {
+    if (dir && isAbsolute(dir))
+      programs.push(join(dir, "ssh.exe"), join(dir, "git.exe"));
+  }
+  for (const file of new Set(programs)) {
+    if (!file || !isAbsolute(file)) continue;
+    const physical = await realpath(file).catch(() => undefined);
+    if (physical) roots.add(parse(physical).root);
+  }
+  return roots;
+}
+
 async function collectSshConfigIdentities(
   files: Set<string>,
   checkout: string,
   configs: ReadonlyMap<string, string | undefined>,
   environment: NodeJS.ProcessEnv,
+  program?: string,
 ) {
+  let volumes: Set<string> | undefined;
   const external = async (path: string) =>
     !inside(checkout, await realControlPath(path)) &&
     !(await directoryLinks(path)).some((link) =>
@@ -824,8 +849,25 @@ async function collectSshConfigIdentities(
           includes.push(...sshIdentityPaths(word, environment));
       if (keyword === "identityfile") {
         const file = sshIdentityFile(args);
-        if (file)
-          for (const key of sshIdentityPaths(file, environment)) files.add(key);
+        if (!file) continue;
+        for (const key of sshIdentityPaths(file, environment)) {
+          files.add(key);
+          // The bound SSH transport starts at its executable's volume root.
+          const root = parse(key).root;
+          const currentDrive =
+            process.platform === "win32" && /^[\\/]$/u.test(root);
+          if ((!currentDrive && isAbsolute(key)) || key.startsWith("~"))
+            continue;
+          volumes ??= await sshTransportVolumes(environment, program);
+          for (const volume of volumes) {
+            if (
+              root.endsWith(":") &&
+              !volume.toLowerCase().startsWith(root.toLowerCase())
+            )
+              continue;
+            files.add(httpCredentialPath(volume, key));
+          }
+        }
       }
     }
     return includes;
@@ -841,14 +883,24 @@ async function collectSshConfigIdentities(
     });
 }
 
+interface SshConfigDirectories {
+  checkout: string;
+  caller: string;
+}
+
 async function collectSshCommandIdentities(
   files: Set<string>,
   command: string,
   environment: NodeJS.ProcessEnv,
-  checkout: string,
+  { checkout, caller }: SshConfigDirectories,
 ) {
   // Read explicit operands without executing shell or SSH configuration.
   const words = splitCommand(command) ?? [];
+  const program = words[0];
+  const configs =
+    process.platform === "win32" && program && isAbsolute(program)
+      ? defaultSshConfigs(program, environment)
+      : new Map<string, string | undefined>();
   for (let index = 1; index < words.length; index++) {
     const option = /^-[46AaCfGgKkMNnqsTtVvXxYy]*([Fio])(.*)$/su.exec(
       words[index]!,
@@ -857,10 +909,10 @@ async function collectSshCommandIdentities(
     let file = option[2] || words[++index];
     if (option[1] === "F") {
       if (file && file.toLowerCase() !== "none") {
-        const configs = new Map<string, string | undefined>();
-        for (const path of sshIdentityPaths(file, environment))
-          configs.set(path, undefined);
-        await collectSshConfigIdentities(files, checkout, configs, environment);
+        for (const path of sshIdentityPaths(file, environment)) {
+          configs.set(relativeFile(checkout, path), undefined);
+          configs.set(relativeFile(caller, path), undefined);
+        }
       }
       continue;
     }
@@ -872,6 +924,13 @@ async function collectSshCommandIdentities(
     if (file)
       for (const path of sshIdentityPaths(file, environment)) files.add(path);
   }
+  await collectSshConfigIdentities(
+    files,
+    checkout,
+    configs,
+    environment,
+    program,
+  );
 }
 
 const npmGlobal = join("etc", "npmrc");
@@ -1011,8 +1070,8 @@ async function collectCredentialPointers(
   paths: ReturnType<typeof credentialPointers>,
   checkout: string,
   inherited: Readonly<Record<string, unknown>>,
+  operator: SshConfigDirectories | undefined,
   settings?: Readonly<Record<string, unknown>>,
-  operator = true,
 ): Promise<void> {
   const environment: NodeJS.ProcessEnv = Object.create(null);
   const key = (name: string) =>
@@ -1024,7 +1083,7 @@ async function collectCredentialPointers(
   if (operator)
     await collectSshConfigIdentities(
       selected,
-      checkout,
+      operator.checkout,
       defaultSshConfigs(undefined, environment),
       environment,
     );
@@ -1347,7 +1406,7 @@ async function collectCredentialPointers(
             selected,
             value,
             environment,
-            checkout,
+            operator,
           );
         break;
       case "NPM_CONFIG_PREFIX":
@@ -2130,9 +2189,15 @@ export async function capturePatchGitControls(
     if (disabled === "false") systemConfigurationPath = systemConfig;
   }
   const file = environmentEntry(environment, "GIT_CONFIG");
+  const sshDirectories = {
+    // A resumed hook can start in a component. The entire enclosing
+    // checkout remains repository-controlled when reading SSH config.
+    checkout: mode === "resumed-hook" ? await setupDirectory(root) : root,
+    caller: requestedDirectory,
+  };
   const filterRoot =
     file && mode === "resumed-hook" && !isAbsolute(file)
-      ? await setupDirectory(root)
+      ? sshDirectories.checkout
       : root;
   const insideSelectedRoots = (path: string): boolean =>
     inside(root, path) ||
@@ -2222,7 +2287,7 @@ export async function capturePatchGitControls(
         pointers.files,
         configPath(value),
         environment,
-        root,
+        sshDirectories,
       );
       await protectPointers(checkout, pointers);
       return;
@@ -2301,12 +2366,18 @@ export async function capturePatchGitControls(
   };
   const inheritedPointers = credentialPointers();
   if (mode !== "external") {
-    await collectCredentialPointers(inheritedPointers, root, environment);
+    await collectCredentialPointers(
+      inheritedPointers,
+      root,
+      environment,
+      sshDirectories,
+    );
     if (shellSettings)
       await collectCredentialPointers(
         inheritedPointers,
         root,
         environment,
+        sshDirectories,
         shellSettings,
       );
   }
@@ -3602,8 +3673,8 @@ export async function capturePatchGitControls(
             added,
             root,
             environment,
+            source === settings.at(-1) ? sshDirectories : undefined,
             source,
-            source === settings.at(-1),
           );
       for (const file of inheritedPointers.files) added.files.delete(file);
       for (const dir of inheritedPointers.directories)
