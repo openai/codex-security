@@ -149,9 +149,57 @@ async function fixture(extraFiles: Record<string, string> = {}) {
   };
 }
 
+test("binds each argument frame to its reviewed source and pins the published revision", async () => {
+  await using f = await fixture();
+  const scope = reviewScopes([f.discovery])[0]!;
+  f.use.trace = [
+    {
+      kind: "source",
+      label: "Request body",
+      site: { path: "secondary.js", line: 2 },
+      argument: "request.body",
+    },
+  ];
+  f.use.proof.sink!.argument = "request.body";
+  await expect(
+    verifyProposedUse(f.path, scope, f.use, signal, true),
+  ).rejects.toThrow(/trace/u);
+  f.use.trace[0] = {
+    kind: "source",
+    label: "Request body",
+    site: { path: "app.js", line: 2 },
+    argument: "request.body",
+  };
+  const verified = await verifyProposedUse(f.path, scope, f.use, signal, true);
+  const key = dependencyRecordHash(
+    verified.evidence.find((s) => s.path === "app.js")!,
+  );
+  expect(verified.findingEvidence).toContainEqual({
+    field: "trace[0].site",
+    keys: [key],
+  });
+  const claim = {
+    id: "use-1",
+    revision: 1,
+    hash: "a".repeat(64),
+    value: { kind: "use" as const, use: verified },
+  };
+  const published = reportedUse(verified, claim, [key]);
+  expect(published.trace?.[0]).toMatchObject({
+    site: { commit: f.revision },
+    argument: "request.body",
+  });
+  expect(published.proof.sink?.callSite.commit).toBe(f.revision);
+});
+
 test("repository investigators share pinned source notes without promoting assertions to reviewed claims", async () => {
   const captured = 'export const selectedMode = "archive";';
   await using f = await fixture({ "modes.js": captured + "\n" });
+  execFileSync(
+    "git",
+    ["remote", "add", "origin", "git@example.invalid:team/parser.git"],
+    { cwd: f.path },
+  );
   const tool = "update_codex_security_graph";
   const graph = "query_codex_security_graph";
   const assertion = {
@@ -171,7 +219,26 @@ test("repository investigators share pinned source notes without promoting asser
       signal,
     },
     {
-      discover: async () => f.discovery,
+      discover: async ({ revision }) => {
+        expect(revision).toBe(f.revision);
+        execFileSync(
+          "git",
+          [
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Advance checkout",
+          ],
+          { cwd: f.path },
+        );
+        return f.discovery;
+      },
       async runAgent(req) {
         const tools = await req.investigationTools!();
         if (!req.coordinator) {
@@ -243,6 +310,7 @@ test("repository investigators share pinned source notes without promoting asser
     },
   );
   if (!("checks" in result)) throw Error("Expected a package check.");
+  expect(result.target).toEqual({ repository: "team/parser", sha: f.revision });
   expect(reviewerRead).toBe(true);
   expect(result.checks[0]!.claims.map((c) => c.id).sort()).toEqual([
     "coverage",
@@ -826,6 +894,7 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
     ),
   );
   if (!("cve" in result)) throw Error("Expected a CVE report.");
+  expect(result.target?.sha).toBe(f.revision);
   expect(result.uses).toMatchObject([
     { conclusionClaim: { id: "assessment:parser", revision: 1 } },
   ]);
