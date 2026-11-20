@@ -36,6 +36,8 @@
 - use singular nouns for one-item match-all counts ([#2751](https://github.com/openai/codex-security/pull/2751))
 - render exploitability reports in Markdown and interactive HTML ([#2762](https://github.com/openai/codex-security/pull/2762))
 - assess captured stacks against public advisory conditions ([#2760](https://github.com/openai/codex-security/pull/2760))
+- keep cached scan skills disabled across path aliases ([#2732](https://github.com/openai/codex-security/pull/2732))
+- split legacy roots from linked global finding groups ([#2702](https://github.com/openai/codex-security/pull/2702))
 
 </details>
 
