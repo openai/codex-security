@@ -1,3 +1,4 @@
+import { workbenchCommand } from "./support/workbench-command.js";
 import { gitText } from "./support/shell.js";
 import { createCliTest, captureCli } from "./support/cli-run.js";
 import { execFileSync } from "node:child_process";
@@ -46,6 +47,7 @@ import {
   type MultiscanOptions,
   type SecurityClient,
   createMultiscanFixtures,
+  registeredCampaignResult,
   git,
   repository,
   client,
@@ -62,7 +64,6 @@ const {
   recordFixtureAuthority,
   reseal,
   options,
-  fixtureRequests,
 } = createMultiscanFixtures();
 
 afterEach(cleanup);
@@ -1775,6 +1776,56 @@ type ScanSettings = NonNullable<Parameters<SecurityClient["run"]>[1]>;
 type CampaignPaths = Awaited<ReturnType<typeof fixture>>;
 type CampaignSource = Awaited<ReturnType<typeof repository>>;
 
+let nodeModule: Promise<Uint8Array> | undefined;
+
+async function prepareNodeRecovery(
+  paths: CampaignPaths,
+  overrides: Partial<MultiscanOptions>,
+  expectFailure = false,
+) {
+  const sourceModule = new URL("../src/multiscan.ts", import.meta.url);
+  nodeModule ??= build({
+    entryPoints: [fileURLToPath(sourceModule)],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    define: { "import.meta.url": JSON.stringify(sourceModule.href) },
+    write: false,
+  }).then((result) => result.outputFiles[0]!.contents);
+  const modulePath = join(paths.root, "multiscan.cjs");
+  await writeFile(modulePath, await nodeModule);
+  const settings = options(paths, client(completeRun), overrides);
+  const code = `
+    const { runMultiscan } = require(process.argv[1]);
+    const options = JSON.parse(process.argv[2]);
+    options.createSecurity = () => ({
+      run: async () => { throw new Error("Completed receipt must be reused"); },
+      close: async () => {},
+    });
+    if (!${expectFailure}) options.recoverScan = async () => undefined;
+    runMultiscan(options).then(
+      result => console.log(JSON.stringify(result)),
+      error => {
+        if (${expectFailure}) {
+          console.log("Child failure returned to SDK host", error.code);
+          console.log("SDK host remained alive");
+        } else {
+          console.error(error);
+          process.exitCode = 1;
+        }
+      }
+    );
+  `;
+  const { environment, ...request } = settings;
+  const args = ["--eval", code, modulePath, JSON.stringify(request)];
+  return () =>
+    execFileSync("node", args, {
+      env: environment,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+}
+
 function writeRecoveryTask(
   paths: CampaignPaths,
   source: CampaignSource,
@@ -1817,9 +1868,17 @@ function savedCampaign(
   return { runs, campaign: options(paths, client(runs), overrides) };
 }
 
-async function cloneWithoutScope(paths: CampaignPaths, source: CampaignSource) {
-  const checkout = join(paths.output, "checkouts", "repo");
+function cloneRetained(
+  paths: CampaignPaths,
+  source: CampaignSource,
+  checkout = join(paths.output, "checkouts", "repo"),
+) {
   git(paths.root, "clone", "--quiet", source.path, checkout);
+  return checkout;
+}
+
+async function cloneWithoutScope(paths: CampaignPaths, source: CampaignSource) {
+  const checkout = cloneRetained(paths, source);
   await rm(join(checkout, "src"), { recursive: true });
   return checkout;
 }
@@ -1865,6 +1924,18 @@ async function expectReused(campaign: MultiscanOptions) {
     completed: 1,
     skipped: 1,
   });
+}
+
+async function pinRecoveryTask(
+  paths: CampaignPaths,
+  source: CampaignSource,
+  message: string,
+  scope?: string,
+) {
+  git(source.path, "add", ".");
+  commitFixture(source.path, message);
+  const revision = git(source.path, "rev-parse", "HEAD");
+  await writeRecoveryTask(paths, source, scope, revision);
 }
 
 test("qualified campaign reuses a completed recovery checkout", async () => {
@@ -2332,8 +2403,7 @@ test("original coordinates reuse an existing pinned scope checkout without refet
   );
   const { runs, campaign } = savedCampaign(paths);
   await expectScanned(campaign);
-  const checkout = join(paths.output, "checkouts", "repo");
-  git(paths.root, "clone", "--quiet", source.path, checkout);
+  const checkout = cloneRetained(paths, source);
   await rename(source.path, join(paths.root, "temporarily-unavailable-source"));
   await expectReused(campaign);
   expect(runs).toHaveBeenCalledTimes(1);
@@ -2649,8 +2719,7 @@ for (const modified of [
     source.revision = git(source.path, "rev-parse", "HEAD");
     await writeRecoveryTask(paths, source, "src");
     const { runs, campaign } = await completedRetry(paths);
-    const checkout = recoveryCheckout(paths);
-    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     const expectedApp = await readFile(join(checkout, "src", "app.ts"));
     await rm(join(checkout, "src"), { recursive: true });
     const notes = modified
@@ -2694,8 +2763,7 @@ test.each(["missing HEAD", "skip-worktree"])(
     source.revision = git(source.path, "rev-parse", "HEAD");
     await writeRecoveryTask(paths, source, "src");
     const { runs, campaign } = await completedRetry(paths);
-    const checkout = recoveryCheckout(paths);
-    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     git(checkout, "rm", "deleted.txt");
     await writeFile(join(checkout, "edited.txt"), "Staged edit");
     git(checkout, "add", "edited.txt");
@@ -2746,8 +2814,7 @@ for (const nested of [false, true, "chain"] as const) {
       source.revision = git(source.path, "rev-parse", "HEAD");
       await writeRecoveryTask(paths, source, nested ? "alias/app.ts" : "alias");
       const { runs, campaign } = await completedRetry(paths);
-      const checkout = recoveryCheckout(paths);
-      git(paths.root, "clone", "--quiet", source.path, checkout);
+      const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       await rm(join(checkout, "alias"));
       if (nested === "chain") await rm(join(checkout, "middle"));
       await rm(join(checkout, "unrelated-alias"));
@@ -2809,10 +2876,7 @@ for (const entry of ["index", "shallow"] as const) {
       join(source.path, "src", "app.ts"),
       "export const pinned = true;\n",
     );
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Advance pinned state");
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src", revision);
+    await pinRecoveryTask(paths, source, "Advance pinned state", "src");
     const { runs, campaign } = savedCampaign(paths);
     await expectScanned(campaign);
     const checkout = join(paths.output, "checkouts", "repo");
@@ -2857,10 +2921,7 @@ test("final native recovery restores a locally pinned commit with an unavailable
     const bytePath = (root: string) =>
       Buffer.concat([Buffer.from(join(root, "src") + sep), suffix]);
     await writeFile(bytePath(source.path), "Synthetic bytes.\n");
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Byte-valued tracked path");
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src", revision);
+    await pinRecoveryTask(paths, source, "Byte-valued tracked path", "src");
     const { runs, campaign } = savedCampaign(paths);
     await runMultiscan(campaign);
     await cloneWithoutScope(paths, source);
@@ -2877,10 +2938,7 @@ testPosix(
     const source = await repository(paths.root, "tracked-python-source");
     const python = await realpath(PYTHON);
     await symlink(python, join(source.path, "python-alias"));
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Tracked interpreter alias");
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src", revision);
+    await pinRecoveryTask(paths, source, "Tracked interpreter alias", "src");
     const alias = join(paths.output, "checkouts", "repo", "python-alias");
     const runs = mock(async (checkout: string, settings: ScanSettings = {}) => {
       const selected = await runtime.resolvePluginPythonCommand({
@@ -2928,10 +2986,7 @@ test("final native recovery refuses a linked pack directory before fetching miss
       join(source.path, "src", `object-${i}.ts`),
       `export const object${i} = ${i};\n`,
     );
-  git(source.path, "add", ".");
-  commitFixture(source.path, "Pinned packed objects");
-  const revision = git(source.path, "rev-parse", "HEAD");
-  await writeRecoveryTask(paths, source, "src", revision);
+  await pinRecoveryTask(paths, source, "Pinned packed objects", "src");
   const { runs, campaign } = savedCampaign(paths);
   await runMultiscan(campaign);
   const outside = join(paths.root, "external-packs");
@@ -2973,10 +3028,7 @@ for (const selection of [
         selection === "chain" ? "middle" : python,
         join(source.path, aliasName),
       );
-      git(source.path, "add", ".");
-      commitFixture(source.path, "Tracked interpreter alias");
-      const revision = git(source.path, "rev-parse", "HEAD");
-      await writeRecoveryTask(paths, source, undefined, revision);
+      await pinRecoveryTask(paths, source, "Tracked interpreter alias");
       const parentAlias = join(paths.root, "output-parent-link");
       if (selection === "parent")
         await symlink(paths.output, parentAlias, "junction");
@@ -2998,50 +3050,48 @@ for (const selection of [
       } else if (selection === "external") {
         await symlink(checkoutAlias, alias);
       }
-      const requestedPython = alias;
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+        ...(inherited && {
+          PYTHON: selection === "padded" ? alias + " " : alias,
+        }),
+      };
       const runs = mock(
         async (checkout: string, settings: ScanSettings = {}) => {
           const selected = await runtime.resolvePluginPythonCommand({
-            configuredPath: inherited ? undefined : requestedPython,
+            configuredPath: inherited ? undefined : alias,
             protectedRoot: checkout,
-            environment: runtime.pluginHelperEnvironment(process.env),
+            environment: runtime.pluginHelperEnvironment(environment),
           });
           expect(selected.executable).toBe(python);
           return completedScan(settings.outputDir!, "complete", checkout);
         },
       );
       const campaign = options(paths, client(runs), {
-        config: inherited ? {} : { pythonPath: requestedPython },
+        environment,
+        config: inherited ? {} : { pythonPath: alias },
       });
-      const previousPython = process.env["PYTHON"];
-      if (inherited)
-        process.env["PYTHON"] = selection === "padded" ? alias + " " : alias;
-      try {
-        const initialSummary = await runMultiscan(campaign);
-        expect(initialSummary).toMatchObject({
-          completed: 1,
-          skipped: 0,
-        });
-        if (selection === "chain") {
-          const checkout = join(paths.output, "checkouts", "repo");
-          git(paths.root, "clone", "--quiet", source.path, checkout);
-          await rm(join(checkout, "middle"));
-          await writeFile(
-            join(checkout, "retained.txt"),
-            "Preserve interrupted data.\n",
-          );
-        } else if (selection === "padded") {
-          const checkout = dirname(alias);
-          git(paths.root, "clone", "--quiet", source.path, checkout);
-          await rm(alias);
-          await writeFile(alias + " ", "Ordinary file.\n", { mode: 0o600 });
-        }
-        await expectReused(campaign);
-        expect(runs).toHaveBeenCalledTimes(1);
-      } finally {
-        if (previousPython === undefined) delete process.env["PYTHON"];
-        else process.env["PYTHON"] = previousPython;
+      const initialSummary = await runMultiscan(campaign);
+      expect(initialSummary).toMatchObject({
+        completed: 1,
+        skipped: 0,
+      });
+      if (selection === "chain") {
+        const checkout = cloneRetained(paths, source);
+        await rm(join(checkout, "middle"));
+        await writeFile(
+          join(checkout, "retained.txt"),
+          "Preserve interrupted data.\n",
+        );
+      } else if (selection === "padded") {
+        const checkout = dirname(alias);
+        git(paths.root, "clone", "--quiet", source.path, checkout);
+        await rm(alias);
+        await writeFile(alias + " ", "Ordinary file.\n", { mode: 0o600 });
       }
+      await expectReused(campaign);
+      expect(runs).toHaveBeenCalledTimes(1);
     },
   );
 }
@@ -3100,10 +3150,7 @@ test("retained scope recovery rejects mismatched artifacts without resurrecting 
     join(source.path, "README.md"),
     "Synthetic retained notes.\n",
   );
-  git(source.path, "add", ".");
-  commitFixture(source.path, "Tracked notes");
-  const revision = git(source.path, "rev-parse", "HEAD");
-  await writeRecoveryTask(paths, source, "src", revision);
+  await pinRecoveryTask(paths, source, "Tracked notes", "src");
   const { runs, campaign, initial: first } = await completedRetry(paths);
   const receipt = (await results(first.resultsPath)).find(
     (entry) => entry["status"] === "completed",
@@ -3118,8 +3165,7 @@ test("retained scope recovery rejects mismatched artifacts without resurrecting 
     await writeFile(path, JSON.stringify(document));
   }
   await reseal(outputDir);
-  const checkout = recoveryCheckout(paths);
-  git(paths.root, "clone", "--quiet", source.path, checkout);
+  const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
   await rm(join(checkout, "src"), { recursive: true });
   await rm(join(checkout, "README.md"));
   await expectScanned(campaign);
@@ -3174,8 +3220,7 @@ for (const selection of ["root", "parent alias"] as const) {
     });
     const initial = await expectScanned(campaign);
     const ledger = await readFile(initial.resultsPath);
-    const checkout = join(paths.output, "checkouts", "repo");
-    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const checkout = cloneRetained(paths, source);
     await rm(join(checkout, "src", "app.ts"));
     await expectReused(campaign);
     expect(await readFile(initial.resultsPath)).toEqual(ledger);
@@ -3191,10 +3236,7 @@ for (const missingAncestor of [false, true]) {
       join(source.path, "src", "app.ts"),
       "Current pinned content.\n",
     );
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Current pinned snapshot");
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src", revision);
+    await pinRecoveryTask(paths, source, "Current pinned snapshot", "src");
     const { runs, campaign } = savedCampaign(paths);
     const initial = await expectScanned(campaign);
     const ledger = await readFile(initial.resultsPath);
@@ -3263,16 +3305,7 @@ for (const linked of [false, true]) {
         `Synthetic version ${i}.\n`,
       );
       git(source.path, "add", ".");
-      git(
-        source.path,
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "commit",
-        "-qm",
-        `Synthetic revision ${i}`,
-      );
+      commitFixture(source.path, `Synthetic revision ${i}`);
     }
     const interrupted = join(paths.root, "interrupted");
     git(paths.root, "clone", "--quiet", source.path, interrupted);
@@ -3280,10 +3313,7 @@ for (const linked of [false, true]) {
       join(source.path, "src", "later.ts"),
       "Pinned later source.\n",
     );
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Pinned later revision");
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src", revision);
+    await pinRecoveryTask(paths, source, "Pinned later revision", "src");
     const { runs, campaign } = savedCampaign(paths);
     const initial = await expectScanned(campaign);
     const ledger = await readFile(initial.resultsPath);
@@ -3379,46 +3409,8 @@ for (const mode of ["many scopes", "early restore exit"] as const) {
       }
       try {
         if (mode === "early restore exit") {
-          const node = "node";
-          const bundle = join(paths.root, "multiscan-runtime.mjs");
-          const modules = join(paths.root, "node_modules");
-          await symlink(
-            join(dirname(import.meta.path), "..", "node_modules"),
-            modules,
-            "junction",
-          );
-          await symlink(
-            PLUGIN_ROOT,
-            join(paths.root, "_bundled_plugin"),
-            "junction",
-          );
-          execFileSync(process.execPath, [
-            "build",
-            join(dirname(import.meta.path), "..", "src", "multiscan.ts"),
-            "--target=node",
-            "--packages=external",
-            `--outfile=${bundle}`,
-          ]);
-          const entry = join(paths.root, "node-recovery.mjs");
-          await writeFile(
-            entry,
-            `import {runMultiscan} from ${JSON.stringify(bundle)};\nconst options=JSON.parse(process.argv[2]);options.createSecurity=()=>({run:async()=>{throw new Error("Existing receipt must be reused");},close:async()=>{}});try{await runMultiscan(options);process.exitCode=1;}catch(error){console.log("Child failure returned to SDK host",error.code);}console.log("SDK host remained alive");\n`,
-          );
-          const output = execFileSync(
-            node,
-            [
-              entry,
-              JSON.stringify({
-                inputPath: paths.input,
-                outputDir: paths.output,
-                workers: 1,
-                mode: "standard",
-                maxAttempts: 2,
-                config: {},
-              }),
-            ],
-            { encoding: "utf8", env: process.env },
-          );
+          const reuse = await prepareNodeRecovery(paths, {}, true);
+          const output = reuse();
           expect(output).toContain("Child failure returned to SDK host 73");
           expect(output).toContain("SDK host remained alive");
         } else await expectReused(campaign);
@@ -3440,10 +3432,7 @@ for (const staged of [false, true]) {
       join(source.path, "README.md"),
       "Synthetic retained readme.\n",
     );
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Selected fixture readme");
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, undefined, revision);
+    await pinRecoveryTask(paths, source, "Selected fixture readme");
     const { runs, campaign, initial } = await completedRetry(
       paths,
       {
@@ -3454,8 +3443,7 @@ for (const staged of [false, true]) {
       completedConfiguredPaths,
     );
     const ledger = await readFile(initial.resultsPath);
-    const checkout = recoveryCheckout(paths);
-    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     const expectedApp = await readFile(join(checkout, "src", "app.ts"));
     const unrelated = join(checkout, "unrelated.txt");
     if (staged) {
@@ -3523,16 +3511,7 @@ for (const linked of [false, true]) {
         `Synthetic pinned version ${i}.\n`,
       );
       git(source.path, "add", ".");
-      git(
-        source.path,
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.test",
-        "commit",
-        "-qm",
-        `Pinned fixture revision ${i}`,
-      );
+      commitFixture(source.path, `Pinned fixture revision ${i}`);
     }
     const revision = git(source.path, "rev-parse", "HEAD");
     const blob = git(source.path, "rev-parse", "HEAD:src/app.ts");
@@ -3636,8 +3615,7 @@ for (const configured of [false, true]) {
       join(output, "report.md"),
       "Refresh this synthetic report.\n",
     );
-    const checkout = join(paths.output, "checkouts", "repo");
-    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const checkout = cloneRetained(paths, source);
     await rm(join(checkout, ".git"), { recursive: true });
     await rm(source.path, { recursive: true });
     const code = `import {runMultiscan} from ${JSON.stringify(join(dirname(import.meta.path), "..", "src", "multiscan.ts"))};
@@ -3651,6 +3629,7 @@ for (const configured of [false, true]) {
         encoding: "utf8",
         env: {
           ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
           PATH: dirname(PYTHON) + delimiter + (process.env["PATH"] ?? ""),
           PYTHON: configured ? undefined : python,
         },
@@ -3750,10 +3729,7 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
     await symlink("tools/child", join(source.path, "jump"));
   }
   await symlink(await realpath(PYTHON), join(source.path, interpreterPath));
-  git(source.path, "add", ".");
-  commitFixture(source.path, "Tracked interpreter link");
-  const revision = git(source.path, "rev-parse", "HEAD");
-  await writeRecoveryTask(paths, source, undefined, revision);
+  await pinRecoveryTask(paths, source, "Tracked interpreter link");
   const checkout = recoveryCheckout(paths);
   const alias =
     process.platform === "win32"
@@ -3895,8 +3871,7 @@ for (const missingCode of ["native", "ENOENT"]) {
         completedConfiguredPaths,
       );
       const ledger = await readFile(initial.resultsPath);
-      const checkout = recoveryCheckout(paths);
-      git(paths.root, "clone", "--quiet", source.path, checkout);
+      const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       const expectedApp = await readFile(join(checkout, "src", "app.ts"));
       await rm(join(checkout, "src"), { recursive: true });
       if (obstructed)
@@ -4012,8 +3987,7 @@ for (const { parentThroughLink, missing, configured = false } of [
         configured ? completedConfiguredPaths : undefined,
       );
       const ledger = await readFile(initial.resultsPath);
-      const checkout = recoveryCheckout(paths);
-      git(paths.root, "clone", "--quiet", source.path, checkout);
+      const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       if (!configured && missing !== "jump") await rm(join(checkout, "alias"));
       if (repeated) await rm(join(checkout, "nested", "deep", "self"));
       else if (missing !== "alias" && missing !== "file")
@@ -4029,26 +4003,7 @@ for (const { parentThroughLink, missing, configured = false } of [
         join(checkout, "retained.txt"),
         "Preserve retained recovery data.\n",
       );
-      const sourceModule = new URL("../src/multiscan.ts", import.meta.url);
-      const nodeModule = join(paths.root, "multiscan.cjs");
-      await build({
-        entryPoints: [fileURLToPath(sourceModule)],
-        outfile: nodeModule,
-        bundle: true,
-        platform: "node",
-        format: "cjs",
-        define: { "import.meta.url": JSON.stringify(sourceModule.href) },
-      });
-      const code = `const {runMultiscan} = require(process.argv[1]);
-      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, ...overrides })};
-      options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
-      options.recoverScan=async()=>undefined;
-      runMultiscan(options).then((result)=>console.log(JSON.stringify(result)),(error)=>{console.error(error);process.exitCode=1});`;
-      const reuse = () =>
-        execFileSync("node", ["--eval", code, nodeModule], {
-          encoding: "utf8",
-          stdio: "pipe",
-        });
+      const reuse = await prepareNodeRecovery(paths, overrides);
       if (obstructed) {
         expect(reuse).toThrow(/ENOTDIR/);
         expect(await readFile(join(checkout, "jump"), "utf8")).toBe(
@@ -4114,8 +4069,7 @@ for (const linked of [false, true]) {
         completedConfiguredPaths,
       );
       const ledger = await readFile(initial.resultsPath);
-      const checkout = recoveryCheckout(paths);
-      git(paths.root, "clone", "--quiet", source.path, checkout);
+      const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       await rm(join(checkout, "src", "app.ts"));
       await rm(join(checkout, "src", "nested", "inside", "keep.ts"));
       const nested = join(checkout, "src", "nested");
@@ -4261,8 +4215,7 @@ for (const ignoreCase of [false, true]) {
       ]),
     );
     const ledger = await readFile(initial.resultsPath);
-    const checkout = recoveryCheckout(paths);
-    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     git(checkout, "config", "core.ignorecase", String(ignoreCase));
     await rm(join(checkout, "src"), { recursive: true, force: true });
     await rm(join(checkout, "SRC"), { recursive: true, force: true });
@@ -4300,78 +4253,10 @@ for (const scenario of [
       CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
     };
     const python = await runtime.resolvePluginPython({ environment });
-    const call = (args: readonly string[], input?: string) =>
-      runtime.runWorkbench(
-        { python, pluginRoot: PLUGIN_ROOT, environment },
-        args,
-        input,
-      );
-    const writeActualScan = async (
-      checkout: string,
-      outputDir: string,
-      userContext: string,
-    ) => {
-      await mkdir(outputDir, { recursive: true, mode: 0o700 });
-      const registered = (await call(
-        [
-          "register-cli-scan",
-          "--repository",
-          checkout,
-          "--scan-dir",
-          outputDir,
-          "--registration-json-stdin",
-        ],
-        JSON.stringify({
-          recipe: {
-            repository: checkout,
-            repositoryRevision: source.revision,
-            scanRequestDigest: fixtureRequests.get(outputDir)?.digest,
-            mode: "standard",
-            target: { kind: "repository", paths: [] },
-            config: {},
-          },
-          userContext,
-        }),
-      )) as unknown as {
-        scanId: string;
-        targetId: string;
-        targetRevision: string;
-        contract: { target: { allowedKinds: string[] } };
-      };
-      await completedScan(outputDir, "complete", checkout);
-      for (const name of [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ]) {
-        const p = join(outputDir, name),
-          document = JSON.parse(await readFile(p, "utf8"));
-        if (name === "scan-manifest.json") {
-          document.scan.id = registered.scanId;
-          document.scan.target.kind =
-            registered.contract.target.allowedKinds[0];
-          document.scan.target.targetId = registered.targetId;
-          document.scan.target.revision = registered.targetRevision;
-          delete document.scan.target.snapshotDigest;
-          delete document.scan.sealedAt;
-          delete document.scan.artifacts;
-        } else document.scanId = registered.scanId;
-        await writeFile(p, JSON.stringify(document));
-      }
-      await call(["complete-scan", "--scan-id", String(registered.scanId)]);
-      return {
-        ...(await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT })),
-        scanDir: outputDir,
-        cost: null,
-      } as ScanResult;
-    };
-    const initial = client(async (checkout, scan) =>
-      writeActualScan(
-        checkout,
-        scan!.outputDir!,
-        "Requested campaign instructions.",
-      ),
-    );
+    const call = workbenchCommand(python, () => environment);
+    const writeActualScan = (checkout: string, scan: ScanSettings = {}) =>
+      registeredCampaignResult(environment, {}, checkout, scan, "findings");
+    const initial = client(writeActualScan);
     const configured = options(paths, initial, {
       maxAttempts: 1,
       scanPrompt: "Requested campaign instructions.",
@@ -4387,11 +4272,11 @@ for (const scenario of [
       const checkout = join(paths.root, "replacement-checkout");
       git(paths.root, "clone", "-q", source.path, checkout);
       const replacement = join(paths.root, "replacement-scan");
-      await writeActualScan(
-        checkout,
-        replacement,
-        "Different supplied instructions.",
-      );
+      await writeActualScan(checkout, {
+        outputDir: replacement,
+        mode: "standard",
+        scanPrompt: "Different supplied instructions.",
+      });
       await rm(scanDir, { recursive: true });
       await cp(replacement, scanDir, { recursive: true });
       await chmod(scanDir, 0o700);

@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -11,27 +10,26 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { PLUGIN_ROOT as pluginRoot } from "./plugin-root.js";
 import {
+  hasSealedReport,
   loadContract,
   loadContractWithScanDirectory,
-  hasSealedReport,
 } from "../src/contract.js";
-import { normalizeExcludedPaths, normalizeTarget } from "../src/targets.js";
+import { registeredCampaignResult } from "./support/multiscan.js";
+import { reseal } from "./support/sealed-scan.js";
+import { readJson, writeJson } from "./support/json.js";
 import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
 import { runMultiscan } from "../src/multiscan.js";
-import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import type { ScanResult } from "../src/result.js";
+import { resolvePluginPython } from "../src/runtime.js";
 import type { ScanOptions } from "../src/api.js";
 import type { CodexSecurityConfig } from "../src/config.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { rejecting } from "./support/errors.js";
 import { git } from "./git-fixture.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-const pluginRoot = fileURLToPath(
-  new URL("../../../plugins/codex-security/", import.meta.url),
-);
+
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "multiscan-authority-",
 );
@@ -53,13 +51,6 @@ async function fixture(registerOnly = false) {
   const revision = git(source, "rev-parse", "HEAD");
   const state = join(root, "state");
   const environment = { ...process.env, CODEX_SECURITY_STATE_DIR: state };
-  const python = await resolvePluginPython({ environment });
-  const workbench = (args: string[], input?: unknown) =>
-    runWorkbench(
-      { python, pluginRoot, environment },
-      args,
-      input === undefined ? undefined : JSON.stringify(input),
-    );
   const inputPath = join(root, "repositories.csv");
   await writeFile(
     inputPath,
@@ -82,129 +73,21 @@ async function fixture(registerOnly = false) {
       close: async () => {},
       run: async (checkout, scan = {}) => {
         runs++;
-        return await registeredResult(config, checkout, scan);
+        const result = await registeredCampaignResult(
+          environment,
+          config,
+          checkout,
+          scan,
+          registerOnly ? "interrupted" : "sealed",
+        );
+        expect(await hasSealedReport(result.scanDir, result.manifest)).toBe(
+          true,
+        );
+        return result;
       },
     }),
   };
-  async function registeredResult(
-    config: CodexSecurityConfig,
-    checkout: string,
-    scan: ScanOptions,
-  ): Promise<ScanResult> {
-    const scanDir = scan.outputDir!;
-    const target = await normalizeTarget(checkout, scan.target ?? "repository");
-    const excludePaths = normalizeExcludedPaths(scan.excludePaths);
-    const includePaths = target.kind === "repository" ? ["."] : target.paths;
-    await mkdir(scanDir, { recursive: true, mode: 0o700 });
-    const registered = await workbench(
-      [
-        "register-cli-scan",
-        "--repository",
-        checkout,
-        "--scan-dir",
-        scanDir,
-        "--registration-json-stdin",
-      ],
-      {
-        recipe: {
-          ...(excludePaths.length ? { excludePaths } : {}),
-          repository: checkout,
-          mode: scan.mode ?? "standard",
-          target,
-          config: {},
-          maxCostUsd: scan.maxCostUsd,
-          ownerSuggestions: scan.ownerSuggestions,
-          scanRequestDigest: scanRequestDigest(
-            config,
-            {
-              ...scan,
-              excludePaths: excludePaths.length ? excludePaths : undefined,
-            },
-            checkout,
-          ),
-        },
-        userContext: scan.scanPrompt,
-      },
-    );
-    if (registerOnly)
-      throw new Error("Synthetic interruption after private registration.");
-    await cp(join(pluginRoot, "examples/completed-scan"), scanDir, {
-      recursive: true,
-    });
-    const manifest = JSON.parse(
-      await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
-    );
-    manifest.scan.id = registered["scanId"];
-    manifest.scan.target = {
-      kind: "git_revision",
-      targetId: registered["targetId"],
-      displayName: basename(checkout),
-      revision: git(checkout, "rev-parse", "HEAD"),
-    };
-    manifest.scan.scope = { includePaths, excludePaths };
-    delete manifest.scan.sealedAt;
-    delete manifest.scan.artifacts;
-    const findings = {
-      documentType: "codex-security.findings",
-      schemaVersion: "1.0",
-      scanId: registered["scanId"],
-      findings: [],
-    };
-    manifest.scan.mode =
-      target.kind === "repository" ? "repository" : "scoped_path";
-    for (const [name, value] of [
-      ["scan-manifest", manifest],
-      ["findings", findings],
-    ])
-      await writeFile(join(scanDir, `${name}.json`), JSON.stringify(value));
-    execFileSync(
-      python,
-      [
-        "-I",
-        "-B",
-        join(pluginRoot, "scripts/finalize_scan_contract.py"),
-        "--scan-dir",
-        scanDir,
-      ],
-      { env: environment, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    const sealed = JSON.parse(
-      await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
-    );
-    sealed.scan.artifacts.push({
-      path: "report.md",
-      mediaType: "text/markdown",
-      sha256: createHash("sha256")
-        .update(await readFile(join(scanDir, "report.md")))
-        .digest("hex"),
-    });
-    await writeFile(
-      join(scanDir, "scan-manifest.json"),
-      execFileSync(
-        python,
-        [
-          "-I",
-          "-c",
-          "import json,sys; sys.stdout.buffer.write((json.dumps(json.load(sys.stdin), indent=2, sort_keys=True) + '\\n').encode('utf-8'))",
-        ],
-        { input: JSON.stringify(sealed), env: environment },
-      ),
-    );
-    await workbench([
-      "complete-scan",
-      "--scan-id",
-      String(registered["scanId"]),
-    ]);
-    const result = await loadContract(scanDir, { pluginRoot });
-    expect(await hasSealedReport(scanDir, result.manifest)).toBe(true);
-    return {
-      ...result,
-      scanDir,
-      cost: null,
-      threatModelPath: null,
-    } as ScanResult;
-  }
-  return { root, source, state, options, runs: () => runs, registeredResult };
+  return { root, source, state, options, runs: () => runs };
 }
 
 test("registered sealed campaign reuse does not need report Python", async () => {
@@ -630,8 +513,8 @@ test.each([
     recursive: true,
   });
   await chmod(scanDir, 0o700);
-  const read = async (name: string) =>
-    JSON.parse(await readFile(join(scanDir, name + ".json"), "utf8"));
+  const read = (name: string) =>
+    readJson<ReturnType<typeof JSON.parse>>(join(scanDir, name + ".json"));
   const manifest = await read("scan-manifest"),
     coverage = await read("coverage"),
     findings = await read("findings");
@@ -678,16 +561,9 @@ test.each([
     ];
     coverage.surfaces[0].disposition = "needs_follow_up";
   }
-  await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
-  await writeFile(join(scanDir, "findings.json"), JSON.stringify(findings));
-  for (const artifact of manifest.scan.artifacts)
-    artifact.sha256 = createHash("sha256")
-      .update(await readFile(join(scanDir, artifact.path)))
-      .digest("hex");
-  await writeFile(
-    join(scanDir, "scan-manifest.json"),
-    JSON.stringify(manifest),
-  );
+  await writeJson(join(scanDir, "coverage.json"), coverage);
+  await writeJson(join(scanDir, "findings.json"), findings);
+  await reseal(scanDir, manifest);
   const before = await readFile(join(scanDir, "findings.json"));
   const python = await resolvePluginPython({ environment: process.env });
   const canonical = () =>

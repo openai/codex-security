@@ -1,19 +1,5 @@
-import {
-  cp,
-  mkdir,
-  readFile,
-  realpath,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { execFileSync } from "node:child_process";
-import { basename, join } from "node:path";
-import { randomUUID } from "node:crypto";
-import { normalizeTarget } from "../src/targets.js";
-import { deriveFindingIdentity, loadContract } from "../src/contract.js";
-import { scanRequestDigest } from "../src/finding-workflow.js";
-import { resolvePluginPython } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
@@ -36,7 +22,7 @@ import { git } from "./git-fixture.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { workbenchCommand } from "./support/workbench-command.js";
+import { registeredCampaignResult } from "./support/multiscan.js";
 import {
   createCliTest,
   captureCli,
@@ -604,123 +590,18 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     CODEX_HOME: join(input.root, "codex-home"),
     CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
   };
-  const python = await resolvePluginPython({ environment });
-  const workbench = workbenchCommand(python, () => environment);
   const deps = dependencies({ currentDirectory: input.root, environment });
   deps.createSecurity = (native) => {
     expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
     return fakeSecurity(async (repository, options = {}) => {
       selected.push(options);
-      const scanDir = options.outputDir!;
-      await mkdir(scanDir, { recursive: true, mode: 0o700 });
-      const root = await realpath(repository);
-      const target = await normalizeTarget(
-        root,
-        options.target ?? "repository",
+      return registeredCampaignResult(
+        environment,
+        native,
+        repository,
+        options,
+        "findings",
       );
-      const registered = await workbench(
-        [
-          "register-cli-scan",
-          "--repository",
-          root,
-          "--scan-dir",
-          scanDir,
-          "--registration-json-stdin",
-        ],
-        JSON.stringify({
-          recipe: {
-            repository: root,
-            mode: options.mode,
-            target,
-            config: native.codexOverrides,
-            scanRequestDigest: scanRequestDigest(native, options, root),
-          },
-          userContext: options.scanPrompt,
-        }),
-      );
-      const scanId = String(registered["scanId"]);
-      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
-        recursive: true,
-      });
-      const template = fakeResult(["high"]);
-      const manifest = JSON.parse(
-        await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
-      ) as typeof template.manifest;
-      const findings = JSON.parse(
-        await readFile(join(scanDir, "findings.json"), "utf8"),
-      ) as typeof template.findings;
-      const includePaths = target.kind === "paths" ? [...target.paths] : ["."];
-      manifest.scan.id = scanId;
-      findings.scanId = scanId;
-      manifest.scan.target = {
-        kind: "git_revision",
-        targetId: String(registered["targetId"]),
-        displayName: basename(root),
-        revision: git(root, "rev-parse", "HEAD"),
-      };
-      manifest.scan.scope.includePaths = includePaths;
-      manifest.scan.mode =
-        target.kind === "paths"
-          ? "scoped_path"
-          : options.mode === "deep"
-            ? "deep_repository"
-            : "repository";
-      for (const finding of findings.findings) {
-        Object.assign(
-          finding,
-          deriveFindingIdentity(
-            scanId,
-            manifest.scan.target.targetId,
-            finding.ruleId,
-            finding.identity,
-          ),
-        );
-        for (const location of finding.locations)
-          location.path = `${includePaths[0]}/index.ts`;
-      }
-      await writeFile(join(scanDir, "findings.json"), JSON.stringify(findings));
-      await writeFile(
-        join(scanDir, "scan-manifest.json"),
-        JSON.stringify({
-          ...manifest,
-          scan: { ...manifest.scan, artifacts: undefined, sealedAt: undefined },
-        }),
-      );
-      if (options.mode === "deep") {
-        await workbench([
-          "begin-deep-scan",
-          "--scan-id",
-          scanId,
-          "--thread-id",
-          randomUUID(),
-          "--available-parallelism",
-          "4",
-          "--workflow-version",
-          "deep-scan-mcp/v1",
-        ]);
-        // The fake scanner supplied a finished Deep result. Persist that
-        // coordinator fixture before asking the real workbench to seal it.
-        execFileSync(
-          python,
-          [
-            "-I",
-            "-c",
-            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE deep_scan_runs SET status='succeeded', phase='terminal', terminal_reason='saturated', manifest_path=?, completed_at=updated_at WHERE scan_id=?\", (sys.argv[2],sys.argv[3])); c.commit()",
-            join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-            join(scanDir, "scan-manifest.json"),
-            scanId,
-          ],
-          { env: environment },
-        );
-      }
-      await workbench(["complete-scan", "--scan-id", scanId]);
-      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
-      return new ScanResult({
-        ...contract,
-        scanDir,
-        threadId: "synthetic-thread",
-        turnResult: template.turnResult,
-      });
     });
   };
   const args = [

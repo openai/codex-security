@@ -1665,7 +1665,7 @@ describe("multiscan", () => {
       const clientDependencies = dependencies({
         currentDirectory: paths.root,
         environment: {
-          CODEX_SECURITY_STATE_DIR: process.env["CODEX_SECURITY_STATE_DIR"],
+          CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
           PYTHON,
         },
         result,
@@ -3069,8 +3069,10 @@ describe("multiscan", () => {
       expect(resolvePython).toHaveBeenCalledWith(
         expect.objectContaining({
           protectedRoot: join(paths.output, "checkouts", "report-recovery"),
-
-          environment: runtime.pluginHelperEnvironment(process.env),
+          environment: runtime.pluginHelperEnvironment({
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
+          }),
         }),
       );
       expect(attempts).toBe(1);
@@ -3132,6 +3134,7 @@ describe("multiscan", () => {
         );
         const environment = {
           ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
           PYTHON: selection === "PYTHON" ? interpreter : undefined,
           PATH: tools + delimiter + (process.env["PATH"] ?? ""),
           MULTISCAN_REPORT_FIXTURE: "invocation-specific",

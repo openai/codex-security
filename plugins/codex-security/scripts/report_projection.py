@@ -61,60 +61,46 @@ def is_sealed_report(
     try:
         output_metadata = (scan_dir / "report.md").stat(follow_symlinks=False)
     except FileNotFoundError:
-        output_metadata = None
+        return False
     except OSError as exc:
         raise ReportProjectionError("report.md: unable to inspect report output") from exc
-    same_file_artifacts: list[str] = []
-    if output_metadata is not None:
-        for artifact_path in artifact_paths:
-            descriptor = open_file(scan_dir, artifact_path, f"sealed artifact {artifact_path}")
-            try:
-                artifact_metadata = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            if os.path.samestat(output_metadata, artifact_metadata):
-                same_file_artifacts.append(artifact_path)
-    if output_metadata is not None and same_file_artifacts:
+
+    def is_same_file(path: str, context: str) -> bool:
+        descriptor = open_file(scan_dir, path, context)
         try:
-            entries = set(os.listdir(scan_dir))
-            report_entries = [name for name in entries if REPORT_NAME_RE.fullmatch(name)]
-            report_entry = None
-            if "report.md" in entries:
-                report_entry = "report.md"
-            elif len(report_entries) == 1:
-                report_entry = report_entries[0]
-            if report_entry is not None and report_entry != "report.md":
-                descriptor = open_file(scan_dir, report_entry, "report directory entry")
-                try:
-                    if not os.path.samestat(output_metadata, os.fstat(descriptor)):
-                        report_entry = None
-                finally:
-                    os.close(descriptor)
+            return os.path.samestat(output_metadata, os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+
+    aliases = {path for path in artifact_paths if is_same_file(path, f"sealed artifact {path}")}
+    if not aliases:
+        return False
+    try:
+        entries = set(os.listdir(scan_dir))
+        report_names = [name for name in entries if REPORT_NAME_RE.fullmatch(name)]
+        report_entry = "report.md" if "report.md" in entries else None
+        if len(report_names) == 1:
+            name = report_names[0]
+            if report_entry is not None or is_same_file(name, "report directory entry"):
+                report_entry = name
+                if any(REPORT_NAME_RE.fullmatch(alias) for alias in aliases):
+                    return True
+        root = scan_dir.stat(follow_symlinks=False)
+        for alias in aliases:
+            artifact = PurePosixPath(alias)
+            parent = check_directory(scan_dir.joinpath(*artifact.parts[:-1]))
+            if not os.path.samestat(root, parent.stat(follow_symlinks=False)):
+                continue
             if (
-                report_entry is not None
-                and len(report_entries) == 1
-                and any(REPORT_NAME_RE.fullmatch(path) for path in same_file_artifacts)
+                report_entry is None
+                or artifact.name not in entries
+                or artifact.name == report_entry
             ):
-                return True
-            root_metadata = scan_dir.stat(follow_symlinks=False)
-            for artifact_path in same_file_artifacts:
-                artifact = PurePosixPath(artifact_path)
-                parent = check_directory(scan_dir.joinpath(*artifact.parts[:-1]))
-                if not os.path.samestat(root_metadata, parent.stat(follow_symlinks=False)):
-                    continue
-                if (
-                    report_entry is not None
-                    and artifact.name in entries
-                    and artifact.name != report_entry
-                ):
-                    continue
                 raise ReportProjectionError(
                     "report.md: cannot safely replace an ambiguous sealed artifact alias"
                 )
-        except OSError as exc:
-            raise ReportProjectionError(
-                "report.md: unable to inspect sealed artifact aliases"
-            ) from exc
+    except OSError as exc:
+        raise ReportProjectionError("report.md: unable to inspect sealed artifact aliases") from exc
     return False
 
 
