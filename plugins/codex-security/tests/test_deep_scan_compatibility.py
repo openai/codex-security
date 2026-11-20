@@ -14,6 +14,30 @@ import pytest
 from workbench_test_support import SCRIPT, run_workbench
 
 
+def start_scan(tmp_path: Path, version: str | None = None):
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    run = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "fixture-thread",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        *(["--workflow-version", version] if version else []),
+    )["deepScan"]
+    return state, run
+
+
+def owner_command(state, command, scan_id, *, check=True):
+    return run_workbench(
+        state, command, "--scan-id", scan_id, "--thread-id", "fixture-thread", check=check
+    )
+
+
 def snapshot(state_dir: Path) -> str:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         return "\n".join(connection.iterdump())
@@ -69,21 +93,7 @@ def claim_requiring_original_settings(
 def test_missing_or_unsupported_settings_reject_before_takeover(
     tmp_path: Path, workflow: str, settings_version: int | None
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    run = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "fixture-thread",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-        "--workflow-version",
-        workflow,
-    )["deepScan"]
+    state, run = start_scan(tmp_path, workflow)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 2, "
@@ -119,21 +129,7 @@ def test_missing_or_unsupported_settings_reject_before_takeover(
 def test_legacy_takeover_does_not_require_or_create_a_new_snapshot(
     tmp_path: Path, workflow: str
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    run = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "fixture-thread",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-        "--workflow-version",
-        workflow,
-    )["deepScan"]
+    state, run = start_scan(tmp_path, workflow)
     result = claim_requiring_original_settings(state, run["scanId"])
     assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)["deepScan"]
@@ -146,27 +142,8 @@ def test_legacy_takeover_does_not_require_or_create_a_new_snapshot(
 def test_observation_and_selected_completion_do_not_require_worker_settings(
     tmp_path: Path, completion_only: bool
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    run = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "fixture-thread",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["deepScan"]
-    claim = run_workbench(
-        state,
-        "claim-deep-scan-coordinator",
-        "--scan-id",
-        run["scanId"],
-        "--thread-id",
-        "fixture-thread",
-    )
+    state, run = start_scan(tmp_path)
+    claim = owner_command(state, "claim-deep-scan-coordinator", run["scanId"])
     if completion_only:
         selection = {
             "version": 1,
@@ -202,29 +179,8 @@ def test_observation_and_selected_completion_do_not_require_worker_settings(
     "version", ["deep-security-scan/v1", "deep-scan-mcp/v1", "deep-security-scan/v2"]
 )
 def test_supported_workflows_keep_their_identity(tmp_path: Path, version: str) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    begun = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "fixture-thread",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-        "--workflow-version",
-        version,
-    )["deepScan"]
-    claimed = run_workbench(
-        state,
-        "claim-deep-scan-coordinator",
-        "--scan-id",
-        str(begun["scanId"]),
-        "--thread-id",
-        "fixture-thread",
-    )["deepScan"]
+    state, begun = start_scan(tmp_path, version)
+    claimed = owner_command(state, "claim-deep-scan-coordinator", str(begun["scanId"]))["deepScan"]
     assert claimed["workflowVersion"] == version
     assert claimed["schemaVersion"] == 1
     assert claimed["noNewStreak"] == begun["noNewStreak"]
@@ -239,19 +195,7 @@ def test_unsupported_execution_does_not_mutate(
     value: str | int,
     operation: str,
 ) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    begun = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "fixture-thread",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["deepScan"]
+    state, begun = start_scan(tmp_path)
     scan_id = str(begun["scanId"])
     if operation == "claim":
         artifact_dir = Path(str(begun["scanDir"])) / "artifacts" / "deep_discovery" / "worker"
@@ -313,19 +257,7 @@ def test_unsupported_execution_does_not_mutate(
 
 @pytest.mark.parametrize("original", [None, "Original discovery context"])
 def test_reader_honors_original_context_when_present(tmp_path: Path, original: str | None) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    state = tmp_path / "state"
-    begun = run_workbench(
-        state,
-        "begin-deep-scan",
-        "--thread-id",
-        "fixture-thread",
-        "--target-path",
-        str(target),
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )["deepScan"]
+    state, begun = start_scan(tmp_path)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")}
         if "discovery_user_context" not in columns:
@@ -335,14 +267,7 @@ def test_reader_honors_original_context_when_present(tmp_path: Path, original: s
             (original,),
         )
         connection.execute("UPDATE scans SET user_context = 'Later discussion'")
-    observed = run_workbench(
-        state,
-        "get-deep-scan",
-        "--scan-id",
-        str(begun["scanId"]),
-        "--thread-id",
-        "fixture-thread",
-    )["deepScan"]
+    observed = owner_command(state, "get-deep-scan", str(begun["scanId"]))["deepScan"]
     assert observed["userContext"] == original
 
 
@@ -386,3 +311,60 @@ def test_unsupported_new_workflow_does_not_claim_registered_scan(tmp_path: Path)
     assert rejected["returncode"] != 0
     assert "unsupported" in str(rejected["stderr"]).lower()
     assert snapshot(state) == before
+
+
+@pytest.mark.parametrize("legacy_version", [None, "deep-security-scan/v1", "deep-scan-mcp/v1"])
+def test_new_workflow_default_preserves_existing_run_version(
+    tmp_path: Path, legacy_version: str | None
+) -> None:
+    state, created = start_scan(tmp_path, legacy_version)
+    expected_version = legacy_version or "deep-security-scan/v2"
+    assert created["workflowVersion"] == expected_version
+    resumed = owner_command(state, "begin-deep-scan", created["scanId"])["deepScan"]
+    assert resumed["workflowVersion"] == expected_version
+    assert resumed["createdAt"] == created["createdAt"]
+
+
+def selected_scan(tmp_path: Path, version: int) -> tuple[Path, str, dict[str, object]]:
+    state, run = start_scan(tmp_path)
+    selected = {
+        "version": version,
+        "resultPath": None,
+        "resultSha256": None,
+        "terminalReason": "capped",
+        "omittedWorkerIds": [],
+        "selectedAt": "2000-01-01T00:00:00Z",
+    }
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")}
+        if "finalization_input_json" not in columns:
+            connection.execute("ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT")
+        connection.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2', "
+            "finalization_input_json = ?, phase = 'reducing', "
+            "created_at = '2000-01-01T00:00:00Z', updated_at = '2000-01-01T00:00:00Z'",
+            (json.dumps(selected),),
+        )
+    return state, str(run["scanId"]), selected
+
+
+def test_claim_preserves_selected_finalization_without_discovery_recovery(tmp_path: Path) -> None:
+    state, scan_id, selected = selected_scan(tmp_path, 1)
+    claimed = owner_command(state, "claim-deep-scan-coordinator", scan_id)["deepScan"]
+    assert claimed["finalizationInput"] == selected
+    assert claimed["phase"] == "reducing"
+    assert claimed["coordinatorGeneration"] == 2
+    assert claimed["dispatchedCount"] == 0
+    assert claimed["createdAt"] == "2000-01-01T00:00:00Z"
+
+
+@pytest.mark.parametrize("command", ["begin-deep-scan", "claim-deep-scan-coordinator"])
+def test_unsupported_selection_rejects_without_mutation(tmp_path: Path, command: str) -> None:
+    state, scan_id, selected = selected_scan(tmp_path, 99)
+    before = snapshot(state)
+    rejected = owner_command(state, command, scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "unsupported" in str(rejected["stderr"]).lower()
+    assert snapshot(state) == before
+    observed = owner_command(state, "get-deep-scan", scan_id)["deepScan"]
+    assert observed["finalizationInput"] == selected

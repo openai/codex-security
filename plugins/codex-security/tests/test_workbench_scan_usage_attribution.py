@@ -788,6 +788,16 @@ def test_completion_recovers_replaced_deep_worker_threads(
             thread_id,
             environment=fixture.environment,
         )
+    if not dedicated:
+        # Legacy runs have no durable owner turn or earlier worker session records.
+        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET usage_owner_json = NULL WHERE scan_id = ?",
+                (fixture.scan_id,),
+            )
+            connection.execute(
+                "DELETE FROM deep_scan_attempt_sessions WHERE scan_id = ?", (fixture.scan_id,)
+            )
     _state_graph(
         fixture.environment,
         {
