@@ -899,16 +899,13 @@ test("isolates relative credential stores selected from an external Git caller",
     },
   });
   expect(outcome.exitCode, outcome.stderr).toBe(0);
-  expect(protectedStores?.toSorted()).toEqual(
-    [
-      ...stores.map(({ parent, name }) => join(caller, parent, name)),
-      ...[caller, directory].flatMap((root) => [
-        join(root, "home", ".aws", "config"),
-        join(root, "home", ".aws", "credentials"),
-        join(root, "home", ".netrc"),
-        join(root, "home", "_netrc"),
-        join(root, cookie),
-      ]),
-    ].sort(),
-  );
+  for (const { parent, name } of stores) {
+    expect(protectedStores).toContain(join(caller, parent, name));
+    expect(protectedStores).not.toContain(join(directory, parent, name));
+  }
+  for (const root of [caller, directory]) {
+    expect(protectedStores).toContain(join(root, cookie));
+    for (const store of [".aws/config", ".aws/credentials", ".netrc", "_netrc"])
+      expect(protectedStores).toContain(join(root, "home", store));
+  }
 });

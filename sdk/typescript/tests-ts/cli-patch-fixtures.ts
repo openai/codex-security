@@ -170,7 +170,7 @@ export async function runWorkflow(
   options: {
     interactive?: boolean;
     review?: boolean;
-    localHosting?: boolean;
+    localHosting?: boolean | "git";
     hostingOrigin?: string;
     configure?: (value: ReturnType<typeof dependencies>) => void;
   } = {},
@@ -219,6 +219,8 @@ export async function runWorkflow(
       cwd,
       commandOptions,
     ) => {
+      if (command !== "git" && options.localHosting === "git")
+        return run(command, args, cwd, commandOptions);
       if (command === "gh" && args[0] === "repo" && args[1] === "view") {
         if (args.at(-1) === ".url") {
           creatingRequest = true;
@@ -267,7 +269,7 @@ export async function runWorkflow(
       if (command !== "git" || args[args.indexOf("remote") + 1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;
-      const remotes = output.split("\n").map((remote) => {
+      const asHosted = (remote: string) => {
         if (
           !isAbsolute(remote) &&
           !win32.isAbsolute(remote) &&
@@ -284,7 +286,15 @@ export async function runWorkflow(
           localRemotes.set(hosted, remote);
         }
         return hosted;
-      });
+      };
+      const remotes = output.split("\n").map(asHosted);
+      // The appended selector names one complete URL, including any line feeds.
+      const selected = environment["CODEX_SECURITY_PATCH_REMOTE"];
+      if (selected?.includes("\n"))
+        localRemotes.set(
+          selected.split("\n").map(asHosted).join("\n"),
+          selected,
+        );
       if (args.includes("--push") && remotes[0]?.includes("://"))
         hostedRemote = remotes[0];
       return remotes.join("\n");
