@@ -1,3 +1,7 @@
+import {
+  createTestWorkbench,
+  discoverCandidate,
+} from "../../../plugins/codex-security/mcp-app/tests/support/discovery.ts";
 import { readReviewState } from "./support/review-state.js";
 import {
   mergeWorkerFiles,
@@ -52,7 +56,6 @@ async function fixture(mode: "diff" | "deep" | "standard" = "standard") {
   const repoRoot = join(directory, "repository"),
     home = join(directory, "home");
   await mkdir(repoRoot);
-  await mkdir(home, { mode: 0o700 });
   await writeFile(join(repoRoot, "app.py"), "value = 1\n");
   const git = (...args: string[]) =>
     execFileSync(
@@ -73,21 +76,7 @@ async function fixture(mode: "diff" | "deep" | "standard" = "standard") {
     git("add", "app.py");
     git("commit", "-qm", "Synthetic fixture");
   }
-  const workbench = async (args: string[]) =>
-    JSON.parse(
-      execFileSync(
-        process.env["PYTHON"]?.trim() || "python3",
-        [join(PLUGIN_ROOT, "scripts/workbench_db.py"), ...args],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_HOME: home,
-            CODEX_SECURITY_STATE_DIR: join(directory, "state"),
-          },
-        },
-      ),
-    );
+  const workbench = await createTestWorkbench(directory, PLUGIN_ROOT);
   if (mode === "deep") {
     await mkdir(join(home, "codex-security"));
     await writeFile(
@@ -449,32 +438,11 @@ for (const decision of ["pending", "suppressed", "not_applicable"]) {
     const replacement = resolution === "receipt";
     test(`public draft after prepared receipt recovery retains current decision: ${decision}, resolution=${resolution}`, async () => {
       const f = await fixture("diff");
-      const discovery = join(f.parent.root, "artifacts/02_discovery");
-      await mkdir(discovery, { recursive: true });
-      await writeFile(join(discovery, "in_scope_files.txt"), "app.py\n");
-      await f.api.discovery.recordCodexSecurityDiscoveryCandidates(
-        {
-          candidates: [
-            {
-              cwe_ids: [],
-              locations: [
-                {
-                  path: "app.py",
-                  start_line: 1,
-                  end_line: 1,
-                  role: "evidence",
-                },
-              ],
-              summary: "Synthetic review candidate",
-              evidence: "Synthetic evidence",
-            },
-          ],
-        },
+      const candidateId = await discoverCandidate(
+        f.api.discovery,
         f.parent,
+        "app.py",
       );
-      const candidateId = (
-        await f.api.discovery.listCodexSecurityCandidates({}, f.parent)
-      ).rows[0].candidate_id;
       await f.publish(
         f.draft(
           {
@@ -657,32 +625,11 @@ for (const decision of ["suppressed", "not_applicable"]) {
   ]) {
     test(`explicit Diff reopening survives ${termination}: ${decision}, resolution=${resolution}`, async () => {
       const f = await fixture("diff");
-      const discovery = join(f.parent.root, "artifacts/02_discovery");
-      await mkdir(discovery, { recursive: true });
-      await writeFile(join(discovery, "in_scope_files.txt"), "app.py\n");
-      await f.api.discovery.recordCodexSecurityDiscoveryCandidates(
-        {
-          candidates: [
-            {
-              cwe_ids: [],
-              locations: [
-                {
-                  path: "app.py",
-                  start_line: 1,
-                  end_line: 1,
-                  role: "evidence",
-                },
-              ],
-              summary: "Synthetic review candidate",
-              evidence: "Synthetic evidence",
-            },
-          ],
-        },
+      const candidateId = await discoverCandidate(
+        f.api.discovery,
         f.parent,
+        "app.py",
       );
-      const candidateId = (
-        await f.api.discovery.listCodexSecurityCandidates({}, f.parent)
-      ).rows[0].candidate_id;
       await f.publish(
         f.draft(
           {
@@ -726,7 +673,12 @@ for (const decision of ["suppressed", "not_applicable"]) {
       };
       await f.publish(f.draft({ surfaces: [surface] }));
       const candidate = JSON.parse(
-        (await readFile(join(discovery, "candidate_ledger.jsonl"), "utf8"))
+        (
+          await readFile(
+            join(f.parent.root, "artifacts/02_discovery/candidate_ledger.jsonl"),
+            "utf8",
+          )
+        )
           .trim()
           .split("\n")[0]!,
       );

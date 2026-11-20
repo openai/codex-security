@@ -522,6 +522,27 @@ export function preserveDiffCandidateDecisions(
   };
 }
 
+function archiveEvidence(
+  target: JsonObject,
+  archive: string,
+  value: unknown,
+): void {
+  if (value === undefined) return;
+  const previous = Array.isArray(target[archive]) ? target[archive] : [];
+  if (!previous.some((item) => isDeepStrictEqual(item, value)))
+    target[archive] = [...previous, structuredClone(value)];
+}
+
+function mergeEvidenceArchives(target: JsonObject, source: JsonObject): void {
+  for (const key of ["originalCandidates", "previousFindings"]) {
+    if (Array.isArray(source[key]))
+      target[key] = exactUnion(
+        Array.isArray(target[key]) ? target[key] : [],
+        source[key],
+      );
+  }
+}
+
 /** Retain unresolved diff candidates alongside the final coverage evidence. */
 export function preserveUnresolvedDiffCandidates(
   input: ScanDraftInput,
@@ -578,34 +599,10 @@ export function preserveUnresolvedDiffCandidates(
     const finding = confirmed.get(key ?? "");
     if (finding) {
       const provenance = finding.provenance as JsonObject;
-      if (pending.candidate !== undefined) {
-        const previous = Array.isArray(provenance.originalCandidates)
-          ? provenance.originalCandidates
-          : [];
-        if (
-          !previous.some((item) => isDeepStrictEqual(item, pending.candidate))
-        )
-          provenance.originalCandidates = [
-            ...previous,
-            structuredClone(pending.candidate),
-          ];
-      }
+      archiveEvidence(provenance, "originalCandidates", pending.candidate);
       if (asRecord(pending.finding))
         preserveFindingDetails(finding, pending.finding as JsonObject);
-      if (Array.isArray(pending.originalCandidates))
-        provenance.originalCandidates = exactUnion(
-          Array.isArray(provenance.originalCandidates)
-            ? provenance.originalCandidates
-            : [],
-          pending.originalCandidates,
-        );
-      if (Array.isArray(pending.previousFindings))
-        provenance.previousFindings = exactUnion(
-          Array.isArray(provenance.previousFindings)
-            ? provenance.previousFindings
-            : [],
-          pending.previousFindings,
-        );
+      mergeEvidenceArchives(provenance, pending);
       continue;
     }
     const decision = decisions.get(key);
@@ -615,27 +612,10 @@ export function preserveUnresolvedDiffCandidates(
       ["finding", "previousFindings"],
     ] as const) {
       if (pending[field] === undefined) continue;
-      const previous = Array.isArray(decision[archive])
-        ? (decision[archive] as unknown[])
-        : [];
-      if (!previous.some((item) => isDeepStrictEqual(item, pending[field])))
-        decision[archive] = [...previous, structuredClone(pending[field])];
+      archiveEvidence(decision, archive, pending[field]);
       decision[field] ??= structuredClone(pending[field]);
     }
-    if (Array.isArray(pending.originalCandidates))
-      decision.originalCandidates = exactUnion(
-        Array.isArray(decision.originalCandidates)
-          ? decision.originalCandidates
-          : [],
-        pending.originalCandidates,
-      );
-    if (Array.isArray(pending.previousFindings))
-      decision.previousFindings = exactUnion(
-        Array.isArray(decision.previousFindings)
-          ? decision.previousFindings
-          : [],
-        pending.previousFindings,
-      );
+    mergeEvidenceArchives(decision, pending);
   }
   const replacedDecisions = new Set<JsonObject>();
   const pending = new Map(

@@ -1,9 +1,8 @@
+import { createTestWorkbench } from "./support/discovery.ts";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
 import {
   draftApi,
@@ -13,7 +12,6 @@ import {
 import { finding } from "./scan-draft-fixture.ts";
 import { readSavedReviewState, readJson } from "./support/json.ts";
 
-const execFileAsync = promisify(execFile);
 const { createScanArtifactContext } = await importSource(
   "../src/artifact-context.ts",
   { absWorkingDir: import.meta.dirname },
@@ -31,28 +29,10 @@ for (const mode of ["standard", "worker"] as const) {
       const f = await fixture(t, mode);
       const directory = path.dirname(f.root);
       const target = path.join(directory, "target");
-      const home = path.join(directory, "home");
       const state = path.join(directory, "state");
       await mkdir(target);
       await writeFile(path.join(target, "app.py"), "synthetic source\n");
-      await mkdir(home, { mode: 0o700 });
-      const workbench = async (args: string[]) => {
-        const { stdout } = await execFileAsync(
-          process.env.PYTHON?.trim() || "python3",
-          [
-            path.join(import.meta.dirname, "../../scripts/workbench_db.py"),
-            ...args,
-          ],
-          {
-            env: {
-              ...process.env,
-              CODEX_HOME: home,
-              CODEX_SECURITY_STATE_DIR: state,
-            },
-          },
-        );
-        return JSON.parse(stdout);
-      };
+      const workbench = await createTestWorkbench(directory);
       let context = { ...f.context, repoRoot: target };
       if (mode === "standard") {
         const { scan } = await workbench([

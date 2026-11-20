@@ -1,22 +1,17 @@
-import { readJson, readSavedReviewState } from "./support/json.ts";
-import { importDiscoverySource } from "./support/discovery.ts";
-import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import {
-  mkdir,
-  readFile,
-  readdir,
-  rm,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+  discoverCandidate,
+  importDiscoverySource,
+  rememberCheckpoints,
+  startDiffScan,
+} from "./support/discovery.ts";
+import { readJson, readSavedReviewState } from "./support/json.ts";
+import assert from "node:assert/strict";
+import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
 import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const execFileAsync = promisify(execFile);
 const options = { absWorkingDir: import.meta.dirname };
 const { createScanArtifactContext } = await importSource(
   "../src/artifact-context.ts",
@@ -26,8 +21,7 @@ const { recordCodexSecurityScanDraftViaWorkbench: record } = await importSource(
   "../src/artifact-scan-draft.ts",
   options,
 );
-const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
-  await importDiscoverySource();
+const discoveryApi = await importDiscoverySource();
 const { recordCodexSecurityCandidateValidations } = await importSource(
   "../src/artifact-candidate-ledger.ts",
   options,
@@ -58,68 +52,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
       test(`receipt recovery precedes saved Diff decisions: section=${section}, termination=${termination}, receipt=${receipt}, ledger=${decision}`, async (t) => {
         const directory = await temporaryDirectory("candidate-receipt-", true);
         t.after(() => rm(directory, { recursive: true, force: true }));
-        const target = path.join(directory, "target");
-        const home = path.join(directory, "home");
-        await mkdir(target);
-        await mkdir(home, { mode: 0o700 });
-        await writeFile(
-          path.join(target, "app.ts"),
-          "export const value = 1;\n",
-        );
-        const git = async (...args: string[]) =>
-          (
-            await execFileAsync("git", [
-              "-C",
-              target,
-              "-c",
-              "user.name=Fixture",
-              "-c",
-              "user.email=fixture@example.test",
-              ...args,
-            ])
-          ).stdout.trim();
-        await git("init", "-q");
-        await git("add", "app.ts");
-        await git("commit", "-qm", "Synthetic fixture");
-        const workbench = async (args: string[]) =>
-          JSON.parse(
-            (
-              await execFileAsync(
-                process.env.PYTHON?.trim() || "python3",
-                [
-                  path.join(
-                    import.meta.dirname,
-                    "../../scripts/workbench_db.py",
-                  ),
-                  ...args,
-                ],
-                {
-                  env: {
-                    ...process.env,
-                    CODEX_HOME: home,
-                    CODEX_SECURITY_STATE_DIR: path.join(directory, "state"),
-                  },
-                },
-              )
-            ).stdout,
-          );
-        const { scan } = await workbench([
-          "start-prompt-only-scan",
-          "--thread-id",
-          "synthetic-receipt-review",
-          "--target-path",
-          target,
-          "--scope",
-          ".",
-          "--mode",
-          "diff",
-          "--diff-target-kind",
-          "commit",
-          "--diff-head-revision",
-          await git("rev-parse", "HEAD"),
-          "--scan-root",
-          path.join(directory, "scans"),
-        ]);
+        const { scan, workbench } = await startDiffScan(directory);
         const context = await createScanArtifactContext(
           scan.scanId,
           workbench,
@@ -131,31 +64,12 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
             ),
           },
         );
-        const discovery = path.join(context.root, "artifacts/02_discovery");
-        await mkdir(discovery, { recursive: true });
-        await writeFile(path.join(discovery, "in_scope_files.txt"), "app.ts\n");
-        await recordCodexSecurityDiscoveryCandidates(
-          {
-            candidates: [
-              {
-                cwe_ids: [],
-                locations: [
-                  {
-                    path: "app.ts",
-                    start_line: 1,
-                    end_line: 1,
-                    role: "evidence",
-                  },
-                ],
-                summary: "Synthetic review candidate",
-                evidence: "Original discovery evidence.",
-              },
-            ],
-          },
+        const candidateId = await discoverCandidate(
+          discoveryApi,
           context,
+          "app.ts",
+          "Original discovery evidence.",
         );
-        const candidateId = (await listCodexSecurityCandidates({}, context))
-          .rows[0].candidate_id;
         await record(
           context,
           {
@@ -284,14 +198,11 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
             workbench,
           );
         }
-        const checkpoints = path.join(context.root, "checkpoints");
-        const originals = await Promise.all(
-          (await readdir(checkpoints)).map(
-            async (name) =>
-              [name, await readFile(path.join(checkpoints, name))] as const,
-          ),
+        const assertUnchanged = await rememberCheckpoints(context.root);
+        const ledger = path.join(
+          context.root,
+          "artifacts/02_discovery/candidate_ledger.jsonl",
         );
-        const ledger = path.join(discovery, "candidate_ledger.jsonl");
         const originalLedger = await readFile(ledger);
         for (const command of [termination, "preserve-scan-results"]) {
           await workbench([
@@ -322,8 +233,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
           }
         }
         assert.deepEqual(await readFile(ledger), originalLedger);
-        for (const [name, bytes] of originals)
-          assert.deepEqual(await readFile(path.join(checkpoints, name)), bytes);
+        await assertUnchanged();
       });
     }
   }

@@ -1812,10 +1812,7 @@ async function preserveScanDraft(
     result.reviewState.deferred,
     resolvedDeferred(result.reviewState),
   );
-  result.reviewState = normalizeCoverageEntries(
-    result.reviewState,
-    normalizeSurfaces(result.reviewState.surfaces),
-  );
+  result.reviewState = normalizeCoverageEntries(result.reviewState, "content");
   if (context.layout === "worker") {
     // Older checkpoints predate the coordinator's requested-path binding.
     result.findings = findingsWithinScope(
@@ -3795,40 +3792,24 @@ function normalizeLegacyCandidateEntry<Item extends JsonObject>(
   return item;
 }
 
+// Legacy semantic IDs hash only the fields that originally identified the task.
+// Content IDs use the entire submitted row.
+type CoverageIdSource = "semantic" | "content";
+
+function contentId(value: unknown): string {
+  return createHash("sha256")
+    .update(JSON.stringify(value))
+    .digest("hex")
+    .slice(0, 16);
+}
+
 function normalizeCoverageEntries(
   coverage: DraftCoverage,
-  preparedSurfaces?: DraftCoverage["surfaces"],
+  surfaceIdSource: CoverageIdSource = "semantic",
 ): DraftCoverage {
   const surfaces = coverage.surfaces;
-  const reservedSurfaceIds = new Set(
-    surfaces.flatMap((surface) =>
-      typeof surface.id === "string" ? [surface.id] : [],
-    ),
-  );
-  const surfaceIds = new Set<string>();
+  const normalizedSurfaces = normalizeSurfaces(surfaces, surfaceIdSource);
   const renamedSurfaces = new Map<string, string>();
-  const normalizedSurfaces =
-    preparedSurfaces ??
-    surfaces.map((surface, index) => {
-      const explicitId = typeof surface.id === "string";
-      const baseId = explicitId
-        ? (surface.id as string)
-        : `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`;
-      let id = baseId;
-      if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
-        let suffix = 2;
-        do {
-          id = `${baseId}-${suffix}`;
-          suffix += 1;
-        } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
-      }
-      surfaceIds.add(id);
-      return {
-        ...surface,
-        id,
-        receiptRefs: surface.receiptRefs ?? [],
-      };
-    });
   for (const [index, surface] of surfaces.entries()) {
     const originalKey = candidateKey(
       surface.id,
@@ -3840,93 +3821,44 @@ function normalizeCoverageEntries(
         normalizedSurfaces[index]!.id as string,
       );
   }
-  const deferred = coverage.deferred;
-  // Reserve later owned identities before deriving any earlier missing ones.
-  const deferredIds = new Set([
-    ...deferred.flatMap((item) =>
-      typeof item.id === "string" ? [item.id] : [],
-    ),
-    ...resolvedDeferred(coverage).map((item) => item.id as string),
-  ]);
-  const reservedCandidateIds = new Set(
-    deferred.flatMap((item) =>
-      typeof item.candidateId === "string" ? [item.candidateId] : [],
-    ),
+  const deferred = normalizeDeferred(
+    coverage.deferred.map(normalizeLegacyCandidateEntry),
+    resolvedDeferred(coverage),
+    "semantic",
   );
-  const assignedDeferredIds = new Set<string>();
-  const normalizedDeferred = deferred.map((item) => {
-    item = normalizeLegacyCandidateEntry(item);
-    const linked = Array.isArray(item.surfaceIds)
-      ? {
-          ...item,
-          surfaceIds: item.surfaceIds.map(
-            (id) =>
-              renamedSurfaces.get(surfaceReferenceKey(id, item, surfaces)!) ??
-              id,
-          ),
-        }
-      : item;
-    if (
-      typeof item.id === "string" &&
-      (genericDeferred(item) || !assignedDeferredIds.has(item.id))
-    ) {
-      assignedDeferredIds.add(item.id);
-      return linked;
-    }
-
-    const candidateId = item.candidateId;
-    const baseId =
-      typeof item.id === "string"
-        ? item.id
-        : typeof candidateId === "string"
-          ? candidateId
-          : `deferred-${createHash("sha256")
-              .update(
-                JSON.stringify([
-                  item.reason,
-                  item.paths ?? [],
-                  item.surfaceIds ?? [],
-                ]),
-              )
-              .digest("hex")
-              .slice(0, 16)}`;
-    let id = baseId;
-    let suffix = 2;
-    while (
-      deferredIds.has(id) ||
-      (typeof candidateId !== "string" && reservedCandidateIds.has(id))
-    ) {
-      id = `${baseId}-${suffix}`;
-      suffix += 1;
-    }
-    deferredIds.add(id);
-    assignedDeferredIds.add(id);
-    return { ...linked, id };
-  });
   return {
     ...coverage,
     surfaces: normalizedSurfaces,
-    deferred: normalizedDeferred,
+    deferred: deferred.map((item) => {
+      if (!Array.isArray(item.surfaceIds)) return item;
+      return {
+        ...item,
+        surfaceIds: item.surfaceIds.map(
+          (id) =>
+            renamedSurfaces.get(surfaceReferenceKey(id, item, surfaces)!) ?? id,
+        ),
+      };
+    }),
   };
 }
 
-function normalizeSurfaces<Item extends JsonObject>(surfaces: Item[]) {
+function normalizeSurfaces<Item extends JsonObject>(
+  surfaces: Item[],
+  idSource: CoverageIdSource = "content",
+) {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
-      [surface.id, surface.candidateId].filter(
-        (id): id is string => typeof id === "string",
-      ),
+      idSource === "semantic" ? [surface.id] : [surface.id, surface.candidateId],
     ),
   );
   const surfaceIds = new Set<string>();
-  return surfaces.map((surface) => {
+  return surfaces.map((surface, index) => {
     const explicitId = typeof surface.id === "string";
     const baseId = explicitId
       ? (surface.id as string)
-      : `surface-${createHash("sha256")
-          .update(JSON.stringify(surface))
-          .digest("hex")
-          .slice(0, 16)}`;
+      : idSource === "semantic"
+        ? `surface_${semanticIdentifier(surface.label as string, String(index + 1))}`
+        : `surface-${contentId(surface)}`;
     let id = baseId;
     if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
       let suffix = 2;
@@ -3943,6 +3875,7 @@ function normalizeSurfaces<Item extends JsonObject>(surfaces: Item[]) {
 function normalizeDeferred<Item extends JsonObject>(
   rows: Item[],
   closures: JsonObject[] = [],
+  idSource: CoverageIdSource = "content",
 ): Item[] {
   // Reserve later owned identities and closures before deriving missing task IDs.
   const ids = new Set([
@@ -3970,10 +3903,11 @@ function normalizeDeferred<Item extends JsonObject>(
         ? item.id
         : typeof candidateId === "string"
           ? candidateId
-          : `deferred-${createHash("sha256")
-              .update(JSON.stringify(item))
-              .digest("hex")
-              .slice(0, 16)}`;
+          : `deferred-${contentId(
+              idSource === "semantic"
+                ? [item.reason, item.paths ?? [], item.surfaceIds ?? []]
+                : item,
+            )}`;
     let id = baseId;
     let suffix = 2;
     while (
