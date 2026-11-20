@@ -4208,8 +4208,13 @@ describe("runtime directories and plugin Python boundary", () => {
       if (runTestInSubprocess(import.meta.path, name)) return;
       const { root, home } = await credentialHome(false);
       await requireSecureCredentialHome(home);
-      const cache = join(home, "cache");
-      await mkdir(cache);
+      const cache = join(home, ".tmp", "plugins");
+      const metadata = join(cache, ".git");
+      await mkdir(metadata, { recursive: true });
+      expect(
+        windowsTestCommand("attrib.exe", ["+H", metadata, "/D"]).status,
+      ).toBe(0);
+      await writeFile(join(metadata, "HEAD"), "synthetic cache metadata\n");
       for (let index = 0; index < 8; index++)
         await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
       const trace = join(root, "acl-queries.txt");
@@ -4219,20 +4224,28 @@ describe("runtime directories and plugin Python boundary", () => {
           language === "ConstrainedLanguage"
             ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
             : "",
-          script.replace(
-            credentialAclFunction,
-            `${credentialAclFunction} ${append} (@($path).Count);`,
-          ),
+          script
+            .replaceAll(
+              "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath",
+              `${append} 'provider'; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath`,
+            )
+            .replace(
+              credentialAclFunction,
+              `${credentialAclFunction} ${append} (@($path).Count);`,
+            ),
           `${append} ('complete:' + $script:descriptorCount)`,
         ].join("\n"),
       );
       try {
         await requireSecureCredentialHome(home);
         const rows = (await readFile(trace, "utf8")).trim().split(/\r?\n/u);
-        const expected = credentialAncestors(home, "").length + 10;
+        const expected = credentialAncestors(home, "").length + 13;
         expect(rows.pop()).toBe(`complete:${expected}`);
-        const queries = rows.map(Number);
-        expect(queries).toContain(8);
+        expect(rows.includes("provider")).toBe(
+          language === "ConstrainedLanguage",
+        );
+        const queries = rows.filter((row) => row !== "provider").map(Number);
+        expect(queries).toContain(9);
         expect(queries.reduce((total, count) => total + count, 0)).toBe(
           expected,
         );
@@ -4241,6 +4254,68 @@ describe("runtime directories and plugin Python boundary", () => {
       }
     });
   }
+
+  test
+    .skipIf(process.platform !== "win32")
+    .each(["file", "directory"] as const)(
+    "recovers a Windows credential cache %s removed before its native ACL read",
+    async (kind) => {
+      const name = `recovers a Windows credential cache ${kind} removed before its native ACL read`;
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const { home } = await credentialHome(true);
+      const cache = join(home, ".tmp", "plugins");
+      await mkdir(cache, { recursive: true });
+      const vanishing = join(cache, "removed-entry");
+      if (kind === "file") await writeFile(vanishing, "synthetic cache file\n");
+      else await mkdir(vanishing);
+      const retained = join(cache, "retained.txt");
+      await writeFile(retained, "retained fixture\n");
+      const literal = win32.toNamespacedPath(vanishing).replaceAll("'", "''");
+      let inspections = 0;
+      const restore = instrumentCredentialAcl(home, (script) => {
+        inspections++;
+        return script.replace(
+          credentialAclFunction,
+          `${credentialAclFunction} if (@($path) -contains '${literal}' -and (Microsoft.PowerShell.Management\\Test-Path -LiteralPath '${literal}')) { Microsoft.PowerShell.Management\\Remove-Item -LiteralPath '${literal}' -Force };`,
+        );
+      });
+      try {
+        await requireSecureCredentialHome(home);
+        expect(inspections).toBe(1);
+        expect(existsSync(vanishing)).toBe(false);
+        expect(await readFile(retained, "utf8")).toBe("retained fixture\n");
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects a Windows credential cache file whose native ACL cannot be read",
+    async () => {
+      const { home } = await credentialHome(true);
+      const cache = join(home, ".tmp", "plugins");
+      await mkdir(cache, { recursive: true });
+      const file = join(cache, "protected.txt");
+      await writeFile(file, "synthetic cache fixture\n");
+      const sid = windowsUserSid();
+      const python = await resolvePluginPython();
+      const grants = `(A;;FA;;;${sid})(A;;FA;;;SY)(A;;FA;;;BA)`;
+      setWindowsTestDacl(python, file, `D:P(D;;RC;;;OW)${grants}`);
+      try {
+        const failure = await requireSecureCredentialHome(home).catch(
+          (error: unknown) => error,
+        );
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain(
+          "UnauthorizedAccessException",
+        );
+      } finally {
+        setWindowsTestDacl(python, file, `D:P${grants}`);
+      }
+      expect(await readFile(file, "utf8")).toBe("synthetic cache fixture\n");
+    },
+  );
 
   test("retries interrupted Windows credential ACL enumeration", async () => {
     const root = await temporaryDirectory();
