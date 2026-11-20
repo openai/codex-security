@@ -21,12 +21,7 @@ import {
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { git } from "./git-fixture.js";
-import {
-  capture,
-  dependencies,
-  fakeResult,
-  fakeSecurity,
-} from "./cli-fixtures.js";
+import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { rejecting, throwing } from "./support/errors.js";
@@ -1199,28 +1194,25 @@ test.each(["openrouter", "fireworks", "amazon-bedrock"] as const)(
       "native override",
     ]) {
       for (const model of [undefined, "synthetic-provider-model"]) {
+        const providerConfig: JsonObject = {
+          model_provider: provider,
+          ...(model === undefined ? {} : { model }),
+        };
         const codex: JsonObject =
           selection === "root"
-            ? {
-                model_provider: provider,
-                ...(model === undefined ? {} : { model }),
-              }
+            ? providerConfig
             : selection === "native override"
               ? {}
               : {
                   model_provider: "openai",
                   profile: selection === "CLI profile" ? "other" : "review",
                   profiles: {
-                    review: {
-                      model_provider: provider,
-                      ...(model === undefined ? {} : { model }),
-                    },
+                    review: providerConfig,
                     other: { model_provider: "openai" },
                   },
                 };
         const input = await fixture({ codex });
-        const stdout = capture();
-        const stderr = capture();
+        const { runCli, stdout, stderr } = createCliTest(main);
         const onConfig = mock<(config: CodexSecurityConfig) => void>();
         const args = [
           "scan",
@@ -1239,10 +1231,8 @@ test.each(["openrouter", "fireworks", "amazon-bedrock"] as const)(
             : []),
         ];
         expect(
-          await main(
+          await runCli(
             args,
-            stdout.stream,
-            stderr.stream,
             dependencies({
               currentDirectory: input.repository,
               onConfig,
@@ -1265,10 +1255,9 @@ test.each(["openrouter", "fireworks", "amazon-bedrock"] as const)(
           );
           if (selection !== "native override") {
             expect(
-              await main(
+              await runCapturedCli(
+                main,
                 [...args, "--provider", "openai"],
-                capture().stream,
-                capture().stream,
                 dependencies({ currentDirectory: input.repository, onConfig }),
               ),
             ).toBe(0);
