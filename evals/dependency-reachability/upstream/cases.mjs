@@ -1,8 +1,11 @@
 import {
+  skillOnly,
+  originalRubric,
   excerpts,
   installedNodemailerVersion,
   mail390,
   nodemailer7010,
+  nodemailer7011,
   nodemailerFile,
 } from "./case-data.mjs";
 import { sanitizerCases } from "./sanitizer-cases.mjs";
@@ -10,17 +13,14 @@ import { serviceCases } from "./service-cases.mjs";
 import { rolloutCases } from "./rollout-cases.mjs";
 import { zipCases } from "./zip-cases.mjs";
 import { mimeReceiverSources } from "./receiver-data.mjs";
+import { applicationCases } from "./application-cases.mjs";
+import { copySelectionCases } from "./copy-selection-cases.mjs";
 
 const pillowAffected = "6e28ed1f36d0eb74053af54e1eddc9c29db698cd";
 const pillowFixed = "e34d346f10c0b1c814661e662a3e0c1ef084cf1c";
 const webpPlugin = "src/PIL/WebPImagePlugin.py";
 const webpNative = "src/_webp.c";
 const wheelRecipe = "pillow-wheels/config.sh";
-const decode =
-  "An attacker supplies the bytes in request_body to Image.open(BytesIO(request_body)).load().";
-const encode =
-  "An attacker controls raw RGB pixel values in a validated, fixed-length 64x64 buffer. " +
-  "The only image operation is Image.frombytes('RGB', (64, 64), pixels).save(output, format='WEBP', lossless=True).";
 
 function pillowCase(id, revision, operation, verdict) {
   const fixed = revision === pillowFixed;
@@ -37,14 +37,28 @@ function pillowCase(id, revision, operation, verdict) {
   const bundledLibrary = fixed
     ? "libwebp-850e2bec.so.7.1.8"
     : "libwebp-8b6d8948.so.7.1.7";
-  const versionEvidence = [
+  const selectedWheel = [
     excerpts("service/deployment.json", wheelSha256),
     excerpts(artifact, wheelSha256),
+  ];
+  const versionEvidence = [
+    ...selectedWheel,
     excerpts(artifact, `"version": "${version}"`),
     excerpts(artifact, `"neededLibrary": "${bundledLibrary}"`),
   ];
+  const handler = excerpts(
+    "service/media.py",
+    operation === "decode"
+      ? 'Image.open(BytesIO(environ["wsgi.input"].read()))'
+      : 'Image.frombytes("RGB", (64, 64), pixels)',
+  );
   return {
     id,
+    target:
+      operation === "decode"
+        ? "thumbnail-webp-decoder"
+        : "thumbnail-webp-encoder",
+    identityEvidence: [...selectedWheel, handler],
     cve: "CVE-2023-4863",
     component: "libwebp",
     suite: "pillow",
@@ -58,12 +72,9 @@ function pillowCase(id, revision, operation, verdict) {
       "manylinux_2_28 wheel declared there. Include all image formats and native backends reachable from that request. " +
       "Report the bundled libwebp version where the selected artifact establishes it.",
     evidenceGroups:
-      operation === decode
+      operation === "decode"
         ? [
-            excerpts(
-              "service/media.py",
-              'Image.open(BytesIO(environ["wsgi.input"].read()))',
-            ),
+            handler,
             excerpts("service/media.py", "image.load()"),
             ...versionEvidence,
             ...(fixed
@@ -75,10 +86,7 @@ function pillowCase(id, revision, operation, verdict) {
                 ]),
           ]
         : [
-            excerpts(
-              "service/media.py",
-              'Image.frombytes("RGB", (64, 64), pixels)',
-            ),
+            handler,
             excerpts("service/media.py", "size = 64 * 64 * 3"),
             excerpts("service/media.py", "if len(pixels) != size:"),
             ...versionEvidence,
@@ -89,7 +97,7 @@ function pillowCase(id, revision, operation, verdict) {
       {
         kind: "fixture",
         source:
-          operation === decode
+          operation === "decode"
             ? "fixtures/rollout/app.py"
             : "fixtures/media/encode.py",
         destination: "service/media.py",
@@ -128,7 +136,6 @@ function pillowCase(id, revision, operation, verdict) {
 }
 
 const mail392 = "bb325f156d35c28d78a18c7f61c0f2a54a2b7854";
-const nodemailer7011 = "3d17dbec49ab3e3f0e13e62871e5534be5b99994";
 const addressSource = "lib/addressparser/index.js";
 const installedAddress = "node_modules/nodemailer/" + addressSource;
 
@@ -151,24 +158,43 @@ const linkVersion = [
     "linkify-it-5.0.0.tgz",
   ),
 ];
-const addressVersion = installedNodemailerVersion;
 const directRoute = excerpts(deployment, '"/inbox": "direct"');
+const queueRoute = excerpts(deployment, '"/inbox": "queue"');
+const parseInbox = excerpts(
+  server,
+  "if (delivery === 'direct') {\n    const mail = await parse(raw);",
+);
+const disabledLinks = excerpts(deployment, '"skipTextLinks": true');
+const localWorker = excerpts(deployment, '"worker": "local"');
+const workerParse = excerpts("service/worker.cjs", "await parse(raw)");
+const remoteFetch = excerpts(
+  server,
+  "fetch(config.workerUrl, { method: 'POST', body: raw })",
+);
+const externalReceiver = "http://mail-worker:8080/jobs";
+const routeGuard = [
+  excerpts(deployment, '"routes": {}'),
+  excerpts(server, "config.routes[req.url]"),
+];
+const stripHeaders = excerpts(deployment, '"stripHeaders": true');
+const charsetConversion = [
+  excerpts(deployment, '"nativeCharset": true'),
+  excerpts(parse, "options.Iconv = require('iconv').Iconv"),
+  excerpts(mail, "new Iconv(charset, 'UTF-8"),
+];
 const parseBody = excerpts(parse, "return simpleParser(");
 const parserSelection = [
   excerpts(parse, "require('../index.js')"),
   excerpts("lib/simple-parser.js", "new MailParser(options)"),
-  excerpts("lib/simple-parser.js", "parser.end(input)"),
+  skillOnly(excerpts("lib/simple-parser.js", "parser.end(input)")),
 ];
 const directParsing = [
   directRoute,
-  excerpts(server, "require('./parse.cjs')"),
+  skillOnly(excerpts(server, "require('./parse.cjs')")),
   excerpts(server, "config.routes[req.url]"),
   excerpts(server, "for await (const chunk of req) chunks.push(chunk)"),
-  excerpts(server, "const raw = Buffer.concat(chunks)"),
-  excerpts(
-    server,
-    "if (delivery === 'direct') {\n    const mail = await parse(raw);",
-  ),
+  skillOnly(excerpts(server, "const raw = Buffer.concat(chunks)")),
+  parseInbox,
   parseBody,
   ...parserSelection,
 ];
@@ -230,75 +256,28 @@ const addressCase = {
   component: "nodemailer",
   revision: mail390,
   version: "7.0.10",
+  identityEvidence: [directRoute, parseInbox, parseAddress],
 };
 const scaffolder = "plugins/scaffolder-backend/src/";
+const selectedSteps = excerpts(
+  scaffolder + "service/router.ts",
+  "steps: template.spec.steps",
+);
 
-function archiveCopyEvidence(item) {
-  if (
-    ![
-      "archive-worker-mime-parts",
-      "archive-worker-pinned-original",
-      "archive-worker-pinned-normalized",
-    ].includes(item.id)
-  )
-    return item;
-  const selectedRelease = excerpts(
-    "package-lock.json",
-    '"node_modules/nodemailer": {\n' +
-      '            "version": "7.0.10",\n' +
-      '            "resolved": "https://registry.npmjs.org/nodemailer/-/nodemailer-7.0.10.tgz",\n' +
-      '            "integrity": "sha512-Us/Se1WtT0ylXgNFfyFSx4LElllVLJXQjWi2Xz17xWw7amDKO2MLtFnVp1WACy7GkVGs+oBlRopVNUzlrGSw1w=="',
-  );
-  const selectedImports = [
-    excerpts(
-      "index.js",
-      "const simpleParser = require('./lib/simple-parser');",
-    ),
-    excerpts(
-      "lib/simple-parser.js",
-      "const MailParser = require('./mail-parser.js');",
-    ),
-    excerpts("lib/simple-parser.js", "let parser = new MailParser(options);"),
-    excerpts("lib/mail-parser.js", "require('nodemailer/lib/addressparser')"),
-  ];
-  return {
-    ...item,
-    // Groups are ANDed, anchors within each group are ORed. Thus the installed
-    // manifest OR (exact locked release AND every import link) is required.
-    // Existing install recipe, worker selection and recursive-source groups stay.
-    evidenceGroups: [
-      ...item.evidenceGroups.map((group) =>
-        group === installedNodemailerVersion
-          ? [...group, ...selectedRelease]
-          : group,
-      ),
-      ...selectedImports.map((group) => [
-        ...installedNodemailerVersion,
-        ...group,
-      ]),
-    ],
-  };
-}
-
-export const challengeCases = [
-  ...sanitizerCases,
-  ...serviceCases.map(archiveCopyEvidence),
-  ...rolloutCases,
-  ...zipCases,
-];
-
-export const cases = [
+export const originalCases = [
   pillowCase(
     "affected-decode",
     pillowAffected,
-    decode,
+    "decode",
     "potentially_exploitable",
   ),
-  pillowCase("fixed-decode", pillowFixed, decode, "ruled_out"),
-  pillowCase("affected-encode-only", pillowAffected, encode, "ruled_out"),
+  pillowCase("fixed-decode", pillowFixed, "decode", "ruled_out"),
+  pillowCase("affected-encode-only", pillowAffected, "encode", "ruled_out"),
   {
     ...linkCase,
     id: "direct-links",
+    target: "inbox-direct-linkifier",
+    identityEvidence: [directRoute, parseInbox, matchLinks],
     verdict: "potentially_exploitable",
     stage: mailFiles(direct),
     evidenceGroups: [...directParsing, linkText, matchLinks, linkVersion],
@@ -306,11 +285,13 @@ export const cases = [
   {
     ...linkCase,
     id: "disabled-links",
+    target: "inbox-disabled-linkifier",
+    identityEvidence: [directRoute, parseInbox, disabledLinks],
     verdict: "ruled_out",
     stage: mailFiles({ ...direct, skipTextLinks: true }),
     evidenceGroups: [
       ...directParsing,
-      excerpts(deployment, '"skipTextLinks": true'),
+      disabledLinks,
       excerpts(parse, "skipTextLinks: config.skipTextLinks"),
       excerpts(mail, "if (!this.options.skipTextLinks)"),
       linkVersion,
@@ -319,11 +300,13 @@ export const cases = [
   {
     ...linkCase,
     id: "queued-links",
+    target: "inbox-local-queued-linkifier",
+    identityEvidence: [queueRoute, localWorker, workerParse],
     verdict: "potentially_exploitable",
     stage: mailFiles({ ...queue, worker: "local" }),
     evidenceGroups: [
-      excerpts(deployment, '"/inbox": "queue"'),
-      excerpts(deployment, '"worker": "local"'),
+      queueRoute,
+      localWorker,
       excerpts(server, "config.routes[req.url]"),
       excerpts(server, "config.worker === 'local'"),
       excerpts(
@@ -331,11 +314,11 @@ export const cases = [
         "fork(require.resolve('./worker.cjs'), [], { serialization: 'advanced' })",
       ),
       excerpts(server, "for await (const chunk of req) chunks.push(chunk)"),
-      excerpts(server, "const raw = Buffer.concat(chunks)"),
+      skillOnly(excerpts(server, "const raw = Buffer.concat(chunks)")),
       excerpts(server, "if (worker) {\n    worker.send(raw);"),
       excerpts("service/worker.cjs", "process.on('message'"),
       excerpts("service/worker.cjs", "require('./parse.cjs')"),
-      excerpts("service/worker.cjs", "await parse(raw)"),
+      workerParse,
       parseBody,
       ...parserSelection,
       linkText,
@@ -346,13 +329,14 @@ export const cases = [
   {
     ...linkCase,
     id: "unmounted-route",
+    target: "inbox-unmounted-route",
+    identityEvidence: routeGuard,
     verdict: "ruled_out",
     // The route guard excludes this caller before any dependency copy is used.
     commandVersion: [null, "5.0.0"],
     stage: mailFiles({ routes: {} }),
     evidenceGroups: [
-      excerpts(deployment, '"routes": {}'),
-      excerpts(server, "config.routes[req.url]"),
+      ...routeGuard,
       excerpts(
         server,
         "if (req.method !== 'POST' || !delivery) {\n    res.writeHead(404).end();\n    return;",
@@ -362,51 +346,59 @@ export const cases = [
   {
     ...linkCase,
     id: "external-worker",
+    target: "inbox-external-worker",
+    identityEvidence: [
+      queueRoute,
+      excerpts(deployment, `"workerUrl": "${externalReceiver}"`),
+      remoteFetch,
+    ],
+    needsDecidingGap: true,
     verdict: "unknown",
     // The selected HTTP receiver is absent; the local 5.0.0 is not its version.
     commandVersion: null,
     stage: mailFiles({
       ...queue,
       worker: "external",
-      workerUrl: "http://mail-worker:8080/jobs",
+      workerUrl: externalReceiver,
     }),
     evidenceGroups: [
-      excerpts(deployment, '"/inbox": "queue"'),
+      queueRoute,
       excerpts(deployment, '"worker": "external"'),
-      excerpts(deployment, '"workerUrl":'),
+      skillOnly(excerpts(deployment, '"workerUrl":')),
       excerpts(server, "config.worker === 'local'"),
-      excerpts(
-        server,
-        "fetch(config.workerUrl, { method: 'POST', body: raw })",
-      ),
+      remoteFetch,
     ],
   },
   {
     ...addressCase,
     id: "address-groups",
+    target: "inbox-installed-address-parser",
     verdict: "potentially_exploitable",
     stage: mailFiles(direct, nodemailer7010),
     evidenceGroups: [
       ...directParsing,
       addressSelection,
       parseAddress,
-      addressVersion,
+      installedNodemailerVersion,
       excerpts(installedAddress, "addressparser(data.group.join(','))"),
     ],
   },
   {
     ...addressCase,
     id: "address-backport",
+    target: "inbox-backported-address-parser",
     verdict: "ruled_out",
     stage: mailFiles(direct, nodemailer7011),
     evidenceGroups: [
       ...directParsing,
       addressSelection,
       parseAddress,
-      addressVersion,
+      installedNodemailerVersion,
       excerpts(installedAddress, "const MAX_NESTED_GROUP_DEPTH = 50"),
-      excerpts(installedAddress, "let depth = options._depth || 0"),
-      excerpts(installedAddress, "_handleAddress(address, depth)"),
+      skillOnly(
+        excerpts(installedAddress, "let depth = options._depth || 0"),
+        excerpts(installedAddress, "_handleAddress(address, depth)"),
+      ),
       excerpts(
         installedAddress,
         "addressparser(data.group.join(','), { _depth: depth + 1 })",
@@ -420,11 +412,13 @@ export const cases = [
   {
     ...addressCase,
     id: "stripped-headers",
+    target: "inbox-filtered-address-parser",
+    identityEvidence: [directRoute, stripHeaders, parseAddress],
     verdict: "ruled_out",
     stage: mailFiles({ ...direct, stripHeaders: true }, nodemailer7010),
     evidenceGroups: [
       ...directParsing,
-      excerpts(deployment, '"stripHeaders": true'),
+      stripHeaders,
       excerpts(
         parse,
         "simpleParser(config.stripHeaders ? replaceHeaders(raw) : raw, options)",
@@ -433,21 +427,25 @@ export const cases = [
       excerpts(parse, "To: archive@example.invalid"),
       excerpts(parse, "Content-Type: text/plain; charset=utf-8"),
       excerpts(parse, "  '',\n  '',\n].join('\\r\\n')"),
-      excerpts(parse, "const lf = raw.indexOf(0x0a, start)"),
+      skillOnly(excerpts(parse, "const lf = raw.indexOf(0x0a, start)")),
       excerpts(
         parse,
         "lf === start || (lf === start + 1 && raw[start] === 0x0d)",
       ),
       excerpts(parse, "Buffer.concat([envelope, raw.subarray(lf + 1)])"),
-      excerpts(parse, "throw new Error('Missing end of message headers')"),
+      skillOnly(
+        excerpts(parse, "throw new Error('Missing end of message headers')"),
+      ),
       addressSelection,
       parseAddress,
-      addressVersion,
+      installedNodemailerVersion,
     ],
   },
   {
     ...mailSource,
     id: "native-charset",
+    target: "inbox-native-charset-conversion",
+    identityEvidence: charsetConversion.slice(0, 2),
     cve: "CVE-2024-2961",
     component: "glibc",
     revision: mail392,
@@ -456,14 +454,16 @@ export const cases = [
     // The runtime declaration is not bound to a selected native implementation.
     commandVersion: null,
     stage: mailFiles({ ...direct, nativeCharset: true }),
-    evidenceGroups: [
-      excerpts(deployment, '"nativeCharset": true'),
-      excerpts(parse, "options.Iconv = require('iconv').Iconv"),
-      excerpts(mail, "new Iconv(charset, 'UTF-8"),
-    ],
+    evidenceGroups: charsetConversion,
   },
   {
     id: "task-parameter",
+    target: "starter-template-task",
+    identityEvidence: [
+      excerpts("portal/app-config.yaml", "target: /app/catalog/template.yaml"),
+      excerpts("portal/template.yaml", "name: example-nodejs-template"),
+      selectedSteps,
+    ],
     cve: "CVE-2023-37466",
     component: "vm2",
     suite: "backstage",
@@ -497,56 +497,64 @@ export const cases = [
         "vm2@npm:3.9.19",
         '"vm2@npm:^3.9.18":\n  version: 3.9.19',
       ),
-      ...[
-        "catalog:",
-        "  readonly: true",
-        "  locations:",
-        "    - type: file",
-        "      target: /app/catalog/template.yaml",
-        "      rules:",
-        "        - allow: [Template]",
-      ].map((line) => excerpts("portal/app-config.yaml", line)),
+      skillOnly(
+        ...[
+          "catalog:",
+          "  readonly: true",
+          "  locations:",
+          "    - type: file",
+          "      target: /app/catalog/template.yaml",
+          "      rules:",
+          "        - allow: [Template]",
+        ].map((line) => excerpts("portal/app-config.yaml", line)),
+      ),
       excerpts("portal/compose.yaml", "/app/catalog/template.yaml:ro"),
       excerpts("portal/compose.yaml", "/app/catalog/content:ro"),
-      excerpts(
-        "portal/compose.yaml",
-        "dockerfile: packages/backend/Dockerfile",
+      skillOnly(
+        excerpts(
+          "portal/compose.yaml",
+          "dockerfile: packages/backend/Dockerfile",
+        ),
+        excerpts(
+          "portal/compose.yaml",
+          "--config, app-config.yaml, --config, portal.yaml",
+        ),
+        excerpts(
+          "packages/backend/package.json",
+          '"@backstage/plugin-scaffolder-backend": "workspace:^"',
+        ),
+        excerpts(
+          "packages/backend/Dockerfile",
+          "yarn.lock package.json packages/backend/dist/skeleton.tar.gz",
+        ),
+        excerpts(
+          "packages/backend/Dockerfile",
+          "packages/backend/dist/bundle.tar.gz",
+        ),
+        excerpts("portal/template.yaml", "additionalProperties: false"),
       ),
-      excerpts(
-        "portal/compose.yaml",
-        "--config, app-config.yaml, --config, portal.yaml",
-      ),
-      excerpts(
-        "packages/backend/package.json",
-        '"@backstage/plugin-scaffolder-backend": "workspace:^"',
-      ),
-      excerpts(
-        "packages/backend/Dockerfile",
-        "yarn.lock package.json packages/backend/dist/skeleton.tar.gz",
-      ),
-      excerpts(
-        "packages/backend/Dockerfile",
-        "packages/backend/dist/bundle.tar.gz",
-      ),
-      excerpts("portal/template.yaml", "additionalProperties: false"),
       excerpts("portal/template.yaml", "parameters.name"),
       excerpts("portal/template.yaml", "url: ./content"),
-      ...["catalog-info.yaml", "index.js", "package.json"].map((name) => [
-        {
-          path:
-            "packages/create-app/templates/default-app/examples/template/content/" +
-            name,
-          contains: "${{ values.name",
-          completeFile: true,
-        },
-      ]),
+      skillOnly(
+        ...["catalog-info.yaml", "index.js", "package.json"].map((name) => [
+          {
+            path:
+              "packages/create-app/templates/default-app/examples/template/content/" +
+              name,
+            contains: "${{ values.name",
+            completeFile: true,
+          },
+        ]),
+      ),
       excerpts(scaffolder + "service/router.ts", "values = req.body.values"),
-      excerpts(
-        scaffolder + "service/router.ts",
-        "validate(values, parameters)",
+      skillOnly(
+        excerpts(
+          scaffolder + "service/router.ts",
+          "validate(values, parameters)",
+        ),
       ),
       excerpts(scaffolder + "service/router.ts", "parameters: values"),
-      excerpts(scaffolder + "service/router.ts", "steps: template.spec.steps"),
+      selectedSteps,
       excerpts(
         scaffolder + "scaffolder/tasks/NunjucksWorkflowRunner.ts",
         "parameters: task.spec.parameters",
@@ -579,5 +587,14 @@ export const cases = [
       ),
     ],
   },
-  ...challengeCases,
+  ...sanitizerCases,
+  ...serviceCases,
+  ...rolloutCases,
+  ...zipCases,
+].map(originalRubric);
+
+export const cases = [
+  ...originalCases,
+  ...copySelectionCases,
+  ...applicationCases,
 ];

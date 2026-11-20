@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { compareRuns } from "./upstream/compare.mjs";
 import {
   commitFixture,
   git,
@@ -179,7 +180,7 @@ test("the repository grader binds each service's verdict to its own checkout evi
   context.claims[0].decision.evidenceKeys.pop();
   assert.throws(
     () => gradeMixed(context, fixture),
-    /source selected by the reviewer/u,
+    /source selected for the claim/u,
   );
   row.decidingEvidence.pop();
   assert.equal(gradeMixed(context, fixture).outcomes.length, 2);
@@ -233,21 +234,21 @@ test("the repository grader binds each service's verdict to its own checkout evi
   view.supportingClaims.pop();
   assert.throws(
     () => gradeMixed(flattened, fixture),
-    /every reviewer-selected premise/u,
+    /every selected premise/u,
   );
   view.supportingClaims.push({ ...childRef, revision: 2 });
   assert.throws(
     () => gradeMixed(flattened, fixture),
-    /every reviewer-selected premise/u,
+    /every selected premise/u,
   );
   view.supportingClaims = [ref, childRef];
   parent.payload.dependencies = [];
-  assert.throws(() => gradeMixed(flattened, fixture), /approved payload/u);
+  assert.throws(() => gradeMixed(flattened, fixture), /claim payload/u);
   parent.payload.dependencies = [childRef];
   parent.decision.evidenceKeys.pop();
   assert.throws(
     () => gradeMixed(flattened, fixture),
-    /every reviewer-selected premise/u,
+    /every selected premise/u,
   );
   dep.state = "rejected";
   assert.throws(() => gradeMixed(premise, fixture), /approved premise/u);
@@ -279,19 +280,19 @@ test("the repository grader binds each service's verdict to its own checkout evi
   missing.claims[0].decision.evidenceKeys = [];
   assert.throws(
     () => gradeMixed(missing, fixture),
-    /reported ranges match approved/u,
+    /reported ranges match submitted/u,
   );
   delete missing.claims[0].payload.use.evidence;
   assert.throws(
     () => gradeMixed(missing, fixture),
-    /approved source evidence/u,
+    /submitted source evidence/u,
   );
   const unrelated = structuredClone(report);
   unrelated.claims[0].evidence.sourceIds =
     unrelated.claims[1].evidence.sourceIds;
   assert.throws(
     () => gradeMixed(unrelated, fixture),
-    /approved source reference/u,
+    /claim source reference/u,
   );
   unrelated.claims[0].application = { assessmentId: "notes" };
   assert.throws(
@@ -305,7 +306,7 @@ test("the repository grader binds each service's verdict to its own checkout evi
   wrongService.uses[1].evidence[0] = report.uses[0].evidence[0];
   assert.throws(
     () => gradeMixed(wrongService, fixture),
-    /reported ranges match approved/u,
+    /reported ranges match submitted/u,
   );
   wrongService.claims[1] = approvedUseClaim(
     wrongService.uses[1],
@@ -465,12 +466,28 @@ test("the evidence grader checks citations against the stdio server's original r
   );
 });
 
-test("the optional suite grades a caller's actual route and config in the same assessed use", async () => {
+test("caller scope selects different clip services in an identical checkout", async () => {
   const { cases } = await import("./upstream/cases.mjs");
+  const mobile = cases.find((c) => c.id === "clips-mobile-caller");
+  const studio = cases.find((c) => c.id === "clips-studio-caller");
+  for (const key of ["cve", "repository", "revision", "stage"])
+    assert.deepEqual(mobile[key], studio[key]);
+  assert.equal(
+    mobile.callerScope.replace("mobile", "studio"),
+    studio.callerScope,
+  );
+  assert.equal(mobile.expectedService, "mobile");
+  assert.equal(mobile.verdict, "potentially_exploitable");
+  assert.equal(studio.expectedService, "studio");
+  assert.equal(studio.verdict, "ruled_out");
+});
+
+test("the optional suite grades a caller's actual route and config in the same assessed use", async () => {
+  const { cases, originalCases } = await import("./upstream/cases.mjs");
   const { gradeSnapshot, validateSnapshot } =
     await import("./upstream/grade.mjs");
-  assert.equal(cases.length, 23);
-  assert.equal(new Set(cases.map((c) => c.id)).size, 23);
+  assert.equal(originalCases.length, 23);
+  assert.equal(new Set(cases.map((c) => c.id)).size, cases.length);
   const scenario = cases.find((c) => c.id === "unmounted-route");
   const repo = await mkdtemp(join(root, "route-"));
   await mkdir(join(repo, "service"));
@@ -483,7 +500,7 @@ test("the optional suite grades a caller's actual route and config in the same a
   const commit = commitFixture(repo);
   assert.deepEqual(validateSnapshot(scenario, repo, commit), {
     identityGroups: 2,
-    decidingGroups: 3,
+    decidingGroups: 1,
   });
   const ref = { id: "caller", revision: 1, hash: sha256("caller") };
   const use = {
@@ -522,7 +539,43 @@ test("the optional suite grades a caller's actual route and config in the same a
     claims: [approvedUseClaim(use, sources)],
     uses: [use],
   };
-  assert.equal(gradeSnapshot(report, scenario, repo, commit).pass, true);
+  const baseline = gradeSnapshot(report, scenario, repo, commit, "enabled");
+  assert.equal(baseline.pass, true);
+  assert.equal(baseline.selectedEvidenceCorrect, true);
+  const selected = structuredClone(report);
+  selected.claims[0].decision.evidenceKeys.pop();
+  selected.uses[0].decidingEvidence.pop();
+  assert.deepEqual(gradeSnapshot(selected, scenario, repo, commit), {
+    ...baseline,
+    selectedEvidenceCorrect: false,
+  });
+  const disabled = structuredClone(report);
+  disabled.grader = "disabled";
+  disabled.claims[0].state = "unreviewed";
+  delete disabled.claims[0].decision;
+  const gradeDisabled = () =>
+    gradeSnapshot(disabled, scenario, repo, commit, "disabled");
+  assert.deepEqual(gradeDisabled(), baseline);
+  assert.throws(
+    () => gradeSnapshot(disabled, scenario, repo, commit, "enabled"),
+    /reviewer mode/u,
+  );
+  disabled.claims[0].decision = report.claims[0].decision;
+  assert.equal(gradeDisabled().claimsCorrect, false);
+  delete disabled.claims[0].decision;
+  disabled.uses[0].decidingEvidence.pop();
+  assert.equal(gradeDisabled().pass, false);
+  disabled.uses[0].decidingEvidence = report.uses[0].decidingEvidence;
+  disabled.uses[0].evidence[0].commit = "wrong";
+  assert.equal(gradeDisabled().pass, false);
+  const sibling = gradeSnapshot(
+    report,
+    { ...scenario, expectedService: "worker" },
+    repo,
+    commit,
+  );
+  assert.equal(sibling.verdictLabelCorrect, false);
+  assert.equal(sibling.identityCorrect, false);
   const untraced = gradeSnapshot(
     { ...report, searches: [] },
     scenario,
@@ -553,8 +606,11 @@ test("the skill and standalone adapter use the same 23 blind questions and verif
   const { runAdapter } = await import("./upstream/adapter.mjs");
   const { runBaseline } = await import("./upstream/skill-baseline.mjs");
   const { questions } = await import("./upstream/skill-questions.mjs");
-  const { cases } = await import("./upstream/cases.mjs");
-  assert.deepEqual([...questions.keys()].sort(), cases.map((c) => c.id).sort());
+  const { originalCases } = await import("./upstream/cases.mjs");
+  assert.deepEqual(
+    [...questions.keys()].sort(),
+    originalCases.map((c) => c.id).sort(),
+  );
   const repo = join(root, "skill-baseline");
   await mkdir(repo);
   await writeFile(join(repo, "source.js"), "export const version = '2';\n");
@@ -703,8 +759,61 @@ test("a reviewer-selected row verifies its linked reply, origin, exact selection
   use.decidingEvidence = [
     { ...shown, selection: { textBlock: 0, record: ["services", 0] } },
   ];
-  assert.throws(verify, /receipt selected by the reviewer/);
+  assert.throws(verify, /receipt selected for the claim/);
   use.decidingEvidence = [shown];
   report.claimEvidence.receipts[id].originCallId = "different";
   assert.throws(verify, /receipt identity/);
+});
+
+test("pairs attempts by case, counts failures, and identifies changed inputs", () => {
+  const enabled = {
+    grader: "enabled",
+    sourceSha: "same-source",
+    advisorySha256: "same-advisory",
+    elapsedMs: 200,
+    reviewBatches: 2,
+    status: "passed",
+    grade: { verdictLabelCorrect: true, evidenceCorrect: true },
+  };
+  const disabled = {
+    ...enabled,
+    grader: "disabled",
+    elapsedMs: 100,
+    reviewBatches: 0,
+  };
+  const score = compareRuns(
+    ["gained", "lost", "changed", "unfinished"],
+    [
+      { ...enabled, id: "gained" },
+      { ...disabled, id: "lost" },
+      {
+        ...disabled,
+        id: "gained",
+        status: "grade_error",
+        grade: { verdictLabelCorrect: true, evidenceCorrect: false },
+      },
+      {
+        ...enabled,
+        id: "lost",
+        status: "execution_error",
+        grade: undefined,
+        advisorySha256: undefined,
+      },
+      { ...disabled, id: "changed", advisorySha256: "new-advisory" },
+      { ...enabled, id: "changed" },
+      { ...enabled, id: "unfinished" },
+    ],
+  );
+  assert.deepEqual(score.gainedWithReview, ["gained"]);
+  assert.deepEqual(score.lostWithReview, ["lost"]);
+  assert.deepEqual(score.inputMismatch, ["changed"]);
+  assert.deepEqual(score.pending, ["unfinished"]);
+  assert.equal(score.matchedAdvisories, 1);
+  assert.equal(score.enabled.cases, 2);
+  assert.equal(score.enabled.executionErrors, 1);
+  assert.equal(score.disabled.passed, 1);
+  assert.equal(score.disabled.verdict, 2);
+  assert.equal(score.disabled.decidingEvidence, 1);
+  assert.equal(score.disabled.reviewBatches, 0);
+  assert.equal(score.medianPairedElapsedDeltaMs, 100);
 });

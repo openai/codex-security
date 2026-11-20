@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -12,13 +13,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
-import { commitFixture, jsonFile } from "./fixtures.mjs";
-import { cases } from "./upstream/cases.mjs";
+import { commitFixture, jsonFile, sha256 } from "./fixtures.mjs";
+import { cases, originalCases } from "./upstream/cases.mjs";
+import { compareRuns } from "./upstream/compare.mjs";
 import { gradeSnapshot, validateSnapshot } from "./upstream/grade.mjs";
 
-const usage = `Usage: node upstream.mjs --cache DIR [--suite mailparser|pillow|backstage] [--case ID]
+const suites = ["original", "added", ...new Set(cases.map((c) => c.suite))];
+const usage = `Usage: node upstream.mjs --cache DIR [--suite ${suites.join("|")}] [--case ID]
        (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
-       For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter.
+       With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled)
+       With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
+       For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
 Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE`;
 const separator = process.argv.indexOf("--", 2);
 const adapter = separator < 0 ? [] : process.argv.slice(separator + 1);
@@ -29,6 +34,8 @@ const { values } = parseArgs({
     suite: { type: "string" },
     case: { type: "string" },
     cli: { type: "string" },
+    grader: { type: "string" },
+    "isolated-state": { type: "boolean" },
     jobs: { type: "string", default: "1" },
     "skill-baseline": { type: "boolean" },
     out: { type: "string" },
@@ -43,26 +50,35 @@ if (values.help) {
   process.exit(0);
 }
 const jobs = Number(values.jobs);
+const existing = values["grade-existing"];
+const grader = values.grader ?? "enabled";
 if (
   !Number.isSafeInteger(jobs) ||
   jobs < 1 ||
   (separator >= 0 &&
     (!adapter.length || !values["skill-baseline"] || values.model)) ||
   !values.cache ||
+  !["enabled", "disabled", "both"].includes(grader) ||
+  (values.grader && !values.cli && !existing) ||
+  (values["isolated-state"] && !values.cli) ||
   [
     values["prepare-only"],
     values.cli,
     values["skill-baseline"],
-    values["grade-existing"],
+    existing,
   ].filter(Boolean).length !== 1
 )
   throw Error(usage);
-const selected = cases.filter(
-  (c) =>
-    (!values.suite || c.suite === values.suite) &&
-    (!values.case || c.id === values.case),
-);
-if (!selected.length) throw Error(usage);
+
+const original = new Set(originalCases.map((c) => c.id));
+const selected = cases.filter((c) => {
+  if (values.case && c.id !== values.case) return false;
+  if (values["skill-baseline"] && !original.has(c.id)) return false;
+  if (values.suite === "original") return original.has(c.id);
+  if (values.suite === "added") return !original.has(c.id);
+  return !values.suite || c.suite === values.suite;
+});
+if (!selected.length) throw Error("No matching cases.\n" + usage);
 const cli = values.cli && (await realpath(resolve(values.cli)));
 const cache = resolve(values.cache);
 const out = values.out
@@ -75,54 +91,121 @@ for (const signal of ["SIGINT", "SIGTERM"])
     process.exitCode = signal === "SIGINT" ? 130 : 143;
     abort.abort();
   });
-const results = [];
+
+const paired = grader === "both";
+const modes = paired ? ["enabled", "disabled"] : [grader];
+if (paired) {
+  for (const mode of modes) await mkdir(join(out, mode), { mode: 0o700 });
+}
+// Alternate which mode starts first to balance launch order and cache effects.
+const tasks = selected.flatMap((scenario, index) =>
+  (index % 2 ? modes.toReversed() : modes).map((mode) => ({
+    scenario,
+    grader: cli || existing ? mode : undefined,
+    path: paired ? join(mode, scenario.id) : scenario.id,
+  })),
+);
+const results = new Map();
 let saved = Promise.resolve();
 console.log("Results: " + out);
-async function runCase(scenario, runSkill) {
+
+function prepare(scenario, scratch) {
+  const repo = execFileSync(
+    "python3",
+    [
+      join(import.meta.dirname, "upstream/assets.py"),
+      "materialize",
+      cache,
+      join(scratch, "tree"),
+    ],
+    {
+      input: JSON.stringify({
+        repository: scenario.repository,
+        revision: scenario.revision,
+        stage: scenario.stage,
+      }),
+      encoding: "utf8",
+    },
+  ).trimEnd();
+  return { repo, sha: commitFixture(repo) };
+}
+
+async function reviewBatches(file) {
+  // A missing or truncated progress log cannot establish zero reviewer calls.
+  try {
+    const lines = (await readFile(file, "utf8")).trim().split("\n");
+    const events = lines.map((line) => JSON.parse(line));
+    if (events.at(-1)?.type !== "finished") return null;
+    return events.filter((event) => event.type === "review").length;
+  } catch {
+    return null;
+  }
+}
+
+async function checkRepository(task, repo, scratch, dest, result) {
+  const config = join(scratch, "scope.json");
+  await jsonFile(config, {
+    exploitability: { scope: { instructions: task.scenario.callerScope } },
+  });
+  const progress = join(dest, "progress.jsonl");
+  const reportFile = join(dest, "report.json");
+  const args = ["check"];
+  if (task.grader === "disabled") args.push("--grader=disabled");
+  args.push(
+    task.scenario.cve,
+    "--config",
+    config,
+    "--report-file",
+    reportFile,
+    "--progress-events",
+    progress,
+    "--json",
+  );
+  if (values.model) args.push("--model", values.model);
+  result.argv = [process.execPath, cli, "exploitability", ...args];
+  const start = performance.now();
+  const proc = await invokeCli(cli, repo, args, {
+    signal: abort.signal,
+    stateDirectory: values["isolated-state"]
+      ? join(scratch, "state")
+      : undefined,
+  });
+  result.elapsedMs = Math.round(performance.now() - start);
+  result.reviewBatches = await reviewBatches(progress);
+  await writeCliLogs(dest, proc);
+  if (proc.code !== 0) {
+    result.exitCode = proc.code;
+    result.signal = proc.signal;
+    throw Error(
+      `CLI exited with ${proc.signal ?? proc.code}, see stderr.log and stdout.log`,
+    );
+  }
+  const report = JSON.parse(await readFile(reportFile, "utf8"));
+  assert.deepEqual(report, JSON.parse(proc.stdout.toString("utf8")));
+  return report;
+}
+
+async function runCase(task, runSkill) {
+  const { scenario } = task;
   const scratch = await mkdtemp(join(tmpdir(), "upstream-eval-"));
-  const dest = join(out, scenario.id);
-  await mkdir(dest, { mode: 0o700 });
+  const dest = join(out, task.path);
   const result = {
     id: scenario.id,
     suite: scenario.suite,
     cve: scenario.cve,
     upstreamRevision: scenario.revision,
+    grader: task.grader,
+    callerScope: scenario.callerScope,
+    status: "execution_error",
   };
   try {
-    const repo = execFileSync(
-      "python3",
-      [
-        join(import.meta.dirname, "upstream/assets.py"),
-        "materialize",
-        cache,
-        join(scratch, "tree"),
-      ],
-      {
-        input: JSON.stringify({
-          repository: scenario.repository,
-          revision: scenario.revision,
-          stage: scenario.stage,
-        }),
-        encoding: "utf8",
-      },
-    ).trimEnd();
-    const sha = commitFixture(repo);
+    await mkdir(dest, { mode: 0o700 });
+    const { repo, sha } = prepare(scenario, scratch);
     result.sourceSha = sha;
     result.evidence = validateSnapshot(scenario, repo, sha);
-    result.status = "prepared";
-    if (values["grade-existing"]) {
-      result.status = "grade_error";
-      const original = join(
-        resolve(values["grade-existing"]),
-        scenario.id,
-        "report.json",
-      );
-      const report = JSON.parse(await readFile(original, "utf8"));
-      result.grade = gradeSnapshot(report, scenario, repo, sha);
-      result.status = result.grade.pass ? "passed" : "grade_error";
-    }
-    if (runSkill) {
-      result.status = "execution_error";
+    if (values["prepare-only"]) {
+      result.status = "prepared";
+    } else if (runSkill) {
       const { runBaseline } = await import("./upstream/skill-baseline.mjs");
       const start = performance.now();
       const { answer, grade, usage, promptSha256 } = await runBaseline(
@@ -140,81 +223,83 @@ async function runCase(scenario, runSkill) {
       });
       await jsonFile(join(dest, "answer.json"), answer);
       result.status = grade.pass ? "passed" : "grade_error";
-    }
-    if (cli) {
-      const config = join(scratch, "scope.json");
-      await jsonFile(config, {
-        exploitability: { scope: { instructions: scenario.callerScope } },
-      });
-      const reportFile = join(scratch, "answer.json");
-      const args = [
-        "check",
-        scenario.cve,
-        "--config",
-        config,
-        "--report-file",
-        reportFile,
-        "--json",
-      ];
-      if (values.model) args.push("--model", values.model);
-      const start = performance.now();
-      const proc = await invokeCli(cli, repo, args, { signal: abort.signal });
-      result.elapsedMs = Math.round(performance.now() - start);
-      await writeCliLogs(dest, proc);
-      if (proc.code !== 0) {
-        result.status = "execution_error";
-        result.exitCode = proc.code;
-        result.signal = proc.signal;
+    } else {
+      let report;
+      if (existing) {
+        const input = join(existing, task.path);
+        report = JSON.parse(await readFile(join(input, "report.json"), "utf8"));
+        result.reviewBatches = await reviewBatches(
+          join(input, "progress.jsonl"),
+        );
       } else {
-        result.status = "grade_error";
-        const reportBytes = await readFile(reportFile);
-        await writeFile(join(dest, "report.json"), reportBytes, {
-          mode: 0o600,
-          flag: "wx",
-        });
-        const report = JSON.parse(reportBytes.toString("utf8"));
-        assert.deepEqual(report, JSON.parse(proc.stdout.toString("utf8")));
-        result.grade = gradeSnapshot(report, scenario, repo, sha);
-        result.status = result.grade.pass ? "passed" : "grade_error";
+        report = await checkRepository(task, repo, scratch, dest, result);
       }
+      result.status = "grade_error";
+      if (report.advisoryDetails)
+        result.advisorySha256 = sha256(JSON.stringify(report.advisoryDetails));
+      result.usage = report.usage ?? null;
+      if (report.target?.sha)
+        assert.equal(
+          report.target.sha,
+          sha,
+          "report used a different checkout",
+        );
+      if (paired)
+        assert(
+          report.assumptions?.some((s) => s.includes(scenario.callerScope)),
+          "report is missing the supplied caller scope",
+        );
+      result.grade = gradeSnapshot(report, scenario, repo, sha, task.grader);
+      if (result.grade.pass) result.status = "passed";
     }
   } catch (error) {
-    result.status =
-      result.status === "grade_error" ? "grade_error" : "execution_error";
     result.error = error.message;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
-  console.log(scenario.id + ": " + result.status);
-  results.push(result);
-  saved = saved.then(() =>
-    writeFile(
-      join(out, "results.json"),
-      JSON.stringify(
-        {
-          model: values.model ?? null,
-          results: selected.flatMap((c) =>
-            results.filter((r) => r.id === c.id),
-          ),
-        },
-        null,
-        2,
-      ) + "\n",
-      { mode: 0o600 },
-    ),
-  );
+  console.log(task.path + ": " + result.status);
+  results.set(task.path, result);
+  saved = saved.then(saveResults);
   await saved;
 }
+
+const ids = selected.map((c) => c.id);
+function comparison() {
+  return compareRuns(ids, [...results.values()]);
+}
+async function saveResults() {
+  const tmp = join(out, "results.tmp");
+  await writeFile(
+    tmp,
+    JSON.stringify(
+      {
+        model: values.model ?? null,
+        jobs,
+        isolatedState: cli ? !!values["isolated-state"] : undefined,
+        grader: cli || existing ? grader : undefined,
+        selected: ids,
+        complete: results.size === tasks.length && !abort.signal.aborted,
+        comparison: paired ? comparison() : undefined,
+        results: tasks.map((t) => results.get(t.path)).filter(Boolean),
+      },
+      null,
+      2,
+    ) + "\n",
+    { mode: 0o600 },
+  );
+  await rename(tmp, join(out, "results.json"));
+}
+
 async function runSelected(runSkill) {
-  const queue = selected.values();
+  const queue = tasks.values();
   async function worker() {
-    for (const scenario of queue) {
+    for (const task of queue) {
       if (abort.signal.aborted) return;
-      await runCase(scenario, runSkill);
+      await runCase(task, runSkill);
     }
   }
   await Promise.all(
-    Array.from({ length: Math.min(jobs, selected.length) }, worker),
+    Array.from({ length: Math.min(jobs, tasks.length) }, worker),
   );
 }
 if (adapter.length) {
@@ -228,9 +313,22 @@ if (adapter.length) {
 } else {
   await runSelected();
 }
+if (paired) {
+  const score = comparison();
+  const table = {};
+  for (const metric of Object.keys(score.enabled))
+    table[metric] = {
+      disabled: score.disabled[metric],
+      enabled: score.enabled[metric],
+    };
+  console.table(table);
+  for (const field of ["gainedWithReview", "lostWithReview", "inputMismatch"])
+    console.log(field + ": " + (score[field].join(", ") || "none"));
+  if (score.inputMismatch.length) process.exitCode ||= 1;
+}
 if (
-  results.length !== selected.length ||
-  results.some(
+  results.size !== tasks.length ||
+  [...results.values()].some(
     (r) => r.status !== (values["prepare-only"] ? "prepared" : "passed"),
   )
 )

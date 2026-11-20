@@ -1,4 +1,5 @@
 import {
+  skillOnly,
   excerpts,
   installedNodemailerVersion,
   mail390,
@@ -15,8 +16,12 @@ const qp = installed + "lib/qp/index.js";
 const archiveCaller =
   "An unauthenticated caller controls the bytes of an uploaded file in POST /archive.";
 function archiveCase(id, boundary, verdict) {
+  const selection = excerpts("service/archive.json", boundary);
+  const parse = excerpts("service/server.cjs", "simpleParser(message)");
   return {
     id,
+    target: `${id}-address-parser`,
+    identityEvidence: [selection, parse],
     cve: "CVE-2025-14874",
     component: "nodemailer",
     suite: "mailparser",
@@ -43,13 +48,13 @@ function archiveCase(id, boundary, verdict) {
     ],
     evidenceGroups: [
       installedNodemailerVersion,
-      excerpts("service/archive.json", boundary),
+      selection,
       excerpts("service/server.cjs", "qp.wrap(qp.encode("),
       excerpts(
         "service/server.cjs",
         "Content-Type: multipart/mixed; boundary=",
       ),
-      excerpts("service/server.cjs", "simpleParser(message)"),
+      parse,
       excerpts(qp, "ord.toString(16).toUpperCase()"),
       excerpts(qp, "[0x20, 0x3c]"),
       excerpts(qp, "[0x3e, 0x7e]"),
@@ -71,9 +76,11 @@ function archiveCase(id, boundary, verdict) {
         : [
             excerpts("service/server.cjs", "From: uploads@example.invalid"),
             excerpts("service/server.cjs", "To: archive@example.invalid"),
-            excerpts(
-              "service/server.cjs",
-              "Content-Type: application/octet-stream",
+            skillOnly(
+              excerpts(
+                "service/server.cjs",
+                "Content-Type: application/octet-stream",
+              ),
             ),
             excerpts(
               "service/server.cjs",

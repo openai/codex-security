@@ -2,12 +2,18 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export async function invokeCli(cli, repo, args, { input, signal } = {}) {
+export async function invokeCli(
+  cli,
+  repo,
+  args,
+  { input, signal, stateDirectory } = {},
+) {
   const child = spawn(process.execPath, [cli, "exploitability", ...args], {
     cwd: repo,
     env: {
       ...process.env,
       CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+      ...(stateDirectory && { CODEX_SECURITY_STATE_DIR: stateDirectory }),
     },
     signal,
     stdio: ["pipe", "pipe", "pipe"],
