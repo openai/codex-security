@@ -80,13 +80,20 @@ test.each(["compiled exec directory", "config separator in executable path"])(
 
 test("one native push uses the configured proxy for each destination", () =>
   checkNativePush("approved"));
+test("one native push uses the configured SSH launcher for its second destination", () =>
+  checkNativePush("approved", "ssh"));
 test("one checkout-selected mirror blocks a native push to all destinations", () =>
   checkNativePush("unapproved mirror"));
 test("a pre-push hook cannot modify the next destination's proxy through a hard link", () =>
-  checkNativePush("linked proxy"));
+  checkNativePush("linked launcher"));
+test("a pre-push hook cannot modify the next destination's SSH launcher through a hard link", () =>
+  checkNativePush("linked launcher", "ssh"));
+test("a pre-push hook cannot modify the next destination's SSH script operand through a hard link", () =>
+  checkNativePush("linked launcher", "ssh-script"));
 
 async function checkNativePush(
-  scenario: "approved" | "unapproved mirror" | "linked proxy",
+  scenario: "approved" | "unapproved mirror" | "linked launcher",
+  secondTransport: "proxy" | "ssh" | "ssh-script" = "proxy",
 ) {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-proxy-routes-");
@@ -114,7 +121,9 @@ async function checkNativePush(
   const receivers: string[] = [];
   for (const port of [1, 2]) {
     const host = "127.0.0.1:" + port;
-    const remote = "git://" + host + "/team/repository.git";
+    const ssh = port === 2 && secondTransport !== "proxy";
+    const remote =
+      (ssh ? "ssh://git@" : "git://") + host + "/team/repository.git";
     if (port === 1) git("remote", "set-url", "origin", remote);
     git(
       "config",
@@ -128,38 +137,53 @@ async function checkNativePush(
     const receiver = join(external, "receiver-" + port);
     git("init", "--bare", receiver);
     receivers.push(receiver);
-    const name = "proxy-" + port;
+    const name = "transport-" + port;
+    const launcher = join(external, name);
     const literal =
       "'" + receiver.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
-    await writeFile(
-      join(external, name),
-      `#!/bin/sh
-header=$(dd bs=1 count=4 2>/dev/null) || exit 1
+    if (ssh) {
+      if (secondTransport === "ssh-script")
+        environment["GIT_SSH_COMMAND"] =
+          "sh " + JSON.stringify(launcher.replaceAll("\\", "/"));
+      else environment["GIT_SSH"] = launcher;
+      environment["GIT_SSH_VARIANT"] = "ssh";
+    } else {
+      git(
+        "config",
+        "--file",
+        include,
+        "--add",
+        "core.gitProxy",
+        name + " for " + host,
+      );
+    }
+    const request = ssh
+      ? ""
+      : `header=$(dd bs=1 count=4 2>/dev/null) || exit 1
 dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
-exec git receive-pack ${literal}
-`,
-      { mode: 0o700 },
-    );
-    git(
-      "config",
-      "--file",
-      include,
-      "--add",
-      "core.gitProxy",
-      name + " for " + host,
+`;
+    await writeFile(
+      launcher,
+      `#!/bin/sh\n${request}exec git receive-pack ${literal}\n`,
+      {
+        mode: 0o700,
+      },
     );
   }
-  if (scenario === "linked proxy") {
+  if (scenario === "linked launcher") {
     const home = await fixtures.create("patch-proxy-home-");
     environment["CODEX_HOME"] = home;
     await writeFile(
       join(home, "config.toml"),
       "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n",
     );
-    await link(join(external, "proxy-2"), join(directory, "proxy-alias"));
+    await link(
+      join(external, "transport-2"),
+      join(directory, "launcher-alias"),
+    );
     await writeFile(
       join(directory, ".git", "hooks", "pre-push"),
-      "#!/bin/sh\n: > proxy-alias\n",
+      "#!/bin/sh\nprintf '%s\\n' '#!/bin/sh' 'echo changed-launcher >&2; exit 1' > launcher-alias\n",
       { mode: 0o700 },
     );
   }
@@ -201,8 +225,8 @@ exec git receive-pack ${literal}
   );
   if (scenario !== "approved") {
     expect(outcome.stderr).toContain(
-      scenario === "linked proxy"
-        ? "hard-linked Git proxy"
+      scenario === "linked launcher"
+        ? "hard-linked transport file"
         : "multiple destinations",
     );
     expect(pushes).toBe(0);
