@@ -1328,6 +1328,7 @@ def _read_rollout_usage(
     prefix_unclassified = 0
     prefix_missing_cache: set[str] = set()
     ambiguous_legacy_turns: set[str | None] = set()
+    regressed_turns: set[str | None] = set()
     unpartitioned_turns: set[str | None] = set()
     boundary_reached = False
     usage_observed = False
@@ -1704,7 +1705,7 @@ def _read_rollout_usage(
                 and timestamp >= started_at
                 and not past_scan_end(timestamp, current_turn_id)
             ):
-                warnings.add("token_counter_regressed")
+                regressed_turns.add(current_turn_id)
                 continue
             if reset:
                 prefix_unclassified = 0
@@ -1852,8 +1853,8 @@ def _read_rollout_usage(
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
         if exact_turns and remainder["totalTokens"]:
             warnings.add("token_receipts_incomplete")
-    if exact_turns:
-        warnings.discard("token_counter_regressed")
+    if regressed_turns - exact_turns:
+        warnings.add("token_counter_regressed")
     if (
         expected_response_tokens
         - response_baseline_tokens
