@@ -1622,6 +1622,16 @@ describe("patch publication integrity", () => {
     "checks actual request state and bounded metadata with %s: %s (%s)",
     async (provider, state, context) => {
       const root = await fixtures.create("codex-security-gh-color-");
+      const clientEnvironment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        HOME: root,
+        USERPROFILE: root,
+        GH_CONFIG_DIR: join(root, "gh"),
+        GH_NO_UPDATE_NOTIFIER: "1",
+        // Avoid launching a keyring session for a temporary credential home.
+        DBUS_SESSION_BUS_ADDRESS: "disabled:",
+      };
       const apiHost =
         context === "api-port"
           ? "forge.example.test:8443"
@@ -1773,12 +1783,7 @@ describe("patch publication integrity", () => {
                     {
                       cwd: repository,
                       env: {
-                        PATH: process.env["PATH"],
-                        SystemRoot: process.env["SystemRoot"],
-                        HOME: root,
-                        USERPROFILE: root,
-                        GH_CONFIG_DIR: join(root, "gh"),
-                        GH_NO_UPDATE_NOTIFIER: "1",
+                        ...clientEnvironment,
                         ...effectiveEnvironment,
                       },
                       encoding: "utf8",
@@ -1824,13 +1829,8 @@ describe("patch publication integrity", () => {
                 ],
                 {
                   env: {
-                    PATH: process.env["PATH"],
-                    SystemRoot: process.env["SystemRoot"],
-                    HOME: root,
-                    USERPROFILE: root,
-                    GH_CONFIG_DIR: join(root, "gh"),
+                    ...clientEnvironment,
                     GH_TOKEN: "synthetic-token",
-                    GH_NO_UPDATE_NOTIFIER: "1",
                     CLICOLOR_FORCE:
                       provider === "github" &&
                       !["second-push", "later-page"].includes(context)

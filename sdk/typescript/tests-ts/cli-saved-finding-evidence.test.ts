@@ -5,6 +5,7 @@ import { exportEnvironment, main } from "../src/cli.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
+import { runGitRepositoryCommand } from "./cli-patch-fixtures.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
 import { setFindingIdentity } from "./support/finding-identity.js";
@@ -28,11 +29,6 @@ async function savedEvidence() {
   );
   try {
     await mkdir(repository);
-    await mkdir(join(repository, "src"));
-    await writeFile(
-      join(repository, "src/extract.py"),
-      "synthetic_source();\n",
-    );
     await mkdir(scanDir, { mode: 0o700 });
     const registered = await workbench(
       scanRegistrationArguments(repository, scanDir),
@@ -147,19 +143,19 @@ test("saved patch and verification tasks receive complete sealed evidence and li
     const received: Finding[] = [];
     const current = dependencies({
       onWorkbench: fixture.workbench,
-      onRepositoryCommand: () => {
-        throw new Error("fatal: not a git repository");
-      },
+      onRepositoryCommand: runGitRepositoryCommand,
       onCodex: async (_args, output) => {
+        if (command === "patch") {
+          await mkdir(join(fixture.repository, "src"), { recursive: true });
+          await writeFile(
+            join(fixture.repository, "src", "extract.py"),
+            "synthetic repaired source\n",
+          );
+        }
         const findings = JSON.parse(
           output!.appServer!.prompt.split("\n").at(-1)!,
         ) as Finding[];
         received.push(...findings);
-        if (command === "patch")
-          await writeFile(
-            join(fixture.repository, "src/extract.py"),
-            "synthetic_safe_source();\n",
-          );
         output!.stdout.write(
           JSON.stringify(
             command === "patch"
@@ -188,6 +184,9 @@ test("saved patch and verification tasks receive complete sealed evidence and li
       await runCli([command, "--scan", fixture.scanId, "--json"], current),
       stderr.text(),
     ).toBe(0);
+    expect(
+      await readFile(join(fixture.repository, "src", "extract.py"), "utf8"),
+    ).toBe("synthetic repaired source\n");
     expect(received).toHaveLength(1);
     expect(received[0]!.codeEvidence).toHaveLength(9);
     expect(received[0]).toMatchObject({

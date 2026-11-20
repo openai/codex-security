@@ -3152,8 +3152,8 @@ Git delegates also run with Terraform's `TF_TOKEN_*` variables removed.
 For rclone, the rules cover `~/.config/rclone/rclone.conf`, `~/.rclone.conf`,
 and `rclone/rclone.conf` under `XDG_CONFIG_HOME` or Windows `APPDATA`.
 Set `RCLONE_CONFIG` to protect a custom path, including a portable config
-beside the rclone executable. Delegates lose that selector, `RCLONE_CONFIG_PASS`
-and `RCLONE_PASSWORD_COMMAND`.
+beside the rclone executable. Delegates lose that selector, `RCLONE_CONFIG_PASS`,
+`RCLONE_PASSWORD_COMMAND`, and recognized rclone key and password settings.
 Additional protected locations include Git Credential Manager’s plaintext
 store and token caches, SOPS age identities, AWS CLI role, login and SSO
 caches, and Azure CLI token files. Package-manager rules cover credential
