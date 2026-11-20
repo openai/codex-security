@@ -7,6 +7,8 @@ import {
   findingIdentity,
   issueIdentity,
   readPatch,
+  selectFindingValidationArtifact,
+  singleFindingValidationIssue,
 } from "./continuum-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import { array, record } from "./scanner-import.js";
@@ -196,6 +198,21 @@ function requireCompleteList(response: Record<string, unknown>, name: string) {
     throw new CodexSecurityError(`Expected a complete Continuum ${name} list.`);
 }
 
+async function getFindingValidationIssue(
+  request: ContinuumRequest,
+  scope: string[],
+  issueId: string,
+  identity: ReturnType<typeof findingIdentity>,
+) {
+  const issue = await request("get-code-issue", scope, "--issue-id", issueId);
+  const selected = issueIdentity(issue);
+  if (selected.scope !== identity.scope || selected.id !== issueId)
+    throw new CodexSecurityError(
+      `Unexpected detail for Continuum issue ${issueId}.`,
+    );
+  return singleFindingValidationIssue(issue, issueId, identity);
+}
+
 export async function collectContinuumFinding(
   options: ContinuumCollectionOptions & {
     findingId: string;
@@ -243,26 +260,46 @@ export async function collectContinuumFinding(
     scope,
     "--issue-id",
     issueId,
-    "--artifact-type",
-    "PATCH",
   );
   requireCompleteList(list, "issue artifact");
-  const artifactIds = array(list["items"], "Continuum issue artifacts")
-    .map((item) =>
-      continuumId.parse(
-        record(item, "Continuum issue artifact summary")["artifactId"],
-      ),
-    )
-    .sort();
+  const artifacts = array(list["items"], "Continuum issue artifacts")
+    .flatMap((item) => {
+      const summary = record(item, "Continuum issue artifact summary");
+      const type = summary["artifactType"];
+      if (type !== "PATCH" && type !== "VALIDATION_EVIDENCE") return [];
+      return [{ id: continuumId.parse(summary["artifactId"]), type }];
+    })
+    .sort((left, right) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+    );
   const patches = [];
-  for (const artifactId of artifactIds) {
+  const evidenceArtifacts = [];
+  let validationIssue:
+    ReturnType<typeof singleFindingValidationIssue> | undefined;
+  for (const { id: artifactId, type } of artifacts) {
     const artifact = await getIssueArtifact(
       request,
       scope,
       issueId,
       artifactId,
-      "PATCH",
+      type,
     );
+    if (type === "VALIDATION_EVIDENCE") {
+      const selected = selectFindingValidationArtifact(artifact, findingId);
+      if (!selected) continue;
+      if (selected.scope === "issue") {
+        if (validationIssue === undefined)
+          validationIssue = await getFindingValidationIssue(
+            request,
+            scope,
+            issueId,
+            identity,
+          );
+        if (!validationIssue) continue;
+      }
+      evidenceArtifacts.push(selected.artifact);
+      continue;
+    }
     const body = record(artifact["body"], "Continuum artifact body");
     const patch = record(
       body["patch"],
@@ -281,7 +318,13 @@ export async function collectContinuumFinding(
     patches.push(readPatch({ ...patch, artifactId }));
   }
   signal?.throwIfAborted();
-  return patches.length ? { finding, patches } : finding;
+  if (!patches.length && !evidenceArtifacts.length) return finding;
+  return {
+    finding,
+    ...(patches.length && { patches }),
+    ...(validationIssue && { validationIssue }),
+    ...(evidenceArtifacts.length && { evidenceArtifacts }),
+  };
 }
 
 export async function collectContinuumIssues(
