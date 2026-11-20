@@ -10,14 +10,14 @@ export const FindingPatchSchema = z.object({
   status: z.enum(["verified", "no_change", "blocked", "failed"]),
   files: z.array(z.string()),
   verification: z.string().optional(),
-  credentialRevocationPending: z
-    .boolean()
-    .transform((pending) => pending || undefined)
-    .optional(),
+  credentialRevocationPending: z.boolean().optional(),
   reason: z.string().optional(),
 });
 
-export type FindingPatch = z.infer<typeof FindingPatchSchema>;
+export type FindingPatch = Omit<
+  z.infer<typeof FindingPatchSchema>,
+  "credentialRevocationPending"
+> & { credentialRevocationPending?: true };
 
 export const FindingVerificationSchema = z.object({
   id: z.string(),
@@ -198,20 +198,29 @@ export function parseFindingPatch(
       "No complete patch result was returned for this finding.",
     );
   }
-  const patch = parsed.data.patches[0]!;
-  if (
-    (patch.status === "verified" || patch.status === "no_change") &&
-    !patch.verification?.trim()
-  ) {
-    throw new CodexSecurityError("Patch verification was not reported.");
-  }
-  if (
-    (patch.status === "blocked" || patch.status === "failed") &&
-    !patch.reason?.trim()
-  ) {
+  const { credentialRevocationPending, ...patch } = parsed.data.patches[0]!;
+  if (patch.status === "verified" || patch.status === "no_change") {
+    if (!patch.verification?.trim())
+      throw new CodexSecurityError("Patch verification was not reported.");
+    if (credentialRevocationPending === undefined)
+      throw new CodexSecurityError(
+        "Credential retirement status was not reported.",
+      );
+    if (
+      patch.status === "verified" &&
+      (patch.files.length === 0 || patch.files.includes(""))
+    )
+      throw new CodexSecurityError(
+        "A verified patch must list its modified files.",
+      );
+    if (patch.status === "no_change" && patch.files.length > 0)
+      throw new CodexSecurityError("A no-change patch listed modified files.");
+  } else if (!patch.reason?.trim()) {
     throw new CodexSecurityError(
       "The patch failure or blocker was not explained.",
     );
   }
-  return patch;
+  return credentialRevocationPending
+    ? { ...patch, credentialRevocationPending: true }
+    : patch;
 }

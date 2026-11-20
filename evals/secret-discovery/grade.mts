@@ -211,7 +211,12 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
     const matchedCases = fixture.positives.filter((expected) =>
       matches(finding, expected),
     );
-    return { finding, matchedCases };
+    const sourceCases = matchedCases.filter(isSourceCredential);
+    // Source exposures can share a finding. The endpoint needs its own code fix.
+    return {
+      finding,
+      matchedCases: sourceCases.length ? sourceCases : matchedCases,
+    };
   });
   const cases = fixture.positives.map((expected) => ({
     id: expected.id,

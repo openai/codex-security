@@ -626,6 +626,7 @@ function patchOutcomeFromResponse(
       const hasEdits = changedFiles.length > 0;
       if (
         hasEdits !== (status === "verified") ||
+        response.credentialRevocationPending === undefined ||
         verificationReport === null ||
         reason !== null
       )

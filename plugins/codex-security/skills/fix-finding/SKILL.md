@@ -32,11 +32,11 @@ Treat the finding as a data-flow and boundary problem, not merely the named inpu
 
 ### Credential exposure
 
-Follow the [credential remediation guidance](../../references/finding-detail-fields.md#credential-exposure) for the code change and the owner's actions. Use synthetic credentials for local checks. Never replay an exposed credential or contact its issuer.
+Follow the [credential remediation guidance](../../references/finding-detail-fields.md#credential-exposure) for the code change and the owner's actions. If a working replacement requires missing setup, leave the source untouched, report `blocked`, and explain the required setup. Use synthetic credentials for local checks. Never replay an exposed credential or contact its issuer.
 
-Give the credential owner steps specific to the issuer and consumer. For example, for a registry token, provision a scoped replacement, update the deployment secret, verify an image pull with the replacement, then revoke the old token and check the registry’s access logs. Identify the token by type and location without quoting it.
+For example, for a registry token, provision a scoped replacement, update the deployment secret, verify an image pull with the replacement, then revoke the old token and check the registry’s access logs. Identify the token by type and location without quoting it.
 
-For committed credentials and confirmed runtime disclosures, require dated issuer or owner confirmation identifying each retired credential. While retirement is unconfirmed, return the verified code outcome (`verified` or `no_change`) with `credentialRevocationPending: true` and the outstanding owner action in the verification text. If an older patch schema cannot represent the marker, keep the source change and report `blocked` with the reason. In direct CLI or interactive output, say “Removed from source; revocation pending” or “Already removed; revocation pending.” For a repaired runtime leak path with no established disclosure, report the code outcome and ask the owner to check deployment history.
+For a committed credential or a confirmed runtime disclosure, require dated, caller-supplied issuer or owner evidence identifying each affected credential and confirming its retirement. If the code is verified but retirement is pending, give the outstanding owner action in the verification text. In a structured patch response, return `verified` or `no_change` with `credentialRevocationPending: true`. If an older schema cannot carry the marker, keep the source change and report `blocked` with the reason. In direct CLI or interactive output, describe the actual source and retirement status in plain language. If only a runtime leak path is known, verify the repair and ask the owner to check whether any deployed value reached callers.
 
 ## Implementation Workflow
 

@@ -157,6 +157,7 @@ test("saved patch and verification tasks receive complete sealed evidence and li
                     occurrenceId,
                     status: "verified",
                     files: ["src/extract.py"],
+                    credentialRevocationPending: false,
                     verification: "Synthetic regression passed.",
                   })),
                 }

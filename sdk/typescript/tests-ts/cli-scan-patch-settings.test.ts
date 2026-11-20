@@ -56,7 +56,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (request.method === "turn/start") {
     receipt.cyberAccessProgram = request.params.cyberAccessProgram ?? null;
     writeFileSync(process.env.SYNTHETIC_PATCH_RECEIPT, JSON.stringify(receipt));
-    completeTurn(request, () => JSON.stringify({ patches: [{ occurrenceId: "occ_1", status: "no_change", files: [], verification: "Synthetic child-process fixture completed." }] }), "synthetic-thread");
+    completeTurn(request, () => JSON.stringify({ patches: [{ occurrenceId: "occ_1", status: "no_change", files: [], credentialRevocationPending: false, verification: "Synthetic child-process fixture completed." }] }), "synthetic-thread");
   } else if (request.id !== undefined) send({ id: request.id, result: {} });
 }
 `;
@@ -145,6 +145,7 @@ async function patchSettings(
         currentDirectory: repository,
         environment,
         result,
+        ...(options.standalone ? {} : { onRepositoryCommand: () => "" }),
         preflight: {
           ...fakePreflight(repository),
           model: "gpt-6.1-sol",

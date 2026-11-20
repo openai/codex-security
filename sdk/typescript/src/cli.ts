@@ -189,7 +189,7 @@ import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
 import {
-  FindingPatchSchema as findingPatchSchema,
+  parseFindingPatch,
   parseFindingVerifications,
   remediationPrompt,
   verificationBatches,
@@ -7685,6 +7685,7 @@ export async function main(
         const jsonOutput = format === "json" || format === "jsonl";
         const fullOutput = argv.includes("--full-output");
         const structuredOutput = jsonOutput || fullOutput;
+        let directReport = "";
         let patchResult: Record<string, unknown> = {
           applied: false,
           filesChanged: 0,
@@ -7774,7 +7775,7 @@ export async function main(
               },
             );
             exitCode = patchExitCode(patches);
-            const files = await changedPatchFiles(
+            const { files } = await inspectPatchChanges(
               selected.repository,
               patchBase,
               dependencies,
@@ -7896,8 +7897,9 @@ export async function main(
               verificationMode: options.verificationMode,
             },
           );
-          if (!jsonOutput) await writeCliOutput(output, report.text());
-          const files = await changedPatchFiles(
+          directReport = report.text();
+          if (!jsonOutput) await writeCliOutput(output, directReport);
+          const { files } = await inspectPatchChanges(
             repository,
             patchBase,
             dependencies,
@@ -7953,7 +7955,7 @@ export async function main(
           if (structuredOutput)
             return {
               ...patchResult,
-              ...(jsonOutput ? { report: report.text() } : {}),
+              ...(jsonOutput ? { report: directReport } : {}),
               ...(pullRequest === undefined ? {} : { pullRequest }),
             };
         } catch (error) {
@@ -7967,6 +7969,13 @@ export async function main(
               error instanceof PatchCommandError ? error.code : "PATCH_FAILED",
             message,
           };
+          if (jsonOutput && directReport) {
+            patchResult["report"] = directReport;
+            if (fullOutput) {
+              failedResultOutput = { format, ...failure };
+              return patchResult;
+            }
+          }
           if (!fullOutput) {
             renderedOutput =
               JSON.stringify({
@@ -10289,17 +10298,18 @@ async function requireCleanPatchPullRequestBase(
   }
 }
 
-async function changedPatchFiles(
+async function inspectPatchChanges(
   repository: string,
   base: string | Map<string, string>,
   dependencies: CliDependencies,
   includeSubmodules = false,
-): Promise<string[]> {
+) {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
-    return [...new Set([...base.keys(), ...head.keys()])]
+    const files = [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
+    return { files };
   }
   const head = await snapshotPatchTree(repository, dependencies);
   const output = await dependencies.runRepositoryCommand(
@@ -10316,7 +10326,7 @@ async function changedPatchFiles(
     repository,
     { trim: false },
   );
-  return output.split("\0").filter(Boolean);
+  return { files: output.split("\0").filter(Boolean), base, head };
 }
 
 async function snapshotPatchState(
@@ -10650,11 +10660,9 @@ async function runFindingPatches(
       },
     });
     let status: number;
-    let changed: boolean;
-    let observedTree: string | undefined;
-    let base: string | Map<string, string>;
+    let changes: Awaited<ReturnType<typeof inspectPatchChanges>>;
     try {
-      base = await snapshotPatchState(selected.repository, dependencies);
+      const base = await snapshotPatchState(selected.repository, dependencies);
       status = await runSkill(
         "fix-finding",
         [],
@@ -10675,17 +10683,12 @@ async function runFindingPatches(
       if (status === 130 || status === 143) {
         throw new CodexSecurityError("Patch operation was interrupted.");
       }
-      if (publication && typeof base === "string") {
-        observedTree = await snapshotPatchTree(
-          selected.repository,
-          dependencies,
-        );
-        changed = base !== observedTree;
-      } else {
-        changed =
-          (await changedPatchFiles(selected.repository, base, dependencies))
-            .length > 0;
-      }
+      changes = await inspectPatchChanges(
+        selected.repository,
+        base,
+        dependencies,
+        publication !== undefined,
+      );
     } finally {
       progress.stop();
     }
@@ -10701,51 +10704,37 @@ async function runFindingPatches(
       patch = failed(`Patch command exited with status ${status}.`);
     } else {
       try {
-        const reported = JSON.parse(response.text()) as { patches?: unknown };
-        const entries = Array.isArray(reported?.patches)
-          ? reported.patches
-          : [];
-        const matches = entries.filter(
-          (entry) =>
-            isJsonObject(entry) &&
-            "occurrenceId" in entry &&
-            entry["occurrenceId"] === finding.occurrenceId,
+        const reported = parseFindingPatch(
+          response.text(),
+          finding.occurrenceId,
         );
-        const parsed = findingPatchSchema.safeParse(matches[0]);
-        if (matches.length !== 1 || !parsed.success) {
-          patch = failed(
-            "No complete patch result was returned for this finding.",
-          );
+        if (reported.status === "verified" && changes.files.length === 0) {
+          patch = failed("No patch was applied; 0 files changed.");
         } else if (
-          (parsed.data.status === "verified" ||
-            parsed.data.status === "no_change") &&
-          !parsed.data.verification?.trim()
+          reported.status === "no_change" &&
+          changes.files.length > 0
         ) {
           patch = failed(
-            "Patch verification was not reported.",
-            parsed.data.files,
+            "The patch reported no change but modified files.",
+            changes.files,
           );
-        } else if (parsed.data.status === "verified" && !changed) {
-          patch = failed("No patch was applied; 0 files changed.");
         } else {
-          patch = parsed.data;
+          patch = reported;
         }
-      } catch {
-        stderr.write("codex-security: Patch results were not valid JSON.\n");
-        patch = failed("Patch results were not valid JSON.");
+      } catch (error) {
+        patch = failed(errorMessage(error), changes.files);
       }
     }
 
     if (
       publication &&
-      typeof base === "string" &&
-      observedTree !== undefined &&
+      changes.head !== undefined &&
       patch.status === "verified"
     ) {
       const reason = await publication.record(
         verifiedPatchFiles(selected, [patch]),
-        base,
-        observedTree,
+        changes.base,
+        changes.head,
       );
       if (reason) patch = failed(reason);
     }
@@ -10759,7 +10748,9 @@ async function runFindingPatches(
       `  ${label}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
     );
     if (patch.credentialRevocationPending) {
-      stderr.write(`  ${CREDENTIAL_REVOCATION_FOLLOW_UP}\n`);
+      stderr.write(
+        `  ${safePatchText(patch.verification?.trim() || CREDENTIAL_REVOCATION_FOLLOW_UP)}\n`,
+      );
     }
     patches.push(patch);
   }

@@ -51,6 +51,7 @@ export function remediationReceipt(request, overrides = {}) {
                 occurrenceId: request.findingId,
                 status: "verified",
                 files: ["guard.ts"],
+                credentialRevocationPending: false,
                 verification: verificationResult.evidence,
               },
             ],
