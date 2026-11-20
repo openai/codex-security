@@ -565,6 +565,29 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("uses singular nouns in match-all counts of one", () => {
+    const output = renderScanHistory(
+      {
+        repository: "/demo/juice-shop",
+        scanCount: 1,
+        unavailableScans: 1,
+        matchedPairs: 1,
+        findingMatches: 1,
+      },
+      "match-all",
+      { color: false },
+    );
+    for (const expected of [
+      "1 scan ",
+      "1 comparison ",
+      "1 root-cause match",
+      "1 scan unavailable",
+    ]) {
+      expect(output).toContain(expected);
+    }
+    expect(output).not.toMatch(/1 (scans|comparisons|root-cause matches)/u);
+  });
+
   test("renders related findings separately in scan details and comparisons", () => {
     const relation = {
       beforeTitle: "Archive writer boundary",

@@ -19,12 +19,14 @@ from workbench_source_scopes import (
     existing_tree_path,
     load_source_scopes,
     offline_git_bytes,
+    requested_exclude_paths,
     requested_scan_paths,
 )
 from workbench_target import (
     SOURCE_METADATA_DIRECTORIES,
     checked_scan_target,
     directory_content_digest,
+    path_in_scopes,
 )
 
 
@@ -83,13 +85,14 @@ def _git_file_digest(target: Path, path: str, blob: str) -> str:
     raise SystemExit(f"Reviewed file no longer matches its registered Git blob: {path}")
 
 
-def _directory_receipts(
-    scan: sqlite3.Row, target: Path, paths: set[str], scopes: set[PurePosixPath]
-) -> dict[str, str]:
+def _require_scope(scan: sqlite3.Row, paths: set[str], includes: list[str]) -> None:
+    exclusions = requested_exclude_paths(scan)
     for path in paths:
-        entry = PurePosixPath(path)
-        if not any(entry.is_relative_to(scope) for scope in scopes):
+        if not path_in_scopes(path, includes) or path_in_scopes(path, exclusions):
             raise SystemExit(f"Reviewed file is outside the registered scope: {path}")
+
+
+def _directory_receipts(scan: sqlite3.Row, target: Path, paths: set[str]) -> dict[str, str]:
     files = dict.fromkeys(paths, "")
     digest = directory_content_digest(
         target, excluded=(Path(scan["scan_dir"]),), capture_file_digests=files
@@ -125,9 +128,8 @@ def review_file_digests(scan: sqlite3.Row, reviewed_files: list[str]) -> dict[st
         requested = requested_scan_paths(scan)
         with checked_scan_target(scan) as target:
             if scan["target_revision"] == "unversioned":
-                return _directory_receipts(
-                    scan, target, paths, {PurePosixPath(s) for s in requested}
-                )
+                _require_scope(scan, paths, requested)
+                return _directory_receipts(scan, target, paths)
             context = (
                 load_source_scopes(scan, target, requested) if scan["source_scopes_json"] else None
             )
@@ -136,16 +138,9 @@ def review_file_digests(scan: sqlite3.Row, reviewed_files: list[str]) -> dict[st
                     "Cannot bind reviewed files to a saved Git tree. Use a clean checkout for file receipts."
                 )
             repository, tree, scopes = context
+            _require_scope(scan, paths, [scope["canonicalPath"] for scope in scopes])
             files = {}
             for path in paths:
-                relative = PurePosixPath(path)
-                if not any(
-                    relative == PurePosixPath(scope["canonicalPath"])
-                    or scope["kind"] == "directory"
-                    and relative.is_relative_to(scope["canonicalPath"])
-                    for scope in scopes
-                ):
-                    raise SystemExit(f"Reviewed file is outside the registered scope: {path}")
                 entry = existing_tree_path(repository, tree, path, target)
                 if entry is None or entry[:2] != (path, "file"):
                     raise SystemExit(

@@ -13,10 +13,14 @@ from test_workbench_completion_binding import register_cli_scan
 from workbench_test_support import initialize_git_repository, load_script
 
 
-def registered_scan(tmp_path: Path, repo: Path) -> sqlite3.Row:
+def registered_scan(tmp_path: Path, repo: Path, *exclusions: str) -> sqlite3.Row:
     state = tmp_path / "state"
     registration = register_cli_scan(
-        state, repo, tmp_path / "scan", scan_target={"kind": "paths", "paths": ["src"]}
+        state,
+        repo,
+        tmp_path / "scan",
+        scan_target={"kind": "paths", "paths": ["src"]},
+        recipe_fields={"excludePaths": list(exclusions)} if exclusions else None,
     )
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
@@ -35,9 +39,11 @@ def test_reviewed_file_must_match_the_registered_blob_and_scope(tmp_path: Path) 
     source.write_bytes(payload)
     (repo / ".gitignore").write_text("ignored.bin\n")
     (repo / "src" / "ignored.bin").write_bytes(payload)
+    (repo / "src" / "selected").mkdir()
+    (repo / "src" / "selected" / "tracked.bin").write_bytes(payload)
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "Add scoped files"], cwd=repo, check=True)
-    scan = registered_scan(tmp_path, repo)
+    scan = registered_scan(tmp_path, repo, "src/selected")
     review = load_script("workbench_standard_review").review_file_digests
 
     selected = "src/selected.bin"
@@ -49,6 +55,7 @@ def test_reviewed_file_must_match_the_registered_blob_and_scope(tmp_path: Path) 
     for invalid in (
         "README.md",
         "src/ignored.bin",
+        "src/selected/tracked.bin",
         "src/missing",
         "src",
         "src/../src/selected.bin",
@@ -128,11 +135,13 @@ def test_reviewed_file_must_belong_to_the_saved_directory_snapshot(tmp_path: Pat
     metadata = src / ".svn"
     metadata.mkdir()
     (metadata / "entries").write_bytes(b"a")
-    scan = registered_scan(tmp_path, repo)
+    scan = registered_scan(tmp_path, repo, "src/c")
     review = load_script("workbench_standard_review").review_file_digests
 
     assert scan["target_revision"] == "unversioned"
     assert review(scan, ["src/a"]) == {"src/a": hashlib.sha256(b"a").hexdigest()}
+    with pytest.raises(SystemExit, match="outside the registered scope"):
+        review(scan, ["src/a", "src/c"])
     with pytest.raises(SystemExit):
         review(scan, ["src/.svn/entries"])
     (src / "b").rename(src / "d")
