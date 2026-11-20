@@ -376,10 +376,12 @@ class SavedCoverageOrigins:
                     provenance.pop(key, None)
                 if not provenance:
                     del row["provenance"]
-        if field != "surfaces" or not isinstance(left, dict) or not isinstance(right, dict):
+        if not isinstance(left, dict) or not isinstance(right, dict):
             return left == right
         if "id" not in left:
             right.pop("id", None)
+        if field != "surfaces":
+            return left == right
         left_refs = self.receipt_resolver(left_path, left, owner)
         right_refs = self.receipt_resolver(right_path, right, owner)
         shared_refs = []
@@ -709,7 +711,7 @@ class SavedCoverageProjection:
         )
 
     def repair_reviewed_surface(
-        self, coverage, canonical, worker, source, surface, *, published=None
+        self, coverage, canonical, worker, source, surface, *, replaced_sources, published=None
     ):
         if not self.is_reviewed_worker(canonical, worker):
             return None
@@ -743,6 +745,7 @@ class SavedCoverageProjection:
         # Receipt repair can recover earlier evidence without replacing the
         # accepted surface's identity, disposition, or host-owned provenance.
         retained["receiptRefs"] = surface["receiptRefs"]
+        replaced_sources.add(id(published))
         return self.retain_coverage_row(
             coverage["surfaces"], retained, worker["id"], "surfaces", source, True
         )

@@ -577,6 +577,7 @@ def merge_saved_results(
         source: dict[str, Any],
         *,
         receipts_resolved: bool = False,
+        relink_retained: bool = True,
     ) -> dict[str, Any]:
         attempt = coverage_origins.attempt(field, index, worker, source)
         prefix = f"{worker['id']}-attempt-{worker['attempt']}"
@@ -616,7 +617,9 @@ def merge_saved_results(
         retained = coverage_origins.retained_record(
             field, item, index, worker, source, coverage, reviewed_attempts
         )
-        if retained is not None and (field != "deferred" or "surfaceIds" not in item):
+        if retained is not None and (
+            field != "deferred" or "surfaceIds" not in item or not relink_retained
+        ):
             return copy.deepcopy(retained)
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
             if key == "id" and inferred_id:
@@ -1284,6 +1287,10 @@ def merge_saved_results(
             for index, row in enumerate(_coverage_rows(draft["reviewState"], field), 1):
                 if not isinstance(row, dict):
                     continue
+                # Bind the parent occurrence before receipt reconciliation changes its links.
+                projected = project_missing_record(
+                    field, row, index, worker, draft["reviewState"], relink_retained=False
+                )
                 if (
                     field == "deferred"
                     and isinstance(candidate_id := row.get("candidateId"), str)
@@ -1292,7 +1299,9 @@ def merge_saved_results(
                     < source_order[relative]
                 ):
                     accepted_pending_candidates.add((worker_id, worker["attempt"], candidate_id))
-                projected = project_missing_record(field, row, index, worker, draft["reviewState"])
+                    accepted_pending_candidates.add(
+                        (worker_id, projected["provenance"]["attempt"], candidate_id)
+                    )
                 key = projection_key(field, projected)
                 projected_sources[key] = (worker_id, row, source_order[relative])
 
@@ -2782,6 +2791,7 @@ def merge_saved_results(
                     worker,
                     source_surface,
                     surface,
+                    replaced_sources=replaced_surfaces,
                     published=published,
                 ) or project_record("surfaces", surface, source_surface, receipts_resolved=True)
                 reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface[

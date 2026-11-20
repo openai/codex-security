@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from argparse import Namespace
 
 import pytest
-from workbench_test_support import interrupt_publication, read_review_state, write_checkpoint
+from workbench_test_support import (
+    interrupt_publication,
+    read_review_state,
+    select_checkpoint,
+    write_checkpoint,
+)
 
 
 def test_changed_coverage_matches_each_snapshot_without_replaying_prefixes(
@@ -1032,3 +1038,186 @@ def test_third_retry_receipt_repair_preserves_bound_canonical_identity(
             expected_closures, key=lambda row: row["id"]
         )
     assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("archived_named", [False, True])
+def test_generated_candidate_id_keeps_accepted_origin_after_recovery(
+    workbench_api, workbench_db, publication_scan, monkeypatch, archived_named
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    task = {"candidateId": "candidate", "reason": "Validate synthetic candidate evidence."}
+    current = {**task, "id": "candidate"}
+    archived = result.parent.parent / "attempts/attempt-01/result.json"
+    archived.parent.mkdir(parents=True)
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {**scan.coverage, "surfaces": [], "deferred": [current]},
+    }
+    archived.write_text(
+        json.dumps(
+            {
+                **draft,
+                "complete": False,
+                "reviewState": {
+                    **draft["reviewState"],
+                    "deferred": [current if archived_named else task],
+                },
+            }
+        )
+    )
+    result.write_text(json.dumps(draft))
+    projected = {
+        **current,
+        "id": f"{worker_id}-attempt-2-deferred-1",
+        "candidateId": "published-candidate",
+        "provenance": {
+            "workerId": worker_id,
+            "attempt": 1,
+            "sourceId": "candidate",
+            "candidateId": "candidate",
+        },
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [],
+                "deferred": [projected],
+                "reviews": [{"workerId": worker_id, "attempt": attempt} for attempt in (1, 2)],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in (result, archived)}
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    assert [row for row in recovered["deferred"] if row.get("reason") == task["reason"]] == [
+        projected
+    ]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("selected_head", [False, True])
+@pytest.mark.parametrize(
+    ("local_shadow", "still_pending"), [(False, False), (True, False), (True, True)]
+)
+def test_recovered_closeout_keeps_accepted_shared_receipt_union(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    selected_head,
+    local_shadow,
+    still_pending,
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    shared, local = "artifacts/shared.txt", "artifacts/local.txt"
+    for path, contents in (
+        (scan.scan_dir / shared, "Shared evidence"),
+        (result.parent / local, "Local evidence"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+    if local_shadow:
+        (result.parent / shared).write_text("Different local shadow")
+    surface = {
+        "id": "scope",
+        "label": "Synthetic scope",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [shared],
+        "provenance": {"scanReceiptRefs": [shared]},
+    }
+    task = {"id": "task", "reason": "Complete synthetic review", "surfaceIds": ["scope"]}
+    remaining = {"id": "remaining", "reason": "Remaining synthetic review", "surfaceIds": ["scope"]}
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "findings": [],
+            "complete": False,
+            "reviewState": {
+                **scan.coverage,
+                "surfaces": [surface],
+                "deferred": [task, remaining] if still_pending else [task],
+            },
+        },
+        mtime_ns=1_000_000_000,
+    )
+    if selected_head:
+        select_checkpoint(result.parent, checkpoint, mtime_ns=1_000_000_000)
+    current = {
+        "id": "scope",
+        "label": "Synthetic scope",
+        "disposition": "no_issue_found",
+        "receiptRefs": [local, shared] if still_pending else [local],
+    }
+    closure = {"id": "task", "reason": "Synthetic review completed"}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "findings": [],
+                "complete": True,
+                "reviewState": {
+                    **scan.coverage,
+                    "surfaces": [current],
+                    "deferred": [remaining] if still_pending else [],
+                    "resolvedDeferred": [closure],
+                },
+            }
+        )
+    )
+    os.utime(result, ns=(3_000_000_000, 3_000_000_000))
+    projected = {
+        **current,
+        "id": f"{worker_id}-attempt-2-surface-1",
+        "disposition": "needs_follow_up" if still_pending else "no_issue_found",
+        "receiptRefs": [
+            (result.parent.relative_to(scan.scan_dir) / local).as_posix(),
+            (result.parent.relative_to(scan.scan_dir) / shared).as_posix()
+            if still_pending
+            else shared,
+        ],
+        "provenance": {"workerId": worker_id, "attempt": 2, "sourceId": "scope"},
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [projected],
+                "deferred": [
+                    {
+                        **remaining,
+                        "id": f"{worker_id}-attempt-2-deferred-1",
+                        "surfaceIds": [projected["id"]],
+                        "provenance": {
+                            "workerId": worker_id,
+                            "attempt": 2,
+                            "sourceId": "remaining",
+                        },
+                    }
+                ]
+                if still_pending
+                else [],
+                "resolvedDeferred": [{**closure, "id": f"{worker_id}-attempt-2-resolved-task"}],
+                "reviews": [{"workerId": worker_id, "attempt": 2}],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in result.parent.rglob("*") if path.is_file()}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    if still_pending:
+        projected["receiptRefs"].append(shared)
+    assert coverage["surfaces"] == [projected]
+    assert [(scan.scan_dir / ref).read_text() for ref in projected["receiptRefs"]] == (
+        ["Local evidence", "Different local shadow", "Shared evidence"]
+        if still_pending
+        else ["Local evidence", "Shared evidence"]
+    )
+    pending = [row for row in coverage["deferred"] if row.get("reason") == remaining["reason"]]
+    assert len(pending) == int(still_pending)
+    if still_pending:
+        assert pending[0]["surfaceIds"] == [projected["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())

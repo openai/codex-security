@@ -532,17 +532,22 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == published
 
 
-@pytest.mark.parametrize("attempt", [1, 2])
+@pytest.mark.parametrize(("attempt", "retained_origin"), [(1, False), (2, False), (2, True)])
 @pytest.mark.parametrize("retry_publication", [False, True])
-def test_previous_attempt_resolution_does_not_clear_current_gap(
-    workbench_db, publication_scan, attempt, retry_publication, stop_scan
+def test_parent_resolution_uses_only_current_or_verified_inherited_attempt(
+    workbench_db, publication_scan, attempt, retained_origin, retry_publication, stop_scan
 ):
     scan = publication_scan()
     result = scan.add_worker()
     worker_id = result.parent.name
     deferred = {"candidateId": "candidate-1", "reason": "Validate the current attempt."}
     result.write_text(json.dumps(scan.worker_draft(completeness="partial", deferred=[deferred])))
-    original = result.read_bytes()
+    originals = {result: result.read_bytes()}
+    if retained_origin:
+        archived = result.parent / "attempts/attempt-01/result.json"
+        archived.parent.mkdir(parents=True)
+        archived.write_text(json.dumps({**json.loads(result.read_text()), "complete": False}))
+        originals[archived] = archived.read_bytes()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_workers SET attempt = ? WHERE id = ?", (attempt, worker_id)
@@ -573,6 +578,8 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
     # This parent disposition follows the worker result; tied observations stay pending.
     observed = result.stat().st_mtime_ns // 1_000_000_000 * 1_000_000_000
     os.utime(result, ns=(observed, observed))
+    if retained_origin:
+        os.utime(archived, ns=(observed - 2_000_000_000, observed - 2_000_000_000))
     parent_observed = observed + 2_000_000_000
     os.utime(parent_path, ns=(parent_observed, parent_observed))
     stop_scan(scan, retry_publication)
@@ -580,8 +587,8 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = read_review_state(workbench_db, scan.scan_dir)
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
-    assert len(pending) == (0 if attempt == 1 else 1)
-    assert result.read_bytes() == original
+    assert len(pending) == (0 if attempt == 1 or retained_origin else 1)
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
 @pytest.mark.parametrize("selected_checkpoint", [False, True])

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -445,3 +445,254 @@ test("archived shared receipts follow the surface's reference order", async (t) 
     receiptRefs,
   );
 });
+
+for (const changedReceipt of [false, true]) {
+  test(`legacy surface identity follows receipt bytes, changed=${changedReceipt}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const archive = path.join(f.workerRoot, "attempts/attempt-01");
+    const row = {
+      label: "Synthetic evidence review",
+      disposition: "no_issue_found",
+      receiptRefs: ["artifacts/evidence.txt"],
+    };
+    for (const directory of [archive, f.output]) {
+      await mkdir(path.join(directory, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(directory, row.receiptRefs[0]!),
+        changedReceipt && directory === f.output
+          ? "Changed evidence"
+          : "Original evidence",
+      );
+    }
+    const old = JSON.stringify(
+      workerDraft([], {
+        complete: false,
+        reviewState: { surfaces: [row], explicitExclusions: [], deferred: [] },
+      }),
+    );
+    const current = JSON.stringify(
+      workerDraft([], {
+        complete: true,
+        reviewState: {
+          surfaces: [{ ...row, id: "review" }],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      }),
+    );
+    const archived = path.join(archive, "result.json");
+    await writeFile(archived, old);
+    await writeFile(f.resultPath, current);
+    const { coverage } = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
+    assert.equal(coverage.surfaces.length, changedReceipt ? 2 : 1);
+    assert.equal(
+      coverage.surfaces[0].provenance.attempt,
+      changedReceipt ? 2 : 1,
+    );
+    assert.equal(coverage.surfaces[0].provenance.sourceId, "review");
+    assert.equal(await readFile(archived, "utf8"), old);
+    assert.equal(await readFile(f.resultPath, "utf8"), current);
+  });
+}
+
+for (const currentId of [undefined, "different-review"]) {
+  test(`legacy terminal deferral keeps its saved identity, current id=${currentId}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const task = { reason: "Review synthetic authentication" };
+    const archive = path.join(f.workerRoot, "attempts/attempt-01");
+    await mkdir(archive, { recursive: true });
+    const old = JSON.stringify(
+      workerDraft([], {
+        complete: false,
+        reviewState: {
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [{ ...task, id: "saved-review" }],
+        },
+      }),
+    );
+    const current = JSON.stringify(
+      workerDraft([], {
+        complete: true,
+        reviewState: {
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [
+            { ...task, ...(currentId === undefined ? {} : { id: currentId }) },
+          ],
+        },
+      }),
+    );
+    await writeFile(path.join(archive, "result.json"), old);
+    await writeFile(f.resultPath, current);
+    const { coverage } = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
+    assert.deepEqual(
+      coverage.deferred.map(
+        (row: { provenance: { attempt: number; sourceId?: string } }) => [
+          row.provenance.attempt,
+          row.provenance.sourceId,
+        ],
+      ),
+      currentId === undefined
+        ? [[1, undefined]]
+        : [
+            [2, currentId],
+            [1, "saved-review"],
+          ],
+    );
+    assert.equal(
+      await readFile(path.join(archive, "result.json"), "utf8"),
+      old,
+    );
+    assert.equal(await readFile(f.resultPath, "utf8"), current);
+  });
+}
+
+test("accepted duplicate surface IDs retain each authored occurrence", async (t) => {
+  const f = await workerHistoryFixture(t, 2);
+  const surfaces = ["First review", "Second review"].map((label) => ({
+    id: "api",
+    label,
+    disposition: "no_issue_found",
+    receiptRefs: [],
+  }));
+  const archive = path.join(f.workerRoot, "attempts/attempt-01");
+  await mkdir(archive, { recursive: true });
+  const draft = workerDraft([], {
+    complete: true,
+    reviewState: { surfaces, explicitExclusions: [], deferred: [] },
+  });
+  const old = JSON.stringify({ ...draft, complete: false });
+  const current = JSON.stringify(draft);
+  await writeFile(path.join(archive, "result.json"), old);
+  await writeFile(f.resultPath, current);
+  const { coverage } = await readAcceptedDiscovery(
+    createDeepScanArtifacts(f.scanRoot),
+    f.worker,
+    scanId,
+  );
+  assert.deepEqual(
+    coverage.surfaces.map(
+      (row: { provenance: { sourceId: string; attempt: number } }) => [
+        row.provenance.sourceId,
+        row.provenance.attempt,
+      ],
+    ),
+    [
+      ["api", 1],
+      ["api", 1],
+    ],
+  );
+  assert.equal(
+    new Set(coverage.surfaces.map((row: { id: string }) => row.id)).size,
+    2,
+  );
+  assert.equal(await readFile(path.join(archive, "result.json"), "utf8"), old);
+  assert.equal(await readFile(f.resultPath, "utf8"), current);
+});
+
+for (const shadow of [
+  "absent",
+  "unreferenced",
+  "authored-local",
+  "pending-local",
+]) {
+  test(`accepted closeout retains inherited receipt ownership, shadow=${shadow}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const pending = shadow === "pending-local";
+    const localAuthored = shadow === "authored-local" || pending;
+    const remaining = {
+      id: "remaining",
+      reason: "Remaining review",
+      surfaceIds: ["scope"],
+    };
+    const shared = "artifacts/shared.txt",
+      local = "artifacts/local.txt";
+    await mkdir(path.join(f.scanRoot, "artifacts"), { recursive: true });
+    await writeFile(path.join(f.scanRoot, shared), "Scan-owned evidence");
+    await recordCodexSecurityWorkerScanDraft(
+      f.workerContext,
+      workerDraft([], {
+        complete: false,
+        reviewState: {
+          surfaces: [
+            {
+              id: "scope",
+              label: "Synthetic scope",
+              disposition: "needs_follow_up",
+              receiptRefs: [shared],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [
+            { id: "task", reason: "Synthetic review", surfaceIds: ["scope"] },
+            ...(pending ? [remaining] : []),
+          ],
+        },
+      }),
+    );
+    await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+    await writeFile(path.join(f.output, local), "Local evidence");
+    if (shadow !== "absent")
+      await writeFile(path.join(f.output, shared), "Local shadow");
+    const current = JSON.stringify(
+      workerDraft([], {
+        complete: true,
+        reviewState: {
+          surfaces: [
+            {
+              id: "scope",
+              label: "Synthetic scope",
+              disposition: "no_issue_found",
+              receiptRefs: localAuthored ? [local, shared] : [local],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: pending ? [remaining] : [],
+          resolvedDeferred: [
+            { id: "task", reason: "Synthetic review complete" },
+          ],
+        },
+      }),
+    );
+    await writeFile(f.resultPath, current);
+    const checkpoints = await Promise.all(
+      (await readdir(path.join(f.output, "checkpoints"))).map(async (name) => {
+        const file = path.join(f.output, "checkpoints", name);
+        return [file, await readFile(file)] as const;
+      }),
+    );
+    const { coverage } = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
+    assert.equal(coverage.surfaces.length, 1);
+    assert.equal(
+      coverage.surfaces[0].disposition,
+      pending ? "needs_follow_up" : "no_issue_found",
+    );
+    assert.deepEqual(
+      await Promise.all(
+        coverage.surfaces[0].receiptRefs.map((ref: string) =>
+          readFile(path.join(f.scanRoot, ref), "utf8"),
+        ),
+      ),
+      [
+        "Local evidence",
+        localAuthored ? "Local shadow" : "Scan-owned evidence",
+      ],
+    );
+    assert.equal(await readFile(f.resultPath, "utf8"), current);
+    for (const [file, bytes] of checkpoints)
+      assert.deepEqual(await readFile(file), bytes);
+  });
+}

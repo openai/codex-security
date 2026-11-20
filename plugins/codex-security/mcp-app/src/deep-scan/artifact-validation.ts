@@ -11,6 +11,7 @@ import {
 } from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
+  matchesSavedCoverageSource,
   readAcceptedWorkerCheckpoints,
   recordedScanReceiptRefs,
   reconcileAcceptedWorkerHistory,
@@ -456,68 +457,6 @@ export function scanCoverage(
           ),
         }),
   };
-}
-
-/** Compare accepted content and readable receipt bytes, never authored origin claims. */
-function matchesSavedCoverageSource(
-  field: string,
-  item: Record<string, unknown>,
-  saved: unknown,
-  artifactPrefix: string,
-  receiptDigests: ReadonlyMap<string, string>,
-): boolean {
-  const original =
-    typeof saved === "string" ? { question: saved } : structuredClone(saved);
-  const current = structuredClone(item);
-  if (
-    typeof original !== "object" ||
-    original === null ||
-    Array.isArray(original)
-  )
-    return false;
-  const previous = original as Record<string, unknown>;
-  if (previous.id === undefined) delete current.id;
-  if (field === "surfaces") {
-    const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
-    for (const row of [previous, current]) {
-      const provenance = row.provenance as Record<string, unknown> | undefined;
-      const sharedRefs = provenance?.scanReceiptRefs as string[] | undefined;
-      row.receiptRefs = [
-        ...new Set(
-          ((row.receiptRefs as string[] | undefined) ?? []).map((ref) => {
-            ref = posix.normalize(ref);
-            const shared = sharedRefs?.includes(ref) ?? false;
-            const digest = receiptDigests.get(JSON.stringify([shared, ref]));
-            let path = ref;
-            // Without readable bytes, only the exact accepted reference can match.
-            if (digest !== undefined && !shared) {
-              if (path.startsWith(`${artifactPrefix}/`))
-                path = path.slice(artifactPrefix.length + 1);
-              else if (path.startsWith(archivePrefix)) {
-                const archived = path.slice(archivePrefix.length);
-                if (/^attempt-[0-9]+\//u.test(archived))
-                  path = archived.slice(archived.indexOf("/") + 1);
-              }
-              while (
-                /^artifacts\/archived-receipts\/attempt-[0-9]+\//u.test(path)
-              ) {
-                path = path.replace(
-                  /^artifacts\/archived-receipts\/attempt-[0-9]+\//u,
-                  "",
-                );
-              }
-            }
-            return JSON.stringify([shared, path, digest]);
-          }),
-        ),
-      ];
-      if (provenance) {
-        delete provenance.scanReceiptRefs;
-        if (Object.keys(provenance).length === 0) delete row.provenance;
-      }
-    }
-  }
-  return isDeepStrictEqual(previous, current);
 }
 
 export function addScanCoverage(

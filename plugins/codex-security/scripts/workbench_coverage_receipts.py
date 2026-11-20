@@ -299,13 +299,42 @@ def _generic_surface_updates(
                 and (owner, identity) in reopened_generic
             }
             reopening = surface.get("disposition") == "needs_follow_up"
-            work_ids = reopened_ids if reopening else closed_ids
-            repair_only = not work_ids
-            if repair_only and receipt_root is None:
-                continue
             if not isinstance(identity, str):
                 continue
             matches = saved_surfaces[(surface_owner, identity)]
+            pending_link = not reopening and any(
+                saved_owner == surface_owner
+                and (owner, deferred_id) not in closed_deferred
+                and (
+                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
+                    or (owner, candidate_id) not in resolved_candidates
+                )
+                and linked(row, identity, saved_owner)
+                for (saved_owner, deferred_id), (_, row, _) in active_deferred.items()
+            )
+            pending_surface = None
+            if pending_link:
+                if not closed_ids and not reopened_ids:
+                    continue
+                # Closing one task cannot complete another task's shared surface.
+                pending_surface = max(
+                    (
+                        (saved_path, row)
+                        for saved_path, row in matches
+                        if row.get("disposition") == "needs_follow_up"
+                        and record_order(saved_path, surface_owner, row)
+                        < record_order(relative, surface_owner, surface)
+                    ),
+                    key=lambda match: record_order(match[0], surface_owner, match[1]),
+                    default=None,
+                )
+                if pending_surface is None:
+                    continue
+                reopening = True
+            work_ids = reopened_ids if reopening else closed_ids
+            repair_only = not work_ids and pending_surface is None
+            if repair_only and receipt_root is None:
+                continue
             # Receipt repair alone cannot close or reopen a saved surface.
             if repair_only and any(
                 row.get("disposition") != surface.get("disposition") for _, row in matches
@@ -345,17 +374,6 @@ def _generic_surface_updates(
                 if isinstance(row, dict)
             ):
                 continue
-            if not reopening and any(
-                saved_owner == surface_owner
-                and (owner, deferred_id) not in closed_deferred
-                and (
-                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
-                    or (owner, candidate_id) not in resolved_candidates
-                )
-                and linked(row, identity, saved_owner)
-                for (saved_owner, deferred_id), (_, row, _) in active_deferred.items()
-            ):
-                continue
             # An accepted checkpoint can update a saved surface by ID without
             # optional surfaceIds links on its generic task.
             receipt_matches = [
@@ -364,15 +382,22 @@ def _generic_surface_updates(
                 if receipt_root is None
                 or saved_path in eligible_receipt_sources
                 or surface_is_retained(saved_path, owner, row)
+                or (
+                    not repair_only
+                    and record_order(saved_path, surface_owner, row)
+                    < record_order(relative, surface_owner, surface)
+                )
             ]
             if not receipt_matches:
                 continue
             latest_relative, latest_surface = max(
                 receipt_matches, key=lambda match: record_order(match[0], surface_owner, match[1])
             )
-            target = (
-                retained_surfaces.get((surface_owner, identity)) if repair_only else latest_surface
-            )
+            target = latest_surface
+            if pending_surface is not None:
+                target = pending_surface[1]
+            elif repair_only:
+                target = retained_surfaces.get((surface_owner, identity))
             if target is None:
                 continue
             update = copy.deepcopy(target)

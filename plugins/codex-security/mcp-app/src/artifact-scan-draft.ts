@@ -1247,10 +1247,6 @@ export async function reconcileAcceptedWorkerHistory(
   requireFiniteNumbers(input);
   const savedSources = structuredClone(history);
   const initial = structuredClone(input);
-  // Legacy terminal drafts may lack the IDs assigned to their archived occurrences.
-  initial.reviewState.deferred = normalizeDeferred(
-    initial.reviewState.deferred,
-  );
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
   const archivePrefix = `${workerPrefix}attempts/`;
   const currentReceiptRefs = new Set(
@@ -1292,11 +1288,19 @@ export async function reconcileAcceptedWorkerHistory(
     initial,
     savedSources,
     sources,
-    // A reader retains authenticated source rows but cannot authenticate new
-    // receipt ownership from a surface match in a different payload.
+    // Only receipt refs actually joined during closeout inherit source ownership.
     () => {},
+    (left, right) =>
+      matchesSavedCoverageSource(
+        "surfaces",
+        right,
+        left,
+        `${workerPrefix}output`,
+        receiptDigests,
+      ),
   );
-  const result = reconciliation.complete();
+  // Projection assigns distinct parent IDs; retain the worker's authored IDs.
+  const result = reconciliation.complete({ preserveSurfaceIds: true });
   const { selectedReceiptsBySurface, closedDeferredIds, resolvedSurfaces } =
     reconciliation;
   const receiptOwners = savedReceiptOwners([result, ...sources]);
@@ -1446,6 +1450,68 @@ function retainSavedReceiptOwnership(
   }
 }
 
+/** Compare accepted content and readable receipt bytes, never authored origin claims. */
+export function matchesSavedCoverageSource(
+  field: string,
+  item: Record<string, unknown>,
+  saved: unknown,
+  artifactPrefix: string,
+  receiptDigests: ReadonlyMap<string, string>,
+): boolean {
+  const original =
+    typeof saved === "string" ? { question: saved } : structuredClone(saved);
+  const current = structuredClone(item);
+  if (
+    typeof original !== "object" ||
+    original === null ||
+    Array.isArray(original)
+  )
+    return false;
+  const previous = original as Record<string, unknown>;
+  if (previous.id === undefined) delete current.id;
+  if (field === "surfaces") {
+    const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
+    for (const row of [previous, current]) {
+      const provenance = row.provenance as Record<string, unknown> | undefined;
+      const sharedRefs = provenance?.scanReceiptRefs as string[] | undefined;
+      row.receiptRefs = [
+        ...new Set(
+          ((row.receiptRefs as string[] | undefined) ?? []).map((ref) => {
+            ref = posix.normalize(ref);
+            const shared = sharedRefs?.includes(ref) ?? false;
+            const digest = receiptDigests.get(JSON.stringify([shared, ref]));
+            let path = ref;
+            // Without readable bytes, only the exact accepted reference can match.
+            if (digest !== undefined && !shared) {
+              if (path.startsWith(`${artifactPrefix}/`))
+                path = path.slice(artifactPrefix.length + 1);
+              else if (path.startsWith(archivePrefix)) {
+                const archived = path.slice(archivePrefix.length);
+                if (/^attempt-[0-9]+\//u.test(archived))
+                  path = archived.slice(archived.indexOf("/") + 1);
+              }
+              while (
+                /^artifacts\/archived-receipts\/attempt-[0-9]+\//u.test(path)
+              ) {
+                path = path.replace(
+                  /^artifacts\/archived-receipts\/attempt-[0-9]+\//u,
+                  "",
+                );
+              }
+            }
+            return JSON.stringify([shared, path, digest]);
+          }),
+        ),
+      ];
+      if (provenance) {
+        delete provenance.scanReceiptRefs;
+        if (Object.keys(provenance).length === 0) delete row.provenance;
+      }
+    }
+  }
+  return isDeepStrictEqual(previous, current);
+}
+
 function prepareScanDraftReconciliation(
   input: ScanDraftInput,
   result: ScanDraftInput,
@@ -1457,6 +1523,14 @@ function prepareScanDraftReconciliation(
     ambiguousIds: Set<string>,
     resolvedSurfaces: Set<JsonObject>,
   ) => void,
+  sameSurface: (left: JsonObject, right: JsonObject) => boolean = (
+    left,
+    right,
+  ) =>
+    isDeepStrictEqual(
+      { ...left, receiptRefs: left.receiptRefs ?? [] },
+      { ...right, receiptRefs: right.receiptRefs ?? [] },
+    ),
 ) {
   // Older checkpoints can omit IDs already assigned in their published output.
   const drafts = [result, ...sources];
@@ -1473,10 +1547,7 @@ function prepareScanDraftReconciliation(
         ({ id, ...content }) =>
           typeof id === "string" &&
           !reservedSurfaceIds.has(id) &&
-          isDeepStrictEqual(
-            { ...content, receiptRefs: content.receiptRefs ?? [] },
-            { ...row, receiptRefs: row.receiptRefs ?? [] },
-          ),
+          sameSurface(content, row),
       );
       if (matching === undefined) return row;
       const id = matching.id as string;
@@ -1492,10 +1563,8 @@ function prepareScanDraftReconciliation(
       return normalized;
     });
   }
-  const savedDeferred = sources.flatMap(
-    (source) => source.reviewState.deferred,
-  );
-  for (const source of sources) {
+  const savedDeferred = drafts.flatMap((source) => source.reviewState.deferred);
+  for (const source of drafts) {
     const reservedIds = new Set(
       source.reviewState.deferred.flatMap((row) =>
         typeof row.id === "string" ? [row.id] : [],
@@ -1699,7 +1768,7 @@ function prepareScanDraftReconciliation(
     complete,
   };
 
-  function complete(): ScanDraftInput {
+  function complete({ preserveSurfaceIds = false } = {}): ScanDraftInput {
     const resolvedFollowUpSurfaces = sources.flatMap((source) => {
       const pending = source.reviewState.deferred;
       if (
@@ -1955,9 +2024,10 @@ function prepareScanDraftReconciliation(
     result.reviewState.deferred = normalizeDeferred(
       result.reviewState.deferred,
     );
-    result.reviewState.surfaces = normalizeSurfaces(
-      result.reviewState.surfaces,
-    );
+    if (!preserveSurfaceIds)
+      result.reviewState.surfaces = normalizeSurfaces(
+        result.reviewState.surfaces,
+      );
     return result;
   }
 }
@@ -2303,10 +2373,12 @@ function reconcileDeferredSurfaces(
         (row) => row.disposition === "needs_follow_up",
       );
       if (!followUp) continue;
+      const currentSharedRefs = recordedScanReceiptRefs(surface);
       surface = {
         ...structuredClone(followUp),
         receiptRefs: surface.receiptRefs,
       };
+      setRecordedScanReceiptRefs(surface, currentSharedRefs);
     }
     const linked = matches.some(
       ({ surfaces, deferred }) =>
@@ -2319,12 +2391,24 @@ function reconcileDeferredSurfaces(
         ),
     );
     if (!linked) continue;
+    const currentRefs = new Set(
+      ((surface.receiptRefs as string[] | undefined) ?? []).map((ref) =>
+        posix.normalize(ref),
+      ),
+    );
+    const inheritedSharedRefs = previousSurfaces.flatMap((previous) =>
+      recordedScanReceiptRefs(previous).filter((ref) => !currentRefs.has(ref)),
+    );
     surface.receiptRefs = exactUnion(
       (surface.receiptRefs as unknown[] | undefined) ?? [],
       previousSurfaces.flatMap(
         (row) => (row.receiptRefs as unknown[] | undefined) ?? [],
       ),
     );
+    setRecordedScanReceiptRefs(surface, [
+      ...recordedScanReceiptRefs(surface),
+      ...inheritedSharedRefs,
+    ]);
     if (saved) current.push(surface);
     else current[current.indexOf(original)] = surface;
     for (const previous of previousSurfaces) {
