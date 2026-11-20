@@ -1,6 +1,11 @@
 import type { InvestigationToolFactory } from "./dependency-investigation-session.js";
 import type { ScanTokenUsage } from "./cost-model.js";
-import { registerDependencyCheck } from "./dependency-check-command.js";
+import {
+  registerDependencyCheck,
+  dependencyReportDestination,
+  reportFileOption,
+  presentDependencyResult,
+} from "./dependency-check-command.js";
 import type {
   DependencyEvidenceRecord,
   DependencyEvidenceFailure,
@@ -8,6 +13,8 @@ import type {
 import { Cli, z } from "incur";
 import { resolveConfigPath } from "./config-path.js";
 import { CodexSecurityError } from "./errors.js";
+import { writeDependencyReportFile } from "./dependency-check-output.js";
+import { formatSecurityPolicyText } from "./security-policy.js";
 import { executeStackRun, stackRunTools } from "./dependency-stack-run.js";
 
 export interface DependencyAgentRequest {
@@ -41,6 +48,8 @@ export interface DependencyAgentRequest {
 }
 
 export interface DependencyCliContext {
+  hasOutputFilter?(): boolean;
+  htmlReportRequested?(): boolean;
   environment: NodeJS.ProcessEnv;
   stderr: Pick<NodeJS.WritableStream, "write">;
   setExitCode(code: number): void;
@@ -58,7 +67,7 @@ export function createExploitabilityCli(context: DependencyCliContext) {
   registerDependencyCheck(group, context);
   const run = Cli.create("run", {
     description:
-      "Read and update a single investigation. Each operation returns JSON.",
+      "Read and update a single investigation. Commands return JSON by default.",
   });
   const pathOptions = z.object({
     state: flag.describe("Path to the investigation SQLite file."),
@@ -78,19 +87,21 @@ export function createExploitabilityCli(context: DependencyCliContext) {
                 "Read optional investigation metadata from standard input.",
               ),
           })
-        : tool.inputSchema
-          ? pathOptions.extend({
-              jsonStdin: z
-                .boolean()
-                .describe("Read one JSON document from standard input."),
-            })
-          : pathOptions;
+        : tool.name === "finalize"
+          ? pathOptions.extend({ reportFile: reportFileOption })
+          : tool.inputSchema
+            ? pathOptions.extend({
+                jsonStdin: z
+                  .boolean()
+                  .describe("Read one JSON document from standard input."),
+              })
+            : pathOptions;
     run.command(tool.name, {
       description: tool.description,
       format: "json",
       options,
       mcp: false,
-      async run({ options: opts }) {
+      async run({ options: opts, format }) {
         return context.withSignal(async (signal) => {
           const dir = context.currentDirectory();
           let input: unknown;
@@ -104,7 +115,7 @@ export function createExploitabilityCli(context: DependencyCliContext) {
               "Use --json-stdin to provide input for " + tool.name + ".",
             );
           }
-          return executeStackRun(tool.name, {
+          const result = await executeStackRun(tool.name, {
             state: resolveConfigPath(dir, opts.state),
             signal,
             input,
@@ -117,6 +128,32 @@ export function createExploitabilityCli(context: DependencyCliContext) {
                 repo: resolveConfigPath(dir, opts.repo),
               }),
           });
+          if (tool.name === "finalize") {
+            const { reportFile: path, reportFormat } =
+              dependencyReportDestination(
+                dir,
+                "reportFile" in opts && typeof opts.reportFile === "string"
+                  ? opts.reportFile
+                  : undefined,
+                context,
+              );
+            if (path) {
+              await writeDependencyReportFile(
+                path,
+                result,
+                signal,
+                reportFormat,
+              );
+              if (reportFormat !== "html")
+                context.stderr.write(
+                  "Report saved · " + formatSecurityPolicyText(path) + "\n",
+                );
+            }
+            return presentDependencyResult(result, context, format, {
+              savedPath: path,
+            });
+          }
+          return result;
         });
       },
     });

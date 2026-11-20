@@ -325,7 +325,16 @@ test("a runtime-shaped binding selection cannot substitute for this observation'
         {
           ...input,
           verdict: "unknown",
+          reason: "The imported version is for a different service.",
           remainingQuestions: ["Which workload does this evidence cover?"],
+          questionChecks: [
+            {
+              question: "Which workload does this evidence cover?",
+              checked: "Compared the service in the import with the capture.",
+              missingEvidence: "A version record for the captured service.",
+              claims: [ref],
+            },
+          ],
         },
         work,
         packet,

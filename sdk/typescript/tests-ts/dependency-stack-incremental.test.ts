@@ -264,6 +264,15 @@ test("interactive runs import runtime evidence, append work, and resume a finali
         reason: "The input source is unknown.",
         supportingClaims: recorded.claims,
         remainingQuestions: ["Who controls the input?"],
+        questionChecks: [
+          {
+            question: "Who controls the input?",
+            checked:
+              "Read the first capture. It records the selected version and call frames.",
+            missingEvidence: "The decoder argument and who supplied it.",
+            claims: recorded.claims,
+          },
+        ],
       },
     ],
   });
@@ -279,14 +288,36 @@ test("interactive runs import runtime evidence, append work, and resume a finali
     assessed: 1,
   });
   await expect(run("finalize")).rejects.toThrow(/disposition|outstanding/i);
-  const second = (await run("next")) as { workItem: { id: string } };
+  const second = (await run("next")) as {
+    workItem: { id: string };
+    receiptId: string;
+  };
+  const { claims: secondClaims } = (await run("record-claims", {
+    claims: [
+      {
+        id: "second-captured-call",
+        scope: "decoder",
+        payload: "The second capture lists the call frames.",
+        receiptIds: [second.receiptId],
+      },
+    ],
+  })) as typeof recorded;
   await run("record-assessments", {
     items: [
       {
         workItemId: second.workItem.id,
         verdict: "unknown",
         reason: "The caller is unknown.",
+        supportingClaims: secondClaims,
         remainingQuestions: ["Which caller supplies the bytes?"],
+        questionChecks: [
+          {
+            question: "Which caller supplies the bytes?",
+            checked: "Read the second capture for the call and its input.",
+            missingEvidence: "The source of the sampled decoder argument.",
+            claims: secondClaims,
+          },
+        ],
       },
     ],
   });
@@ -338,14 +369,36 @@ test("packet-bound verification rejects added work while direct finalize retains
   })) as { receiptId: string };
   await run("record-observations", { receiptId: imported.receiptId });
   for (let index = 0; index < 2; index++) {
-    const current = (await run("next")) as { workItem: { id: string } };
+    const current = (await run("next")) as {
+      workItem: { id: string };
+      receiptId: string;
+    };
+    const { claims } = (await run("record-claims", {
+      claims: [
+        {
+          id: "captured-call-" + index,
+          scope: "decoder",
+          payload: "The capture lists the decoder call.",
+          receiptIds: [current.receiptId],
+        },
+      ],
+    })) as { claims: { id: string; revision: number; hash: string }[] };
     await run("record-assessments", {
       items: [
         {
           workItemId: current.workItem.id,
           verdict: "unknown",
           reason: "The caller input is unknown.",
+          supportingClaims: claims,
           remainingQuestions: ["Who supplies the bytes?"],
+          questionChecks: [
+            {
+              question: "Who supplies the bytes?",
+              checked: "Read the capture for the decoder call and input.",
+              missingEvidence: "The source of the sampled decoder argument.",
+              claims,
+            },
+          ],
         },
       ],
     });
@@ -408,6 +461,14 @@ test("a supplemental capture citation automatically carries its original runtime
         reason: "The input source is unknown.",
         supportingClaims: recorded.claims,
         remainingQuestions: ["Who controls the input?"],
+        questionChecks: [
+          {
+            question: "Who controls the input?",
+            checked: "Read the captured decoder frame.",
+            missingEvidence: "The decoder argument and who supplied it.",
+            claims: recorded.claims,
+          },
+        ],
       },
     ],
   });

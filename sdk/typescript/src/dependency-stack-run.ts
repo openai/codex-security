@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
+import { effectiveStackSinks } from "./dependency-stack-advisory.js";
 import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   createDependencyClaims,
@@ -157,6 +158,7 @@ interface RunLocation {
   repo: string;
   fingerprint: string;
   manifest: StackPacket["manifest"];
+  hostReview?: true;
 }
 
 type WorkItem = ReturnType<typeof stackPacketWorkItems>[number];
@@ -176,6 +178,7 @@ async function initialize(
   repo?: string,
   input?: unknown,
   signal?: AbortSignal,
+  hostReview?: boolean,
 ) {
   if (!repo) throw new CodexSecurityError("run init requires --repo.");
   if (!inputs) {
@@ -200,11 +203,13 @@ async function initialize(
       if (!store.get("manifest", "active"))
         store.set("stack-protocol", "capture-origin", "next");
       store.bindIdentity(manifest);
+      const existing = store.get<RunLocation>("manifest", "active");
       store.set("manifest", "active", {
         inputs: inputPath,
         repo: repoPath,
         fingerprint,
         manifest,
+        ...((hostReview || existing?.hostReview) && { hostReview: true }),
       });
       return manifest;
     });
@@ -217,15 +222,21 @@ function mutation(store: DependencyAttemptStore, name: string, input: unknown) {
   if (!isRecord(input))
     throw new CodexSecurityError("Pass a JSON object on stdin.");
   const { operationId, ...body } = input;
-  const key =
+  const round = store.get<number>("review", "round") ?? 0;
+  const operation =
     operationId === undefined
       ? "input:" + dependencyClaimHash({ name, body })
       : "id:" + id.parse(operationId);
+  const key = round ? `review:${round}:${operation}` : operation;
   return {
     body,
     receipt: () => store.operation<unknown>(key, name, body),
     commit: (write: () => unknown) =>
       store.mutate(key, name, body, () => {
+        if ((store.get<number>("review", "round") ?? 0) !== round)
+          throw new CodexSecurityError(
+            "Independent review reopened the investigation. Run next again.",
+          );
         if (store.get("report", "final"))
           throw new CodexSecurityError(
             "This investigation has been finalized.",
@@ -233,6 +244,36 @@ function mutation(store: DependencyAttemptStore, name: string, input: unknown) {
         return write();
       }),
   };
+}
+
+/** Reopen a private draft while keeping the other assessments and the evidence ledger. */
+export function reviseLocalStackReport(
+  state: string,
+  draft: StackInvestigationReport,
+  workItemIds: readonly string[],
+): void {
+  const store = new DependencyAttemptStore(state, { create: false });
+  try {
+    store.transaction(() => {
+      const saved = store.get("report", "final");
+      if (
+        !runLocation(store).hostReview ||
+        !saved ||
+        dependencyClaimHash(saved) !== dependencyClaimHash(draft)
+      )
+        throw new CodexSecurityError(
+          "The report is not the current local review draft.",
+        );
+      const round = store.get<number>("review", "round") ?? 0;
+      store.set("review-draft", String(round), saved);
+      for (const workItemId of workItemIds)
+        store.delete("stack-assessment", workItemId);
+      store.delete("report", "final");
+      store.set("review", "round", round + 1);
+    });
+  } finally {
+    store.close();
+  }
 }
 
 function captureId(packet: StackPacket, item: WorkItem) {
@@ -378,6 +419,7 @@ function currentAssessments(store: DependencyAttemptStore, claims: Ledger) {
 
 function investigationVersion(store: DependencyAttemptStore) {
   return dependencyClaimHash({
+    reviewRound: store.get<number>("review", "round") ?? 0,
     live: getLiveRun(store) ?? null,
     queries: store.keys("supplemental-query"),
     runtime: store.keys("runtime-receipt"),
@@ -551,7 +593,11 @@ async function verifyFinal(
 
 export async function readFinalStackReport(
   state: string,
-  expected?: { packet: StackPacket; repository: string; signal?: AbortSignal },
+  expected?: {
+    packet: StackPacket;
+    repository: string;
+    signal?: AbortSignal;
+  },
 ): Promise<StackInvestigationReport> {
   const store = new DependencyAttemptStore(state, { create: false });
   try {
@@ -607,6 +653,7 @@ export async function executeStackRun(
     repo?: string;
     input?: unknown;
     signal?: AbortSignal;
+    hostReview?: boolean;
   },
 ): Promise<unknown> {
   const { state, signal } = options;
@@ -617,6 +664,7 @@ export async function executeStackRun(
       options.repo,
       options.input,
       signal,
+      options.hostReview,
     );
   const store = new DependencyAttemptStore(state, { create: false });
   try {
@@ -690,6 +738,7 @@ export async function executeStackRun(
             workItem: null,
             coverage: summarizeStackCoverage(packet, assessments()),
           };
+        const sinks = effectiveStackSinks(packet);
         return {
           workItem: item,
           receiptId: captureId(packet, item),
@@ -701,11 +750,18 @@ export async function executeStackRun(
           target: manifest.target,
           cve: manifest.cve,
           advisory: manifest.advisory,
+          ...(manifest.triggerAnalysis && {
+            triggerAnalysis: manifest.triggerAnalysis,
+          }),
+          ...(manifest.advisoryDetails && {
+            advisoryDetails: manifest.advisoryDetails,
+          }),
+          ...(manifest.advisoryLookupError && {
+            advisoryLookupError: manifest.advisoryLookupError,
+          }),
           sources: packet.sources.sources,
-          sinks: packet.sinks.sinks,
-          openQuestions: packet.sinks.sinks.flatMap(
-            (sink) => sink.preconditions,
-          ),
+          sinks,
+          openQuestions: sinks.flatMap((sink) => sink.preconditions),
         };
       }
       case "query-claims":
