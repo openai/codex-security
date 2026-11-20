@@ -4493,15 +4493,15 @@ if __name__ == "__main__":
   );
 
   test.each([
-    "failure",
-    "cancellation",
-    "tool output only",
-    "legacy plugin",
-    "poll first",
-    "stale live report",
-  ])(
+    ["failure", true],
+    ["cancellation", true],
+    ["tool output only", false],
+    ["legacy plugin", false],
+    ["poll first", true],
+    ["stale live report", false],
+  ] as const)(
     "saves only an accepted coordinator phase at its observation time on stop (%s)",
-    async (scenario) => {
+    async (scenario, savesPhase) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const runtime = preparedRuntime(codexHome);
       if (scenario === "legacy plugin") {
@@ -4566,42 +4566,36 @@ if __name__ == "__main__":
           return registerEightFileScan(options, args, input);
         },
       });
-      const phases: string[] = [];
+      let reports = 0;
       const keepAlive = setInterval(() => {}, 1_000);
       try {
         await expect(
           client.run(repository, {
             signal: controller.signal,
             onProgress: ({ phase }) => {
-              phases.push(phase);
-              if (phase === "validation") polled.resolve();
+              if (phase !== "validation") return;
+              reports++;
+              polled.resolve();
             },
           }),
         ).rejects.toThrow();
       } finally {
         clearInterval(keepAlive);
       }
-      if (pollFirst)
-        expect(phases.filter((phase) => phase === "validation")).toHaveLength(
-          1,
-        );
+      if (pollFirst) expect(reports).toBe(1);
       expect(stopped?.[0]).toBe(
         scenario === "cancellation" ? "cancel-scan" : "fail-scan",
       );
-      if (
-        ["legacy plugin", "tool output only", "stale live report"].includes(
-          scenario,
-        )
-      ) {
-        expect(stopped).not.toContain("--observed-phase");
-        expect(stopped).not.toContain("--phase-observed-at");
-      } else {
+      if (savesPhase) {
         expect(stopped?.slice(-4)).toEqual([
           "--observed-phase",
           "validation",
           "--phase-observed-at",
           observedAt,
         ]);
+      } else {
+        expect(stopped).not.toContain("--observed-phase");
+        expect(stopped).not.toContain("--phase-observed-at");
       }
     },
   );

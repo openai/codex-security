@@ -1253,24 +1253,21 @@ def mark_running_scan_failed(
     return updated.rowcount == 1
 
 
-def stopped_phase_observation(scan: sqlite3.Row, args: argparse.Namespace) -> str | None:
-    phase = getattr(args, "observed_phase", None)
-    observed_at = getattr(args, "phase_observed_at", None)
-    if scan["mode"] == "standard" and phase and parse_observation_time(observed_at) is not None:
-        return json.dumps({"phase": phase, "observedAt": observed_at})
-    return None
-
-
-def fill_missing_stopped_phase(
+def record_stopped_phase(
     connection: sqlite3.Connection, scan: sqlite3.Row, args: argparse.Namespace
 ) -> None:
-    observation = stopped_phase_observation(scan, args)
-    if observation is not None:
-        connection.execute(
-            "UPDATE scan_progress SET last_observed_phase_json = ? "
-            "WHERE scan_id = ? AND last_observed_phase_json IS NULL",
-            (observation, scan["id"]),
-        )
+    phase = getattr(args, "observed_phase", None)
+    observed_at = getattr(args, "phase_observed_at", None)
+    observation = None
+    if scan["mode"] == "standard" and phase and parse_observation_time(observed_at) is not None:
+        observation = json.dumps({"phase": phase, "observedAt": observed_at})
+    # A new stop replaces the previous attempt's observation. A retry may fill a gap.
+    connection.execute(
+        "UPDATE scan_progress SET last_observed_phase_json = :observation "
+        "WHERE scan_id = :id AND last_observed_phase_json IS NOT :observation "
+        "AND (:running OR last_observed_phase_json IS NULL)",
+        {"observation": observation, "id": scan["id"], "running": scan["status"] == "running"},
+    )
 
 
 def touch_scan_progress(
@@ -1278,12 +1275,11 @@ def touch_scan_progress(
     scan_id: str,
     timestamp: str,
     scope_file_count: int | None = None,
-    last_observed_phase: str | None = None,
 ) -> bool:
     updated = connection.execute(
-        "UPDATE scan_progress SET updated_at = ?, scope_file_count = COALESCE(?, scope_file_count), "
-        "last_observed_phase_json = ? WHERE scan_id = ?",
-        (timestamp, scope_file_count, last_observed_phase, scan_id),
+        "UPDATE scan_progress SET updated_at = ?, scope_file_count = COALESCE(?, scope_file_count) "
+        "WHERE scan_id = ?",
+        (timestamp, scope_file_count, scan_id),
     )
     return updated.rowcount == 1
 
@@ -1322,8 +1318,8 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        record_stopped_phase(connection, scan, args)
         if scan["status"] == "failed":
-            fill_missing_stopped_phase(connection, scan, args)
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return db.scan_context(connection, scan["id"])
@@ -1336,7 +1332,6 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             scan_id,
             timestamp,
             scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
-            stopped_phase_observation(scan, args),
         ):
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
@@ -1374,8 +1369,8 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         require_cancel_owner(db, connection, scan, thread_id)
+        record_stopped_phase(connection, scan, args)
         if scan["canceled_at"] is not None:
-            fill_missing_stopped_phase(connection, scan, args)
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
             return {
@@ -1402,7 +1397,6 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             scan_id,
             timestamp,
             scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
-            stopped_phase_observation(scan, args),
         ):
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
