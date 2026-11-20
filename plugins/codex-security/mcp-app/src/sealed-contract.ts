@@ -411,9 +411,6 @@ function validateCanonicalContract(
   const activeDeferredIds = new Set<string>();
   for (const [index, deferred] of (coverage?.deferred ?? []).entries()) {
     activeDeferredIds.add(deferred.id);
-    if (typeof deferred["candidateId"] === "string") {
-      activeDeferredIds.add(deferred["candidateId"]);
-    }
     for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
       const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
       try {

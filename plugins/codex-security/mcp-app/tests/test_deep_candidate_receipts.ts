@@ -353,6 +353,8 @@ for (const savedGap of [false, true]) {
     assert.deepEqual(worker.reviewState.surfaces[0].previousFindings, [
       oldFinding,
     ]);
+    const closure = { id: "candidate", reason: "Independent review finished." };
+    worker.reviewState.resolvedDeferred = [closure];
     if (savedGap) {
       worker.reviewState.completeness = "partial";
       worker.reviewState.deferred = [
@@ -362,8 +364,8 @@ for (const savedGap of [false, true]) {
           candidate: { evidence: "Independent saved proof" },
         },
       ];
-      await writeFile(resultPath, JSON.stringify(worker));
     }
+    await writeFile(resultPath, JSON.stringify(worker));
     const original = await readFile(resultPath);
     const saved = await f.merge();
     const pending = saved.unresolvedCandidates[0];
@@ -383,6 +385,10 @@ for (const savedGap of [false, true]) {
       );
     }
     const publication = scanUnionToDraft(saved);
+    assert.equal(
+      publication.reviewState.resolvedDeferred[0].reason,
+      closure.reason,
+    );
     assert.equal(
       unresolvedCandidates(publication.reviewState, publication.findings)
         .length,

@@ -200,9 +200,7 @@ export async function validateDiscoveryArtifacts(
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
   if (closures.length) {
-    const active = new Set(
-      result.reviewState.deferred.flatMap((row) => [row.id, row.candidateId]),
-    );
+    const active = new Set(result.reviewState.deferred.map((row) => row.id));
     const closed = new Set<string>();
     for (const { id } of closures) {
       if (active.has(id))

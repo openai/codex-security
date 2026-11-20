@@ -949,15 +949,6 @@ async function testCoveragePublicationParity(root: string) {
     },
     {
       patch: (result) => {
-        result.reviewState.deferred = [
-          { id: "other", candidateId: "route", reason: "Needs evidence." },
-        ];
-        result.reviewState.resolvedDeferred = [closure];
-      },
-      error: /deferred work is still active/,
-    },
-    {
-      patch: (result) => {
         result.reviewState.resolvedDeferred = [
           { ...closure, reason: "Invalid \ud800 text." },
         ];
