@@ -3103,7 +3103,13 @@ URL-specific values. Delegates also have deny rules for the account's `.ssh`
 directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
 `.kube/config`, `.npmrc`, and `.pypirc`. The rules cover home-directory defaults
 and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
-`NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. They protect
+`NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. For pip, they cover
+`PIP_CONFIG_FILE`, `PIP_CLIENT_CERT`, and pip configuration in standard user and
+system locations, `VIRTUAL_ENV`, or `CONDA_PREFIX`. Git delegates also strip
+environment values containing authenticated HTTP URLs. For credential file
+selectors such as `GIT_SSL_KEY`, `REGISTRY_AUTH_FILE`, and
+`AWS_WEB_IDENTITY_TOKEN_FILE`, delegates lose the selector and filesystem
+access to the selected file. The rules protect
 `auth.json`, `.credentials.json`, and
 Codex configuration files (including named profiles) in the default Codex home,
 the selected `CODEX_HOME`, and the Codex Security credential home.
@@ -3196,7 +3202,8 @@ libraries and their dependencies outside the patch's writable roots. The CLI
 checks each selected directory tree, including nested search locations. It
 omits the whole directory if it finds a link into a writable root or a writable
 hard link whose other names it cannot verify. Before launching a command, it
-checks for changes to files the patch could edit through new hard links.
+checks for changes to files the patch could edit through new hard links. When
+Git delegates a publication hook, it omits directories containing such files.
 It filters out relative entries and ELF loader tokens such as `$ORIGIN`, and
 clears other `LD_*` and `DYLD_*` overrides when launching repository commands.
 With an external sandbox or unknown write permissions, the CLI clears the

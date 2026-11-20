@@ -3,12 +3,14 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import {
   completePatches,
+  patchArtifactFromPrompt,
   patchRiskAssessment,
   repositoryGit,
   resultWithFindings,
   runWorkflow,
   savedScan,
   patchDirectories,
+  initializePatchGit,
   gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
 
@@ -19,13 +21,8 @@ async function configuredRepository(selector: string, absolute: boolean) {
   const support = await fixtures.create("patch-snapshot-filter-");
   const nested = join(directory, "nested");
   await mkdir(nested);
-  const git = repositoryGit(directory);
-  const nestedGit = repositoryGit(nested);
-  for (const run of [git, nestedGit]) {
-    run("init", "--initial-branch=main");
-    run("config", "user.name", "Synthetic User");
-    run("config", "user.email", "synthetic@example.test");
-  }
+  const git = initializePatchGit(directory);
+  const nestedGit = initializePatchGit(nested);
   await writeFile(join(directory, "root.txt"), "unchanged\n");
   await writeFile(join(directory, ".gitignore"), "settings\n");
   await writeFile(join(nested, "app.txt"), "original\n");
@@ -89,10 +86,8 @@ for (const selector of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]) {
                 output!.appServer!.prompt.includes("immutable patch artifact")
               ) {
                 assessments++;
-                const artifact = JSON.parse(
-                  output!
-                    .appServer!.prompt.split("\n")
-                    .find((line) => line.startsWith('{"path":'))!,
+                const artifact = patchArtifactFromPrompt(
+                  output!.appServer!.prompt,
                 );
                 expect(artifact.changedFiles).toEqual(files);
                 const verification = await fixtures.create(
@@ -229,11 +224,7 @@ test.each(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])(
         onCodex: async (_args, output, childEnvironment) => {
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
             assessments++;
-            const artifact = JSON.parse(
-              output!
-                .appServer!.prompt.split("\n")
-                .find((line) => line.startsWith('{"path":'))!,
-            );
+            const artifact = patchArtifactFromPrompt(output!.appServer!.prompt);
             expect(artifact.changedFiles).toEqual(files);
             const patch = await readFile(artifact.path, "utf8");
             expect(patch).toContain("-component");
@@ -289,11 +280,7 @@ test("saved findings rebaseline with the same nested filter configuration", asyn
       onCodex: async (args, output, childEnvironment) => {
         if (output!.appServer!.prompt.includes("immutable patch artifact")) {
           assessments++;
-          const artifact = JSON.parse(
-            output!
-              .appServer!.prompt.split("\n")
-              .find((line) => line.startsWith('{"path":'))!,
-          );
+          const artifact = patchArtifactFromPrompt(output!.appServer!.prompt);
           expect(artifact.changedFiles).toEqual(files);
           const patch = await readFile(artifact.path, "utf8");
           expect(patch).toContain("-unchanged");

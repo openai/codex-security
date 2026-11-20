@@ -12,7 +12,7 @@ export let CURRENT_REPOSITORY: string;
 export let SAVED_REPOSITORY: string;
 
 export function setupPatchWorkflowFixtures() {
-  const workflowDirectories = createTemporaryDirectories(true);
+  const workflowDirectories = patchDirectories();
   beforeEach(async () => {
     const root = await workflowDirectories.create("patch-workflow-");
     CURRENT_REPOSITORY = join(root, "current", "repository");
@@ -28,7 +28,7 @@ export function setupPatchWorkflowFixtures() {
       }),
     );
   });
-  afterEach(workflowDirectories.cleanup);
+  return workflowDirectories;
 }
 
 export const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
@@ -91,6 +91,17 @@ export function completePatches(
     }),
   );
   return findings;
+}
+
+export function patchArtifactFromPrompt(prompt: string): {
+  path: string;
+  base: string;
+  changedFiles: string[];
+  sha256: string;
+} {
+  return JSON.parse(
+    prompt.split("\n").find((line) => line.startsWith('{"path":'))!,
+  );
 }
 
 export function patchRiskSummary() {

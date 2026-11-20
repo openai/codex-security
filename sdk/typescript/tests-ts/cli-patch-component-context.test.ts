@@ -12,6 +12,7 @@ import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   completePatches,
+  patchArtifactFromPrompt,
   patchRiskAssessment,
   publicationRepository,
   repositoryGit,
@@ -26,6 +27,15 @@ import {
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
+
+async function applyToClone(directory: string, patch: string) {
+  const clone = await fixtures.create("patch-component-assessment-");
+  const git = repositoryGit(clone);
+  git("clone", "-c", "core.autocrlf=false", "--no-hardlinks", directory, ".");
+  git("apply", "--check", patch);
+  git("apply", patch);
+  return clone;
+}
 
 test.each([
   { scope: "root", siblingOnly: false, literal: false },
@@ -113,26 +123,9 @@ test.each([
         onCodex: async (_args, output) => {
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
             assessments++;
-            const artifact = JSON.parse(
-              output!
-                .appServer!.prompt.split("\n")
-                .find((line) => line.startsWith('{"path":'))!,
-            );
+            const artifact = patchArtifactFromPrompt(output!.appServer!.prompt);
             expect(artifact.changedFiles).toEqual(expectedFiles);
-            const verification = await fixtures.create(
-              "patch-component-assessment-",
-            );
-            const verify = repositoryGit(verification);
-            verify(
-              "clone",
-              "-c",
-              "core.autocrlf=false",
-              "--no-hardlinks",
-              directory,
-              ".",
-            );
-            verify("apply", "--check", artifact.path);
-            verify("apply", artifact.path);
+            const verification = await applyToClone(directory, artifact.path);
             expect(
               await readFile(join(verification, "generated.txt"), "utf8"),
             ).toBe("generated fix\n");
@@ -253,26 +246,9 @@ test.each(
         onCodex: async (_args, output) => {
           if (output!.appServer!.prompt.includes("immutable patch artifact")) {
             assessments++;
-            const artifact = JSON.parse(
-              output!
-                .appServer!.prompt.split("\n")
-                .find((line) => line.startsWith('{"path":'))!,
-            );
+            const artifact = patchArtifactFromPrompt(output!.appServer!.prompt);
             expect(artifact.changedFiles).toEqual(["app.ts"]);
-            const verification = await fixtures.create(
-              "patch-alias-assessment-",
-            );
-            const verify = repositoryGit(verification);
-            verify(
-              "clone",
-              "-c",
-              "core.autocrlf=false",
-              "--no-hardlinks",
-              directory,
-              ".",
-            );
-            verify("apply", "--check", artifact.path);
-            verify("apply", artifact.path);
+            const verification = await applyToClone(directory, artifact.path);
             expect(await readFile(join(verification, "app.ts"), "utf8")).toBe(
               explicit ? "FIXED\n" : "fixed\n",
             );
@@ -467,25 +443,10 @@ for (const raw of [false, true]) {
               output!.appServer!.prompt.includes("immutable patch artifact")
             ) {
               assessments++;
-              const artifact = JSON.parse(
-                output!
-                  .appServer!.prompt.split("\n")
-                  .find((line) => line.startsWith('{"path":'))!,
+              const artifact = patchArtifactFromPrompt(
+                output!.appServer!.prompt,
               );
-              const verification = await fixtures.create(
-                "patch-byte-assessment-",
-              );
-              const verify = repositoryGit(verification);
-              verify(
-                "clone",
-                "-c",
-                "core.autocrlf=false",
-                "--no-hardlinks",
-                directory,
-                ".",
-              );
-              verify("apply", "--check", artifact.path);
-              verify("apply", artifact.path);
+              const verification = await applyToClone(directory, artifact.path);
               expect(
                 await readFile(
                   Buffer.concat([Buffer.from(`${verification}/`), name]),

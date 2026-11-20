@@ -11,8 +11,41 @@ export const gitSecretSetting =
 export const httpCredentialFile =
   /^http(?:\..*)?\.(?:cookiefile|(?:proxy)?ssl(?:key|cert))$/iu;
 
-export const credentialFileVariable =
-  /^(?:GOOGLE_APPLICATION_CREDENTIALS|NPM_CONFIG_(?:USER|GLOBAL)CONFIG|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY)|TERRAFORM_CONFIG|TF_CLI_CONFIG_FILE)$/iu;
+// This classifier also runs in the standalone Git and hook processes.
+export function patchCredentialKind(
+  name: string,
+): "file" | "value" | undefined {
+  if (
+    /^(?:GIT_(?:PROXY_)?SSL_(?:KEY|CERT)|NETRC|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY))$/iu.test(
+      name,
+    ) ||
+    /^(?:BOTO_CONFIG|CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE|GOOGLE_APPLICATION_CREDENTIALS|AZURE_CLIENT_CERTIFICATE_PATH|TERRAFORM_CONFIG|TF_CLI_CONFIG_FILE)$/iu.test(
+      name,
+    ) ||
+    /^(?:(?:PIP|UV)_CONFIG_FILE|(?:PIP|SSL|BUNDLE_SSL)_CLIENT_CERT|P?NPM_CONFIG_(?:USER|GLOBAL)CONFIG|REGISTRY_AUTH_FILE|PNPM_CONFIG_NPMRC_AUTH_FILE)$/iu.test(
+      name,
+    ) ||
+    /^(?:BUNDLE_(?:USER_)?CONFIG|CABAL_CONFIG|HELM_(?:REGISTRY|REPOSITORY)_CONFIG|SBT_CREDENTIALS|SCALA_CLI_CONFIG|(?:ARTIFACTS|NUGET)_CREDENTIALPROVIDER_MSAL_FILECACHE_LOCATION)$/iu.test(
+      name,
+    )
+  )
+    return "file";
+  const secret =
+    /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(_FILE)?$/iu.exec(
+      name,
+    );
+  if (secret) return secret[1] ? "file" : "value";
+  if (
+    /^(?:AWS_BEARER_TOKEN_|POETRY_PYPI_TOKEN_|TF_TOKEN_|NuGetPackageSourceCredentials_)/iu.test(
+      name,
+    ) ||
+    /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$/iu.test(
+      name,
+    )
+  )
+    return "value";
+  return undefined;
+}
 
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
@@ -20,22 +53,18 @@ export function removePatchCredentials(
   credentialNames: readonly string[],
   stripAwsCredentials?: boolean,
   proxyCredentials = proxyUserinfo,
-  fileVariable = credentialFileVariable,
+  credentialKind = patchCredentialKind,
 ): void {
   for (const [name, value] of Object.entries(environment)) {
     if (
-      fileVariable.test(name) ||
-      /^TF_TOKEN_/iu.test(name) ||
-      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
-        name,
-      ) ||
+      credentialKind(name) !== undefined ||
       credentialNames.includes(name.toUpperCase()) ||
       (stripAwsCredentials && /^AWS_/i.test(name)) ||
       // Package indexes can contain several URLs, including named indexes.
       // Git command config is filtered as key/value pairs by filterCommandConfig.
       (!/^GIT_CONFIG_(?:PARAMETERS|(?:KEY|VALUE)_\d+)$/iu.test(name) &&
         value !== undefined &&
-        /(?:^|[\s=])https?:\/{1,3}[^/@?#\s]+@/iu.test(value)) ||
+        /\bhttps?:\/{1,3}[^/@?#\s]+@/iu.test(value)) ||
       (/^(?:https?|all|pip)_proxy$/i.test(name) &&
         value !== undefined &&
         proxyCredentials.test(value))
@@ -245,7 +274,7 @@ const plan = JSON.parse(
 );
 const environment = { ...process.env };
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
+removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo}, ${patchCredentialKind});
 environment.CODEX_HOME = plan.home;
 
 const windowsConfig = plan.windowsConfig;

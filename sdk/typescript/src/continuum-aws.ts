@@ -65,13 +65,13 @@ function expandVariables(path: string, environment: NodeJS.ProcessEnv): string {
   });
 }
 
-function expandedSetting(
+export function expandCredentialPath(
   name: string,
   value: string,
   home: string,
-  environment: NodeJS.ProcessEnv,
+  environment?: NodeJS.ProcessEnv,
 ): string {
-  const path = expandVariables(value, environment);
+  const path = environment ? expandVariables(value, environment) : value;
   if (
     path === "~" ||
     path.startsWith("~/") ||
@@ -108,7 +108,7 @@ export function awsProfileFiles(home: string, environment: NodeJS.ProcessEnv) {
     const path =
       value === undefined
         ? defaultPath
-        : expandedSetting(name, value, home, environment);
+        : expandCredentialPath(name, value, home, environment);
     return { name, value, defaultPath, path };
   });
 }
@@ -259,7 +259,12 @@ export async function prepareContinuumAws(
   if (child["AWS_DATA_PATH"] !== undefined) {
     const paths: string[] = [];
     for (const entry of child["AWS_DATA_PATH"].split(delimiter)) {
-      const path = expandedSetting("AWS_DATA_PATH", entry, home, environment);
+      const path = expandCredentialPath(
+        "AWS_DATA_PATH",
+        entry,
+        home,
+        environment,
+      );
       if (!path) continue;
       const safe = await checkModelPath(path, resolvePath, roots, signal);
       paths.push(pinSetting("AWS_DATA_PATH", safe, child));

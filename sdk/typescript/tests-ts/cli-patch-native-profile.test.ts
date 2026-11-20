@@ -895,6 +895,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   await mkdir(ssh);
   await mkdir(defaultGh, { recursive: true });
   await mkdir(terraformDir, { recursive: true });
+  const pipConfig = process.platform === "win32" ? "pip.ini" : "pip.conf";
   const npm = join(operator, "selected npmrc");
   const npmGlobal = join(operator, "selected global npmrc");
   await mkdir(registry);
@@ -902,11 +903,27 @@ test("patch model and clean filters cannot read selected authentication files", 
     files
       .map((file) => (process.platform === "win32" ? `"${file}"` : file))
       .join(delimiter);
+  const selectedFiles = Object.fromEntries(
+    [
+      "GIT_SSL_KEY",
+      "GIT_PROXY_SSL_CERT",
+      "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+      "AWS_WEB_IDENTITY_TOKEN_FILE",
+      "PNPM_CONFIG_NPMRC_AUTH_FILE",
+      "BUNDLE_USER_CONFIG",
+      "REGISTRY_AUTH_FILE",
+      "SSL_CLIENT_CERT",
+    ].map((name) => [name, join(operator, name)]),
+  );
   const pointers = {
+    ...selectedFiles,
     KUBECONFIG: clusterList(clusterFiles),
     DOCKER_CONFIG: registry,
     GH_CONFIG_DIR: gh,
     GLAB_CONFIG_DIR: glab,
+    PIP_CONFIG_FILE: join(operator, "selected pip config"),
+    PIP_CLIENT_CERT: "~/pip client.pem",
+    BOTO_CONFIG: "${HOME}/selected boto.cfg",
     PGPASSFILE: pgpass,
     PGSERVICEFILE: pgservice,
     PGSSLKEY: pgKey,
@@ -931,6 +948,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     CLOUDSDK_CONFIG: cloudConfig,
     APPDATA: appdata,
+    VIRTUAL_ENV: join(operator, "venv"),
     PGSYSCONFDIR: operator,
     NETRC: selectedNetrc,
     HOME: operator,
@@ -967,6 +985,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     proxyKey,
     clientCert,
     join(operator, ".pypirc"),
+    pointers.PIP_CONFIG_FILE,
     join(cloudConfig, "credentials.db"),
     join(cloudConfig, "credentials.db-wal"),
     join(legacyCloud, ".boto"),
@@ -1029,6 +1048,12 @@ test("patch model and clean filters cannot read selected authentication files", 
       ? join(appdata, "postgresql", "pgpass.conf")
       : join(operator, ".pgpass"),
     ...glabDirectories.map((directory) => join(directory, "config.yml")),
+    ...Object.values(selectedFiles),
+    join(operator, "pip client.pem"),
+    join(operator, "selected boto.cfg"),
+    join(environment.XDG_CONFIG_HOME, "pip", pipConfig),
+    join(environment.VIRTUAL_ENV, pipConfig),
+    join(operator, process.platform === "win32" ? "pip" : ".pip", pipConfig),
     cloudKey,
     join(cloudConfig, cloudDefault),
     join(cloudConfig, "access_tokens.db"),
@@ -1049,8 +1074,11 @@ test("patch model and clean filters cannot read selected authentication files", 
     npmGlobal,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
-  const createInput = (i: number) =>
-    writeFile(protectedPaths[i]!, contents[i]!, { mode: 0o600, flag: "wx" });
+  const createInput = async (i: number) => {
+    const path = protectedPaths[i]!;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, contents[i]!, { mode: 0o600, flag: "wx" });
+  };
   for (const i of existing.keys()) await createInput(i);
   const neighbor = join(registry, "ordinary-sibling.txt");
   await writeFile(neighbor, "ordinary sibling");
@@ -1073,18 +1101,8 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
     async (context, inspectModel) => {
       // An operator may have no AWS profile directory when the first model tool runs.
       expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
-      await mkdir(join(operator, ".codex"), { recursive: true });
-      await mkdir(join(operator, "codex-home"), { recursive: true });
       await mkdir(awsDirectory);
-      await mkdir(join(operator, ".docker"));
-      await mkdir(join(operator, ".kube"));
-      for (const directory of glabDirectories)
-        await mkdir(directory, { recursive: true });
-      await mkdir(pgTlsDir, { recursive: true });
       await writeFile(join(terraformDir, "ordinary.txt"), "Terraform sibling");
-      await mkdir(join(operator, ".config", "gcloud"));
-      if (process.platform === "win32")
-        await mkdir(join(appdata, "gcloud"), { recursive: true });
       await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
       for (let i = existing.length; i < protectedPaths.length; i++)
