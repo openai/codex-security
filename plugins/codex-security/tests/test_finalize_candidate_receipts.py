@@ -14,6 +14,25 @@ class FinalizeCandidateReceiptsTest(unittest.TestCase):
     write_scan = fixtures.FinalizeScanContractTest.write_scan
     write_json = fixtures.FinalizeScanContractTest.write_json
     read_json = fixtures.FinalizeScanContractTest.read_json
+    project_csv = fixtures.FinalizeScanContractTest.project_csv
+
+    def test_scoped_standard_csv_export_keeps_candidate_provenance_in_standard_format(
+        self,
+    ) -> None:
+        self.coverage["mode"] = "scoped_path"
+        self.finding["provenance"]["candidateId"] = "candidate-001"
+        reader = self.project_csv()
+        self.assertNotIn("candidate_id", reader.fieldnames or [])
+        self.assertEqual(next(reader)["title"], self.finding["title"])
+
+    def test_scoped_deep_csv_export_recognizes_canonical_worker_ownership(self) -> None:
+        self.coverage["mode"] = "scoped_path"
+        self.finding["provenance"].update(
+            {"candidateId": "candidate-001", "sourceWorkerId": "worker-001"}
+        )
+        reader = self.project_csv()
+        self.assertIn("candidate_id", reader.fieldnames or [])
+        self.assertEqual(next(reader)["candidate_id"], "candidate-001")
 
     def test_unverified_disposition_retains_owned_candidate_evidence(self) -> None:
         original = copy.deepcopy(self.coverage)
