@@ -90,10 +90,18 @@ test("a pre-push hook cannot modify the next destination's SSH launcher through 
   checkNativePush("linked launcher", "ssh"));
 test("a pre-push hook cannot modify the next destination's SSH script operand through a hard link", () =>
   checkNativePush("linked launcher", "ssh-script"));
+test.skipIf(process.platform === "win32")(
+  "a pre-push hook cannot replace the Git child launcher for a single destination",
+  () => checkNativePush("linked launcher", "single"),
+);
+test.skipIf(process.platform === "win32")(
+  "a single destination with a pre-push hook uses a separate Git child launcher",
+  () => checkNativePush("approved", "single"),
+);
 
 async function checkNativePush(
   scenario: "approved" | "unapproved mirror" | "linked launcher",
-  secondTransport: "proxy" | "ssh" | "ssh-script" = "proxy",
+  route: "proxy" | "ssh" | "ssh-script" | "single" = "proxy",
 ) {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-proxy-routes-");
@@ -119,9 +127,9 @@ async function checkNativePush(
   const commit = git("rev-parse", "HEAD");
   git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
   const receivers: string[] = [];
-  for (const port of [1, 2]) {
+  for (const port of route === "single" ? [1] : [1, 2]) {
     const host = "127.0.0.1:" + port;
-    const ssh = port === 2 && secondTransport !== "proxy";
+    const ssh = port === 2 && route !== "proxy";
     const remote =
       (ssh ? "ssh://git@" : "git://") + host + "/team/repository.git";
     if (port === 1) git("remote", "set-url", "origin", remote);
@@ -142,7 +150,7 @@ async function checkNativePush(
     const literal =
       "'" + receiver.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
     if (ssh) {
-      if (secondTransport === "ssh-script")
+      if (route === "ssh-script")
         environment["GIT_SSH_COMMAND"] =
           "sh " + JSON.stringify(launcher.replaceAll("\\", "/"));
       else environment["GIT_SSH"] = launcher;
@@ -170,20 +178,30 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
       },
     );
   }
-  if (scenario === "linked launcher") {
+  if (scenario === "linked launcher" || route === "single") {
     const home = await fixtures.create("patch-proxy-home-");
     environment["CODEX_HOME"] = home;
     await writeFile(
       join(home, "config.toml"),
       "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n",
     );
-    await link(
-      join(external, "transport-2"),
-      join(directory, "launcher-alias"),
-    );
+    let launcher = join(external, "transport-2");
+    if (route === "single") {
+      const execPath = join(external, "git-core");
+      await mkdir(execPath);
+      environment["GIT_EXEC_PATH"] = execPath;
+      launcher = join(execPath, "git");
+      await writeFile(
+        launcher,
+        `#!/bin/sh\nexec ${JSON.stringify(Bun.which("git"))} "$@"\n`,
+        { mode: 0o700 },
+      );
+    }
+    if (scenario === "linked launcher")
+      await link(launcher, join(directory, "launcher-alias"));
     await writeFile(
       join(directory, ".git", "hooks", "pre-push"),
-      "#!/bin/sh\nprintf '%s\\n' '#!/bin/sh' 'echo changed-launcher >&2; exit 1' > launcher-alias\n",
+      "#!/bin/sh\nprintf '%s\\n' '#!/bin/sh' 'echo changed-launcher \"$1\" >&2; exit 1' > launcher-alias\n",
       { mode: 0o700 },
     );
   }
