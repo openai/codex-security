@@ -232,7 +232,7 @@ import {
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
 import {
-  createWorkerDispatchMonitor,
+  createWorkerSpawnObserver,
   scanProgressUpdatesFromEvent,
   scanPhaseSchema,
   workerStatusFromEvent,
@@ -6141,8 +6141,9 @@ export async function runScanEvents(
   let tacStatusReported = false;
   try {
     options.signal.throwIfAborted();
-    const workerDispatch =
-      options.onWorkerSpawn && createWorkerDispatchMonitor();
+    const observeSpawn =
+      options.onWorkerSpawn &&
+      createWorkerSpawnObserver(notifyObserver(options, "onWorkerSpawn"));
     const turn = await readCodexTurn({
       thread: options.thread,
       events: options.events,
@@ -6188,10 +6189,7 @@ export async function runScanEvents(
         if (workerStatus !== null) {
           notifyObserver(options, "onWorkerStatus")(workerStatus);
         }
-        const spawn = workerDispatch?.observe(event);
-        if (spawn) {
-          notifyObserver(options, "onWorkerSpawn")(spawn);
-        }
+        observeSpawn?.(event);
         if (event.type === "thread.started") {
           const startedThreadId = event["thread_id"];
           if (typeof startedThreadId === "string") {

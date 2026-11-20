@@ -157,38 +157,36 @@ export type ScanWorkerSpawnEvent =
   | { kind: "dispatch"; attempt: number }
   | { kind: "failed"; attempt: number; reason: string };
 
-export function createWorkerDispatchMonitor() {
+export function createWorkerSpawnObserver(
+  notify: (event: ScanWorkerSpawnEvent) => void,
+) {
   const attempts = new Map<string, { attempt: number; failed: boolean }>();
-  return {
-    observe(
-      event: Readonly<Record<string, unknown>>,
-    ): ScanWorkerSpawnEvent | null {
-      const item = event["item"];
-      if (
-        !isRecord(item) ||
-        item["type"] !== "collab_tool_call" ||
-        item["tool"] !== "spawn_agent" ||
-        typeof item["id"] !== "string"
-      ) {
-        return null;
-      }
-      const failed =
-        event["type"] === "item.completed" && item["status"] === "failed";
-      if (
-        !failed &&
-        event["type"] !== "item.started" &&
-        !(event["type"] === "item.completed" && item["status"] === "completed")
-      ) {
-        return null;
-      }
-      const previous = attempts.get(item["id"]);
-      if (previous && (!failed || previous.failed)) return null;
-      const attempt = previous?.attempt ?? attempts.size + 1;
-      attempts.set(item["id"], { attempt, failed });
-      return failed
+  return (event: Readonly<Record<string, unknown>>) => {
+    const item = asRecord(event["item"]);
+    const id = item?.["id"];
+    if (
+      item?.["type"] !== "collab_tool_call" ||
+      item["tool"] !== "spawn_agent" ||
+      typeof id !== "string"
+    )
+      return;
+    const completed = event["type"] === "item.completed";
+    const failed = completed && item["status"] === "failed";
+    if (
+      !failed &&
+      event["type"] !== "item.started" &&
+      !(completed && item["status"] === "completed")
+    )
+      return;
+    const previous = attempts.get(id);
+    if (previous && (!failed || previous.failed)) return;
+    const attempt = previous?.attempt ?? attempts.size + 1;
+    attempts.set(id, { attempt, failed });
+    notify(
+      failed
         ? { kind: "failed", attempt, reason: spawnFailureReason(item) }
-        : { kind: "dispatch", attempt };
-    },
+        : { kind: "dispatch", attempt },
+    );
   };
 }
 
