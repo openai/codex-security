@@ -513,7 +513,8 @@ describe("npm package tar listings", () => {
     }
   });
 
-  const paddedTar = { trailingZeroBytes: 31 * 1024 * 1024 };
+  const expandedBytes = 32 * 1024 * 1024;
+  const paddedTar = { trailingZeroBytes: expandedBytes - packageTar().length };
   test.each([
     { name: "default", tar: paddedTar },
     { name: "level-0", tar: paddedTar, gzip: { level: 0 } },
@@ -545,7 +546,7 @@ describe("npm package tar listings", () => {
         if (name === "default")
           expect(contents.length).toBeLessThan(1024 * 1024);
         if (name === "level-0")
-          expect(contents.length).toBeGreaterThan(paddedTar.trailingZeroBytes);
+          expect(contents.length).toBeGreaterThan(expandedBytes);
         const archivePath = join(root, `${name}.tgz`);
         writeFileSync(archivePath, contents);
         const contractPath = join(root, "plugin contract.json");
