@@ -1,5 +1,10 @@
 import type { CodexSecuritySurface } from "./api.js";
-import { inlineToml, resolveCodexProfile, type JsonObject } from "./config.js";
+import {
+  isExternalModelProvider,
+  inlineToml,
+  resolveCodexProfile,
+  type JsonObject,
+} from "./config.js";
 import { isRecord } from "./record.js";
 import type { ScanMode } from "./scan-modes.js";
 import { VERSION } from "./version.js";
@@ -60,12 +65,10 @@ export function codexSecurityRequestContext(
 function providerFamily(provider: unknown): string {
   if (typeof provider !== "string")
     return provider === undefined ? "openai" : "custom";
+  if (isExternalModelProvider(provider)) return provider;
   switch (provider) {
     case "openai":
     case "amazon-bedrock":
-    case "cheaperinference":
-    case "openrouter":
-    case "fireworks":
     case "ollama":
     case "lmstudio":
       return provider;

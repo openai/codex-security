@@ -69,6 +69,31 @@ function providerSettings(
 }
 
 describe("skill authentication configuration", () => {
+  test("a Standard Compute skill uses the selected native header", () => {
+    const result = resolveSkillAuthentication(
+      {
+        command: "patch",
+        auth: "api-key",
+        modelProvider: "standardcompute",
+      },
+      { STANDARDCOMPUTE_API_KEY: "unused-synthetic-key" },
+      {
+        model_providers: {
+          standardcompute: {
+            http_headers: { Authorization: "Bearer synthetic" },
+          },
+        },
+      },
+    );
+    expect(result.authentication).toEqual({
+      method: "api_key",
+      source: "http_headers",
+      verified: false,
+    });
+    expect(result.requiresOpenAiAuth).toBe(false);
+    expect(result.environment).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+  });
+
   test.each(
     (["override", "ambient", "profile"] as const).flatMap((source) =>
       [true, false, undefined].flatMap((requiresOpenAiAuth) =>
