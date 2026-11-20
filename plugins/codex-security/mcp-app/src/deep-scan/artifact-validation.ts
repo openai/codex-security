@@ -63,16 +63,17 @@ export function parseScanUnion(input: unknown): ScanUnion {
 }
 
 type WorkerAdmission = "new" | "previously-accepted";
+type WorkerScope = Pick<
+  ArtifactContext,
+  "scope" | "includePaths" | "filePaths" | "excludePaths"
+>;
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
 export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
-  > = {},
+  boundScope: WorkerScope = {},
   admission: WorkerAdmission = "new",
 ): Promise<ScanDraftInput> {
   const { context, result } = await readWorkerDraft(
@@ -90,7 +91,7 @@ async function readWorkerDraft(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<ArtifactContext, "scope" | "includePaths" | "filePaths">,
+  boundScope: WorkerScope,
   admission: WorkerAdmission,
 ) {
   await requireRegularFile(resultPath, artifacts.workersRoot);
@@ -103,6 +104,7 @@ async function readWorkerDraft(
     scope: boundScope.scope,
     includePaths: boundScope.includePaths,
     filePaths: boundScope.filePaths,
+    excludePaths: boundScope.excludePaths,
   };
   const stored = await readJsonObject(resultPath);
   await retainRecordedReceiptOwnership(context, stored);
@@ -195,10 +197,7 @@ export async function readAcceptedDiscovery(
   artifacts: DeepScanArtifacts,
   worker: Omit<AcceptedDiscovery, "result" | "coverage">,
   scanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
-  > = {},
+  boundScope: WorkerScope = {},
   admission: WorkerAdmission = "new",
 ): Promise<AcceptedDiscovery> {
   const draft = await readWorkerDraft(
