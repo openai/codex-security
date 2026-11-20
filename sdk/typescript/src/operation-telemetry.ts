@@ -44,7 +44,8 @@ export interface OperationTelemetryEvent {
     | "validate"
     | "policy"
     | "verify-fix"
-    | "assess-patch-risk";
+    | "assess-patch-risk"
+    | "exploitability check";
   surface: "cli" | "sdk";
   packageVersion: string;
   mode?: "standard" | "deep";

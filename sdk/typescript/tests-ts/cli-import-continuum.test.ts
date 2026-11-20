@@ -485,7 +485,7 @@ test("import continuum rejects an environment ARN before invoking AWS", async ()
   expect(collect).not.toHaveBeenCalled();
 });
 
-test("import continuum captures one finding and only patches for the named AWS source", async () => {
+test("import continuum includes only the named AWS source's patches for one finding", async () => {
   await using fixture = await scopedTemporaryDirectory("continuum-finding-");
   const finding = { ...continuumDetail(), duplicateOfIssueId: "issue1" };
   const matching = patchArtifact("match", "+// example\n");
@@ -503,7 +503,12 @@ test("import continuum captures one finding and only patches for the named AWS s
       case "get-code-finding":
         return finding;
       case "list-code-issue-artifacts":
-        return { items: patches.map(({ artifactId }) => ({ artifactId })) };
+        return {
+          items: patches.map(({ artifactId }) => ({
+            artifactId,
+            artifactType: "PATCH",
+          })),
+        };
       case "get-code-issue-artifact": {
         const { artifactId, ...patch } = patches.find(
           (patch) => patch.artifactId === args.at(-1),
@@ -559,8 +564,6 @@ test("import continuum captures one finding and only patches for the named AWS s
       ...scope,
       "--issue-id",
       "issue1",
-      "--artifact-type",
-      "PATCH",
     ],
     ...["match", "other", "unnamed"].map((id) => [
       "continuum",
@@ -591,6 +594,144 @@ test("import continuum captures one finding and only patches for the named AWS s
   });
 });
 
+async function collectSelectedArtifacts(
+  findingIds: readonly string[],
+  artifacts: { artifactId: string; artifactType: string; body: object }[],
+) {
+  const finding = { ...continuumDetail(), duplicateOfIssueId: "issue1" };
+  const { issue } = continuumIssueExport().issues[0]!;
+  const aws = mock(async (args: string[]) => {
+    switch (args[1]) {
+      case "get-code-finding":
+        return finding;
+      case "get-code-issue":
+        return { ...issue, findingIds };
+      case "list-code-issue-artifacts":
+        return {
+          items: artifacts.map(({ artifactId, artifactType }) => ({
+            artifactId,
+            artifactType,
+          })),
+        };
+      case "get-code-issue-artifact":
+        return artifacts.find(({ artifactId }) => artifactId === args.at(-1))!;
+      default:
+        throw new Error(`Unexpected AWS request ${args.join(" ")}`);
+    }
+  });
+  const capture = await collectContinuumFinding(
+    {
+      environmentId: "example",
+      findingId: finding.findingId,
+      sourceRoot: ".",
+      cwd: ".",
+      environment: {},
+      repositoryName: "project",
+    },
+    aws,
+  );
+  return { finding, issue, capture, aws };
+}
+
+test("a bundled validation artifact includes only the selected finding's proof and verdict alongside its patch", async () => {
+  const artifact = continuumValidationArtifact();
+  const validation = artifact.body.validationEvidence;
+  const selected = {
+    ...validation.perFindingResults[0]!,
+    exploitArtifact: validation.exploitArtifact,
+  };
+  const sibling = validation.perFindingResults[1]!;
+  const bundle = {
+    ...artifact,
+    metadata: { siblingFinding: sibling.findingId },
+    body: {
+      validationEvidence: {
+        ...validation,
+        exploitable: "UNCERTAIN",
+        perFindingResults: [sibling, selected],
+      },
+    },
+  };
+  const selectedBody = {
+    validationEvidence: {
+      exploitable: selected.exploitable,
+      perFindingResults: [selected],
+    },
+  };
+  const patch = patchArtifact("patch1", "+// example\n");
+  const { finding, capture } = await collectSelectedArtifacts(
+    ["one", "two"],
+    [
+      bundle,
+      {
+        ...artifact,
+        artifactId: "sibling",
+        body: {
+          validationEvidence: {
+            exploitable: sibling.exploitable,
+            perFindingResults: [sibling],
+          },
+        },
+      },
+      { artifactId: patch.artifactId, artifactType: "PATCH", body: { patch } },
+    ],
+  );
+  expect(capture).toEqual({
+    finding,
+    patches: [patch],
+    evidenceArtifacts: [{ ...artifact, body: selectedBody }],
+  });
+});
+
+test.each([
+  [["one"], true],
+  [["one", "two"], false],
+  [["two"], false],
+] as const)(
+  "single-finding import associates issue-wide proof using linked finding IDs %j",
+  async (findingIds, matches) => {
+    const descriptor = continuumValidationArtifact();
+    const artifacts = [
+      {
+        ...descriptor,
+        body: {
+          validationEvidence: {
+            exploitable: "UNCERTAIN",
+            sourceAnalysis: {
+              summary: "The example is reachable for local users.",
+            },
+          },
+        },
+      },
+      {
+        ...descriptor,
+        artifactId: "validation2",
+        body: { raw: "Example validation output." },
+      },
+    ];
+    const { finding, issue, capture, aws } = await collectSelectedArtifacts(
+      findingIds,
+      artifacts,
+    );
+    expect(capture).toEqual(
+      matches
+        ? {
+            finding,
+            evidenceArtifacts: artifacts,
+            validationIssue: {
+              issueArn: issue.issueArn,
+              issueId: issue.issueId,
+              findingIds,
+            },
+          }
+        : finding,
+    );
+    expect(
+      aws.mock.calls.filter(([args]) => args[1] === "get-code-issue"),
+    ).toHaveLength(1);
+  },
+);
+
 test("import continuum includes an unnamed patch after verifying a Git-only environment", async () => {
   await using fixture = await scopedTemporaryDirectory("continuum-finding-");
   const { run } = awsFixture("github", false);
@@ -606,7 +747,9 @@ test("import continuum includes an unnamed patch after verifying a Git-only envi
       case "get-code-finding":
         return finding;
       case "list-code-issue-artifacts":
-        return { items: [{ artifactId: patch.artifactId }] };
+        return {
+          items: [{ artifactId: patch.artifactId, artifactType: "PATCH" }],
+        };
       case "get-code-issue-artifact":
         return {
           artifactId: patch.artifactId,
@@ -682,7 +825,7 @@ test.each([
 );
 
 test.each([false, true])(
-  "import continuum preserves native finding JSON without patches (linked issue: %p)",
+  "import continuum preserves native finding JSON without matching artifacts (linked issue: %p)",
   async (linked) => {
     await using fixture = await scopedTemporaryDirectory("continuum-finding-");
     const finding = {
@@ -751,7 +894,7 @@ test("import continuum rejects inconsistent finding options before collecting", 
   expect(selected).not.toHaveBeenCalled();
 });
 
-test.each(["incomplete list", "artifact read failure"])(
+test.each(["incomplete list", "artifact read failure", "issue detail failure"])(
   "import continuum emits no partial finding capture on %s",
   async (failure) => {
     await using fixture = await scopedTemporaryDirectory("continuum-finding-");
@@ -776,7 +919,10 @@ test.each(["incomplete list", "artifact read failure"])(
                 return { ...continuumDetail(), createdIssueId: "issue1" };
               if (args[1] === "list-code-issue-artifacts")
                 return {
-                  items: [{ artifactId: "one" }, { artifactId: "two" }],
+                  items: [
+                    { artifactId: "one", artifactType: "PATCH" },
+                    { artifactId: "two", artifactType: "VALIDATION_EVIDENCE" },
+                  ],
                   ...(failure === "incomplete list"
                     ? { nextToken: "next" }
                     : {}),
@@ -786,6 +932,12 @@ test.each(["incomplete list", "artifact read failure"])(
                   artifactId: "one",
                   artifactType: "PATCH",
                   body: { patch },
+                };
+              if (args.at(-1) === "two" && failure === "issue detail failure")
+                return {
+                  artifactId: "two",
+                  artifactType: "VALIDATION_EVIDENCE",
+                  body: { validationEvidence: { exploitable: "UNCERTAIN" } },
                 };
               throw new Error("AWS AccessDenied");
             }),

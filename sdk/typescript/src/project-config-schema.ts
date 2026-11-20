@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { dependencyBoundarySchema } from "./dependency-caller-scope.js";
 import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
@@ -70,6 +71,27 @@ export const ProjectConfigInputSchema = z.strictObject({
         .optional()
         .describe(
           "Deep defaults; a valid block may be retained while standard mode is selected.",
+        ),
+    })
+    .optional(),
+  exploitability: z
+    .strictObject({
+      ...dependencyBoundarySchema.shape,
+      evidence_sources: z
+        .array(
+          z.strictObject({
+            server: nonempty.describe("Server name in codex.mcp_servers."),
+            instructions: z
+              .string()
+              .regex(/\S/u)
+              .describe(
+                "When to use this server and what evidence its tools can provide.",
+              ),
+          }),
+        )
+        .optional()
+        .describe(
+          "MCP servers the investigator can query during a reviewed dependency check.",
         ),
     })
     .optional(),
