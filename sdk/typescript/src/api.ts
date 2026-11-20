@@ -318,6 +318,7 @@ import {
   resolvePluginSource,
   resolveScanOutputPath,
   runWorkbench,
+  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginInstall,
@@ -2385,12 +2386,6 @@ export class CodexSecurity {
         return undefined;
       throw error;
     }
-    // The reader checked the directory itself. Resolve only its parent so an
-    // aliased output path matches the canonical scan registration.
-    const scanDir = join(
-      await realpath(dirname(selectedScanDir)),
-      basename(selectedScanDir),
-    );
     const requestedRepository =
       await resolveRequestedPath(repository).catch(nullIfMissingPath);
     const pluginRoot = await bundledPluginRoot();
@@ -2407,6 +2402,7 @@ export class CodexSecurity {
     );
     const producer = context["sealedProducerVersion"];
     if (typeof producer !== "string") return undefined;
+    const scanDir = context["scanDir"];
     const repo = context["targetPath"];
     const recipe = context["recipe"];
     const threadId = context["threadId"];
@@ -2414,7 +2410,9 @@ export class CodexSecurity {
       !isRecord(recipe) ||
       recipe["mode"] !== "deep" ||
       context["scanId"] !== scanId ||
-      context["scanDir"] !== scanDir ||
+      typeof scanDir !== "string" ||
+      !isAbsolute(scanDir) ||
+      !(await sameFile(selectedScanDir, scanDir)) ||
       typeof recipe["repository"] !== "string" ||
       typeof repo !== "string" ||
       !isAbsolute(repo) ||
