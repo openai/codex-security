@@ -595,8 +595,9 @@ async function collectCredentialPointers(
     if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
       paths.add(directory + file);
   };
+  const gcloudAdc = "application_default_credentials.json";
   const selectGcloud = (directory: string, prefix = "") => {
-    selectFile(directory, join(prefix, "application_default_credentials.json"));
+    selectFile(directory, join(prefix, gcloudAdc));
     for (const db of ["credentials.db", "access_tokens.db"])
       // SQLite can also keep credential rows in its journal or write-ahead log.
       for (const suffix of ["", "-journal", "-wal"])
@@ -685,7 +686,9 @@ async function collectCredentialPointers(
       selected.add(join(appData, "GitHub CLI", "hosts.yml"));
       selectPgDefaults(relativeFile(appData, "postgresql"));
     }
-    // google-auth uses the system drive when APPDATA is absent.
+    // google-auth treats an empty APPDATA as a relative directory.
+    if (appData === "") selectFile(appData, join("gcloud", gcloudAdc));
+    // The gcloud CLI falls back to the system drive for empty or absent APPDATA.
     selectGcloud(
       appData || (environment["SYSTEMDRIVE"] ?? "C:") + sep,
       "gcloud",

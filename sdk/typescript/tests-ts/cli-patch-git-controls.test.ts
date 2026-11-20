@@ -55,6 +55,28 @@ describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
 
+  test.skipIf(process.platform !== "win32")(
+    "empty APPDATA protects the external ADC selected through a checkout junction",
+    async () => {
+      const repository = await fixtures.create("patch-gcloud-checkout-");
+      const external = await fixtures.create("patch-gcloud-external-");
+      repositoryGit(repository)("init");
+      const adc = join(external, "application_default_credentials.json");
+      await writeFile(adc, "synthetic credential");
+      await symlink(external, join(repository, "gcloud"), "junction");
+      const controls = await capturePatchGitControls(
+        repository,
+        async (_root, checkout, args, options) =>
+          runGitRepositoryCommand("git", args, checkout, options),
+        true,
+      );
+      const stores = await controls!.protectShellCredentialFiles({
+        APPDATA: "",
+      });
+      expect(stores).toContain(await realpath(adc));
+    },
+  );
+
   test.each(["GIT_DIR", "GIT_COMMON_DIR"] as const)(
     "a saved patch cannot adopt a different %s between findings",
     async (selector) => {
