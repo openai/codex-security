@@ -12576,7 +12576,9 @@ async function inspectPatchGitExecutable(
   {
     afterHook,
     implicit,
-    invocationDirectory = dependencies.patchCallerDirectory ?? repository,
+    invocationDirectory = dependencies.patchTransportContext?.caller ??
+      dependencies.patchCallerDirectory ??
+      repository,
   }: {
     afterHook?: boolean;
     implicit?: boolean;

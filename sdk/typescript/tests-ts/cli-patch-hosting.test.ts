@@ -448,6 +448,10 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           NO_PROXY: "127.0.0.1",
           PATCH_HELPER_CANARY: "synthetic",
         };
+        if (removesComponent) {
+          await symlink(git("--exec-path"), alias, linkType);
+          environment["GIT_EXEC_PATH"] = relative(component, alias);
+        }
         if (retarget) {
           const trusted = join(external, "trusted");
           await mkdir(trusted);
