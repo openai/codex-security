@@ -3238,8 +3238,13 @@ checks these commands in every host block of the selected configuration and
 its includes, along with the `SHELL` used to execute them. Use
 literal executable and script paths outside the patch's writable directories,
 or executable names on the protected search path. On Windows use drive-qualified
-paths with forward slashes. Proxy arguments can use `%h`, `%n`, `%p`, and `%r`.
-Put shell expressions in a trusted external wrapper.
+paths with forward slashes. Use an explicit script path for an interpreter.
+Routing arguments after the script can use `%h`, `%n`, `%p`, and `%r`.
+Publication also supports netcat and stock systemd and SSSD proxy templates.
+Put nested SSH, option-based dispatch and shell expressions in a trusted
+external wrapper. Select key-provider libraries and `XAuthLocation` by
+absolute external path. Publication also checks `SSH_SK_PROVIDER`,
+`SSH_SK_HELPER` and `SSH_PKCS11_HELPER`.
 
 For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
 publication also rechecks the selected executable before starting Git.

@@ -13128,46 +13128,25 @@ function unsupportedSshCommand() {
   );
 }
 
-function sshMatchCommands(line: string, commands: string[]) {
-  // Match uses OpenSSH's argv_split before passing an exec operand to the shell.
-  const words: string[] = [];
-  let quote = "";
-  let word: string | undefined;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i]!;
-    if (!quote && (char === " " || char === "\t")) {
-      if (word !== undefined) words.push(word);
-      word = undefined;
+// Accept the common syntax of OpenSSH's older strdelim and newer argv_split.
+// Escapes and adjoining quoted parts can select different words across versions.
+const sshConfigWord = /^(?:"([^"\\\r\f]*)"|([^'"\\= \t\r\f]+))(?:[ \t]+|$)/u;
+
+function sshMatchCommands(args: string, commands: string[]) {
+  if (!/exec/iu.test(args.replace(/['"]/gu, ""))) return;
+  while (args && !args.startsWith("#")) {
+    const criterion = /^!?([a-z]+)(=|[ \t]+|$)/iu.exec(args);
+    if (!criterion) throw unsupportedSshCommand();
+    args = args.slice(criterion[0].length);
+    if (/^(?:canonical|final|all)$/iu.test(criterion[1]!)) {
+      if (criterion[2] === "=") throw unsupportedSshCommand();
       continue;
     }
-    if (char === "#" && word === undefined) break;
-    word ??= "";
-    const next = line[i + 1];
-    if (
-      char === "\\" &&
-      (next === "'" ||
-        next === '"' ||
-        next === "\\" ||
-        (!quote && next === " "))
-    )
-      word += line[++i];
-    else if (!quote && (char === "'" || char === '"')) quote = char;
-    else if (char === quote) quote = "";
-    else word += char;
-  }
-  if (quote) throw unsupportedSshCommand();
-  if (word !== undefined) words.push(word);
-  for (let i = 0; i < words.length; i++) {
-    const criterion = words[i]!.replace(/^!/u, "");
-    if (/^(?:all|canonical|final)$/iu.test(criterion)) continue;
-    const equals = criterion.indexOf("=");
-    const arg = equals < 0 ? words[++i] : criterion.slice(equals + 1);
-    // Older Match readers split '=' inside tokens and after whitespace.
-    if (/^exec(?:=|$)/iu.test(criterion)) {
-      if (!arg || arg.startsWith("=")) throw unsupportedSshCommand();
-      commands.push(arg);
-    } else if (arg && /=!?exec(?:[ \t=]|$)/iu.test(arg))
-      throw unsupportedSshCommand();
+    const arg = sshConfigWord.exec(args);
+    if (!arg) throw unsupportedSshCommand();
+    if (criterion[1]!.toLowerCase() === "exec")
+      commands.push((arg[1] ?? arg[2])!);
+    args = args.slice(arg[0].length);
   }
 }
 
@@ -13181,17 +13160,46 @@ function sshConfigReferences(
     // OpenSSH's keyword reader accepts double quotes and an optional '='.
     // Detect unusual spellings too, then require unambiguous static syntax.
     const keyword =
-      /^[\s=]*(include|match|proxycommand|localcommand|knownhostscommand)/iu
+      /^[\s=]*(include|match|proxycommand|localcommand|knownhostscommand|pkcs11provider|smartcarddevice|securitykeyprovider|xauthlocation)/iu
         .exec(line.replaceAll('"', ""))?.[1]
         ?.toLowerCase();
     if (!keyword) continue;
     const directive =
-      /^[ \t\r]*([a-z]+)(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
+      /^[ \t\r]*([a-z\d]+)(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
     if (!directive || directive[1]!.toLowerCase() !== keyword)
       throw keyword === "include"
         ? unsupportedSshInclude()
         : unsupportedSshCommand();
     let args = directive[2]!;
+    if (
+      /^(?:pkcs11provider|smartcarddevice|securitykeyprovider|xauthlocation)$/u.test(
+        keyword,
+      )
+    ) {
+      const word = sshConfigWord.exec(args);
+      if (
+        !word ||
+        (word[0].length < args.length &&
+          !args.slice(word[0].length).startsWith("#"))
+      )
+        throw unsupportedSshCommand();
+      const file = (word[1] ?? word[2])!;
+      if (
+        keyword === "securitykeyprovider" &&
+        (file.toLowerCase() === "internal" || file === "$SSH_SK_PROVIDER")
+      )
+        continue;
+      if (keyword !== "xauthlocation" && file.toLowerCase() === "none")
+        continue;
+      if (
+        !isAbsolute(file) ||
+        /[%$\x60\ufffd]/u.test(file) ||
+        (keyword === "xauthlocation" && !/^[a-zA-Z0-9_./:+-]+$/u.test(file))
+      )
+        throw unsupportedSshCommand();
+      commands.push(quoteGitArgument(file));
+      continue;
+    }
     if (keyword !== "include") {
       if (keyword === "match") sshMatchCommands(args, commands);
       else {
@@ -13242,6 +13250,33 @@ async function bindSshConfiguration(
     const words = literalTransportWords(command);
     if (!words?.[0] || (process.platform === "win32" && command.includes("\\")))
       throw unsupportedSshCommand();
+    const [program, first, ...rest] = words;
+    // A nested SSH client selects a new configuration. Interpreter options
+    // and dispatchers can select a second program by name or inline code.
+    if (
+      /^(?:ssh|eval|source|\.)$/iu.test(
+        basename(program!).replace(/\.exe$/iu, ""),
+      )
+    )
+      throw unsupportedSshCommand();
+    const stockProxy =
+      /^\/usr\/(?:lib|libexec)\/systemd\/systemd-ssh-proxy (?:%h|unix\/run\/ssh-unix-local\/socket) %p$/u.test(
+        command,
+      ) ||
+      command === "/usr/bin/sss_ssh_knownhostsproxy -p %p %h" ||
+      command === "/usr/bin/sss_ssh_knownhosts %H";
+    if (stockProxy) words.length = 1;
+    else if (first !== undefined) {
+      const netcat = /^(?:nc|ncat|netcat)(?:\.exe)?$/iu.test(
+        basename(program!),
+      );
+      if (
+        (!netcat && !first.includes("/")) ||
+        first.startsWith("-") ||
+        rest.some((arg) => arg.startsWith("-"))
+      )
+        throw unsupportedSshCommand();
+    }
     for (const [index, word] of words.entries()) {
       if (index === 0 && /^[a-z\d_.+-]+$/iu.test(word)) {
         invocation.launchers.add(word);
@@ -13561,10 +13596,21 @@ async function pinPublicationCommand(
 
   const sshEnvironment: NodeJS.ProcessEnv = {};
   if (kind === "ssh") {
-    for (const name of ["SSH_ASKPASS", "SHELL"]) {
+    for (const name of [
+      "SSH_ASKPASS",
+      "SHELL",
+      "SSH_SK_PROVIDER",
+      "SSH_SK_HELPER",
+      "SSH_PKCS11_HELPER",
+    ]) {
       const value = environmentEntry(dependencies.environment, name);
       if (!value) {
         sshEnvironment[name] = value;
+        continue;
+      }
+      if (name === "SSH_SK_PROVIDER") {
+        sshEnvironment[name] =
+          value.toLowerCase() === "internal" ? value : await bindFile(value);
         continue;
       }
       // OpenSSH searches PATH for its prompt. It executes SHELL directly
