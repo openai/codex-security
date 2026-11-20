@@ -11,6 +11,7 @@ import {
   type Finding,
   type Report,
   advisoryFunctions,
+  sectionAdvisories,
   type Section,
   type StackAssessment,
 } from "./dependency-report-model.js";
@@ -134,6 +135,17 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
     );
   return blocks(
     limits.join(" "),
+    a.reviewReason && "**Independent review** — " + prose(a.reviewReason),
+    list(
+      (a.questionChecks ?? []).map((q) =>
+        join([
+          prose(q.question),
+          "**Checked** " + prose(q.checked),
+          "**Missing evidence** " + prose(q.missingEvidence),
+        ]),
+      ),
+      "Deciding checks",
+    ),
     list(bindings, "Package evidence"),
     list(claimFacts, "Supporting evidence"),
     list(context, "Capture details"),
@@ -518,7 +530,7 @@ function sectionBody(section: Section, heading: string) {
   const c = counts(findings);
   const stack = section.stack;
   const totals = stack
-    ? `**${dependencyVerdictLabels[stack.verdict]}** · Single-agent assessment · ${stack.coverage.assessed}/${stack.coverage.total} work items assessed · ${stack.coverage.observed} observed`
+    ? `**${dependencyVerdictLabels[stack.verdict]}** · ${stack.review ? "Independently reviewed" : "Finalized offline"} · ${stack.coverage.assessed}/${stack.coverage.total} work items assessed · ${stack.coverage.observed} observed`
     : `${c.reviewed} reviewed ${c.reviewed === 1 ? "use" : "uses"} · ${c.unresolved} unresolved coverage ${c.unresolved === 1 ? "item" : "items"}`;
   const outcomes = verdictOrder
     .filter((v) => c.breakdown[v])
@@ -537,7 +549,8 @@ function sectionBody(section: Section, heading: string) {
       if (ids.length) notes.push(label + ": " + ids.length);
   }
   const check = section.check;
-  const advisory = (check?.advisoryDetails ?? []).map((a) =>
+  const { details, urls } = sectionAdvisories(section);
+  const advisory = details.map((a) =>
     blocks(
       a.summary && prose(a.summary),
       a.overview && a.overview !== a.summary && prose(a.overview),
@@ -548,14 +561,13 @@ function sectionBody(section: Section, heading: string) {
   const evidence = results.map((result) => result.evidence).filter(Boolean);
   return blocks(
     ...advisory,
-    list(
-      advisoryFunctions(check?.advisoryDetails ?? []).map(code),
-      "Vulnerable functions",
-    ),
+    list(advisoryFunctions(details).map(code), "Vulnerable functions"),
     totals,
     (!stack || outcomes.length > 1 || c.breakdown[stack.verdict] === 0) &&
       join(outcomes),
     notes.length > 0 && "Capture limits · " + join(notes),
+    stack?.advisoryLookupError &&
+      "Advisory lookup failed · " + prose(stack.advisoryLookupError),
     stack &&
       "A sampled stack shows which functions ran. It does not measure call counts or establish who controlled the input.",
     list((check?.assumptions ?? []).map(prose), "Scope"),
@@ -563,6 +575,8 @@ function sectionBody(section: Section, heading: string) {
     ...results.map((result) => result.decision),
     evidence.length > 0 && heading + " Evidence",
     ...evidence,
+    stack?.review &&
+      "Reviewed draft digest · " + code(stack.review.draftDigest),
     dismissed.length > 0 &&
       blocks(
         heading + " Dismissed candidates",
@@ -576,11 +590,8 @@ function sectionBody(section: Section, heading: string) {
           list(check.limitations.map(prose)),
         )
       : "",
-    check?.advisories?.length
-      ? blocks(
-          heading + " Advisory references",
-          list(check.advisories.map(code)),
-        )
+    urls.length
+      ? blocks(heading + " Advisory references", list(urls.map(code)))
       : "",
   );
 }

@@ -113,7 +113,9 @@ export function registerDependencyCheck(
         .describe("Path to the supplied source endpoint document."),
       sinks: text
         .optional()
-        .describe("Path to the sink endpoints and frozen advisory."),
+        .describe(
+          "Path to the sink endpoints and catalog advisory. The CLI looks up public advisory details unless supplied.",
+        ),
       stacks: text
         .optional()
         .describe("Path to the observed stacks and target revision."),
@@ -207,9 +209,8 @@ export function registerDependencyCheck(
             },
             async (emit) => {
               if (sources && sinks && stacks) {
-                const { runLocalStackInvestigation, stackInvestigationPrompt } =
+                const { runLocalStackInvestigation } =
                   await import("./dependency-stack-launcher.js");
-                emit("investigation");
                 return runLocalStackInvestigation({
                   cve: args.subject.toUpperCase(),
                   repository,
@@ -217,16 +218,9 @@ export function registerDependencyCheck(
                   sourcesPath: resolveConfigPath(cwd, sources),
                   sinksPath: resolveConfigPath(cwd, sinks),
                   stacksPath: resolveConfigPath(cwd, stacks),
-                  async investigate(session) {
-                    await context.runAgent({
-                      directory: session.directory,
-                      stackTarget: session.repo,
-                      signal,
-                      prompt: await stackInvestigationPrompt(session),
-                      ...settings,
-                    });
-                    return 0;
-                  },
+                  emit,
+                  runAgent: (request) =>
+                    context.runAgent({ ...request, ...settings }),
                 });
               }
               const project = config

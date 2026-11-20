@@ -35,7 +35,14 @@ test("command schema exposes complete and blocked reports as direct output alter
     );
   expect(variant("cve", "uses")).toBeDefined();
   expect(variant("checks", "package")).toBeDefined();
-  expect(variant("runId", "assessments")).toBeDefined();
+  const stacks = anyOf.filter((branch: { required?: string[] }) =>
+    branch.required?.includes("assessments"),
+  );
+  expect(stacks).toHaveLength(1);
+  expect(stacks[0].required).toEqual(
+    expect.arrayContaining(["runId", "review"]),
+  );
+  expect(stacks[0].properties).not.toHaveProperty("reviewPolicy");
   expect(
     variant("status", "code", "affectedScope", "retainedEvidence"),
   ).toBeDefined();
