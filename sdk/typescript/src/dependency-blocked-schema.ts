@@ -1,3 +1,4 @@
+import { dependencyTargetSchema } from "./dependency-source-identity.js";
 import { z } from "zod";
 import { dependencyReceiptSelectionSchema } from "./dependency-receipt-selection.js";
 
@@ -54,6 +55,7 @@ export const dependencyScopedBlockedSchema = dependencyAbortInputSchema.extend({
   status: z.literal("blocked"),
   code: z.literal("INVESTIGATION_BLOCKED"),
   cve: label.optional(),
+  target: dependencyTargetSchema.optional(),
   nativeThreadId: label,
   retainedEvidence,
 });

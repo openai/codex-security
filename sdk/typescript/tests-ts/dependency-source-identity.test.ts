@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import { hash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { readDependencySourceCitation } from "../src/dependency-source-identity.js";
+import { basename, join } from "node:path";
+import {
+  readDependencySourceCitation,
+  readDependencyTarget,
+} from "../src/dependency-source-identity.js";
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
@@ -82,4 +85,44 @@ test("validates only the cited bytes as UTF-8 and hashes the entire source blob"
   });
   await expect(cite(2, 3)).rejects.toThrow();
   await expect(cite(3, 9)).rejects.toThrow();
+});
+
+test("report targets identify the checkout without URL credentials or local paths", async () => {
+  await using directory = await scopedTemporaryDirectory("source-identity-");
+  const repo = directory.path;
+  git(repo, "init", "-q");
+  expect(await readDependencyTarget(repo)).toBeUndefined();
+  git(repo, "commit", "--allow-empty", "-qm", "Initial checkout");
+  const sha = git(repo, "rev-parse", "HEAD");
+  expect(await readDependencyTarget(repo)).toEqual({
+    repository: basename(repo),
+    sha,
+  });
+  git(
+    repo,
+    "remote",
+    "add",
+    "origin",
+    "https://user:secret@example.invalid/team/reader.git?auth=key",
+  );
+  expect(await readDependencyTarget(repo)).toEqual({
+    repository: "team/reader",
+    sha,
+  });
+  git(
+    repo,
+    "remote",
+    "set-url",
+    "origin",
+    "git@example.invalid:team/core/reader.git",
+  );
+  expect(await readDependencyTarget(repo)).toEqual({
+    repository: "team/core/reader",
+    sha,
+  });
+  git(repo, "remote", "set-url", "origin", "file:///fixtures/reader.git");
+  expect(await readDependencyTarget(repo)).toEqual({
+    repository: basename(repo),
+    sha,
+  });
 });
