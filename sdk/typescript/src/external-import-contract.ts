@@ -13,14 +13,6 @@ import type {
 
 export const SCANNER_IMPORT_MEDIA_TYPE =
   "application/vnd.openai.codex-security.scanner-imports.v1+json";
-export const SCANNER_IMPORT_V2_MEDIA_TYPE =
-  "application/vnd.openai.codex-security.scanner-imports.v2+json";
-
-export function scannerImportMediaType(provider: string): string {
-  return provider === "armorcode" || provider === "crowdstrike"
-    ? SCANNER_IMPORT_V2_MEDIA_TYPE
-    : SCANNER_IMPORT_MEDIA_TYPE;
-}
 
 export function importResponseMediaType(
   response: Response,
