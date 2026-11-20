@@ -1315,6 +1315,15 @@ def complete_scan_locked(
             _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
         )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+    require_complete_evidence = True
+    if scan["mode"] == "deep":
+        run = deep_scan.require_deep_scan_run(connection, scan_id)
+        require_complete_evidence = not (
+            run["status"] == "succeeded"
+            and run["terminal_reason"] == "capped"
+            and run["completion_sequence"] == 0
+            and deep_scan.deep_scan_deadline_reached(run)
+        )
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
 
@@ -1395,6 +1404,7 @@ def complete_scan_locked(
                 recover_unsealed=scan["mode"] != "deep",
                 allow_missing_writeups=True,
                 draft_documents=draft_documents,
+                require_complete_evidence=require_complete_evidence,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)

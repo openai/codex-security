@@ -9,13 +9,13 @@ import sqlite3
 import sys
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
-from finalize_scan_contract import manifest_is_sealed
+from finalize_scan_contract import manifest_is_sealed, path_within_scope
 from scan_contract_fields import finding_evidence_error
 from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench.saved_sources import selected_iteration_result_path
@@ -334,11 +334,26 @@ def selected_evidence_repair_required(scan: sqlite3.Row, run: sqlite3.Row) -> bo
         return False
     if manifest_is_sealed(manifest["scan"]):
         return False
-    return findings_need_evidence_repair(draft["findings"])
+    return findings_need_evidence_repair(draft["findings"], scan)
 
 
-def findings_need_evidence_repair(findings: list[dict[str, Any]]) -> bool:
-    return any(finding_evidence_error(finding) for finding in findings)
+def findings_need_evidence_repair(findings: list[dict[str, Any]], scan: sqlite3.Row) -> bool:
+    scope = dependencies().requested_finding_scope(scan)
+    exclusions = dependencies().requested_exclude_paths(scan)
+    return any(
+        finding_evidence_error(finding)
+        and any(
+            not any(path_within_scope(location["path"], path) for path in exclusions)
+            and any(
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for path, is_file in scope
+            )
+            for location in finding["locations"]
+        )
+        for finding in findings
+    )
 
 
 def require_selected_repair_target(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
@@ -348,7 +363,7 @@ def require_selected_repair_target(connection: sqlite3.Connection, scan: sqlite3
         reducer, _, _ = saved_results._read_saved_result(
             scan_dir, Path(result_path).relative_to(scan_dir).as_posix(), scan["id"], kind="dedup"
         )
-        if findings_need_evidence_repair(reducer["findings"]):
+        if findings_need_evidence_repair(reducer["findings"], scan):
             require_scan_target_unchanged(scan)
 
 

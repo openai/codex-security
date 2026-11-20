@@ -93,6 +93,14 @@ for (const state of [
           }));
         }
       }
+      if (completedIteration && !withLaterBatch) {
+        const excluded = structuredClone(saved.findings[0]);
+        excluded.provenance.candidateId = "outside-scope";
+        excluded.locations = [
+          { ...excluded.locations[0], path: "generated/source.py" },
+        ];
+        saved.findings.push(excluded);
+      }
       await writeJson(worker.resultManifestPath!, saved);
       if (!completedIteration && worker.kind === "discovery")
         store.workers.set(worker.id, { ...worker, mergeState: "buffered" });
@@ -191,6 +199,7 @@ for (const state of [
     assert.equal(store.run.dispatchedCount, withLaterBatch ? 2 : 1);
     assert.equal(store.failureMessages.length, 0);
     assert.equal(published.length, 1);
+    assert.equal(published[0].findings.length, 1);
     const [repaired] = published[0].findings;
     assert.deepEqual(repaired.validation, {
       method: "Static analysis",

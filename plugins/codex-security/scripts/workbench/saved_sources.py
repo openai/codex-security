@@ -595,7 +595,7 @@ def _restore_frozen_model_capture(
 
 
 def _read_saved_parent_result(
-    scan_dir: Path, scan_id: str
+    scan_dir: Path, scan_id: str, *, recover_checkpoint: bool = False
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
     findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
@@ -613,7 +613,27 @@ def _read_saved_parent_result(
         or coverage.get("scanId", scan_id) != scan_id
     ):
         raise ContractError("Saved parent documents belong to a different scan")
-    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
+    parent = _parent_scan_draft(scan_id, parent_scan, findings, coverage)
+    if recover_checkpoint and (scan_dir / "checkpoint-head.json").exists():
+        head, _, observed = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
+        # A partial publication cannot outrank the head saved before its canonical files.
+        canonical_observed = min(
+            (scan_dir / name).lstat().st_mtime_ns
+            for name in (
+                "findings.json",
+                "scan-manifest.json",
+                *(["coverage.json"] if uses_legacy_review(parent_scan) else []),
+            )
+        )
+        if observed >= canonical_observed:
+            parent, _, _ = _read_saved_result(
+                scan_dir, f"checkpoints/{head['checkpoint']}", scan_id
+            )
+            for key in ("scope", "threatModel", "complete"):
+                parent_scan.pop(key, None)
+                if key in parent:
+                    parent_scan[key] = parent[key]
+    return manifest, parent
 
 
 def _require_current_deep_publication(

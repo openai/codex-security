@@ -2210,6 +2210,7 @@ async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
   removeHistoricalPrompts = true,
   includePaths?: string[],
+  sparseOutsideScope = false,
 ) {
   const fixture = await fixtureRun({
     workers: 2,
@@ -2276,6 +2277,16 @@ async function testResumedManifestPreservesCompletedReducer(
   const acceptedWorkers = store.run.persistedWorkers!.filter(
     (worker) => worker.status === "succeeded",
   );
+  if (sparseOutsideScope) {
+    for (const worker of acceptedWorkers) {
+      const result = await readJson(worker.resultManifestPath!);
+      for (const finding of result.findings) delete finding.validation;
+      await writeFile(worker.resultManifestPath!, JSON.stringify(result));
+    }
+    store.checkRepairTarget = async () => {
+      throw new Error("The checkout changed after the accepted review.");
+    };
+  }
   const acceptedResults = await Promise.all(
     acceptedWorkers.map((worker) =>
       readFile(worker.resultManifestPath!, "utf8"),
@@ -3007,6 +3018,7 @@ registerCases(testResumedManifestPreservesCompletedReducer, [
   [],
   [true],
   [false, true, ["api", "background jobs"]],
+  [false, true, ["api", "background jobs"], true],
 ]);
 test(testPersistedErrorLimitStopsBeforeRescheduling);
 registerCases(testRestartRestoresDispatchOrderAfterMixedResults, [[1], [2]]);

@@ -617,7 +617,8 @@ def test_count_capped_repair_after_deadline_preserves_original_cutoff(
 
 
 @pytest.mark.parametrize(
-    "checkpoint", ["late", "complete", "sparse", "sparse-normalized", "sparse-collision"]
+    "checkpoint",
+    ["late", "complete", "sparse", "sparse-normalized", "sparse-collision", "sparse-interrupted"],
 )
 def test_evidence_repair_preserves_selected_deadline_findings(
     workbench_api, workbench_db, deadline_scan, checkpoint, monkeypatch
@@ -715,6 +716,23 @@ def test_evidence_repair_preserves_selected_deadline_findings(
     publication = stage_publication(
         scan, generation=generation, result_path=reducer_path, title=scan.findings[0]["title"]
     )
+    if checkpoint == "sparse-interrupted":
+        saved_results = workbench_api["saved_results"]
+        write_bytes = saved_results.write_scan_local_bytes
+
+        def interrupt_manifest(scan_dir, relative, contents):
+            if relative == "scan-manifest.json":
+                raise OSError("Coordinator stopped before replacing the manifest.")
+            write_bytes(scan_dir, relative, contents)
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(saved_results, "write_scan_local_bytes", interrupt_manifest)
+            with pytest.raises(OSError, match="Coordinator stopped"):
+                saved_results.write_scan_draft(
+                    workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
+                )
+        assert len(json.loads(findings_path.read_text())["findings"]) == 1
+        assert read_review_state(workbench_db, scan.scan_dir) == coverage
     for _ in range(2 if sparse else 1):
         workbench_api["saved_results"].write_scan_draft(
             workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
@@ -867,3 +885,70 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
         )
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     assert "sealedAt" not in manifest
+    completed = scan.complete()
+    assert completed["progress"]["status"] == "complete"
+    assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == retained
+    assert read_review_state(workbench_db, scan.scan_dir) == coverage
+    sealed = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert sealed["sealedAt"]
+    assert (scan.scan_dir / "report.md").is_file()
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+    assert (
+        workbench_db.execute(
+            "SELECT completion_sequence FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_scoped_evidence_repair_claim_ignores_sparse_outside_findings(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan(scope="subdir")
+    reducer = scan.add_worker()
+    saved = scan.worker_draft(copy.deepcopy(scan.findings))
+    outside = copy.deepcopy(saved["findings"][0])
+    outside["locations"][0]["path"] = "unrelated/extract.py"
+    outside.pop("validation")
+    saved["findings"].append(outside)
+    reducer.write_text(json.dumps(saved))
+    original = reducer.read_bytes()
+    parent = scan.scan_dir / "findings.json"
+    selected = json.loads(parent.read_text())
+    selected["findings"][0].pop("validation")
+    parent.write_text(json.dumps(selected))
+    owner = "scoped-repair-owner"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' "
+            "WHERE result_manifest_path = ?",
+            (str(reducer),),
+        )
+        workbench_db.execute(
+            "UPDATE scans SET deep_scan_owner_thread_id = ? WHERE id = ?", (owner, scan.scan_id)
+        )
+    checked = []
+
+    def changed_target(selected_scan):
+        checked.append(selected_scan["id"])
+        raise SystemExit("Checkout changed after the accepted review.")
+
+    deep = workbench_api["deep_scan"]
+    monkeypatch.setattr(deep, "require_scan_target_unchanged", changed_target)
+    claimed = deep.claim_deep_scan_coordinator(
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, thread_id=owner, claim_token=None, coordinator_generation=None
+        ),
+    )
+    assert claimed["deepScan"]["status"] == "running"
+    assert checked == []
+    assert reducer.read_bytes() == original
+    saved["findings"][0].pop("validation")
+    reducer.write_text(json.dumps(saved))
+    selected_scan = workbench_db.execute(
+        "SELECT * FROM scans WHERE id = ?", (scan.scan_id,)
+    ).fetchone()
+    with pytest.raises(SystemExit, match="Checkout changed"):
+        deep.require_selected_repair_target(workbench_db, selected_scan)
+    assert checked == [scan.scan_id]

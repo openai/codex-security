@@ -1326,7 +1326,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
         ):
             # An evidence-only continuation repairs the report selected at its original cutoff.
-            manifest, selected = _read_saved_parent_result(scan_dir, scan_id)
+            manifest, selected = _read_saved_parent_result(
+                scan_dir, scan_id, recover_checkpoint=True
+            )
             reduced_ids = _repair_selected_finding_evidence(
                 selected["findings"], findings["findings"]
             )
