@@ -704,6 +704,7 @@ function selectClientFiles(
   const helm = ["registry/config.json", "repositories.yaml"];
   const helmConfig = helm.map((file) => join("helm", file));
   const podmanAuth = "containers/auth.json";
+  const rcloneConfig = "rclone/rclone.conf";
   const pnpm = (dir = "pnpm") =>
     ["rc", "auth.ini", "config.yaml"].map((file) => join(dir, file));
   const npmPrefix =
@@ -760,6 +761,7 @@ function selectClientFiles(
       nuget,
       "gem/gemrc",
       podmanAuth,
+      rcloneConfig,
       ...helmConfig,
       ...pnpm(),
     ],
@@ -773,6 +775,7 @@ function selectClientFiles(
         "AppData/Roaming",
         ["APPDATA"],
         nuget,
+        rcloneConfig,
         ...helmConfig,
         join("npm", npmGlobal),
         uvCredentials,
@@ -939,6 +942,7 @@ async function collectCredentialPointers(
       selectComposer(relativeFile(home, "AppData/Roaming/Composer"));
     for (const file of [
       ".dockercfg",
+      ".rclone.conf",
       ".gemrc",
       join(".gem", "credentials"),
       join(".kube", "config"),
@@ -1117,6 +1121,13 @@ async function collectCredentialPointers(
     if (typeof value !== "string" || !value) continue;
     const variable = name.toUpperCase();
     if (patchCredentialKind(variable) === "file") {
+      // These rclone selectors request an in-memory configuration.
+      if (
+        variable === "RCLONE_CONFIG" &&
+        (basename(value) === "notfound" ||
+          value === (process.platform === "win32" ? "NUL" : "/dev/null"))
+      )
+        continue;
       selected.add(value);
       if (/^~[\\/]/u.test(value))
         for (const home of homes) if (home) selectFile(home, value.slice(2));
