@@ -18,6 +18,8 @@ afterEach(fixtures.cleanup);
 for (const [indexState, stage] of [
   ["staged", undefined],
   ["staged", 0],
+  ["normalized", undefined],
+  ["normalized", 0],
   ["unmerged", undefined],
   ["unmerged", 1],
   ["unmerged", 2],
@@ -27,13 +29,23 @@ for (const [indexState, stage] of [
     const copied = stage !== undefined;
     const { directory, git, remote } = await publicationRepository(fixtures);
     const file = join(directory, "unrelated.txt");
-    const baseline = "Committed fixture baseline\n";
-    const marker = "Synthetic staged-only content\n";
+    const normalized = indexState === "normalized";
+    const baseline = normalized ? "$Id$\n" : "Committed fixture baseline\n";
+    const marker = normalized
+      ? "$Id: Synthetic private edit $\n"
+      : "Synthetic staged-only content\n";
+    if (normalized) {
+      await writeFile(
+        join(directory, ".gitattributes"),
+        "unrelated.txt ident\n",
+      );
+      git("add", ".gitattributes");
+    }
     await writeFile(file, baseline);
     git("add", "--", "unrelated.txt");
     git("commit", "-m", "Add independent fixture file");
     await writeFile(file, marker);
-    if (indexState === "staged") {
+    if (indexState !== "unmerged") {
       git("add", "--", "unrelated.txt");
     } else {
       git("update-index", "--force-remove", "--", "unrelated.txt");
@@ -50,7 +62,8 @@ for (const [indexState, stage] of [
         { input: entries.join("") },
       );
     }
-    await writeFile(file, baseline);
+    if (normalized) expect(git("status", "--porcelain")).toBe("");
+    else await writeFile(file, baseline);
     const before = git("ls-files", "--stage", "unrelated.txt");
     const head = git("rev-parse", "HEAD");
     let pushes = 0;
@@ -65,10 +78,12 @@ for (const [indexState, stage] of [
             join(directory, "selected.txt"),
             stage === undefined
               ? "Independent change\n"
-              : git(
-                  "show",
-                  stage === 0 ? ":unrelated.txt" : `:${stage}:unrelated.txt`,
-                ) + "\n",
+              : normalized
+                ? await readFile(file)
+                : git(
+                    "show",
+                    stage === 0 ? ":unrelated.txt" : `:${stage}:unrelated.txt`,
+                  ) + "\n",
           );
           output!.stdout.write(
             JSON.stringify({
@@ -100,11 +115,15 @@ for (const [indexState, stage] of [
       },
     );
     expect(git("ls-files", "--stage", "unrelated.txt")).toBe(before);
-    expect(await readFile(file, "utf8")).toBe(baseline);
+    expect(await readFile(file, "utf8")).toBe(normalized ? marker : baseline);
     expect(pushes).toBe(copied ? 0 : 1);
     expect(result.exitCode, result.stderr).toBe(copied ? 2 : 0);
     if (copied) {
-      expect(result.stderr).toContain("pre-existing staged content");
+      expect(result.stderr).toContain(
+        normalized
+          ? "pre-existing worktree content"
+          : "pre-existing staged content",
+      );
       expect(git("rev-parse", "HEAD")).toBe(head);
       expect(repositoryGit(remote)("for-each-ref")).toBe("");
     }

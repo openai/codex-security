@@ -3102,9 +3102,10 @@ and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `auth.json`, `.credentials.json`, and
 Codex configuration files (including named profiles) in the default Codex home,
 the selected `CODEX_HOME`, and the Codex Security credential home.
-They also cover Google Cloud Application Default
-Credentials in the standard gcloud directory, the same file under
-`CLOUDSDK_CONFIG`, and the file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
+In the standard gcloud directory and under `CLOUDSDK_CONFIG`, the rules cover
+Application Default Credentials, `credentials.db`, `access_tokens.db`, their
+SQLite journals, and the `legacy_credentials` directory. They also cover the
+file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
 the standard `glab-cli` configuration directories and Git administration.
 PostgreSQL password and service file protection covers `PGPASSFILE`,
@@ -3264,12 +3265,13 @@ File permissions are left unchanged. This adds reads proportional to the ignored
 data and does not detect arbitrary transformed or partial copies. Existing tracked
 edits are protected by path overlap and Git's rename/copy recognition.
 
-For initialized submodules, publication preflight also reads materialized
-tracked files. Git can report a clean submodule after a clean filter discards
-local bytes, even if the filter is later disabled. The CLI checks for exact
+Publication preflight also reads materialized files in its checkout snapshot
+and tracked files in initialized submodules. Git can report a clean file after
+an attribute or clean filter discards local bytes. The CLI checks for exact
 copies of content that differs from the indexed blob and its built-in checkout
-representation. This adds reads proportional to the tracked data in those
-submodules. Copies of externally smudged content can require manual review.
+representation. This adds reads proportional to the materialized data in
+the snapshot and submodules. Copies of externally smudged content can require
+manual review.
 
 When `origin` pushes to multiple distinct URLs, select each effective
 `remote.origin.pushurl` explicitly in the system, user, or command scope.

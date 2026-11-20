@@ -95,7 +95,7 @@ type RunIndexGit = (
 
 export async function withPatchGitIndex<T>(
   run: RunIndexGit,
-  inspect: (run: RunIndexGit) => Promise<T>,
+  inspect: (run: RunIndexGit, indexFile: string) => Promise<T>,
   files?: readonly string[] | { readonly treeKeys: readonly string[] },
   sourcePathspecs?: readonly string[],
 ): Promise<T> {
@@ -190,7 +190,7 @@ export async function withPatchGitIndex<T>(
         ),
       },
     );
-    return await inspect(indexed);
+    return await inspect(indexed, indexFile);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -557,26 +557,42 @@ function gitLabConfigRoots(
   return roots;
 }
 
-async function credentialPointerFiles(
+function credentialPointers() {
+  return { files: new Set<string>(), directories: new Set<string>() };
+}
+
+async function collectCredentialPointers(
+  paths: ReturnType<typeof credentialPointers>,
   checkout: string,
   inherited: Readonly<Record<string, unknown>>,
   settings?: Readonly<Record<string, unknown>>,
-): Promise<Set<string>> {
+): Promise<void> {
   const environment: NodeJS.ProcessEnv = Object.create(null);
   const key = (name: string) =>
     process.platform === "win32" ? name.toUpperCase() : name;
   for (const source of [inherited, settings ?? {}])
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
-  const selected = new Set<string>();
+  const selected = paths.files;
   const terraformHomes = new Set<string>();
-  const gcloudCredentials = "application_default_credentials.json";
   const selectFile = (directory: string, file: string, paths = selected) => {
     // A delegate can use the literal path or a client's normalized spelling.
     paths.add(relativeFile(directory, file));
     paths.add(join(directory, file));
     if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
       paths.add(directory + file);
+  };
+  const selectGcloud = (directory: string, prefix = "") => {
+    selectFile(directory, join(prefix, "application_default_credentials.json"));
+    for (const db of ["credentials.db", "access_tokens.db"])
+      // SQLite can also keep credential rows in its journal or write-ahead log.
+      for (const suffix of ["", "-journal", "-wal"])
+        selectFile(directory, join(prefix, db + suffix));
+    selectFile(
+      directory,
+      join(prefix, "legacy_credentials"),
+      paths.directories,
+    );
   };
   const selectPgDefaults = (home: string) => {
     selectFile(home, process.platform === "win32" ? "pgpass.conf" : ".pgpass");
@@ -633,9 +649,9 @@ async function credentialPointerFiles(
         : home,
     );
     protectCodexHome(home, ".codex");
+    selectGcloud(home, join(".config", "gcloud"));
     for (const file of [
       join(".config", "gh", "hosts.yml"),
-      join(".config", "gcloud", gcloudCredentials),
       join(".docker", "config.json"),
       join(".kube", "config"),
       ".npmrc",
@@ -657,9 +673,9 @@ async function credentialPointerFiles(
       selectPgDefaults(relativeFile(appData, "postgresql"));
     }
     // google-auth uses the system drive when APPDATA is absent.
-    selectFile(
-      appData ?? (environment["SYSTEMDRIVE"] ?? "C:") + sep,
-      join("gcloud", gcloudCredentials),
+    selectGcloud(
+      appData || (environment["SYSTEMDRIVE"] ?? "C:") + sep,
+      "gcloud",
     );
   }
   if (environment["GH_CONFIG_DIR"])
@@ -732,14 +748,13 @@ async function credentialPointerFiles(
         selectFile(value, "config.json");
         break;
       case "CLOUDSDK_CONFIG":
-        selectFile(value, gcloudCredentials);
+        selectGcloud(value);
         break;
       case "PGSYSCONFDIR":
         selectFile(value, "pg_service.conf");
         break;
     }
   }
-  return selected;
 }
 
 async function readGitMarker(
@@ -1402,15 +1417,20 @@ export async function capturePatchGitControls(
         throw error;
     }
   };
-  const protectTransportFile = async (checkout: string, file: string) => {
+  const protectTransportFile = async (
+    checkout: string,
+    file: string,
+    includeDirectory = false,
+  ) => {
     const selected = httpCredentialPath(checkout, file);
-    await protectStore(selected);
+    await protectStore(selected, includeDirectory);
     // Git can retain an external caller's cwd for transport.
     if (checkout === root) {
       const caller = await realControlPath(directory);
       if (!inside(root, caller)) {
         const fromCaller = httpCredentialPath(caller, file);
-        if (fromCaller !== selected) await protectStore(fromCaller);
+        if (fromCaller !== selected)
+          await protectStore(fromCaller, includeDirectory);
       }
     }
   };
@@ -1626,26 +1646,37 @@ export async function capturePatchGitControls(
       .filter(([, untrusted]) => untrusted)
       .map(([key]) => key);
   };
-  const inheritedPointerFiles =
-    mode === "external"
-      ? new Set<string>()
-      : await credentialPointerFiles(root, pointerEnvironment);
-  if (mode !== "external" && shellSettings)
-    for (const file of await credentialPointerFiles(
+  const inheritedPointers = credentialPointers();
+  if (mode !== "external") {
+    await collectCredentialPointers(
+      inheritedPointers,
       root,
       pointerEnvironment,
-      shellSettings,
-    ))
-      inheritedPointerFiles.add(file);
-  const protectPointerFiles = async (checkout: string, files: Set<string>) => {
+    );
+    if (shellSettings)
+      await collectCredentialPointers(
+        inheritedPointers,
+        root,
+        pointerEnvironment,
+        shellSettings,
+      );
+  }
+  const protectPointers = async (
+    checkout: string,
+    { files, directories }: ReturnType<typeof credentialPointers>,
+  ) => {
     if (mode === "external") return;
-    for (const file of files) {
+    for (const file of [...files, ...directories]) {
       if (process.platform !== "win32" && file === "/dev/null") continue;
       hostMayReadStore = true;
-      await protectTransportFile(checkout, file);
+      const includeDirectory = directories.has(file);
+      await protectTransportFile(checkout, file, includeDirectory);
       // Commands may also inherit the original caller's subdirectory.
       if (checkout === root && directory !== root && !isAbsolute(file))
-        await protectStore(httpCredentialPath(directory, file));
+        await protectStore(
+          httpCredentialPath(directory, file),
+          includeDirectory,
+        );
     }
   };
   const captureReferences = async (checkout: string): Promise<void> => {
@@ -1674,7 +1705,7 @@ export async function capturePatchGitControls(
       if (projectConfig) parsedFiles.set(contents, entries);
       return entries;
     };
-    await protectPointerFiles(checkout, inheritedPointerFiles);
+    await protectPointers(checkout, inheritedPointers);
     if (mode !== "external" && netrc) {
       hostMayReadStore = true;
       await protectTransportFile(checkout, netrc);
@@ -2894,19 +2925,23 @@ export async function capturePatchGitControls(
     unavailableFilters: unisolatedCredentialHelper ? protectedFilterKeys() : [],
     credentialStorePaths: [...credentialStorePaths],
     async protectShellCredentialFiles(...settings) {
-      const newFiles = new Set<string>();
+      const added = credentialPointers();
       for (const source of new Set(settings))
         if (source)
-          for (const file of await credentialPointerFiles(
+          await collectCredentialPointers(
+            added,
             root,
             pointerEnvironment,
             source,
-          ))
-            if (!inheritedPointerFiles.has(file)) newFiles.add(file);
+          );
+      for (const file of inheritedPointers.files) added.files.delete(file);
+      for (const dir of inheritedPointers.directories)
+        added.directories.delete(dir);
       const previouslyUnisolated = unisolatedCredentialHelper;
       for (const checkout of filterCheckouts)
-        await protectPointerFiles(checkout, newFiles);
-      if (newFiles.size) await projectSnapshotConfig?.();
+        await protectPointers(checkout, added);
+      if (added.files.size || added.directories.size)
+        await projectSnapshotConfig?.();
       if (
         !previouslyUnisolated &&
         unisolatedCredentialHelper &&
