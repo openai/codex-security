@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import { importModule } from "./import-module.ts";
 
 const {
+  abortError,
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
+  knownPolicyRefusalFromAbort,
 } = await importModule({
   entryPoints: [
     fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
@@ -63,6 +65,68 @@ test(function testWorkerErrorClassificationPreservesExplicitFailures() {
       code,
     });
     assert.equal(classifyCodexWorkerError(original), original);
+  }
+});
+
+test(function testParentTurnAbortRefusalClassification() {
+  const refusal =
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
+  // The waiter abort preserves the MCP cancellation reason as its cause.
+  assert.equal(knownPolicyRefusalFromAbort(abortError(refusal)), refusal);
+  // An Error reason carries the refusal in its message.
+  assert.equal(
+    knownPolicyRefusalFromAbort(abortError(new Error(refusal))),
+    refusal,
+  );
+  // A worker refusal is not a parent-turn refusal, whether nested or direct.
+  assert.equal(
+    knownPolicyRefusalFromAbort(
+      abortError(
+        new Error("outer abort", {
+          cause: new DeepScanNonRetryableError(refusal),
+        }),
+      ),
+    ),
+    undefined,
+  );
+  assert.equal(
+    knownPolicyRefusalFromAbort(
+      abortError(new DeepScanNonRetryableError(refusal)),
+    ),
+    undefined,
+  );
+  // Plain detaches and unrelated aborts classify as nothing.
+  for (const reason of [
+    undefined,
+    "detach the first Deep Scan waiter",
+    "user closed Desktop",
+    new Error("boom"),
+    new Error("Deep Scan worker was aborted."),
+  ]) {
+    assert.equal(knownPolicyRefusalFromAbort(abortError(reason)), undefined);
+  }
+  // Exact strings only: substrings, prefixes, and changed punctuation are
+  // not refusals.
+  for (const reason of [
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing",
+    `Error: ${refusal}`,
+    refusal.replace("https://chatgpt.com/cyber", "https://chatgpt.com/cyber!"),
+    ` ${refusal}`,
+  ]) {
+    assert.equal(knownPolicyRefusalFromAbort(abortError(reason)), undefined);
+  }
+  // Every known refusal text classifies as itself.
+  for (const message of [
+    "Request blocked by cyberPolicy.",
+    "Request blocked by a safety policy violation.",
+    "This content was flagged for possible cybersecurity risk.",
+    refusal,
+    "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
+    "This request was blocked due to a misalignment policy violation.",
+  ]) {
+    assert.equal(knownPolicyRefusalFromAbort(abortError(message)), message);
   }
 });
 

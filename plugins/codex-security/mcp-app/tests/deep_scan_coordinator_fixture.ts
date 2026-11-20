@@ -29,6 +29,7 @@ export const {
   AsyncLock,
   classifyCodexWorkerError,
   codexWorkerTurnError,
+  knownPolicyRefusalFromAbort,
   startOrJoinDeepScanCoordinator,
   recordCodexSecurityWorkerScanDraft,
 } = await importModule({
@@ -36,7 +37,11 @@ export const {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
-      export { classifyCodexWorkerError, codexWorkerTurnError } from "./errors.ts";
+      export {
+        classifyCodexWorkerError,
+        codexWorkerTurnError,
+        knownPolicyRefusalFromAbort,
+      } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
@@ -131,6 +136,14 @@ export class FakeStore {
   failureMessages: string[] = [];
   finishCalls: StoreInput<"finish">[] = [];
   failFinish = false;
+  finishGate?: PromiseWithResolvers<void>;
+  // When set, finish() commits success before the finish gate releases,
+  // modeling the real Workbench: the commit is durable inside finish()
+  // and the coordinator only learns of it when finish() returns.
+  commitFinishBeforeGate = false;
+  // When set with commitFinishBeforeGate, finish() commits success and then
+  // throws, modeling a lost finish response after the commit.
+  throwFinishAfterCommit = false;
   rejectFailurePersistence = false;
   replacementManifestBeforeFinishRejection: string | undefined = undefined;
   iterationResponseGate?: PromiseWithResolvers<void>;
@@ -241,6 +254,20 @@ export class FakeStore {
 
   async finish(input: StoreInput<"finish">) {
     this.finishCalls.push(structuredClone(input));
+    if (this.commitFinishBeforeGate) {
+      const committed = await this.commitFinish(input);
+      await this.finishGate?.promise;
+      if (this.throwFinishAfterCommit)
+        throw new DeepScanNonRetryableError(
+          "fixture finish response lost after commit",
+        );
+      return committed;
+    }
+    await this.finishGate?.promise;
+    return this.commitFinish(input);
+  }
+
+  private async commitFinish(input: StoreInput<"finish">) {
     if (this.run.status === "succeeded") return structuredClone(this.run);
     if (this.failFinish) {
       if (this.replacementManifestBeforeFinishRejection) {
@@ -287,6 +314,14 @@ export class FakeStore {
     manifestPath?: string,
     stagedManifestPath?: string,
   ) {
+    // Mirror fail_deep_scan_locked(): once success is committed with a
+    // manifest, a failure write is rejected. A success without a manifest
+    // can still be failed, matching the terminal-before-manifest escape.
+    if (this.run.status === "succeeded" && this.run.manifestPath != null) {
+      throw new DeepScanNonRetryableError(
+        "Only a running Deep Scan can be failed or interrupted.",
+      );
+    }
     this.failureMessages.push(message);
     if (this.rejectFailurePersistence) {
       throw new DeepScanNonRetryableError(
