@@ -13,6 +13,7 @@ import { isWithin } from "./trusted-executable.js";
 import {
   canonicalConfigPath,
   expandHome,
+  resolveInputPath,
   type ProcessEnvironment,
 } from "./runtime.js";
 import {
@@ -51,6 +52,33 @@ export function absoluteModelFilePaths(
     if (typeof value !== "string" || !value) return [];
     const path = expandHome(value, environment);
     return isAbsolute(path) ? [path] : [];
+  });
+}
+
+/** File inputs that identify source checkouts during saved interpreter discovery. */
+export function scanConfigSourcePaths(
+  config: JsonObject,
+  scanDir: string | undefined,
+  environment: ProcessEnvironment,
+): string[] {
+  const selected = resolveCodexProfile(config);
+  const paths = MODEL_FILE_SETTINGS.map((key) => selected[key]);
+  const skills = selected["skills"];
+  if (isRecord(skills) && Array.isArray(skills["config"])) {
+    for (const skill of skills["config"])
+      if (isRecord(skill) && typeof skill["path"] === "string")
+        paths.push(skill["path"]);
+  }
+  const agents = selected["agents"];
+  if (isRecord(agents)) {
+    for (const agent of Object.values(agents))
+      if (isRecord(agent) && typeof agent["config_file"] === "string")
+        paths.push(agent["config_file"]);
+  }
+  return paths.flatMap((path) => {
+    if (typeof path !== "string" || !path) return [];
+    if (!scanDir && !isAbsolute(expandHome(path, environment))) return [];
+    return [resolveInputPath(path, scanDir, environment)];
   });
 }
 

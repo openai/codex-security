@@ -1,6 +1,6 @@
-import { executableSourceRoots } from "./deep-config.js";
+import { executableSourceRoots, scanConfigSourcePaths } from "./deep-config.js";
 import { isRecord } from "./record.js";
-import { MODEL_FILE_SETTINGS, type JsonValue } from "./config.js";
+import type { JsonObject, JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
@@ -28,7 +28,7 @@ interface ScanTarget {
   id: string;
   target_path: string;
   executableSourcePaths?: string[];
-  knowledgeRoots?: string[];
+  sourceRoots?: string[];
   missingProfileSources?: boolean;
   repository_generation?: string | null;
   originFallback?: boolean;
@@ -273,6 +273,7 @@ async function readTargets(
         const checkouts = savedCheckouts(
           database,
           targets.length === 1 ? targets : [],
+          environment,
         );
         return { targets, checkouts };
       },
@@ -299,11 +300,17 @@ async function readTargets(
 function loadRecipeSources(
   database: RuntimeDatabase,
   target: ScanTarget,
+  environment: ProcessEnvironment,
 ): void {
-  if (!tableColumns(database, "scans").has("recipe_json")) return;
-  const [row] = readRows<{ recipe_json: string | null }>(
+  const columns = tableColumns(database, "scans");
+  if (!columns.has("recipe_json")) return;
+  const scanDir = columns.has("scan_dir") ? "scan_dir" : "NULL AS scan_dir";
+  const [row] = readRows<{
+    recipe_json: string | null;
+    scan_dir: string | null;
+  }>(
     database,
-    "SELECT recipe_json FROM scans WHERE id = ?",
+    `SELECT recipe_json, ${scanDir} FROM scans WHERE id = ?`,
     target.id,
   );
   if (!row?.recipe_json) return;
@@ -323,33 +330,30 @@ function loadRecipeSources(
     throw new CodexSecurityError(invalidPaths);
   };
   target.executableSourcePaths = paths("executableSourcePaths");
-  // Older recipes stored the effective model file paths only in config.
+  // Older recipes recorded some file inputs only in the selected configuration.
   const config = recipe["config"];
   if (isRecord(config)) {
-    const modelPaths = MODEL_FILE_SETTINGS.flatMap((key) => {
-      const path = config[key];
-      return typeof path === "string" && isAbsolute(path) ? [path] : [];
-    });
-    target.executableSourcePaths.push(...modelPaths);
+    target.executableSourcePaths.push(
+      ...scanConfigSourcePaths(
+        config as JsonObject,
+        row.scan_dir ?? undefined,
+        environment,
+      ),
+    );
     const profile = config["profile"];
     const profiles = config["profiles"];
     const nativeProfile =
       typeof profile === "string" &&
       !(isRecord(profiles) && isRecord(profiles[profile]));
-    const inputs = recipe["scanInputs"];
-    // Writers with model-file receipts also recorded all effective source paths.
-    // Older native profiles omitted inherited paths; today's profile can differ.
-    const hasModelReceipt =
-      isRecord(inputs) &&
-      isRecord(inputs["modelFileInputs"]) &&
-      Object.hasOwn(inputs["modelFileInputs"], "model_instructions_file");
+    // Even receipts with model file identities could omit inherited skills.
+    // Reading today's profile cannot recover the original source checkouts.
     target.missingProfileSources =
       recipe["mode"] === "deep" &&
       nativeProfile &&
-      !hasModelReceipt &&
-      modelPaths.length !== MODEL_FILE_SETTINGS.length;
+      !Array.isArray(recipe["executableSourceRoots"]);
   }
-  target.knowledgeRoots = [
+  target.sourceRoots = [
+    ...paths("executableSourceRoots"),
     ...paths("knowledgeBasePaths"),
     ...paths("knowledgeBaseProtectedRoots"),
   ];
@@ -369,7 +373,7 @@ async function savedInputRoots(
   );
   return [
     ...configRoots.flat(),
-    ...targets.flatMap((target) => target.knowledgeRoots ?? []),
+    ...targets.flatMap((target) => target.sourceRoots ?? []),
   ];
 }
 
@@ -400,7 +404,10 @@ export async function savedCheckoutBoundaries(
       tableColumns(database, "scans").has("recipe_json")
         ? exactTargets(database, selected)
         : [];
-    return { checkouts: savedCheckouts(database, targets), targets };
+    return {
+      checkouts: savedCheckouts(database, targets, environment),
+      targets,
+    };
   });
   return {
     ...checkouts,
@@ -533,8 +540,10 @@ function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
 function savedCheckouts(
   database: RuntimeDatabase,
   targets: ScanTarget[],
+  environment: ProcessEnvironment,
 ): SavedBoundaries {
-  for (const target of targets) loadRecipeSources(database, target);
+  for (const target of targets)
+    loadRecipeSources(database, target, environment);
   const scan = tableColumns(database, "scans");
   const registry = tableColumns(database, "security_targets");
   const workspace = tableColumns(database, "workspaces");

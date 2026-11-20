@@ -83,6 +83,7 @@ async function interruptedScan(
     recipeRepositoryAlias?: boolean;
     sqliteHome?: string;
     executableSourcePaths?: string[];
+    executableSourceRoots?: string[];
     target?: { kind: "paths"; paths: string[] };
     sealedPricing?: JsonObject;
     knowledgeBaseProtectedRoots?: string[];
@@ -1678,6 +1679,7 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
         ? {
             config: { profile: "review" },
             sealedPricing: { model },
+            executableSourceRoots: [],
             scanInputs: {
               ...scanInputIdentity("Keep the original scan instructions."),
               modelFileInputs: { model_instructions_file: null },
@@ -1810,10 +1812,10 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
   },
 );
 
-async function modelInputCheckout() {
+async function modelInputCheckout(filename = "instructions.md") {
   const checkout = await temporaryDirectory();
   gitText(["-C", checkout, "init", "-q"]);
-  const source = join(checkout, "settings", "instructions.md");
+  const source = join(checkout, "settings", filename);
   const bin = join(checkout, "tools");
   await mkdir(dirname(source));
   await mkdir(bin);
@@ -1833,11 +1835,18 @@ test
     "knowledge",
     "legacy-knowledge",
     "legacy-model-instructions",
+    "legacy-skill",
+    "legacy-profile-skill",
+    "legacy-home-skill",
+    "skill-without-marker",
   ] as const)(
   "sealed SDK recovery excludes the %s checkout before Python discovery",
   async (sourceKind) => {
-    const { checkout, source, bin, python } = await modelInputCheckout();
+    const { checkout, source, bin, python } = await modelInputCheckout(
+      sourceKind.includes("skill") ? "SKILL.md" : undefined,
+    );
     const configuredSources = { executableSourcePaths: [source] };
+    const skills = { config: [{ path: source, enabled: true }] };
     const recipes = {
       config: configuredSources,
       resupplied: configuredSources,
@@ -1846,6 +1855,26 @@ test
         knowledgeBaseProtectedRoots: [checkout],
       },
       "legacy-knowledge": { knowledgeBasePaths: [source] },
+      "legacy-skill": { config: { skills } },
+      "legacy-home-skill": {
+        config: {
+          skills: {
+            config: [
+              {
+                path: join("~", basename(checkout), "settings", "SKILL.md"),
+                enabled: true,
+              },
+            ],
+          },
+        },
+      },
+      "legacy-profile-skill": {
+        config: { profile: "selected", profiles: { selected: { skills } } },
+      },
+      "skill-without-marker": {
+        executableSourcePaths: [source],
+        executableSourceRoots: [checkout],
+      },
       "legacy-model-instructions": {
         config: { model_instructions_file: source },
       },
@@ -1853,8 +1882,14 @@ test
     const f = await interruptedScan("deep", false, recipes[sourceKind]);
     await sealWithOriginalPlugin(f);
     await rm(f.repository, { recursive: true });
-    f.environment.PATH = bin;
-    const client = resumeDependencies(f, () =>
+    if (sourceKind === "skill-without-marker")
+      await rm(join(checkout, ".git"), { recursive: true });
+    const environment = {
+      ...f.environment,
+      HOME: dirname(checkout),
+      PATH: bin,
+    };
+    const client = resumeDependencies({ ...f, environment }, () =>
       fail("Unexpected model launch"),
     ).createSecurity({
       pythonPath: "python3",
@@ -1898,10 +1933,14 @@ async function trustedRecoveryPython(python: string): Promise<string> {
 function legacyNativeProfileRecipe(): {
   config: JsonObject;
   scanInputs: JsonObject;
+  executableSourceRoots?: string[];
 } {
   return {
     config: { profile: "review", approval_policy: "never" },
-    scanInputs: scanInputIdentity("Keep the original scan instructions."),
+    scanInputs: {
+      ...scanInputIdentity("Keep the original scan instructions."),
+      modelFileInputs: { model_instructions_file: null },
+    },
   };
 }
 
@@ -1912,8 +1951,7 @@ test
   async (kind) => {
     const { bin, python } = await modelInputCheckout();
     const recipe = legacyNativeProfileRecipe();
-    if (kind === "recorded native")
-      recipe.scanInputs["modelFileInputs"] = { model_instructions_file: null };
+    if (kind === "recorded native") recipe.executableSourceRoots = [];
     if (kind === "selected inline")
       recipe.config["profiles"] = { review: { model: "gpt-5.6-sol" } };
     const f = await interruptedScan("deep", false, recipe);
@@ -1929,7 +1967,7 @@ test
       requireSealedResume: true,
     };
     if (kind === "legacy native") {
-      // The missing profile and this receipt cannot recover the original model-file paths.
+      // A model-only receipt omits skills inherited from the missing profile.
       f.environment.PATH = [bin, f.environment.PATH].join(delimiter);
       await using named = clients.createSecurity({ pythonPath: "python3" });
       await expect(named.run(f.repository, options)).rejects.toThrow(
@@ -1952,6 +1990,7 @@ test
 
 test.skipIf(process.platform === "win32").each([
   ["single", "config", "named"],
+  ["single", "skill", "named"],
   ["bulk", "config", "named"],
   ["bulk", "config", "absolute"],
   ["single", "legacy native profile", "named"],
@@ -1961,16 +2000,21 @@ test.skipIf(process.platform === "win32").each([
 ] as const)(
   "CLI %s sealed recovery with %s and %s Python excludes the instruction checkout",
   async (command, source, selection) => {
-    const { source: instructions, bin, python } = await modelInputCheckout();
+    const {
+      source: instructions,
+      bin,
+      python,
+    } = await modelInputCheckout(source === "skill" ? "SKILL.md" : undefined);
     const bulk = command === "bulk";
     const legacyProfile = source === "legacy native profile";
-    const f = await interruptedScan(
-      "deep",
-      bulk,
-      legacyProfile
-        ? legacyNativeProfileRecipe()
-        : { config: { model_instructions_file: instructions } },
-    );
+    const recipes = {
+      "legacy native profile": legacyNativeProfileRecipe(),
+      config: { config: { model_instructions_file: instructions } },
+      skill: {
+        config: { skills: { config: [{ path: instructions, enabled: true }] } },
+      },
+    };
+    const f = await interruptedScan("deep", bulk, recipes[source]);
     await sealWithOriginalPlugin(f);
     if (bulk) await rm(join(f.root, "results.jsonl"));
     else await rm(f.repository, { recursive: true });
