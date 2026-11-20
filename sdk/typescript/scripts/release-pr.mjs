@@ -10,6 +10,7 @@ import { isMain } from "./is-main.mjs";
 export const packagePath = "sdk/typescript/package.json";
 export const actionPackagePath = "github-action/package.json";
 export const actionLockPath = "github-action/package-lock.json";
+export const citationPath = "CITATION.cff";
 export const exampleWorkflowPath = "examples/github-actions/codex-security.yml";
 export const notesPath = ".github/release-notes.md";
 export const statePath = ".github/release-pr-state.json";
@@ -18,6 +19,8 @@ const templatePath = ".github/PULL_REQUEST_TEMPLATE.md";
 const sectionIds = ["highlights", "upgrades"];
 const releaseBranchPrefix = "release/next-";
 const conventionalTitle = /^([a-z][a-z0-9-]*)(?:\(([^)]*)\))?(!)?: (.+)$/u;
+const citationVersionPattern =
+  /^(version:[ \t]+)(["']?)[0-9]+\.[0-9]+\.[0-9]+\2(?=[ \t]*(?:#[^\r\n]*)?\r?$)/gmu;
 const exampleVersionPattern =
   /^([ \t]*CODEX_SECURITY_VERSION:[ \t]*)(["']?)[0-9]+\.[0-9]+\.[0-9]+\2(?=[ \t]*(?:#[^\r\n]*)?\r?$)/gmu;
 
@@ -196,14 +199,12 @@ function updateActionLockVersion(lockText, version) {
   return `${JSON.stringify(lock, null, 2)}\n`;
 }
 
-function updateExampleVersion(exampleText, version) {
-  if ([...exampleText.matchAll(exampleVersionPattern)].length !== 1) {
-    throw new Error(
-      "Unable to update only the GitHub Actions example CLI version.",
-    );
+function updateYamlVersion(text, version, pattern, field) {
+  if ([...text.matchAll(pattern)].length !== 1) {
+    throw new Error(`Unable to update only the ${field} version.`);
   }
-  return exampleText.replace(
-    exampleVersionPattern,
+  return text.replace(
+    pattern,
     (_match, prefix, quote) => `${prefix}${quote}${version}${quote}`,
   );
 }
@@ -256,9 +257,19 @@ export function createReleasePlan(history, previous = null) {
     );
   }
   if (history.exampleWorkflowText != null) {
-    files[exampleWorkflowPath] = updateExampleVersion(
+    files[exampleWorkflowPath] = updateYamlVersion(
       history.exampleWorkflowText,
       version,
+      exampleVersionPattern,
+      "GitHub Actions example CLI",
+    );
+  }
+  if (history.citationText != null) {
+    files[citationPath] = updateYamlVersion(
+      history.citationText,
+      version,
+      citationVersionPattern,
+      "citation",
     );
   }
   return {
@@ -353,6 +364,7 @@ export async function readReleaseHistory(repo, mainSha, github) {
     packageText,
     actionPackageText: repo.readFile(mainSha, actionPackagePath),
     actionLockText: repo.readFile(mainSha, actionLockPath),
+    citationText: repo.readFile(mainSha, citationPath),
     exampleWorkflowText: repo.readFile(mainSha, exampleWorkflowPath),
     changes: [...changes.values()],
   };
@@ -368,9 +380,13 @@ function readReleaseBranch(repo, mainSha, headSha) {
   if (
     paths.some(
       (path) =>
-        ![...packagePaths, exampleWorkflowPath, notesPath, statePath].includes(
-          path,
-        ),
+        ![
+          ...packagePaths,
+          citationPath,
+          exampleWorkflowPath,
+          notesPath,
+          statePath,
+        ].includes(path),
     )
   ) {
     return {
@@ -394,17 +410,21 @@ function readReleaseBranch(repo, mainSha, headSha) {
       };
     }
   }
-  const originalExample = repo
-    .readFile(mergeBase, exampleWorkflowPath)
-    ?.replace(exampleVersionPattern, "$1$2$2");
-  const branchExample = repo
-    .readFile(headSha, exampleWorkflowPath)
-    ?.replace(exampleVersionPattern, "$1$2$2");
-  if (originalExample !== branchExample) {
-    return {
-      holdReason:
-        "The release branch has GitHub Actions example edits beyond its CLI version. Preserve them before running the updater.",
-    };
+  for (const [path, pattern, edited] of [
+    [
+      exampleWorkflowPath,
+      exampleVersionPattern,
+      "GitHub Actions example edits beyond its CLI version",
+    ],
+    [citationPath, citationVersionPattern, "citation edits beyond its version"],
+  ]) {
+    const original = repo.readFile(mergeBase, path)?.replace(pattern, "$1$2$2");
+    const branch = repo.readFile(headSha, path)?.replace(pattern, "$1$2$2");
+    if (original !== branch) {
+      return {
+        holdReason: `The release branch has ${edited}. Preserve them before running the updater.`,
+      };
+    }
   }
   const state = JSON.parse(repo.readFile(headSha, statePath));
   if (!state?.sections) {

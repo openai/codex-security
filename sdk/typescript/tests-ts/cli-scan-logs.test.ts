@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Cli, Formatter, z } from "incur";
+import { estimateTokenCount, sliceByTokens } from "tokenx";
 import { main } from "../src/cli.js";
 import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
@@ -187,15 +188,9 @@ describe("saved logs JSON output", () => {
       ["--json", "--filter-output", "events[0,1]"],
       ["--json", "--filter-output", "missing"],
       ["--json", "--filter-output", "scanId,threadId"],
-      ["--json", "--token-count"],
-      ["--json", "--token-limit", "4"],
-      ["--json", "--token-offset", "1", "--token-limit", "4"],
-      ["--json", "--token-offset", "999999"],
       ["--json", "--token-limit", "999999"],
       ["--json", "--full-output"],
       ["--json", "--full-output", "--filter-output", "scanId"],
-      ["--json", "--full-output", "--token-limit", "4"],
-      ["--json", "--full-output", "--token-count"],
     ].map((args) => [args]),
   )("preserves Incur output for %j", async (args) => {
     const f = await fixture();
@@ -211,16 +206,10 @@ describe("saved logs JSON output", () => {
         ),
         f.logs,
       );
-      if (args.includes("--full-output") && !args.includes("--token-count")) {
+      if (args.includes("--full-output")) {
         expect(withoutDuration(stdout.text())).toEqual(
           withoutDuration(expected),
         );
-      } else if (args.includes("999999") && args.includes("--token-offset")) {
-        expect(JSON.parse(stdout.text())).toMatch(
-          /showing tokens (\d+)–\1 of \1/u,
-        );
-      } else if (expected.includes("[truncated:")) {
-        expect(JSON.parse(stdout.text())).toBe(expected.trimEnd());
       } else {
         expect(stdout.text()).toBe(expected);
       }
@@ -234,6 +223,50 @@ describe("saved logs JSON output", () => {
       await rm(f.state, { recursive: true, force: true });
     }
   });
+
+  test.each([false, true])(
+    "counts and pages JSON logs with full output %p",
+    async (fullOutput) => {
+      const f = await fixture();
+      try {
+        const args = ["scans", "logs", "scan-1", "--json"];
+        if (fullOutput) args.push("--full-output");
+        const text = Formatter.format(f.logs, "json");
+        const total = estimateTokenCount(text);
+        async function run(...flags: string[]) {
+          const { stdout, stderr, runCli } = createCliTest(main);
+          expect(await runCli([...args, ...flags], f.deps)).toBe(0);
+          expect(stderr.text()).toBe("");
+          return JSON.parse(stdout.text());
+        }
+
+        expect(await run("--token-count")).toBe(total);
+        for (const [flags, start, end] of [
+          [["--token-limit", "4"], 0, 4],
+          [["--token-offset", "1", "--token-limit", "4"], 1, 5],
+          [["--token-offset", String(total + 1)], total, total],
+        ] as const) {
+          const page = `${sliceByTokens(text, start, end)}\n[truncated: showing tokens ${start}–${end} of ${total}]`;
+          const actual = await run(...flags);
+          if (fullOutput) {
+            expect(actual).toEqual({
+              ok: true,
+              data: page,
+              meta: {
+                command: "scans logs",
+                duration: expect.any(String),
+                ...(end < total && { nextOffset: end }),
+              },
+            });
+          } else {
+            expect(actual).toBe(page);
+          }
+        }
+      } finally {
+        await rm(f.state, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.each(
     [
