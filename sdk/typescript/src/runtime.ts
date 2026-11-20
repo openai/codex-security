@@ -102,6 +102,7 @@ import {
 import { isRecord } from "./record.js";
 import {
   campaignExecutable,
+  campaignProtectedRoots,
   inspectTrustedExecutable,
   isWithin,
   resolveTrustedExecutable,
@@ -218,7 +219,14 @@ interface CodexCommandResult {
 
 export type ProcessEnvironment = Record<string, string | undefined>;
 
+export interface PythonProtectionRoots {
+  protected: string[];
+  discovery: string[];
+}
+
 export interface PluginPythonOptions {
+  /** @internal Retain the actual interpreter boundaries with the scan. */
+  captureRoots?: PythonProtectionRoots;
   configuredPath?: string;
   environment?: ProcessEnvironment;
   homeDirectory?: string;
@@ -228,8 +236,8 @@ export interface PluginPythonOptions {
   discoveryProtectedRoots?: readonly string[];
   /** @internal Ambient PATH lookup requires a known boundary for saved Git targets. */
   allowPathLookup?: boolean;
-  /** @internal A historical native profile did not record its source checkouts. */
-  excludeCheckoutPython?: boolean;
+  /** @internal Older recipes may lack their original source checkouts. */
+  excludeCheckoutPython?: boolean | "discovery";
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -4151,8 +4159,18 @@ export async function resolvePluginPython(
     )
       discoveryRoots.push(directory);
   }
+  if (options.captureRoots) {
+    const protectedPaths = new Set([
+      ...protectedRoot,
+      ...campaignProtectedRoots(),
+    ]);
+    options.captureRoots.protected = [...protectedPaths];
+    options.captureRoots.discovery = [...new Set(discoveryRoots)].filter(
+      (path) => !protectedPaths.has(path),
+    );
+  }
   const allowPathLookup =
-    options.allowPathLookup !== false && !options.excludeCheckoutPython;
+    options.allowPathLookup !== false && options.excludeCheckoutPython !== true;
   const missingBoundaryMessage =
     "Could not establish the saved checkout boundary for Python discovery. Set PYTHON to an absolute trusted interpreter.";
   if (options.configuredPath !== undefined) {
@@ -4655,6 +4673,7 @@ async function requirePython(
     environment,
     protectedRoot,
     options,
+    true,
   );
   if (resolved !== null) return resolved;
   throw new PluginPythonUnavailableError(
@@ -4668,27 +4687,26 @@ async function usablePython(
   environment: ProcessEnvironment,
   protectedRoot: readonly string[],
   options: Pick<PluginPythonOptions, "signal" | "excludeCheckoutPython">,
+  configured = false,
 ): Promise<string | null> {
   const { signal } = options;
   const path = isPythonPathCandidate(candidate)
     ? expandHomeForLookup(candidate, environment)
     : candidate;
-  if (options.excludeCheckoutPython && !isAbsolute(path)) return null;
-  let command = await resolveTrustedExecutable(
-    path,
-    environment,
-    protectedRoot,
-  );
-  if (command && options.excludeCheckoutPython) {
-    // The original profile could have read from this checkout. Check the
-    // resolved launcher, including managed-runtime links, before its first probe.
-    const checkouts = await gitProtectionRoots(command.executable, signal);
-    if (checkouts.length)
-      command = await resolveTrustedExecutable(
-        command.executable,
-        environment,
-        [...protectedRoot, ...checkouts],
-      );
+  const exclude = options.excludeCheckoutPython;
+  if (exclude === true && !isAbsolute(path)) return null;
+  const roots = [...protectedRoot];
+  let command = await resolveTrustedExecutable(path, environment, roots);
+  if (exclude && !(exclude === "discovery" && configured && isAbsolute(path))) {
+    // Exclude each launcher's checkout before probing, so a later trusted
+    // interpreter with the same name remains eligible on PATH.
+    while (command) {
+      const checkouts = await gitProtectionRoots(command.executable, signal);
+      if (checkouts.length === 0) break;
+      if (checkouts.every((root) => roots.includes(root))) return null;
+      roots.push(...checkouts);
+      command = await resolveTrustedExecutable(path, environment, roots);
+    }
   }
   if (command === null) return null;
   try {

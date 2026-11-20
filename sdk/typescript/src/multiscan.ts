@@ -52,6 +52,7 @@ import {
   createWindowsOutputDirectory,
   requireSecureOutputAncestry,
   requireWindowsOutputPath,
+  resolveParentTraversal,
   resolvePluginPath,
   validateOutputDir,
 } from "./runtime.js";
@@ -120,6 +121,7 @@ type MultiscanKnowledge = Partial<
 >;
 
 export interface MultiscanOptions extends ScanPromptSettings {
+  documentSourcePaths?: readonly string[];
   inputPath: string;
   outputDir: string;
   githubHost?: string;
@@ -220,15 +222,25 @@ export async function runMultiscan(
     join(output, "checkouts"),
     join(output, "recovery-checkouts"),
   ];
-  const prompts = await resolveScanPrompts(options, () =>
-    withProtectedExecutableRoots(
-      executableRoots(requestedOutput),
-      documentRoots,
-    ),
+  const { documentSourcePaths = [], ...prompts } = await resolveScanPrompts(
+    options,
+    () =>
+      withProtectedExecutableRoots(
+        executableRoots(requestedOutput),
+        documentRoots,
+      ),
   );
+  const inventory = resolveTargetPath(options.inputPath);
   const resolvedOptions: MultiscanOptions = {
     ...options,
     ...prompts,
+    documentSourcePaths: tasks.some((task) => task.mode === "deep")
+      ? [
+          ...documentSourcePaths,
+          inventory,
+          await canonicalConfigPath(await resolveParentTraversal(inventory)),
+        ]
+      : undefined,
     ...(options.scanOptionsByMode === undefined
       ? {}
       : {
@@ -698,6 +710,7 @@ async function runCampaign(
             operationId ??= randomUUID();
             result = await security.run(checkout, {
               ...scanSettings,
+              documentSourcePaths: options.documentSourcePaths,
               knowledgeBaseSnapshot: knowledge?.snapshot,
               ...(task.scope === undefined
                 ? {}
@@ -779,10 +792,11 @@ async function runCampaign(
               (await savedCheckoutBoundaries(process.env, { scanDir }, signal));
             threatModelPath = await readThreatModelPath(scanDir, {
               pythonPath: options.config.pythonPath,
-              excludeCheckoutPython: saved?.missingProfileSources,
+              excludeCheckoutPython: saved?.excludeCheckoutPython,
               protectedRoot: saved?.inputRoots.length
                 ? [protectedRoot, ...saved.inputRoots]
                 : protectedRoot,
+              discoveryProtectedRoots: saved?.pythonDiscoveryRoots,
               signal,
             });
           } catch {

@@ -31,6 +31,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { resolvePluginSource, runWorkbench } from "../src/runtime.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
@@ -63,6 +64,7 @@ async function interruptedScan(
   bulk = false,
   {
     recipeRepositoryAlias = false,
+    registrationFiles,
     sqliteHome,
     ...settings
   }: Pick<
@@ -81,9 +83,14 @@ async function interruptedScan(
     config?: JsonObject;
     providerProfile?: JsonObject;
     recipeRepositoryAlias?: boolean;
+    registrationFiles?: Pick<
+      ScanOptions,
+      "scanPromptFile" | "postScanPromptFile" | "rubricPath"
+    >;
     sqliteHome?: string;
     executableSourcePaths?: string[];
     executableSourceRoots?: string[];
+    pythonDiscoveryRoots?: string[];
     target?: { kind: "paths"; paths: string[] };
     sealedPricing?: JsonObject;
     knowledgeBaseProtectedRoots?: string[];
@@ -207,6 +214,7 @@ async function interruptedScan(
     },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
+    pythonDiscoveryRoots: [],
     ...settings,
     ...(sqliteHome
       ? {
@@ -242,7 +250,33 @@ async function interruptedScan(
         }
       : {}),
   };
-  const registration = await command(
+  let registration: JsonObject | undefined;
+  if (registrationFiles) {
+    const stop = "Synthetic interruption after registration";
+    await using client = new TestClient(
+      { pythonPath: python },
+      {
+        environment,
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        runWorkbench: async (options, args, input) => {
+          const result = await runWorkbench(options, args, input);
+          if (args[0] === "register-cli-scan") {
+            registration = result;
+            throw new Error(stop);
+          }
+          return result;
+        },
+      },
+    );
+    await expect(
+      client.run(repository, {
+        mode,
+        outputDir: scanDir,
+        ...registrationFiles,
+      }),
+    ).rejects.toThrow(stop);
+  }
+  registration ??= await command(
     [
       "register-cli-scan",
       "--repository",
@@ -1915,6 +1949,51 @@ test
   },
 );
 
+test.skipIf(process.platform === "win32").each([
+  ["scanPromptFile", "before sealing"],
+  ["scanPromptFile", "after sealing"],
+  ["rubricPath", "after sealing"],
+  ["postScanPromptFile", "with post-scan work"],
+] as const)(
+  "SDK recovery excludes the original %s checkout %s",
+  async (file, stage) => {
+    const { checkout, source, bin, python } = await modelInputCheckout();
+    const f = await interruptedScan("deep", false, {
+      registrationFiles: { [file]: source },
+    });
+    if (stage !== "before sealing") await sealWithOriginalPlugin(f);
+    if (stage === "after sealing") await rm(f.repository, { recursive: true });
+    await rm(join(checkout, ".git"), { recursive: true });
+    const launcher = join(bin, "example-scan-python");
+    await rename(python, launcher);
+    await using client = new TestClient(
+      { pythonPath: basename(launcher) },
+      {
+        environment: {
+          ...f.environment,
+          PATH: [bin, f.environment.PATH].join(delimiter),
+        },
+        prepareRuntime: async () => preparedRuntime(f.codexHome),
+        runWorkbench,
+      },
+    );
+    await expect(
+      client.run(f.repository, {
+        mode: "deep",
+        resumeScanId: f.scanId,
+        outputDir: f.scanDir,
+        requireSealedResume: stage === "after sealing",
+        ...(stage === "with post-scan work"
+          ? { postScanPrompt: await readFile(source, "utf8") }
+          : {}),
+      }),
+    ).rejects.toThrow("interpreter is unavailable or unusable");
+    await expect(readFile(launcher + ".ran", "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
+
 async function trustedRecoveryPython(python: string): Promise<string> {
   // The host interpreter may itself be installed in a checkout (e.g. Homebrew).
   const venv = await temporaryDirectory();
@@ -1929,6 +2008,35 @@ async function trustedRecoveryPython(python: string): Promise<string> {
   expect(created.exitCode, created.stderr.toString()).toBe(0);
   return join(venv, "bin", "python3");
 }
+
+test.skipIf(process.platform === "win32")(
+  "sealed SDK recovery skips the original campaign checkout and finds Python beside a standalone prompt",
+  async () => {
+    const { checkout, bin, python } = await modelInputCheckout();
+    const trusted = await trustedRecoveryPython(pythonOnPath()!);
+    const scanPromptFile = join(dirname(dirname(trusted)), "instructions.md");
+    await writeFile(scanPromptFile, "Review input handling.");
+    const f = await withProtectedExecutableRoots([checkout], () =>
+      interruptedScan("deep", false, { registrationFiles: { scanPromptFile } }),
+    );
+    await sealWithOriginalPlugin(f);
+    await rm(join(checkout, ".git"), { recursive: true });
+    f.environment.PATH = [bin, dirname(trusted)].join(delimiter);
+    await using client = resumeDependencies(f, () =>
+      fail("Unexpected model launch"),
+    ).createSecurity({ pythonPath: "python3" });
+    const result = await client.run(f.repository, {
+      mode: "deep",
+      resumeScanId: f.scanId,
+      outputDir: f.scanDir,
+      requireSealedResume: true,
+    });
+    expect(result.manifest.scan.id).toBe(f.scanId);
+    await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  },
+);
 
 function legacyNativeProfileRecipe(): {
   config: JsonObject;
@@ -1993,6 +2101,8 @@ test.skipIf(process.platform === "win32").each([
   ["single", "skill", "named"],
   ["bulk", "config", "named"],
   ["bulk", "config", "absolute"],
+  ["single", "legacy prompt", "named"],
+  ["bulk", "legacy prompt", "ambient"],
   ["single", "legacy native profile", "named"],
   ["single", "legacy native profile", "trusted absolute"],
   ["bulk", "legacy native profile", "ambient"],
@@ -2008,6 +2118,7 @@ test.skipIf(process.platform === "win32").each([
     const bulk = command === "bulk";
     const legacyProfile = source === "legacy native profile";
     const recipes = {
+      "legacy prompt": { pythonDiscoveryRoots: undefined },
       "legacy native profile": legacyNativeProfileRecipe(),
       config: { config: { model_instructions_file: instructions } },
       skill: {
@@ -2033,6 +2144,10 @@ test.skipIf(process.platform === "win32").each([
             "checkout symlink": join(alias, "python3"),
           }[selection];
     const cli = join(import.meta.dirname, "../src/cli.ts");
+    const fallback =
+      source === "legacy prompt"
+        ? [dirname(await trustedRecoveryPython(f.python))]
+        : [];
     const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], {
       cwd: f.root,
       env: {
@@ -2040,7 +2155,7 @@ test.skipIf(process.platform === "win32").each([
         HOME: f.root,
         TMPDIR: f.root,
         XDG_CACHE_HOME: join(f.root, "cache"),
-        PATH: [bin, f.environment.PATH].join(delimiter),
+        PATH: [bin, ...fallback, f.environment.PATH].join(delimiter),
         PYTHON: configuredPython,
         CODEX_CLI_PATH: join(f.root, "absent-codex"),
       },

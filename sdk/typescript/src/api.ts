@@ -262,6 +262,7 @@ import {
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   readSavedScanLifecycle,
+  savedCheckoutBoundaries,
   savedScanWorkbench,
 } from "./saved-scan-bootstrap.js";
 import {
@@ -322,6 +323,7 @@ import {
   type PluginInstall,
   type PluginZipSource,
   type ProcessEnvironment,
+  type PythonProtectionRoots,
   type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
   validateOutputDir,
@@ -381,6 +383,32 @@ interface PreparedRuntime {
   plugin: PluginInstall;
   environment: Record<string, string>;
   credentialsAvailable: boolean;
+}
+
+function scanPythonProtection(
+  inputs: LocalScanInputs | undefined,
+  config: JsonObject,
+  environment: ProcessEnvironment,
+) {
+  if (!inputs) return {};
+  return {
+    protectedRoot: [
+      ...new Set([
+        ...inputs.protectedRoots,
+        ...inputs.documentPaths,
+        ...inputs.executableSourcePaths,
+        ...(inputs.previous?.inputRoots ?? []),
+        ...scanConfigSourcePaths(
+          config,
+          inputs.outputDir ?? undefined,
+          environment,
+        ),
+      ]),
+    ],
+    discoveryProtectedRoots: inputs.previous?.pythonDiscoveryRoots,
+    excludeCheckoutPython: inputs.previous?.excludeCheckoutPython,
+    captureRoots: inputs.pythonRoots,
+  };
 }
 
 interface PreparedSession {
@@ -473,6 +501,8 @@ const scanLifecycleSchema = z.object({
 export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
 
 export interface ScanOptions extends ScanSettings {
+  /** @internal Document paths that the caller has already resolved to scan inputs. */
+  documentSourcePaths?: readonly string[];
   /** @internal A bounded batch omits unmetered model calls after the scan. */
   skipFindingMatching?: boolean;
   /** Explicit policy for the initial scan and its workers. */
@@ -804,6 +834,10 @@ interface LocalScanInputs extends Omit<
   stateDirectory: string;
   deepScanConfiguration?: ResolvedDeepScanConfig;
   prompts: ScanPromptSettings;
+  executableSourcePaths: readonly string[];
+  documentPaths: Set<string>;
+  previous?: Awaited<ReturnType<typeof savedCheckoutBoundaries>>;
+  pythonRoots: PythonProtectionRoots;
   retryRecipe?: JsonObject;
 }
 
@@ -987,6 +1021,7 @@ export class CodexSecurity {
         options: {
           ...options,
           ...local.prompts,
+          documentSourcePaths: undefined,
           target: options.target ?? "repository",
           mode: options.mode ?? DEFAULT_SCAN_MODE,
           workflowId: undefined,
@@ -1813,6 +1848,26 @@ export class CodexSecurity {
     return await this.#preflightInputs(inputs, options);
   }
 
+  async #readRubric(
+    inputs: LocalScanInputs,
+    options: ScanOptions,
+  ): Promise<SeverityRubricSnapshot | undefined> {
+    if (
+      this.#dependencies.hostedScan === undefined &&
+      options.rubricPath !== undefined &&
+      options.severityRubric === undefined &&
+      inputs.retryRecipe === undefined &&
+      options.resumeScanId === undefined
+    ) {
+      return await readSeverityRubricFile(
+        resolve(expandHome(options.rubricPath)),
+        inputs.protectedRoot,
+        inputs.documentPaths,
+      );
+    }
+    return undefined;
+  }
+
   async #preflightInputs(
     inputs: LocalScanInputs,
     options: ScanOptions,
@@ -1822,18 +1877,7 @@ export class CodexSecurity {
       await realpath(tmpdir()),
       "temporary",
     );
-    if (
-      this.#dependencies.hostedScan === undefined &&
-      options.rubricPath !== undefined &&
-      options.severityRubric === undefined &&
-      inputs.retryRecipe === undefined &&
-      options.resumeScanId === undefined
-    ) {
-      await readSeverityRubricFile(
-        resolve(expandHome(options.rubricPath)),
-        inputs.protectedRoot,
-      );
-    }
+    await this.#readRubric(inputs, options);
     if (options.knowledgeBasePaths?.length) {
       const knowledgeBase = await prepareKnowledgeBase(
         options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
@@ -2771,12 +2815,21 @@ export class CodexSecurity {
       }
       checkOpen();
 
+      const rubricFile = await this.#readRubric(inputs, options);
+      if (mode === "deep" && options.resumeScanId !== undefined)
+        inputs.previous = await savedCheckoutBoundaries(
+          this.#dependencies.environment,
+          options.resumeScanId,
+          signal,
+        );
+      for (const source of knowledgeBase?.protectedRoots ?? [])
+        inputs.documentPaths.add(source);
       const session = await this.#prepareSession(
         { protectedRoot },
         options,
         signal,
         temporaryRoot,
-        mode === "deep",
+        mode === "deep" ? inputs : undefined,
       );
       const {
         runtime,
@@ -3241,11 +3294,7 @@ export class CodexSecurity {
             .parse(inputs.retryRecipe["severityRubric"]);
         else if (options.severityRubric !== undefined)
           severityRubric = severityRubricSchema.parse(options.severityRubric);
-        else if (options.rubricPath !== undefined)
-          severityRubric = await readSeverityRubricFile(
-            resolve(expandHome(options.rubricPath)),
-            protectedRoot,
-          );
+        else if (rubricFile !== undefined) severityRubric = rubricFile;
         else
           severityRubric = await getDefaultSeverityRubric({
             environment: this.#dependencies.environment,
@@ -3265,8 +3314,7 @@ export class CodexSecurity {
       });
       if (mode === "deep") {
         const sources = [
-          ...(this.config.executableSourcePaths ?? []),
-          ...(inputs.deepScanConfiguration?.sourcePaths ?? []),
+          ...inputs.executableSourcePaths,
           ...scanConfigSourcePaths(
             workerRuntimeConfig,
             scanDir,
@@ -3286,7 +3334,10 @@ export class CodexSecurity {
         const sourceRoots = await Promise.all(
           executableSources.map((path) => gitProtectionRoots(path, signal)),
         );
-        recipe["executableSourceRoots"] = [...new Set(sourceRoots.flat())];
+        recipe["executableSourceRoots"] = [
+          ...new Set([...inputs.pythonRoots.protected, ...sourceRoots.flat()]),
+        ];
+        recipe["pythonDiscoveryRoots"] = inputs.pythonRoots.discovery;
         recipe["sealedPricing"] = {
           model,
           ...(pricingContext && { context: pricingContext }),
@@ -5524,7 +5575,7 @@ export class CodexSecurity {
     >,
     signal: AbortSignal,
     temporaryRoot?: string,
-    deepScan = false,
+    deepScan?: LocalScanInputs,
   ): Promise<PreparedSession> {
     if (this.#operationTelemetryStart !== null)
       await this.#operationTelemetryStart;
@@ -5564,6 +5615,7 @@ export class CodexSecurity {
       const python = await resolvePluginPython({
         environment,
         protectedRoot,
+        ...scanPythonProtection(deepScan, effectiveConfig, environment),
         signal,
       });
       return {
@@ -5789,6 +5841,7 @@ export class CodexSecurity {
         configuredPath: this.config.pythonPath,
         environment: helperEnvironment,
         protectedRoot,
+        ...scanPythonProtection(deepScan, effectiveConfig, helperEnvironment),
         signal,
       });
       checkOpen();
@@ -6266,7 +6319,11 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const mode = options.mode ?? DEFAULT_SCAN_MODE;
     validateMode(normalized, mode);
-    const prompts = await resolveScanPrompts(options, repo);
+    const { documentSourcePaths, ...prompts } = await resolveScanPrompts(
+      options,
+      repo,
+    );
+    const documentPaths = new Set(documentSourcePaths);
     if (prompts.validationPrompt !== undefined) {
       if (
         typeof prompts.validationPrompt !== "string" ||
@@ -6339,6 +6396,11 @@ export class CodexSecurity {
       protectedRoots,
       stateDirectory,
       prompts,
+      documentPaths,
+      pythonRoots: { protected: [], discovery: [] },
+      executableSourcePaths: executableSources.map((path) =>
+        resolveInputPath(path, process.cwd(), this.#dependencies.environment),
+      ),
       ...(deepScanConfiguration ? { deepScanConfiguration } : {}),
     };
   }

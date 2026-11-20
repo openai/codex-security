@@ -7281,7 +7281,7 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test("legacy profile recovery probes managed Python only outside a checkout", async () => {
+  test("legacy recovery probes managed Python only outside a checkout", async () => {
     const root = await temporaryDirectory();
     const installation = join(root, "installation");
     execNodePython(
@@ -7329,10 +7329,19 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(marker)).toBe(true);
     await rm(marker);
     await mkdir(join(installation, ".git"));
-    await expect(resolvePluginPython(options)).rejects.toBeInstanceOf(
-      PluginPythonUnavailableError,
-    );
-    expect(existsSync(marker)).toBe(false);
+    for (const excludeCheckoutPython of [true, "discovery"] as const) {
+      await expect(
+        resolvePluginPython({ ...options, excludeCheckoutPython }),
+      ).rejects.toBeInstanceOf(PluginPythonUnavailableError);
+      expect(existsSync(marker)).toBe(false);
+    }
+    const explicit = await resolvePluginPython({
+      ...options,
+      configuredPath: python,
+      excludeCheckoutPython: "discovery",
+    });
+    expect(await realpath(explicit)).toBe(await realpath(python));
+    expect(existsSync(marker)).toBe(true);
   });
 
   test("uses XDG_CACHE_HOME for Windows managed Python", async () => {

@@ -1752,7 +1752,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
             )
           : undefined,
       allowPathLookup: boundaries?.complete,
-      excludeCheckoutPython: boundaries?.missingProfileSources,
+      excludeCheckoutPython: boundaries?.excludeCheckoutPython,
     });
     if (
       checkingTarget &&
@@ -6615,6 +6615,7 @@ export async function main(
             pluginPath: options.pluginPath,
             pythonPath: options.python,
           };
+          const sourcePaths = new Set<string>();
           const components =
             options.componentsFile === undefined
               ? options.component.map((path) => ({ name: path, paths: [path] }))
@@ -6624,6 +6625,8 @@ export async function main(
                       await readRegularInputFile(
                         resolveCliPath(directory, options.componentsFile),
                         repository,
+                        undefined,
+                        sourcePaths,
                       )
                     ).replace(/^\uFEFF/u, ""),
                   ),
@@ -6675,7 +6678,11 @@ export async function main(
             config,
             scanOptions: {
               ...settings,
-              ...(await resolveScanPrompts(settings, repository, directory)),
+              ...(await resolveScanPrompts(
+                { ...settings, documentSourcePaths: [...sourcePaths] },
+                repository,
+                directory,
+              )),
             },
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,

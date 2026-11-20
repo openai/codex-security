@@ -23,6 +23,7 @@ type ResolvedScanPrompts = Pick<
   ScanPromptSettings,
   "scanPrompt" | "validationPrompt" | "postScanPrompt"
 > & {
+  documentSourcePaths?: readonly string[];
   scanPromptFile: undefined;
   validationPromptFile: undefined;
   postScanPromptFile: undefined;
@@ -30,16 +31,19 @@ type ResolvedScanPrompts = Pick<
 
 /** Resolve selected files once; an inline SDK prompt overrides its file. */
 export async function resolveScanPrompts(
-  options: ScanPromptSettings,
+  options: ScanPromptSettings & { documentSourcePaths?: readonly string[] },
   repository: string | DocumentRootSource,
   directory = process.cwd(),
 ): Promise<ResolvedScanPrompts> {
+  const sourcePaths = new Set(options.documentSourcePaths);
   const read = async (inline: string | undefined, file: string | undefined) =>
     inline !== undefined || file === undefined
       ? inline
       : await readRegularInputFile(
           resolveInputPath(file, directory),
           repository,
+          undefined,
+          sourcePaths,
         );
   const [scanPrompt, validationPrompt, postScanPrompt] = await Promise.all([
     read(options.scanPrompt, options.scanPromptFile),
@@ -54,6 +58,7 @@ export async function resolveScanPrompts(
     throw new CodexSecurityError("The validation prompt must not be empty.");
   }
   return {
+    ...(sourcePaths.size ? { documentSourcePaths: [...sourcePaths] } : {}),
     scanPrompt:
       options.scanPrompt !== undefined || scanPrompt?.trim()
         ? scanPrompt
@@ -113,16 +118,18 @@ export async function readRegularInputFile(
   path: string,
   repository: string | DocumentRootSource,
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
+  sourcePaths?: Set<string>,
 ): Promise<string> {
-  return (await readRegularInputFileBytes(path, repository, metadata)).toString(
-    "utf8",
-  );
+  return (
+    await readRegularInputFileBytes(path, repository, metadata, sourcePaths)
+  ).toString("utf8");
 }
 
 export async function readRegularInputFileBytes(
   path: string,
   repository: string | DocumentRootSource,
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
+  sourcePaths?: Set<string>,
 ): Promise<Buffer> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
@@ -166,7 +173,10 @@ export async function readRegularInputFileBytes(
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }
-    return await file.readFile();
+    const bytes = await file.readFile();
+    sourcePaths?.add(path);
+    sourcePaths?.add(canonical);
+    return bytes;
   } finally {
     await file.close();
   }
