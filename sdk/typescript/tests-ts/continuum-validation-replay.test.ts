@@ -83,7 +83,7 @@ describe("recorded shape, anonymised replay", () => {
     );
     expect(result.record?.reasons).toContainEqual(
       expect.objectContaining({
-        basis: "CODE",
+        basis: "FINDING",
         reason: expect.stringContaining("configurationNeeded"),
       }),
     );

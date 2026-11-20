@@ -198,12 +198,13 @@ describe("Continuum validation provider", () => {
         return response;
       }).validate(finding, { repositoryPath: "/repo" });
       expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
+      expect(result.record?.resultScope).toBe("finding");
       expect(result.record?.claimMatch).toBe("unknown");
       expect(result.record?.severityAfter).toBe("high");
     },
   );
 
-  test("does not use another finding's proof when a bundle has no matching result", async () => {
+  test("labels a bundle without a matching result at issue scope, never as the finding's proof", async () => {
     const aws = fakeAws();
     let elapsed = 0;
     const p = new ContinuumValidationProvider({
@@ -227,8 +228,14 @@ describe("Continuum validation provider", () => {
       },
     });
     const result = await p.validate(finding, { repositoryPath: "/repo" });
-    expect(result.record?.verdict).toBe("UNAVAILABLE");
-    expect(result.record?.severityAfter).toBe("high");
+    expect(result.record).toMatchObject({
+      verdict: "EXPLOITABLE",
+      resultScope: "issue",
+      claimMatch: "unknown",
+      severityAfter: "high",
+    });
+    expect(result.report).toContain("not an individual validation");
+    expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
   });
 
   test("polls a ready fifth finding before waiting on four pending findings", async () => {
@@ -290,7 +297,7 @@ describe("Continuum validation provider", () => {
     expect(result.report).not.toContain("current at submission");
   });
 
-  test.each(["multiple findings", "another sole finding", "wrong issue ARN"])(
+  test.each(["another sole finding", "wrong issue ARN"])(
     "rejects issue-wide proof with %s",
     async (scenario) => {
       const aws = fakeAws("duplicateOfIssueId");
@@ -305,8 +312,6 @@ describe("Continuum validation provider", () => {
         launcher: async (op, args, signal) => {
           const response = await aws.launcher(op, args, signal);
           if (op === "get-code-issue") {
-            if (scenario === "multiple findings")
-              response["findingIds"] = ["finding-1", "another-finding"];
             if (scenario === "another sole finding")
               response["findingIds"] = ["another-finding"];
             if (scenario === "wrong issue ARN")
@@ -357,6 +362,144 @@ describe("Continuum validation provider", () => {
     expect(fetched).toEqual(["new-validation", "older-validation"]);
     expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
   });
+
+  test("shared issue evidence returns promptly without changing the finding severity", async () => {
+    const aws = fakeAws();
+    const result = await provider(async (op, args, signal) => {
+      const response = await aws.launcher(op, args, signal);
+      if (op === "get-code-issue") {
+        response["findingIds"] = ["finding-1", "other-1", "other-2"];
+        response["severity"] = "CRITICAL";
+      }
+      return response;
+    }).validate(finding, { repositoryPath: "/repo" });
+    expect(aws.calls.filter((op) => op === "get-code-finding")).toHaveLength(1);
+    expect(result.record).toMatchObject({
+      resultScope: "issue",
+      issueFindingCount: 3,
+      joinedValidatedIssue: false,
+      verdict: "EXPLOITABLE",
+      severityBefore: "high",
+      severityAfter: "high",
+      providerSeverity: "critical",
+      claimMatch: "unknown",
+    });
+    expect(result.report).toContain(
+      "grouped this finding with 2 other findings",
+    );
+    expect(result.report).toContain("not an individual validation");
+    expect(result.report).toContain("Continuum issue severity: critical");
+    expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
+  });
+
+  test("labels a finding joining an already validated shared issue and stale scoring", async () => {
+    const aws = fakeAws("duplicateOfIssueId");
+    const result = await new ContinuumValidationProvider({
+      environmentId: "environment-1",
+      now: () => new Date("2026-11-14T00:00:00Z"),
+      delay: async () => {
+        throw new Error("must not wait");
+      },
+      launcher: async (op, args, signal) => {
+        const response = await aws.launcher(op, args, signal);
+        if (op === "get-code-issue")
+          response["findingIds"] = ["finding-1", "other-1"];
+        return response;
+      },
+    }).validate(finding, { repositoryPath: "/repo" });
+    expect(result.record).toMatchObject({
+      resultScope: "issue",
+      joinedValidatedIssue: true,
+      freshness: { stale: true },
+    });
+    expect(result.report).toContain(
+      "joined an issue Continuum had already validated",
+    );
+    expect(result.report).toContain("proof predates this submission");
+  });
+
+  test("shared issue without evidence keeps waiting", async () => {
+    const aws = fakeAws();
+    let rounds = 0;
+    const result = await provider(async (op, args, signal) => {
+      const response = await aws.launcher(op, args, signal);
+      if (op === "get-code-finding") rounds++;
+      if (op === "get-code-issue")
+        response["findingIds"] = ["finding-1", "other-1"];
+      if (op === "list-code-issue-artifacts" && rounds === 1)
+        return { items: [] };
+      return response;
+    }).validate(finding, { repositoryPath: "/repo" });
+    expect(rounds).toBe(2);
+    expect(result.record?.resultScope).toBe("issue");
+  });
+
+  test.each([1, 2])(
+    "an older per-finding result beats the newest issue proof with %i members",
+    async (members) => {
+      const aws = fakeAws();
+      const result = await provider(async (op, args, signal) => {
+        if (
+          op === "list-code-issue-artifacts" &&
+          args.at(-1) === "VALIDATION_EVIDENCE"
+        )
+          return {
+            items: [
+              { artifactId: "new", createdAt: "2026-11-14T00:00:00Z" },
+              { artifactId: "old", createdAt: "2026-11-13T00:00:00Z" },
+            ],
+          };
+        const response = await aws.launcher(op, args, signal);
+        if (op === "get-code-issue")
+          response["findingIds"] =
+            members === 1 ? ["finding-1"] : ["finding-1", "other-1"];
+        if (op === "get-code-issue-artifact" && args.at(-1) === "old")
+          (response["body"] as any).validationEvidence.perFindingResults = [
+            { findingId: "finding-1", exploitable: "NOT_EXPLOITABLE" },
+          ];
+        return response;
+      }).validate(finding, { repositoryPath: "/repo" });
+      expect(result.record).toMatchObject({
+        resultScope: "finding",
+        verdict: "NOT_EXPLOITABLE",
+        severityAfter: "high",
+        issueFindingCount: members,
+      });
+    },
+  );
+
+  test.each(["FINDING", "FUTURE_SOURCE"])(
+    "preserves %s reachability basis",
+    async (basis) => {
+      const aws = fakeAws();
+      const result = await provider(async (op, args, signal) => {
+        const response = await aws.launcher(op, args, signal);
+        if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
+          (response["body"] as any).prevalidationSignals.signals = [
+            {
+              dimension: "LIKELIHOOD_ASSESSMENT",
+              conclusion: "reachable",
+              preconditions: {
+                reachableFromAttacker: {
+                  value: true,
+                  basis,
+                  reason: "The finding describes a public route.",
+                },
+              },
+            },
+          ];
+        return response;
+      }).validate(finding, { repositoryPath: "/repo" });
+      expect(result.report).toContain(
+        `reachable from attacker (basis ${basis})`,
+      );
+      expect(result.record?.reasons).toContainEqual({
+        basis,
+        reason:
+          "reachableFromAttacker: true — The finding describes a public route.",
+      });
+    },
+  );
 
   test("retries throttling within the same deadline", async () => {
     const aws = fakeAws();

@@ -162,6 +162,103 @@ await test("configured plugin completion returns supplemental results and preser
   }
 });
 
+for (const reachable of [true, false, undefined])
+  await test(`compact completion distinguishes shared issue results with reachability ${reachable}`, async () => {
+    const root = await temporaryDirectory("plugin-validation-issue-");
+    const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+    process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+    try {
+      const scanDir = join(root, "scan");
+      await mkdir(scanDir);
+      await writeFile(
+        join(root, "security.json"),
+        JSON.stringify({
+          scan: {
+            validation: {
+              provider: "continuum",
+              continuum: { environment_id: "synthetic-environment" },
+            },
+          },
+        }),
+      );
+      await writeFile(
+        join(scanDir, "findings.json"),
+        JSON.stringify({ findings: [{ id: "item-1" }] }),
+      );
+      await bindValidationProvider("issue-scan", root, "security.json", true);
+      const result = await validateCompletedScan(
+        { scanId: "issue-scan", targetPath: root, scanDir },
+        () => ({
+          name: "fake",
+          version: "1",
+          async validate() {
+            return {
+              disposition: "reportable" as const,
+              report: "Synthetic issue-level result",
+              provenance: {
+                provider: "fake",
+                providerVersion: "1",
+                validatedAt: "2026-01-01",
+              },
+              record: {
+                itemId: "item-1",
+                provider: "fake",
+                verdict: "EXPLOITABLE",
+                severityBefore: "high",
+                severityAfter: "high",
+                providerSeverity: "critical",
+                resultScope: "issue" as const,
+                issueFindingCount: 2,
+                joinedValidatedIssue: true,
+                reachableFromAttacker: reachable,
+                claimMatch: "unknown" as const,
+                reasons: [
+                  {
+                    basis: "FINDING" as const,
+                    reason:
+                      "Basis: FINDING — reachableFromAttacker: true (Reported public route).",
+                  },
+                ],
+                freshness: {
+                  stale: true,
+                  reasons: ["Evidence predates submission."],
+                },
+              },
+            };
+          },
+        }),
+      );
+      const completion = validationCompletionText(result);
+      assert.match(completion, /Codex severity high retained/);
+      assert.match(completion, /with 1 other findings/);
+      assert.match(
+        completion,
+        /Issue-level verdict: EXPLOITABLE; issue severity: critical/,
+      );
+      assert.match(completion, /Not individually validated/);
+      assert.ok(
+        completion.includes(
+          `Issue reachability: ${reachable === true ? "reachable from attacker" : reachable === false ? "not reachable from attacker" : "unknown"}.`,
+        ),
+      );
+      assert.match(completion, /Context: Basis: FINDING/);
+      assert.match(
+        completion,
+        /joined an issue Continuum had already validated/,
+      );
+      assert.doesNotMatch(completion, /high → critical/);
+      const saved = JSON.parse(
+        await readFile(join(scanDir, "validation.json"), "utf8"),
+      );
+      assert.equal(saved.items[0].resultScope, "issue");
+      assert.equal(saved.items[0].issueFindingCount, 2);
+    } finally {
+      if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+      else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 await test("model-authored supplemental files cannot impersonate provider results or disclose symlink targets", async () => {
   const root = await temporaryDirectory("plugin-validation-symlink-");
   const oldState = process.env.CODEX_SECURITY_STATE_DIR;
