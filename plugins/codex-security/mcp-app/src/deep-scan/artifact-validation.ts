@@ -228,11 +228,11 @@ export async function readAcceptedDiscovery(
   );
   const history = [...current, ...archived];
   const receiptDigests = new Map<string, string>();
-  const receiptSources = archived.length
-    ? [result, ...history.map(({ input }) => input)]
-    : [];
-  for (const source of receiptSources) {
-    for (const surface of source.reviewState.surfaces) {
+  if (history.length) {
+    const sources = [result, ...history.map(({ input }) => input)];
+    for (const surface of sources.flatMap(
+      ({ reviewState }) => reviewState.surfaces,
+    )) {
       for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
         const ref = posix.normalize(value);
         const shared = recordedScanReceiptRefs(surface).includes(ref);
@@ -254,8 +254,6 @@ export async function readAcceptedDiscovery(
         }
       }
     }
-  }
-  if (history.length) {
     const prefix = workerArtifactPrefix(artifacts.scanDir, worker.resultPath);
     result = await reconcileAcceptedWorkerHistory(
       context,

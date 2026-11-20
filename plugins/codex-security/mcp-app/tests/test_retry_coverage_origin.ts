@@ -51,6 +51,28 @@ test("three actual cumulative worker attempts retain original coverage ownership
   }
 });
 
+test("a direct terminal result matches its first checkpoint by receipt", async (t) => {
+  const f = await workerHistoryFixture(t, 1);
+  const ref = "artifacts/review.txt";
+  await mkdir(path.join(f.output, "artifacts"));
+  await writeFile(path.join(f.output, ref), "Synthetic evidence");
+  const surface = {
+    label: "Review",
+    disposition: "no_issue_found",
+    receiptRefs: [ref],
+  };
+  await f.record(
+    reviewDraft(false, { surfaces: [{ ...surface, id: "saved" }] }),
+  );
+  await writeFile(
+    f.resultPath,
+    JSON.stringify(reviewDraft(true, { surfaces: [surface] })),
+  );
+  const { coverage } = await f.readAccepted();
+  assert.equal(coverage.surfaces.length, 1);
+  assert.equal(coverage.surfaces[0].provenance.sourceId, "saved");
+});
+
 test("an accepted retry reconciles each occurrence of legacy ID-less surfaces and deferrals", async (t) => {
   const f = await workerHistoryFixture(t, 2);
   const task = { reason: "Synthetic pending review" };
