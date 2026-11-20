@@ -118,6 +118,13 @@ test("inline Codex overrides omit optional null fields like the file writer", as
   });
 });
 
+test("reports null array entries when resolving a Codex profile", () => {
+  const resolveProfile = () =>
+    resolveCodexProfile({ skills: { config: [null] } });
+  expect(resolveProfile).toThrow(ConfigurationError);
+  expect(resolveProfile).toThrow("cannot contain null");
+});
+
 function runPinnedCodex(
   codexHome: string,
   arguments_: readonly string[],
@@ -441,7 +448,7 @@ describe("Codex configuration", () => {
       "sqlite_home",
       "log_dir",
     ].flatMap((key) =>
-      [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+      [undefined, "explicit.md", null].map((explicit) => ({ key, explicit })),
     ),
   )(
     "resolves file-profile paths before explicit overrides: %j",
@@ -459,7 +466,14 @@ describe("Codex configuration", () => {
         { codexOverrides: overrides },
         home,
       );
-      expect(config[key]).toBe(explicit ?? join(home, "instructions.md"));
+      const expected =
+        explicit === undefined ? join(home, "instructions.md") : explicit;
+      expect(config[key]).toBe(expected);
+      const path = join(home, "worker.toml");
+      await writeCodexConfig(path, resolveCodexProfile(config));
+      expect(parse(await readFile(path, "utf8"))[key]).toBe(
+        expected ?? undefined,
+      );
       expect(overrides).toEqual({
         profile: "review",
         ...(explicit === undefined ? {} : { [key]: explicit }),
