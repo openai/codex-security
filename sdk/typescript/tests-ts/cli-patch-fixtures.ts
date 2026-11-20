@@ -178,6 +178,10 @@ export function patchDependencies(
 ) {
   return dependencies({
     ...options,
+    environment: {
+      GH_CONFIG_DIR: resolve("/synthetic/gh"),
+      ...options.environment,
+    },
     onRepositoryCommand: async (command, args, repository, commandOptions) => {
       const output = await options.onRepositoryCommand?.(
         command,

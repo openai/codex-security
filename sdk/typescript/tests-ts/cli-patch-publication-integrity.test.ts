@@ -1088,11 +1088,10 @@ describe("patch publication integrity", () => {
                 SSH_ASKPASS: `sub${sep}app.ts`,
               }
             : {};
-      const providerConfiguration = kind.includes(
+      const providerConfiguration = join(directory, "provider-config");
+      const missingConfiguration = kind.includes(
         "removed provider configuration",
-      )
-        ? join(subdirectory, "provider-config")
-        : join(directory, "provider-config");
+      );
       const providerEnvironment = kind.includes("provider configuration")
         ? { GH_CONFIG_DIR: relative(subdirectory, providerConfiguration) }
         : kind.includes("relative GitLab configuration")
@@ -1116,9 +1115,6 @@ describe("patch publication integrity", () => {
           join(providerConfiguration, "config.yml"),
           "git_protocol: https\n",
         );
-        if (kind.includes("removed provider configuration")) {
-          await writeFile(join(repository, ".gitignore"), "provider-config/\n");
-        }
       }
       await writeFile(
         join(subdirectory, ".codex", "config.toml"),
@@ -1233,6 +1229,8 @@ describe("patch publication integrity", () => {
                 selectedBeforePatch = git("rev-parse", "HEAD");
               if (removesComponent) {
                 await rm(subdirectory, { recursive: true });
+                if (missingConfiguration)
+                  await rm(providerConfiguration, { recursive: true });
                 if (kind.includes("replaced by a file"))
                   await writeFile(subdirectory, "replacement file\n");
                 if (kind.includes("replaced by a directory link")) {
@@ -1379,9 +1377,6 @@ describe("patch publication integrity", () => {
           "fixed\n",
         );
       }
-      const missingConfiguration = kind.includes(
-        "removed provider configuration",
-      );
       const linkedComponent = kind.includes("replaced by a directory link");
       expect(outcome.exitCode, outcome.stderr).toBe(
         missingConfiguration || linkedComponent ? 2 : 0,
@@ -2396,12 +2391,13 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"],
         {
           onCodex,
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, cwd) => {
             if (command === "git") {
               if (args[0] === "config" && args[1] === "--local")
                 return args.at(-1)?.endsWith("PatchCommit")
                   ? "verified-commit"
                   : "Synthetic body";
+              if (args.includes("--show-toplevel")) return cwd;
               if (args[0] === "rev-parse") return "verified-commit";
               if (args[0] === "remote")
                 return `https://${client === "glab" ? "gitlab.com" : "github.example.test"}/example/repository.git`;

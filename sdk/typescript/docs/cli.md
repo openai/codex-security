@@ -3314,10 +3314,12 @@ port, use the account configured for that endpoint or select the base explicitly
 with `GH_REPO=HOST:PORT/OWNER/REPO`. The `origin` push destination identifies
 the repository that supplies the head branch.
 
-If you configure GitHub CLI's `http_unix_socket`, keep the socket and its
-symlinks outside the checkout and other directories the patch can write to.
-The path must reach the same socket from every publication directory. On Linux,
-keep the path and its symlinks outside `/proc` and `/dev/fd`.
+Publication uses the GitHub CLI configuration directory resolved before the
+patch. Keep that directory, its configuration files and any configured
+`http_unix_socket` outside the checkout and other directories the patch
+can write to. The socket path must reach the same socket from every
+publication directory. On Unix, keep these paths and their symlinks outside
+`/proc` and `/dev/fd`.
 
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with

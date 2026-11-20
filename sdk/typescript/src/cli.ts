@@ -12765,33 +12765,42 @@ async function patchTransportIdentity(
   }
 }
 
-async function captureGithubSocket(
+const processRelativePaths =
+  process.platform === "win32" ? [] : ["/proc", "/dev/fd"];
+
+async function captureGithubInputs(
+  config: string | undefined,
   socket: string,
   cwd: string,
   repository: string,
   dependencies: CliDependencies,
 ) {
-  // Linux abstract sockets have no pathname to replace.
-  if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
-    return;
+  if (!config) return;
   const { protectedRoots } = await patchTransportDirectories(
     repository,
     dependencies,
   );
-  if (process.platform === "linux") protectedRoots.push("/proc", "/dev/fd");
   const access = dependencies.patchTransportAccess;
   const identity = async (directory: string) => {
+    // A patch writer can replace a denied file by renaming its parent directory.
+    const host = await trustedHostPathResolver(directory, [
+      ...protectedRoots,
+      ...processRelativePaths,
+      ...(access?.writable ?? []),
+    ]);
+    if (
+      access?.unknownWriters ||
+      githubConfigFiles.some((name) => !host(join(config, name)))
+    )
+      throw patchTransportChanged("gh");
+    // Linux abstract sockets have no pathname to replace.
+    if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
+      return;
     const path =
       process.platform === "win32"
         ? resolve(directory, socket)
         : resolveGitControlPath(directory, socket);
-    // gh opens this path after verification. A writable ancestor could redirect it.
-    const host = await trustedHostPathResolver(directory, [
-      ...protectedRoots,
-      ...(access?.writable ?? []),
-    ]);
-    if (!host(path) || access?.unknownWriters)
-      throw patchTransportChanged("gh");
+    if (!host(path)) throw patchTransportChanged("gh");
     return patchFileStamp(await stat(path, { bigint: true }));
   };
   const endpoint = await identity(cwd);
@@ -12829,7 +12838,11 @@ async function captureHostingConfig(
           files.set(file.target, file);
       }
     } else if (provider === "gh") {
-      const directory = resolve(cwd, githubConfigDirectory(environment));
+      const physical = await trustedHostPathResolver(cwd, processRelativePaths);
+      const directory = physical(
+        resolve(cwd, githubConfigDirectory(environment)),
+      );
+      if (!directory) throw patchTransportChanged(provider);
       pinned["GH_CONFIG_DIR"] = directory;
       for (const name of githubConfigFiles) paths.add(join(directory, name));
     } else {
@@ -12855,16 +12868,21 @@ async function captureHostingConfig(
         )
       ).replace(/\n$/u, "");
     }
-    const verifySocket = await captureGithubSocket(
+    const verifyGithub = await captureGithubInputs(
+      config,
       socket,
       cwd,
       repository,
       dependencies,
     );
+    const checks =
+      config && dependencies.patchTransportAccess
+        ? { writers: dependencies.patchTransportAccess }
+        : {};
     return async (directory = cwd) => {
       for (const [path, file] of files)
-        await patchTransportIdentity(path, provider, file);
-      await verifySocket?.(directory);
+        await patchTransportIdentity(path, provider, file, checks);
+      await verifyGithub?.(directory);
       return pinned;
     };
   } catch (error) {
@@ -12949,7 +12967,7 @@ async function requireProtectedTransportLinks(
     }
   }
   throw new CodexSecurityError(
-    "Cannot publish with a hard-linked transport file that Git may use after a hook. Select a separate executable or input file outside the checkout.",
+    "Cannot publish with a hard-linked transport file that the patch could modify before use. Select a separate executable or input file outside the checkout.",
   );
 }
 

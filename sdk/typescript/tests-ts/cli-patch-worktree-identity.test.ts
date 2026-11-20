@@ -1252,11 +1252,12 @@ describe("ordinary patch snapshot context", () => {
       );
       const foreignObjects = foreignGit("count-objects", "-v");
       const foreignIndex = await readFile(join(foreign, ".git/index"));
+      const providerConfig = join(remote, "provider-config");
       const environment = {
         ...(settings === "relative"
           ? { GIT_DIR: "../.git", GIT_WORK_TREE: ".." }
           : {}),
-        GH_CONFIG_DIR: "provider-config",
+        GH_CONFIG_DIR: relative(directory, providerConfig),
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "core.quotePath",
         GIT_CONFIG_VALUE_0: "false",
@@ -1330,7 +1331,7 @@ describe("ordinary patch snapshot context", () => {
               gitfilePublication.push([...args]);
             if (args[1] === "list") return "[]";
             expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(
-              resolve(directory, "provider-config"),
+              providerConfig,
             );
             return "https://github.example.test/example/repository/pull/1";
           },

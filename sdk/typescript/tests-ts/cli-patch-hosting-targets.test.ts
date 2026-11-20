@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  link,
   symlink,
   unlink,
   writeFile,
@@ -29,22 +30,33 @@ const fixtures = patchDirectories();
 const branch = "codex-security/patch-scan-1";
 
 describe("GitHub patch destinations", () => {
-  const socketCases = ["stable", "replaced", "writable", "writable alias"];
+  const socketCases = [
+    "stable",
+    "replaced",
+    "writable",
+    "writable alias",
+    "config alias",
+    "config hard link",
+  ];
   if (process.platform === "linux") socketCases.push("process-relative");
   test.skipIf(process.platform === "win32").each(socketCases)(
-    "binds the configured GitHub CLI socket across the patch: %s",
+    "binds GitHub CLI configuration and sockets across the patch: %s",
     async (mode) => {
-      const { directory } = await publicationRepository(fixtures);
+      const { directory, git } = await publicationRepository(fixtures);
       const caller = mode.startsWith("writable")
         ? join(directory, "src")
         : directory;
       const config = await fixtures.create("gh-");
+      const alias = join(caller, "gh-config");
+      await symlink(config, alias);
+      if (mode === "config alias")
+        await symlink(join(alias, "source.yml"), join(config, "config.yml"));
       const name = " gh";
       const endpoint = join(
         mode.startsWith("writable") ? caller : config,
         name,
       );
-      let socket = relative(caller, endpoint);
+      let socket = mode.startsWith("config") ? "" : relative(caller, endpoint);
       if (mode === "process-relative")
         socket = "/proc/self/cwd/" + relative(process.cwd(), endpoint);
       if (mode === "writable alias") {
@@ -55,6 +67,10 @@ describe("GitHub patch destinations", () => {
         join(config, "config.yml"),
         `http_unix_socket: "${socket}"\n`,
       );
+      if (mode === "config hard link")
+        await link(join(config, "config.yml"), join(caller, "settings.yml"));
+      git("add", ".");
+      git("commit", "-m", "Select provider configuration through a symlink");
       const listen = () =>
         Bun.serve({ unix: endpoint, fetch: () => new Response() });
       const sockets = [listen()];
@@ -63,10 +79,12 @@ describe("GitHub patch destinations", () => {
       try {
         const outcome = await runPublicationWorkflow("issue", {
           currentDirectory: caller,
-          environment: { GH_CONFIG_DIR: config },
+          environment: { GH_CONFIG_DIR: "gh-config" },
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "gh") {
               if (edited) callsAfterEdit++;
+              if (edited && mode === "stable")
+                expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(config);
               if (args[0] === "config") {
                 expect(args).toEqual(["config", "get", "http_unix_socket"]);
                 return socket + "\n";
@@ -92,7 +110,9 @@ describe("GitHub patch destinations", () => {
         } else {
           expect(outcome.exitCode, outcome.stderr).toBe(2);
           expect(outcome.stderr).toContain(
-            "GitHub CLI configuration changed before publication",
+            mode === "config hard link"
+              ? "hard-linked transport file"
+              : "GitHub CLI configuration changed before publication",
           );
           expect(callsAfterEdit).toBe(0);
         }
@@ -104,6 +124,7 @@ describe("GitHub patch destinations", () => {
 
   test.each([
     ["GitHub", "creation"],
+    ["GitHub", "in a writable directory"],
     ["GitLab", "creation"],
     ...(process.platform === "win32"
       ? []
@@ -142,7 +163,9 @@ describe("GitHub patch destinations", () => {
               await symlink("routing.yml", config);
             }
             await writeFile(
-              config,
+              mutation === "in a writable directory"
+                ? join(directory, "src/example.yml")
+                : config,
               gitlab
                 ? "hosts:\n  gitlab.com:\n    api_host: redirect.example.test\n"
                 : "http_unix_socket: synthetic.sock\n",

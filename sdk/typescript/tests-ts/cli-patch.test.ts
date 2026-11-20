@@ -3413,6 +3413,7 @@ describe("inherited patch publication context", () => {
                     : root,
             };
       const settingsBefore = JSON.stringify(gitSettings);
+      let environmentBefore: NodeJS.ProcessEnv | undefined;
       let inputDependencies: ReturnType<typeof dependencies> | undefined;
       let inputRunner:
         ReturnType<typeof dependencies>["runRepositoryCommand"] | undefined;
@@ -3471,6 +3472,7 @@ describe("inherited patch publication context", () => {
         {
           configure: (current) => {
             inputDependencies = current;
+            environmentBefore = { ...current.environment };
             inputRunner = current.runRepositoryCommand;
             current.assessPatchRisk = async (request) => {
               expect(request.repository).toBe(root);
@@ -3494,9 +3496,7 @@ describe("inherited patch publication context", () => {
         },
       );
       expect(inputDependencies!.runRepositoryCommand).toBe(inputRunner!);
-      expect(JSON.stringify(inputDependencies!.environment)).toBe(
-        settingsBefore,
-      );
+      expect(inputDependencies!.environment).toEqual(environmentBefore!);
       expect(JSON.stringify(gitSettings)).toBe(settingsBefore);
       if (settings === "empty") {
         expect(outcome.exitCode).toBe(flag === undefined ? 0 : 2);
