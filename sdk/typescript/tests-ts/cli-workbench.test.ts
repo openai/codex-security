@@ -1458,6 +1458,31 @@ describe("CLI workbench", () => {
             "Error: unexpected status 401 Unauthorized: synthetic authentication failure",
           ],
           [
+            "provider token",
+            "turn",
+            "HTTP 403 ExpiredTokenException: The security token included in the request has expired.",
+          ],
+          [
+            "provider client",
+            "turn",
+            "UnrecognizedClientException: The security token included in the request is invalid.",
+          ],
+          [
+            "provider signature",
+            "turn",
+            "HTTP 400 IncompleteSignature: The request signature is incomplete.",
+          ],
+          [
+            "provider status",
+            "turn",
+            "403 ExpiredTokenException: The security token included in the request has expired.",
+          ],
+          [
+            "wrapped provider token",
+            "exit",
+            "Error: unexpected status 403 Forbidden: ExpiredTokenException: The security token included in the request has expired.",
+          ],
+          [
             "configuration",
             "exit",
             "Error loading configuration: invalid synthetic matcher setting",

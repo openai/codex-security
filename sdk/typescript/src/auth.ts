@@ -31,6 +31,10 @@ export const NATIVE_REFRESH_FAILURE_PATTERN =
   /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu;
 
 /** @internal */
+export const NATIVE_PROVIDER_AUTH_FAILURE_PATTERN =
+  /\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu;
+
+/** @internal */
 export function environmentEntry(
   environment: ProcessEnvironment,
   requested: string,

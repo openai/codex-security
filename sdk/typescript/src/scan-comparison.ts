@@ -28,6 +28,7 @@ import {
   readCodexHomeConfig,
   NATIVE_REFRESH_RECOVERY_PATTERN,
   NATIVE_REFRESH_FAILURE_PATTERN,
+  NATIVE_PROVIDER_AUTH_FAILURE_PATTERN,
   withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
@@ -428,10 +429,16 @@ export async function matchScanFindingsInternal(
             nativeMessage.startsWith("failed to load bootstrap configuration")
           )
             throw new ConfigurationError(error.message, { cause: error });
+          const providerMessage = nativeMessage.replace(
+            /^(?:(?:HTTP )?4\d\d |unexpected status 4\d\d [^:\n]+: )/u,
+            "",
+          );
           if (
             nativeMessage.startsWith("unexpected status 401 Unauthorized:") ||
             nativeMessage.match(NATIVE_REFRESH_RECOVERY_PATTERN)?.index === 0 ||
-            nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index === 0
+            nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index === 0 ||
+            providerMessage.match(NATIVE_PROVIDER_AUTH_FAILURE_PATTERN)
+              ?.index === 0
           ) {
             throw new AuthenticationRequiredError(error.message, {
               cause: error,
