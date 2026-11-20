@@ -935,11 +935,18 @@ test("patch model and clean filters cannot read selected authentication files", 
   const gh = join(operator, "selected gh");
   const glab = join(operator, "selected glab");
   const pgpass = join(operator, "selected pgpass");
+  const pgservice = join(operator, "selected pg service");
+  const pgKey = join(operator, "selected pg key");
+  const pgCert = join(operator, "selected pg cert");
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
   const cloudDefault = "application_default_credentials.json";
   const appdata = join(operator, "Roaming");
+  const pgTlsDir =
+    process.platform === "win32"
+      ? join(appdata, "postgresql")
+      : join(operator, ".postgresql");
   const ssh = join(operator, ".ssh");
   await mkdir(gh);
   await mkdir(ssh);
@@ -956,6 +963,9 @@ test("patch model and clean filters cannot read selected authentication files", 
     GH_CONFIG_DIR: gh,
     GLAB_CONFIG_DIR: glab,
     PGPASSFILE: pgpass,
+    PGSERVICEFILE: pgservice,
+    PGSSLKEY: pgKey,
+    PGSSLCERT: pgCert,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
@@ -971,6 +981,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     CLOUDSDK_CONFIG: cloudConfig,
     APPDATA: appdata,
+    PGSYSCONFDIR: operator,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -1030,6 +1041,15 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(gh, "hosts.yml"),
     join(defaultGh, "hosts.yml"),
     pgpass,
+    pgservice,
+    pgKey,
+    pgCert,
+    join(pgTlsDir, "postgresql.key"),
+    join(pgTlsDir, "postgresql.crt"),
+    join(operator, "pg_service.conf"),
+    process.platform === "win32"
+      ? join(appdata, "postgresql", ".pg_service.conf")
+      : join(operator, ".pg_service.conf"),
     process.platform === "win32"
       ? join(appdata, "postgresql", "pgpass.conf")
       : join(operator, ".pgpass"),
@@ -1075,8 +1095,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       for (const directory of glabDirectories)
         await mkdir(directory, { recursive: true });
       await mkdir(cloudConfig);
-      if (process.platform === "win32")
-        await mkdir(join(appdata, "postgresql"), { recursive: true });
+      await mkdir(pgTlsDir, { recursive: true });
       await mkdir(join(operator, ".config", "gcloud"));
       if (process.platform === "win32")
         await mkdir(join(appdata, "gcloud"), { recursive: true });
