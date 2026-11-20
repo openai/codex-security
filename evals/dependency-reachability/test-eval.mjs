@@ -171,6 +171,17 @@ test("the repository grader binds each service's verdict to its own checkout evi
     );
   }
   assert.equal(gradeMixed(report, fixture).outcomes.length, 2);
+  const disabled = structuredClone(report);
+  disabled.grader = "disabled";
+  for (const claim of disabled.claims) {
+    claim.state = "unreviewed";
+    delete claim.decision;
+  }
+  assert.deepEqual(
+    gradeMixed(disabled, fixture, false, undefined, "disabled"),
+    gradeMixed(report, fixture),
+  );
+  assert.throws(() => gradeMixed(disabled, fixture), /expected reviewer mode/u);
   const context = structuredClone(report);
   const row = context.uses[0];
   // Context was approved with this exact claim, but the reviewer did not use
@@ -442,17 +453,45 @@ test("the evidence grader checks citations against the stdio server's original r
       supports: ref.supports,
     });
   }
-  gradeEvidenceSource(report, use, { calls, withAccess: true });
+  const source = { calls, requestService: "notes" };
+  gradeEvidenceSource(report, use, source);
   const compact = structuredClone(use);
   for (const ref of compact.observations) {
     delete ref.sha256;
     delete ref.tool;
   }
-  gradeEvidenceSource(report, compact, { calls, withAccess: true });
+  gradeEvidenceSource(report, compact, source);
+  const disabled = structuredClone(report);
+  disabled.grader = "disabled";
+  disabled.claims[0].state = "unreviewed";
+  delete disabled.claims[0].decision;
+  gradeEvidenceSource(disabled, compact, source);
+  disabled.claims[0].evidence.receiptIds.pop();
+  assert.throws(
+    () => gradeEvidenceSource(disabled, compact, source),
+    /actual request_record/u,
+  );
+  const sibling = { calls: structuredClone(calls), requestService: "reviews" };
+  sibling.calls[1].result.content[0].text =
+    "An anonymous client sent its own text to POST /preview on service reviews at revision abc.";
+  assert.throws(
+    () => gradeEvidenceSource(report, compact, sibling),
+    /unrelated request/u,
+  );
+  const releaseOnly = structuredClone(report);
+  releaseOnly.claims[0].payload.use.observations.pop();
+  gradeEvidenceSource(
+    releaseOnly,
+    {
+      ...compact,
+      observations: compact.observations.slice(0, 1),
+    },
+    sibling,
+  );
   const unreviewed = structuredClone(report);
   unreviewed.claims[0].decision.evidenceKeys.pop();
   assert.throws(
-    () => gradeEvidenceSource(unreviewed, compact, { calls, withAccess: true }),
+    () => gradeEvidenceSource(unreviewed, compact, source),
     /actual request_record/u,
   );
   const access = use.observations[1];
@@ -461,7 +500,7 @@ test("the evidence grader checks citations against the stdio server's original r
     access.record =
       "An invented request.";
   assert.throws(
-    () => gradeEvidenceSource(report, use, { calls, withAccess: true }),
+    () => gradeEvidenceSource(report, use, source),
     /actual request_record response|receipt identity/u,
   );
 });

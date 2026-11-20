@@ -31,8 +31,9 @@ const usage = `Usage: node run.mjs behavior [--out NEW_DIR]
        node run.mjs contracts --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs benchmark --cli /path/to/codex-security.mjs [--out NEW_DIR]
        node run.mjs live --cli /path/to/codex-security.mjs [--case CASE] [--model MODEL] [--out NEW_DIR]
+       With --case mixed-*: [--grader enabled|disabled] (default enabled)
 Use --packets DIR to reuse an earlier run's packets/ directory.
-Cases: positive, fixed, unbound, missing-version, mixed-services, mixed-package, mixed-evidence, mixed-evidence-no-access, or all (default).`;
+Cases: positive, fixed, unbound, missing-version, mixed-services, mixed-package, mixed-evidence, mixed-evidence-no-access, mixed-evidence-sibling, or all (default).`;
 const { positionals, values } = parseArgs({
   allowPositionals: true,
   options: {
@@ -40,6 +41,7 @@ const { positionals, values } = parseArgs({
     help: { type: "boolean", short: "h" },
     cli: { type: "string" },
     model: { type: "string" },
+    grader: { type: "string" },
     case: { type: "string" },
     out: { type: "string" },
   },
@@ -58,6 +60,7 @@ const allCases = [
   "mixed-package",
   "mixed-evidence",
   "mixed-evidence-no-access",
+  "mixed-evidence-sibling",
 ];
 if (
   positionals.length !== 1 ||
@@ -66,6 +69,9 @@ if (
   (values.case &&
     (mode !== "live" || ![...allCases, "all"].includes(values.case))) ||
   (values.model && mode !== "live") ||
+  (values.grader !== undefined &&
+    (!["enabled", "disabled"].includes(values.grader) ||
+      !values.case?.startsWith("mixed-"))) ||
   (values.packets && mode === "behavior")
 ) {
   throw new Error(usage);
@@ -278,12 +284,22 @@ try {
           : mixed
             ? reviewedCve
             : summaryCve;
-      const args = ["check", subject];
+      const grader = values.grader ?? "enabled";
+      const args = ["check"];
+      if (grader === "disabled") args.push("--grader=disabled");
+      args.push(subject);
+      if (mixed) args.push("--progress-events", join(runDir, "progress.jsonl"));
       if (!mixed) {
         for (const role of ["sources", "sinks", "stacks"])
           args.push("--" + role, join(fixture.input, role + ".json"));
       }
       let transcript;
+      const requestService =
+        id === "mixed-evidence"
+          ? "notes"
+          : id === "mixed-evidence-sibling"
+            ? "reviews"
+            : undefined;
       if (id.startsWith("mixed-evidence")) {
         const records = join(answerDir, "records.json");
         transcript = join(answerDir, "calls.jsonl");
@@ -292,8 +308,8 @@ try {
         await jsonFile(records, {
           notes: {
             release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version ${mixedServiceVersions.notes}.`,
-            ...(id === "mixed-evidence" && {
-              request_record: `An anonymous client sent its own text to POST /preview on service notes at revision ${fixture.sha}, and received the parsed links from its submitted body.`,
+            ...(requestService && {
+              request_record: `An anonymous client sent its own text to POST /preview on service ${requestService} at revision ${fixture.sha}, and received the parsed links from its submitted body.`,
             }),
           },
         });
@@ -328,6 +344,10 @@ try {
       assert.equal(git(fixture.repo, "status", "--porcelain"), "");
       const result = {
         id,
+        ...(mixed && {
+          grader,
+          argv: [process.execPath, cli, "exploitability", ...args],
+        }),
         sourceSha: mixed ? fixture.sha : fixture.target.sha,
         fixtureDigest: mixed
           ? fixture.sha
@@ -370,7 +390,8 @@ try {
                 report,
                 fixture,
                 id === "mixed-package",
-                calls && { calls, withAccess: id === "mixed-evidence" },
+                calls && { calls, requestService },
+                grader,
               )
             : gradeStack(report, fixture, { reviewed: true });
           result.status = "passed";

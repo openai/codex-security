@@ -82,7 +82,7 @@ A separate suite exercises launcher selection and catalog evidence on five fixtu
 
 ## Local service and captured stack checks
 
-`run.mjs` exercises the installed CLI against two small Git projects. Four cases supply measured stack evidence for a synthetic availability bug. Four cases check two configured services using the same public dependency.
+`run.mjs` exercises the installed CLI against two small Git projects. Four cases supply measured stack evidence for a synthetic availability bug. Five cases check two configured services using the same public dependency.
 
 | Case              | Inputs and deciding outcome                                                                                                                                                                                                                                                                                                                           |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -95,11 +95,18 @@ A separate suite exercises launcher selection and catalog evidence on five fixtu
 
 The example summary package and CVE-2099-1001 are fictional. The external observer takes a V8 breakpoint inside the actual library during a request, verifies the running checkout and loaded module, and saves the frames in their original order. A fresh, uninstrumented process must produce the same HTTP results with the same requests. The expected answers, probe requests and probe outcomes stay outside the investigator inputs.
 
-The `mixed-evidence` case uses the same checkout as `mixed-services` and configures a read-only stdio MCP server through `exploitability.evidence_sources`. The server returns synthetic observations for the notes service. One lookup identifies the running revision and package, and another records an anonymous client's request to the parser. The expected verdicts are `exploitable` for notes and `ruled_out` for reviews. In `mixed-evidence-no-access`, the server still reports the running build but has no record of a client request. The expected notes verdict becomes `potentially_exploitable`.
+The runtime controls hold the CVE and Git checkout fixed. Three configure a read-only stdio MCP server through `exploitability.evidence_sources`. It returns synthetic build and request records. A confirmed verdict requires evidence that the affected copy ran and the caller reached its parser on that same service. The fixed reviews service should be `ruled_out` throughout.
+
+| Case                       | Evidence for the notes service                                                                                          | Expected notes verdict    |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `mixed-services`           | Checkout and configured build                                                                                           | `potentially_exploitable` |
+| `mixed-evidence-no-access` | The affected version ran at the target revision. Caller access is unresolved.                                           | `potentially_exploitable` |
+| `mixed-evidence-sibling`   | The notes release matches. Querying for a notes request returns a request to reviews at the same revision.              | `potentially_exploitable` |
+| `mixed-evidence`           | The affected version ran at the target revision. An anonymous caller sent text to its parser and received parsed links. | `exploitable`             |
 
 The grader checks the cited service, tool, arguments, and exact response against the server's independent transcript in `source-calls.json`. Each response includes a freshly generated record ID so a report from an earlier run cannot stand in for a new lookup.
 
-The mixed-services project uses the published linkify-it CVE-2026-48801, npm distribution URLs and integrity digests. Each service runs a shared handler using its own lockfile and Docker build argument. The checkout establishes the configured build. The two evidence-source cases supply the additional observations through MCP. [Published advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
+The mixed-services project uses the published linkify-it CVE-2026-48801, npm distribution URLs and integrity digests. Each service runs a shared handler using its own lockfile and Docker build argument. [Published advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
 
 ### Run the local checks
 
@@ -127,6 +134,16 @@ node "$runner" live --case mixed-evidence-no-access --cli "$CLI" --out "$outputs
 node "$runner" benchmark --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/benchmark"
 ```
 
-Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The grader checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks independent claim approval and each service's selected lockfile. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
+Select a `mixed-*` case to compare the two modes of the regular repository CLI. Each command runs in a fresh copy of the fixture. The independent eval checks service-specific source citations and verifies runtime records against that run’s MCP transcript in both modes. Check `progress.jsonl` for reviewer batches and `results.json` for the exact arguments.
+
+```sh
+for control in mixed-services mixed-evidence-no-access mixed-evidence-sibling mixed-evidence; do
+  for grader in enabled disabled; do
+    node "$runner" live --cli "$CLI" --case "$control" --grader "$grader" --out "$outputs/$control-$grader"
+  done
+done
+```
+
+Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The grader checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks each service's selected lockfile and the claim's review state. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
 
 The benchmark initializes five fresh SQLite attempts. Each timed trial writes one batch of ten source-backed claims and reads them back in another CLI process. It checks all ten IDs, revisions, hashes and payloads and records the median, including CLI startup time. Fixture preparation and state initialization take place before timing.

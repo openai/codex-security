@@ -631,12 +631,21 @@ export function verifyClaimCitations(report, use, read, sha, reviewed) {
 }
 
 // Compare report citations with replies recorded by the independent MCP process.
-export function gradeEvidenceSource(report, use, { calls, withAccess }) {
+export function gradeEvidenceSource(report, use, { calls, requestService }) {
   const claim = exactClaim(report.claims, use.conclusionClaim);
-  assert(
-    claim.state === "approved" && claim.decision.accepted === true,
-    "approved runtime observations",
-  );
+  const reviewed = report.grader !== "disabled";
+  if (reviewed) {
+    assert(
+      claim.state === "approved" && claim.decision?.accepted === true,
+      "approved runtime observations",
+    );
+  } else {
+    assert.equal(claim.state, "unreviewed");
+    assert.equal(claim.decision, undefined);
+  }
+  const keys = reviewed
+    ? claim.decision.evidenceKeys
+    : claim.evidence.receiptIds;
   const records = claim.payload.use.observations;
   const compact = ({ server, record, supports }) => ({
     server,
@@ -652,7 +661,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
         ["running", "access", "affected_copy"].includes(s),
       ),
     })),
-    "runtime citations belong to the independently approved claim",
+    "runtime citations belong to the reported claim",
   );
   const expected = { running: "release_record", access: "request_record" };
   for (const [support, tool] of Object.entries(expected)) {
@@ -660,15 +669,28 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
       (c) => c.tool === tool && c.arguments.service === "notes",
     );
     assert(actual.length, "investigator requested " + tool + " for notes");
-    if (!withAccess && support === "access") {
+    if (requestService !== "notes" && support === "access") {
+      const expected =
+        requestService === "reviews"
+          ? "POST /preview on service reviews at revision "
+          : "No observation for notes.";
       assert(
-        actual.every((c) =>
-          c.result.content[0].text.includes("No observation for notes."),
+        actual.every((c) => c.result.content[0].text.includes(expected)),
+        "expected request record",
+      );
+      assert(
+        !records.some(
+          (ref) =>
+            ref.tool === tool &&
+            ref.supports.some((s) =>
+              ["running", "access", "affected_copy"].includes(s),
+            ),
         ),
+        "unrelated request cannot establish runtime facts about notes",
       );
       assert(
         !use.observations.some((ref) => ref.supports.includes("access")),
-        "missing request record cannot prove access",
+        "missing notes request cannot prove access",
       );
       continue;
     }
@@ -689,7 +711,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
           !receipt ||
           receipt.server !== ref.server ||
           receipt.tool !== tool ||
-          !claim.decision.evidenceKeys.some((key) => {
+          !keys.some((key) => {
             if (!claim.evidence.receiptIds.includes(key)) return false;
             const selected = selectedReceipt(
               report.claimEvidence.receipts,
@@ -713,7 +735,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
             c.result.content[0].text.includes(ref.quote),
         );
       }),
-      "approved use cites the actual " + tool + " response",
+      "reported use cites the actual " + tool + " response",
     );
   }
 }
@@ -723,8 +745,10 @@ export function gradeMixed(
   fixture,
   packageCheck = false,
   evidenceSource,
+  grader = "enabled",
 ) {
   let report = response;
+  assert.equal(response.grader ?? "enabled", grader, "expected reviewer mode");
   if (packageCheck) {
     assert.equal(response.package.name, "linkify-it");
     const checks = response.checks.filter(
@@ -744,13 +768,16 @@ export function gradeMixed(
     assert.equal(report.cve, reviewedCve);
   }
   assert.equal(report.schemaVersion, 2);
+  assert.equal(report.grader ?? "enabled", grader, "expected reviewer mode");
   const validate = sourceReader(fixture.repo, fixture.sha);
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];
   for (const [service, verdict] of [
     [
       "notes",
-      evidenceSource?.withAccess ? "exploitable" : "potentially_exploitable",
+      evidenceSource?.requestService === "notes"
+        ? "exploitable"
+        : "potentially_exploitable",
     ],
     ["reviews", "ruled_out"],
   ]) {
@@ -771,7 +798,13 @@ export function gradeMixed(
       gradeEvidenceSource(report, use, evidenceSource);
     }
     assert(use.reason?.trim());
-    const cites = approvedCitations(report, use, validate, fixture.sha);
+    const { deciding: cites } = verifyClaimCitations(
+      report,
+      use,
+      validate,
+      fixture.sha,
+      grader === "enabled",
+    );
     const lock = service + "/package-lock.json";
     const lines = git(fixture.repo, "show", fixture.sha + ":" + lock).split(
       "\n",
