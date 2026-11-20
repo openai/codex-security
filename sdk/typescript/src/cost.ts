@@ -370,7 +370,7 @@ interface SessionUsage {
   modelUsage: Map<string | null, ScanTokenUsage>;
   counterModelUsage: Map<string | null, ScanTokenUsage>;
   legacyTurnUsage: Map<string, Map<string | null, ScanTokenUsage>>;
-  mayStartCounterEpoch: boolean;
+  usageAtCounterBoundary: ScanTokenUsage | null | undefined;
   priorCounterEpochs: ScanTokenUsage | null;
   currentTurnId: string | null;
   previousUsage: ScanTokenUsage | null;
@@ -494,7 +494,7 @@ function createSessionUsage(observeUsage: boolean): SessionUsage {
     modelUsage: new Map(),
     counterModelUsage: new Map(),
     legacyTurnUsage: new Map(),
-    mayStartCounterEpoch: false,
+    usageAtCounterBoundary: undefined,
     priorCounterEpochs: null,
     currentTurnId: null,
     previousUsage: null,
@@ -3993,7 +3993,7 @@ function readSessionEvent(
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
       if (!session.replaying) {
-        session.mayStartCounterEpoch = true;
+        session.usageAtCounterBoundary = session.usage;
         session.events?.push(sessionObservation(session, event));
       }
       return;
@@ -4026,7 +4026,7 @@ function readSessionEvent(
     return;
   }
   if (event["type"] === "compacted") {
-    session.mayStartCounterEpoch = true;
+    session.usageAtCounterBoundary = session.usage;
     // Later counter epochs cannot account for missing earlier scan receipts.
     if (missingResponseTokens(session)) session.incompleteResponseEpoch = true;
     session.responseTokens = 0;
@@ -4038,7 +4038,7 @@ function readSessionEvent(
     typeof payload["turn_id"] === "string"
   ) {
     if (session.currentTurnId !== payload["turn_id"])
-      session.mayStartCounterEpoch = true;
+      session.usageAtCounterBoundary = session.usage;
     session.currentTurnId = payload["turn_id"];
   }
   if (
@@ -4393,7 +4393,7 @@ function readSessionEvent(
   const previousTotal =
     (session.inheritedUsage?.total_tokens ?? 0) +
     (session.previousUsage?.total_tokens ?? 0);
-  const priorLegacy = attribution
+  let priorLegacy = attribution
     ? session.counterUsage
     : session.previousUsage
       ? addTokenUsage(session.priorCounterEpochs, session.previousUsage)
@@ -4406,12 +4406,19 @@ function readSessionEvent(
     // reconnects and in legacy logs without turn IDs, keep the new epoch.
     if (
       attributable &&
-      !session.mayStartCounterEpoch &&
+      session.usageAtCounterBoundary === undefined &&
       (turnId !== null || responseUsageObserved)
     )
       return;
     session.inheritedUsage = null;
     session.previousUsage = null;
+    // Receipts before the boundary belong to the closed epoch. Receipts
+    // recorded since the boundary may already be included in the reset counter.
+    const boundary = session.usageAtCounterBoundary;
+    if (boundary && boundary.total_tokens > (priorLegacy?.total_tokens ?? 0)) {
+      priorLegacy = boundary;
+      if (attribution) session.counterUsage = boundary;
+    }
     session.priorCounterEpochs = priorLegacy;
   }
   const ownUsage =
@@ -4419,7 +4426,7 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) {
-    session.mayStartCounterEpoch = false;
+    session.usageAtCounterBoundary = undefined;
     const hadPreviousUsage = session.previousUsage !== null;
     const delta =
       session.previousUsage === null

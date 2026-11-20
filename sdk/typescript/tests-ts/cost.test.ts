@@ -9292,6 +9292,33 @@ test.each([true, false])(
   },
 );
 
+test("retains exact usage from before a legacy counter resets", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, "worker", {});
+  const turn = (turn_id: string) => ({
+    type: "turn_context",
+    payload: { turn_id },
+  });
+  const usage = (input_tokens: number) => ({ input_tokens, output_tokens: 0 });
+  await appendFile(
+    path,
+    jsonLines([
+      turn("first"),
+      legacyUsageRecord(usage(1000)),
+      nativeUsageRecord("worker", "first", usage(1100)),
+      turn("second"),
+      legacyUsageRecord(usage(100)),
+      legacyUsageRecord(usage(200)),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home);
+  tracker.start("worker");
+  expect((await tracker.stop()).measurement).toMatchObject({
+    usage: { input_tokens: 1300 },
+    coverage: "partial",
+  });
+});
+
 test("reconciles exact receipts against counters from the same turn", async () => {
   const home = await codexHome();
   const path = await writeSession(home, "worker", {});
