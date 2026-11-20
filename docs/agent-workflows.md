@@ -144,6 +144,7 @@ for command discovery and output formats.
 | `cs` is missing or opens another program                 | Check that npm’s executable directory is on `PATH`, or use `codex-security` or `npx @openai/codex-security`. See [CLI setup](../README.md#quick-start). |
 | Codex shows CLI guidance but no security workflow skills | Install and enable the full plugin in your host, then start a new chat.                                                                                 |
 | A skill is visible but its scan tools are unavailable    | Check the plugin server’s setup error and resolve it before starting a scan.                                                                            |
+| A macOS helper reports `different Team IDs`              | Select a compatible [helper Node runtime](../sdk/typescript/docs/cli.md#helper-node-runtime).                                                           |
 | Authentication fails on a headless machine               | Use [device or SSH login](../sdk/typescript/docs/cli.md#authentication), or configured API credentials for CI.                                          |
 
 ## Recover an interrupted task
