@@ -437,7 +437,7 @@ class SavedCoverageOrigins:
             self.directory(relative).as_posix(), (worker["id"], worker["attempt"])
         )[1]
         rows = self.sources[relative][0].get(field, [])
-        if not isinstance(rows, list) or not 0 < index <= len(rows):
+        if attempt <= 1 or not isinstance(rows, list) or not 0 < index <= len(rows):
             return attempt
         current = rows[index - 1]
         occurrence = sum(
@@ -520,6 +520,9 @@ class SavedCoverageOrigins:
         relative = self.paths.get(id(source))
         if relative is None or field not in {"surfaces", "deferred", "openQuestions"}:
             return None
+        published_rows = _coverage_rows(published, field)
+        if not published_rows:
+            return None
 
         def comparable(value, projected=False, inferred_identity=False):
             original = value
@@ -588,7 +591,7 @@ class SavedCoverageOrigins:
             for offset, row in enumerate(original_rows[:index], 1)
         )
         matches = []
-        for row in _coverage_rows(published, field):
+        for row in published_rows:
             if not isinstance(row, dict):
                 continue
             provenance = row.get("provenance")

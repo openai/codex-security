@@ -301,51 +301,54 @@ export function scanCoverage(
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
   const reviews = [provenance];
-  const history: typeof archived = [...archived]
-    .sort((left, right) => left.attempt - right.attempt)
-    .map(({ attempt, coverage }) => ({
-      attempt,
-      coverage: {
-        ...coverage,
-        // Match explicit IDs before an otherwise identical unnamed occurrence.
-        surfaces: [...coverage.surfaces].sort(
-          (left, right) =>
-            Number(right.id !== undefined) - Number(left.id !== undefined),
-        ),
-      },
-    }));
-  // Each occurrence in one snapshot can account for only one current record.
-  const matchedRows = new Map<
-    string,
-    Map<(typeof history)[number], Set<number>>
-  >();
-  const project = <T extends Record<string, unknown>>(
-    field: string,
-    item: T,
-  ): T => {
-    const matchedHistory = matchedRows.get(field) ?? new Map();
-    matchedRows.set(field, matchedHistory);
-    let origin = provenance;
-    for (const saved of history) {
-      const matched = matchedHistory.get(saved) ?? new Set<number>();
-      const rows = (saved.coverage[field] as unknown[] | undefined) ?? [];
-      const index = rows.findIndex(
-        (row, index) =>
-          !matched.has(index) &&
-          matchesSavedCoverageSource(
-            field,
-            item,
-            row,
-            artifactPrefix,
-            receiptDigests,
-          ),
+  const history = [...archived].sort(
+    (left, right) => left.attempt - right.attempt,
+  );
+  type Row = Record<string, unknown>;
+  const remaining = new Map<string, { attempt: number; rows: Row[] }[]>();
+
+  function originFor(field: string, item: Row) {
+    if (!history.length) return provenance;
+    const comparable = (row: Row) =>
+      comparableCoverageRow(field, row, artifactPrefix, receiptDigests);
+    let snapshots = remaining.get(field);
+    if (!snapshots) {
+      snapshots = history.map(({ attempt, coverage }) => {
+        const rows = ((coverage[field] as unknown[] | undefined) ?? []).flatMap(
+          (value) => {
+            const row =
+              typeof value === "string" ? { question: value } : asRecord(value);
+            return row ? [comparable(row)] : [];
+          },
+        );
+        // Prefer explicit IDs over an otherwise identical unnamed surface.
+        if (field === "surfaces")
+          rows.sort(
+            (left, right) =>
+              Number(right.id !== undefined) - Number(left.id !== undefined),
+          );
+        return { attempt, rows };
+      });
+      remaining.set(field, snapshots);
+    }
+    const current = comparable(item);
+    const { id: _id, ...unnamed } = current;
+    let first: number | undefined;
+    // Consume one occurrence from every matching snapshot.
+    for (const { attempt, rows } of snapshots) {
+      const index = rows.findIndex((row) =>
+        isDeepStrictEqual(row, row.id === undefined ? unnamed : current),
       );
       if (index < 0) continue;
-      matched.add(index);
-      matchedHistory.set(saved, matched);
-      if (origin === provenance)
-        origin = { workerId: worker.id, attempt: saved.attempt };
+      rows.splice(index, 1);
+      first ??= attempt;
     }
+    return first === undefined
+      ? provenance
+      : { workerId: worker.id, attempt: first };
+  }
+  const project = <T extends Row>(field: string, item: T): T => {
+    const origin = originFor(field, item);
     if (!reviews.some((review) => review.attempt === origin.attempt))
       reviews.push(origin);
     const result = structuredClone(item);
@@ -438,66 +441,48 @@ export function scanCoverage(
   };
 }
 
-/** Compare accepted content and readable receipt bytes, never authored origin claims. */
-function matchesSavedCoverageSource(
+/** Compare accepted content and readable receipt bytes once per saved occurrence. */
+function comparableCoverageRow(
   field: string,
   item: Record<string, unknown>,
-  saved: unknown,
   artifactPrefix: string,
   receiptDigests: ReadonlyMap<string, string>,
-): boolean {
-  const original =
-    typeof saved === "string" ? { question: saved } : structuredClone(saved);
-  const current = structuredClone(item);
-  if (
-    typeof original !== "object" ||
-    original === null ||
-    Array.isArray(original)
-  )
-    return false;
-  const previous = original as Record<string, unknown>;
-  if (previous.id === undefined) delete current.id;
-  if (field === "surfaces") {
-    const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
-    for (const row of [previous, current]) {
-      const provenance = row.provenance as Record<string, unknown> | undefined;
-      const sharedRefs = provenance?.scanReceiptRefs as string[] | undefined;
-      row.receiptRefs = [
-        ...new Set(
-          ((row.receiptRefs as string[] | undefined) ?? []).map((ref) => {
-            ref = posix.normalize(ref);
-            const shared = sharedRefs?.includes(ref) ?? false;
-            const digest = receiptDigests.get(JSON.stringify([shared, ref]));
-            let path = ref;
-            // Without readable bytes, only the exact accepted reference can match.
-            if (digest !== undefined && !shared) {
-              if (path.startsWith(`${artifactPrefix}/`))
-                path = path.slice(artifactPrefix.length + 1);
-              else if (path.startsWith(archivePrefix)) {
-                const archived = path.slice(archivePrefix.length);
-                if (/^attempt-[0-9]+\//u.test(archived))
-                  path = archived.slice(archived.indexOf("/") + 1);
-              }
-              while (
-                /^artifacts\/archived-receipts\/attempt-[0-9]+\//u.test(path)
-              ) {
-                path = path.replace(
-                  /^artifacts\/archived-receipts\/attempt-[0-9]+\//u,
-                  "",
-                );
-              }
-            }
-            return JSON.stringify([shared, path, digest]);
-          }),
-        ),
-      ];
-      if (provenance) {
-        delete provenance.scanReceiptRefs;
-        if (Object.keys(provenance).length === 0) delete row.provenance;
-      }
-    }
+) {
+  if (field !== "surfaces") return item;
+  const row = structuredClone(item);
+  const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
+  const provenance = row.provenance as Record<string, unknown> | undefined;
+  const sharedRefs = provenance?.scanReceiptRefs as string[] | undefined;
+  row.receiptRefs = [
+    ...new Set(
+      ((row.receiptRefs as string[] | undefined) ?? []).map((ref) => {
+        ref = posix.normalize(ref);
+        const shared = sharedRefs?.includes(ref) ?? false;
+        const digest = receiptDigests.get(JSON.stringify([shared, ref]));
+        let path = ref;
+        // Without readable bytes, only the exact accepted reference can match.
+        if (digest !== undefined && !shared) {
+          if (path.startsWith(`${artifactPrefix}/`))
+            path = path.slice(artifactPrefix.length + 1);
+          else if (path.startsWith(archivePrefix)) {
+            const archived = path.slice(archivePrefix.length);
+            if (/^attempt-[0-9]+\//u.test(archived))
+              path = archived.slice(archived.indexOf("/") + 1);
+          }
+          path = path.replace(
+            /^(?:artifacts\/archived-receipts\/attempt-[0-9]+\/)+/u,
+            "",
+          );
+        }
+        return JSON.stringify([shared, path, digest]);
+      }),
+    ),
+  ];
+  if (provenance) {
+    delete provenance.scanReceiptRefs;
+    if (Object.keys(provenance).length === 0) delete row.provenance;
   }
-  return isDeepStrictEqual(previous, current);
+  return row;
 }
 
 export function addScanCoverage(
