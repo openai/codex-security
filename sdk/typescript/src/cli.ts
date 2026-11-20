@@ -241,6 +241,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
+  selectedScanProfile,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -1405,7 +1406,7 @@ function cliFailureSchema(...codes: [string, ...string[]]) {
   });
 }
 
-const scanOutputSchema: z.ZodType<
+const scanCommandOutputSchema: z.ZodType<
   Record<string, unknown> | number | string | undefined
 > = z
   .union([
@@ -1416,11 +1417,7 @@ const scanOutputSchema: z.ZodType<
       .describe("Token count for the rendered scan output."),
     completedScanOutput,
     scanPreflightOutput,
-    z.looseObject({
-      status: z.literal("failed"),
-      code: z.literal("SCAN_FAILED"),
-      message: z.string(),
-    }),
+    cliFailureSchema("SCAN_FAILED").loose(),
     failedScanEnvelopeSchema,
     z.looseObject({
       ok: z.literal(true),
@@ -1436,7 +1433,7 @@ const scanOutputSchema: z.ZodType<
   ])
   .optional();
 
-function scanReplayOutputSchema(
+function scanOutputSchema(
   ...codes: [string, ...string[]]
 ): z.ZodType<Record<string, unknown> | undefined> {
   return z
@@ -3345,7 +3342,7 @@ export async function main(
           .default(false)
           .describe("Print additional scan diagnostics to stderr."),
       }),
-      output: scanReplayOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
+      output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -3433,7 +3430,7 @@ export async function main(
           .default(false)
           .describe("Print additional scan diagnostics to stderr."),
       }),
-      output: scanReplayOutputSchema(
+      output: scanOutputSchema(
         "SCAN_FAILED",
         "SCAN_REPLAY_UNAVAILABLE",
         "SCAN_IMPORT_FAILED",
@@ -5878,7 +5875,7 @@ export async function main(
               "--mock cannot be combined with --dry-run, --patch, or --validate.",
           },
         ),
-      output: scanOutputSchema,
+      output: scanCommandOutputSchema,
       async run({ args, error: incurError, format, options }) {
         if (options.host)
           throw new CodexSecurityError("Use scan --host alone.");
@@ -14445,28 +14442,16 @@ function parseCodexOverrideValues(
   if (provider !== undefined) {
     const effective = mergeCodexOverrides(defaults ?? {}, result);
     const profile = effective["profile"];
-    const profiles = effective["profiles"] ?? {};
-    if (
-      typeof profile === "string" &&
-      isJsonObject(profiles) &&
-      isJsonObject(profiles[profile] ?? null)
-    ) {
-      const overrides = result["profiles"] ?? {};
-      const selectedOverrides = isJsonObject(overrides)
-        ? overrides[profile]
-        : undefined;
-      if (
-        isJsonObject(selectedOverrides) &&
-        Object.hasOwn(selectedOverrides, "model_provider")
-      ) {
+    if (typeof profile === "string" && selectedScanProfile(effective)) {
+      const overrides = selectedScanProfile({ ...result, profile });
+      if (overrides && Object.hasOwn(overrides, "model_provider")) {
         throw new CodexSecurityError(
           `--provider conflicts with --codex profiles.${profile}.model_provider`,
         );
       }
-      result["profiles"] = mergeCodexOverrides(
-        isJsonObject(overrides) ? overrides : {},
-        { [profile]: { model_provider: provider } },
-      );
+      return mergeCodexOverrides(result, {
+        profiles: { [profile]: { model_provider: provider } },
+      });
     }
   }
   return result;

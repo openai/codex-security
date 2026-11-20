@@ -1,5 +1,5 @@
-import Ajv2020 from "ajv/dist/2020.js";
-import { describe, expect, test } from "bun:test";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,8 @@ import {
   fakeResult,
 } from "./cli-fixtures.js";
 
-async function scanOutputSchema() {
+let validate: ValidateFunction;
+beforeAll(async () => {
   const stdout = capture();
   const stderr = capture();
   expect(
@@ -28,52 +29,53 @@ async function scanOutputSchema() {
     ),
   ).toBe(0);
   expect(stderr.text()).toBe("");
-  return (JSON.parse(stdout.text()) as { output: object }).output;
+  const { output } = JSON.parse(stdout.text());
+  validate = new Ajv2020({ strict: false }).compile(output);
+});
+
+async function scanJson(
+  args: string[],
+  options: Parameters<typeof dependencies>[0],
+  expectedExit = 0,
+) {
+  const stdout = capture();
+  const stderr = capture();
+  const code = await main(
+    ["scan", ...args],
+    stdout.stream,
+    stderr.stream,
+    dependencies(options),
+  );
+  expect(code, stderr.text()).toBe(expectedExit);
+  const data = JSON.parse(stdout.text());
+  expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
+  return data;
 }
 
 describe("scan output schema", () => {
   test("describes completed scans, preflight, and failure separately", async () => {
-    const schema = await scanOutputSchema();
-    const validate = new Ajv2020({ strict: false }).compile(schema);
     expect(validate({})).toBe(false);
-    const output = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--dry-run", "--token-count"],
-        output.stream,
-        capture().stream,
-        dependencies({ preflight: fakePreflight() }),
-      ),
-    ).toBe(0);
-    expect(validate(JSON.parse(output.text()))).toBe(true);
+    await scanJson(["--json", "--dry-run", "--token-count"], {
+      preflight: fakePreflight(),
+    });
     expect(validate(-1)).toBe(false);
   });
 
   test.each(["partial", "unknown"] as const)(
     "accepts changed-target full-output errors with legacy %s coverage",
     async (completeness) => {
-      const validate = new Ajv2020({ strict: false }).compile(
-        await scanOutputSchema(),
-      );
-      const stdout = capture();
-      const deps = dependencies({
-        onTurn: (_repository, options) => {
-          options.onWarning?.("Synthetic target changed.", {
-            kind: "target_changed",
-          });
+      const output = await scanJson(
+        [".", "--json", "--full-output"],
+        {
+          onTurn: (_repository, options) => {
+            options.onWarning?.("Synthetic target changed.", {
+              kind: "target_changed",
+            });
+          },
+          result: fakeResult(["high"], completeness),
         },
-        result: fakeResult(["high"], completeness),
-      });
-      expect(
-        await main(
-          ["scan", ".", "--json", "--full-output"],
-          stdout.stream,
-          capture().stream,
-          deps,
-        ),
-      ).toBe(2);
-      const output = JSON.parse(stdout.text());
-      expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+        2,
+      );
       expect(output.ok).toBe(false);
       expect(output.error.code).toBe("SCAN_FAILED");
       expect(output.error.message).toContain("target changed");
@@ -88,21 +90,10 @@ describe("scan output schema", () => {
   ] as const)(
     "declares the optional positive time budget for $mode dry-run: $maxTimeMinutes",
     async ({ mode, maxTimeMinutes }) => {
-      const schema = await scanOutputSchema();
-      const validate = new Ajv2020({ strict: false }).compile(schema);
-      const stdout = capture();
-      expect(
-        await main(
-          ["scan", ".", "--mode", mode, "--dry-run", "--json"],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            preflight: { ...fakePreflight(), mode, maxTimeMinutes },
-          }),
-        ),
-      ).toBe(0);
-      const output = JSON.parse(stdout.text());
-      expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+      const output = await scanJson(
+        [".", "--mode", mode, "--dry-run", "--json"],
+        { preflight: { ...fakePreflight(), mode, maxTimeMinutes } },
+      );
       for (const invalid of ["2.5", 0, -1]) {
         expect(validate({ ...output, maxTimeMinutes: invalid })).toBe(false);
       }
@@ -110,21 +101,10 @@ describe("scan output schema", () => {
   );
 
   test("describes the follow-up validation returned by a completed scan", async () => {
-    const validate = new Ajv2020({ strict: false }).compile(
-      await scanOutputSchema(),
-    );
-    const stdout = capture();
-    expect(
-      await main(
-        ["scan", ".", "--validate", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({ currentDirectory: tmpdir() }),
-      ),
-    ).toBe(0);
-    const output = JSON.parse(stdout.text());
+    const output = await scanJson([".", "--validate", "--json"], {
+      currentDirectory: tmpdir(),
+    });
     expect(output.validation).toEqual({ status: "complete", findings: 0 });
-    expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
     expect(
       validate({
         ...output,
@@ -136,31 +116,18 @@ describe("scan output schema", () => {
   test.each(["completed", "dry-run", "failed"] as const)(
     "accepts actual %s command output",
     async (outcome) => {
-      const validate = new Ajv2020({ strict: false }).compile(
-        await scanOutputSchema(),
-      );
-      const stdout = capture();
       const result = fakeResult(["high"]);
-      const code = await main(
-        [
-          "scan",
-          ".",
-          "--json",
-          ...(outcome === "dry-run" ? ["--dry-run"] : []),
-        ],
-        stdout.stream,
-        capture().stream,
-        dependencies({
+      const data = await scanJson(
+        [".", "--json", ...(outcome === "dry-run" ? ["--dry-run"] : [])],
+        {
           result,
           preflight: fakePreflight(),
           onRun: () => {
             if (outcome === "failed") throw new Error("Synthetic failure.");
           },
-        }),
+        },
+        outcome === "failed" ? 2 : 0,
       );
-      expect(code).toBe(outcome === "failed" ? 2 : 0);
-      const data: unknown = JSON.parse(stdout.text());
-      expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
       if (outcome === "completed") {
         expect(data).toMatchObject({
           findings: result.findings,
@@ -184,25 +151,13 @@ const retainedThreatModels: (ThreatModel | null)[] = [
 test.each(["absent", "saved", "failed"] as const)(
   "declares optional owner-suggestion fields for a %s result",
   async (outcome) => {
-    const schema = await scanOutputSchema();
     const result = fakeResult();
     if (outcome === "saved")
       result.ownerSuggestionsPath = join(result.scanDir, "owners.json");
     if (outcome === "failed")
       result.ownerSuggestionsError = "Synthetic owner suggestion failure.";
-    const stdout = capture();
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({ result }),
-      ),
-    ).toBe(0);
-    const data = JSON.parse(stdout.text());
+    const data = await scanJson([".", "--json"], { result });
     expect(data).toEqual(result.toJSON());
-    const validate = new Ajv2020({ strict: false }).compile(schema);
-    expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
     for (const field of ["ownerSuggestionsPath", "ownerSuggestionsError"]) {
       expect(validate({ ...data, [field]: "Synthetic optional value." })).toBe(
         true,
@@ -215,7 +170,6 @@ test.each(["absent", "saved", "failed"] as const)(
 test.each(retainedThreatModels)(
   "declares nullable threat-model fields from actual scan output: %j",
   async (threatModel) => {
-    const schema = await scanOutputSchema();
     const original = fakeResult(["high"]);
     const result = new ScanResult({
       manifest: {
@@ -234,22 +188,11 @@ test.each(retainedThreatModels)(
       threatModelPath:
         threatModel === null ? null : join(original.scanDir, "threatmodel.md"),
     });
-    const stdout = capture();
-    expect(
-      await main(
-        ["scan", ".", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies({ result }),
-      ),
-    ).toBe(0);
-    const data = JSON.parse(stdout.text()) as Record<string, unknown>;
+    const data = await scanJson([".", "--json"], { result });
     expect(data).toMatchObject({
       threatModel,
       threatModelPath: result.threatModelPath,
     });
-    const validate = new Ajv2020({ strict: false }).compile(schema);
-    expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
     expect(validate({ ...data, threatModel: "wrong object type" })).toBe(false);
     expect(validate({ ...data, threatModelPath: 1 })).toBe(false);
   },
@@ -258,32 +201,18 @@ test.each(retainedThreatModels)(
 test.each(["completed", "dry-run"] as const)(
   "accepts actual %s full-output success envelopes",
   async (outcome) => {
-    const validate = new Ajv2020({ strict: false }).compile(
-      await scanOutputSchema(),
-    );
     for (const format of ["json", "jsonl"]) {
-      const stdout = capture();
-      expect(
-        await main(
-          [
-            "scan",
-            ".",
-            "--format",
-            format,
-            "--full-output",
-            ...(outcome === "dry-run" ? ["--dry-run"] : []),
-          ],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            result: fakeResult(["high"]),
-            preflight: fakePreflight(),
-          }),
-        ),
-      ).toBe(0);
-      const output = JSON.parse(stdout.text());
+      const output = await scanJson(
+        [
+          ".",
+          "--format",
+          format,
+          "--full-output",
+          ...(outcome === "dry-run" ? ["--dry-run"] : []),
+        ],
+        { result: fakeResult(["high"]), preflight: fakePreflight() },
+      );
       expect(output.ok).toBe(true);
-      expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
       expect(validate({ ...output, data: {} })).toBe(false);
     }
   },
@@ -292,42 +221,32 @@ test.each(["completed", "dry-run"] as const)(
 test.each(["completed", "dry-run", "failed", "argument-error"] as const)(
   "accepts token-truncated %s full-output envelopes",
   async (outcome) => {
-    const validate = new Ajv2020({ strict: false }).compile(
-      await scanOutputSchema(),
-    );
     const failed = outcome === "failed" || outcome === "argument-error";
     for (const format of ["json", "jsonl"]) {
       for (const transform of ["--token-limit", "--token-offset"]) {
-        const stdout = capture();
-        expect(
-          await main(
-            [
-              "scan",
-              ".",
-              "--format",
-              format,
-              "--full-output",
-              transform,
-              "2",
-              ...(outcome === "dry-run" ? ["--dry-run"] : []),
-              ...(outcome === "argument-error" ? ["--mode", "bogus"] : []),
-            ],
-            stdout.stream,
-            capture().stream,
-            dependencies({
-              result: fakeResult(["high"]),
-              preflight: fakePreflight(),
-              onRun: () => {
-                if (outcome === "failed") throw new Error("Synthetic failure.");
-              },
-            }),
-          ),
-        ).toBe(failed ? 2 : 0);
-        const output = JSON.parse(stdout.text());
+        const output = await scanJson(
+          [
+            ".",
+            "--format",
+            format,
+            "--full-output",
+            transform,
+            "2",
+            ...(outcome === "dry-run" ? ["--dry-run"] : []),
+            ...(outcome === "argument-error" ? ["--mode", "bogus"] : []),
+          ],
+          {
+            result: fakeResult(["high"]),
+            preflight: fakePreflight(),
+            onRun: () => {
+              if (outcome === "failed") throw new Error("Synthetic failure.");
+            },
+          },
+          failed ? 2 : 0,
+        );
         expect(output.ok).toBe(!failed);
         if (failed) expect(output.error).toMatchObject({ code: "SCAN_FAILED" });
         else expect(typeof output.data).toBe("string");
-        expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
       }
     }
   },
