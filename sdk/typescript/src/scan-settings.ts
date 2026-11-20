@@ -93,6 +93,7 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
       "Investigation minutes: advisory in Standard (default: unset); enforced Deep discovery limit (default and maximum: 5760). Scans may finish early; reporting may run longer.",
     ),
   knowledgeBasePaths: z.array(inputPath).optional(),
+  excludePaths: z.array(inputPath).optional(),
   scanPrompt: z.string().optional(),
   scanPromptFile: inputPath.optional(),
   validationPrompt: z.string().optional(),

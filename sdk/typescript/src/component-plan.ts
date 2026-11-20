@@ -1,6 +1,6 @@
 import { lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, posix, resolve } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 import { z } from "zod";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
@@ -14,6 +14,7 @@ import {
   gitOutput,
   normalizeRepository,
   normalizeTarget,
+  resolveTargetPath,
   validatedGitEnvironment,
 } from "./targets.js";
 
@@ -58,7 +59,7 @@ export async function normalizeComponentPlan(
     const target = await normalizeTarget(
       repository,
       component.paths.map((path) =>
-        isAbsolute(path) ? path : resolve(repository, path),
+        isAbsolute(path) ? path : resolveTargetPath(path, repository),
       ),
       signal,
     );
