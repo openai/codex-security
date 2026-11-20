@@ -55,7 +55,7 @@ export type DeepScanReplaceableFailureKind =
 /** Durable operations implemented by the Python workbench. */
 export type DeepScanStore = Omit<
   WorkbenchDeepScanStore,
-  "begin" | "coordinatorGeneration"
+  "begin" | "coordinatorGeneration" | "stopInstructionMeasurements"
 >;
 
 /** Host-bound worker artifact state; never populate this from model input. */

@@ -84,14 +84,18 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 )
 
 
-def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
+def threat_model_fields(
+    db: Any, connection: sqlite3.Connection, scan: sqlite3.Row
+) -> dict[str, Any]:
     """Return availability and provenance for a saved threat model, reporting it as unavailable when verification fails."""
     scan_dir = Path(scan["scan_dir"])
     fields: dict[str, Any] = {"threatModelAvailable": False}
     try:
         db.require_recorded_manifest_digest(scan, scan_dir)
         db.verify_manifest_binding(
-            scan, _read_scan_local_json(scan_dir, db.ARTIFACTS["manifest"], "scan manifest")
+            scan,
+            _read_scan_local_json(scan_dir, db.ARTIFACTS["manifest"], "scan manifest"),
+            connection,
         )
         saved_model = _read_saved_threat_model(scan_dir)
         if saved_model is not None:
@@ -117,16 +121,18 @@ def refresh_completed_scan(
     warnings = json.loads(scan["completion_warnings_json"])
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
-    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    db.verify_manifest_binding(
+        scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]), connection
+    )
     try:
         manifest, _, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
             projection_warnings=warnings,
+            verify_manifest=lambda manifest: db.verify_manifest_binding(scan, manifest, connection),
         )
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-    db.verify_manifest_binding(scan, manifest)
     manifest_digest = db.published_manifest_digest(scan_dir, manifest)
     db.pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
     if cost_json is not None and scan["recipe_json"] is not None:
@@ -436,7 +442,7 @@ def preserve_deep_deadline_draft(
     """Recover unfinished reviews at a settled Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     warnings = json.loads(scan["completion_warnings_json"])
-    binding = db.workbench_completion_binding(scan, db.now())
+    binding = db.workbench_completion_binding(connection, scan, db.now())
     workers = saved_deep_workers(connection, scan)
     if preserve_reduction:
         # Completed reviews already went through reduction. Only add evidence
@@ -679,8 +685,8 @@ def preserve_scan_results_locked(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
             projection_warnings=warnings,
+            verify_manifest=lambda manifest: db.verify_manifest_binding(scan, manifest, connection),
         )
-        db.verify_manifest_binding(scan, existing)
         if existing_scan.get("status") == outcome:
             existing_sources = existing_scan.get("preservedSources")
             existing_heads = existing_scan.get("preservedCheckpointHeads")
@@ -712,7 +718,7 @@ def preserve_scan_results_locked(
             if not unchanged and recovery_source_digests is None and not pending_recovery:
                 raise ContractError("Stopped scan sources changed after terminal publication.")
     binding = {
-        **db.workbench_completion_binding(scan, scan["completed_at"], existing),
+        **db.workbench_completion_binding(connection, scan, scan["completed_at"], existing),
         "status": outcome,
     }
     canonical_model_source = saved_model_source
@@ -878,11 +884,15 @@ def preserve_scan_results_locked(
         retain_sources()
     warnings.extend(prepared.warnings)
     snapshots = _snapshot_published_outputs(scan_dir)
+    with connection:
+        db.pin_prepared_instruction_digests(
+            connection, scan_id, prepared.manifest["scan"]["producer"]
+        )
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
         )
-        db.verify_manifest_binding(scan, manifest)
+        db.verify_manifest_binding(db.require_scan(connection, scan_id), manifest, connection)
         record_publication(manifest, findings)
     except BaseException:
         _restore_published_outputs(scan_dir, snapshots)
@@ -1043,7 +1053,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         )
         manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
         manifest["scan"].pop("coverageRef", None)
-        binding = db.workbench_completion_binding(scan, db.now())
+        binding = db.workbench_completion_binding(connection, scan, db.now())
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)

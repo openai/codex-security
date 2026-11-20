@@ -405,7 +405,7 @@ def test_receipt_io_failure_preserves_successful_publication(
     instant = workbench_api["now"]()
     monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
     scan_row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
-    binding = workbench_api["workbench_completion_binding"](scan_row, instant)
+    binding = workbench_api["workbench_completion_binding"](workbench_db, scan_row, instant)
     saved = workbench_api["saved_results"]
     saved._populate_unsealed_manifest_envelope(
         draft["manifest"], draft["manifest"]["scan"], binding

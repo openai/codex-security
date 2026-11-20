@@ -99,6 +99,39 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
     .run(target);
 }
 
+test("moves the instruction digest preview before Python restores repository history", (t) => {
+  const database = memory(t, 66);
+  const digestMigration = workbenchMigrations[75];
+  database.exec(digestMigration.statements.join("\n"));
+  database
+    .prepare("INSERT INTO schema_migrations VALUES (70, ?, 'preview')")
+    .run(digestMigration.name);
+  insertScan(database);
+  database.exec("UPDATE scans SET instruction_digest = 'saved bundle'");
+
+  applyMigrations(database);
+  const history = migrationHistory(database);
+  assertMigrationNames(database, 72, 73, 74, 75, 76);
+  assert.equal(
+    database
+      .prepare("SELECT applied_at FROM schema_migrations WHERE version = 76")
+      .get()?.applied_at,
+    "preview",
+  );
+  assert.equal(
+    database
+      .prepare("SELECT version FROM schema_migrations WHERE version = 70")
+      .get(),
+    undefined,
+  );
+  applyMigrations(database);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.equal(
+    storedValue(database, "scans", "instruction_digest"),
+    "saved bundle",
+  );
+});
+
 test("migration records first admission through both terminal publication routes", (t) => {
   const database = memory(t, 65);
   insertScan(database);
@@ -1742,6 +1775,8 @@ with sqlite3.connect(sys.argv[2]) as connection:
               "log_completed_at",
               "windows_resume_output_identity",
               "windows_resume_target_identity",
+              "instruction_digest",
+              "prepared_instruction_digests_json",
             ]) {
               assert.equal(row[column], null);
               delete row[column];

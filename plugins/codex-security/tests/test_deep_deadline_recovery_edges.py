@@ -616,7 +616,9 @@ def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
     with sqlite3.connect(scan.database) as connection:
         connection.row_factory = sqlite3.Row
         record = workbench_api["require_scan"](connection, scan.scan_id)
-        binding = workbench_api["workbench_completion_binding"](record, workbench_api["now"]())
+        binding = workbench_api["workbench_completion_binding"](
+            connection, record, workbench_api["now"]()
+        )
         saved.merge_saved_results(
             scan.directory, scan.scan_id, binding, [], [], stopped=True, reason="Synthetic stop."
         )
