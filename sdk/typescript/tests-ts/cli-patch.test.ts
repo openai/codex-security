@@ -3451,7 +3451,7 @@ describe("patch publication integrity", () => {
         },
       );
       expect(inputDependencies!.runRepositoryCommand).toBe(inputRunner!);
-      expect(inputDependencies!.environment).toEqual(environmentBefore);
+      expect(inputDependencies!.environment).toEqual(environmentBefore!);
       expect(JSON.stringify(gitSettings)).toBe(settingsBefore);
       if (settings === "empty") {
         expect(outcome.exitCode).toBe(flag === undefined ? 0 : 2);
