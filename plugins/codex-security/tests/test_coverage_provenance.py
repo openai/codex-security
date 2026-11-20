@@ -315,6 +315,50 @@ def test_recovered_surface_with_assigned_id_keeps_legacy_attempt(
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+@pytest.mark.parametrize("malformed_id", [[], {}], ids=["list", "object"])
+@pytest.mark.parametrize("malformed_current", [False, True], ids=["historical", "current"])
+def test_recovered_malformed_surface_ids_preserve_valid_coverage(
+    workbench_api, workbench_db, publication_scan, monkeypatch, malformed_id, malformed_current
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    surface = {"disposition": "no_issue_found", "receiptRefs": []}
+    old = {
+        **surface,
+        "id": "old-review" if malformed_current else malformed_id,
+        "label": "Historical review",
+    }
+    current = [{**surface, "id": "current-review", "label": "Current review"}]
+    if malformed_current:
+        current.insert(0, {**surface, "id": malformed_id, "label": "Malformed review"})
+    draft = {"scanId": scan.scan_id, "findings": []}
+    coverage = {"explicitExclusions": [], "deferred": []}
+    archived = result.parent.parent / "attempts/attempt-01/result.json"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(
+        json.dumps({**draft, "complete": False, "reviewState": {**coverage, "surfaces": [old]}})
+    )
+    result.write_text(
+        json.dumps({**draft, "complete": True, "reviewState": {**coverage, "surfaces": current}})
+    )
+    originals = {path: path.read_bytes() for path in (archived, result)}
+
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    (retained,) = [row for row in recovered["surfaces"] if row["label"] == "Current review"]
+    assert retained["provenance"] == {
+        "workerId": worker_id,
+        "attempt": 2,
+        "sourceId": "current-review",
+    }
+    assert all(isinstance(row["id"], str) for row in recovered["surfaces"])
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 @pytest.mark.parametrize(
     ("history_variant", "named_history"),
     [("plain", False), ("origin", False), ("receipt", False), ("origin", True), ("receipt", True)],

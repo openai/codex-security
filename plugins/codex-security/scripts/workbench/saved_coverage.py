@@ -622,9 +622,9 @@ class SavedCoverageOrigins:
                     if previous_id == current_id:
                         identity = previous_id
                 elif previous_id != current_id:
-                    if current.get("id") in previous_aliases:
+                    if isinstance(current.get("id"), str) and current["id"] in previous_aliases:
                         identity = current["id"]
-                    elif previous.get("id") in current_aliases:
+                    elif isinstance(previous.get("id"), str) and previous["id"] in current_aliases:
                         identity = previous["id"]
                 if not isinstance(identity, str):
                     return False
