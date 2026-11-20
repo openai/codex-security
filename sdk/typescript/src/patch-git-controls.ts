@@ -393,8 +393,10 @@ export interface PatchSnapshotConfig {
 
 // Embedded in the sandbox bridge, where each invocation has its own endpoints.
 export function snapshotConfigBytes(files: string[], prefix: string): Buffer[] {
+  // A blank line keeps the writer connected until Git finishes probing the
+  // pipe's attributes or reading the otherwise empty configuration.
   return files.map((text) =>
-    Buffer.from(text.replaceAll("\0", prefix), "latin1"),
+    Buffer.from(text.replaceAll("\0", prefix) || "\n", "latin1"),
   );
 }
 
