@@ -108,6 +108,27 @@ type OsvRecord = z.infer<typeof osvRecord>;
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 const cvePattern = /^CVE-\d{4}-\d{4,}$/u;
 
+export const dependencyAdvisoryDetailsSchema = z.object({
+  id: z.string().optional(),
+  aliases: z.array(z.string()).optional(),
+  url: z.string(),
+  references: z.array(advisoryReference).optional(),
+  source: z.object({ type: z.string(), url: z.string() }).optional(),
+  type: z.string().optional(),
+  body: z.string().optional(),
+  vulnerabilities: z.array(githubVulnerability).optional(),
+  lookupErrors: z.array(advisoryLookupError).optional(),
+  summary: z.string().optional(),
+  overview: z.string().optional(),
+  applicability: z.string().optional(),
+  affected: z.array(
+    affected.extend({
+      ecosystem_specific: z.union([goImports, rustAffects]).optional(),
+    }),
+  ),
+  vulnerableFunctions: z.array(z.string()).optional(),
+});
+
 interface Advisory {
   id: string;
   aliases?: string[];
