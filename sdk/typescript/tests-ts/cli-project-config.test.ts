@@ -358,6 +358,27 @@ test("an explicit config flag overrides the operator-selected environment file",
   }
 });
 
+test("scan exclusions come from project config and repeatable CLI overrides", async () => {
+  const input = await fixture({ scan: { exclude_paths: ["examples/"] } });
+  for (const [flags, expected] of [
+    [[], ["examples/"]],
+    [
+      ["--exclude-path", "fixtures", "--exclude-path", "src/demos"],
+      ["fixtures", "src/demos"],
+    ],
+  ] as const) {
+    const onTurn = mock<(_target: string, options: ScanOptions) => void>();
+    expect(
+      await runCapturedCli(
+        main,
+        ["scan", input.repository, "-c", input.config, ...flags, "--json"],
+        dependencies({ currentDirectory: input.repository, onTurn }),
+      ),
+    ).toBe(0);
+    expect(onTurn.mock.lastCall?.[1].excludePaths).toEqual([...expected]);
+  }
+});
+
 test.each([undefined, "standard", "daybreak_red"] as const)(
   "scan and follow-up validation use Cyber selection from project or CLI override: %s",
   async (override) => {
