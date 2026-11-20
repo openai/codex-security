@@ -934,6 +934,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   const registry = join(operator, "selected registry");
   const gh = join(operator, "selected gh");
   const glab = join(operator, "selected glab");
+  const pgpass = join(operator, "selected pgpass");
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
@@ -954,6 +955,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     DOCKER_CONFIG: registry,
     GH_CONFIG_DIR: gh,
     GLAB_CONFIG_DIR: glab,
+    PGPASSFILE: pgpass,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
@@ -1027,6 +1029,10 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(registry, "config.json"),
     join(gh, "hosts.yml"),
     join(defaultGh, "hosts.yml"),
+    pgpass,
+    process.platform === "win32"
+      ? join(appdata, "postgresql", "pgpass.conf")
+      : join(operator, ".pgpass"),
     ...glabDirectories.map((directory) => join(directory, "config.yml")),
     cloudKey,
     join(cloudConfig, cloudDefault),
@@ -1069,6 +1075,8 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       for (const directory of glabDirectories)
         await mkdir(directory, { recursive: true });
       await mkdir(cloudConfig);
+      if (process.platform === "win32")
+        await mkdir(join(appdata, "postgresql"), { recursive: true });
       await mkdir(join(operator, ".config", "gcloud"));
       if (process.platform === "win32")
         await mkdir(join(appdata, "gcloud"), { recursive: true });

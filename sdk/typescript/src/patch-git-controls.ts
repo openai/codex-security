@@ -572,6 +572,7 @@ function credentialPointerFiles(
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
   const gcloudCredentials = "application_default_credentials.json";
+  const pgpass = join("postgresql", "pgpass.conf");
   const selectFile = (directory: string, file: string) => {
     // A delegate can use the literal path or a client's normalized spelling.
     selected.add(relativeFile(directory, file));
@@ -594,6 +595,12 @@ function credentialPointerFiles(
     homes.add(environment["HOMEDRIVE"] + environment["HOMEPATH"]);
   for (const home of homes) {
     if (home === undefined) continue;
+    selectFile(
+      home,
+      process.platform === "win32"
+        ? join("AppData", "Roaming", pgpass)
+        : ".pgpass",
+    );
     for (const file of [
       join(".config", "gh", "hosts.yml"),
       join(".config", "gcloud", gcloudCredentials),
@@ -611,7 +618,10 @@ function credentialPointerFiles(
     selected.add(join(environment["XDG_CONFIG_HOME"], "gh", "hosts.yml"));
   if (process.platform === "win32") {
     const appData = environment["APPDATA"];
-    if (appData) selected.add(join(appData, "GitHub CLI", "hosts.yml"));
+    if (appData) {
+      selected.add(join(appData, "GitHub CLI", "hosts.yml"));
+      selectFile(appData, pgpass);
+    }
     // google-auth uses the system drive when APPDATA is absent.
     selectFile(
       appData ?? (environment["SYSTEMDRIVE"] ?? "C:") + sep,
@@ -638,6 +648,7 @@ function credentialPointerFiles(
         selectFile(value, gcloudCredentials);
         break;
       case "GOOGLE_APPLICATION_CREDENTIALS":
+      case "PGPASSFILE":
         selected.add(value);
         selected.add(normalize(value));
         break;
