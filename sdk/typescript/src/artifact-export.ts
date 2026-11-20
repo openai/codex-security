@@ -88,6 +88,7 @@ interface HelperOptions {
   pythonPath?: string;
   protectedRoot?: PluginPythonOptions["protectedRoot"];
   discoveryProtectedRoots?: readonly string[];
+  /** @internal Forward the saved scan's interpreter policy. */
   excludeCheckoutPython?: PluginPythonOptions["excludeCheckoutPython"];
   pluginRoot?: string;
   signal?: AbortSignal;
