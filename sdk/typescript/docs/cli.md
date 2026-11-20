@@ -3061,14 +3061,25 @@ The assessment does not change the patch or merge state.
 Git snapshots, including snapshots of initialized submodules, run configured Git
 filters with the workspace permissions from your Codex configuration. Configure
 additional writable roots and network access in your user configuration.
-Snapshot Git retains access to external Git configuration files selected by the
-operator. The patch model’s filesystem profile denies access to those files.
+Snapshot Git uses the external Git settings selected by the operator. The patch
+model’s filesystem profile denies access to those files. On Windows, managed
+Git commands and their descendants receive those settings through temporary
+named pipes. Each configuration file has 32 listeners. If concurrent connections
+use every listener for a file, the CLI reports an error before accepting the
+Git result because Git can skip a busy configuration source. Git evaluates
+conditional includes within each checkout and reports the pipe names in
+`--show-origin`. When Git selects both XDG and home configuration files,
+`git config --global` inside the sandbox sees their combined settings.
+The CLI omits recognized inline credentials from the streams, which can
+affect conditions that match a remote URL containing credentials.
 When a snapshot filter or publication hook can run, keep inline Git credentials
 out of external configuration files, including conditional includes. A patch
 stops before running a delegate with an authorization header, credential-bearing
-URL or proxy, or inline password available in those files. Password settings
-include `imap.pass`, `sendemail.smtpPass`, and `gitcvs.dbPass`, including
-identity-specific SMTP and access-method-specific CVS settings.
+URL or proxy, or inline secret available in those files. The check covers
+`imap.pass`, `sendemail.smtpPass`, `gitcvs.dbPass`, and `receive.certNonceSeed`,
+including SMTP passwords for individual identities and CVS passwords for
+specific access methods. The CLI also removes these secrets from the command
+configuration that Git delegates inherit.
 
 HTTPS publication runs named Git credential helpers and executable wrappers
 outside the checkout. Operator settings can also select `!gh auth git-credential`

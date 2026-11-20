@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmod, readFile, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -233,7 +233,7 @@ for (const outside of [true, false])
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(
         await readFile(join(allowed, "hook-ran"), "utf8").catch(() => null),
-        outcome.stderr + outcome.stdout,
+        outcome.stderr,
       ).toBe("reached");
       expect(await readFile(privateFile).catch(() => null)).toBeNull();
       expect(trustedHostPush).toBe(false);
@@ -268,7 +268,13 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
     );
     const home = await fixtures.create("resume-hook-home-");
     const temporary = await fixtures.create("resume-hook-tmp-");
-    const allowed = await fixtures.create("resume-hook-approved-output-");
+    const allowed =
+      process.platform === "linux"
+        ? join(home, "approved-output")
+        : await fixtures.create("resume-hook-approved-output-");
+    await mkdir(allowed, { recursive: true });
+    const login = join(allowed, "selected-netrc");
+    await writeFile(login, "synthetic login");
     const outside = await fixtures.create("resume-hook-outside-");
     const denied = join(outside, "marker");
     await chmod(home, 0o700);
@@ -297,6 +303,7 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
     const environment = patchSnapshotEnvironment(temporary, {
       ...process.env,
       CODEX_HOME: home,
+      NETRC: login,
       Synthetic_Model_Access: "synthetic fixture credential",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
@@ -308,6 +315,7 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
         "#!/bin/sh",
         "set -eu",
         'test "$1" = origin',
+        `if grep -q 'synthetic login' ${shell(login)}; then exit 16; fi`,
         'if test -n "${Synthetic_Model_Access+x}"; then echo "Hook received the configured provider credential" >&2; exit 15; fi',
         `grep -F 'refs/heads/${branch}' >/dev/null`,
         "echo 'Entered synthetic resumed hook' >&2",

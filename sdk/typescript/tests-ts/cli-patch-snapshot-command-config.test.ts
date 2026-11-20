@@ -51,6 +51,7 @@ test("snapshot filters receive safe command config from both Git encodings", asy
   const parameters = [
     "'sendemail.smtpPass'='" + credentials + "'",
     "'gitcvs.dbPass'='" + credentials + "'",
+    "'receive.certNonceSeed'='" + credentials + "'",
     "'demo.value'='second with spaces'",
     "'demo.a=b.flag'=",
     "'demo.empty'=''",
