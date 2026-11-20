@@ -934,6 +934,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   const gh = join(operator, "selected gh");
   const glab = join(operator, "selected glab");
   const pgpass = join(operator, "selected pgpass");
+  const pgservice = join(operator, "selected pg service");
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
@@ -955,6 +956,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     GH_CONFIG_DIR: gh,
     GLAB_CONFIG_DIR: glab,
     PGPASSFILE: pgpass,
+    PGSERVICEFILE: pgservice,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
@@ -970,6 +972,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     CLOUDSDK_CONFIG: cloudConfig,
     APPDATA: appdata,
+    PGSYSCONFDIR: operator,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -1029,6 +1032,11 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(gh, "hosts.yml"),
     join(defaultGh, "hosts.yml"),
     pgpass,
+    pgservice,
+    join(operator, "pg_service.conf"),
+    process.platform === "win32"
+      ? join(appdata, "postgresql", ".pg_service.conf")
+      : join(operator, ".pg_service.conf"),
     process.platform === "win32"
       ? join(appdata, "postgresql", "pgpass.conf")
       : join(operator, ".pgpass"),

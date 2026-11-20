@@ -559,13 +559,16 @@ function credentialPointerFiles(
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
   const gcloudCredentials = "application_default_credentials.json";
-  const pgpass = join("postgresql", "pgpass.conf");
   const selectFile = (directory: string, file: string) => {
     // A delegate can use the literal path or a client's normalized spelling.
     selected.add(relativeFile(directory, file));
     selected.add(join(directory, file));
     if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
       selected.add(directory + file);
+  };
+  const selectPgDefaults = (home: string) => {
+    selectFile(home, process.platform === "win32" ? "pgpass.conf" : ".pgpass");
+    selectFile(home, ".pg_service.conf");
   };
   // A delegate can unset a client override or read the default file directly.
   // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
@@ -582,11 +585,10 @@ function credentialPointerFiles(
     homes.add(environment["HOMEDRIVE"] + environment["HOMEPATH"]);
   for (const home of homes) {
     if (home === undefined) continue;
-    selectFile(
-      home,
+    selectPgDefaults(
       process.platform === "win32"
-        ? join("AppData", "Roaming", pgpass)
-        : ".pgpass",
+        ? relativeFile(home, join("AppData", "Roaming", "postgresql"))
+        : home,
     );
     for (const file of [
       join(".config", "gh", "hosts.yml"),
@@ -607,7 +609,7 @@ function credentialPointerFiles(
     const appData = environment["APPDATA"];
     if (appData) {
       selected.add(join(appData, "GitHub CLI", "hosts.yml"));
-      selectFile(appData, pgpass);
+      selectPgDefaults(relativeFile(appData, "postgresql"));
     }
     // google-auth uses the system drive when APPDATA is absent.
     selectFile(
@@ -634,8 +636,12 @@ function credentialPointerFiles(
       case "CLOUDSDK_CONFIG":
         selectFile(value, gcloudCredentials);
         break;
+      case "PGSYSCONFDIR":
+        selectFile(value, "pg_service.conf");
+        break;
       case "GOOGLE_APPLICATION_CREDENTIALS":
       case "PGPASSFILE":
+      case "PGSERVICEFILE":
         selected.add(value);
         selected.add(normalize(value));
         break;
