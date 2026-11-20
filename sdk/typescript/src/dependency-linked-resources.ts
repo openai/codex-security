@@ -1,0 +1,430 @@
+import { createHash, hash } from "node:crypto";
+import type { JsonObject } from "./config.js";
+import { dependencyRecordHash } from "./dependency-attempt-store.js";
+import {
+  investigationServer,
+  type DependencyEvidenceRecord,
+} from "./dependency-evidence-sources.js";
+import {
+  dependencyGraphEvidenceDocument,
+  dependencyGraphEvidenceFormat,
+} from "./dependency-graph-evidence.js";
+import { isRecord } from "./record.js";
+
+// An external tool can advertise an unbounded chain of resources. These limits
+// apply to the host's automatic follow-up reads, independently of model context.
+const maxReads = 32;
+const maxBytes = 32 * 1024 * 1024;
+const budgetMessage =
+  "Linked MCP evidence exceeded the automatic capture budget. Coverage is incomplete.";
+const invalidMessage =
+  "A linked MCP resource did not match its advertised URI, size or digest. Coverage is incomplete.";
+const descriptorMessage =
+  "A graph evidence reference or its returned document was invalid. Coverage is incomplete.";
+const truncatedMessage =
+  "A selected MCP source reported truncated linked evidence. Coverage is incomplete.";
+const readMessage =
+  "A selected MCP source could not return a linked resource. Coverage is incomplete.";
+const cursorMessage =
+  "A linked MCP resource advertised more results without a resource link. Coverage is incomplete.";
+
+export interface LinkedDependencyEvidence extends DependencyEvidenceRecord {
+  linkedFrom: string;
+  contentSha256: string[];
+  originThreadId?: string;
+  originCallId?: string;
+}
+
+interface ResourceInvocation {
+  threadId: string;
+  callId: string;
+}
+
+type Link = Record<string, unknown> & { uri: string };
+function isLink(value: unknown): value is Link {
+  return (
+    isRecord(value) &&
+    value["type"] === "resource_link" &&
+    typeof value["uri"] === "string" &&
+    value["uri"].length > 0 &&
+    typeof value["name"] === "string"
+  );
+}
+
+function jsonObject(text: string): Record<string, unknown> | undefined {
+  try {
+    const value: unknown = JSON.parse(text);
+    return isRecord(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function truncated(value: Record<string, unknown>) {
+  const meta = value["_meta"];
+  return (
+    value["truncated"] === true ||
+    (isRecord(meta) && meta["truncated"] === true)
+  );
+}
+
+interface QueuedResource {
+  link: Link;
+  parent: string;
+  graph: boolean;
+  sha256?: string;
+  size?: number;
+  refused?: boolean;
+  read?: { digest: string; size: number; text?: string; graphValid?: boolean };
+}
+function matchesIntegrity(
+  metadata: Record<string, unknown>,
+  sha256: string,
+  size: number,
+) {
+  const meta = metadata["_meta"];
+  const advertised = isRecord(meta) ? [metadata, meta] : [metadata];
+  return advertised.every(
+    (fields) =>
+      (fields["size"] === undefined || fields["size"] === size) &&
+      (fields["sha256"] === undefined ||
+        (typeof fields["sha256"] === "string" &&
+          fields["sha256"].toLowerCase() === sha256)),
+  );
+}
+
+function bytesOf(part: Record<string, unknown>, remaining: number) {
+  const text = part["text"],
+    blob = part["blob"];
+  if (typeof text === "string" && blob === undefined) {
+    if (Buffer.byteLength(text) > remaining) throw new Error(budgetMessage);
+    return Buffer.from(text);
+  }
+  if (typeof blob !== "string" || text !== undefined)
+    throw new Error(invalidMessage);
+  if (blob.length > 4 * Math.ceil(remaining / 3))
+    throw new Error(budgetMessage);
+  const bytes = Buffer.from(blob, "base64");
+  if (bytes.length > remaining) throw new Error(budgetMessage);
+  if (bytes.toString("base64") !== blob) throw new Error(invalidMessage);
+  return bytes;
+}
+
+interface CaptureOptions {
+  servers: JsonObject;
+  onEvidence: (record: LinkedDependencyEvidence) => void;
+  onDiagnostic: (message: string) => void;
+}
+
+type ReadResource = (server: string, uri: string) => Promise<unknown>;
+
+/** Follow only resource links returned by authorized tools on their own MCP server.
+ * Original MCP structured and JSON text responses may also advertise a checksum-pinned
+ * graph evidence document. A captured JSON page can advertise the same kinds of links. */
+export function createDependencyLinkedResourceCapture({
+  servers,
+  onEvidence,
+  onDiagnostic,
+}: CaptureOptions) {
+  const pending = new Map<string, Promise<void>>();
+  const complete = new Set<string>();
+
+  async function follow(
+    origin: DependencyEvidenceRecord,
+    read: ReadResource,
+    invocation?: ResourceInvocation,
+  ) {
+    const { server, tool, arguments: args, result } = origin;
+    const settings = Object.hasOwn(servers, server)
+      ? servers[server]
+      : undefined;
+    if (
+      server === investigationServer ||
+      !isRecord(settings) ||
+      settings["enabled"] === false ||
+      tool === "read_mcp_resource" ||
+      result["isError"] === true ||
+      result["is_error"] === true
+    )
+      return;
+    const allow = settings["enabled_tools"],
+      deny = settings["disabled_tools"];
+    if (
+      (Array.isArray(allow) && !allow.includes(tool)) ||
+      (Array.isArray(deny) &&
+        (deny.includes(tool) || deny.includes("read_mcp_resource")))
+    )
+      return;
+    if (
+      origin.sha256 !==
+      dependencyRecordHash({ server, tool, arguments: args, result })
+    )
+      return;
+
+    const queue = new Map<string, QueuedResource>();
+    const diagnostics = new Set<string>();
+    let remaining = maxBytes;
+    function warn(message: string) {
+      if (!diagnostics.has(message)) {
+        diagnostics.add(message);
+        onDiagnostic(message);
+      }
+    }
+    function add(link: Link, parent: string, graph = false) {
+      let entry = queue.get(link.uri);
+      if (!entry) {
+        if (queue.size >= maxReads) {
+          warn(budgetMessage);
+          return;
+        }
+        entry = { link, parent, graph };
+        queue.set(link.uri, entry);
+      }
+      // Merge constraints before reading, even if a plain resource link appears
+      // before a checksum-pinned reference to the same URI.
+      for (const metadata of [link, link["_meta"]]) {
+        if (!isRecord(metadata)) continue;
+        const sha = metadata["sha256"];
+        const size = metadata["size"];
+        if (sha !== undefined) {
+          if (
+            typeof sha !== "string" ||
+            !/^[a-f0-9]{64}$/iu.test(sha) ||
+            (entry.sha256 !== undefined && entry.sha256 !== sha.toLowerCase())
+          )
+            entry.refused = true;
+          else entry.sha256 = sha.toLowerCase();
+        }
+        if (size !== undefined) {
+          if (
+            typeof size !== "number" ||
+            !Number.isSafeInteger(size) ||
+            size < 0 ||
+            (entry.size !== undefined && size !== entry.size)
+          )
+            entry.refused = true;
+          else entry.size = size;
+        }
+      }
+      entry.graph ||= graph;
+      if (entry.read) {
+        const prior = entry.read;
+        if (
+          (entry.sha256 !== undefined && entry.sha256 !== prior.digest) ||
+          (entry.size !== undefined && entry.size !== prior.size)
+        )
+          entry.refused = true;
+        if (entry.graph) {
+          prior.graphValid ??=
+            prior.text !== undefined &&
+            dependencyGraphEvidenceDocument.safeParse(jsonObject(prior.text))
+              .success;
+          if (!prior.graphValid) entry.refused = true;
+        }
+      }
+      if (entry.refused) warn(invalidMessage);
+    }
+
+    function advertisements(
+      envelope: Record<string, unknown>,
+      parent: string,
+      page = false,
+    ) {
+      let advertised = false;
+      function graph(holder: unknown) {
+        if (!isRecord(holder) || !Object.hasOwn(holder, "graph_evidence"))
+          return;
+        const ref = holder["graph_evidence"];
+        if (
+          !isRecord(ref) ||
+          ref["format"] !== dependencyGraphEvidenceFormat ||
+          typeof ref["uri"] !== "string" ||
+          !ref["uri"].trim() ||
+          typeof ref["sha256"] !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(ref["sha256"])
+        ) {
+          warn(descriptorMessage);
+          return;
+        }
+        advertised = true;
+        add(
+          {
+            uri: ref["uri"],
+            mimeType: "application/json",
+            sha256: ref["sha256"],
+          },
+          parent,
+          true,
+        );
+      }
+      if (page) graph(envelope);
+      graph(envelope["structuredContent"] ?? envelope["structured_content"]);
+      if (Array.isArray(envelope["content"])) {
+        for (const part of envelope["content"]) {
+          if (isLink(part)) {
+            advertised = true;
+            add(part, parent);
+          } else if (
+            isRecord(part) &&
+            part["type"] === "text" &&
+            typeof part["text"] === "string"
+          ) {
+            graph(jsonObject(part["text"]));
+          }
+        }
+      }
+      if (envelope["nextCursor"] && !advertised) warn(cursorMessage);
+      if (truncated(envelope)) warn(truncatedMessage);
+    }
+
+    advertisements(result, origin.sha256);
+    for (const entry of queue.values()) {
+      if (entry.refused) continue;
+      const { link, parent, graph } = entry;
+      if (entry.size !== undefined && entry.size > remaining) {
+        warn(budgetMessage);
+        continue;
+      }
+      let response: unknown;
+      try {
+        response = await read(server, link.uri);
+      } catch {
+        warn(readMessage);
+        continue;
+      }
+      if (!isRecord(response)) {
+        warn(invalidMessage);
+        continue;
+      }
+      // Charge the entire native reply, including metadata and base64 expansion.
+      // Rejected reads also consume the budget. Never retain a partial receipt.
+      const responseBytes = Buffer.byteLength(JSON.stringify(response));
+      if (responseBytes > remaining) {
+        warn(budgetMessage);
+        break;
+      }
+      remaining -= responseBytes;
+      if (
+        response["isError"] === true ||
+        response["is_error"] === true ||
+        (response["server"] !== undefined && response["server"] !== server) ||
+        (response["uri"] !== undefined && response["uri"] !== link.uri) ||
+        (invocation &&
+          response["originCallId"] != null &&
+          response["originCallId"] !== invocation.callId) ||
+        !Array.isArray(response["contents"]) ||
+        !response["contents"].length
+      ) {
+        warn(invalidMessage);
+        continue;
+      }
+      if (
+        truncated(response) ||
+        response["contents"].some((part) => isRecord(part) && truncated(part))
+      ) {
+        warn(truncatedMessage);
+        continue;
+      }
+      const singleText =
+        response["contents"].length === 1 &&
+        isRecord(response["contents"][0]) &&
+        typeof response["contents"][0]["text"] === "string";
+      if (graph && !singleText) {
+        warn(descriptorMessage);
+        continue;
+      }
+      const aggregate = createHash("sha256"),
+        contentSha256: string[] = [];
+      const pages: Record<string, unknown>[] = [];
+      let size = 0;
+      try {
+        for (const part of response["contents"]) {
+          if (!isRecord(part) || part["uri"] !== link.uri)
+            throw new Error(invalidMessage);
+          const bytes = bytesOf(part, responseBytes - size);
+          size += bytes.length;
+          const digest = hash("sha256", bytes);
+          if (!matchesIntegrity(part, digest, bytes.length))
+            throw new Error(invalidMessage);
+          aggregate.update(bytes);
+          contentSha256.push(digest);
+          const mime = part["mimeType"] ?? link["mimeType"];
+          if (
+            !graph &&
+            (typeof mime !== "string" ||
+              !/^application\/(?:json|[\w.+-]+\+json)(?:\s*;|$)/iu.test(mime))
+          )
+            continue;
+          // Follow explicitly typed MCP blocks, never arbitrary URLs or cursors in source data.
+          const body = jsonObject(bytes.toString("utf8"));
+          if (body) pages.push(body);
+        }
+        const digest = aggregate.digest("hex");
+        if (
+          (entry.size !== undefined && entry.size !== size) ||
+          (entry.sha256 !== undefined && digest !== entry.sha256)
+        )
+          throw new Error(invalidMessage);
+        if (
+          graph &&
+          !dependencyGraphEvidenceDocument.safeParse(pages[0]).success
+        ) {
+          warn(descriptorMessage);
+          continue;
+        }
+        entry.read = {
+          digest,
+          size,
+          ...(singleText && { text: response["contents"][0]["text"] }),
+          ...(graph && { graphValid: true }),
+        };
+      } catch (error) {
+        warn(
+          error instanceof Error && error.message === budgetMessage
+            ? budgetMessage
+            : invalidMessage,
+        );
+        continue;
+      }
+      const receipt = {
+        server,
+        tool: "read_mcp_resource",
+        arguments: { server, uri: link.uri },
+        result: response,
+        linkedFrom: parent,
+        contentSha256,
+        ...(invocation && {
+          originThreadId: invocation.threadId,
+          originCallId: invocation.callId,
+        }),
+      };
+      const sha256 = dependencyRecordHash(receipt);
+      onEvidence({ ...receipt, sha256 });
+      for (const page of pages) advertisements(page, sha256, true);
+    }
+    return queue.size > 0 && !diagnostics.size;
+  }
+
+  return async (
+    origin: DependencyEvidenceRecord,
+    read: ReadResource,
+    invocation?: ResourceInvocation,
+  ) => {
+    // Identical tool output can advertise a URI whose bytes are scoped to a native call.
+    const key = invocation
+      ? JSON.stringify([origin.sha256, invocation.threadId, invocation.callId])
+      : origin.sha256;
+    if (complete.has(key)) return;
+    const inFlight = pending.get(key);
+    if (inFlight) return inFlight;
+    const task = follow(origin, read, invocation).then((captured) => {
+      if (captured) complete.add(key);
+    });
+    pending.set(key, task);
+    try {
+      await task;
+    } finally {
+      pending.delete(key);
+    }
+  };
+}

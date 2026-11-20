@@ -1,7 +1,12 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { resolveCodexProfile, type JsonObject } from "./config.js";
+import {
+  resolveCodexProfile,
+  selectedScanProfile,
+  type JsonObject,
+} from "./config.js";
 import { isRecord } from "./record.js";
+import { canonicalConfigPath } from "./runtime.js";
 import { isWithin } from "./trusted-executable.js";
 
 /** Keep native skill injection out of the denied credential home. The scan
@@ -11,7 +16,11 @@ export async function scanSkillConfig(
   plugin: { pluginRoot: string; installedRoot: string },
   credentialHome: string,
 ): Promise<JsonObject> {
-  if (!isWithin(credentialHome, plugin.installedRoot)) return config;
+  const [home, installedRoot] = await Promise.all([
+    canonicalConfigPath(credentialHome),
+    canonicalConfigPath(plugin.installedRoot),
+  ]);
+  if (!isWithin(home, installedRoot)) return config;
   const skills = await readdir(join(plugin.pluginRoot, "skills"), {
     withFileTypes: true,
   }).catch((error: NodeJS.ErrnoException) => {
@@ -21,9 +30,7 @@ export async function scanSkillConfig(
   const paths = new Set(
     skills
       .filter((entry) => entry.isDirectory())
-      .map((entry) =>
-        join(plugin.installedRoot, "skills", entry.name, "SKILL.md"),
-      ),
+      .map((entry) => join(installedRoot, "skills", entry.name, "SKILL.md")),
   );
   if (paths.size === 0) return config;
   const configured = resolveCodexProfile(config)["skills"];
@@ -37,16 +44,13 @@ export async function scanSkillConfig(
       ...(entries ?? []).filter(
         (entry) => !isRecord(entry) || !paths.has(String(entry["path"])),
       ),
+      // Codex resolves path aliases and applies the last matching rule.
       ...Array.from(paths, (path) => ({ path, enabled: false })),
     ],
   } as JsonObject;
   const updated = structuredClone(config);
   updated["skills"] = selection;
-  const profiles = updated["profiles"];
-  const profile =
-    typeof updated["profile"] === "string" && isRecord(profiles)
-      ? profiles[updated["profile"]]
-      : undefined;
-  if (isRecord(profile)) profile["skills"] = selection;
+  const profile = selectedScanProfile(updated);
+  if (profile) profile["skills"] = selection;
   return updated;
 }
