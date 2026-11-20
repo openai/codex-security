@@ -1,6 +1,6 @@
 # Import CrowdStrike findings locally
 
-Use a saved JSON report from `fcs scan iac` in the CrowdStrike Falcon Cloud Security (FCS) CLI 4.x. The reader imports each detection in `rule_detections` as one misconfiguration or secret finding. It works offline and does not run the FCS CLI. Reports in the older `violations` format and image scan reports are not supported. CrowdStrike reports support local import only.
+Use a saved JSON report from `fcs scan iac` in the CrowdStrike Falcon Cloud Security (FCS) CLI 4.x. The reader imports each detection in `rule_detections` as one misconfiguration or secret finding. It works offline and does not run the FCS CLI. Reports in the older `violations` format and image scan reports are not supported. For Cloud publication, run from the scanned checkout and provide its verified repository URL. The destination must advertise CrowdStrike support.
 
 ## Create the report
 
@@ -34,6 +34,8 @@ git -C "$checkout" checkout --quiet --detach "$commit"
 ```
 
 To scan another branch, replace `HEAD` with `refs/heads/BRANCH`. Paths start at the repository root. If the URL ends with a subdirectory, such as `.git//infra?ref=...`, paths start at that subdirectory. Use `"$checkout/infra"` as `--repository`. If the checkout is at a different commit, the import stops at the first file that changed.
+
+For Cloud publication, run from the directory that FCS scanned. If that directory is `infra` and the report lists `main.tf`, Cloud uses `infra/main.tf` for both the location and the finding ID. With the same source key, a scan from the repository root identifies the same detection, and equivalent detections in sibling directories have distinct Cloud IDs. Local findings and the retained FCS detection keep the original `main.tf` path.
 
 A report of a `git::https://` URL names its repository. The import records that URL, without the subdirectory or `?ref=`, as the findings' repository. If you also pass `--source-repository-url`, both must name the same repository, or the import stops. If the scanned URL has a user name and token, FCS keeps them in the report's `flags.path`. The import does not store that field, but keep the report private.
 

@@ -2,7 +2,6 @@ import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { readCrowdStrikeFindings } from "../src/crowdstrike-findings.js";
 import {
-  type NormalizedExternalPublicationOptions,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
 } from "../src/external-findings-publish.js";
@@ -531,32 +530,43 @@ test("replayed findings keep the location of their native detection", async () =
   );
 });
 
-test("Cloud rejects local CrowdStrike findings before file access or credential lookup", async () => {
+test("Cloud verifies the scanned checkout and retained evidence before authentication", async () => {
   await using fixture = await checkout();
-  const options = { ...source, repository: fixture.repository };
+  await fixture.writeJson(single);
+  const options = { ...source, repository: repositoryUrl };
   const unexpected = mock(async () => {
     throw new Error("Unexpected Cloud call");
   });
   const deps = {
     environment: fixture.environment,
+    sourceCheckout: fixture.repository,
     fetch: unexpected,
     credentials: unexpected,
   };
-  // JavaScript callers may supply a local provider despite the SDK's Cloud types.
-  const cloudOptions =
-    options as unknown as NormalizedExternalPublicationOptions;
-  const empty = { read: 0, findings: [], excluded: [] };
-  await expect(
-    prepareExternalPublication(fixture.file, cloudOptions, deps),
-  ).rejects.toThrow(/local/i);
-  await expect(
-    prepareNormalizedExternalPublication(empty, cloudOptions, deps),
-  ).rejects.toThrow(/local/i);
-  await fixture.writeJson(single);
   const { preview } = await fixture.prepare();
-  const relabeled = { ...options, provider: "wiz" as const };
   await expect(
-    prepareNormalizedExternalPublication(preview, relabeled, deps),
-  ).rejects.toThrow(/local/i);
+    prepareNormalizedExternalPublication(
+      preview,
+      { ...options, provider: "wiz" },
+      deps,
+    ),
+  ).rejects.toThrow(/crowdstrike provider/i);
+  fixture.git(
+    "remote",
+    "set-url",
+    "origin",
+    "https://github.com/example/other",
+  );
+  await expect(
+    prepareExternalPublication(fixture.file, options, deps),
+  ).rejects.toThrow(/fetch remote/i);
+  fixture.git("remote", "set-url", "origin", repositoryUrl);
+  await writeFile(join(fixture.repository, "infra", "net", "main.tf"), "stale");
+  await expect(
+    prepareExternalPublication(fixture.file, options, deps),
+  ).rejects.toThrow(/changed after the FCS scan/);
+  await expect(
+    prepareNormalizedExternalPublication(preview, options, deps),
+  ).rejects.toThrow(/changed after the FCS scan/);
   expect(unexpected).not.toHaveBeenCalled();
 });

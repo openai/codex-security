@@ -19,7 +19,8 @@ export type Provider =
   | "checkmarx"
   | "trivy"
   | "armorcode"
-  | "tenable";
+  | "tenable"
+  | "crowdstrike";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;

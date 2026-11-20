@@ -1,3 +1,4 @@
+import { readCrowdStrikeFindings } from "../src/crowdstrike-findings.js";
 import {
   snykJson,
   snykPluginExport,
@@ -81,7 +82,10 @@ import {
 import { readTenableFindings } from "../src/tenable-findings.js";
 import { tenableReport } from "./support/tenable-import-fixtures.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import type { CloudFindingsReader } from "../src/external-findings-read.js";
+import {
+  EXTERNAL_FINDINGS_READERS,
+  type ExternalFindingsReader,
+} from "../src/external-findings-read.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -1604,6 +1608,9 @@ async function privateUploadFixture(
       if (pathname === "/backend-api/aardvark/finding-imports/jobs") {
         expect(init.method).toBe("POST");
         const job = JSON.parse(String(init.body));
+        const headers = new Headers(init.headers);
+        expect(headers.get("accept")).toBe(scannerMediaType);
+        expect(headers.get("content-type")).toBe(scannerMediaType);
         jobs.push(job);
         return Response.json(
           privateJobReceipt(job, "import_" + "b".repeat(32)),
@@ -1679,6 +1686,144 @@ test("Tenable SDK retry publishes the approved file selection with the native oc
       source_data: { asset: capture.asset, finding: capture.findings[0] },
     },
   });
+});
+
+function crowdstrikeReport(file: string) {
+  return {
+    fcs_version: "4.2.3",
+    rule_detections: [
+      {
+        rule_uuid: "10000000-0000-4000-8000-000000000001",
+        rule_name: "Public port",
+        severity: "High",
+        detections: [{ file, file_sha256: hash("sha256", ""), line: 7 }],
+      },
+    ],
+  };
+}
+
+test("CrowdStrike Cloud locations and identities use the Git root across entrypoints", async () => {
+  const {
+    f: cloud,
+    deps: privateDeps,
+    inbox,
+    uploads,
+  } = await privateUploadFixture(
+    crowdstrikeReport("main.tf"),
+    "crowdstrike",
+    exampleRepository,
+  );
+  cloud.state.catalogHeaders = { [scopeHeader]: "personal" };
+  await using local = await storedPublicationFixture(cloud);
+  const checkout = join(local.repository, "infra", "network files");
+  await mkdir(checkout, { recursive: true });
+  await writeFile(join(checkout, "main.tf"), "");
+  await writeFile(join(local.repository, "main.tf"), "different root file");
+  const settings = {
+    ...options,
+    provider: "crowdstrike",
+    sourceRepositoryUrl: exampleRepository,
+  } as const;
+  const deps = { ...local.deps, sourceCheckout: checkout };
+  const input = await readCrowdStrikeFindings(cloud.file, exampleRepository);
+  const raw = await prepareExternalPublication(cloud.file, settings, deps);
+  const normalized = await prepareNormalizedExternalPublication(
+    input,
+    settings,
+    deps,
+  );
+  const imported = await prepareLocalExternalImport(
+    cloud.file,
+    { ...settings, repository: checkout },
+    deps,
+  );
+  await imported.import();
+  const [row] = await listLocalExternalFindings({ repository: checkout }, deps);
+  const selection = {
+    repository: checkout,
+    findings: [{ id: row!.id, version: row!.version }],
+  };
+  await rm(cloud.file);
+  cloud.state.repositoryUrl = "https://github.com/example/other";
+  await expect(local.prepare(selection)).rejects.toThrow(
+    /selected Cloud repository/,
+  );
+  cloud.state.repositoryUrl = exampleRepository;
+  const { groups, excluded } = await local.prepare(selection);
+  expect(excluded).toEqual([]);
+  const path = "infra/network files/main.tf";
+  const rootReport = join(cloud.root, "root.json");
+  await writeFile(rootReport, JSON.stringify(crowdstrikeReport(path)));
+  const root = await readCrowdStrikeFindings(rootReport, exampleRepository);
+  const publishedId = root.findings[0]!.source_finding_id;
+  expect(row!.sourceFindingId).toBe(input.findings[0]!.source_finding_id);
+  expect(row!.sourceFindingId).not.toBe(publishedId);
+  for (const preview of [raw.preview, normalized.preview, groups[0]!.preview]) {
+    expect(preview.findings[0]!.source_finding_id).toBe(publishedId);
+    const evidence = preview.findings[0]!.evidence;
+    expect(evidence.locations).toEqual([{ path, line: 7 }]);
+    expect(evidence.source_data).toEqual(
+      input.findings[0]!.evidence.source_data,
+    );
+  }
+  expect(input.findings[0]!.evidence.locations?.[0]?.path).toBe("main.tf");
+  expect(row!.evidence.locations?.[0]?.path).toBe("main.tf");
+  expect(cloud.posts).toHaveLength(0);
+  expect((await groups[0]!.publish(groups[0]!.reviewId)).verified).toBe(1);
+  const sibling = join(local.repository, "sibling");
+  await mkdir(sibling);
+  await writeFile(join(sibling, "main.tf"), "");
+  const other = await prepareNormalizedExternalPublication(input, settings, {
+    ...deps,
+    sourceCheckout: sibling,
+  });
+  expect((await other.publish()).counts.created).toBe(1);
+  expect(cloud.reports.size).toBe(2);
+  expect(cloud.reports.get(publishedId)?.evidence).toMatchObject({
+    locations: [{ path }],
+    source_data: row!.evidence.source_data,
+  });
+  const fromRoot = await prepareExternalPublication(rootReport, settings, {
+    ...deps,
+    sourceCheckout: local.repository,
+  });
+  expect(fromRoot.preview.requests[0]!.items[0]).toMatchObject({
+    source_finding_id: publishedId,
+    expected_version: 1,
+  });
+
+  cloud.state.catalogHeaders = {
+    [scopeHeader]: "workspace",
+    [providerHeader]: "crowdstrike",
+  };
+  inbox.interruptUpload = false;
+  const {
+    groups: [workspace],
+  } = await prepareStoredFindingsPublication(selection, options, {
+    ...deps,
+    fetch: privateDeps.fetch,
+  });
+  expect(
+    (await workspace!.publish(workspace!.reviewId)).privateJob?.status,
+  ).toBe("completed");
+  expect(JSON.parse(uploads[0]!.bytes).findings[0]).toMatchObject({
+    source_finding_id: publishedId,
+    evidence: {
+      locations: [{ path, start_line: 7 }],
+      source_data: input.findings[0]!.evidence.source_data,
+    },
+  });
+  const receipts = await listLocalFindingPublications(
+    { repository: checkout },
+    deps,
+  );
+  for (const outcome of ["created", "private_job"])
+    expect(receipts).toContainEqual(
+      expect.objectContaining({
+        ...selection.findings[0],
+        outcome,
+      }),
+    );
 });
 
 test("stored Tenable publication verifies the catalog and publishes the selected local version", async () => {
@@ -9373,6 +9518,7 @@ const readerReports = {
     finding: { ...continuumDetail(), createdIssueId: "oneissue" },
     patches: [continuumPatch],
   },
+  crowdstrike: crowdstrikeReport("main.tf"),
   endor: [endorSource],
   github: [importedAlert()],
   inspector: inspectorReport(),
@@ -9392,10 +9538,10 @@ const readerReports = {
       vulnerableAsset: { id: "asset-1" },
     },
   ],
-} satisfies Record<CloudFindingsReader, unknown>;
+} satisfies Record<ExternalFindingsReader, unknown>;
 
 const scannerReports = [
-  ...(Object.keys(readerReports) as CloudFindingsReader[]).map((reader) => ({
+  ...EXTERNAL_FINDINGS_READERS.map((reader) => ({
     name: reader,
     reader,
     report: readerReports[reader],
@@ -9421,6 +9567,14 @@ test.each(scannerReports)(
       reader === "tenable" ? tenableReport.repository_url : exampleRepository;
     const { f, deps, inbox, uploads, jobs, fileId, paths } =
       await privateUploadFixture(report, provider, url);
+    const sourceCheckout = join(f.root, "checkout");
+    if (reader === "crowdstrike") {
+      await mkdir(sourceCheckout);
+      await writeFile(join(sourceCheckout, "main.tf"), "");
+      const git = promisify(execFile);
+      await git("git", ["-C", sourceCheckout, "init", "--quiet"]);
+      await git("git", ["-C", sourceCheckout, "remote", "add", "origin", url]);
+    }
     const prepare = () =>
       prepareExternalPublication(
         f.file,
@@ -9431,7 +9585,7 @@ test.each(scannerReports)(
             ? { trivyScanRoot: "." }
             : { sourceRepositoryUrl: url }),
         },
-        deps,
+        { ...deps, sourceCheckout },
       );
 
     f.state.catalogHeaders = { [scopeHeader]: "personal" };

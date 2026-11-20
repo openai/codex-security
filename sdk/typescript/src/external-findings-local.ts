@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   semgrepPlatformFindingBinding,
@@ -51,7 +51,6 @@ import {
   EXTERNAL_FINDINGS_READERS,
   localFindingRepositories,
   semgrepSarifRepositories,
-  LOCAL_ONLY_PROVIDERS,
 } from "./external-findings-read.js";
 import {
   tenableReportFormat,
@@ -60,6 +59,7 @@ import {
 import {
   crowdstrikeCheckout,
   crowdstrikeReportFormat,
+  rebaseCrowdStrikeFinding,
 } from "./crowdstrike-findings.js";
 import {
   guardianFindingRepository,
@@ -500,7 +500,7 @@ export function sonarRepositoryForRemote(origin: string): string | undefined {
 }
 
 /** Use the same executable and configuration boundaries for every Git query proving a binding. */
-export function boundSonarWorktree(
+export function boundGitWorktree(
   repository: string,
   protectedRoots: string | readonly string[],
   environment: NodeJS.ProcessEnv | undefined,
@@ -589,7 +589,7 @@ export async function configuredFetchRemotes(
     );
   if (
     provider === "sonar" &&
-    !(await boundSonarWorktree(
+    !(await boundGitWorktree(
       repository,
       gitProtectedRoots,
       environment,
@@ -956,11 +956,93 @@ export function distinctSourceRepositories(
   });
 }
 
+const checkoutScannerNames = {
+  tenable: "Tenable",
+  crowdstrike: "CrowdStrike",
+} as const;
+
+export function checkRetainedCheckoutProvider(
+  current: Pick<ExternalFindings, "findings" | "report">,
+  selected: Provider,
+) {
+  for (const [provider, format] of [
+    ["tenable", tenableReportFormat],
+    ["crowdstrike", crowdstrikeReportFormat],
+  ] as const)
+    if (
+      selected !== provider &&
+      (current.report?.["format"] === format ||
+        current.findings.some(
+          (row) => row.evidence?.source_data?.["format"] === format,
+        ))
+    )
+      throw new CodexSecurityError(
+        `Retained ${checkoutScannerNames[provider]} evidence requires the ${provider} provider.`,
+      );
+}
+
+async function requireScannerFetchRemote(
+  source: ExternalSourceRepository,
+  provider: keyof typeof checkoutScannerNames,
+  { repository, options }: Awaited<ReturnType<typeof localContext>>,
+) {
+  const remotes = await hostedCheckoutRemotes(
+    repository,
+    options.protectedRoot,
+    options.environment,
+    options.signal,
+  );
+  if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
+    throw new CodexSecurityError(
+      `${checkoutScannerNames[provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
+    );
+}
+
+/** Verify the native FCS paths, then project Cloud locations and IDs from the Git root. */
+export async function prepareCrowdStrikeCloudReport(
+  input: ExternalFindings,
+  declared: string | undefined,
+  references: readonly ExternalSourceRepository[],
+  checkout: string,
+  dependencies: Pick<LocalExternalImportDependencies, "environment" | "signal">,
+  localSourceIds = new Map<string, string>(),
+) {
+  const context = await localContext(checkout, dependencies);
+  const source = await crowdstrikeCheckout(
+    input,
+    declared,
+    references,
+    context.repository,
+  );
+  if (!source)
+    throw new CodexSecurityError(
+      "CrowdStrike Cloud imports require a verified source repository URL.",
+    );
+  await requireScannerFetchRemote(source, "crowdstrike", context);
+  const root = await boundGitWorktree(
+    context.repository,
+    context.options.protectedRoot,
+    context.options.environment,
+    dependencies.signal,
+  );
+  if (!root)
+    throw new CodexSecurityError(
+      "CrowdStrike Cloud imports require a Git worktree for the selected checkout.",
+    );
+  const prefix = relative(root, context.repository).split(sep).join("/");
+  if (!prefix) return { source, report: input };
+  const findings = input.findings.map((finding) => {
+    const projected = rebaseCrowdStrikeFinding(finding, prefix);
+    localSourceIds.set(projected.source_finding_id, finding.source_finding_id);
+    return projected;
+  });
+  return { source, report: { ...input, findings }, localSourceIds };
+}
+
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
-  options: NormalizedLocalImportOptions &
-    ({ provider: "crowdstrike" } | { provider: Provider }),
+  options: NormalizedLocalImportOptions & { provider: Provider },
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
@@ -986,21 +1068,7 @@ export async function prepareLocalImport(
     "local",
     options.provider,
   );
-  const providerNames = { tenable: "Tenable", ...LOCAL_ONLY_PROVIDERS };
-  for (const [provider, format] of [
-    ["tenable", tenableReportFormat],
-    ["crowdstrike", crowdstrikeReportFormat],
-  ] as const)
-    if (
-      options.provider !== provider &&
-      (current.report?.["format"] === format ||
-        current.findings.some(
-          (row) => row.evidence?.source_data?.["format"] === format,
-        ))
-    )
-      throw new CodexSecurityError(
-        `Retained ${providerNames[provider]} evidence requires the ${provider} provider.`,
-      );
+  checkRetainedCheckoutProvider(current, options.provider);
   checkTrivyReportProvider(options.provider, current.report);
   let dependabotSource: string | undefined;
   validateFindingIds(current);
@@ -1024,29 +1092,13 @@ export async function prepareLocalImport(
     dependabotSource = native;
   }
   const context = await localContext(options.repository, dependencies);
-  // Neither report records the checkout, so check the operator's URL against its remotes.
-  const requireFetchRemote = async (
-    source: ExternalSourceRepository,
-    provider: keyof typeof providerNames,
-  ) => {
-    const remotes = await hostedCheckoutRemotes(
-      context.repository,
-      context.options.protectedRoot,
-      context.options.environment,
-      dependencies.signal,
-    );
-    if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
-      throw new CodexSecurityError(
-        `${providerNames[provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
-      );
-  };
   if (options.provider === "tenable") {
     const source = tenableSourceRepository(
       current,
       options.sourceRepositoryUrl,
       [...readerSources, ...parsedSources],
     );
-    await requireFetchRemote(source, "tenable");
+    await requireScannerFetchRemote(source, "tenable", context);
     return preparedLocalStorage(current, options, context, dependencies, true, {
       sourceRepositories: [source],
     });
@@ -1062,7 +1114,7 @@ export async function prepareLocalImport(
     const bound =
       source !== undefined &&
       (await hasGitMetadata(context.repository, dependencies.signal));
-    if (bound) await requireFetchRemote(source, "crowdstrike");
+    if (bound) await requireScannerFetchRemote(source, "crowdstrike", context);
     return preparedLocalStorage(
       current,
       options,

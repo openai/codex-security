@@ -34,7 +34,10 @@ import {
   tenableReportFormat,
   tenableSourceRepository,
 } from "./tenable-findings.js";
-import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
+import {
+  checkRetainedCheckoutProvider,
+  prepareCrowdStrikeCloudReport,
+} from "./external-findings-local.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -51,10 +54,9 @@ import {
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
-  requireCloudReader,
   semgrepSarifRepositories,
   snykFileRepositories,
-  type CloudFindingsReader,
+  type ExternalFindingsReader,
 } from "./external-findings-read.js";
 import { canonicalJson, isRecord } from "./record.js";
 import { notify } from "./value.js";
@@ -155,11 +157,13 @@ export interface NormalizedExternalPublicationOptions {
 
 /** File readers accepted by the Cloud publisher. */
 export interface ExternalPublicationOptions extends LocalExternalImportOptions {
-  provider: CloudFindingsReader;
+  provider: ExternalFindingsReader;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
 export interface ExternalPublicationDependencies {
+  /** Directory FCS scanned. Defaults to the working directory for file and SDK imports. */
+  sourceCheckout?: string;
   /** Independently verified source repositories supplied by the reader. */
   sourceRepositories?: readonly ExternalSourceRepository[];
   environment?: NodeJS.ProcessEnv;
@@ -295,6 +299,8 @@ type RecordPublicationReceipts = (
 export interface WorkbenchPublication {
   checkout: string;
   findings: readonly { id: string; version: number }[];
+  /** Original IDs by projected Cloud ID, for local exclusions and receipts. */
+  localSourceIds: Map<string, string>;
   record: RecordPublicationReceipts;
 }
 
@@ -374,6 +380,7 @@ function repositorySelection(
   report: ExternalFindings,
   severities: readonly string[] | undefined,
   sourcePositions: PublicationSelection["sourcePositions"],
+  localSourceIds?: ReadonlyMap<string, string>,
 ): ExternalFindings {
   const findings = repositoryFindings(report, severities);
   if (findings.length === report.findings.length) return report;
@@ -382,7 +389,7 @@ function repositorySelection(
   function exclude(position: number, id: string | null, severity: string) {
     excluded.push({
       position,
-      source_finding_id: id,
+      source_finding_id: id && (localSourceIds?.get(id) ?? id),
       reason: `The repository publisher does not accept severity ${JSON.stringify(severity)}. A local import or an available private inbox can retain this finding.`,
     });
   }
@@ -610,24 +617,19 @@ function checkFindingProvider(
   input: Pick<ExternalFindings, "findings" | "report">,
   provider: Provider,
 ): void {
-  function checkFormat(format: unknown) {
-    if (format === tenableReportFormat && provider !== "tenable")
-      throw new CodexSecurityError(
-        "Retained Tenable evidence requires the tenable provider.",
-      );
-    if (format === crowdstrikeReportFormat)
-      requireCloudReader({ provider: "crowdstrike" });
-    if (format === guardianSelectionFormat && provider !== "semgrep")
-      throw new CodexSecurityError(
-        "Use the semgrep provider for Guardian findings.",
-      );
-  }
-  checkFormat(input.report?.["format"]);
-  for (const { source_finding_id, evidence } of input.findings) {
-    if (guardianFindingId.test(source_finding_id))
-      checkFormat(guardianSelectionFormat);
-    checkFormat(evidence.source_data?.["format"]);
-  }
+  checkRetainedCheckoutProvider(input, provider);
+  if (
+    provider !== "semgrep" &&
+    (input.report?.["format"] === guardianSelectionFormat ||
+      input.findings.some(
+        ({ source_finding_id, evidence }) =>
+          guardianFindingId.test(source_finding_id) ||
+          evidence.source_data?.["format"] === guardianSelectionFormat,
+      ))
+  )
+    throw new CodexSecurityError(
+      "Use the semgrep provider for Guardian findings.",
+    );
 }
 
 export async function prepareExternalPublication(
@@ -636,7 +638,6 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
@@ -743,14 +744,15 @@ export async function prepareNormalizedPublication(
   workbench?: WorkbenchPublication | "preview",
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,
     dependencies,
     snapshotSourceRepositories(dependencies.sourceRepositories),
     workbench,
-    settings.provider === "tenable" ? settings.sourceRepositoryUrl : undefined,
+    settings.provider === "tenable" || settings.provider === "crowdstrike"
+      ? settings.sourceRepositoryUrl
+      : undefined,
   );
 }
 
@@ -1054,7 +1056,8 @@ async function preparePublicationInput(
   declaredUrl?: string,
   fileRepositories?: () => readonly ExternalSourceRepository[],
 ): Promise<PreparedExternalPublication> {
-  const record = workbench !== "preview" && workbench?.record;
+  const stored = workbench === "preview" ? undefined : workbench;
+  const record = stored?.record;
   function withReceipts(
     scope: ExternalPublicationPreview,
     prepared: {
@@ -1139,6 +1142,19 @@ async function preparePublicationInput(
     if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   }
   if (typeof supplied !== "function") checkSelection(supplied);
+  const crowdstrike =
+    options.provider === "crowdstrike" && typeof supplied !== "function"
+      ? await prepareCrowdStrikeCloudReport(
+          supplied.current,
+          declaredUrl,
+          readerSources,
+          stored?.checkout ?? dependencies.sourceCheckout ?? process.cwd(),
+          dependencies,
+          stored?.localSourceIds,
+        )
+      : undefined;
+  if (crowdstrike?.localSourceIds)
+    validatePublicationFindings(crowdstrike.report);
   progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
@@ -1306,7 +1322,7 @@ async function preparePublicationInput(
   const resolved = deferred ? await supplied(destination) : supplied;
   if (deferred) checkSelection(resolved);
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
-    resolved.current;
+    crowdstrike?.report ?? resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
   const sourceReportsPath = sourcePath(destination);
   const hosted = options.provider === "snyk" || options.provider === "semgrep";
@@ -1455,7 +1471,12 @@ async function preparePublicationInput(
   const severities = saved ? saved.repositorySeverities : repositorySeverities;
   const direct = usePrivateImport
     ? parsed
-    : repositorySelection(parsed, severities, resolved.sourcePositions);
+    : repositorySelection(
+        parsed,
+        severities,
+        resolved.sourcePositions,
+        crowdstrike?.localSourceIds,
+      );
   const submittedIds = new Set(
     direct.findings.map((row) => row.source_finding_id),
   );
@@ -1783,6 +1804,13 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    if (
+      crowdstrike &&
+      catalogKey(crowdstrike.source.url) !== catalogKey(approvedUrl)
+    )
+      throw new CodexSecurityError(
+        "CrowdStrike's source repository does not match the selected Cloud repository.",
+      );
     if (provider === "armorcode")
       requireDestination("ArmorCode source", declaredUrl);
     if (report?.["format"] === guardianSelectionFormat)
@@ -2203,7 +2231,11 @@ async function preparePublicationInput(
         ? suppliedSemgrepScopeDigest()
         : saved?.semgrepPartialScopeDigest,
     approvedRepositoryUrl:
-      hosted || options.provider === "tenable" ? approvedUrl : undefined,
+      hosted ||
+      options.provider === "tenable" ||
+      options.provider === "crowdstrike"
+        ? approvedUrl
+        : undefined,
   };
   if (
     saved?.approvedRepositoryPlatform ||
