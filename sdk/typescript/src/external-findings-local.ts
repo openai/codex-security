@@ -59,6 +59,7 @@ import {
 import {
   crowdstrikeCheckout,
   crowdstrikeReportFormat,
+  rebaseCrowdStrikeFinding,
 } from "./crowdstrike-findings.js";
 import {
   guardianFindingRepository,
@@ -963,14 +964,13 @@ const checkoutScannerNames = {
 async function requireScannerFetchRemote(
   source: ExternalSourceRepository,
   provider: keyof typeof checkoutScannerNames,
-  context: Awaited<ReturnType<typeof localContext>>,
-  signal?: AbortSignal,
+  { repository, options }: Awaited<ReturnType<typeof localContext>>,
 ) {
   const remotes = await hostedCheckoutRemotes(
-    context.repository,
-    context.options.protectedRoot,
-    context.options.environment,
-    signal,
+    repository,
+    options.protectedRoot,
+    options.environment,
+    options.signal,
   );
   if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
     throw new CodexSecurityError(
@@ -978,13 +978,14 @@ async function requireScannerFetchRemote(
     );
 }
 
-/** Verify the native FCS paths, then project Cloud locations from the Git root. */
+/** Verify the native FCS paths, then project Cloud locations and IDs from the Git root. */
 export async function prepareCrowdStrikeCloudReport(
   input: ExternalFindings,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
   checkout: string,
   dependencies: Pick<LocalExternalImportDependencies, "environment" | "signal">,
+  localSourceIds = new Map<string, string>(),
 ) {
   const context = await localContext(checkout, dependencies);
   const source = await crowdstrikeCheckout(
@@ -997,12 +998,7 @@ export async function prepareCrowdStrikeCloudReport(
     throw new CodexSecurityError(
       "CrowdStrike Cloud imports require a verified source repository URL.",
     );
-  await requireScannerFetchRemote(
-    source,
-    "crowdstrike",
-    context,
-    dependencies.signal,
-  );
+  await requireScannerFetchRemote(source, "crowdstrike", context);
   const root = await boundGitWorktree(
     context.repository,
     context.options.protectedRoot,
@@ -1015,17 +1011,12 @@ export async function prepareCrowdStrikeCloudReport(
     );
   const prefix = relative(root, context.repository).split(sep).join("/");
   if (!prefix) return { source, report: input };
-  const findings = input.findings.map(({ evidence, ...finding }) => ({
-    ...finding,
-    evidence: {
-      ...evidence,
-      locations: evidence.locations?.map((location) => ({
-        ...location,
-        path: `${prefix}/${location.path}`,
-      })),
-    },
-  }));
-  return { source, report: { ...input, findings } };
+  const findings = input.findings.map((finding) => {
+    const projected = rebaseCrowdStrikeFinding(finding, prefix);
+    localSourceIds.set(projected.source_finding_id, finding.source_finding_id);
+    return projected;
+  });
+  return { source, report: { ...input, findings }, localSourceIds };
 }
 
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
@@ -1100,12 +1091,7 @@ export async function prepareLocalImport(
       options.sourceRepositoryUrl,
       [...readerSources, ...parsedSources],
     );
-    await requireScannerFetchRemote(
-      source,
-      "tenable",
-      context,
-      dependencies.signal,
-    );
+    await requireScannerFetchRemote(source, "tenable", context);
     return preparedLocalStorage(current, options, context, dependencies, true, {
       sourceRepositories: [source],
     });
@@ -1121,13 +1107,7 @@ export async function prepareLocalImport(
     const bound =
       source !== undefined &&
       (await hasGitMetadata(context.repository, dependencies.signal));
-    if (bound)
-      await requireScannerFetchRemote(
-        source,
-        "crowdstrike",
-        context,
-        dependencies.signal,
-      );
+    if (bound) await requireScannerFetchRemote(source, "crowdstrike", context);
     return preparedLocalStorage(
       current,
       options,
