@@ -231,7 +231,12 @@ const observation = z
     }
   });
 
-const captureStatus = z.enum(["observed", "no_match", "no_coverage"]);
+const captureStatus = z.enum([
+  "observed",
+  "no_match",
+  "no_coverage",
+  "no_indexed_match",
+]);
 
 export const sampledStacksSchema = z.strictObject({
   format: z.literal("codex-security.sampled-stacks/v1"),
@@ -264,7 +269,7 @@ export const sampledStacksSchema = z.strictObject({
                 (group) =>
                   (group.status === "observed") ===
                   group.observations.length > 0,
-                "Observed groups require observations. Use an empty list for no_match or no_coverage.",
+                "Observed groups require observations. All other statuses require an empty list.",
               ),
           )
           .min(1),
