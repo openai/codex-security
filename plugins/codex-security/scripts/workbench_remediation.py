@@ -89,7 +89,10 @@ def patch_artifact_preview(
     if f"sha256:{digest.hexdigest()}" != expected_digest:
         return None, None
     preview_truncated = len(preview) > PATCH_PREVIEW_BYTES
-    preview_text = preview[:PATCH_PREVIEW_BYTES].decode("utf-8", errors="replace")
+    # Leave out a character that the byte limit splits instead of replacing it with U+FFFD.
+    preview_text = codecs.getincrementaldecoder("utf-8")(errors="replace").decode(
+        preview[:PATCH_PREVIEW_BYTES], final=not preview_truncated
+    )
     if preview_truncated:
         preview_text = f"{preview_text}\n... patch preview truncated ..."
     return preview_text, {
