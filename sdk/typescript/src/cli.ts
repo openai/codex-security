@@ -2200,8 +2200,11 @@ async function restrictRepositoryLoader(
   environment: NodeJS.ProcessEnv,
   protectedRoots: readonly string[],
   sandbox: PatchSnapshotSandbox | undefined,
-  writers: PatchWriters = { writable: new Set() },
+  options: Parameters<CliDependencies["runRepositoryCommand"]>[3],
 ) {
+  const writers: PatchWriters = options?.loaderAccess ?? {
+    writable: new Set(),
+  };
   let roots: string[] | undefined;
   let resolvePath: ((path: string) => string | null) | undefined;
   const search =
@@ -2260,7 +2263,9 @@ async function restrictRepositoryLoader(
         checked.set(path, null);
         continue;
       }
-      allowed.push(path);
+      // A delegated hook can rewrite a mutable library through a hard link
+      // before this Git process launches its next host child.
+      if (!options?.publicationHooks || files.size === 0) allowed.push(path);
     }
     if (allowed.length) environment[name] = allowed.join(":");
   }
@@ -2553,7 +2558,7 @@ export async function runRepositoryCommand(
       environment,
       protectedRoots,
       sandbox,
-      options?.loaderAccess,
+      options,
     );
     const credentialNames = [
       "OPENAI_API_KEY",

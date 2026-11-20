@@ -31,7 +31,12 @@ export function removePatchCredentials(
       ) ||
       credentialNames.includes(name.toUpperCase()) ||
       (stripAwsCredentials && /^AWS_/i.test(name)) ||
-      (/^(?:https?|all)_proxy$/i.test(name) &&
+      // Package indexes can contain several URLs, including named indexes.
+      // Git command config is filtered as key/value pairs by filterCommandConfig.
+      (!/^GIT_CONFIG_(?:PARAMETERS|(?:KEY|VALUE)_\d+)$/iu.test(name) &&
+        value !== undefined &&
+        /(?:^|[\s=])https?:\/{1,3}[^/@?#\s]+@/iu.test(value)) ||
+      (/^(?:https?|all|pip)_proxy$/i.test(name) &&
         value !== undefined &&
         proxyCredentials.test(value))
     )

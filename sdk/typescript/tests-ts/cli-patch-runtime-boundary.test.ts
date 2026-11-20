@@ -23,8 +23,7 @@ function inspectLoader(
   checkout: string,
   name: string,
   value: string,
-  protectedRoots: string[] = [],
-  loaderAccess = { writable: new Set<string>() },
+  options?: Parameters<typeof runRepositoryCommand>[3],
 ) {
   const binding = `--config-env=probe.loader=${name}`;
   return runRepositoryCommand(
@@ -33,8 +32,7 @@ function inspectLoader(
     checkout,
     {
       environment: { [name]: value, LC_ALL: "C" },
-      protectedRoots,
-      loaderAccess,
+      ...options,
     },
   );
 }
@@ -94,9 +92,9 @@ test.skipIf(process.platform === "win32")(
     }
     for (const name of names) {
       const value = paths.join(name === "LD_LIBRARY_PATH" ? ";" : ":");
-      const actual = await inspectLoader(checkout, name, value, [
-        join(grant, "library"),
-      ]);
+      const actual = await inspectLoader(checkout, name, value, {
+        protectedRoots: [join(grant, "library")],
+      });
       expect(actual).toBe([first, last].join(":"));
     }
   },
@@ -113,9 +111,19 @@ test.skipIf(process.platform === "win32")(
     const loaderAccess = { writable: new Set([checkout]) };
     const paths = [tools, fallback].join(":");
     const inspect = () =>
-      inspectLoader(checkout, "LD_LIBRARY_PATH", paths, [], loaderAccess);
+      inspectLoader(checkout, "LD_LIBRARY_PATH", paths, { loaderAccess });
     await writeFile(library, "original");
     expect(await inspect()).toBe(paths);
+    expect(
+      await inspectLoader(checkout, "LD_LIBRARY_PATH", paths, {
+        loaderAccess,
+        publicationHooks: {
+          gitDirectory: join(checkout, ".git"),
+          configured: new Set(),
+          events: new Set(["pre-push"]),
+        },
+      }),
+    ).toBe(fallback);
     await link(library, alias);
     await writeFile(alias, "modified");
     await unlink(alias);
