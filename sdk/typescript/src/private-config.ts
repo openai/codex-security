@@ -2,23 +2,13 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { stringify } from "smol-toml";
-import { ConfigurationError } from "./config-errors.js";
-import type { JsonObject } from "./codex-profile.js";
+import { serializeCodexConfig, type JsonObject } from "./codex-profile.js";
 
 export async function writeCodexConfig(
   path: string,
   config: JsonObject,
 ): Promise<void> {
-  let contents: string;
-  try {
-    contents = stringify(config);
-  } catch (error) {
-    throw new ConfigurationError("Invalid Codex configuration.", {
-      cause: error,
-    });
-  }
-  await writePrivateConfig(path, contents);
+  await writePrivateConfig(path, serializeCodexConfig(config));
 }
 
 /** @internal Write private configuration without changing its serialized contents. */

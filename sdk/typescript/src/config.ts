@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import {
+  NULL_TOML_VALUE_MESSAGE,
   deepMerge,
   isObject,
   resolveCodexProfile,
@@ -12,7 +13,7 @@ import {
   type JsonValue,
 } from "./codex-profile.js";
 /** @internal */
-export { deepMerge } from "./codex-profile.js";
+export { deepMerge, selectedScanProfile } from "./codex-profile.js";
 export {
   resolveCodexProfile,
   type JsonObject,
@@ -319,10 +320,7 @@ export function quoteTomlString(value: string): string {
 
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
-  if (value === null)
-    throw new ConfigurationError(
-      "Codex TOML overrides cannot contain null values.",
-    );
+  if (value === null) throw new ConfigurationError(NULL_TOML_VALUE_MESSAGE);
   // Match the Codex SDK's numeric spelling, including integers above 2**53 - 1.
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;

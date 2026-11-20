@@ -1,4 +1,5 @@
 import { parse, stringify } from "smol-toml";
+import { ConfigurationError } from "./config-errors.js";
 import { isRecord } from "./record.js";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -21,8 +22,31 @@ export function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+export const NULL_TOML_VALUE_MESSAGE =
+  "Codex TOML overrides cannot contain null values.";
+
+function containsNullArrayElement(value: JsonValue): boolean {
+  if (Array.isArray(value))
+    return value.some(
+      (item) => item === null || containsNullArrayElement(item),
+    );
+  return isObject(value) && Object.values(value).some(containsNullArrayElement);
+}
+
+export function serializeCodexConfig(config: JsonObject): string {
+  try {
+    return stringify(config);
+  } catch (error) {
+    const message =
+      error instanceof TypeError && containsNullArrayElement(config)
+        ? NULL_TOML_VALUE_MESSAGE
+        : `Invalid Codex configuration: ${error instanceof Error ? error.message : String(error)}`;
+    throw new ConfigurationError(message, { cause: error });
+  }
+}
+
 export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const normalized = parse(stringify(config)) as JsonObject;
+  const normalized = parse(serializeCodexConfig(config)) as JsonObject;
   const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
   delete resolved["profile"];
   delete resolved["profiles"];
