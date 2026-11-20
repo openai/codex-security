@@ -132,7 +132,6 @@ export async function testCapturedCustomProviderSettings({
               environment,
             )
           : await loadDeepScanExecutionSettings(
-              codexHome,
               {
                 workflowVersion: "deep-security-scan/v1",
                 usageOwner:

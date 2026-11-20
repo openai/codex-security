@@ -262,7 +262,6 @@ export function reconstructedWorkerCases({
       assert.equal(saved.cyberAccessProgram, accessProgram);
       assert.deepEqual(saved.apiFeatures, apiFeatures);
       const legacy = await loadDeepScanExecutionSettings(
-        fixture.root,
         {
           ...settings,
           workflowVersion: "deep-security-scan/v1",
@@ -281,10 +280,9 @@ export function reconstructedWorkerCases({
       const runWorkbench = async (
         args: string[],
         input?: string,
-        _selectFinalization?: boolean,
-        withExecutionSettings?: boolean,
+        options?: { withExecutionSettings?: boolean },
       ) => {
-        const pythonArgs = withExecutionSettings
+        const pythonArgs = options?.withExecutionSettings
           ? [
               "-c",
               "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](with_execution_settings=True)",
@@ -363,10 +361,7 @@ export function reconstructedWorkerCases({
         threadId: beginInput.threadId,
       });
       assert.equal(claim.acquired, true);
-      assert.deepEqual(
-        await loadDeepScanExecutionSettings(recordedScanDir, claim.run),
-        saved,
-      );
+      assert.deepEqual(await loadDeepScanExecutionSettings(claim.run), saved);
       const observer = await new WorkbenchDeepScanStore(runWorkbench).begin({
         ...beginInput,
         model: "observer-model",
@@ -409,7 +404,6 @@ export function reconstructedWorkerCases({
               threadId: beginInput.threadId,
             })
           ).run,
-        recordedScanDir,
         currentParentSandbox,
         config,
         configPath,
@@ -518,14 +512,11 @@ export function reconstructedWorkerCases({
               scan.snapshotPath,
               "utf8",
             );
-            const recorded = await loadDeepScanExecutionSettings(
-              scan.recordedScanDir,
-              {
-                ...scan.run,
-                ...scan.settings,
-                createdAt: "2026-01-01T00:01:00Z",
-              },
-            );
+            const recorded = await loadDeepScanExecutionSettings({
+              ...scan.run,
+              ...scan.settings,
+              createdAt: "2026-01-01T00:01:00Z",
+            });
             const restored = restoredDeepScanWorkerSettings(
               recorded,
               scan.currentParentSandbox,

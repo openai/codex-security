@@ -79,77 +79,6 @@ export async function validateDiscoveryArtifacts(
   options: DiscoveryArtifactOptions = {},
   admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
-  const result = await readDiscoveryAuditDraft(
-    artifacts,
-    resultPath,
-    expectedScanId,
-    options,
-    admission,
-  );
-  if (result.complete === false)
-    throw new Error(
-      "Standard scan worker wrote only a checkpoint; its audit is not complete.",
-    );
-  return result;
-}
-
-async function validateDiscoveryCoverage(
-  workersRoot: string,
-  context: ArtifactContext,
-  result: ScanDraftInput,
-): Promise<void> {
-  validateRetainedCoverage(result.reviewState);
-  // Check the worker's own task IDs before qualifying active and closed tasks.
-  const closures = result.reviewState.resolvedDeferred ?? [];
-  if (closures.length) {
-    const active = new Set(
-      result.reviewState.deferred.flatMap((row) => [row.id, row.candidateId]),
-    );
-    const closed = new Set<string>();
-    for (const { id } of closures) {
-      if (active.has(id))
-        throw new Error(
-          `Standard scan worker deferred work is still active: ${id}`,
-        );
-      if (closed.has(id))
-        throw new Error(
-          `Standard scan worker repeats resolved deferred id: ${id}`,
-        );
-      closed.add(id);
-    }
-  }
-  const receiptPaths = new Map<string, string>();
-  for (const row of result.reviewState.surfaces as JsonObject[]) {
-    for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
-      const location = workerCoverageReceiptLocation(context, row, ref);
-      const normalized = relative(
-        workersRoot,
-        join(location.context.root, ...location.components),
-      );
-      const key = normalized.toLowerCase();
-      const previous = receiptPaths.get(key);
-      if (previous === normalized) continue;
-      if (previous !== undefined)
-        throw new Error(
-          `Standard scan worker coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
-        );
-      receiptPaths.set(key, normalized);
-      await artifactSourcePath(
-        location.context,
-        location.components,
-        "Standard scan worker coverage receipt",
-      );
-    }
-  }
-}
-
-export async function readDiscoveryAuditDraft(
-  artifacts: DeepScanArtifacts,
-  resultPath: string,
-  expectedScanId: string,
-  options: DiscoveryArtifactOptions = {},
-  admission: "new" | "previously-accepted" = "new",
-): Promise<ScanDraftInput> {
   const {
     artifactDir = dirname(resultPath),
     scope,
@@ -183,10 +112,54 @@ export async function readDiscoveryAuditDraft(
     expectedScanId,
     parsePersistedScanDraft,
   );
-  if (result.complete !== false) {
-    // Historical results retain their original display policy.
-    if (admission === "new") validateWorkerReport(result);
-    await validateDiscoveryCoverage(artifacts.workersRoot, context, result);
+  if (result.complete === false)
+    throw new Error(
+      "Standard scan worker wrote only a checkpoint; its audit is not complete.",
+    );
+  // Preserve the existing publication of previously accepted historical payloads.
+  if (admission === "new") validateWorkerReport(result);
+  validateRetainedCoverage(result.reviewState);
+  // Check the worker's own task IDs before qualifying active and closed tasks.
+  const closures = result.reviewState.resolvedDeferred ?? [];
+  if (closures.length) {
+    const active = new Set(
+      result.reviewState.deferred.flatMap((row) => [row.id, row.candidateId]),
+    );
+    const closed = new Set<string>();
+    for (const { id } of closures) {
+      if (active.has(id))
+        throw new Error(
+          `Standard scan worker deferred work is still active: ${id}`,
+        );
+      if (closed.has(id))
+        throw new Error(
+          `Standard scan worker repeats resolved deferred id: ${id}`,
+        );
+      closed.add(id);
+    }
+  }
+  const receiptPaths = new Map<string, string>();
+  for (const row of result.reviewState.surfaces as JsonObject[]) {
+    for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
+      const location = workerCoverageReceiptLocation(context, row, ref);
+      const normalized = relative(
+        artifacts.workersRoot,
+        join(location.context.root, ...location.components),
+      );
+      const key = normalized.toLowerCase();
+      const previous = receiptPaths.get(key);
+      if (previous === normalized) continue;
+      if (previous !== undefined)
+        throw new Error(
+          `Standard scan worker coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
+        );
+      receiptPaths.set(key, normalized);
+      await artifactSourcePath(
+        location.context,
+        location.components,
+        "Standard scan worker coverage receipt",
+      );
+    }
   }
   return result;
 }

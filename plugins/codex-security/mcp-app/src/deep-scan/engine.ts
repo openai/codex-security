@@ -53,26 +53,22 @@ export function startDeepScanEngine(options: {
             created: true,
           },
         )
-      : await loadDeepScanExecutionSettings(
-          active.scanDir,
-          active,
-          async () => {
-            const context = await runWorkbench([
-              "get-scan",
-              "--scan-id",
-              active.scanId,
-            ]);
-            const recipe = context.recipe as
-              Pick<DeepScanLegacySettingsContext, "config"> | undefined;
-            const scan = context.scan as {
-              executionAttribution?: { owner: DeepScanRunState["usageOwner"] };
-            };
-            return {
-              config: recipe?.config,
-              usageOwner: scan.executionAttribution?.owner,
-            };
-          },
-        ),
+      : await loadDeepScanExecutionSettings(active, async () => {
+          const context = await runWorkbench([
+            "get-scan",
+            "--scan-id",
+            active.scanId,
+          ]);
+          const recipe = context.recipe as
+            Pick<DeepScanLegacySettingsContext, "config"> | undefined;
+          const scan = context.scan as {
+            executionAttribution?: { owner: DeepScanRunState["usageOwner"] };
+          };
+          return {
+            config: recipe?.config,
+            usageOwner: scan.executionAttribution?.owner,
+          };
+        }),
   );
   return startOrJoinDeepScanCoordinator({
     run,

@@ -6,11 +6,6 @@ import { captureOriginalReasoningSummary } from "./reasoning-summary.js";
 export { scanPreflightCodexConfig } from "./preflight-config.js";
 import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
 import {
-  auditEvidence,
-  runAcceptedAudit,
-  type ScanDraftInput,
-} from "./accepted-audit.js";
-import {
   explicitlyCanceled,
   hostedScanFailureStatus,
   ScanExecutionError,
@@ -69,13 +64,6 @@ import {
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
-
-import {
-  readCodexSessionTurn,
-  type CodexSessionClient as CodexClientLike,
-  type CodexSessionThread as CodexThreadLike,
-  type CodexSessionEvent as ScanEvent,
-} from "./codex-session.js";
 import {
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
@@ -348,6 +336,24 @@ import {
   isWithin,
   type InspectedExecutable,
 } from "./trusted-executable.js";
+
+interface CodexThreadLike {
+  readonly id: string | null;
+  runStreamed(
+    input: string,
+    options: TurnOptions,
+  ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
+}
+
+interface ScanEvent {
+  readonly type: string;
+  readonly [key: string]: unknown;
+}
+
+interface CodexClientLike {
+  startThread(options: ThreadOptions): CodexThreadLike;
+  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
+}
 
 interface PreparedRuntime {
   codexHome: string;
@@ -6355,12 +6361,6 @@ export async function runScanEvents(
   let scanStarted = false;
   let tacStatusReported = false;
   try {
-    let completedTurn:
-      | (Awaited<ReturnType<typeof readCodexTurn>> & {
-          threadId: string;
-          status: "completed";
-        })
-      | undefined;
     const execute = async () => {
       options.signal.throwIfAborted();
       const turn =
@@ -6448,10 +6448,11 @@ export async function runScanEvents(
           "Codex Security did not report a thread ID.",
         );
       }
-      return (completedTurn = { ...turn, threadId, status });
+      return { ...turn, threadId, status };
     };
     let managedFinalized = false;
     const accept = async (execution: Awaited<ReturnType<typeof execute>>) => {
+      options.signal.throwIfAborted();
       // Managed scans reconcile saved checkpoints before admitting canonical artifacts.
       if (
         options.workbenchValidated &&
@@ -6487,45 +6488,36 @@ export async function runScanEvents(
           pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
         )
       ).default;
-      const draft: ScanDraftInput = await helper.readScanAuditDraft({
+      const draft = await helper.readScanAuditDraft({
         root: options.scanDir,
         scanId: options.scanId ?? manifest.scan.id,
         manifest,
         findings,
         reviewState,
       });
-      return auditEvidence(draft);
+      options.signal.throwIfAborted();
+      return draft.complete !== false;
     };
-    let audit;
+    let turn: Awaited<ReturnType<typeof execute>> | undefined;
+    let complete: boolean;
     try {
-      audit = await runAcceptedAudit({
-        signal: options.signal,
-        execute,
-        accept,
-      });
+      turn = await execute();
+      complete = await accept(turn);
     } catch (error) {
       if (options.signal.aborted) throw error;
       const saved = await options.recoverCompletion?.();
       if (!saved || saved.status !== "completed" || saved.threadId === null)
         throw error;
       // The enclosing scan publishes its saved selection; acceptance then reads it.
-      const recovered = completedTurn ?? {
-        ...saved,
-        threadId: saved.threadId,
-        status: saved.status,
-      };
-      audit = await runAcceptedAudit({
-        signal: options.signal,
-        execute: async () => recovered,
-        accept,
-      });
+      turn ??= { ...saved, threadId: saved.threadId, status: saved.status };
+      complete = await accept(turn);
     }
-    if (audit.status === "checkpoint")
+    if (!complete)
       throw new IncompleteScanError(
         "Codex Security produced only an unfinished audit checkpoint.",
       );
-    const { status, threadId, finalResponse } = audit.execution;
-    let { usage } = audit.execution;
+    const { status, threadId, finalResponse } = turn;
+    let { usage } = turn;
     if (!options.workbenchValidated && options.onFinalize !== undefined) {
       const finalizedUsage = await options.onFinalize(usage);
       if (finalizedUsage !== undefined) usage = finalizedUsage;
@@ -6589,6 +6581,11 @@ async function readCodexTurn(options: {
   usage: unknown;
   lastStreamError: string | null;
 }> {
+  const { readCodexSessionTurn } = await import(
+    pathToFileURL(
+      join(await bundledPluginRoot(), "scripts", "codex_session.mjs"),
+    ).href
+  );
   async function* transportEvents() {
     try {
       yield* options.events;

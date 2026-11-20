@@ -2690,8 +2690,7 @@ async function testResumeDoesNotRequireHistoricalWorkerPrompt(
         attempt: 1,
         promptPath,
         artifactDir: fixture.run.scanDir,
-        mergeState: "none",
-      } satisfies PersistedDeepScanWorker,
+      } as PersistedDeepScanWorker,
     ],
   });
   const executor = new FakeExecutor();

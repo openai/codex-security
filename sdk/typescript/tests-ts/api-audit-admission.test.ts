@@ -1,12 +1,10 @@
-import type { ScanDraftInput } from "../src/accepted-audit.js";
-import * as auditModule from "../src/accepted-audit.js";
 import { resolvePluginPath } from "../src/runtime.js";
 import { strToU8, zipSync } from "fflate";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, expect, test, spyOn } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { build } from "esbuild";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runScanEvents } from "../src/api.js";
@@ -493,7 +491,7 @@ test.each([
   const helper = (
     await import(pathToFileURL(join(PLUGIN_ROOT, "mcp/helpers.mjs")).href)
   ).default;
-  const checkpoint: ScanDraftInput = helper.parseCanonicalScanDraft({
+  const checkpoint: DraftFixture = helper.parseCanonicalScanDraft({
     scanId,
     manifest,
     findings,
@@ -536,14 +534,6 @@ async function observeStandardAdmission(
   scanDir: string,
   scanId?: string,
 ) {
-  const drafts: ScanDraftInput[] = [];
-  const original = auditModule.auditEvidence;
-  const observer = spyOn(auditModule, "auditEvidence").mockImplementation(
-    (draft) => {
-      drafts.push(draft);
-      return original(draft);
-    },
-  );
   const finalization = new Error("The enclosing finalizer owns the next step.");
   let finalizations = 0;
   const error = await runScanEvents({
@@ -569,16 +559,8 @@ async function observeStandardAdmission(
       finalizations++;
       throw finalization;
     },
-  })
-    .catch((error: unknown) => error)
-    .finally(() => observer.mockRestore());
-  return {
-    error,
-    finalization,
-    finalizations,
-    drafts,
-    calls: drafts.length,
-  };
+  }).catch((error: unknown) => error);
+  return { error, finalization, finalizations };
 }
 
 function mutateDraft(input: DraftFixture, mutation?: Mutation): DraftFixture {

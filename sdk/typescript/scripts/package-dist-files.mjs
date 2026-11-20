@@ -1,5 +1,4 @@
 const distModules = [
-  "accepted-audit",
   "api",
   "dependency-stack-advisory",
   "dependency-stack-assessment",
@@ -138,7 +137,6 @@ const distModules = [
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
-  "codex-session",
   "component-plan",
   "component-scan",
   "config",

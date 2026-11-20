@@ -17,7 +17,6 @@ interface WorkbenchModule {
     input?: string | Buffer,
     options?: {
       isolatedPython?: boolean;
-      selectFinalization?: boolean;
       withExecutionSettings?: boolean;
     },
   ): Promise<Record<string, unknown>>;
@@ -62,35 +61,23 @@ async function fixtureWorkbench(root: string, source: string) {
   return executeWorkbench as WorkbenchModule["executeWorkbench"];
 }
 
-await test("Deep Scan execution and finalization options reach the workbench child", async () => {
+await test("Deep Scan execution settings reach the workbench child", async () => {
   const root = await temporaryDirectory("workbench-internal-options-");
   try {
     const execute = await fixtureWorkbench(
       root,
       `import json, sys
-def main(*, select_finalization=False, with_execution_settings=False):
-    print(json.dumps({"selection": select_finalization, "settings": with_execution_settings,
+def main(*, with_execution_settings=False):
+    print(json.dumps({"settings": with_execution_settings,
                       "args": sys.argv[1:], "input": sys.stdin.read()}))
 `,
     );
-    for (const [command, selectFinalization, withExecutionSettings] of [
-      ["begin-deep-scan", false, true],
-      ["finish-deep-scan", true, false],
-      ["finish-deep-scan", true, true],
-    ] as const) {
-      const args = [command, "--scan-id=fixture"];
+    for (const withExecutionSettings of [false, true]) {
+      const args = ["claim-deep-scan-coordinator", "--scan-id=fixture"];
       const input = '{"worker":"fixture"}';
       assert.deepEqual(
-        await execute(fixturePython, args, input, {
-          selectFinalization,
-          withExecutionSettings,
-        }),
-        {
-          selection: selectFinalization,
-          settings: withExecutionSettings,
-          args,
-          input,
-        },
+        await execute(fixturePython, args, input, { withExecutionSettings }),
+        { settings: withExecutionSettings, args, input },
       );
     }
   } finally {

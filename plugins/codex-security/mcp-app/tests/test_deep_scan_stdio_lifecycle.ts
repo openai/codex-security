@@ -1516,8 +1516,6 @@ async function testCliDeepScanEngine({
     const command = launch.workbenchArgs[0];
     if (command === "claim-deep-scan-coordinator") {
       assert.deepEqual(options, ["with_execution_settings"]);
-    } else if (command === "finish-deep-scan" && options.length > 0) {
-      assert.deepEqual(options, ["select_finalization"]);
     } else {
       assert.deepEqual(options, []);
     }

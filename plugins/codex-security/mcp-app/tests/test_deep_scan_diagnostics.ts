@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
-import { workerDraft } from "./scan-draft-fixture.ts";
 import { importModule } from "./import-module.ts";
 import {
   coordinatorFixture,
@@ -64,7 +63,6 @@ test("Standard scan retries preserve the full validation error", async () => {
       artifactDir,
       validate: async () => {
         if (validations++ === 0) throw validationError;
-        return workerDraft([], { scanId: fixture.run.scanId });
       },
     });
     assert.equal(outcome.status, "validated");

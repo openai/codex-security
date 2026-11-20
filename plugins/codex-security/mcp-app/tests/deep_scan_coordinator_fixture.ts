@@ -100,7 +100,7 @@ export async function fixtureRun(
 export type TestWorker = PersistedDeepScanWorker &
   Pick<DeepScanWorkerMutation, "replaceableFailureKind">;
 export type StoreInput<Method extends keyof DeepScanStore> = Parameters<
-  NonNullable<DeepScanStore[Method]>
+  DeepScanStore[Method]
 >[0];
 
 export function pausePoint() {

@@ -8,24 +8,12 @@ import { resolvePythonCommand } from "./src/python_command.js";
 import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import { resolveDeepWorkerParentSandbox } from "./src/deep-scan/parent-sandbox.js";
 import { DeepScanCoordinatorRegistry } from "./src/deep-scan/registry.js";
-import {
-  WorkbenchDeepScanStore,
-  type WorkbenchRunner,
-} from "./src/deep-scan/store.js";
+import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 
 /** Private SDK entry point. The child process isolates each scan's environment. */
 export async function runCliDeepScan(): Promise<void> {
-  const runWorkbench = (
-    args: string[],
-    input?: string | Buffer,
-    selectFinalization?: boolean,
-    withExecutionSettings?: boolean,
-  ) =>
-    runWorkbenchCommand(args, input, {
-      isolatedPython: true,
-      selectFinalization,
-      withExecutionSettings,
-    });
+  const runWorkbench: typeof runWorkbenchCommand = (args, input, options) =>
+    runWorkbenchCommand(args, input, { ...options, isolatedPython: true });
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const registry = new DeepScanCoordinatorRegistry();
   const controller = new AbortController();

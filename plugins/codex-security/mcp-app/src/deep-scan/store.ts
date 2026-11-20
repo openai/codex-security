@@ -1,10 +1,11 @@
-import { parseDeepScan as parseRunResponse } from "./response.js";
 import { workbenchArgs } from "../workbench-arguments.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
+import { parseDeepScan, parseWorker } from "./response.js";
 
+export { parseDeepScan };
 import {
   deepScanErrorMessage,
   DeepScanNonRetryableError,
@@ -12,10 +13,6 @@ import {
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  DeepScanWorkerStatus,
-  DeepScanWorkerKind,
-  DeepScanMergeState,
-  PersistedDeepScanDedupInput,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
   DeepScanRunState,
@@ -28,8 +25,7 @@ type JsonObject = Record<string, unknown>;
 export type WorkbenchRunner = (
   args: string[],
   input?: string,
-  selectFinalization?: boolean,
-  withExecutionSettings?: boolean,
+  options?: { withExecutionSettings?: boolean },
 ) => Promise<JsonObject>;
 
 const WORKFLOW_VERSION = "deep-security-scan/v1";
@@ -166,7 +162,6 @@ export class WorkbenchDeepScanStore {
         ...args,
         joinOnly: input.projectConfigPath !== undefined,
       }),
-      false,
       userContext,
     );
     if (
@@ -183,7 +178,6 @@ export class WorkbenchDeepScanStore {
           targetPath: result.newScanTarget,
           deepScanProjectJson: JSON.stringify(project),
         }),
-        false,
         userContext,
       );
     }
@@ -220,21 +214,14 @@ export class WorkbenchDeepScanStore {
     input: DeepScanCoordinatorLeaseInput,
   ): Promise<DeepScanCoordinatorClaim> {
     const result = await this.enqueueWrite(
-      [
-        "claim-deep-scan-coordinator",
-        "--scan-id",
-        input.scanId,
-        "--thread-id",
-        input.threadId,
-        ...this.coordinatorLeaseArgs(input.scanId),
-        ...(input.handoffClaimToken
-          ? ["--claim-token", input.handoffClaimToken]
-          : []),
-      ],
-      false,
+      workbenchArgs("claim-deep-scan-coordinator", {
+        scanId: input.scanId,
+        threadId: input.threadId,
+        coordinatorGeneration: this.coordinatorGeneration(input.scanId),
+        claimToken: input.handoffClaimToken || undefined,
+      }),
       undefined,
-      false,
-      true,
+      { withExecutionSettings: true },
     );
     const run = parseDeepScan(result);
     const disposition = result.coordinatorDisposition;
@@ -289,65 +276,29 @@ export class WorkbenchDeepScanStore {
     return { ...lease.run, updatedAt };
   }
 
-  async cancel(scanId: string, threadId: string): Promise<JsonObject> {
-    return this.enqueueWrite([
-      "cancel-scan",
-      "--scan-id",
-      scanId,
-      "--thread-id",
-      threadId,
-    ]);
-  }
-
   async updateWorker(
     update: DeepScanWorkerMutation,
   ): Promise<PersistedDeepScanWorker> {
-    const result = await this.enqueueWrite(
-      [
-        "upsert-deep-scan-worker",
-        "--scan-id",
-        update.scanId,
-        "--worker-id",
-        update.id,
-        "--kind",
-        update.kind,
-        "--status",
-        update.status,
-        "--prompt-path",
-        update.promptPath,
-        "--artifact-dir",
-        update.artifactDir,
-        "--attempt",
-        String(update.attempt),
-        ...this.coordinatorLeaseArgs(update.scanId),
-        ...(update.resultManifestPath
-          ? ["--result-manifest-path", update.resultManifestPath]
-          : []),
-        ...(update.threadId ? ["--sdk-thread-id", update.threadId] : []),
-        ...(update.error ? [`--error-message=${update.error}`] : []),
-        ...(update.terminalFailure ? ["--terminal-failure"] : []),
-        ...(update.replaceableFailureKind
-          ? ["--replaceable-failure-kind", update.replaceableFailureKind]
-          : []),
-      ],
-      true,
-    );
-    const state = objectValue(result.deepScan, "deepScan");
-    const worker = parseWorker(
-      state.workerReceipt
-        ? { deepScan: { ...state, workers: [state.workerReceipt] } }
-        : result,
-      update.id,
-    );
-    return state.consecutiveErrors === undefined
-      ? worker
-      : {
-          ...worker,
-          consecutiveErrors: nonNegativeInteger(
-            state.consecutiveErrors,
-            "deepScan.consecutiveErrors",
-          ),
-        };
+    const result = await this.enqueueWrite([
+      ...workbenchArgs("upsert-deep-scan-worker", {
+        scanId: update.scanId,
+        workerId: update.id,
+        kind: update.kind,
+        status: update.status,
+        promptPath: update.promptPath,
+        artifactDir: update.artifactDir,
+        attempt: update.attempt,
+        coordinatorGeneration: this.coordinatorGeneration(update.scanId),
+        resultManifestPath: update.resultManifestPath || undefined,
+        sdkThreadId: update.threadId || undefined,
+      }),
+      ...(update.error ? [`--error-message=${update.error}`] : []),
+      ...(update.terminalFailure ? ["--terminal-failure"] : []),
+      ...(update.replaceableFailureKind
+        ? ["--replaceable-failure-kind", update.replaceableFailureKind]
+        : []),
+    ]);
+    return parseWorker(result, update.id);
   }
 
   async recordIteration(input: {
@@ -373,42 +324,6 @@ export class WorkbenchDeepScanStore {
     );
   }
 
-  async selectFinalization(input: {
-    scanId: string;
-    coordinatorGeneration?: number;
-    reason: DeepScanTerminalReason;
-    manifestPath: string;
-    resultPath?: string;
-    omittedWorkerIds: string[];
-  }): Promise<DeepScanRunState> {
-    return parseDeepScan(
-      await this.enqueueWrite(
-        [
-          "finish-deep-scan",
-          "--scan-id",
-          input.scanId,
-          ...(input.coordinatorGeneration === undefined
-            ? this.coordinatorLeaseArgs(input.scanId)
-            : [
-                "--coordinator-generation",
-                String(input.coordinatorGeneration),
-              ]),
-          "--terminal-reason",
-          input.reason,
-          "--manifest-path",
-          input.manifestPath,
-          ...input.omittedWorkerIds.flatMap((workerId) => [
-            "--omitted-worker-id",
-            workerId,
-          ]),
-        ],
-        true,
-        JSON.stringify({ resultPath: input.resultPath ?? null }),
-        true,
-      ),
-    );
-  }
-
   async finish(input: {
     scanId: string;
     coordinatorGeneration?: number;
@@ -419,29 +334,16 @@ export class WorkbenchDeepScanStore {
   }): Promise<DeepScanRunState> {
     return parseDeepScan(
       await this.enqueueWrite(
-        [
-          "finish-deep-scan",
-          "--scan-id",
-          input.scanId,
-          ...(input.coordinatorGeneration === undefined
-            ? this.coordinatorLeaseArgs(input.scanId)
-            : [
-                "--coordinator-generation",
-                String(input.coordinatorGeneration),
-              ]),
-          "--terminal-reason",
-          input.reason,
-          "--manifest-path",
-          input.manifestPath,
-          ...(input.stagedManifestPath
-            ? ["--staged-manifest-path", input.stagedManifestPath]
-            : []),
-          ...input.omittedWorkerIds.flatMap((workerId) => [
-            "--omitted-worker-id",
-            workerId,
-          ]),
-        ],
-        true,
+        workbenchArgs("finish-deep-scan", {
+          scanId: input.scanId,
+          coordinatorGeneration:
+            input.coordinatorGeneration ??
+            this.coordinatorGeneration(input.scanId),
+          terminalReason: input.reason,
+          manifestPath: input.manifestPath,
+          stagedManifestPath: input.stagedManifestPath || undefined,
+          omittedWorkerId: input.omittedWorkerIds,
+        }),
       ),
     );
   }
@@ -513,13 +415,6 @@ export class WorkbenchDeepScanStore {
     return this.coordinatorLeases.get(scanId)?.run.coordinatorGeneration;
   }
 
-  private coordinatorLeaseArgs(scanId: string): string[] {
-    const generation = this.coordinatorGeneration(scanId);
-    return generation === undefined
-      ? []
-      : ["--coordinator-generation", String(generation)];
-  }
-
   /**
    * Run mutations in call order. Callers receive their own operation's result
    * or error, while the stored tail always resolves so one failed write cannot
@@ -531,22 +426,14 @@ export class WorkbenchDeepScanStore {
    */
   private enqueueWrite(
     args: string[],
-    retryTransientFailure = false,
     input?: string,
-    selectFinalization = false,
-    withExecutionSettings = false,
+    options?: { withExecutionSettings?: boolean },
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
-        return retryTransientFailure ||
-          RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
-          ? await this.runIdempotentPersistence(args, input, selectFinalization)
-          : await this.runWorkbench(
-              args,
-              input,
-              selectFinalization,
-              withExecutionSettings,
-            );
+        return RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
+          ? await this.runIdempotentPersistence(args)
+          : await this.runWorkbench(args, input, options);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
@@ -578,15 +465,11 @@ export class WorkbenchDeepScanStore {
   }
 
   /** Replay only existing, same-identity workbench mutations after transient failures. */
-  private async runIdempotentPersistence(
-    args: string[],
-    input?: string,
-    selectFinalization = false,
-  ): Promise<JsonObject> {
+  private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
     const startedAt = Date.now();
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.runWorkbench(args, input, selectFinalization);
+        return await this.runWorkbench(args);
       } catch (error) {
         if (!isTransientPersistenceError(error)) {
           throw error;
@@ -714,289 +597,4 @@ function persistenceErrorRecords(error: unknown): PersistenceErrorRecord[] {
 function argumentValue(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index < 0 ? undefined : args[index + 1];
-}
-
-export function parseDeepScan(result: JsonObject): DeepScanRunState {
-  const value = objectValue(result.deepScan, "deepScan");
-  return {
-    ...parseRunResponse(result),
-    schemaVersion: optionalPositiveInteger(value.schemaVersion),
-    workflowVersion: optionalString(value.workflowVersion),
-    finalizationInput: parseFinalizationInput(value.finalizationInput),
-    usageOwner: parseUsageOwner(value.usageOwner),
-    executionSettings:
-      value.executionSettings == null
-        ? undefined
-        : (objectValue(
-            value.executionSettings,
-            "deepScan.executionSettings",
-          ) as unknown as DeepScanRunState["executionSettings"]),
-    model: optionalString(value.model),
-    reasoningEffort: optionalString(value.reasoningEffort),
-    persistedWorkers: parsePersistedWorkers(value.workers),
-    persistedDedupInputs: parsePersistedDedupInputs(value.dedupInputs),
-    persistedMergeClaims: Array.isArray(value.mergeClaims)
-      ? value.mergeClaims.map((candidate) => {
-          const claim = objectValue(candidate, "deepScan.mergeClaim");
-          return {
-            workerId: requiredString(
-              claim.workerId,
-              "deepScan.mergeClaim.workerId",
-            ),
-            previousWorkerId: optionalString(claim.previousWorkerId),
-            previousResultPath: optionalString(claim.previousResultPath),
-            previousResultSha256: optionalString(claim.previousResultSha256),
-          };
-        })
-      : [],
-    ...(value.committedMerge
-      ? { committedMerge: parseCommittedMerge(value.committedMerge) }
-      : {}),
-  };
-}
-
-function parseUsageOwner(value: unknown): DeepScanRunState["usageOwner"] {
-  if (value === undefined || value === null) return null;
-  const owner = objectValue(value, "deepScan.usageOwner");
-  return {
-    threadId: optionalString(owner.threadId) ?? null,
-    turnId: optionalString(owner.turnId) ?? null,
-    startedAt: requiredString(owner.startedAt, "deepScan.usageOwner.startedAt"),
-  };
-}
-
-function parseFinalizationInput(
-  value: unknown,
-): DeepScanRunState["finalizationInput"] {
-  if (value === undefined || value === null) return undefined;
-  const input = objectValue(value, "deepScan.finalizationInput");
-  if (
-    input.terminalReason !== "saturated" &&
-    input.terminalReason !== "capped"
-  ) {
-    throw new Error(
-      "Codex Security workbench returned invalid finalization terminal reason.",
-    );
-  }
-  if (!Array.isArray(input.omittedWorkerIds)) {
-    throw new Error(
-      "Codex Security workbench returned invalid finalization omissions.",
-    );
-  }
-  return {
-    version: positiveInteger(
-      input.version,
-      "deepScan.finalizationInput.version",
-    ),
-    resultPath:
-      input.resultPath === null
-        ? null
-        : requiredString(
-            input.resultPath,
-            "deepScan.finalizationInput.resultPath",
-          ),
-    resultSha256:
-      input.resultSha256 === null
-        ? null
-        : requiredString(
-            input.resultSha256,
-            "deepScan.finalizationInput.resultSha256",
-          ),
-    terminalReason: input.terminalReason,
-    omittedWorkerIds: input.omittedWorkerIds.map((id) =>
-      requiredString(id, "omittedWorkerId"),
-    ),
-    selectedAt: requiredString(
-      input.selectedAt,
-      "deepScan.finalizationInput.selectedAt",
-    ),
-  };
-}
-
-function parsePersistedDedupInputs(
-  value: unknown,
-): PersistedDeepScanDedupInput[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) {
-    throw new Error(
-      "Codex Security workbench returned invalid deepScan.dedupInputs.",
-    );
-  }
-  return value.map((candidate) => {
-    const input = objectValue(candidate, "deepScan.dedupInput");
-    return {
-      dedupWorkerId: requiredString(
-        input.dedupWorkerId,
-        "deepScan.dedupInput.dedupWorkerId",
-      ),
-      discoveryWorkerId: requiredString(
-        input.discoveryWorkerId,
-        "deepScan.dedupInput.discoveryWorkerId",
-      ),
-      inputOrder: nonNegativeInteger(
-        input.inputOrder,
-        "deepScan.dedupInput.inputOrder",
-      ),
-      resultManifestPath: optionalString(input.resultManifestPath),
-      resultManifestSha256: optionalString(input.resultManifestSha256),
-      attempt: optionalPositiveInteger(input.attempt),
-    };
-  });
-}
-
-function parseCommittedMerge(
-  value: unknown,
-): NonNullable<DeepScanRunState["committedMerge"]> {
-  const commit = objectValue(value, "deepScan.committedMerge");
-  return {
-    workerId: requiredString(
-      commit.workerId,
-      "deepScan.committedMerge.workerId",
-    ),
-    resultManifestPath: requiredString(
-      commit.resultManifestPath,
-      "deepScan.committedMerge.resultManifestPath",
-    ),
-    resultManifestSha256: requiredString(
-      commit.resultManifestSha256,
-      "deepScan.committedMerge.resultManifestSha256",
-    ),
-    newFindings: nonNegativeInteger(
-      commit.newFindings,
-      "deepScan.committedMerge.newFindings",
-    ),
-  };
-}
-
-function parsePersistedWorkers(value: unknown): PersistedDeepScanWorker[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) {
-    throw new Error(
-      "Codex Security workbench returned invalid deepScan.workers.",
-    );
-  }
-  return value.map((candidate) =>
-    parsePersistedWorker(objectValue(candidate, "deepScan.worker")),
-  );
-}
-
-function parseWorker(
-  result: JsonObject,
-  workerId: string,
-): PersistedDeepScanWorker {
-  const deepScan = objectValue(result.deepScan, "deepScan");
-  if (!Array.isArray(deepScan.workers)) {
-    throw new Error(
-      "Codex Security workbench did not return deepScan.workers.",
-    );
-  }
-  const value = deepScan.workers.find(
-    (candidate) =>
-      candidate &&
-      typeof candidate === "object" &&
-      !Array.isArray(candidate) &&
-      (candidate as JsonObject).id === workerId,
-  ) as JsonObject | undefined;
-  if (!value) {
-    throw new Error(
-      `Codex Security workbench did not return Deep Scan worker ${workerId}.`,
-    );
-  }
-  return parsePersistedWorker(value);
-}
-
-function parsePersistedWorker(value: JsonObject): PersistedDeepScanWorker {
-  return {
-    id: requiredString(value.id, "deepScan.worker.id"),
-    kind: workerKind(value.kind),
-    status: workerStatus(value.status),
-    mergeState: mergeState(value.mergeState),
-    promptPath: requiredString(value.promptPath, "deepScan.worker.promptPath"),
-    artifactDir: requiredString(
-      value.artifactDir,
-      "deepScan.worker.artifactDir",
-    ),
-    attempt: nonNegativeInteger(value.attempt, "deepScan.worker.attempt"),
-    threadId: optionalString(value.sdkThreadId),
-    resultManifestPath: optionalString(value.resultManifestPath),
-    acceptedResultPath: optionalString(value.acceptedResultPath),
-    acceptedResultSha256: optionalString(value.acceptedResultSha256),
-    completionSequence: optionalPositiveInteger(value.completionSequence),
-    error: optionalString(value.error),
-  };
-}
-
-function mergeState(value: unknown): DeepScanMergeState {
-  if (
-    value === "none" ||
-    value === "buffered" ||
-    value === "merging" ||
-    value === "merged"
-  ) {
-    return value;
-  }
-  throw new Error(
-    "Codex Security workbench returned invalid deepScan.worker.mergeState.",
-  );
-}
-
-function workerKind(value: unknown): DeepScanWorkerKind {
-  if (value === "setup" || value === "discovery" || value === "dedup")
-    return value;
-  throw new Error(
-    "Codex Security workbench returned invalid deepScan.worker.kind.",
-  );
-}
-
-function workerStatus(value: unknown): DeepScanWorkerStatus {
-  if (
-    value === "queued" ||
-    value === "running" ||
-    value === "succeeded" ||
-    value === "failed" ||
-    value === "canceled"
-  ) {
-    return value;
-  }
-  throw new Error(
-    "Codex Security workbench returned invalid deepScan.worker.status.",
-  );
-}
-
-function objectValue(value: unknown, field: string): JsonObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`Codex Security workbench did not return ${field}.`);
-  }
-  return value as JsonObject;
-}
-
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return value;
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
-}
-
-function positiveInteger(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || Number(value) < 1) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return Number(value);
-}
-
-function optionalPositiveInteger(value: unknown): number | undefined {
-  return Number.isInteger(value) && Number(value) >= 1
-    ? Number(value)
-    : undefined;
-}
-
-function nonNegativeInteger(value: unknown, field: string): number {
-  if (!Number.isInteger(value) || Number(value) < 0) {
-    throw new Error(`Codex Security workbench returned invalid ${field}.`);
-  }
-  return Number(value);
 }

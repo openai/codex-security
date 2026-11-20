@@ -89,13 +89,11 @@ export async function captureDeepScanExecutionSettings(
     original.usageOwner === undefined || parent?.created
       ? parent
       : original.usageOwner;
-  const native = !owner?.threadId
-    ? {}
-    : await originalParentSettings(codexHome, {
-        ...owner,
-        threadId: owner.threadId,
-        startedAt: parent?.startedAt ?? owner.startedAt,
-      });
+  const native = await originalParentSettings(
+    codexHome,
+    owner,
+    parent?.startedAt ?? owner?.startedAt,
+  );
   return executionSettings({
     codexPath: resolveCodexPath(
       environment,
@@ -109,6 +107,19 @@ export async function captureDeepScanExecutionSettings(
         ["\\", "/"].includes(win32.parse(codexHome).root))
         ? await fs.realpath(codexHome)
         : codexHome,
+    ...modelSelections(original, resolved, selected, native),
+    providerConfig: selected.model_providers as JsonObject | undefined,
+    parentSandbox,
+  });
+}
+
+function modelSelections(
+  original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "serviceTier">,
+  resolved: JsonObject,
+  selected: JsonObject,
+  native: Partial<DeepScanExecutionSettings>,
+) {
+  return {
     model:
       original.model ?? (selected.model as string | undefined) ?? native.model,
     reasoningEffort:
@@ -132,33 +143,31 @@ export async function captureDeepScanExecutionSettings(
     cyberAccessProgram:
       native.cyberAccessProgram ?? cyberAccessProgram(resolved),
     apiFeatures: apiFeatures(selected.features, native.cyberAccessProgram),
-    providerConfig: selected.model_providers as JsonObject | undefined,
-    parentSandbox,
-  });
+  };
 }
 
 async function originalParentSettings(
   codexHome: string,
-  parent: { threadId: string; turnId?: string | null; startedAt?: string },
+  parent:
+    { threadId: string | null; turnId?: string | null } | null | undefined,
+  startedAt: string | undefined,
 ): Promise<Partial<DeepScanExecutionSettings>> {
+  if (!parent?.threadId) return {};
   // Native config/read represents omitted selections as null. Recover recorded
   // selections from the original parent; some native records omit the summary.
   const events = await readOriginalParentEvents(codexHome, parent.threadId);
   const settings: Partial<DeepScanExecutionSettings> = {};
   let applied: Partial<DeepScanExecutionSettings> | undefined;
   let summaryIsCompatibilityOnly = false;
-  const cutoff =
-    parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
+  const cutoff = startedAt === undefined ? Infinity : Date.parse(startedAt);
   for (const event of events) {
     const timestamp =
       typeof event.timestamp === "string"
         ? Date.parse(event.timestamp)
         : undefined;
     if (timestamp !== undefined && timestamp > cutoff) continue;
-    const payload = event.payload;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload))
-      continue;
-    const context = payload as Record<string, unknown>;
+    const context = event.payload;
+    if (!isRecord(context)) continue;
     if (
       event.type === "event_msg" &&
       context.type === "thread_settings_applied"
@@ -168,10 +177,8 @@ async function originalParentSettings(
         context.thread_id !== parent.threadId
       )
         continue;
-      const snapshot = context.thread_settings;
-      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot))
-        continue;
-      const value = snapshot as Record<string, unknown>;
+      const value = context.thread_settings;
+      if (!isRecord(value)) continue;
       applied = {
         model: typeof value.model === "string" ? value.model : undefined,
         modelProvider:
@@ -232,8 +239,7 @@ async function originalParentSettings(
 
 /** Read recorded execution settings or original legacy facts. */
 export async function loadDeepScanExecutionSettings(
-  _scanDir: string,
-  original?: Pick<
+  original: Pick<
     DeepScanRunState,
     | "model"
     | "reasoningEffort"
@@ -247,19 +253,11 @@ export async function loadDeepScanExecutionSettings(
 ): Promise<Partial<DeepScanExecutionSettings>> {
   // Only the workbench creation transaction records the launch selection. Scan
   // artifacts are model-writable and cannot select a preflight executable/home.
-  const saved = original?.executionSettings;
-  let settings: DeepScanExecutionSettings;
-  if (saved) {
-    if (saved.version !== 1) {
-      throw new Error(
-        "This Deep Scan uses an unsupported execution settings version.",
-      );
-    }
-    settings = executionSettings(saved.settings);
-  } else {
+  const saved = original.executionSettings;
+  if (!saved) {
     if (
-      original?.workflowVersion === "deep-security-scan/v1" ||
-      original?.workflowVersion === "deep-scan-mcp/v1"
+      original.workflowVersion === "deep-security-scan/v1" ||
+      original.workflowVersion === "deep-scan-mcp/v1"
     ) {
       // Legacy runs predate the binding. Their saved recipe and recorded owner
       // can recover selections, but cannot establish an original executable or
@@ -269,37 +267,18 @@ export async function loadDeepScanExecutionSettings(
       const selected = projectWorkerSettings(resolved);
       const owner = original.usageOwner ?? context?.usageOwner;
       const home = environment.CODEX_HOME || join(homedir(), ".codex");
-      const native = !owner?.threadId
-        ? {}
-        : await originalParentSettings(home, {
-            ...owner,
-            threadId: owner.threadId,
-            startedAt: original.createdAt ?? owner.startedAt,
-          });
+      const native = await originalParentSettings(
+        home,
+        owner,
+        original.createdAt ?? owner?.startedAt,
+      );
       return {
-        model:
-          original.model ??
-          (selected.model as string | undefined) ??
-          native.model,
-        reasoningEffort:
-          original.reasoningEffort ??
-          (selected.model_reasoning_effort as string | undefined) ??
-          native.reasoningEffort,
-        modelProvider:
-          (selected.model_provider as string | undefined) ??
-          native.modelProvider,
-        reasoningSummary:
-          (selected.model_reasoning_summary as string | undefined) ??
-          native.reasoningSummary,
-        serviceTier:
-          (selected.service_tier as string | undefined) ?? native.serviceTier,
-        ...(selected.service_tier === undefined &&
-        native.nativeServiceTierAbsent
-          ? { nativeServiceTierAbsent: true as const }
-          : {}),
-        cyberAccessProgram:
-          native.cyberAccessProgram ?? cyberAccessProgram(resolved),
-        apiFeatures: apiFeatures(selected.features, native.cyberAccessProgram),
+        ...modelSelections(
+          { model: original.model, reasoningEffort: original.reasoningEffort },
+          resolved,
+          selected,
+          native,
+        ),
         providerConfig:
           typeof selected.model_provider === "string" &&
           isRecord(resolved.model_providers) &&
@@ -312,26 +291,28 @@ export async function loadDeepScanExecutionSettings(
       "This Deep Scan has no recorded original execution settings; its executable and Codex home cannot be recovered.",
     );
   }
+  if (saved.version !== 1) {
+    throw new Error(
+      "This Deep Scan uses an unsupported execution settings version.",
+    );
+  }
+  const settings = executionSettings(saved.settings);
   if (
-    !original ||
-    (settings.model !== undefined &&
-      settings.reasoningEffort !== undefined &&
-      settings.modelProvider !== undefined &&
-      settings.reasoningSummary !== undefined &&
-      settings.serviceTier !== undefined &&
-      settings.cyberAccessProgram !== undefined)
+    settings.model !== undefined &&
+    settings.reasoningEffort !== undefined &&
+    settings.modelProvider !== undefined &&
+    settings.reasoningSummary !== undefined &&
+    settings.serviceTier !== undefined &&
+    settings.cyberAccessProgram !== undefined
   )
     return settings;
   // Earlier snapshots can omit native selections. Recover only from the saved
   // home and recorded owner; the continuation's current config is not history.
-  const owner = original.usageOwner;
-  const native = !owner?.threadId
-    ? {}
-    : await originalParentSettings(settings.codexHome, {
-        ...owner,
-        threadId: owner.threadId,
-        startedAt: original.createdAt,
-      });
+  const native = await originalParentSettings(
+    settings.codexHome,
+    original.usageOwner,
+    original.createdAt,
+  );
   // History reads can outlive this coordinator. Project missing selections for
   // its workers without overwriting a snapshot owned by a newer coordinator.
   return executionSettings({
@@ -385,25 +366,13 @@ export function restoredDeepScanWorkerSettings(
       ),
   );
   const config = projectWorkerSettings({
-    ...(settings.model === undefined ? {} : { model: settings.model }),
-    ...(settings.reasoningEffort === undefined
-      ? {}
-      : { model_reasoning_effort: settings.reasoningEffort }),
-    ...(settings.modelProvider === undefined
-      ? {}
-      : { model_provider: settings.modelProvider }),
-    ...(settings.reasoningSummary === undefined
-      ? {}
-      : { model_reasoning_summary: settings.reasoningSummary }),
-    ...(settings.serviceTier === undefined
-      ? {}
-      : { service_tier: settings.serviceTier }),
-    ...(settings.apiFeatures === undefined
-      ? {}
-      : { features: settings.apiFeatures }),
-    ...(settings.providerConfig === undefined
-      ? {}
-      : { model_providers: settings.providerConfig }),
+    model: settings.model,
+    model_reasoning_effort: settings.reasoningEffort,
+    model_provider: settings.modelProvider,
+    model_reasoning_summary: settings.reasoningSummary,
+    service_tier: settings.serviceTier,
+    features: settings.apiFeatures,
+    model_providers: settings.providerConfig,
   }) as NonNullable<CodexOptions["config"]>;
   if (settings.codexHome === undefined && settings.providerConfig === undefined)
     delete config.model_providers;
@@ -467,17 +436,11 @@ function executionSettings(
 ): DeepScanExecutionSettings {
   // Keep custom routing fields while reconstructing unchanged catalog defaults.
   const projected = projectWorkerSettings({
-    ...(value.modelProvider === undefined
-      ? {}
-      : { model_provider: value.modelProvider }),
-    ...(value.providerConfig === undefined
-      ? {}
-      : { model_providers: value.providerConfig }),
+    model_provider: value.modelProvider,
+    model_providers: value.providerConfig,
   }).model_providers as JsonObject | undefined;
   const defaults = projectWorkerSettings({
-    ...(value.modelProvider === undefined
-      ? {}
-      : { model_provider: value.modelProvider }),
+    model_provider: value.modelProvider,
   }).model_providers;
   const provider =
     value.modelProvider === "amazon-bedrock" ||

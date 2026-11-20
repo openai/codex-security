@@ -4,8 +4,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import { scanPreflightCodexConfig } from "../src/preflight-config.js";
 import { readScanLogs } from "../src/scan-logs.js";
-import { readCodexSessionTurn } from "../src/codex-session.js";
-import { readCodexSessionTurn as readWorkerTurn } from "../../../plugins/codex-security/mcp-app/src/codex-session.js";
+import { readCodexSessionTurn } from "../../../plugins/codex-security/scripts/codex_session.mjs";
 import { readOriginalParentEvents } from "../../../plugins/codex-security/mcp-app/src/deep-scan/parent-history.js";
 import {
   projectWorkerSettings,
@@ -59,53 +58,47 @@ for (const completion of [
   "missing-usage",
   "upstream-null-usage-error",
 ] as const) {
-  test(`standalone worker and SDK retain the same stream lifecycle: ${completion}`, async () => {
-    const results = [];
-    for (const reader of [readCodexSessionTurn, readWorkerTurn]) {
-      const observed: string[] = [];
-      let closed = false;
-      const events = (async function* () {
-        try {
-          yield { type: "thread.started", thread_id: "synthetic-thread" };
-          yield {
-            type: "item.completed",
-            item: { type: "agent_message", text: "accepted output" },
-          };
-          if (completion === "upstream-null-usage-error") {
-            throw new TypeError(
-              "Cannot read properties of null (reading 'cache_write_input_tokens')",
-            );
-          }
-          yield {
-            type: "turn.completed",
-            ...(completion === "usage" ? { usage: { input_tokens: 3 } } : {}),
-          };
-          yield { type: "error", message: "after completion" };
-        } finally {
-          closed = true;
+  test(`stops the shared stream reader at completion: ${completion}`, async () => {
+    const observed: string[] = [];
+    let closed = false;
+    const events = (async function* () {
+      try {
+        yield { type: "thread.started", thread_id: "synthetic-thread" };
+        yield {
+          type: "item.completed",
+          item: { type: "agent_message", text: "accepted output" },
+        };
+        if (completion === "upstream-null-usage-error") {
+          throw new TypeError(
+            "Cannot read properties of null (reading 'cache_write_input_tokens')",
+          );
         }
-      })();
-      results.push(
-        await reader({
-          thread: { id: null },
-          events,
-          onEvent: (event) => {
-            observed.push(event.type);
-          },
-          stopOnCompletion: true,
-        }),
-      );
-      expect(observed).toEqual([
-        "thread.started",
-        "item.completed",
-        "turn.completed",
-      ]);
-      expect(closed).toBe(true);
-    }
-    expect(results[0]).toEqual(results[1]);
-    expect(results[0]?.status).toBe("completed");
-    expect(results[0]?.finalResponse).toBe("accepted output");
-    expect(results[0]?.usage).toEqual(
+        yield {
+          type: "turn.completed",
+          ...(completion === "usage" ? { usage: { input_tokens: 3 } } : {}),
+        };
+        yield { type: "error", message: "after completion" };
+      } finally {
+        closed = true;
+      }
+    })();
+    const result = await readCodexSessionTurn({
+      thread: { id: null },
+      events,
+      onEvent: (event) => {
+        observed.push(event.type);
+      },
+      stopOnCompletion: true,
+    });
+    expect(observed).toEqual([
+      "thread.started",
+      "item.completed",
+      "turn.completed",
+    ]);
+    expect(closed).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.finalResponse).toBe("accepted output");
+    expect(result.usage).toEqual(
       completion === "usage" ? { input_tokens: 3 } : null,
     );
   });
