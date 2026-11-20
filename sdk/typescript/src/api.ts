@@ -315,6 +315,7 @@ import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
+  normalizeExcludedPaths,
   nullIfMissingFile,
   gitMarkerRoot,
   repositoryRevision,
@@ -711,6 +712,7 @@ export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   maxTimeMinutes?: number;
   repository: string;
   target: NormalizedTarget;
+  excludePaths?: string[];
   mode: ScanMode;
   knowledgeBasePaths?: string[];
   outputDir: string | null;
@@ -1789,6 +1791,9 @@ export class CodexSecurity {
     return {
       repository: inputs.repository,
       target: inputs.target,
+      ...(inputs.excludePaths?.length
+        ? { excludePaths: inputs.excludePaths }
+        : {}),
       mode: inputs.mode,
       ...inputs.deepScanConfiguration?.settings,
       ...(inputs.deepScanConfiguration === undefined
@@ -2352,7 +2357,7 @@ export class CodexSecurity {
         deepScanConfiguration,
         prompts,
       } = inputs;
-      options = { ...options, ...prompts };
+      options = { ...options, ...prompts, excludePaths: inputs.excludePaths };
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -2643,6 +2648,7 @@ export class CodexSecurity {
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
+        excludePaths: options.excludePaths,
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model, pricingContext);
@@ -2986,7 +2992,9 @@ export class CodexSecurity {
           typeof resumeThreadId !== "string" ||
           !resumeThreadId ||
           JSON.stringify(savedRecipe["target"]) !==
-            JSON.stringify(recipe["target"])
+            JSON.stringify(recipe["target"]) ||
+          JSON.stringify(savedRecipe["excludePaths"] ?? []) !==
+            JSON.stringify(recipe["excludePaths"] ?? [])
         ) {
           throw new CodexSecurityError(
             "The workbench returned mismatched scan resume context.",
@@ -3450,6 +3458,8 @@ export class CodexSecurity {
         scopeFileCount === null
           ? basePrompt
           : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
+      if (options.excludePaths?.length)
+        prompt += `\nExclude these literal repository-relative paths and all their descendants from review: ${jsonForPrompt(options.excludePaths)}. Exclusions take precedence over requested paths. Pass the same exclusions to every reviewer and worker. You may read excluded files as supporting context, but the affected operation must be in scope. Do not report findings located only in excluded paths. Inventory helpers apply the host-supplied exclusions automatically.`;
       if (
         standard &&
         modelProvider !== "amazon-bedrock" &&
@@ -3533,6 +3543,9 @@ export class CodexSecurity {
         ...(normalized.base === undefined
           ? {}
           : { CODEX_SECURITY_POLICY_BASE: normalized.base }),
+        CODEX_SECURITY_EXCLUDE_PATHS: JSON.stringify(
+          options.excludePaths ?? [],
+        ),
         ...(targetRevision === null
           ? {}
           : { CODEX_SECURITY_TARGET_REVISION: targetRevision }),
@@ -5487,7 +5500,11 @@ export class CodexSecurity {
       ...(options.signal ? [options.signal] : []),
     ]);
     const local = await this.#prepareLocalInputs(repository, options, signal);
-    options = { ...options, ...local.prompts };
+    options = {
+      ...options,
+      ...local.prompts,
+      excludePaths: local.excludePaths,
+    };
     const temporaryRoot = await realpath(tmpdir());
     requireOutputOutsideRepository(
       local.protectedRoot,
@@ -5687,6 +5704,7 @@ export class CodexSecurity {
           target: local.target,
           mode: local.mode,
           pluginVersion: plugin.version,
+          excludePaths: options.excludePaths,
         },
         signal,
         true,
@@ -5789,6 +5807,7 @@ export class CodexSecurity {
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);
     const normalized = await normalizeTarget(repo, requestedTarget, signal);
+    const excludePaths = normalizeExcludedPaths(options.excludePaths);
     throwIfAborted(signal);
     const mode = options.mode ?? DEFAULT_SCAN_MODE;
     validateMode(normalized, mode);
@@ -5831,6 +5850,7 @@ export class CodexSecurity {
     return {
       repository: repo,
       target: normalized,
+      ...(excludePaths.length ? { excludePaths } : {}),
       mode,
       outputDir: requestedOutput,
       protectedRoot,
@@ -6659,6 +6679,9 @@ function scanRecipe({
   deepScan?: Required<DeepScanOptions>;
 }): JsonObject {
   const optionalSettings = {
+    excludePaths: options.excludePaths?.length
+      ? options.excludePaths
+      : undefined,
     ownerSuggestions: options.ownerSuggestions,
     auth: options.auth,
     cyberAccessProgram: options.cyberAccessProgram,

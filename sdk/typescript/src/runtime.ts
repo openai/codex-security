@@ -2120,6 +2120,10 @@ export async function runWorkbench(
           ],
       pluginHelperEnvironment({
         ...(node?.environment ?? options.environment),
+        // Older plugins ignore this request and keep returning inline findings.
+        ...(arguments_[0] === "list-unmatched-scan-pairs"
+          ? { CODEX_SECURITY_MATCHING_PLAN_FORMAT: "compact" }
+          : {}),
         // Python's compressed-rollout reader needs the selected Node even when
         // this SDK was launched by absolute path without Node on PATH.
         ...(!native &&

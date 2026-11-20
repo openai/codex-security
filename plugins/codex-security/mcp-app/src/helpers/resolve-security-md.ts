@@ -9,19 +9,12 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  relative,
-  resolve,
-  sep,
-  win32,
-} from "node:path";
+import { basename, dirname, posix, resolve, sep, win32 } from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
 import { windowsFileSystem } from "../../../native/windows-files.mjs";
 import { decodeGitPath, git } from "./inventory-git";
+import { ancestors, inside as relativeScope } from "./inventory-paths";
 import {
   decodePosixBytes,
   encodePosixPath,
@@ -315,18 +308,17 @@ function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
   return policies.sort();
 }
 
-function readPolicy(path: Buffer, displayedPath: Buffer): string {
-  const buffer = windows ? windowsFiles().readFile(path) : readFileSync(path);
+function policySection(
+  source: string,
+  bytes: Buffer,
+  displayedPath = source,
+): string[] {
+  let content: string;
   try {
-    return decodeUtf8(buffer);
+    content = decodeUtf8(bytes);
   } catch {
-    throw new Error(
-      `SECURITY.md is not valid UTF-8: ${decodePath(displayedPath)}`,
-    );
+    throw new Error(`SECURITY.md is not valid UTF-8: ${displayedPath}`);
   }
-}
-
-function policySection(source: string, content: string): string[] {
   // Match Python's whitespace-only guidance without discarding a UTF-8 BOM.
   if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(content)) return [];
   const section = `## SECURITY.md source: ${asciiJson(source)}\n\n${content}`;
@@ -342,20 +334,17 @@ async function revisionGuidance(
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(revision))
     throw new Error("the policy revision must be a full Git commit ID");
   const root = resolve(expandHome(repo, posixHome));
-  const paths: string[] = [];
-  if (scope !== undefined) {
-    // Use the reviewed path as spelled, including files deleted from the worktree.
-    // Its ancestors in the base tree determine policy even if HEAD replaces one with a link.
-    const path = relative(root, resolve(root, expandHome(scope, posixHome)));
-    if (isAbsolute(path) || path === ".." || path.startsWith(".." + sep))
-      throw new Error("scan scope is outside the scan root");
-    paths.push("SECURITY.md");
-    let prefix = "";
-    for (const name of path.split(sep).filter(Boolean)) {
-      prefix += name + "/";
-      paths.push(prefix + "SECURITY.md");
-    }
-  }
+  // Include ancestors of deleted paths and paths replaced by links in HEAD.
+  const path =
+    scope === undefined
+      ? undefined
+      : relativeScope(root, resolve(root, expandHome(scope, posixHome)));
+  const paths =
+    path === undefined
+      ? []
+      : [...ancestors(path)]
+          .reverse()
+          .map((dir) => posix.join(dir, "SECURITY.md"));
   async function readGit(args: string[]) {
     const result = await git(root, ["--no-replace-objects", ...args]);
     if (result.status !== 0)
@@ -383,20 +372,18 @@ async function revisionGuidance(
   for (const path of paths) {
     const oid = blobs.get(path);
     if (oid === undefined) continue;
-    const data = await readGit(["cat-file", "blob", oid]);
-    try {
-      sections.push(...policySection(path, decodeUtf8(data)));
-    } catch {
-      throw new Error(`SECURITY.md is not valid UTF-8: ${path}`);
-    }
+    sections.push(
+      ...policySection(path, await readGit(["cat-file", "blob", oid])),
+    );
   }
   return sections.join("\n");
 }
 
-function resolveSecurityMd(
+export function resolveSecurityMd(
   repo: string,
   scope: string,
   posixHome: string | undefined,
+  { requireResolvedLinks = false }: { requireResolvedLinks?: boolean } = {},
 ): string {
   const root = resolveRoot(repo, posixHome);
   const expandedScope = parsedPath(expandHome(scope, posixHome));
@@ -439,14 +426,31 @@ function resolveSecurityMd(
   const sections: string[] = [];
   for (const directory of directories) {
     const policy = appendPath(directory, encodePath("SECURITY.md"));
-    if (!fileStat(policy)?.isFile()) continue;
+    const metadata = fileStat(policy);
+    if (!metadata && requireResolvedLinks) {
+      // A dangling or looping link is present guidance with unknown content.
+      // Ordinary policy lookup keeps its existing missing-file behavior.
+      let entry: FileInfo | undefined;
+      try {
+        entry = windows
+          ? windowsFiles().stat(policy, false)
+          : lstatSync(policy, { throwIfNoEntry: false });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (entry)
+        throw new Error(`Could not resolve SECURITY.md: ${decodePath(policy)}`);
+    }
+    if (!metadata?.isFile()) continue;
     const resolvedPolicy = resolvedPath(policy);
     inside(resolvedPolicy, root, "SECURITY.md");
-    const content = readPolicy(resolvedPolicy, policy);
+    const bytes = windows
+      ? windowsFiles().readFile(resolvedPolicy)
+      : readFileSync(resolvedPolicy);
     const source = decodePath(inside(policy, root, "SECURITY.md"))
       .split(sep)
       .join("/");
-    sections.push(...policySection(source, content));
+    sections.push(...policySection(source, bytes, decodePath(policy)));
   }
   return sections.join("\n");
 }
