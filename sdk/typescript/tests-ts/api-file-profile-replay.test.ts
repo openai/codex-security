@@ -371,6 +371,9 @@ test.each(
             forced_chatgpt_workspace_id: "synthetic-explicit-workspace",
           }
         : {};
+    const skillCheckout = join(home, "file-skill");
+    if (skills === "inherited")
+      execFileSync("git", ["init", "-q", skillCheckout]);
     const fileProfile = (version: string) => ({
       openai_base_url: `https://${version}.example.test/v1`,
       model: version === "first" ? "initial-model" : "updated-model",
@@ -452,6 +455,10 @@ test.each(
         "synthetic stop after registration",
       );
       expect(recipe!["sealedPricing"]).toEqual({ model: "initial-model" });
+      if (skills === "inherited") {
+        expect(recipe!["executableSourcePaths"]).toContain(skillCheckout);
+        expect(recipe!["executableSourceRoots"]).toContain(skillCheckout);
+      }
       await writeFile(profilePath, stringify(fileProfile("reloaded")));
       let replay: JsonObject | undefined;
       const out = capture(),

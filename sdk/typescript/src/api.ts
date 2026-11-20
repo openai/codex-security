@@ -135,6 +135,7 @@ import {
 } from "./severity-rubric.js";
 import {
   absoluteModelFilePaths,
+  scanConfigSourcePaths,
   deepScanOptions,
   requireDeepScanExecutable,
   resolveDeepScanConfig,
@@ -331,6 +332,7 @@ import {
   normalizeExcludedPaths,
   nullIfMissingFile,
   gitMarkerRoot,
+  gitProtectionRoots,
   repositoryRevision,
   resolveRepositoryPath,
   resolveTargetPath,
@@ -3257,13 +3259,26 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
-      const executableSources = [
-        ...(this.config.executableSourcePaths ?? []),
-        ...(inputs.deepScanConfiguration?.sourcePaths ?? []),
-        ...modelFilePaths,
-        ...(await Promise.all(modelFilePaths.map((path) => realpath(path)))),
-      ];
       if (mode === "deep") {
+        const sources = [
+          ...(this.config.executableSourcePaths ?? []),
+          ...(inputs.deepScanConfiguration?.sourcePaths ?? []),
+          ...scanConfigSourcePaths(
+            workerRuntimeConfig,
+            scanDir,
+            workerProviderEnvironment,
+          ),
+        ];
+        const resolvedSources = await Promise.all(
+          modelFilePaths.map((path) => realpath(path)),
+        );
+        const executableSources = [
+          ...new Set([...sources, ...resolvedSources]),
+        ];
+        const sourceRoots = await Promise.all(
+          executableSources.map((path) => gitProtectionRoots(path, signal)),
+        );
+        recipe["executableSourceRoots"] = [...new Set(sourceRoots.flat())];
         recipe["sealedPricing"] = {
           model,
           ...(pricingContext && { context: pricingContext }),
@@ -3271,7 +3286,7 @@ export class CodexSecurity {
         if (knowledgeBase?.protectedRoots.length)
           recipe["knowledgeBaseProtectedRoots"] = knowledgeBase.protectedRoots;
         if (executableSources.length)
-          recipe["executableSourcePaths"] = [...new Set(executableSources)];
+          recipe["executableSourcePaths"] = executableSources;
         if (
           Array.isArray(options.target) &&
           !isDeepStrictEqual(options.target, normalized.paths)

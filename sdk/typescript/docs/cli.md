@@ -2451,9 +2451,11 @@ automatic discovery. When an older saved target lacks a recorded checkout
 directory, set `CODEX_SECURITY_GIT` to the absolute path of a trusted Git
 executable outside the checkouts. If you use a system Python instead of the
 Codex managed runtime, set `PYTHON` to the absolute path of your interpreter.
-The same Python requirement applies when recovering an older Deep Scan whose
-saved native Codex profile did not record its inherited model-file paths. Use
-an interpreter installed outside Git checkouts for these scans.
+Deep Scan also records the checkouts of its model files, configured skills,
+agent settings, and knowledge sources. Recovery excludes those checkouts when
+selecting Python, even after the original target is removed. For older scans
+whose saved native Codex profile omitted inherited sources, use the managed
+runtime or set `PYTHON` to an absolute interpreter path outside Git checkouts.
 
 Saved scan logs retain the finishing turn, including its final response, and
 exclude later turns once the scan records a completion boundary. Older scans
