@@ -369,6 +369,29 @@ def _extended_path(path: Path) -> str:
     return "\\\\?\\" + value
 
 
+def windows_path_spellings(path: Path) -> tuple[Path, Path, tuple[str, ...]] | None:
+    """Return ordinary and extended drive or UNC names, and the components subject to DOS aliases."""
+    value = str(path)
+    if value[:8].upper() == "\\\\?\\UNC\\":
+        ordinary = type(path)("\\\\" + value[8:])
+        native = path
+    elif re.fullmatch(r"\\\\\?\\[A-Za-z]:", path.drive):
+        ordinary = type(path)(value[4:])
+        native = path
+    elif value.startswith(("\\\\?\\", "\\\\.\\")):
+        return None
+    else:
+        ordinary = path
+        native = type(path)(_extended_path(path))
+    components = ordinary.parts[1:]
+    if ordinary.drive.startswith("\\\\"):
+        server, share = ordinary.drive[2:].split("\\", 1)
+        if server in {".", "?"}:
+            return None
+        components = (server, share, *components)
+    return ordinary, native, components
+
+
 def workbench_sqlite_paths(path: Path) -> tuple[Path, Path]:
     """Choose equivalent filenames for Win32 file access and the default SQLite pager."""
     if os.name != "nt":
@@ -380,20 +403,10 @@ def workbench_sqlite_paths(path: Path) -> tuple[Path, Path]:
         or len(value.encode("utf-16-le", errors="surrogatepass")) // 2 + 8 < 260
     ):
         return path, path
-    if value[:8].upper() == "\\\\?\\UNC\\":
-        ordinary = Path("\\\\" + value[8:])
-        native = path
-    elif re.fullmatch(r"\\\\\?\\[A-Za-z]:", path.drive):
-        ordinary = Path(value[4:])
-        native = path
-    elif value.startswith(("\\\\?\\", "\\\\.\\")):
+    spellings = windows_path_spellings(path)
+    if spellings is None:
         return path, path
-    else:
-        ordinary = path
-        native = Path(_extended_path(path))
-    components = ordinary.parts[1:]
-    if ordinary.drive.startswith("\\\\"):
-        components = (*ordinary.drive[2:].split("\\"), *components)
+    ordinary, native, components = spellings
     # The verbatim namespace bypasses DOS aliases such as trailing dots and device names.
     if any(
         not name

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -17,7 +16,6 @@ from workbench_test_support import (
     cancel_scan,
     fail_deep_scan,
     get_scan,
-    load_script,
     preserve_scan_results,
     read_review_state,
     saved_draft,
@@ -27,30 +25,6 @@ from workbench_test_support import (
     write_checkpoint,
     write_result_draft,
 )
-
-
-@pytest.mark.native_windows
-@pytest.mark.skipif(os.name != "nt", reason="requires Win32 worker aliases")
-def test_recovery_credits_the_accepted_worker_in_an_extended_directory(tmp_path: Path) -> None:
-    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    extended = Path(load_script("windows_scan_local_files")._extended_path(scan_dir))
-    worker_id, result = accepted_standard_worker(state_dir, codex_home, extended, scan_id)
-    result.write_text(
-        json.dumps(
-            saved_draft(
-                scan_id,
-                complete=True,
-                surfaces=[{"id": "api", "label": "API", "disposition": "no_issue_found"}],
-            )
-        )
-    )
-
-    fail_deep_scan(state_dir, codex_home, scan_id)
-    coverage = read_review_state(state_dir, scan_dir)
-    surface = coverage["surfaces"][0]
-    assert surface["id"] == f"{worker_id}-attempt-1-surface-1"
-    assert surface["provenance"] == {"workerId": worker_id, "attempt": 1, "sourceId": "api"}
-    assert coverage["reviews"] == [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}]
 
 
 def coverage_worker(

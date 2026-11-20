@@ -165,34 +165,22 @@ def _archive_owner(
 ) -> sqlite3.Row | None:
     name = str(spellings[0])
     if os.name == "nt":
-        names = {str(path) for path in spellings}
-        folded = {os.path.normcase(name) for name in names}
-
-        def owns_directory(value: str) -> bool:
-            if value in names:
-                return True
-            if os.path.normcase(value) not in folded:
-                return False
-            path = Path(value)
-            for current in spellings:
-                matches = same_directory_spelling(path, current)
-                if matches is None:
-                    raise SystemExit("Cannot verify the owner of a case-variant scan directory.")
-                if matches:
-                    return True
-            return False
-
+        folded = {os.path.normcase(path): path for path in spellings}
+        name = None
         # Read only the unique directory index before retrieving the matching scan row.
-        owners = [
-            value
-            for (value,) in connection.execute("SELECT scan_dir FROM scans")
-            if owns_directory(value)
-        ]
-        if len(owners) > 1:
-            raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
-        if not owners:
+        for (stored,) in connection.execute("SELECT scan_dir FROM scans"):
+            expected = folded.get(os.path.normcase(stored))
+            if expected is None:
+                continue
+            matches = same_directory_spelling(Path(stored), expected)
+            if matches is None:
+                raise SystemExit("Cannot verify the owner of a case-variant scan directory.")
+            if matches:
+                if name is not None:
+                    raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
+                name = stored
+        if name is None:
             return None
-        name = owners[0]
     columns = "id, status, scan_dir" if for_registration else "id"
     return connection.execute(f"SELECT {columns} FROM scans WHERE scan_dir = ?", (name,)).fetchone()
 

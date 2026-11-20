@@ -389,16 +389,9 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
     assert not list(tmp_path.glob("scan.previous-*"))
 
 
-@pytest.mark.cross_platform
-@pytest.mark.parametrize(
-    "root, alias",
-    [(r"C:\scans", r"\\?\C:\scans"), (r"\\host\share\scans", r"\\?\UNC\host\share\scans")],
-)
-def test_archive_owner_distinguishes_aliases_and_literal_directories(
-    tmp_path, monkeypatch, root, alias
-):
+@pytest.fixture
+def windows_directory(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(SCRIPT.parent))
-    import workbench_scan_start as start
     from workbench import storage
 
     class Directory(PureWindowsPath):
@@ -407,6 +400,7 @@ def test_archive_owner_distinguishes_aliases_and_literal_directories(
             if not str(self).startswith("\\\\?\\"):
                 parts = [part.rstrip(" .") for part in parts]
             parts = ["output" if part == "OUTPUT" else part for part in parts]
+            # Encode each component so the case-sensitive sibling fixture works on every host.
             return tmp_path.joinpath(*(part.encode().hex() for part in parts))
 
         def expanduser(self):
@@ -416,7 +410,18 @@ def test_archive_owner_distinguishes_aliases_and_literal_directories(
             return self
 
         def resolve(self, strict=False):
+            if strict:
+                self.local().stat()
             return self
+
+        def is_file(self):
+            return self.local().is_file()
+
+        def is_dir(self):
+            return self.local().is_dir()
+
+        def exists(self):
+            return self.local().exists()
 
         def iterdir(self):
             return self.local().iterdir()
@@ -428,6 +433,21 @@ def test_archive_owner_distinguishes_aliases_and_literal_directories(
 
     monkeypatch.setattr(storage, "Path", Directory)
     monkeypatch.setattr(storage, "os", SimpleNamespace(name="nt"))
+    return Directory
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    "root, alias",
+    [(r"C:\scans", r"\\?\C:\scans"), (r"\\host\share\scans", r"\\?\UNC\host\share\scans")],
+)
+def test_archive_owner_distinguishes_aliases_and_literal_directories(
+    windows_directory, monkeypatch, root, alias
+):
+    import workbench_scan_start as start
+    from workbench import storage
+
+    Directory = windows_directory
     monkeypatch.setattr(start, "Path", Directory)
     monkeypatch.setattr(start, "os", SimpleNamespace(name="nt", path=ntpath))
     ordinary, extended = Directory(root) / "output", Directory(alias) / "output"
@@ -558,6 +578,23 @@ def test_archive_owner_distinguishes_aliases_and_literal_directories(
             start._archive_owner(connection, start.scan_directory_spellings(ordinary))
 
 
+def archive_with_report(state, repo, output, scan_id, report):
+    database = state / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO scan_artifacts VALUES (?, 'markdownReport', ?, 'before')",
+            (scan_id, str(report)),
+        )
+    current = register_scan(state, repo, output, "--archive-existing")
+    with sqlite3.connect(database) as connection:
+        root, path = connection.execute(
+            "SELECT scan_dir, path FROM scans JOIN scan_artifacts ON scan_id = scans.id "
+            "WHERE scans.id = ?",
+            (scan_id,),
+        ).fetchone()
+    return Path(current["archivedScanDir"]), root, path
+
+
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 archive aliases")
 @pytest.mark.parametrize("old_extended", [False, True])
@@ -602,22 +639,7 @@ def test_archive_follows_the_owner_across_windows_spellings(
         deep.deep_scan_path(scan, str(ordinary_report), "Worker result", kind="file")
     ).samefile(ordinary_report)
     assert not Path(recorded_report).samefile(ordinary_report)
-    database = state / "workbench.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "INSERT INTO scan_artifacts VALUES (?, 'markdownReport', ?, 'before')",
-            (scan_id, recorded_report),
-        )
-
-    current = register_scan(state, repo, new, "--archive-existing")
-    archived = Path(current["archivedScanDir"])
-    with sqlite3.connect(database) as connection:
-        recorded = connection.execute(
-            "SELECT scan_dir FROM scans WHERE id = ?", (scan_id,)
-        ).fetchone()[0]
-        saved = connection.execute(
-            "SELECT path FROM scan_artifacts WHERE scan_id = ?", (scan_id,)
-        ).fetchone()[0]
+    archived, recorded, saved = archive_with_report(state, repo, new, scan_id, recorded_report)
     assert Path(recorded).samefile(archived)
     assert Path(saved).parent.samefile(recorded)
     assert Path(saved).read_text() == "original report"
@@ -650,21 +672,9 @@ def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(tmp_path, r
     fail_scan(state, scan_id, "Stopped")
     report = output / "report.md"
     report.write_text("Previous report")
-    database = state / "workbench.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "INSERT INTO scan_artifacts VALUES (?, 'markdownReport', ?, 'before')",
-            (scan_id, str(report)),
-        )
-
-    current = register_scan(state, repo, Path(extended(output)), "--archive-existing")
-    archived = Path(current["archivedScanDir"])
-    with sqlite3.connect(database) as connection:
-        root, artifact = connection.execute(
-            "SELECT scan_dir, path FROM scans JOIN scan_artifacts ON scan_id = scans.id "
-            "WHERE scans.id = ?",
-            (scan_id,),
-        ).fetchone()
+    archived, root, artifact = archive_with_report(
+        state, repo, Path(extended(output)), scan_id, report
+    )
     assert root == extended(archived)
     assert artifact == str(Path(root) / report.name)
     assert Path(artifact).read_text() == "Previous report"
@@ -698,45 +708,12 @@ def test_archive_does_not_move_state_or_checkout_via_an_extended_output(tmp_path
     [(r"C:\scans", r"\\?\C:\scans"), (r"\\host\share\scans", r"\\?\UNC\host\share\scans")],
 )
 def test_mixed_worker_paths_preserve_file_identity_through_archive(
-    tmp_path, monkeypatch, root, prefix
+    windows_directory, monkeypatch, root, prefix
 ):
-    monkeypatch.syspath_prepend(str(SCRIPT.parent))
     import deep_scan_workbench as deep
     from workbench import storage
 
-    class Directory(PureWindowsPath):
-        def local(self):
-            parts = self.parts[1:]
-            if not str(self).startswith("\\\\?\\"):
-                parts = [part.rstrip(" .") for part in parts]
-            # Encode each component so the case-sensitive sibling fixture works on every host.
-            return tmp_path.joinpath(*(part.encode().hex() for part in parts))
-
-        def expanduser(self):
-            return self
-
-        def absolute(self):
-            return self
-
-        def resolve(self, strict=False):
-            if strict:
-                self.local().stat()
-            return self
-
-        def is_file(self):
-            return self.local().is_file()
-
-        def is_dir(self):
-            return self.local().is_dir()
-
-        def exists(self):
-            return self.local().exists()
-
-        def samefile(self, other):
-            return self.local().samefile(other.local())
-
-    monkeypatch.setattr(storage, "Path", Directory)
-    monkeypatch.setattr(storage, "os", SimpleNamespace(name="nt"))
+    Directory = windows_directory
     monkeypatch.setattr(deep, "Path", Directory)
     monkeypatch.setattr(
         deep,
@@ -834,22 +811,12 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
 
 
 @pytest.mark.cross_platform
-def test_staged_promotion_rejects_a_namespace_alias_before_moving_the_output(tmp_path, monkeypatch):
+def test_staged_promotion_rejects_a_namespace_alias_before_moving_the_output(
+    windows_directory, monkeypatch
+):
     deep = load_script("deep_scan_workbench")
 
-    class Filename(PureWindowsPath):
-        def local(self):
-            parts = self.parts[1:]
-            if not str(self).startswith("\\\\?\\"):
-                parts = [name.rstrip(" .") for name in parts]
-            return tmp_path.joinpath(*(name.encode().hex() for name in parts))
-
-        def exists(self):
-            return self.local().exists()
-
-        def samefile(self, other):
-            return self.local().samefile(other.local())
-
+    Filename = windows_directory
     renames = []
 
     def replace(source, destination):

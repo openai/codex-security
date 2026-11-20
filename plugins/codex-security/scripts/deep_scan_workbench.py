@@ -20,8 +20,8 @@ from workbench.storage import (
     archived_deep_path,
     create_private_directory,
     require_worker_path,
+    same_worker_path,
     saved_deep_workers,
-    scan_relative_path,
     worker_contract_relative_path,
     worker_usage_directory,
 )
@@ -252,14 +252,9 @@ def _coordinator_manifest_path(scan: sqlite3.Row, value: str, label: str, *, sta
         if staged
         else deep_scan_path(scan, value, label, kind="file")
     )
-    scan_dir = Path(scan["scan_dir"])
-    path = Path(result)
-    if Path(path.anchor) != Path(scan_dir.anchor):
-        relative = scan_relative_path(path, scan_dir)
-        if relative.parts == ("scan-manifest.json",):
-            # Completion and replay identify the standard manifest by its stored scan-root spelling.
-            return str(scan_dir / relative)
-    return result
+    # Completion and replay identify the standard manifest by its stored scan-root spelling.
+    standard = str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    return standard if same_worker_path(standard, result) else result
 
 
 def promote_staged_file(staged_path: str, output_path: str) -> tuple[Path, Path, Path | None]:
@@ -1302,7 +1297,9 @@ def upsert_deep_scan_worker(
 
         if existing["scan_id"] != scan_id or existing["kind"] != args.kind:
             raise SystemExit("Deep Scan worker identity does not match its persisted run and kind.")
-        if existing["prompt_path"] != prompt_path or existing["artifact_dir"] != artifact_dir:
+        if not same_worker_path(existing["prompt_path"], prompt_path) or not same_worker_path(
+            existing["artifact_dir"], artifact_dir
+        ):
             raise SystemExit("Deep Scan worker prompt and artifact paths are immutable.")
         require_worker_transition(existing["status"], args.status)
         if terminal_repeat:
@@ -1312,7 +1309,7 @@ def upsert_deep_scan_worker(
             repeated_result_path = result_manifest_path or existing["result_manifest_path"]
             if (
                 repeated_attempt != existing["attempt"]
-                or repeated_result_path != existing["result_manifest_path"]
+                or not same_worker_path(existing["result_manifest_path"], repeated_result_path)
                 or (
                     repeated_thread_id is not None
                     and repeated_thread_id != existing["sdk_thread_id"]
@@ -1456,7 +1453,9 @@ def record_deep_scan_iteration(
             (checkpoint_id,),
         ).fetchone()
         if existing is not None:
-            if existing["scan_id"] != scan_id or existing["result_manifest_path"] != result:
+            if existing["scan_id"] != scan_id or not same_worker_path(
+                existing["result_manifest_path"], result
+            ):
                 raise SystemExit("Iteration already belongs to another result.")
             recorded_ids = [
                 row[0]
@@ -1544,10 +1543,10 @@ def finish_deep_scan_locked(
             )
         }
         if run["status"] == "succeeded":
+            recorded = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
             if (
                 run["terminal_reason"] != args.terminal_reason
-                or archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
-                not in {None, manifest_path}
+                or (recorded is not None and not same_worker_path(recorded, manifest_path))
                 or omitted_worker_ids != buffered_worker_ids
             ):
                 raise SystemExit(
@@ -1709,7 +1708,7 @@ def fail_deep_scan_locked(
                 run["status"] == args.deep_status
                 and scan["status"] == "failed"
                 and run["error_message"] == message
-                and recorded_manifest == manifest_path
+                and same_worker_path(recorded_manifest, manifest_path)
                 and scan["failure_message"] == message
             ):
                 connection.commit()
@@ -1731,7 +1730,7 @@ def fail_deep_scan_locked(
         # Cleanup can report a later error after a worker committed the terminal cause.
         if run["status"] == "running" and run["error_message"] is not None:
             message = run["error_message"]
-        if run["manifest_path"] not in {None, manifest_path}:
+        if recorded_manifest is not None and not same_worker_path(recorded_manifest, manifest_path):
             raise SystemExit("Deep Scan coordinator manifest path is immutable.")
         if args.staged_manifest_path and manifest_path:
             staged_manifest_path = deep_scan_path(

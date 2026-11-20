@@ -262,10 +262,10 @@ def connect(
     discovery_roots: tuple[Path, ...] = (),
     in_memory: bool = False,
 ) -> sqlite3.Connection:
-    """Open and migrate the workbench database.
+    """Open the workbench SQLite database and bring its schema up to date.
 
     Args:
-        deferred: Let the first migration defer its write lock.
+        deferred (bool): Let the first migration attempt defer its write lock.
             Retries after lock contention use an immediate transaction.
 
         discovery_roots: Additional local paths for bounded target discovery.

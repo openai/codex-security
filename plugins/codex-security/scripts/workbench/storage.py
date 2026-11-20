@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -51,25 +50,13 @@ def scan_directory_spellings(directory: Path) -> tuple[Path, ...]:
     """Return equivalent ordinary and extended Win32 names for a workbench directory."""
     if os.name != "nt":
         return (directory,)
-    from windows_scan_local_files import _extended_path
+    from windows_scan_local_files import windows_path_spellings
 
-    value = str(directory)
-    if value[:8].upper() == "\\\\?\\UNC\\":
-        alternate = Path("\\\\" + value[8:])
-    elif re.fullmatch(r"\\\\\?\\[A-Za-z]:", directory.drive):
-        alternate = Path(value[4:])
-    elif value.startswith(("\\\\?\\", "\\\\.\\")):
+    spellings = windows_path_spellings(directory)
+    if spellings is None:
         return (directory,)
-    else:
-        alternate = Path(_extended_path(directory))
-
-    ordinary = alternate if value.startswith("\\\\?\\") else directory
-    parts = ordinary.parts[1:]
-    if ordinary.drive.startswith("\\\\"):
-        server, share = ordinary.drive[2:].split("\\", 1)
-        if server in {".", "?"}:
-            return (directory,)
-        parts = (server, share, *parts)
+    ordinary, native, parts = spellings
+    alternate = native if directory == ordinary else ordinary
     if not all(_ordinary_windows_name(name) for name in parts):
         # DOS may name a different object. Accept an alias only if both handles agree.
         try:
@@ -96,6 +83,21 @@ def same_directory_spelling(path: Path, other: Path) -> bool | None:
             except OSError:
                 continue
     return None
+
+
+def same_worker_path(stored: str | None, supplied: str | None) -> bool:
+    """Recognize the same recorded entry on retry through a different Windows namespace."""
+    if stored == supplied:
+        return True
+    if os.name != "nt" or not stored or not supplied:
+        return False
+    first, second = Path(stored), Path(supplied)
+    if first.name != second.name or not _ordinary_windows_name(first.name):
+        return False
+    return any(
+        same_directory_spelling(parent, second.parent)
+        for parent in scan_directory_spellings(first.parent)
+    )
 
 
 def scan_relative_path(path: Path, scan_dir: Path) -> Path:
