@@ -34,8 +34,10 @@ import {
   tenableReportFormat,
   tenableSourceRepository,
 } from "./tenable-findings.js";
-import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
-import { prepareCrowdStrikeCloudReport } from "./external-findings-local.js";
+import {
+  checkRetainedCheckoutProvider,
+  prepareCrowdStrikeCloudReport,
+} from "./external-findings-local.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -615,26 +617,19 @@ function checkFindingProvider(
   input: Pick<ExternalFindings, "findings" | "report">,
   provider: Provider,
 ): void {
-  function checkFormat(format: unknown) {
-    if (format === tenableReportFormat && provider !== "tenable")
-      throw new CodexSecurityError(
-        "Retained Tenable evidence requires the tenable provider.",
-      );
-    if (format === crowdstrikeReportFormat && provider !== "crowdstrike")
-      throw new CodexSecurityError(
-        "Retained CrowdStrike evidence requires the crowdstrike provider.",
-      );
-    if (format === guardianSelectionFormat && provider !== "semgrep")
-      throw new CodexSecurityError(
-        "Use the semgrep provider for Guardian findings.",
-      );
-  }
-  checkFormat(input.report?.["format"]);
-  for (const { source_finding_id, evidence } of input.findings) {
-    if (guardianFindingId.test(source_finding_id))
-      checkFormat(guardianSelectionFormat);
-    checkFormat(evidence.source_data?.["format"]);
-  }
+  checkRetainedCheckoutProvider(input, provider);
+  if (
+    provider !== "semgrep" &&
+    (input.report?.["format"] === guardianSelectionFormat ||
+      input.findings.some(
+        ({ source_finding_id, evidence }) =>
+          guardianFindingId.test(source_finding_id) ||
+          evidence.source_data?.["format"] === guardianSelectionFormat,
+      ))
+  )
+    throw new CodexSecurityError(
+      "Use the semgrep provider for Guardian findings.",
+    );
 }
 
 export async function prepareExternalPublication(
@@ -1182,6 +1177,13 @@ async function preparePublicationInput(
   const providerJobVersion = privateJobVersions[options.provider];
   const requestedJobVersion = String(providerJobVersion ?? 2);
   let legacyJobVersion: PrivateJobVersion | undefined;
+  function supportsPrivateProtocol(version = legacyJobVersion) {
+    return (
+      importMedia === SCANNER_IMPORT_MEDIA_TYPE ||
+      legacyUnversionedJob ||
+      version !== undefined
+    );
+  }
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1261,16 +1263,13 @@ async function preparePublicationInput(
       importScope = scope;
       importMedia = media;
       legacyJobVersion =
+        media === "application/json" &&
         response.headers.get(jobVersionHeader) === requestedJobVersion
           ? providerJobVersion
           : undefined;
-      canStartJob = privateProviders?.includes(options.provider) ?? false;
-      if (
-        media === "application/json" &&
-        !legacyUnversionedJob &&
-        !legacyJobVersion
-      )
-        canStartJob = false;
+      canStartJob =
+        supportsPrivateProtocol() &&
+        (privateProviders?.includes(options.provider) ?? false);
     } else if (
       importMedia === SCANNER_IMPORT_MEDIA_TYPE &&
       importResponseMediaType(response) !== importMedia
@@ -1626,11 +1625,7 @@ async function preparePublicationInput(
   if (
     usePrivateImport &&
     !canStartJob &&
-    (!privateSaved ||
-      (importMedia === "application/json" &&
-        !legacyUnversionedJob &&
-        !privateSaved.jobApiVersion &&
-        !legacyJobVersion))
+    (!privateSaved || !supportsPrivateProtocol(privateSaved.jobApiVersion))
   )
     throw new CodexSecurityError(
       "Private findings import is unavailable for this account or provider.",
@@ -2021,13 +2016,10 @@ async function preparePublicationInput(
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const negotiatedLegacyJobVersion =
-            importMedia === "application/json" ? legacyJobVersion : undefined;
           const checkpoint = active
             ? {
                 ...active,
-                jobApiVersion:
-                  active.jobApiVersion ?? negotiatedLegacyJobVersion,
+                jobApiVersion: active.jobApiVersion ?? legacyJobVersion,
               }
             : {
                 ...binding,
@@ -2038,7 +2030,7 @@ async function preparePublicationInput(
                     : undefined,
                 uploadRequestId: randomUUID(),
                 jobRequestId: randomUUID(),
-                jobApiVersion: negotiatedLegacyJobVersion,
+                jobApiVersion: legacyJobVersion,
                 fileId: undefined,
                 jobId: undefined,
                 receipt: undefined,

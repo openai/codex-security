@@ -1,7 +1,3 @@
-import {
-  report as crowdstrikeReport,
-  misconfiguration as crowdstrikeRule,
-} from "./support/crowdstrike-import-fixtures.js";
 import { readCrowdStrikeFindings } from "../src/crowdstrike-findings.js";
 import {
   snykJson,
@@ -1592,11 +1588,13 @@ async function privateUploadFixture(
   };
   const uploads: { id: string; bytes: string }[] = [];
   const jobs: unknown[] = [];
+  const paths: string[] = [];
   const fileId = "aifile_" + "a".repeat(32);
   const deps = {
     ...f.deps,
     fetch: async (url: string, init: RequestInit) => {
       const { pathname } = new URL(url);
+      paths.push(pathname);
       if (pathname.endsWith("/finding-imports/context"))
         return privateInboxContext(inbox.version, inbox.formats);
       if (pathname.includes("/finding-imports/file-requests/")) {
@@ -1631,7 +1629,17 @@ async function privateUploadFixture(
     },
   };
   const prepareFile = () => prepareExternalPublication(f.file, settings, deps);
-  return { f, settings, deps, inbox, uploads, jobs, fileId, prepareFile };
+  return {
+    f,
+    settings,
+    deps,
+    inbox,
+    uploads,
+    jobs,
+    fileId,
+    prepareFile,
+    paths,
+  };
 }
 
 const tenableOptions = {
@@ -1680,59 +1688,28 @@ test("Tenable SDK retry publishes the approved file selection with the native oc
   });
 });
 
-test("selected CrowdStrike findings use the saved checkout and validate the Cloud destination", async () => {
-  const report = { ...crowdstrikeReport, rule_detections: [crowdstrikeRule] };
-  const cloud = await fixture(report, exampleRepository);
-  await using local = await storedPublicationFixture(cloud);
-  const { repository, deps } = local;
-  await mkdir(join(repository, "infra", "net"), { recursive: true });
-  await writeFile(join(repository, "infra", "net", "main.tf"), "");
-  const imported = await prepareLocalExternalImport(
-    cloud.file,
-    {
-      provider: "crowdstrike",
-      sourceKey: "fcs/main",
-      repository,
-      sourceRepositoryUrl: exampleRepository,
-    },
-    deps,
-  );
-  await imported.import();
-  await rm(cloud.file);
-  const [row] = await listLocalExternalFindings({ repository }, deps);
-  const selection = {
-    repository,
-    findings: [{ id: row!.id, version: row!.version }],
+function crowdstrikeReport(file: string) {
+  return {
+    fcs_version: "4.2.3",
+    rule_detections: [
+      {
+        rule_uuid: "10000000-0000-4000-8000-000000000001",
+        rule_name: "Public port",
+        severity: "High",
+        detections: [{ file, file_sha256: hash("sha256", ""), line: 7 }],
+      },
+    ],
   };
-  cloud.state.repositoryUrl = "https://github.com/example/other";
-  await expect(local.prepare(selection)).rejects.toThrow(
-    /selected Cloud repository/,
-  );
-  expect(cloud.posts).toHaveLength(0);
-  cloud.state.repositoryUrl = exampleRepository;
-  const { groups } = await local.prepare(selection);
-  expect(cloud.posts).toHaveLength(0);
-  expect((await groups[0]!.publish(groups[0]!.reviewId)).verified).toBe(1);
-  expect(cloud.reports.get(row!.sourceFindingId)?.evidence.source_data).toEqual(
-    row!.evidence.source_data,
-  );
-});
+}
 
 test("CrowdStrike Cloud locations and identities use the Git root across entrypoints", async () => {
-  const detection = { ...crowdstrikeRule.detections[0]!, file: "main.tf" };
-  const reportFor = (file: string) => ({
-    ...crowdstrikeReport,
-    rule_detections: [
-      { ...crowdstrikeRule, detections: [{ ...detection, file }] },
-    ],
-  });
   const {
     f: cloud,
     deps: privateDeps,
     inbox,
     uploads,
   } = await privateUploadFixture(
-    reportFor(detection.file),
+    crowdstrikeReport("main.tf"),
     "crowdstrike",
     exampleRepository,
   );
@@ -1766,11 +1743,17 @@ test("CrowdStrike Cloud locations and identities use the Git root across entrypo
     repository: checkout,
     findings: [{ id: row!.id, version: row!.version }],
   };
+  await rm(cloud.file);
+  cloud.state.repositoryUrl = "https://github.com/example/other";
+  await expect(local.prepare(selection)).rejects.toThrow(
+    /selected Cloud repository/,
+  );
+  cloud.state.repositoryUrl = exampleRepository;
   const { groups, excluded } = await local.prepare(selection);
   expect(excluded).toEqual([]);
   const path = "infra/network files/main.tf";
   const rootReport = join(cloud.root, "root.json");
-  await writeFile(rootReport, JSON.stringify(reportFor(path)));
+  await writeFile(rootReport, JSON.stringify(crowdstrikeReport(path)));
   const root = await readCrowdStrikeFindings(rootReport, exampleRepository);
   const publishedId = root.findings[0]!.source_finding_id;
   expect(row!.sourceFindingId).toBe(input.findings[0]!.source_finding_id);
@@ -1778,7 +1761,7 @@ test("CrowdStrike Cloud locations and identities use the Git root across entrypo
   for (const preview of [raw.preview, normalized.preview, groups[0]!.preview]) {
     expect(preview.findings[0]!.source_finding_id).toBe(publishedId);
     const evidence = preview.findings[0]!.evidence;
-    expect(evidence.locations).toEqual([{ path, line: detection.line }]);
+    expect(evidence.locations).toEqual([{ path, line: 7 }]);
     expect(evidence.source_data).toEqual(
       input.findings[0]!.evidence.source_data,
     );
@@ -1786,19 +1769,20 @@ test("CrowdStrike Cloud locations and identities use the Git root across entrypo
   expect(input.findings[0]!.evidence.locations?.[0]?.path).toBe("main.tf");
   expect(row!.evidence.locations?.[0]?.path).toBe("main.tf");
   expect(cloud.posts).toHaveLength(0);
-  await groups[0]!.publish(groups[0]!.reviewId);
+  expect((await groups[0]!.publish(groups[0]!.reviewId)).verified).toBe(1);
   const sibling = join(local.repository, "sibling");
   await mkdir(sibling);
-  await writeFile(join(sibling, detection.file), "");
-  const other = await prepareExternalPublication(cloud.file, settings, {
+  await writeFile(join(sibling, "main.tf"), "");
+  const other = await prepareNormalizedExternalPublication(input, settings, {
     ...deps,
     sourceCheckout: sibling,
   });
   expect((await other.publish()).counts.created).toBe(1);
   expect(cloud.reports.size).toBe(2);
-  expect(cloud.reports.get(publishedId)?.evidence.locations?.[0]?.path).toBe(
-    path,
-  );
+  expect(cloud.reports.get(publishedId)?.evidence).toMatchObject({
+    locations: [{ path }],
+    source_data: row!.evidence.source_data,
+  });
   const fromRoot = await prepareExternalPublication(rootReport, settings, {
     ...deps,
     sourceCheckout: local.repository,
@@ -1825,7 +1809,7 @@ test("CrowdStrike Cloud locations and identities use the Git root across entrypo
   expect(JSON.parse(uploads[0]!.bytes).findings[0]).toMatchObject({
     source_finding_id: publishedId,
     evidence: {
-      locations: [{ path, start_line: detection.line }],
+      locations: [{ path, start_line: 7 }],
       source_data: input.findings[0]!.evidence.source_data,
     },
   });
@@ -6831,63 +6815,46 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
   expect(f.posts[2]).toBe(f.posts[1]);
 });
 
-test("an unexpected import response preserves the approved request for retry", async () => {
-  const f = await fixture();
-  let dropMediaType = true;
-  const prepare = () =>
-    prepareExternalPublication(f.file, options, {
-      ...f.deps,
-      async fetch(url, init) {
-        const response = await f.deps.fetch(url, init);
-        if (init.method !== "POST" || !dropMediaType) return response;
-        dropMediaType = false;
-        return new Response(response.body, {
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    });
-  const first = await prepare();
-  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect(retry.preview.requests).toEqual(first.preview.requests);
-  expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
-  expect(f.receipts.size).toBe(1);
-});
-
-test("an unexpected private job response retries the same uploaded file and job request", async () => {
-  const { f, deps, inbox, uploads, jobs } = await privateUploadFixture(
-    [normalized()],
-    "wiz",
-  );
-  inbox.interruptUpload = false;
-  let dropMediaType = true;
-  const prepare = () =>
-    prepareExternalPublication(f.file, options, {
-      ...deps,
-      async fetch(url, init) {
-        const response = await deps.fetch(url, init);
-        if (
-          !new URL(url).pathname.endsWith("/finding-imports/jobs") ||
-          !dropMediaType
-        )
-          return response;
-        dropMediaType = false;
-        return new Response(response.body, {
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    });
-  const first = await prepare();
-  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).privateJob?.status).toBe("completed");
-  expect(uploads).toHaveLength(1);
-  expect(jobs).toEqual([jobs[0], jobs[0]]);
-  expect(f.posts).toHaveLength(0);
-});
+test.each(["personal", "workspace"] as const)(
+  "an unexpected %s response retries the same approved request",
+  async (scope) => {
+    const { f, deps, inbox, uploads, jobs } = await privateUploadFixture(
+      [normalized()],
+      "wiz",
+    );
+    if (scope === "personal") f.state.catalogHeaders = { [scopeHeader]: scope };
+    inbox.interruptUpload = false;
+    let dropMediaType = true;
+    const prepare = () =>
+      prepareExternalPublication(f.file, options, {
+        ...deps,
+        async fetch(url, init) {
+          const response = await deps.fetch(url, init);
+          if (typeof init.body !== "string" || !dropMediaType) return response;
+          dropMediaType = false;
+          return new Response(response.body, {
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      });
+    const first = await prepare();
+    await expect(first.publish()).rejects.toThrow(/representation|media type/i);
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    const result = await retry.publish();
+    if (scope === "personal") {
+      expect(result.verified).toBe(1);
+      expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+      expect(f.receipts.size).toBe(1);
+    } else {
+      expect(result.privateJob?.status).toBe("completed");
+      expect(uploads).toHaveLength(1);
+      expect(jobs).toEqual([jobs[0], jobs[0]]);
+      expect(f.posts).toHaveLength(0);
+    }
+  },
+);
 
 test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
   const input = opengrepJson();
@@ -9551,7 +9518,7 @@ const readerReports = {
     finding: { ...continuumDetail(), createdIssueId: "oneissue" },
     patches: [continuumPatch],
   },
-  crowdstrike: { ...crowdstrikeReport, rule_detections: [crowdstrikeRule] },
+  crowdstrike: crowdstrikeReport("main.tf"),
   endor: [endorSource],
   github: [importedAlert()],
   inspector: inspectorReport(),
@@ -9598,17 +9565,16 @@ test.each(scannerReports)(
     const provider = reader === "opengrep" ? "semgrep" : reader;
     const url =
       reader === "tenable" ? tenableReport.repository_url : exampleRepository;
-    const { f, deps, inbox, uploads, jobs, fileId } =
+    const { f, deps, inbox, uploads, jobs, fileId, paths } =
       await privateUploadFixture(report, provider, url);
     const sourceCheckout = join(f.root, "checkout");
     if (reader === "crowdstrike") {
-      await mkdir(join(sourceCheckout, "infra", "net"), { recursive: true });
-      await writeFile(join(sourceCheckout, "infra", "net", "main.tf"), "");
+      await mkdir(sourceCheckout);
+      await writeFile(join(sourceCheckout, "main.tf"), "");
       const git = promisify(execFile);
       await git("git", ["-C", sourceCheckout, "init", "--quiet"]);
       await git("git", ["-C", sourceCheckout, "remote", "add", "origin", url]);
     }
-    const paths: string[] = [];
     const prepare = () =>
       prepareExternalPublication(
         f.file,
@@ -9619,14 +9585,7 @@ test.each(scannerReports)(
             ? { trivyScanRoot: "." }
             : { sourceRepositoryUrl: url }),
         },
-        {
-          ...deps,
-          sourceCheckout,
-          fetch(url, init) {
-            paths.push(new URL(url).pathname);
-            return deps.fetch(url, init);
-          },
-        },
+        { ...deps, sourceCheckout },
       );
 
     f.state.catalogHeaders = { [scopeHeader]: "personal" };
@@ -9741,10 +9700,13 @@ test.each([
 ] as [string, string, Record<string, string>][])(
   "Continuum rejects %s before transferring evidence",
   async (_, mediaType, headers) => {
-    const f = await fixture(readerReports.continuum, exampleRepository);
+    const { f, deps, paths } = await privateUploadFixture(
+      readerReports.continuum,
+      "continuum",
+      exampleRepository,
+    );
     f.state.catalogMediaType = mediaType;
     f.state.catalogHeaders = headers;
-    const paths: string[] = [];
     await expect(
       prepareExternalPublication(
         f.file,
@@ -9753,13 +9715,7 @@ test.each([
           provider: "continuum",
           sourceRepositoryUrl: exampleRepository,
         },
-        {
-          ...f.deps,
-          fetch(url, init) {
-            paths.push(new URL(url).pathname);
-            return f.deps.fetch(url, init);
-          },
-        },
+        deps,
       ),
     ).rejects.toThrow(/Cloud|unavailable|scope|provider|contract|catalog/i);
     expect(paths).toEqual(["/backend-api/aardvark/external/repositories"]);
