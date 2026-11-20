@@ -164,29 +164,35 @@ for (const platform of ["win32", "linux"] as const) {
 
 test("snapshot Git keeps credentials out of checkout-filtered blobs and preserves ordinary settings", async () => {
   const cwd = await fixtures.create("patch-snapshot-credentials-");
-  const env = {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([key]) => !/^(?:https?|all)_proxy$/iu.test(key),
-      ),
-    ),
+  const credentials = {
     DOCKER_AUTH_CONFIG: JSON.stringify({
       auths: {
         "registry.example.test": { auth: "synthetic-registry-credential" },
       },
     }),
     DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
+    MONGODB_URI: "mongodb+srv://fixture:synthetic@db.example.test/fixture",
+    REDIS_URI: "redis://:synthetic@cache.example.test",
+    MYSQL_PWD: "synthetic-database-password",
     AWS_BEARER_TOKEN_BEDROCK: "synthetic-service-token",
     TF_TOKEN_registry_example_test: "synthetic-terraform-token",
-    TF_VAR_workspace: "example",
-    SNAPSHOT_USER_SETTING: "preserved",
     PIP_INDEX_URL: "https://fixture:synthetic@packages.example.test/simple",
     pip_extra_index_url:
       "https://public.example.test/simple https://synthetic@packages.example.test/simple",
     UV_INDEX: "private=https://synthetic@packages.example.test/simple",
-    PIP_FIND_LINKS: "https://packages.example.test/archives/user@release",
     HTTP_PROXY: "http://fixture:synthetic@proxy.example.test:8080",
     https_proxy: "https://fixture:synthetic@proxy.example.test",
+  };
+  const env = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => !/^(?:https?|all)_proxy$/iu.test(key),
+      ),
+    ),
+    ...credentials,
+    TF_VAR_workspace: "example",
+    SNAPSHOT_USER_SETTING: "ssh://git@repository.example.test/project",
+    PIP_FIND_LINKS: "https://packages.example.test/archives/user@release",
     ALL_PROXY: "socks5://proxy.example.test:1080#note@proxy.example.test",
   };
   const git = (...args: string[]) =>
@@ -203,7 +209,7 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
 process.stdout.write(JSON.stringify({
   input, setting: process.env.SNAPSHOT_USER_SETTING, proxy: process.env.ALL_PROXY,
   workspace: process.env.TF_VAR_workspace, links: process.env.PIP_FIND_LINKS,
-  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "AWS_BEARER_TOKEN_BEDROCK", "TF_TOKEN_registry_example_test", "PIP_INDEX_URL", "pip_extra_index_url", "UV_INDEX", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
+  credentialKeys: ${JSON.stringify(Object.keys(credentials))}.filter(key => key in process.env),
 }));`,
   );
   const add = [
@@ -215,7 +221,7 @@ process.stdout.write(JSON.stringify({
   ];
   const expected = {
     input: "safe patch\n",
-    setting: "preserved",
+    setting: env.SNAPSHOT_USER_SETTING,
     proxy: env.ALL_PROXY,
     workspace: env.TF_VAR_workspace,
     links: env.PIP_FIND_LINKS,
@@ -223,17 +229,7 @@ process.stdout.write(JSON.stringify({
   git(...add);
   expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
     ...expected,
-    credentialKeys: [
-      "DOCKER_AUTH_CONFIG",
-      "DATABASE_URL",
-      "AWS_BEARER_TOKEN_BEDROCK",
-      "TF_TOKEN_registry_example_test",
-      "PIP_INDEX_URL",
-      "pip_extra_index_url",
-      "UV_INDEX",
-      "HTTP_PROXY",
-      "https_proxy",
-    ],
+    credentialKeys: Object.keys(credentials),
   });
 
   git("read-tree", "--empty");

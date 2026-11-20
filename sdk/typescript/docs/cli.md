@@ -3102,6 +3102,7 @@ OpenSSL configuration and module directories. Configure required cryptographic
 policies in those defaults.
 For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
 versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
+On Linux they clear `GCONV_PATH` so glibc uses its default conversion modules.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.
@@ -3139,7 +3140,7 @@ and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `PIP_CONFIG_FILE`, `PIP_CLIENT_CERT`, and pip configuration in standard user and
 system locations, `VIRTUAL_ENV`, or `CONDA_PREFIX`. Git delegates also strip
 `MYSQL_PWD`, `PGPASSWORD`, `DATABASE_URL` and environment values containing
-authenticated HTTP URLs. For credential file
+URLs with embedded passwords or HTTP and FTP user credentials. For credential file
 selectors such as `GIT_SSL_KEY`, `REGISTRY_AUTH_FILE`, and
 `AWS_WEB_IDENTITY_TOKEN_FILE`, delegates lose the selector and filesystem
 access to the selected file. The rules protect
@@ -3154,6 +3155,11 @@ Databricks protection covers `~/.databrickscfg`, `~/.databricks/token-cache.json
 and files selected by `DATABRICKS_CONFIG_FILE` or `DATABRICKS_OIDC_TOKEN_FILEPATH`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
 the standard `glab-cli` configuration directories and Git administration.
+MySQL protection covers `~/.my.cnf` and `~/.mylogin.cnf` on Unix,
+`%APPDATA%\MySQL\.mylogin.cnf` on Windows, and the login file selected by
+`MYSQL_TEST_LOGIN_FILE`. In `MYSQL_HOME`, the rules protect `my.cnf` and, on
+Windows, `my.ini`. MySQL adds a leading dot to these filenames when the
+directory setting starts with a literal `~`.
 PostgreSQL password and service file protection covers `PGPASSFILE`,
 `PGSERVICEFILE`, the standard per-user files and `pg_service.conf` in
 the directory selected by `PGSYSCONFDIR`.

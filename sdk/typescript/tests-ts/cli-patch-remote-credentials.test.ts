@@ -762,6 +762,7 @@ test.each([
       PYTHONPATH: directory,
       PYTHONNOUSERSITE: "0",
       NODE_PATH: directory,
+      ...(process.platform === "linux" && { GCONV_PATH: directory }),
       OPENSSL_CONF: join(directory, "synthetic.cnf"),
       OPENSSL_CONF_INCLUDE: directory,
       OPENSSL_MODULES: directory,

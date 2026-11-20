@@ -942,6 +942,7 @@ test("patch model and clean filters cannot read selected authentication files", 
       "GIT_SSL_KEY",
       "GIT_PROXY_SSL_CERT",
       "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+      "MYSQL_TEST_LOGIN_FILE",
       "DATABRICKS_CONFIG_FILE",
       "DATABRICKS_OIDC_TOKEN_FILEPATH",
       "AWS_WEB_IDENTITY_TOKEN_FILE",
@@ -1019,6 +1020,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     CODEX_SECURITY_STATE_DIR: operator,
     FILTER_FIXTURE_SETTING: "from host",
     LOGIN_CACHE_NAME: "selected login cache",
+    MYSQL_HOME: at("selected mysql"),
     AWS_CONFIG_FILE: at("selected aws config"),
     AWS_SHARED_CREDENTIALS_FILE: at("selected aws credentials"),
     CLOUDSDK_CONFIG: cloudConfig,
@@ -1152,6 +1154,13 @@ test("patch model and clean filters cannot read selected authentication files", 
     ghFiles(".config/gh"),
     ghFiles(join(xdg, "gh")),
     windows ? ghFiles(join(appdata, "GitHub CLI")) : [],
+    join(environment.MYSQL_HOME, "my.cnf"),
+    windows
+      ? [
+          join(appdata, "MySQL/.mylogin.cnf"),
+          join(environment.MYSQL_HOME, "my.ini"),
+        ]
+      : [".my.cnf", ".mylogin.cnf"],
     [pointers.PGPASSFILE, pointers.PGSERVICEFILE],
     [pointers.PGSSLKEY, pointers.PGSSLCERT],
     [pointers.TF_CLI_CONFIG_FILE, pointers.TERRAFORM_CONFIG],
@@ -1562,7 +1571,7 @@ for (const location of ["inside", "outside", "selected"] as const) {
           );
         },
       );
-    }, 30_000);
+    });
   }
 }
 
