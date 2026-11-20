@@ -958,6 +958,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   await mkdir(gh);
   await mkdir(ssh);
   await mkdir(defaultGh, { recursive: true });
+  await mkdir(terraformDir, { recursive: true });
   const npm = join(operator, "selected npmrc");
   await mkdir(registry);
   const clusterList = (files: string[]) =>
@@ -1020,7 +1021,14 @@ test("patch model and clean filters cannot read selected authentication files", 
   const scopedProxyKey = join(operator, "scoped proxy key.pem");
   const clientCert = join(operator, "origin identity.pem");
   const proxyCert = join(operator, "proxy identity.pem");
-  const existing = [...paths.slice(0, 2), netrc, proxyKey, clientCert];
+  const existing = [
+    ...paths.slice(0, 2),
+    netrc,
+    proxyKey,
+    clientCert,
+    join(terraformDir, "registry.tfrc"),
+    join(terraformDir, "workspace.tfrc.json"),
+  ];
   const glabDirectories = [
     glab,
     join(operator, ".config", "glab-cli"),
@@ -1113,7 +1121,6 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         await mkdir(directory, { recursive: true });
       await mkdir(cloudConfig);
       await mkdir(pgTlsDir, { recursive: true });
-      await mkdir(terraformDir, { recursive: true });
       await writeFile(join(terraformDir, "ordinary.txt"), "Terraform sibling");
       await mkdir(join(operator, ".config", "gcloud"));
       if (process.platform === "win32")
