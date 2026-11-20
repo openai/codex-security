@@ -20,6 +20,7 @@ For a repository with a `src` directory, save these settings in the file:
 scan:
   scope:
     paths: [src]
+  exclude_paths: [src/examples]
 policy:
   fail_on_severity: high
 ```
@@ -27,6 +28,13 @@ policy:
 To supply additional context, add `knowledge_base: [SECURITY.md, docs/architecture.md]`
 under `scan` only if both files exist relative to the configuration file.
 Use the paths to your own documents or leave the list out.
+
+To exclude files or directories you do not want scanned, set
+`scan.exclude_paths: [examples/]`. Omit `scope` to scan the rest of the repository.
+Exclusions are literal paths relative to each scanned repository and take precedence
+over inclusions. The agent can still read excluded files as context for in-scope
+code, but findings located only in excluded paths are filtered from the results.
+Repeat `--exclude-path PATH` on `scan` to replace the configured list for one run.
 
 ```sh
 # Inspect the settings and where each one came from.
@@ -146,6 +154,7 @@ load the same config also use that setting. The usual config file is
 | `scan.max_time_minutes`        | Advisory Standard investigation allowance; enforced Deep discovery limit, in minutes | Unset in Standard; 5760 in Deep    |
 | `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Unset; preserve Codex defaults     |
 | `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`           | Whole repository                   |
+| `scan.exclude_paths`           | Literal repository-relative files or directories to exclude                          | Empty list                         |
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions, including [credential reporting][credentials]          | Unset                              |
 | `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
@@ -179,6 +188,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.scope.paths`                        | `target: ["src"]`                     | `--path`                                             |
 | `scan.scope.diff`                         | `target: DiffTarget.refs(...)`        | `--diff`, `--head`                                   |
 | `scan.scope.working_tree`                 | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`                           |
+| `scan.exclude_paths`                      | `excludePaths`                        | `--exclude-path`                                     |
 | `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
 | `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
 | `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
@@ -266,6 +276,7 @@ hints; parsing does not insert them. Lists are replaced, not concatenated.
 | ------------------------------------------------------- | ------------------------------ |
 | Repository positional argument                          | Invocation directory           |
 | File `scan.scope.paths`                                 | Selected repository            |
+| File `scan.exclude_paths`                               | Selected repository            |
 | File context, instruction, validation, and output paths | Configuration file's directory |
 | CLI context, prompt, and output paths                   | Invocation directory           |
 | Native values under `codex`                             | Existing native Codex rules    |

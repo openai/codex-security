@@ -15,7 +15,9 @@ const invoices = new Map<string, Invoice>([
   ["1002", { id: "1002", owner: "bob", amount: 80 }],
 ]);
 
-export async function createServer(): Promise<Server> {
+export async function createServer({
+  enforceOwnership = false,
+}: { enforceOwnership?: boolean } = {}): Promise<Server> {
   const server = createHttpServer((request, response) => {
     function reply(status: number, body: Invoice | { error: string }): void {
       const encoded = JSON.stringify(body);
@@ -41,7 +43,9 @@ export async function createServer(): Promise<Server> {
       return reply(404, { error: "not found" });
     const invoice = invoices.get(path.slice("/invoices/".length));
     if (invoice === undefined) return reply(404, { error: "not found" });
-    // BUG: authentication does not establish ownership of this invoice.
+    // The default demo path is vulnerable; the repaired control is an explicit test mode.
+    if (enforceOwnership && invoice.owner !== user)
+      return reply(403, { error: "forbidden" });
     reply(200, invoice);
   });
   server.listen(0, "127.0.0.1");
