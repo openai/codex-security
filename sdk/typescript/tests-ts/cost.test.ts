@@ -9183,6 +9183,52 @@ test.each([300, 1_300])(
   },
 );
 
+test.each([
+  "legacy",
+  "resumed session",
+  "new turn",
+  "same turn",
+  "compacted fork",
+])("reconciles a lower legacy counter across %s", async (boundary) => {
+  const home = await codexHome();
+  const path = await writeSession(home, "owner", {});
+  const turn = (turn_id: string) => ({
+    type: "turn_context",
+    payload: { turn_id, model: "gpt-5.6-sol" },
+  });
+  const counter = (input_tokens: number) =>
+    legacyUsageRecord({ input_tokens, output_tokens: 0 });
+  const session = (id: string) => ({ type: "session_meta", payload: { id } });
+  const fork = boundary === "compacted fork";
+  await appendFile(
+    path,
+    jsonLines([
+      ...(fork ? [session("parent"), counter(1000), session("owner")] : []),
+      ...(boundary === "legacy" ? [] : [turn("first")]),
+      counter(fork ? 2000 : 1000),
+      ...(fork ? [{ type: "compacted", payload: {} }] : []),
+      ...(boundary === "resumed session" ? [session("owner")] : []),
+      ...(boundary === "new turn" ? [turn("second")] : []),
+      counter(100),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home);
+  tracker.start("owner");
+  try {
+    const base = boundary === "same turn" ? 1000 : 1100;
+    const afterReset = await tracker.refresh();
+    expect(afterReset.measurement.usage?.input_tokens).toBe(base);
+    expect(afterReset.measurement.coverage).toBe("partial");
+    await appendFile(path, jsonLines([counter(200)]) + "\n");
+    const next = await tracker.refresh();
+    expect(next.measurement.usage?.input_tokens).toBe(
+      boundary === "same turn" ? 1000 : 1200,
+    );
+  } finally {
+    await tracker.stop();
+  }
+});
+
 test("reconciles exact receipts against counters from the same turn", async () => {
   const home = await codexHome();
   const path = await writeSession(home, "worker", {});

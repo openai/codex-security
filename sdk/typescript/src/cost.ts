@@ -370,7 +370,7 @@ interface SessionUsage {
   modelUsage: Map<string | null, ScanTokenUsage>;
   counterModelUsage: Map<string | null, ScanTokenUsage>;
   legacyTurnUsage: Map<string, Map<string | null, ScanTokenUsage>>;
-  afterCompaction: boolean;
+  mayStartCounterEpoch: boolean;
   priorCounterEpochs: ScanTokenUsage | null;
   currentTurnId: string | null;
   previousUsage: ScanTokenUsage | null;
@@ -494,7 +494,7 @@ function createSessionUsage(observeUsage: boolean): SessionUsage {
     modelUsage: new Map(),
     counterModelUsage: new Map(),
     legacyTurnUsage: new Map(),
-    afterCompaction: false,
+    mayStartCounterEpoch: false,
     priorCounterEpochs: null,
     currentTurnId: null,
     previousUsage: null,
@@ -3992,8 +3992,10 @@ function readSessionEvent(
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
-      if (!session.replaying)
+      if (!session.replaying) {
+        session.mayStartCounterEpoch = true;
         session.events?.push(sessionObservation(session, event));
+      }
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -4024,7 +4026,7 @@ function readSessionEvent(
     return;
   }
   if (event["type"] === "compacted") {
-    session.afterCompaction = true;
+    session.mayStartCounterEpoch = true;
     // Later counter epochs cannot account for missing earlier scan receipts.
     if (missingResponseTokens(session)) session.incompleteResponseEpoch = true;
     session.responseTokens = 0;
@@ -4035,6 +4037,8 @@ function readSessionEvent(
     (event["type"] === "turn_context" || payload["type"] === "task_started") &&
     typeof payload["turn_id"] === "string"
   ) {
+    if (session.currentTurnId !== payload["turn_id"])
+      session.mayStartCounterEpoch = true;
     session.currentTurnId = payload["turn_id"];
   }
   if (
@@ -4384,43 +4388,36 @@ function readSessionEvent(
   if (!isRecord(payload["info"])) return;
   const usage = tokenUsage(payload["info"]["total_token_usage"]);
   if (usage === null) return;
+  const previousTotal =
+    (session.inheritedUsage?.total_tokens ?? 0) +
+    (session.previousUsage?.total_tokens ?? 0);
+  if (usage.total_tokens < previousTotal) {
+    if (attributable) session.counterRegressed = true;
+    // A smaller snapshot in the same identified turn may be stale. Across
+    // reconnects and in legacy logs without turn IDs, keep the new epoch.
+    if (
+      attributable &&
+      !session.mayStartCounterEpoch &&
+      (session.currentTurnId !== null || session.responseUsageObserved)
+    )
+      return;
+    session.inheritedUsage = null;
+    session.previousUsage = null;
+    session.priorCounterEpochs = session.counterUsage;
+  }
   const ownUsage =
     session.inheritedUsage === null
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) {
-    if (
-      session.afterCompaction &&
-      session.previousUsage !== null &&
-      ownUsage.total_tokens < session.previousUsage.total_tokens
-    ) {
-      session.previousUsage = null;
-      session.priorCounterEpochs = session.counterUsage;
-    }
-    session.afterCompaction = false;
+    session.mayStartCounterEpoch = false;
     const hadPreviousUsage = session.previousUsage !== null;
     const delta =
       session.previousUsage === null
         ? ownUsage
         : subtractTokenUsage(ownUsage, session.previousUsage);
-    if (
-      session.previousUsage !== null &&
-      ownUsage.total_tokens < session.previousUsage.total_tokens
-    ) {
-      session.counterRegressed = true;
-      return;
-    }
     session.previousUsage = ownUsage;
-    if (
-      attribution &&
-      !isAttributedScanEvent(
-        attribution,
-        session.threadId!,
-        session.currentTurnId,
-        event["timestamp"],
-      )
-    )
-      return;
+    if (!attributable) return;
     if (delta !== null) {
       const model =
         !hadPreviousUsage && session.responseUsageObserved
