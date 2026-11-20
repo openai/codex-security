@@ -70,7 +70,11 @@ function savedScan(
 function completePatches(
   args: readonly string[],
   output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-  status: "verified" | "blocked" = "verified",
+  status: "verified" | "no_change" | "blocked" = "verified",
+  report?: {
+    verification: string;
+    credentialRevocationPending: boolean | undefined;
+  },
 ): Finding[] {
   const prompt = output?.appServer?.prompt ?? args.at(-1)!;
   const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
@@ -80,8 +84,10 @@ function completePatches(
         occurrenceId: finding.occurrenceId,
         status,
         files: status === "verified" ? [finding.locations[0]!.path] : [],
-        ...(status === "verified"
-          ? { verification: "The exploit fails and focused tests pass." }
+        ...(status !== "blocked"
+          ? (report ?? {
+              verification: "The exploit fails and focused tests pass.",
+            })
           : { reason: "The required service is unavailable." }),
       })),
     }),
@@ -2142,7 +2148,6 @@ describe("scan and patch workflow", () => {
   test.each(["verified", "no_change"] as const)(
     "keeps pending credential retirement blocking CI after a %s code patch",
     async (status) => {
-      const files = status === "verified" ? ["src/finding-1.ts"] : [];
       const fixtures = await publicationFixtures(initialPatchFiles);
       let publishedBody: string | undefined;
       const outcome = await runWorkflow(
@@ -2156,26 +2161,17 @@ describe("scan and patch workflow", () => {
         ],
         {
           ...fixtures,
-          onCodex: async (_args, output) => {
+          onCodex: async (args, output) => {
             if (status === "verified")
               await writeFile(
-                join(fixtures.currentDirectory, files[0]!),
+                join(fixtures.currentDirectory, "src/finding-1.ts"),
                 "fixed\n",
               );
-            output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status,
-                    files,
-                    verification:
-                      "The application now reads its password from the configured store.",
-                    credentialRevocationPending: true,
-                  },
-                ],
-              }),
-            );
+            completePatches(args, output, status, {
+              verification:
+                "The application now reads its password from the configured store.",
+              credentialRevocationPending: true,
+            });
             return 0;
           },
           onRepositoryCommand: (command, args, cwd, options) => {

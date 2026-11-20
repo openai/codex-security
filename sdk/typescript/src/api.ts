@@ -620,26 +620,25 @@ function patchOutcomeFromResponse(
   response: z.infer<typeof patchResponseSchema>,
 ): PatchOutcome {
   const { status, changedFiles, verificationReport, reason } = response;
-  const followUp = response.credentialRevocationPending
-    ? { credentialRevocationPending: true as const }
-    : {};
   switch (status) {
     case "verified":
+    case "no_change": {
+      const hasEdits = changedFiles.length > 0;
       if (
-        changedFiles.length === 0 ||
+        hasEdits !== (status === "verified") ||
         verificationReport === null ||
         reason !== null
       )
-        throw new Error("Invalid verified patch result.");
-      return { status, changedFiles, verificationReport, ...followUp };
-    case "no_change":
-      if (
-        changedFiles.length !== 0 ||
-        verificationReport === null ||
-        reason !== null
-      )
-        throw new Error("Invalid no-change patch result.");
-      return { status, changedFiles, verificationReport, ...followUp };
+        throw new Error(`Invalid ${status.replace("_", "-")} patch result.`);
+      return {
+        status,
+        changedFiles,
+        verificationReport,
+        ...(response.credentialRevocationPending
+          ? { credentialRevocationPending: true }
+          : {}),
+      };
+    }
     case "blocked":
     case "failed":
       if (reason === null)
