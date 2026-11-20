@@ -1528,6 +1528,38 @@ async function patchSandboxWritableRoots(
   return [...roots];
 }
 
+async function hookFilesystem(
+  sandbox: PatchSnapshotSandbox,
+  home: string,
+  data: string,
+): Promise<JsonObject> {
+  const filesystem: JsonObject = {
+    ...(sandbox.profile["filesystem"] as JsonObject),
+    [home]: { ".": "deny" },
+    [data]: { ".": "read" },
+  };
+  if (process.platform !== "linux") return filesystem;
+  const grants = await patchSandboxWritableRoots(sandbox, home);
+  if (!grants) return filesystem;
+  const entries = Object.entries(filesystem);
+  for (const [path, rule] of entries)
+    if (isJsonObject(rule) && rule["."] === "read") grants.push(path);
+  const reopened = grants.filter((path) => path.startsWith(home + sep));
+  // Bubblewrap cannot mount a file inside the masked home. A more specific
+  // grant reopens its subtree, where the file still needs its own mask.
+  for (const [path, rule] of entries) {
+    const glob = rule === "deny";
+    if (!glob && !(isJsonObject(rule) && rule["."] === "deny")) continue;
+    const covers = (root: string) => {
+      const prefix = glob ? escapeCredentialGlob(root) : root;
+      return path === prefix || path.startsWith(prefix + sep);
+    };
+    if (path !== home && covers(home) && !reopened.some(covers))
+      delete filesystem[path];
+  }
+  return filesystem;
+}
+
 // A profile may span the Git commands of one private-index snapshot only when
 // none of their workspace or temporary write grants can reach its directory.
 async function reusableWindowsSnapshotHome(
@@ -2322,29 +2354,12 @@ export async function runRepositoryCommand(
         await file.chmod(0o600);
         await requirePrivateSnapshotProfileFile(path);
         const permissions = { ...sandbox.profile };
-        if (hookDirectory) {
-          const home = dirname(hookDirectory);
-          const filesystem = {
-            ...(permissions["filesystem"] as JsonObject | undefined),
-          };
-          // Bubblewrap cannot mount individual masks inside the empty
-          // read-only directory it mounts over the hook's credential home.
-          if (process.platform === "linux") {
-            const globPrefix = escapeCredentialGlob(home) + sep;
-            for (const [path, rule] of Object.entries(filesystem)) {
-              if (
-                (rule === "deny" && path.startsWith(globPrefix)) ||
-                (isJsonObject(rule) &&
-                  rule["."] === "deny" &&
-                  path.startsWith(home + sep))
-              )
-                delete filesystem[path];
-            }
-          }
-          filesystem[home] = { ".": "deny" };
-          filesystem[hookDataDirectory!] = { ".": "read" };
-          permissions["filesystem"] = filesystem;
-        }
+        if (hookDirectory)
+          permissions["filesystem"] = await hookFilesystem(
+            sandbox,
+            dirname(hookDirectory),
+            hookDataDirectory!,
+          );
         const profiles = { [profile]: permissions };
         for (const [event, messageDirectory] of Object.entries(
           messageDirectories,
