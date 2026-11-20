@@ -41,7 +41,7 @@ test("stack Markdown explains sampled call, gaps and claims without borrowing ev
   expect(recorded).toContain("sample-a");
   expect(absent).toContain("sample-b");
   expect(absent).not.toContain("Sampled copy 1.0");
-  expect(output).toMatch(/single-agent/i);
+  expect(output).toContain("Finalized offline");
   expect(output).not.toMatch(/reviewed uses/i);
   expect(sampled).toContain("src/codec.ts:3");
   expect(sampled).toContain("sample-codec 1.0");
