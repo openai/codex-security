@@ -12,6 +12,8 @@ import {
   type ValidationProviderAssessment,
   type ValidationProviderContext,
   type ValidationClaimMatch,
+  type ValidationBasis,
+  type ValidationResultScope,
   unavailableAssessment,
 } from "./validation-provider.js";
 
@@ -301,11 +303,13 @@ function severityFactors(
     : safeText(value, 180);
 }
 
-function basisLabel(value: unknown): "GRAPH" | "CODE" | "INFERRED" {
-  const raw = text(value) ?? "";
-  if (/graph|inventory|deployment/iu.test(raw)) return "GRAPH";
-  if (/source|code|finding/iu.test(raw)) return "CODE";
-  return "INFERRED";
+function basisLabel(value: unknown): ValidationBasis {
+  const raw = text(value);
+  if (!raw) return "INFERRED";
+  const known = raw.toUpperCase();
+  return ["GRAPH", "CODE", "FINDING", "INFERRED"].includes(known)
+    ? known
+    : safeText(raw, 80);
 }
 
 function attackerReachability(
@@ -340,7 +344,7 @@ function evidenceSignal(artifact: Record<string, unknown>): string {
     .find(([, row]) => row["value"] !== undefined);
   if (selectedPrecondition) {
     const [name, row] = selectedPrecondition;
-    const rawBasis = row["basis"] ?? row["reason"];
+    const rawBasis = row["basis"];
     const basis = basisLabel(rawBasis);
     const reason = safeText(row["reason"], 180);
     return `Basis: ${basis} — ${name}: ${safeText(String(row["value"]), 80)} (${reason}).`;
@@ -354,8 +358,8 @@ function evidenceSignal(artifact: Record<string, unknown>): string {
     ) ?? rows[0];
   if (!preferred)
     return "Basis: INFERRED — No likelihood precondition was returned.";
-  const rawBasis = safeText(preferred["basis"] ?? preferred["reason"], 180);
-  const basis = basisLabel(rawBasis);
+  const rawBasis = safeText(preferred["basis"], 80);
+  const basis = basisLabel(preferred["basis"]);
   const graphState = safeText(
     body["graphStatus"] ?? prevalidation["graphStatus"],
     40,
@@ -653,6 +657,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
     let issue: Record<string, unknown> = {};
     let validationArtifact: Record<string, unknown> | undefined;
     let likelihoodArtifact: Record<string, unknown> | undefined;
+    let resultScope: ValidationResultScope = "finding";
+    let issueFindingCount: number | undefined;
     let status = "SUBMITTED";
     try {
       {
@@ -713,6 +719,23 @@ export class ContinuumValidationProvider implements ValidationProvider {
             delay,
             now,
           );
+          const arn = text(current["findingArn"]);
+          const suffix = `/code-findings/${findingId}`;
+          const scope = arn?.endsWith(suffix)
+            ? arn.slice(0, -suffix.length)
+            : undefined;
+          const ids = issue["findingIds"];
+          const associatedIssue =
+            scope?.endsWith(`:environments/${this.#options.environmentId}`) &&
+            issue["issueArn"] === `${scope}/code-issues/${issueId}` &&
+            issue["issueId"] === issueId &&
+            Array.isArray(ids) &&
+            ids.every((id) => typeof id === "string") &&
+            ids.includes(findingId);
+          if (associatedIssue)
+            issueFindingCount = new Set(ids as string[]).size;
+          let issueFallback: Record<string, unknown> | undefined;
+          let soleFindingFallback: Record<string, unknown> | undefined;
           for (const kind of ["EVIDENCE", "VALIDATION_EVIDENCE"] as const) {
             const listed = await this.#call(
               launch,
@@ -765,27 +788,36 @@ export class ContinuumValidationProvider implements ValidationProvider {
                 artifact,
                 findingId,
               );
-              if (!selected) continue;
-              if (selected.scope === "issue") {
-                const arn = text(current["findingArn"]);
-                const suffix = `/code-findings/${findingId}`;
-                const scope = arn?.endsWith(suffix)
-                  ? arn.slice(0, -suffix.length)
-                  : undefined;
-                if (
-                  !scope?.endsWith(
-                    `:environments/${this.#options.environmentId}`,
-                  ) ||
-                  !singleFindingValidationIssue(issue, issueId, {
-                    scope,
-                    id: findingId,
-                  })
-                )
-                  continue;
+              if (selected?.scope === "finding") {
+                validationArtifact = selected.artifact;
+                break;
               }
-              validationArtifact = selected.artifact;
-              break;
+              if (
+                selected?.scope === "issue" &&
+                associatedIssue &&
+                singleFindingValidationIssue(issue, issueId, {
+                  scope: scope!,
+                  id: findingId,
+                })
+              ) {
+                soleFindingFallback ??= selected.artifact;
+                continue;
+              }
+              // Keep issue proof separate. Search all histories first: an older
+              // explicit result for this finding must beat this fallback.
+              if (
+                !issueFallback &&
+                associatedIssue &&
+                artifact["artifactType"] === "VALIDATION_EVIDENCE" &&
+                verdictFrom(artifact) !== "not returned"
+              )
+                issueFallback = artifact;
             }
+          }
+          validationArtifact ??= soleFindingFallback;
+          if (!validationArtifact && issueFallback) {
+            validationArtifact = issueFallback;
+            resultScope = "issue";
           }
         }
       }
@@ -804,7 +836,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
               name: issue["name"],
               synopsis: issue["synopsis"],
             };
-      const match = proofClaimMatch(claimEvidence, finding);
+      const match =
+        resultScope === "issue"
+          ? "unknown"
+          : proofClaimMatch(claimEvidence, finding);
       const validatedAt = new Date(
         text(validationArtifact["createdAt"]) ?? now(),
       );
@@ -818,7 +853,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
         validatedAt.getTime() < submittedAt.getTime() ||
         issueTime.getTime() < submittedAt.getTime() ||
         scorerTime.getTime() < submittedAt.getTime();
-      const reason = `Basis: CODE — Continuum returned ${verdict} using ${proofType(validationArtifact)}. Basis: INFERRED — The proof-to-claim comparison was ${match}. Raw proof code, payloads, commands, and console output are intentionally omitted.`;
+      const reason =
+        resultScope === "issue"
+          ? `Continuum returned ${verdict} for the issue using ${proofType(validationArtifact)}. This is not proof for the submitted finding individually. Raw proof code, payloads, commands, and console output are intentionally omitted.`
+          : `Basis: CODE — Continuum returned ${verdict} using ${proofType(validationArtifact)}. Basis: INFERRED — The proof-to-claim comparison was ${match}. Raw proof code, payloads, commands, and console output are intentionally omitted.`;
       return this.#report(
         finding,
         issueId,
@@ -830,14 +868,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         likelihoodArtifact
           ? evidenceSignal(likelihoodArtifact)
           : "Basis: INFERRED — No likelihood precondition was returned.",
-        basisLabel(
-          issue["severityReasoning"] ??
-            evidenceRows(likelihoodArtifact ?? {}).flatMap((row) =>
-              Object.values(object(row["preconditions"])).map(
-                (value) => object(value)["basis"],
-              ),
-            ),
-        ),
+        "INFERRED",
         match,
         validatedAt,
         stale,
@@ -851,6 +882,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
           })),
         ),
         attackerReachability(likelihoodArtifact),
+        resultScope,
+        issueFindingCount,
+        resultScope === "issue" &&
+          validatedAt.getTime() < submittedAt.getTime(),
       );
     } catch (error) {
       return unavailableAssessment(
@@ -869,15 +904,18 @@ export class ContinuumValidationProvider implements ValidationProvider {
     factors: string,
     reason: string,
     signal: string,
-    severityBasis: "GRAPH" | "CODE" | "INFERRED",
+    severityBasis: ValidationBasis,
     match: ValidationClaimMatch,
     validatedAt: Date,
     stale = false,
     preconditions: Array<{
-      basis: "GRAPH" | "CODE" | "INFERRED";
+      basis: ValidationBasis;
       reason: string;
     }> = [],
     reachableFromAttacker?: boolean,
+    resultScope: ValidationResultScope = "finding",
+    issueFindingCount?: number,
+    joinedValidatedIssue = false,
   ): ValidationProviderAssessment {
     const base = (
       this.#options.consoleBaseUrl ??
@@ -894,18 +932,27 @@ export class ContinuumValidationProvider implements ValidationProvider {
         : reachableFromAttacker === false
           ? "not reachable from attacker"
           : "exposure unknown";
+    const signalBasis = basisLabel(/^Basis: (.*?) —/u.exec(signal)?.[1]);
+    const scopeDescription =
+      resultScope === "issue"
+        ? `Continuum grouped this finding with ${(issueFindingCount ?? 1) - 1} other findings into this issue. This is an issue-level result, not an individual validation of this finding. Codex severity is retained.${joinedValidatedIssue ? " This finding joined an issue Continuum had already validated; the issue proof predates this submission." : ""}`
+        : "Continuum result for this finding.";
     const report = [
-      `Codex: ${severityLevel(finding)}, exposure unknown → Continuum: ${match === "different_flaw" || match === "unknown" ? `${severityLevel(finding)} (Codex retained)` : severity.toLowerCase()}, ${exposure} (basis ${basisLabel(signal.split("—")[0])}).`,
+      `**Result scope:** ${scopeDescription}`,
+      "",
+      resultScope === "issue"
+        ? `Codex finding severity: ${severityLevel(finding)} (retained). Continuum issue severity: ${severity.toLowerCase()}; issue ${exposure} (basis ${signalBasis}).`
+        : `Codex: ${severityLevel(finding)}, exposure unknown → Continuum: ${match === "different_flaw" || match === "unknown" ? `${severityLevel(finding)} (Codex retained)` : severity.toLowerCase()}, ${exposure} (basis ${signalBasis}).`,
       "",
       `**What Codex said:** ${title} (${severityLevel(finding)}). ${summary}`,
       "",
-      `**What Continuum says:** ${verdict}; severity ${severity}; ${factors} (basis: ${severityBasis}).`,
+      `**What Continuum says${resultScope === "issue" ? " for the issue" : ""}:** ${verdict}; ${resultScope === "issue" ? "issue severity" : "severity"} ${severity}; ${factors} (basis: ${severityBasis}).`,
       "",
       `**Freshness:** validated at ${validatedAt.toISOString()}; ${stale ? "possibly stale: evidence predates submission" : "current at submission"}. Deployment source identity is not compared.`,
       "",
       `**Claim match:** ${match} (basis: INFERRED).${match === "different_flaw" ? " Not validated: Continuum proved a related flaw. Codex severity is retained." : ""}`,
       "",
-      `**Main barrier or enabler:** ${signal}`,
+      `**Main barrier or enabler${resultScope === "issue" ? " for the issue" : ""}:** ${signal}`,
       "",
       reason,
       "",
@@ -930,12 +977,16 @@ export class ContinuumValidationProvider implements ValidationProvider {
             ? severityLevel(finding)
             : severity.toLowerCase(),
         providerSeverity: severity.toLowerCase(),
+        resultScope,
+        ...(issueFindingCount !== undefined && { issueFindingCount }),
+        joinedValidatedIssue,
+        ...(reachableFromAttacker !== undefined && { reachableFromAttacker }),
         reasons: [
           { basis: severityBasis, reason: factors },
-          { basis: basisLabel(signal.split("—")[0]), reason: signal },
+          { basis: signalBasis, reason: signal },
           {
             basis: match === "unknown" ? "INFERRED" : "CODE",
-            reason: `Continuum verdict: ${verdict}`,
+            reason: `Continuum ${resultScope} verdict: ${verdict}`,
           },
           { basis: "INFERRED", reason: `Claim comparison: ${match}` },
           ...preconditions,

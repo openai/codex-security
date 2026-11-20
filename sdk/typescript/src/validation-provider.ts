@@ -8,7 +8,10 @@ export interface ValidationProvenance {
   validatedAt: string;
 }
 
-export type ValidationBasis = "GRAPH" | "CODE" | "INFERRED";
+/** Known provenance categories, or a future category preserved as reported. */
+export type ValidationBasis =
+  "GRAPH" | "CODE" | "FINDING" | "INFERRED" | (string & {});
+export type ValidationResultScope = "finding" | "issue";
 export type ValidationClaimMatch =
   "on_target" | "on_target_escalated" | "different_flaw" | "unknown";
 
@@ -20,6 +23,13 @@ export interface ValidationItemRecord {
   severityBefore: string;
   severityAfter: string;
   providerSeverity?: string;
+  /** Scope of the verdict and provider severity, not the sealed Codex finding. */
+  resultScope?: ValidationResultScope;
+  issueFindingCount?: number;
+  /** Structured attacker reachability at resultScope; absent means unknown. */
+  reachableFromAttacker?: boolean;
+  /** Issue validation evidence existed before this finding was submitted. */
+  joinedValidatedIssue?: boolean;
   reasons: Array<{ basis: ValidationBasis; reason: string }>;
   claimMatch: ValidationClaimMatch;
   issueUrl?: string;

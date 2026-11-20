@@ -103,6 +103,7 @@ export type {
   ValidationProviderContext,
   ValidationProvenance,
   ValidationItemRecord,
+  ValidationResultScope,
   ValidationBasis,
   ValidationClaimMatch,
 } from "./validation-provider.js";
