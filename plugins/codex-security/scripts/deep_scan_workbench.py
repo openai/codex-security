@@ -491,6 +491,8 @@ def deep_scan_result(
 
 MODEL_FILE_DIGEST_KEYS = {
     "model_instructions_file": "modelInstructionsFileSha256",
+    "experimental_compact_prompt_file": "compactPromptFileSha256",
+    "model_catalog_json": "modelCatalogFileSha256",
 }
 MODEL_INPUT_KEYS = (*MODEL_FILE_DIGEST_KEYS, "developer_instructions")
 

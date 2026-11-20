@@ -11,7 +11,7 @@ export const modelFileSettings = [
   "model_catalog_json",
 ] as const;
 const modelInputSettings = [
-  "model_instructions_file",
+  ...modelFileSettings,
   "developer_instructions",
 ] as const;
 

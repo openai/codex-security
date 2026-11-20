@@ -89,6 +89,12 @@ test("restored model inputs resume the same host run without spending a discover
     /model_instructions_file changed/u,
   );
   config.model_instructions_file = file;
+  config.experimental_compact_prompt_file = file;
+  await assert.rejects(
+    runCoordinator(fixture, store, executor),
+    /experimental_compact_prompt_file changed/u,
+  );
+  delete config.experimental_compact_prompt_file;
   assert.equal(
     (await runCoordinator(fixture, store, executor)).status,
     "succeeded",

@@ -3,7 +3,7 @@ import { constants, open, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import type { JsonObject } from "./config.js";
+import { MODEL_FILE_SETTINGS, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
@@ -43,9 +43,10 @@ export function scanInputIdentity(
   };
 }
 
-const modelFileSettings = ["model_instructions_file"] as const;
 const legacyModelFileDigests = {
   model_instructions_file: "modelInstructionsFileSha256",
+  experimental_compact_prompt_file: "compactPromptFileSha256",
+  model_catalog_json: "modelCatalogFileSha256",
 } as const;
 
 function inlineInstructions(config: JsonObject) {
@@ -55,7 +56,7 @@ function inlineInstructions(config: JsonObject) {
 
 async function modelFileInput(
   config: JsonObject,
-  setting: (typeof modelFileSettings)[number],
+  setting: (typeof MODEL_FILE_SETTINGS)[number],
   signal?: AbortSignal,
 ) {
   const path = config[setting];
@@ -84,7 +85,7 @@ export async function deepModelFileInputs(
   const inputs: JsonObject = {
     developer_instructions: inlineInstructions(config),
   };
-  for (const setting of modelFileSettings)
+  for (const setting of MODEL_FILE_SETTINGS)
     inputs[setting] = await modelFileInput(config, setting, signal);
   return inputs;
 }
@@ -108,7 +109,7 @@ export async function validateDeepModelFileInputs(
     throw new CodexSecurityError(
       "The saved Deep Scan's developer_instructions changed. Restore the original input and resume the scan, or start a new scan.",
     );
-  for (const setting of modelFileSettings) {
+  for (const setting of MODEL_FILE_SETTINGS) {
     const saved = inputs?.[setting];
     const priorDigest = original[legacyModelFileDigests[setting]];
     if (saved === undefined && priorDigest === undefined) continue;

@@ -16,7 +16,11 @@ from workbench_test_support import (
     write_completed_contract,
 )
 
-MODEL_FILES = ("model_instructions_file",)
+MODEL_FILES = {
+    "model_instructions_file": "modelInstructionsFileSha256",
+    "experimental_compact_prompt_file": "compactPromptFileSha256",
+    "model_catalog_json": "modelCatalogFileSha256",
+}
 
 
 @pytest.mark.cross_platform
@@ -163,7 +167,7 @@ def test_unfinished_preview_cannot_start_another_host_run(tmp_path: Path, versio
 
 @pytest.mark.parametrize("checkout", ["missing", "replacement-link", "loop", "original-alias"])
 def test_host_seal_recovers_without_the_original_checkout(tmp_path: Path, checkout: str) -> None:
-    inputs = model_inputs(tmp_path / "original", MODEL_FILES[0])
+    inputs = model_inputs(tmp_path / "original", "model_instructions_file")
     state, target, directory, scan_id = register_deep(
         tmp_path, {"modelFileInputs": inputs}, alias=checkout == "original-alias"
     )
@@ -224,12 +228,7 @@ def test_registered_legacy_receipt_retains_only_the_known_input(tmp_path: Path) 
     assert state_view["modelFileInputs"] == {"model_instructions_file": instructions}
 
 
-@pytest.mark.parametrize(
-    ("field", "legacy_key"),
-    [
-        ("model_instructions_file", "modelInstructionsFileSha256"),
-    ],
-)
+@pytest.mark.parametrize(("field", "legacy_key"), list(MODEL_FILES.items()))
 @pytest.mark.parametrize("digest", [None, "b" * 64])
 def test_rejoin_uses_a_flat_historical_recipe_receipt(
     tmp_path: Path, field: str, legacy_key: str, digest: str | None

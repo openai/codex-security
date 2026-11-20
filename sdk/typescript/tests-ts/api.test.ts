@@ -15287,9 +15287,13 @@ if __name__ == "__main__":
     },
   );
 
-  test.each(["model_instructions_file"] as const)(
+  test.each([
+    ["model_instructions_file", "modelInstructionsFileSha256"],
+    ["experimental_compact_prompt_file", "compactPromptFileSha256"],
+    ["model_catalog_json", "modelCatalogFileSha256"],
+  ] as const)(
     "checks the recorded %s before resuming a Deep model turn",
-    async (setting) => {
+    async (setting, legacyKey) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const path = join(codexHome, "scan-model-input.json");
       await writeFile(path, '{"models":[]}');
@@ -15352,7 +15356,7 @@ if __name__ == "__main__":
       const receipt = (inputs["modelFileInputs"] as JsonObject)[
         setting
       ] as JsonObject;
-      inputs["modelInstructionsFileSha256"] = receipt["sha256"]!;
+      inputs[legacyKey] = receipt["sha256"]!;
       delete inputs["modelFileInputs"];
       await expect(resume()).rejects.toThrow(`${setting} changed`);
       await writeFile(path, '{"models":[]}');
