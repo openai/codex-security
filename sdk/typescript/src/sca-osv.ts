@@ -883,66 +883,41 @@ export async function discoverScaInputs(
           );
           input.status = inspected.status;
           input.reason = inspected.reason;
-          if (
-            input.format === "cargo" &&
-            inspected.references.some(
-              (reference) => reference.resolution === "workspace-or-path",
-            )
-          ) {
+          if (inspected.cargoSources) {
             const declared = await cargoWorkspacePackages(
               repository,
               path,
               files,
               diagnostics,
             );
-            if (declared.size > 0) {
-              const packages = parseToml(content.toString("utf8"))["package"];
-              for (
-                let index = inspected.references.length - 1;
-                index >= 0;
-                index--
-              ) {
-                const reference = inspected.references[index]!;
-                const manifestPath = declared.get(
-                  `${reference.name}@${reference.version}`,
-                );
-                if (
-                  reference.resolution === "workspace-or-path" &&
-                  reference.version !== null &&
-                  manifestPath !== undefined
-                ) {
-                  const sources = Array.isArray(packages)
-                    ? packages.flatMap((candidate) =>
-                        record(candidate) &&
-                        candidate["name"] === reference.name &&
-                        candidate["version"] === reference.version &&
-                        typeof candidate["source"] === "string" &&
-                        candidate["source"] !== ""
-                          ? [candidate["source"]]
-                          : [],
-                      )
-                    : [];
-                  const unresolvedSource = sources.find(
-                    (source) =>
-                      source !==
-                      "registry+https://github.com/rust-lang/crates.io-index",
-                  );
-                  if (unresolvedSource === undefined)
-                    inspected.references.splice(index, 1);
-                  else reference.resolution = unresolvedSource;
-                  const sourceBearingTwin = sources.length > 0;
-                  if (!sourceBearingTwin)
-                    firstPartyPackages.push({
-                      name: reference.name,
-                      version: reference.version,
-                      sourcePath: input.path,
-                      manifestPath,
-                    });
-                  limitations.push(
-                    `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${manifestPath}; ${sourceBearingTwin ? "a source-bearing package shares its name and version, so scanner components and advisory matches are retained." : "registry advisory coverage does not apply to that local package."}`,
-                  );
-                }
-              }
+            for (
+              let index = inspected.references.length - 1;
+              index >= 0;
+              index--
+            ) {
+              const reference = inspected.references[index]!;
+              const { name, version, sourcePath } = reference;
+              if (
+                reference.resolution !== "workspace-or-path" ||
+                version === null
+              )
+                continue;
+              const id = `${name}@${version}`;
+              const manifestPath = declared.get(id);
+              if (manifestPath === undefined) continue;
+              const source = inspected.cargoSources.get(id);
+              if (source == null) inspected.references.splice(index, 1);
+              else reference.resolution = source;
+              if (source === undefined)
+                firstPartyPackages.push({
+                  name,
+                  version,
+                  sourcePath,
+                  manifestPath,
+                });
+              limitations.push(
+                `${sourcePath}: ${id} is the local first-party package declared in ${manifestPath}; ${source === undefined ? "registry advisory coverage does not apply to that local package." : "a source-bearing package shares its name and version, so scanner components and advisory matches are retained."}`,
+              );
             }
           }
           localReferences.push(...inspected.references);

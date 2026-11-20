@@ -109,6 +109,14 @@ async function scanFixture(
     await mkdir(join(repository, path, ".."), { recursive: true });
     await writeFile(join(repository, path), content);
   }
+  return scanWithOutput(repository, output, out);
+}
+
+function scanWithOutput(
+  repository: string,
+  output: string,
+  out: OsvProcessResult,
+) {
   return runOsvScan(
     { repositoryPath: repository, outputDir: output },
     {
@@ -156,17 +164,11 @@ test.each(
         structuredClone(raw.results[0]!.packages[0]!),
       );
     const serialized = JSON.stringify(raw);
-    const result = await runOsvScan(
-      { repositoryPath: repository, outputDir: output },
-      {
-        executable: process.execPath,
-        runProcess: async (_exe, argv) => ({
-          stdout: argv[0] === "--version" ? "2.6.0" : serialized,
-          stderr: "",
-          exitCode: argv[0] === "--version" ? 0 : 1,
-        }),
-      },
-    );
+    const result = await scanWithOutput(repository, output, {
+      stdout: serialized,
+      stderr: "",
+      exitCode: 1,
+    });
     const alternate = source === "registry+https://registry.example.test/index";
     expect(result.coverage.firstPartyPackages).toHaveLength(
       source === null ? 1 : 0,
@@ -216,17 +218,11 @@ test.each(["missing", "external", "mismatched"] as const)(
     const raw = rawOutput("Cargo.lock", [vulnerability]);
     raw.results[0]!.packages[0]!.package.ecosystem = "crates.io";
     const serialized = JSON.stringify(raw);
-    const result = await runOsvScan(
-      { repositoryPath: repository, outputDir: output },
-      {
-        executable: process.execPath,
-        runProcess: async (_exe, argv) => ({
-          stdout: argv[0] === "--version" ? "2.6.0" : serialized,
-          stderr: "",
-          exitCode: argv[0] === "--version" ? 0 : 1,
-        }),
-      },
-    );
+    const result = await scanWithOutput(repository, output, {
+      stdout: serialized,
+      stderr: "",
+      exitCode: 1,
+    });
     expect(result.coverage.firstPartyPackages).toEqual([]);
     expect(result.coverage.unresolvedPackages).toBe(1);
     expect(result.status).toBe("partial");
@@ -361,17 +357,11 @@ test("first-party Cargo exclusion retains malformed advisory diagnostics", async
   const raw = rawOutput("Cargo.lock", [{}]);
   raw.results[0]!.packages[0]!.package.ecosystem = "crates.io";
   const serialized = JSON.stringify(raw);
-  const result = await runOsvScan(
-    { repositoryPath: repository, outputDir: output },
-    {
-      executable: process.execPath,
-      runProcess: async (_exe, argv) => ({
-        stdout: argv[0] === "--version" ? "2.6.0" : serialized,
-        stderr: "",
-        exitCode: argv[0] === "--version" ? 0 : 1,
-      }),
-    },
-  );
+  const result = await scanWithOutput(repository, output, {
+    stdout: serialized,
+    stderr: "",
+    exitCode: 1,
+  });
   expect(result.components).toEqual([]);
   expect(result.matches).toEqual([]);
   expect(result.status).not.toBe("completed");

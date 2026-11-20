@@ -20,6 +20,8 @@ export interface InputInspection {
   status: "scanned" | "unsupported";
   reason: string | null;
   references: ScaUnresolvedReference[];
+  /** Source-bearing Cargo tuples: first unresolved origin, or null for crates.io only. */
+  cargoSources?: Map<string, string | null>;
   diagnostics: string[];
   limitations: string[];
 }
@@ -251,20 +253,30 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
 
 function inspectCargo(content: string, sourcePath: string): InputInspection {
   const result = inspection();
+  const registry = "registry+https://github.com/rust-lang/crates.io-index";
+  const sources = new Map<string, string | null>();
   for (const pkg of packagesInToml(content)) {
     const name = packageName(pkg);
+    const version = text(pkg["version"]);
     const source = text(pkg["source"]);
+    if (source !== null && version !== null) {
+      const id = `${name}@${version}`;
+      if (sources.get(id) == null)
+        sources.set(id, source === registry ? null : source);
+    }
     // The upstream extractor drops source identity, including alternate registries.
-    if (source !== "registry+https://github.com/rust-lang/crates.io-index")
+    if (source !== registry)
       addReference(
         result,
         sourcePath,
         "crates.io",
         name,
-        text(pkg["version"]),
+        version,
         source ?? "workspace-or-path",
       );
   }
+  if (result.references.some((ref) => ref.resolution === "workspace-or-path"))
+    result.cargoSources = sources;
   return result;
 }
 
