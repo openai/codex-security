@@ -7,6 +7,10 @@
     "source": "https://raw.githubusercontent.com/cfworker/cfworker/5409fdc2bd144f68e8b28c61c71fcb16600000a6/LICENSE.md",
     "sha256": "376944252ab78ca6b41aee44ddea8894927ee67891e77e61eb9d59af63e35094"
   },
+  "EMOJI-SEGMENTER-LICENSE": {
+    "source": "https://raw.githubusercontent.com/Brooooooklyn/canvas/4627c0f8ddec93d8b25f2e24e6d7055a23b92691/third_party/emoji-segmenter/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
   "JS-TIKTOKEN-LICENSE": {
     "source": "https://raw.githubusercontent.com/dqbd/tiktoken/4c8b748e07992c00386f3180af5c574b27b65139/LICENSE",
     "sha256": "418cb499b436128d653d79941333a5437b7be2ea9213dcc2f04d15d5d2c51d86"

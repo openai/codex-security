@@ -45,6 +45,10 @@ export type {
   ProjectConfigInput,
   ProjectScope,
 } from "./project-config-schema.js";
+export type {
+  DependencyEndpointConfiguration,
+  DependencyRuntimeSelector,
+} from "./dependency-caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
 export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
@@ -356,6 +360,8 @@ export type {
   ClassifySeverityRecordsResult,
   CanonicalSeverityAssessment,
   SeverityClassificationReviewRequest,
+  SeverityDiagnosticCode,
+  SeverityRecordDiagnosticCode,
 } from "./classify-severity-records.js";
 export { validateRecords } from "./validation-records.js";
 export type {

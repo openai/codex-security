@@ -131,6 +131,46 @@ export interface NormalizedTarget {
   headRef?: string;
 }
 
+/** Exclusions are literal repository-relative names and may be absent in a checkout. */
+export function normalizeExcludedPaths(
+  values: readonly string[] | undefined,
+): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values))
+    throw new InvalidTargetError("Excluded paths must be an array of paths.");
+  const paths = new Set<string>();
+  for (const value of values) {
+    if (
+      typeof value !== "string" ||
+      !value ||
+      !value.isWellFormed() ||
+      /[\u0000-\u001f]/u.test(value)
+    )
+      throw new InvalidTargetError(
+        "Excluded paths must be non-empty UTF-8 paths.",
+      );
+    const path =
+      process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+    if (
+      isAbsolute(value) ||
+      path.startsWith("/") ||
+      /^[a-z]:/iu.test(path) ||
+      path.includes("\\") ||
+      path.split("/").includes("..")
+    )
+      throw new InvalidTargetError(
+        `Excluded path must be relative to the repository: ${value}`,
+      );
+    paths.add(
+      path
+        .split("/")
+        .filter((part) => part && part !== ".")
+        .join("/") || ".",
+    );
+  }
+  return [...paths];
+}
+
 export async function normalizeRepository(
   repository: string,
   signal?: AbortSignal,

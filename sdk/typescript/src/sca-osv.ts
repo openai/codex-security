@@ -24,9 +24,10 @@ import { promisify } from "node:util";
 import { parseAllDocuments } from "yaml";
 import { parse as parseToml } from "smol-toml";
 import semverValid from "semver/functions/valid.js";
+import { isRecord as record } from "./record.js";
 import { errorMessage } from "./errors.js";
 import {
-  additionalScaFormat,
+  scaInputFormat,
   inspectAdditionalScaInput,
   scaInputBasename,
   type ScaUnresolvedReference,
@@ -53,20 +54,6 @@ import type { DependencyScanProgress } from "./sca-progress.js";
 import { notify } from "./value.js";
 
 const execFile = promisify(execFileCallback);
-const lockNames = new Set([
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-  "pnpm-lock.yaml",
-]);
-
-function primaryScaFormat(path: string): "npm" | "pnpm" | null {
-  const name = scaInputBasename(path);
-  return lockNames.has(name)
-    ? name === "pnpm-lock.yaml"
-      ? "pnpm"
-      : "npm"
-    : null;
-}
 
 export interface OsvScanResult {
   scanner: ScaScanner;
@@ -107,9 +94,6 @@ function stableId(prefix: string, values: unknown[]): string {
 }
 function slash(path: string): string {
   return path.split(sep).join("/");
-}
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function strings(value: unknown): string[] {
   return Array.isArray(value)
@@ -568,11 +552,7 @@ async function repositoryFiles(
         } catch {
           let diagnostic = `Git dependency path bytes ${bytes.toString("hex")} cannot be decoded as UTF-8; coverage is incomplete.`;
           if (filesOnly) {
-            if (
-              primaryScaFormat(scoped) === null &&
-              additionalScaFormat(scoped) === null
-            )
-              continue;
+            if (scaInputFormat(scoped) === null) continue;
             const metadata = await lstat(bytePath(repository, scoped)).catch(
               (error: NodeJS.ErrnoException) => {
                 signal?.throwIfAborted();
@@ -650,8 +630,7 @@ async function repositoryFiles(
       } catch {
         if (
           metadata.isDirectory() ||
-          primaryScaFormat(bytes.toString("latin1")) !== null ||
-          additionalScaFormat(bytes.toString("latin1")) !== null
+          scaInputFormat(bytes.toString("latin1")) !== null
         ) {
           const prefix = slash(relative(repository, directory));
           const pathBytes = Buffer.concat([
@@ -713,10 +692,7 @@ export async function discoverScaInputs(
     diagnostics: pathDiagnostics,
   } = await repositoryFiles(repository, environment, signal);
   const candidates = files
-    .filter(
-      (path) =>
-        primaryScaFormat(path) !== null || additionalScaFormat(path) !== null,
-    )
+    .filter((path) => scaInputFormat(path) !== null)
     .map(slash)
     .sort();
   const inputs: ScaInput[] = [];
@@ -741,11 +717,10 @@ export async function discoverScaInputs(
     for (const candidate of candidates) {
       signal?.throwIfAborted();
       const path = join(repository, candidate);
-      const additional = additionalScaFormat(path);
       const input: ScaInput = {
         path: slash(candidate),
         sha256: "",
-        format: additional ?? primaryScaFormat(path)!,
+        format: scaInputFormat(candidate)!,
         status: "scanned",
         reason: null,
       };
@@ -810,10 +785,10 @@ export async function discoverScaInputs(
           }
           continue;
         }
-        if (additional !== null) {
+        if (input.format !== "npm" && input.format !== "pnpm") {
           const inspected = inspectAdditionalScaInput(
             content.toString("utf8"),
-            additional,
+            input.format,
             input.path,
           );
           input.status = inspected.status;

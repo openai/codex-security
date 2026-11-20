@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import { SaxesParser } from "saxes";
 import { parse as parseToml } from "smol-toml";
 
+import { isRecord as record } from "./record.js";
 import type { ScaInput } from "./sca-types.js";
 
 export type AdditionalScaFormat = Exclude<ScaInput["format"], "npm" | "pnpm">;
@@ -23,7 +24,10 @@ export interface InputInspection {
   limitations: string[];
 }
 
-const filenames = new Map<string, AdditionalScaFormat>([
+const filenames = new Map<string, ScaInput["format"]>([
+  ["package-lock.json", "npm"],
+  ["npm-shrinkwrap.json", "npm"],
+  ["pnpm-lock.yaml", "pnpm"],
   ["uv.lock", "uv"],
   ["poetry.lock", "poetry"],
   ["Pipfile.lock", "pipenv"],
@@ -46,22 +50,14 @@ export function scaInputBasename(path: string): string {
   return process.platform === "win32" ? name.toLowerCase() : name;
 }
 
-export function additionalScaFormat(path: string): AdditionalScaFormat | null {
-  const name = basename(path);
-  const known =
-    filenames.get(name) ??
-    (process.platform === "win32"
-      ? windowsFilenames.get(name.toLowerCase())
-      : undefined);
+export function scaInputFormat(path: string): ScaInput["format"] | null {
+  const name = scaInputBasename(path);
+  const formats = process.platform === "win32" ? windowsFilenames : filenames;
+  const known = formats.get(name);
   if (known) return known;
-  const requirementsName =
-    process.platform === "win32" ? name.toLowerCase() : name;
-  if (
-    requirementsName.endsWith(".txt") &&
-    requirementsName.includes("requirements")
-  )
+  if (name.endsWith(".txt") && name.includes("requirements"))
     return "requirements";
-  if (scaInputBasename(path).endsWith(".pom")) return "maven";
+  if (name.endsWith(".pom")) return "maven";
   return null;
 }
 
@@ -77,10 +73,6 @@ function inspection(): InputInspection {
 
 function unsupported(reason: string): InputInspection {
   return { ...inspection(), status: "unsupported", reason };
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function text(value: unknown): string | null {
