@@ -560,6 +560,7 @@ export async function executeStackRun(
           receiptId: captureId(packet, item),
           target: manifest.target,
           cve: manifest.cve,
+          ...(manifest.callerScope && { callerScope: manifest.callerScope }),
           advisory: manifest.advisory,
           ...(manifest.triggerAnalysis && {
             triggerAnalysis: manifest.triggerAnalysis,

@@ -152,11 +152,13 @@ async function sample(
 async function startProof(
   root: string,
   files: Awaited<ReturnType<typeof sample>>,
+  callerScope?: string,
 ) {
   const inputs = join(root, "packet"),
     state = join(root, "attempt.sqlite");
   await prepareStackPacket({
     cve,
+    callerScope,
     ...files,
     repository: files.repo,
     inputsDir: inputs,
@@ -597,8 +599,11 @@ test("the stack process gets a private Codex home and can write only its workspa
   });
 });
 
-test("the gated check resolves the advisory once and reopens only the challenged path through two corrections", () =>
-  reviewedStackCheck("correct"));
+test("the gated check preserves configured caller scope through review and two corrections of the challenged path", () =>
+  reviewedStackCheck(
+    "correct",
+    'Assess the "import" worker.\nTreat uploaded records as caller-controlled.',
+  ));
 
 test("a third independent rejection exhausts the one-shot budget without publishing a report", () =>
   reviewedStackCheck("exhausted"));
@@ -606,7 +611,10 @@ test("a third independent rejection exhausts the one-shot budget without publish
 test("a review that repeats one decision and omits another cannot publish a report", () =>
   reviewedStackCheck("duplicate"));
 
-async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
+async function reviewedStackCheck(
+  mode: "correct" | "duplicate" | "exhausted",
+  callerScope?: string,
+) {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
   const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
@@ -659,9 +667,9 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
       if (out?.readOnly) {
         expect(argv).toContain('model_reasoning_effort="low"');
         expect(out.stackTarget).toBe(files.repo);
-        const { reportFile, repo, inputs } = JSON.parse(
-          prompt!.split("\n").at(-1)!,
-        );
+        const review = JSON.parse(prompt!.split("\n").at(-1)!);
+        expect(review.callerScope).toBe(callerScope);
+        const { reportFile, repo, inputs } = review;
         expect(repo).toBe(files.repo);
         const draft: StackInvestigationReport = JSON.parse(
           await readFile(reportFile, "utf8"),
@@ -694,9 +702,11 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
         out.stdout.write(JSON.stringify({ decisions }));
         return 0;
       }
-      const { state, command } = JSON.parse(
+      const investigation = JSON.parse(
         prompt!.split("\n").find((line) => line.startsWith('{"command":'))!,
       );
+      expect(investigation.callerScope).toBe(callerScope);
+      const { state, command } = investigation;
       expect(command.slice(-2)).toEqual(["exploitability", "run"]);
       async function child(verb: string, input?: unknown, error?: RegExp) {
         const io = createCliTest(main);
@@ -826,6 +836,15 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   );
   d.environment["CODEX_HOME"] = configHome;
   d.environment[gate] = "1";
+  const configPath = join(dir.path, "project.json");
+  if (callerScope !== undefined) {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        exploitability: { scope: { instructions: callerScope } },
+      }),
+    );
+  }
   const io = createCliTest(main);
   const code = await io.runCli(
     [
@@ -838,6 +857,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
       files.sinksPath,
       "--stacks",
       files.stacksPath,
+      ...(callerScope === undefined ? [] : ["--config", configPath]),
       "--report-file",
       destination,
       "--json",
@@ -846,7 +866,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   );
   expect(lookup).toHaveBeenCalledTimes(1);
   if (mode !== "duplicate") {
-    expect(drafts).toHaveLength(3);
+    expect(drafts, io.stderr.text()).toHaveLength(3);
     expect(calls).toBe(7); // analysis, then three investigator/reviewer pairs
   }
   if (mode !== "correct") {
@@ -867,6 +887,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   const approvedDraft = drafts[2]!;
   expect({ ...report, review: null }).toEqual(approvedDraft);
   expect(report).toMatchObject({
+    callerScope,
     verdict: "unknown",
     coverage: { assessed: 2 },
     review: {
@@ -894,7 +915,12 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
 test("offline finalize renders the saved assessment and protects existing output", async () => {
   await using dir = await scopedTemporaryDirectory("stack-render-");
   const files = await sample(dir.path, false);
-  const { state, call, row, claims } = await startProof(dir.path, files);
+  const callerScope = "Assess callers with upload access";
+  const { state, call, row, claims } = await startProof(
+    dir.path,
+    files,
+    callerScope,
+  );
   const question = "Which source commit ran?";
   await call("record-assessments", {
     items: [
@@ -923,6 +949,7 @@ test("offline finalize renders the saved assessment and protects existing output
   const markdown = createCliTest(main);
   expect(await markdown.runCli([...args, "--format", "md"], readDeps)).toBe(0);
   expect(markdown.stdout.text()).toContain(cve);
+  expect(markdown.stdout.text()).toContain(callerScope);
   expect(markdown.stdout.text()).toContain("Source identity is missing.");
   expect(markdown.stdout.text()).not.toContain("[object Object]");
   const saved = createCliTest(main);
@@ -938,6 +965,7 @@ test("offline finalize renders the saved assessment and protects existing output
   expect(saved.stdout.text()).toContain("Next: Which source commit ran?");
   const html = await readFile(htmlPath, "utf8");
   expect(html).toStartWith("<!doctype html>");
+  expect(html).toContain(callerScope);
   expect(html).toContain("Source identity is missing.");
   const duplicate = createCliTest(main);
   expect(
@@ -1089,6 +1117,47 @@ test("claim identity and finalized reports retain every own key in opaque JSON e
   expect(JSON.stringify(result.claims[0]!.payload)).toEqual(
     JSON.stringify(payload),
   );
+});
+
+test("a caller scope is frozen separately from imported endpoint metadata", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-caller-scope-");
+  const files = await sample(dir.path, true);
+  const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
+  catalog.sinks[0].callerScope = "An endpoint annotation.";
+  await writeFile(files.sinksPath, JSON.stringify(catalog));
+  const options = {
+    ...files,
+    cve,
+    repository: files.repo,
+    toolRevision: "test",
+    runId: "run",
+    attemptId: "attempt",
+  };
+  const original = join(dir.path, "original");
+  const { manifest } = await prepareStackPacket({
+    ...options,
+    inputsDir: original,
+  });
+  expect(manifest).not.toHaveProperty("callerScope");
+
+  const callerScope = "Assess ordinary accounts.\nInclude delegated jobs.";
+  const inputs = join(dir.path, "scoped");
+  const scoped = await prepareStackPacket({
+    ...options,
+    inputsDir: inputs,
+    callerScope,
+  });
+  expect(scoped.manifest.inputDigest).not.toBe(manifest.inputDigest);
+  expect(scoped.manifest.files).toEqual(manifest.files);
+  const state = join(dir.path, "run.sqlite");
+  await executeStackRun("init", { inputs, repo: files.repo, state });
+  expect(await executeStackRun("next", { state })).toMatchObject({
+    callerScope,
+    sinks: [{ callerScope: catalog.sinks[0].callerScope }],
+  });
+  await expect(
+    executeStackRun("init", { inputs: original, repo: files.repo, state }),
+  ).rejects.toThrow(/different investigation attempt/);
 });
 
 test("packet preparation and reopen preserve opaque endpoint and query metadata", async () => {
