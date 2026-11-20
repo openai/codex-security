@@ -254,6 +254,7 @@ export function completeCli(
   cliOptions: Cli.create.Options,
   shell: z.infer<typeof completionShell>,
   argv: readonly string[],
+  firstNonGlobal: (argv: readonly string[], start: number) => number,
 ) {
   const words = argv[0] === "--" ? argv.slice(1) : [...argv];
   if (words.length === 0)
@@ -276,9 +277,25 @@ export function completeCli(
       [...words.slice(0, index), "--report-file"],
       index,
     ).some((candidate) => candidate.value === "--report-file");
+  let scanFormat = false;
+  if (words[index - 1] === "--format") {
+    const prefix = words.slice(0, index - 1);
+    const commandIndex = firstNonGlobal(prefix, 1);
+    const command = prefix[commandIndex];
+    scanFormat = command === "scan";
+    if (command === "scans") {
+      const verb = prefix[firstNonGlobal(prefix, commandIndex + 1)];
+      scanFormat = verb === "rerun" || verb === "resume";
+    }
+  }
+  const outputFormats = cliOutputFormats(reportFormat);
   const candidates = Completions.complete(commands, undefined, words, index, {
     schema: z.object({
-      format: z.enum(cliOutputFormats(reportFormat)),
+      format: z.enum(
+        scanFormat
+          ? outputFormats.filter((format) => format !== "md")
+          : outputFormats,
+      ),
     }),
   });
   return Completions.format(shell, candidates);

@@ -8396,7 +8396,7 @@ export async function main(
   if (completion.success) {
     await writeCliOutput(
       output,
-      completeCli(cli, cliOptions, completion.data, shellArgv),
+      completeCli(cli, cliOptions, completion.data, shellArgv, firstNonGlobal),
     );
     return 0;
   }
