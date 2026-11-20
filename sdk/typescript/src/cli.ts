@@ -34,6 +34,7 @@ import {
   writeSync,
 } from "node:fs";
 import {
+  access,
   appendFile,
   chmod,
   lstat,
@@ -1866,6 +1867,8 @@ interface PatchTransportAccess {
   readonly writable: Set<string>;
   // A null target represents a known-hosts file that SSH may create.
   readonly invocations: Map<string, string | null>;
+  readonly afterHook: Set<string>;
+  readonly pushHooks: boolean;
   external: boolean;
   unknownWriters?: boolean;
 }
@@ -1952,7 +1955,7 @@ interface CliDependencies {
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
       snapshotProfiles?: PatchSnapshotProfiles;
-      patchTransport?: true;
+      patchTransport?: { mirrors: boolean; pushing: boolean };
       publicationHooks?: PatchPublicationHooks;
       hookSandbox?: PatchSnapshotSandbox;
       hostRefreshFilters?: readonly string[];
@@ -3612,13 +3615,20 @@ export async function main(
 ): Promise<number> {
   const parentDependencies = dependencies;
   const patchTransportFiles = new Map<string, PatchTransportFile>();
+  let publicationHooks: PatchPublicationHooks | undefined;
   const patchTransportAccess: PatchTransportAccess = {
     writable: new Set(),
     invocations: new Map(),
+    afterHook: new Set(),
+    get pushHooks() {
+      const events = publicationHooks?.events;
+      return Boolean(
+        events?.has("pre-push") || events?.has("reference-transaction"),
+      );
+    },
     external: false,
   };
   let patchSandbox: PatchSnapshotSandbox | undefined;
-  let publicationHooks: PatchPublicationHooks | undefined;
   let unavailableFilters: readonly string[] = [];
   let snapshotConfigPaths: readonly string[] | undefined;
   let snapshotConfigReady: Promise<void> | undefined;
@@ -3824,8 +3834,20 @@ export async function main(
           args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
           args[2] === "codex-security-ssh-config")
       ) {
-        for (const [path, selected] of patchTransportFiles)
-          await patchTransportIdentity(path, selected.kind, selected);
+        // Git can launch its packer and ask for HTTPS credentials after
+        // pre-push. With mirrors it can start a whole second transport.
+        const prePush =
+          options.patchTransport?.pushing &&
+          publicationHooks?.events.has("pre-push");
+        for (const [path, selected] of patchTransportFiles) {
+          const checkLinks =
+            (options.patchTransport?.mirrors &&
+              patchTransportAccess.pushHooks) ||
+            (prePush && patchTransportAccess.afterHook.has(path));
+          await patchTransportIdentity(path, selected.kind, selected, {
+            ...(checkLinks && { writers: patchTransportAccess }),
+          });
+        }
       }
       return parentDependencies.runRepositoryCommand(
         command,
@@ -12249,7 +12271,7 @@ async function patchTransportIdentity(
   path: string,
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
-  updatedHostKeys = false,
+  options: { updatedHostKeys?: boolean; writers?: PatchTransportAccess } = {},
 ): Promise<PatchTransportFile> {
   const changed = () =>
     new CodexSecurityError(
@@ -12270,14 +12292,17 @@ async function patchTransportIdentity(
     const leaf = await gitPublicationPathMetadata(path);
     if (!leaf) return { kind, target: path, stamp };
     // Only a successful SSH transport can populate the previously absent file.
-    if (!updatedHostKeys || !leaf.isFile()) throw changed();
+    if (!options.updatedHostKeys || !leaf.isFile()) throw changed();
     kind = "known-hosts";
   }
   const target = await realpath(path);
   if (selected && target !== selected.target) throw changed();
   const entry = await stat(target, { bigint: true });
+  if (options.writers && entry.nlink > 1n && entry.isFile())
+    await requireProtectedTransportLinks(target, entry, options.writers);
   const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
-  if (selected && !updatedHostKeys && selected.stamp !== stamp) throw changed();
+  if (selected && !options.updatedHostKeys && selected.stamp !== stamp)
+    throw changed();
   if (
     kind === "executable" ||
     (target === "/dev/null" && entry.isCharacterDevice())
@@ -12296,7 +12321,7 @@ async function patchTransportIdentity(
     );
     if (
       selected?.digest !== undefined &&
-      !updatedHostKeys &&
+      !options.updatedHostKeys &&
       selected.digest !== digest
     )
       throw changed();
@@ -12320,6 +12345,62 @@ async function bindPatchTransportFile(
     // A path that is also used as a launcher, config or script must stay fixed.
     files.set(path, await patchTransportIdentity(path, "file", selected));
   }
+}
+
+async function requireProtectedTransportLinks(
+  target: string,
+  file: { uid: bigint; mode: bigint; dev: bigint; ino: bigint; nlink: bigint },
+  writers: PatchTransportAccess,
+) {
+  // Git installations commonly hard-link their subcommands. An inode owned
+  // by another user and unwritable from this account stays safe through every
+  // alias. Its owner, however, can make a read-only file writable via chmod.
+  const uid = process.geteuid?.();
+  if (
+    uid !== undefined &&
+    uid !== 0 &&
+    file.uid !== BigInt(uid) &&
+    !(file.mode & 0o022n)
+  ) {
+    try {
+      await access(target, constants.W_OK);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EACCES" || code === "EROFS") return;
+      throw error;
+    }
+  }
+  // Git for Windows and user-owned installations share one inode among
+  // commands in libexec/git-core and bin. Count directory entries in the
+  // protected installation, accepting it only if every link is accounted for.
+  if (writers.writable.size && file.ino) {
+    const directory = dirname(target);
+    const locations = [directory];
+    if (basename(directory).toLowerCase() === "git-core")
+      locations.push(resolve(directory, "../../bin"));
+    if (basename(directory).toLowerCase() === "bin")
+      locations.push(resolve(directory, "../libexec/git-core"));
+    const seen = new Set<string>();
+    let remaining = file.nlink;
+    for (const location of locations) {
+      const physical = await realpath(location).catch(() => undefined);
+      if (!physical) continue;
+      const dir = await stat(physical, { bigint: true });
+      const identity = [dir.dev, dir.ino].join(":");
+      if (!dir.isDirectory() || seen.has(identity)) continue;
+      seen.add(identity);
+      for (const name of new Set(await readdir(physical))) {
+        const path = join(physical, name);
+        const link = await lstat(path, { bigint: true });
+        if (link.dev !== file.dev || link.ino !== file.ino) continue;
+        requireStablePatchTransportTarget(path, writers);
+        if (--remaining === 0n) return;
+      }
+    }
+  }
+  throw new CodexSecurityError(
+    "Cannot publish with a hard-linked transport file that Git may use after a hook. Select a separate executable or input file outside the checkout.",
+  );
 }
 
 function writablePatchTransportError(path: string) {
@@ -12382,7 +12463,15 @@ async function inspectPatchGitExecutable(
   dependencies: CliDependencies,
   protectedRoots: string[],
   transportDirectory: string,
-  invocationDirectory = dependencies.patchCallerDirectory ?? repository,
+  {
+    afterHook,
+    implicit,
+    invocationDirectory = dependencies.patchCallerDirectory ?? repository,
+  }: {
+    afterHook?: boolean;
+    implicit?: boolean;
+    invocationDirectory?: string;
+  } = {},
 ) {
   // Git prepends GIT_EXEC_PATH from its invocation cwd before it enters the worktree.
   const selected = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
@@ -12391,6 +12480,8 @@ async function inspectPatchGitExecutable(
     (await trustedHostPathResolver(invocationDirectory, protectedRoots))(
       selected,
     );
+  if (implicit && selected && !configuredExecPath)
+    throw writablePatchTransportError(selected);
   let execPath = configuredExecPath;
   const hostPath =
     environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
@@ -12457,9 +12548,37 @@ async function inspectPatchGitExecutable(
     ...inspected,
     configuredExecPath,
   };
+  if (implicit) {
+    // Git searches for its child by name. An absolute replacement command
+    // cannot pin that lookup: a hook can replace an intermediate link or
+    // install an earlier candidate in any writable search directory.
+    const resolveHostPath = await trustedHostPathResolver(transportDirectory, [
+      ...protectedRoots,
+      ...(dependencies.patchTransportAccess?.writable ?? []),
+    ]);
+    const windows = process.platform === "win32";
+    const names = windows ? [command + ".exe", command] : [command];
+    search: for (const entry of path?.split(delimiter) ?? []) {
+      const directory = windows ? entry.replace(/^"(.*)"$/u, "$1") : entry;
+      for (const name of names) {
+        const lookup = directory ? directory + sep + name : name;
+        const physical = resolveHostPath(lookup);
+        if (!physical) throw writablePatchTransportError(lookup);
+        if (physical === result.gitTransport?.target) break search;
+        // An earlier non-executable candidate could become executable by
+        // chmod through a writable hard link.
+        if ((await stat(physical).catch(() => undefined))?.isFile()) {
+          await bindPatchTransportFile(physical, "executable", dependencies);
+          if (afterHook)
+            dependencies.patchTransportAccess?.afterHook.add(physical);
+        }
+      }
+    }
+  }
   if (!result.executable || !result.gitTransport) return result;
   const { launcher, target } = result.gitTransport;
   await bindPatchTransportFile(launcher, "executable", dependencies);
+  if (afterHook) dependencies.patchTransportAccess?.afterHook.add(launcher);
   const selectedFile = dependencies.patchTransportFiles?.get(launcher);
   if (selectedFile && selectedFile.target !== target)
     throw new CodexSecurityError(
@@ -12527,14 +12646,45 @@ async function runPatchTransport(
       ]
     : args;
   const run = async (overrides: NodeJS.ProcessEnv = {}) => {
+    const effective = { ...environment, ...overrides };
+    if (dependencies.patchTransportAccess?.pushHooks) {
+      const { protectedRoots, directory } = await patchTransportDirectories(
+        repository,
+        dependencies,
+      );
+      const transport = {
+        ...dependencies,
+        environment: { ...dependencies.environment, ...effective },
+      };
+      // Git resolves its own child commands through its exec directory before
+      // PATH. It starts pack-objects after pre-push, even with one destination.
+      const commands = ["git"];
+      if (remotes.some((remote) => remote.startsWith("https://")))
+        commands.push("git-remote-https");
+      for (const command of commands) {
+        const { configuredExecPath } = await inspectPatchGitExecutable(
+          command,
+          repository,
+          transport,
+          protectedRoots,
+          directory,
+          { afterHook: command === "git", implicit: true },
+        );
+        // Child Git processes prepend this again from their own cwd.
+        if (configuredExecPath) effective["GIT_EXEC_PATH"] = configuredExecPath;
+      }
+    }
     const result = await dependencies.runRepositoryCommand(
       "git",
       transportArgs,
       repository,
       {
         ...options,
-        patchTransport: true,
-        environment: { ...environment, ...overrides },
+        patchTransport: {
+          mirrors: remotes.length > 1,
+          pushing: args[0] === "push",
+        },
+        environment: effective,
       },
     );
     if (
@@ -12554,7 +12704,7 @@ async function runPatchTransport(
             path,
             selected.kind,
             selected,
-            true,
+            { updatedHostKeys: true },
           );
           files.set(path, updated);
           if (
@@ -12596,14 +12746,7 @@ async function runPatchTransport(
       );
       transportBindings.proxy.set(command, result.executable);
     }
-    const target = transportBindings.proxy.get(command)!;
-    // A single git push can start a pre-push hook between destinations,
-    // after our last identity check. An alias could still write the inode.
-    if (target && remotes.length > 1 && (await stat(target)).nlink > 1)
-      throw new CodexSecurityError(
-        "Cannot publish to multiple destinations with a hard-linked Git proxy. Select a separate proxy executable outside the checkout.",
-      );
-    return target;
+    return transportBindings.proxy.get(command)!;
   };
   if (override !== undefined) {
     const executable = await pin(override);
@@ -12885,6 +13028,7 @@ async function patchTransportEnvironment(
       dependencies,
       directories.protectedRoots,
       directories.directory,
+      { afterHook: true },
     );
     executable = helper.executable ?? "";
     bindings?.askPass?.set(command, executable);
@@ -12990,6 +13134,7 @@ async function pinPublicationCommand(
       dependencies,
       protectedRoots,
       directory,
+      { afterHook: kind === "credential" },
     );
   if (!executable) {
     // A credential manager installed on another platform may precede the
@@ -13036,6 +13181,8 @@ async function pinPublicationCommand(
       physical,
       fileKind === "missing-known-hosts" ? null : physical,
     );
+    if (kind === "credential")
+      dependencies.patchTransportAccess?.afterHook.add(physical);
     if (kind === "credential" && file !== physical) {
       const resolveHostPath = await trustedHostPathResolver(
         directory,
@@ -13736,7 +13883,7 @@ async function patchCommandContext(
       dependencies,
       [physicalRoot, physicalDirectory],
       transportDirectory,
-      physicalDirectory,
+      { invocationDirectory: physicalDirectory, afterHook: true },
     );
     // An empty value disables a missing or checkout-controlled helper.
     environment[name] = helper.executable ?? "";
