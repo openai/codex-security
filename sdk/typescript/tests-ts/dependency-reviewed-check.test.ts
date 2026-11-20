@@ -1152,6 +1152,102 @@ test("host feedback repairs a bad citation and an independent rejection requires
   expect([investigations, reviews]).toEqual([3, 2]);
 });
 
+test("the grader switch preserves the investigator prompt, host checks and queued evidence", async () => {
+  await using f = await fixture();
+  const prompts: string[] = [];
+  for (const grader of ["enabled", "disabled"] as const) {
+    const reviewed = grader === "enabled";
+    const state = reviewed ? "approved" : "unreviewed";
+    const events: string[] = [];
+    const result = await runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Untrusted input reaches the parser.",
+        grader,
+        onProgress: (type) => events.push(type),
+        signal,
+      },
+      {
+        discover: async () => f.discovery,
+        async runAgent(req) {
+          if (!req.coordinator) {
+            expect(reviewed).toBe(true);
+            return approvedReview(
+              JSON.parse(req.prompt.split("\n\n").at(-1)!).claims,
+            );
+          }
+          prompts.push(req.prompt);
+          const { call } = await req.investigationTools!();
+          const source = { path: "app.js", startLine: 1, endLine: 1 };
+          await call("submit_dependency_claims", {
+            claims: [
+              {
+                id: "import",
+                expectedRevision: 0,
+                scope: "app",
+                statement: "The application imports the parser.",
+                sources: [source],
+                receiptIds: [],
+                dependencies: [],
+              },
+            ],
+          });
+          const [premise] = (await call("query_dependency_claims", {
+            wait: true,
+          })) as PremiseRef[];
+          expect(premise).toMatchObject({ state });
+          expect(Object.hasOwn(premise!, "decision")).toBe(reviewed);
+          const assessment = {
+            id: "app",
+            expectedRevision: 0,
+            use: { ...f.use, premises: [reference(premise!)] },
+          };
+          const invalid = structuredClone(assessment);
+          invalid.use.proof.sink!.callSite.line = 3;
+          await expect(
+            call("submit_dependency_assessments", {
+              assessments: [invalid],
+            }),
+          ).rejects.toThrow("outside the citations");
+          await call("submit_dependency_assessments", {
+            assessments: [assessment],
+          });
+          return JSON.stringify({ uses: [], limitations: [] });
+        },
+      },
+    );
+    if (!("checks" in result)) throw Error("Missing package result");
+    const check = result.checks[0]!;
+    expect(check.grader).toBe(reviewed ? undefined : "disabled");
+    expect(events).toContain("proposed_sink");
+    expect(events.includes("review")).toBe(reviewed);
+    expect(events.includes("reviewed")).toBe(reviewed);
+    expect(events.includes("unreviewed")).toBe(!reviewed);
+    expect(check.claims.map((claim) => claim.id)).toEqual([
+      "premise:import",
+      "assessment:app",
+      "coverage",
+    ]);
+    for (const claim of check.claims) {
+      expect(claim.state).toBe(state);
+      expect(Object.hasOwn(claim, "decision")).toBe(reviewed);
+    }
+    const [use] = check.uses;
+    expect(use?.supportingClaims).toEqual([reference(check.claims[0]!)]);
+    expect(use?.verdict).toBe("potentially_exploitable");
+    expect(use?.decidingEvidence).toContainEqual({
+      kind: "source",
+      path: "app.js",
+      commit: f.revision,
+      startLine: 1,
+      endLine: 1,
+    });
+  }
+  expect(prompts).toHaveLength(2);
+  expect(prompts[0]).toBe(prompts[1]);
+});
+
 test.each(["corrected", "exhausted"] as const)(
   "the same coordinator can correct an invalid final submission (%s)",
   async (mode) => {
@@ -2370,7 +2466,8 @@ test("native investigators share asynchronous reviews, immutable premises and pa
     supports: [],
   });
   expect(
-    check.claims.find((c) => c.id === "premise:version")!.decision.evidenceKeys,
+    check.claims.find((c) => c.id === "premise:version")!.decision
+      ?.evidenceKeys,
   ).toEqual([receipt.sha256]);
   expect(use.decidingEvidence).toContainEqual({
     kind: "receipt",

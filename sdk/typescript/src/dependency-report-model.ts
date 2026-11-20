@@ -98,11 +98,16 @@ export type Section = {
 export type Report = {
   target?: DependencyTarget;
   contextHint?: string;
+  reviewNote?: string;
   title: string;
   context: string;
   description?: string;
   sections: Section[];
 };
+export function useCountLabel(section: Section, count: number | "No"): string {
+  const state = section.check?.grader === "disabled" ? "reported" : "reviewed";
+  return `${count} ${state} ${count === 1 ? "use" : "uses"}`;
+}
 export const verdictOrder: DependencyVerdict[] = [
   "exploitable",
   "potentially_exploitable",
@@ -119,8 +124,7 @@ function unwrap(value: unknown) {
     ? (value["answer"] ?? value["data"])
     : value;
 }
-function readReport(value: unknown): Report {
-  const raw = unwrap(value);
+function readReport(raw: unknown): Report {
   const stack = readStackReport(raw);
   if (stack)
     return {
@@ -421,7 +425,10 @@ function loadExcerpts(
 }
 
 export function prepareDependencyReport(value: unknown): Report {
-  const report = readReport(value);
+  const raw = unwrap(value);
+  const report = readReport(raw);
+  if (isRecord(raw) && raw["grader"] === "disabled")
+    report.reviewNote = "Independent review disabled";
   for (const [i, section] of report.sections.entries()) {
     if (section.stack)
       section.prepared = prepareFindings(

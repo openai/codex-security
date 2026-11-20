@@ -1,6 +1,8 @@
 import type { GraphCandidates } from "./dependency-graph-candidates.js";
 import { defaultDependencyCallerScope } from "./dependency-caller-scope.js";
 import {
+  acceptedByHost,
+  availableEvidenceKeys,
   assertReviewedPremises,
   claimInputs,
   currentApproval,
@@ -184,7 +186,10 @@ export const reviewSchema = z.strictObject({
     }),
   ),
 });
-export type Decision = z.infer<typeof reviewSchema>["decisions"][number];
+type ReviewerDecision = z.infer<typeof reviewSchema>["decisions"][number];
+export type Decision = Omit<ReviewerDecision, "approved"> & {
+  approved: boolean | null;
+};
 export type Scope = {
   id: string;
   location: string;
@@ -1112,7 +1117,7 @@ export function findingSelectionProblem(
   { id, value }: Claim,
   decision: Decision,
 ) {
-  if (!decision.approved) return;
+  if (!acceptedByHost(decision)) return;
   const finding =
     value.kind === "use"
       ? value.use
@@ -1154,24 +1159,21 @@ export function approveDependencyClaims(
         throw new CodexSecurityError(
           "Independent review does not match the current claim revisions.",
         );
-      const { sourceIds, receiptKeys, dependencies } = claimInputs(claim);
-      assertReviewedPremises(store, dependencies);
+      const inputs = claimInputs(claim);
+      assertReviewedPremises(store, inputs.dependencies);
+      const accepted = acceptedByHost(decision);
       if (
-        decision.approved &&
+        accepted &&
         claim.value.kind === "disposition" &&
         claim.value.replacesUse &&
         !currentApproval(store, claim)
       )
         approvedUse(store, claim.value.replacesUse);
-      const allowed = new Set([
-        ...sourceIds,
-        ...receiptKeys,
-        ...dependencies.map(premiseKey),
-      ]);
+      const allowed = availableEvidenceKeys(inputs);
       if (
         new Set(decision.evidenceKeys).size !== decision.evidenceKeys.length ||
         decision.evidenceKeys.some((key) => !allowed.has(key)) ||
-        (decision.approved && allowed.size > 0 && !decision.evidenceKeys.length)
+        (accepted && allowed.size > 0 && !decision.evidenceKeys.length)
       )
         throw new DependencyReviewRejection(
           "Reviewer must select the deciding evidence from this claim's original evidence or approved premises: " +
@@ -1181,7 +1183,7 @@ export function approveDependencyClaims(
       if (problem) throw new DependencyReviewRejection(problem);
       store.set("dependency-review", claim.id, decision);
       if (
-        decision.approved &&
+        accepted &&
         claim.id.startsWith("assessment:") &&
         store.get<Decision>("retained-use", claim.id)
       )
@@ -1189,7 +1191,7 @@ export function approveDependencyClaims(
       return { ...reference(current), value: current.value, review: decision };
     }),
   );
-  const rejected = reviewed.filter((c) => !c.review.approved);
+  const rejected = reviewed.filter((c) => !acceptedByHost(c.review));
   if (rejected.length)
     throw new DependencyReviewRejection(
       rejected

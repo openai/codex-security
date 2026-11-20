@@ -132,8 +132,10 @@ function progressLine(type: string, fields: Record<string, unknown>) {
         return `${activities[String(fields["activity"])]} failed`;
       return;
     }
+    case "unreviewed":
     case "reviewed":
       return [
+        type === "unreviewed" && "Unreviewed",
         verdictNames[String(fields["verdict"])],
         fields["location"],
         fields["scope"],
@@ -144,15 +146,20 @@ function progressLine(type: string, fields: Record<string, unknown>) {
         .filter(Boolean)
         .join(" · ");
     case "reviewed_group":
-      return `${verdictNames[String(fields["verdict"])]} · ${fields["callsites"]} reviewed calls · ${fields["location"]}`;
+    case "unreviewed_group": {
+      const state = type === "reviewed_group" ? "reviewed" : "unreviewed";
+      return `${verdictNames[String(fields["verdict"])]} · ${fields["callsites"]} ${state} calls · ${fields["location"]}`;
+    }
     case "report_ready": {
+      const unreviewed = fields["grader"] === "disabled";
       const counts = Object.entries(
         isRecord(fields["verdicts"]) ? fields["verdicts"] : {},
       ).filter(([, n]) => typeof n === "number" && n > 0);
       return [
         "Investigation summary",
+        unreviewed && "Independent review disabled",
         ...counts.map(([key, n]) => `${n} ${verdictNames[key]}`),
-        !counts.length && "0 reviewed uses",
+        !counts.length && (unreviewed ? "0 uses" : "0 reviewed uses"),
         fields["limitations"] && `${fields["limitations"]} limitations`,
         fields["path"] && `Report saved · ${fields["path"]}`,
       ]
@@ -191,7 +198,12 @@ function reportSummary(report: unknown) {
             verdicts[use["verdict"] as keyof typeof verdicts]++;
     }
   }
-  return { verdicts, limitations };
+  return {
+    verdicts,
+    limitations,
+    ...(isRecord(report) &&
+      report["grader"] === "disabled" && { grader: "disabled" }),
+  };
 }
 
 export async function writeDependencyReportFile(

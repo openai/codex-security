@@ -97,7 +97,24 @@ export function claimInputs(claim: Claim) {
   };
 }
 
-/** An approval is reusable only while the exact claim and all its prerequisites remain current. */
+export function availableEvidenceKeys({
+  sourceIds,
+  receiptKeys,
+  dependencies,
+}: ReturnType<typeof claimInputs>) {
+  return new Set([
+    ...sourceIds,
+    ...receiptKeys,
+    ...dependencies.map(premiseKey),
+  ]);
+}
+
+// A null decision denotes a host-validated claim from an investigation with grading disabled.
+export function acceptedByHost(decision: Decision) {
+  return decision.approved === true || decision.approved === null;
+}
+
+/** An acceptance is reusable only while the exact claim and all its prerequisites remain current. */
 export function currentApproval(
   store: DependencyAttemptStore,
   ref: PremiseRef,
@@ -115,7 +132,7 @@ export function currentApproval(
     : store.get<Decision>("dependency-review", ref.id);
   if (
     !decision ||
-    !decision.approved ||
+    !acceptedByHost(decision) ||
     decision.revision !== ref.revision ||
     decision.hash !== ref.hash
   )
@@ -222,15 +239,17 @@ export function createPremiseQueue(options: {
     const previous = !decision && retainedUse(store, c.id);
     const stale =
       !decision &&
-      reviewed?.approved &&
+      reviewed &&
+      acceptedByHost(reviewed) &&
       reviewed.hash === c.hash &&
       reviewed.revision === c.revision;
+    const accepted = decision?.approved === null ? "unreviewed" : "approved";
     return {
       ...ref(c),
       payload: c.value,
       ...(previous && { retainedUse: ref(previous) }),
       state: decision
-        ? "approved"
+        ? accepted
         : failures.has(key)
           ? "rejected"
           : stale
@@ -240,7 +259,9 @@ export function createPremiseQueue(options: {
         reason:
           "A reviewed premise changed; submit a corrected claim with current references.",
       }),
-      ...(decision && { decision }),
+      ...(decision?.approved === null
+        ? { reason: decision.reason }
+        : decision && { decision }),
       ...(failures.has(key) && !decision && { reason: failures.get(key) }),
     };
   }

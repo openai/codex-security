@@ -1,6 +1,7 @@
 import {
   citationKey,
   counts,
+  useCountLabel,
   inputFor,
   matchTraceFrame,
   prepareDependencyReport,
@@ -531,7 +532,7 @@ function sectionBody(section: Section, heading: string) {
   const stack = section.stack;
   const totals = stack
     ? `**${dependencyVerdictLabels[stack.verdict]}** · ${stack.review ? "Independently reviewed" : "Finalized offline"} · ${stack.coverage.assessed}/${stack.coverage.total} work items assessed · ${stack.coverage.observed} observed`
-    : `${c.reviewed} reviewed ${c.reviewed === 1 ? "use" : "uses"} · ${c.unresolved} unresolved coverage ${c.unresolved === 1 ? "item" : "items"}`;
+    : `${useCountLabel(section, c.reviewed)} · ${c.unresolved} unresolved coverage ${c.unresolved === 1 ? "item" : "items"}`;
   const outcomes = verdictOrder
     .filter((v) => c.breakdown[v])
     .map((v) => dependencyVerdictLabels[v] + ": " + c.breakdown[v]);
@@ -614,6 +615,7 @@ export function renderPreparedDependencyReportMarkdown(report: Report): string {
   return (
     blocks(
       "# " + prose(report.title),
+      report.reviewNote,
       report.target
         ? "Repository " +
             code(report.target.repository) +

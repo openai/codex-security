@@ -1,5 +1,6 @@
 import {
   counts,
+  useCountLabel,
   verdictOrder,
   type Finding,
   type Report,
@@ -40,6 +41,7 @@ export function summarizeDependencyReport(report: Report): string {
       ? report.title
       : report.title + ": no published advisories found.",
   ];
+  if (report.reviewNote) lines.push(report.reviewNote);
   if (report.target)
     lines.push(
       "Repository " +
@@ -68,7 +70,7 @@ export function summarizeDependencyReport(report: Report): string {
           dependencyVerdictLabels[section.stack.verdict],
           `${section.stack.coverage.assessed}/${section.stack.coverage.total} stack items assessed`,
         ]
-      : [reviewed + " reviewed " + (reviewed === 1 ? "use" : "uses")];
+      : [useCountLabel(section, reviewed)];
     for (const verdict of verdictOrder)
       if (
         breakdown[verdict] &&

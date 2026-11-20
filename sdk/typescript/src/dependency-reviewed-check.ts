@@ -24,6 +24,7 @@ import {
 } from "./dependency-investigation-session.js";
 import {
   createPremiseQueue,
+  availableEvidenceKeys,
   claimInputs,
   currentApproval,
   dependencyPremiseRefSchema,
@@ -127,6 +128,7 @@ type Dependencies = {
 };
 
 export type ReviewedCheckOptions = AgentSettings & {
+  grader?: "enabled" | "disabled";
   directory: string;
   subject: string;
   vulnDescription?: string;
@@ -178,6 +180,19 @@ const reviewInstructions = [
   "Repository discovery describes the initial search. Check that the coverage claim accounts for outstanding gaps. Later source citations and tool replies can resolve a discovery gap, including which builds consume shared source. Verify the cited original lines and each observation against the complete recorded tool replies. Verify that the returned records describe this use, rather than echoing a request, naming a different artifact, or expressing a planned or failed action. Follow the evidence linking multiple replies to the same running service, revision and package version. Caller access needs separate evidence naming the relevant caller and showing that it can reach this use. Check that the actual dependency selection belongs to this service and that each claimed advisory condition follows. A trace hit establishes a lead; source must establish value flow. For a positive verdict verify both caller control and evidence proving this running revision and caller access. For an exclusion verify a prerequisite is decisively false. Check that unresolved callers are disclosed. For every omitted manifest, verify the stated reason against the supplied caller or endpoint boundary and the checkout. Reject unsupported omissions. Approve a scoped unknown if the missing deciding facts are identified.",
   "Return one decision for every entry in claims, including coverage when present. Copy its exact id, revision and hash. References in approvedClaims or dependencies are context and do not need another decision. Set approved to false if the evidence is insufficient for the asserted conclusion, the scope is conflated, or relevant coverage was dropped. Explain the decision. Select only the evidenceKeys that decide the claim from its availableEvidenceKeys; the others are supporting context. Consider each dependency at precisely its supplied revision. Check each use against the evidence you select and the evidence selected by its exact approved premises. For each decisive step in the call path, require ranges showing how the caller selects the implementation and passes the input to it. Request missing ranges even if a sibling proved the step. For each claimed application identity check the original catalog row and the cited launch or import that binds this caller. If the caller requested mappings, require a scoped final graph lookup or a specific attempted check and open gap. For each findingEvidence entry on a use or disposition, independently verify the fact against the cited originals and include at least one of its keys in this decision's evidenceKeys. Reject the claim if none supports the fact. Also select the exact ranges for the deciding binding, copy and condition. Keep neighboring declarations and unrelated catalog rows as context. The initial evidence list is a bounded preview. Use read_dependency_evidence to list receipts, then pass an id and an optional path or offset to inspect the original result. Reject a scope omission unless the checkout evidence and the actual caller boundary justify it. You cannot modify claims or issue an alternative verdict.",
 ].join("\n");
+
+function claimReviewState(review: Decision, citedVersion: string | null) {
+  if (review.approved === null) return { state: "unreviewed" as const };
+  return {
+    state: "approved" as const,
+    decision: {
+      accepted: true as const,
+      reason: review.reason,
+      evidenceKeys: review.evidenceKeys,
+      citedVersion,
+    },
+  };
+}
 
 function decode<T>(raw: string, schema: z.ZodType<T>) {
   // Some providers wrap their structured final message in a Markdown code block.
@@ -606,6 +621,7 @@ async function investigateIssue(
   const verdictProgress = createDependencyVerdictProgress(
     subject,
     options.onProgress,
+    options.grader === "disabled" ? "unreviewed" : "reviewed",
   );
   const discover = dependencies.discover ?? discoverDependencyRepository;
   const callerBoundary = {
@@ -880,8 +896,8 @@ async function investigateIssue(
       const requestReview = (outstanding: Claim[], problem?: string) => {
         let previewBytes = 24_000;
         const supplied = outstanding.map((c) => {
-          const { sourceIds, receiptKeys, selected, dependencies } =
-            claimInputs(c);
+          const inputs = claimInputs(c);
+          const { sourceIds, selected, dependencies, sources } = inputs;
           return {
             ...reference(c),
             payload: c.value,
@@ -889,13 +905,7 @@ async function investigateIssue(
               c.value.replacesUse && {
                 previousUse: approvedUse(store, c.value.replacesUse),
               }),
-            availableEvidenceKeys: [
-              ...new Set([
-                ...sourceIds,
-                ...receiptKeys,
-                ...dependencies.map(premiseKey),
-              ]),
-            ],
+            availableEvidenceKeys: [...availableEvidenceKeys(inputs)],
             ...(selected.length && {
               receiptSelections: selected.map((row) => {
                 const value = selectedValue(row);
@@ -915,7 +925,7 @@ async function investigateIssue(
                 };
               }),
             }),
-            sources: claimInputs(c).sources.map((source, i) => ({
+            sources: sources.map((source, i) => ({
               id: sourceIds[i],
               source,
             })),
@@ -995,7 +1005,6 @@ async function investigateIssue(
           ].join("\n\n"),
         );
       };
-      options.onProgress?.("review", subject);
       const retained: Decision[] = [];
       let outstanding = pending;
       let problem: string | undefined;
@@ -1017,6 +1026,22 @@ async function investigateIssue(
         }
       }
       try {
+        if (options.grader === "disabled") {
+          // The host has checked the original evidence and still enforces claim
+          // revisions, prerequisites, and coverage. Keep all submitted evidence.
+          applyDecisions(
+            pending,
+            pending.map((claim) => ({
+              ...reference(claim),
+              approved: null,
+              reason:
+                "Host checks passed. Independent grading disabled. Use this claim wherever an approved claim is requested.",
+              evidenceKeys: [...availableEvidenceKeys(claimInputs(claim))],
+            })),
+          );
+          return;
+        }
+        options.onProgress?.("review", subject);
         // One corrective reviewer turn can repair its envelope without rerunning the investigation.
         for (let attempt = 0; attempt < 2; attempt++) {
           const raw = await requestReview(outstanding, problem);
@@ -1389,6 +1414,7 @@ async function investigateIssue(
           });
           return {
             schemaVersion: 2 as const,
+            ...(options.grader === "disabled" && { grader: options.grader }),
             uses: approved.flatMap((claim) => {
               if (claim.value.kind !== "use") return [];
               const selected = selectedPremises(
@@ -1413,7 +1439,7 @@ async function investigateIssue(
                 claimInputs(claim);
               return {
                 ...reference(claim),
-                state: "approved" as const,
+                ...claimReviewState(claim.review, use?.version ?? null),
                 contextHash,
                 payload: claim.value,
                 scope: {
@@ -1426,12 +1452,6 @@ async function investigateIssue(
                   subject,
                 },
                 dependencies,
-                decision: {
-                  accepted: true as const,
-                  reason: claim.review.reason,
-                  evidenceKeys: claim.review.evidenceKeys,
-                  citedVersion: use?.version ?? null,
-                },
                 evidence: {
                   sourceIds,
                   receiptIds: receiptKeys.filter(
@@ -1618,7 +1638,10 @@ export async function runReviewedDependencyCheck(
       "--vuln-description requires an ecosystem-qualified package.",
     );
   const target = await readDependencyTarget(options.directory, signal);
-  const identity = target ? { target } : {};
+  const identity = {
+    ...(target && { target }),
+    ...(options.grader === "disabled" && { grader: options.grader }),
+  };
   const activity = createActivityProgress(
     options.directory,
     options.onProgress,

@@ -28,7 +28,12 @@ test("command schema exposes complete and blocked reports as direct output alter
     ),
     stderr.text(),
   ).toBe(0);
-  const { anyOf } = JSON.parse(stdout.text()).output;
+  const schema = JSON.parse(stdout.text());
+  expect(schema.options.properties.grader).toMatchObject({
+    default: "enabled",
+    enum: ["enabled", "disabled"],
+  });
+  const { anyOf } = schema.output;
   const variant = (...required: string[]) =>
     anyOf.find((branch: { required?: string[] }) =>
       required.every((field) => branch.required?.includes(field)),
@@ -422,10 +427,21 @@ const outputFlags = {
 };
 test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
   "a coordinator reports its selected access program and writes the requested %s output",
-  checkCoordinatorOutput,
+  (format) => checkCoordinatorOutput(format),
 );
 
-async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
+test.each([
+  ["md", ["--grader=disabled", "npm:sample"]],
+  ["html", ["npm:sample", "--grader", "disabled"]],
+] as const)(
+  "disabling the grader skips the independent model call and labels the %s report",
+  (format, args) => checkCoordinatorOutput(format, args),
+);
+
+async function checkCoordinatorOutput(
+  format: keyof typeof outputFlags,
+  disabledArgs?: readonly string[],
+) {
   await using repo = await scopedTemporaryDirectory("dependency-progress-");
   execFileSync("git", ["init", "-q"], { cwd: repo.path });
   await writeFile(
@@ -454,11 +470,12 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     repo.path,
     format === "summary" ? "report.html" : "report.json",
   );
+  let modelCalls = 0;
   const status = await main(
     [
       "exploitability",
       "check",
-      "npm:sample",
+      ...(disabledArgs ?? ["npm:sample"]),
       "--vuln-description",
       "Supplied condition",
       "--progress-events",
@@ -475,6 +492,7 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
         TERM: "dumb",
       },
       async onCodex(_args, output, _env, prompt) {
+        modelCalls++;
         if (output?.appServer) {
           expect(output.appServer.resumableCoordinator).toBe(true);
           output.appServer.onAccessProgram?.("standard");
@@ -513,6 +531,7 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     }),
   );
   expect(status, stdout.text()).toBe(0);
+  expect(modelCalls).toBe(disabledArgs ? 1 : 2);
   const reportPath =
     format === "html"
       ? stdout.text().trimEnd().split("\n").at(-1)!
@@ -527,6 +546,21 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     expect(contents).toContain("No applicable package was found.");
   } else expect(JSON.parse(contents).checks).toHaveLength(1);
   const output = stdout.text().trim();
+  if (disabledArgs) {
+    expect(stderr.text()).toContain("Independent review disabled");
+    expect(output).toContain("Independent review disabled");
+    expect(output).toContain("0 reported uses");
+    if (format === "html")
+      expect(contents).toContain("Independent review disabled");
+    else {
+      const report = JSON.parse(contents);
+      expect(report.grader).toBe("disabled");
+      expect(report.checks[0].grader).toBe("disabled");
+      const [claim] = report.checks[0].claims;
+      expect(claim.state).toBe("unreviewed");
+      expect(claim).not.toHaveProperty("decision");
+    }
+  }
   switch (format) {
     case "json":
       expect(JSON.parse(output)).toEqual(JSON.parse(contents));
@@ -534,7 +568,7 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     case "summary":
     case "html":
       expect(output).not.toContain("<!doctype html>");
-      expect(output).toContain("0 reviewed uses");
+      if (!disabledArgs) expect(output).toContain("0 reviewed uses");
       expect(output).toContain("No applicable package was found.");
       break;
     case "md":

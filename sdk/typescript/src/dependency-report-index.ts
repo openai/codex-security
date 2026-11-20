@@ -2,6 +2,7 @@ import {
   advisoryFunctions,
   sectionAdvisories,
   servicesFor,
+  useCountLabel,
   inputFor,
   verdictOrder,
   type Advisory,
@@ -102,7 +103,7 @@ export function entries(section: Section, index: number): Entry[] {
       ? "Investigation not started"
       : section.blocked
         ? "Investigation blocked"
-        : "No reviewed uses";
+        : useCountLabel(section, "No");
     return [
       { id: "empty-" + index, state, name, file: section.title, scope: "" },
     ];
@@ -307,6 +308,7 @@ export function advisoryHeader(report: Report, section: Section): string {
   const eyebrow = context([
     isPackage ? report.title : undefined,
     title !== id ? id : undefined,
+    report.reviewNote,
   ]);
   return `<header class="advisory-head">
    ${eyebrow ? `<p class="eyebrow">${esc(eyebrow)}</p>` : ""}
