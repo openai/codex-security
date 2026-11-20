@@ -607,6 +607,7 @@ export function renderPreparedDependencyReportMarkdown(report: Report): string {
       sections.length === 0
         ? "No advisory checks recorded."
         : sections.join("\n\n"),
+      report.contextHint,
     ) + "\n"
   );
 }

@@ -97,6 +97,7 @@ export type Section = {
 };
 export type Report = {
   target?: DependencyTarget;
+  contextHint?: string;
   title: string;
   context: string;
   description?: string;
@@ -448,6 +449,14 @@ export function prepareDependencyReport(value: unknown): Report {
             : [],
       );
     }
+    if (
+      section.check?.uses.some((use) => use.verdict === "unknown") ||
+      section.stack?.verdict === "unknown" ||
+      section.stack?.assessments.some((a) => a.verdict === "unknown")
+    )
+      report.contextHint = section.stack
+        ? "Have more context? Describe who controls the input in the relevant entry in your --sources JSON, then rerun cs exploitability check with the updated inputs."
+        : "Have more context? Set exploitability.scope.instructions in project.yaml to describe the callers and what they control, then rerun with --config project.yaml. This replaces the default caller scope.";
     const claims = new Map(section.check?.claims?.map((c) => [claimKey(c), c]));
     if (section.prepared)
       for (const finding of [

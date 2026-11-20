@@ -157,5 +157,6 @@ export function summarizeDependencyReport(report: Report): string {
     for (const note of section.check?.limitations ?? [])
       lines.push("  Gap: " + note);
   }
+  if (report.contextHint) lines.push("", report.contextHint);
   return lines.map((line) => formatSecurityPolicyText(line)).join("\n");
 }

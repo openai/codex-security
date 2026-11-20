@@ -282,7 +282,7 @@ export function renderPreparedDependencyReport(report: Report): string {
 <title>${esc(report.title)} · Exploitability report</title><style>${reportStyles}</style></head>
 <body><header class="masthead"><span class="brand">Codex Security</span><span class="product">Exploitability report</span>${checkout(report.target)}</header>
 <div class="workspace">${rail(groups)}
-  <main class="reader"><p data-no-results hidden>No findings match these filters.</p>${pages || empty}</main>
+  <main class="reader"><p data-no-results hidden>No findings match these filters.</p>${pages || empty}${report.contextHint ? `<p>${esc(report.contextHint)}</p>` : ""}</main>
 </div><script>${reportInteractions}</script></body></html>\n`;
 }
 export function renderDependencyReport(value: unknown) {
