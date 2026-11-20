@@ -163,6 +163,61 @@ describe("integration command dispatch", () => {
     expect(await readdir(project)).toEqual([]);
   });
 
+  test.each([
+    {
+      words: ["scan", ".", "--format", ""],
+      formats: ["toon", "json", "yaml", "jsonl"],
+    },
+    {
+      words: ["scan", "import", "sample.json", "--format", ""],
+      formats: ["toon", "json", "yaml", "jsonl"],
+    },
+    {
+      words: ["scans", "rerun", "sample-id", "--format", ""],
+      formats: ["toon", "json", "yaml", "jsonl"],
+    },
+    {
+      words: ["scans", "resume", "sample-id", "--format", ""],
+      formats: ["toon", "json", "yaml", "jsonl"],
+    },
+    {
+      words: [
+        "--token-limit",
+        "10",
+        "scans",
+        "--full-output",
+        "resume",
+        "sample-id",
+        "--format",
+        "",
+        "--json",
+      ],
+      index: "8",
+      formats: ["toon", "json", "yaml", "jsonl"],
+    },
+    {
+      words: ["info", "--config", "scan", "--format", ""],
+      formats: ["toon", "json", "yaml", "md", "jsonl"],
+    },
+  ])(
+    "scan format completion follows the selected command for $words",
+    async ({ words, formats, index }) => {
+      await using temp = await scopedTemporaryDirectory(
+        "cli-format-completion-",
+      );
+      const { run } = await isolatedCli(temp.path, {
+        COMPLETE: "bash",
+        _COMPLETE_INDEX: index,
+      });
+      for (const executable of ["cs", "codex-security"]) {
+        const result = await run("--", executable, ...words);
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout.trimEnd().split("\v")).toEqual([...formats]);
+      }
+    },
+  );
+
   test("zsh completes at the supplied cursor after an equals-form option", async () => {
     await using temp = await scopedTemporaryDirectory("cli-zsh-completions-");
     const { run } = await isolatedCli(temp.path, {
