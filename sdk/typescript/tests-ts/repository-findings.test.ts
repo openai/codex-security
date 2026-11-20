@@ -47,7 +47,7 @@ add_decision("latest-occurrence", "closed", "2026-01-01T12:00:00Z", "false_posit
 
 def findings(target, status="open"):
     arguments = argparse.Namespace(limit=20, offset=0, query=None, severity=None, status=status, target_id=target)
-    return indexes.list_global_findings(connection, arguments, read_coverage=lambda _scan: {"completeness": "partial"})["findings"]
+    return indexes.list_global_findings(connection, arguments)["findings"]
 
 result = {"dismissed": findings("first"), "other": findings("second"), "closed": findings("first", None)}
 add_decision("latest-occurrence", "open", "2025-12-31T00:00:00Z", None)
