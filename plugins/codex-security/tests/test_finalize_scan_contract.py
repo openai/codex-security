@@ -2805,6 +2805,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         binding = self.completion_binding()
         binding["scope"] = {"includePaths": ["."], "excludePaths": ["src"]}
         title = self.findings["findings"][0]["title"]
+        self.findings["findings"][0].pop("validation")
         self.write_scan()
 
         manifest, findings, coverage = FINALIZER.finalize_scan(

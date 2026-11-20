@@ -3164,9 +3164,6 @@ def _prepare_scan_finalization(
             _populate_unsealed_finding_identities(manifest, findings)
             _validate_findings(manifest, findings)
             _validate_current_findings(findings, schema_dir)
-            if require_complete_evidence and not (completion_binding or {}).get("imported"):
-                for index, finding in enumerate(findings["findings"]):
-                    _validate_finding_evidence(finding, index)
         except ContractError as exc:
             raise RecoverableContractError(
                 "Scan result contains invalid findings; repair the finding records "
@@ -3240,6 +3237,20 @@ def _prepare_scan_finalization(
                 allow_missing=allow_missing_writeups,
             )
             findings["findings"] = scoped_findings
+    if (
+        not was_sealed
+        and scan["status"] == "completed"
+        and require_complete_evidence
+        and not (completion_binding or {}).get("imported")
+    ):
+        try:
+            for index, finding in enumerate(findings["findings"]):
+                _validate_finding_evidence(finding, index)
+        except ContractError as exc:
+            raise RecoverableContractError(
+                "Scan result contains invalid findings; repair the finding records "
+                f"before completion. {exc}"
+            ) from exc
     warnings.extend(
         _prepare_derived_writeups(
             scan_dir,

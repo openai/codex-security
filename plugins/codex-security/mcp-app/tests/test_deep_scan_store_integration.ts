@@ -1473,6 +1473,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       omittedWorkerIds: [],
     });
     assert.equal(finished.status, "succeeded");
+    assert.equal(finished.completionSequence, 0);
     assert.equal(
       finished.persistedWorkers.every(
         (worker: { status: string }) => worker.status === "canceled",
@@ -1553,14 +1554,13 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
       beforeReplay,
     );
-    // An unfinished checkpoint retains its original proof and cannot seal the scan.
-    await assert.rejects(
-      runWorkbench(["complete-scan", "--scan-id", run.scanId]),
-      /repair the finding records.*codeEvidence/,
-    );
-    assert.equal(
-      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
-      beforeReplay,
+    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    const sealed = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(sealed.scan.status, "completed");
+    assert.equal(typeof sealed.scan.sealedAt, "string");
+    assert.match(
+      await readFile(path.join(run.scanDir, "report.md"), "utf8"),
+      /Unsafe request output valid/,
     );
     assert.deepEqual(
       (await readFixtureCoverage(run.scanDir)).surfaces,

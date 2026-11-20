@@ -418,6 +418,11 @@ with sqlite3.connect(sys.argv[1]) as db:
           delete finding.provenance.sourceFindings;
           if (route === "headless continuation")
             delete finding.provenance.sourceFindingIds;
+          if (file === legacyReducer)
+            finding.provenance.deepScanRepairGroups = [
+              { order: 0, sources: finding.provenance.sourceFindingIds ?? [] },
+            ];
+          else assert.equal(finding.provenance.deepScanRepairGroups, undefined);
         }
       }
       if (file === parentFindingsPath && route === "plugin" && !saturated) {

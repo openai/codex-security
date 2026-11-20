@@ -88,10 +88,12 @@ export async function repairAcceptedEvidence(
         if (!finding.provenance.sourceFindings?.length) {
           // Historical reducer checkpoints may predate source provenance.
           const id = `previous:${index}`;
+          const previous = structuredClone(finding);
+          delete previous.provenance.deepScanRepairGroups;
           repaired.provenance = {
             ...finding.provenance,
             sourceFindingIds: [id],
-            sourceFindings: [{ id, finding: structuredClone(finding) }],
+            sourceFindings: [{ id, finding: previous }],
           };
         }
         findings[index] = repaired;
