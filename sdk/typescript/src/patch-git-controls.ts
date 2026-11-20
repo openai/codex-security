@@ -1312,6 +1312,26 @@ async function canonicalPath(path: string): Promise<string> {
   return `${await canonicalPath(parent)}${path.slice(parent.length)}`;
 }
 
+export async function publicationConfigSelector(
+  directory: string,
+  environment: ProcessEnvironment,
+): Promise<string | undefined> {
+  const file = environmentEntry(environment, "GIT_CONFIG");
+  if (
+    !file ||
+    file === "-" ||
+    (process.platform === "win32" && file.toUpperCase() === "NUL")
+  )
+    return undefined;
+  if (isAbsolute(file)) return file;
+  if (process.platform === "win32") return resolve(directory, file);
+  // git config interprets its explicit file from the caller, even when
+  // Git enters the worktree. Resolve the parent before that caller can disappear.
+  const path = relativeFile(directory, file);
+  const parent = dirname(path);
+  return (await canonicalPath(parent)) + path.slice(parent.length);
+}
+
 async function directoryLinkEntry(
   path: string,
   identity: { dev: bigint; ino: bigint },
@@ -1504,7 +1524,12 @@ export async function capturePatchGitControls(
     "GIT_CONFIG_PARAMETERS",
   );
   const userProfile = environmentEntry(environment, "USERPROFILE");
-  const run: RunGit = (root, checkout, args, options) =>
+  let root = directory;
+  const run = (
+    checkout: string,
+    args: string[],
+    options?: PatchGitCommandOptions,
+  ) =>
     runGit(root, checkout, args, {
       ...options,
       environment: {
@@ -1513,53 +1538,41 @@ export async function capturePatchGitControls(
       },
     });
   const runBytes = async (
-    root: string,
     checkout: string,
     args: string[],
     options?: PatchGitCommandOptions,
   ) =>
     Buffer.from(
-      await run(root, checkout, args, { ...options, encoding: "base64" }),
+      await run(checkout, args, { ...options, encoding: "base64" }),
       "base64",
     );
-  const runControl = async (
-    root: string,
-    checkout: string,
-    args: string[],
-    options?: PatchGitCommandOptions,
-  ) => controlPathText(await runBytes(root, checkout, args, options));
+  const runControl = async (...args: Parameters<typeof run>) =>
+    controlPathText(await runBytes(...args));
   // GIT_CONFIG selects a file only for git-config, not snapshot bookkeeping.
-  const configurationEnvironment = { GIT_CONFIG: undefined };
+  const configOptions = { environment: { GIT_CONFIG: undefined } };
+  const runConfig = (checkout: string, args: string[]) =>
+    runControl(checkout, args, configOptions);
   // Config records contain unrelated keys too. Split bytes before decoding paths.
   const runConfigFields = async (
     checkout: string,
     args: string[],
     input?: Uint8Array,
   ) =>
-    (
-      await runBytes(root, checkout, args, {
-        input,
-        environment: configurationEnvironment,
-      })
-    )
+    (await runBytes(checkout, args, { ...configOptions, input }))
       .toString("latin1")
       .split("\0");
   const controlPath = async (checkout: string, ...args: string[]) =>
-    (await runControl(root, checkout, ["rev-parse", ...args])).replace(
-      /\n$/u,
-      "",
-    );
+    (await runControl(checkout, ["rev-parse", ...args])).replace(/\n$/u, "");
   const absolutePath = (checkout: string, ...args: string[]) =>
     controlPath(checkout, "--path-format=absolute", ...args);
   const configPath = (field: string) =>
     controlPathText(Buffer.from(field, "latin1"));
-  let root: string;
   if (mode === "resumed-hook") {
     // Use the saved push's working directory, including a bare repository.
     root = await realControlPath(directory);
   } else {
     try {
-      const output = await runControl(directory, directory, [
+      const output = await runControl(directory, [
         "rev-parse",
         "--show-toplevel",
       ]);
@@ -1611,7 +1624,7 @@ export async function capturePatchGitControls(
     try {
       // This early rev-parse mode only checks filesystem structure. It does not
       // select the candidate repository or load its configuration and hooks.
-      await runBytes(root, root, ["rev-parse", "--resolve-git-dir", gitPath], {
+      await runBytes(root, ["rev-parse", "--resolve-git-dir", gitPath], {
         nestedProbe,
       });
       return true;
@@ -1763,7 +1776,7 @@ export async function capturePatchGitControls(
       // Absent and empty regular inputs have no --show-origin records. Devices
       // such as /dev/null and unavailable optional inputs keep native behavior.
       const metadata = await stat(path).catch(missing);
-      if (metadata === undefined) {
+      if (metadata === undefined || metadata.isDirectory()) {
         await rememberControl(path, false);
         controlPaths.get(path)!.contents = null;
       } else if (metadata.isFile())
@@ -1780,20 +1793,15 @@ export async function capturePatchGitControls(
   ) => {
     try {
       return (
-        await runControl(
-          root,
-          checkout,
-          [
-            "-c",
-            `codexsecurity.patchcontrolpath=${path}`,
-            "config",
-            "--null",
-            "--type=path",
-            "--get",
-            "codexsecurity.patchcontrolpath",
-          ],
-          { environment: configurationEnvironment },
-        )
+        await runConfig(checkout, [
+          "-c",
+          `codexsecurity.patchcontrolpath=${path}`,
+          "config",
+          "--null",
+          "--type=path",
+          "--get",
+          "codexsecurity.patchcontrolpath",
+        ])
       ).replace(/\0$/u, "");
     } catch (error) {
       // Per-user defaults and inactive includes can name an unavailable home.
@@ -1811,11 +1819,8 @@ export async function capturePatchGitControls(
   let hostMayReadStore = false;
   let unisolatedCredentialHelper = false;
   const storeTarget = async (path: string): Promise<string> => {
-    try {
-      return await realControlPath(path);
-    } catch (error) {
-      missing(error);
-    }
+    const physical = await realControlPath(path).catch(missing);
+    if (physical !== undefined) return physical;
     // A dangling store symlink may acquire credentials after preflight. Deny
     // its physical target even when an ancestor or the final file is absent.
     const parent = dirname(path);
@@ -1911,19 +1916,14 @@ export async function capturePatchGitControls(
       noSystem === undefined
         ? "false"
         : (
-            await runControl(
-              root,
-              root,
-              [
-                "-c",
-                `codexsecurity.patchnosystem=${noSystem}`,
-                "config",
-                "--type=bool",
-                "--get",
-                "codexsecurity.patchnosystem",
-              ],
-              { environment: configurationEnvironment },
-            )
+            await runConfig(root, [
+              "-c",
+              `codexsecurity.patchnosystem=${noSystem}`,
+              "config",
+              "--type=bool",
+              "--get",
+              "codexsecurity.patchnosystem",
+            ])
           ).trim();
     if (disabled === "false") systemConfigurationPath = systemConfig;
   }
@@ -2003,7 +2003,6 @@ export async function capturePatchGitControls(
   const setupDirectory = async (checkout: string): Promise<string> =>
     (
       await runControl(
-        root,
         checkout,
         ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
         { environment: { GIT_OBJECT_DIRECTORY: "." } },
@@ -2223,9 +2222,7 @@ export async function capturePatchGitControls(
       settings.some(({ key }) => /^hook\..+\.event$/u.test(key))
     )
       await readConfiguredHooks(publicationHooks, (args) =>
-        runControl(root, checkout, args, {
-          environment: configurationEnvironment,
-        }),
+        runConfig(checkout, args),
       );
     for (const [key, value] of new Map(
       settings
@@ -2289,7 +2286,7 @@ export async function capturePatchGitControls(
     const captureHooks = async (configured?: string): Promise<void> => {
       let entry: string;
       try {
-        entry = await runControl(root, checkout, [
+        entry = await runControl(checkout, [
           ...(configured === undefined
             ? []
             : ["-c", `core.hooksPath=${configured}`]),
@@ -2597,19 +2594,14 @@ export async function capturePatchGitControls(
     try {
       worktreeConfig =
         (
-          await runControl(
-            root,
-            checkout,
-            [
-              "config",
-              "--local",
-              "--no-includes",
-              "--type=bool",
-              "--get",
-              "extensions.worktreeConfig",
-            ],
-            { environment: configurationEnvironment },
-          )
+          await runConfig(checkout, [
+            "config",
+            "--local",
+            "--no-includes",
+            "--type=bool",
+            "--get",
+            "extensions.worktreeConfig",
+          ])
         ).trim() === "true";
     } catch (error) {
       const failure = error as { code?: unknown; status?: unknown };
@@ -2628,11 +2620,7 @@ export async function capturePatchGitControls(
   const directoryArguments = ["--absolute-git-dir", "--git-common-dir"];
   const readSelectedPath = async (argument: string) =>
     (
-      await runControl(root, root, [
-        "rev-parse",
-        "--path-format=absolute",
-        argument,
-      ])
+      await runControl(root, ["rev-parse", "--path-format=absolute", argument])
     ).replace(/\n$/u, "");
   const selectedPaths: string[] = [];
   for (const argument of directoryArguments)
@@ -2712,6 +2700,13 @@ export async function capturePatchGitControls(
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
     : selectedDirectories[1];
+  if (automaticPublication) {
+    const selector = await publicationConfigSelector(
+      requestedDirectory,
+      environment,
+    );
+    if (selector) await rememberSelectedConfiguration(selector);
+  }
   const selectorDirectory = await setupDirectory(root);
   for (const argument of [
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
@@ -2970,7 +2965,7 @@ export async function capturePatchGitControls(
         const [common, storage] = await Promise.all([
           absolutePath(checkout, "--git-common-dir"),
           // Git LFS reads the selected config with includes enabled.
-          runControl(root, checkout, [
+          runControl(checkout, [
             "config",
             "--includes",
             "--null",
@@ -3025,7 +3020,6 @@ export async function capturePatchGitControls(
         [tracked, untracked, deleted] = await withPatchGitIndex(
           (args, options) =>
             run(
-              root,
               checkout,
               [
                 "-c",
@@ -3210,50 +3204,35 @@ export async function capturePatchGitControls(
         },
       };
       for (const checkout of visited) {
-        const local = await runBytes(
-          root,
-          checkout,
-          [
-            ...passive,
-            "ls-files",
-            "--others",
-            "--directory",
-            "--no-empty-directory",
-            "-z",
-          ],
-          passiveOptions,
+        const inspect = (...args: string[]) =>
+          runBytes(checkout, [...passive, ...args], passiveOptions);
+        const local = await inspect(
+          "ls-files",
+          "--others",
+          "--directory",
+          "--no-empty-directory",
+          "-z",
         );
         const error =
           "Cannot automatically publish from a checkout with local-only files or tracked edits and a checkout-selected Git filter. Run patch without --create-pr and review the changes before publishing.";
         if (local.length) throw new Error(error);
         // Git normally skips these paths when it compares the worktree to the index.
-        const entries = await runBytes(
-          root,
-          checkout,
-          [...passive, "ls-files", "-v", "-z"],
-          passiveOptions,
-        );
+        const entries = await inspect("ls-files", "-v", "-z");
         if (/(?:^|\0)[a-zS] /u.test(entries.toString("latin1")))
           throw new Error(error);
         // The index may itself contain private edits. Check it separately even when
         // the worktree exactly matches those staged bytes. Visit gitlinks below
         // their own root rather than letting Git invoke a nested status command.
         for (const comparison of [["diff", "--cached"], ["diff-files"]]) {
-          const changed = await runBytes(
-            root,
-            checkout,
-            [
-              ...passive,
-              ...comparison,
-              "--name-only",
-              "-z",
-              "--no-renames",
-              "--no-ext-diff",
-              "--no-textconv",
-              "--ignore-submodules=dirty",
-              "--",
-            ],
-            passiveOptions,
+          const changed = await inspect(
+            ...comparison,
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=dirty",
+            "--",
           );
           if (changed.length) throw new Error(error);
         }
@@ -3379,7 +3358,6 @@ export async function capturePatchGitControls(
     let resolved: Buffer;
     try {
       resolved = await runBytes(
-        root,
         root,
         ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
         {

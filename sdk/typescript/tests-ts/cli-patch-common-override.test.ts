@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import {
   cp,
   mkdir,
@@ -17,8 +16,10 @@ import {
   repositoryGit,
   runGitRepositoryCommand,
   patchDirectories,
+  directoryLinkType,
   initializePatchGit,
   runIssuePatch,
+  observeIssuePatch,
   gitWithEnvironment,
   completePatches,
   patchRiskAssessment,
@@ -29,6 +30,22 @@ import {
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
+
+async function prepareReplacement(
+  source: string,
+  replacement: string,
+  shared: boolean,
+) {
+  const lfs = join(source, "lfs");
+  if (shared)
+    for (const dir of ["objects", "tmp"])
+      await mkdir(join(lfs, dir), { recursive: true });
+  await cp(source, replacement, { recursive: true });
+  if (shared) {
+    await rm(join(replacement, "lfs"), { recursive: true });
+    await symlink(lfs, join(replacement, "lfs"), directoryLinkType);
+  }
+}
 
 for (const mode of [
   "absolute",
@@ -51,8 +68,7 @@ for (const mode of [
     const administration = join(support, "administration");
     await rename(join(repository, ".git"), administration);
     const alias = join(repository, "admin-alias");
-    const linkType = process.platform === "win32" ? "junction" : "dir";
-    await symlink(administration, alias, linkType);
+    await symlink(administration, alias, directoryLinkType);
     const marker = join(repository, "selected.git");
     const contents = "gitdir: admin-alias\n";
     if (mode === "linked file") {
@@ -78,12 +94,7 @@ for (const mode of [
       ).replaceAll("\\", "/"),
       GIT_WORK_TREE: repository,
     };
-    const selectedGit = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: currentDirectory,
-        env: { ...process.env, ...environment },
-        encoding: "utf8",
-      }).trim();
+    const selectedGit = repositoryGit(currentDirectory, environment);
     selectedGit("config", "lfs.storage", join(alias, "lfs"));
     expect(
       await selectedGitFileReference(marker, await realpath(administration)),
@@ -93,23 +104,12 @@ for (const mode of [
     const index = await readFile(join(administration, "index"));
     const replacement = join(support, "replacement");
     const retargeted = mode.startsWith("retargeted");
-    if (mode === "retargeted shared storage") {
-      await mkdir(join(administration, "lfs", "objects"), { recursive: true });
-      await mkdir(join(administration, "lfs", "tmp"), { recursive: true });
-    }
-    if (retargeted) await cp(administration, replacement, { recursive: true });
-    if (mode === "retargeted shared storage") {
-      await rm(join(replacement, "lfs"), { recursive: true });
-      await symlink(
-        join(administration, "lfs"),
-        join(replacement, "lfs"),
-        linkType,
-      );
-    }
-    const outcome = await runIssuePatch(currentDirectory, {
-      environment,
-      onRepositoryCommand: gitWithEnvironment(environment),
-      onCodex: async (_args, output) => {
+    const shared = mode === "retargeted shared storage";
+    if (retargeted)
+      await prepareReplacement(administration, replacement, shared);
+    const { outcome } = await observeIssuePatch(
+      currentDirectory,
+      async (output) => {
         expect(output!.appServer!.snapshotStoragePaths).toEqual([
           join(administration, "lfs"),
         ]);
@@ -118,8 +118,8 @@ for (const mode of [
         );
         if (retargeted) {
           await rename(alias, join(repository, "original-alias"));
-          await symlink(replacement, alias, linkType);
-          if (mode === "retargeted shared storage") {
+          await symlink(replacement, alias, directoryLinkType);
+          if (shared) {
             expect(
               await realpath(selectedGit("rev-parse", "--absolute-git-dir")),
             ).toBe(await realpath(replacement));
@@ -129,24 +129,16 @@ for (const mode of [
           }
         }
         await writeFile(join(repository, "app.ts"), "after\n");
-        output!.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+      environment,
+    );
     expect(outcome.exitCode, outcome.stderr).toBe(retargeted ? 2 : 0);
     if (retargeted)
       expect(outcome.stderr).toContain("changed location during the patch");
     else expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
     expect(await readFile(marker, "utf8")).toBe(contents);
     expect(await readFile(join(administration, "index"))).toEqual(index);
-    expect(
-      repositoryGit(repository)(
-        "--git-dir",
-        administration,
-        "rev-parse",
-        "HEAD",
-      ),
-    ).toBe(head);
+    expect(git("--git-dir", administration, "rev-parse", "HEAD")).toBe(head);
   });
 }
 
@@ -171,8 +163,7 @@ for (const mode of [
     );
     const common = await realpath(join(main, ".git"));
     const alias = join(selected, "common-alias");
-    const linkType = process.platform === "win32" ? "junction" : "dir";
-    await symlink(common, alias, linkType);
+    await symlink(common, alias, directoryLinkType);
     await writeFile(
       join(common, "info", "exclude"),
       "common-alias\noriginal-common-alias\n",
@@ -200,52 +191,35 @@ for (const mode of [
     const index = await readFile(join(administration, "index"));
     const replacement = await fixtures.create("patch-common-replacement-");
     const retargeted = mode.startsWith("implicit retargeted");
-    if (mode === "implicit retargeted shared storage") {
-      await mkdir(join(common, "lfs", "objects"), { recursive: true });
-      await mkdir(join(common, "lfs", "tmp"), { recursive: true });
-    }
-    if (retargeted) await cp(common, replacement, { recursive: true });
-    if (mode === "implicit retargeted shared storage") {
-      await rm(join(replacement, "lfs"), { recursive: true });
-      await symlink(join(common, "lfs"), join(replacement, "lfs"), linkType);
-    }
-    let launches = 0;
-    const outcome = await runIssuePatch(selected, {
-      environment,
-      onRepositoryCommand: gitWithEnvironment(environment),
-      onCodex: async (_args, output) => {
-        launches++;
+    const shared = mode === "implicit retargeted shared storage";
+    const selectedGit = repositoryGit(selected, environment);
+    if (retargeted) await prepareReplacement(common, replacement, shared);
+    const { outcome, launches } = await observeIssuePatch(
+      selected,
+      async (output) => {
         expect(output!.appServer!.snapshotStoragePaths).toEqual(
           mode === "overridden alias" ? [] : [join(common, "lfs")],
         );
         expect(output!.appServer!.permissions!.readOnlyPaths).toContain(common);
         if (retargeted) {
           await rename(alias, join(selected, "original-common-alias"));
-          await symlink(replacement, alias, linkType);
-          if (mode === "implicit retargeted shared storage") {
-            expect(
-              await realpath(
-                execFileSync(
-                  "git",
-                  ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-                  {
-                    cwd: selected,
-                    env: { ...process.env, ...environment },
-                    encoding: "utf8",
-                  },
-                ).trim(),
-              ),
-            ).toBe(await realpath(replacement));
+          await symlink(replacement, alias, directoryLinkType);
+          if (shared) {
+            const bound = selectedGit(
+              "rev-parse",
+              "--path-format=absolute",
+              "--git-common-dir",
+            );
+            expect(await realpath(bound)).toBe(await realpath(replacement));
             expect(await realpath(join(alias, "lfs"))).toBe(
               join(common, "lfs"),
             );
           }
         }
         await writeFile(join(selected, "app.ts"), "after\n");
-        output!.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+      environment,
+    );
     expect(launches).toBe(1);
     expect(outcome.exitCode, outcome.stderr).toBe(retargeted ? 2 : 0);
     if (retargeted)
@@ -287,13 +261,7 @@ test.each([
     const environment = {
       GIT_COMMON_DIR: relativeCommon ? relative(selected, common) : common,
     };
-    const selectedGit = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: selected,
-        env: { ...process.env, ...environment },
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+    const selectedGit = repositoryGit(selected, environment);
     expect(selectedGit("status", "--porcelain")).toBe("");
     const head = selectedGit("rev-parse", "HEAD");
     const index = await readFile(join(administration, "index"));
@@ -301,29 +269,22 @@ test.each([
     const otherContents = await readFile(join(other, "app.ts"));
     const selectedMarker = await readFile(join(selected, ".git"));
     const otherMarker = await readFile(join(other, ".git"));
-    const afterTurnCommands: string[][] = [];
-    let launches = 0;
-    const outcome = await runIssuePatch(selected, {
-      environment,
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurnCommands.push([...args]);
-        return runGitRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: { ...environment, ...options?.environment },
-        });
-      },
-      onCodex: async (_args, output) => {
-        launches++;
+    const {
+      outcome,
+      launches,
+      afterTurn: afterTurnCommands,
+    } = await observeIssuePatch(
+      selected,
+      async (output) => {
         expect(output?.appServer?.permissions?.readOnlyPaths).toContain(
           administration,
         );
         expect(output?.appServer?.permissions?.readOnlyPaths).toContain(common);
         if (rebind) await writeFile(join(selected, ".git"), otherMarker);
         await writeFile(join(selected, "app.ts"), "after\n");
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+      environment,
+    );
     expect(outcome.exitCode, outcome.stderr).toBe(rebind ? 2 : 0);
     expect(launches).toBe(1);
     if (rebind) {
@@ -385,29 +346,20 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
         { mode: 0o755 },
       );
       git("--git-dir", replacement, "config", "core.hooksPath", hooks);
-      git(
-        "--git-dir",
-        replacement,
-        "--work-tree",
-        root,
-        "update-index",
-        "--assume-unchanged",
-        "app.ts",
-      );
-      git(
-        "--git-dir",
-        replacement,
-        "--work-tree",
-        root,
-        "update-index",
-        "--no-assume-unchanged",
-        "app.ts",
-      );
+      for (const flag of ["--assume-unchanged", "--no-assume-unchanged"])
+        git(
+          "--git-dir",
+          replacement,
+          "--work-tree",
+          root,
+          "update-index",
+          flag,
+          "app.ts",
+        );
       expect(await readFile(effect, "utf8")).toBe("effect");
       await unlink(effect);
       const alias = join(root, "selected-administration");
-      const linkType = process.platform === "win32" ? "junction" : "dir";
-      await symlink(join(root, ".git"), alias, linkType);
+      await symlink(join(root, ".git"), alias, directoryLinkType);
       const environment = {
         [selector]: alias,
         ...(selector === "GIT_DIR" ? { GIT_WORK_TREE: root } : {}),
@@ -417,6 +369,7 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
       const otherIndex = await readFile(join(replacement, "index"));
       let launches = 0;
       const afterTurnCommands: string[][] = [];
+      const runGit = gitWithEnvironment(environment);
       const outcome = await runIssuePatch(root, {
         environment,
         onRepositoryCommand: (command, args, cwd, options) => {
@@ -428,16 +381,13 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
               expect(resolve(boundCommon!)).toBe(join(root, ".git"));
             }
           }
-          return runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          });
+          return runGit(command, args, cwd, options);
         },
         onCodex: async (_args, output) => {
           launches++;
           if (retarget) {
             await rename(alias, join(root, "original-administration"));
-            await symlink(replacement, alias, linkType);
+            await symlink(replacement, alias, directoryLinkType);
           }
           await writeFile(join(root, "app.ts"), "after\n");
           output?.stdout.write("Synthetic patch complete.\n");
@@ -463,8 +413,6 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
     },
   );
 }
-
-const linkType = process.platform === "win32" ? "junction" : "dir";
 
 async function writeGitMarker(
   administration: string,
@@ -556,7 +504,7 @@ test.each(["absolute", "relative"] as const)(
     git("commit", "-m", "Synthetic successive patch baseline");
     const administration = await realpath(join(directory, ".git"));
     const alias = join(directory, "administration-alias");
-    await symlink(administration, alias, linkType);
+    await symlink(administration, alias, directoryLinkType);
     git("config", "lfs.storage", join(alias, "lfs"));
     const environment = {
       GIT_COMMON_DIR: selection === "absolute" ? alias : "administration-alias",
@@ -586,8 +534,7 @@ for (const selection of [
     git("commit", "-m", "Synthetic successive Git-file baseline");
     const administration = await realpath(join(directory, ".git"));
     const alias = join(directory, "admin-alias");
-
-    await symlink(administration, alias, linkType);
+    await symlink(administration, alias, directoryLinkType);
     const component = join(directory, "component");
     await mkdir(component);
     const removeMarker = selection.includes("removed marker directory");
@@ -609,7 +556,7 @@ for (const selection of [
       );
       await cp(administration, common, { recursive: true });
       storageAlias = join(directory, "common-alias");
-      await symlink(common, storageAlias, linkType);
+      await symlink(common, storageAlias, directoryLinkType);
     }
     const environment = {
       GIT_DIR: (selection === "absolute"
@@ -657,7 +604,7 @@ for (const linked of [false, true]) {
     git("commit", "-m", "Synthetic Git-file caller baseline");
     const administration = await realpath(join(directory, ".git"));
     const alias = join(directory, "admin-alias");
-    await symlink(administration, alias, linkType);
+    await symlink(administration, alias, directoryLinkType);
     git("config", "lfs.storage", join(alias, "lfs"));
     const marker = join(component, "selected.git");
     const contents = "gitdir: ../admin-alias\n";

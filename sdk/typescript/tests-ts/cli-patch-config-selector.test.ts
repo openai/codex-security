@@ -15,7 +15,7 @@ import {
   mkdtemp,
   rm,
 } from "node:fs/promises";
-import { join, dirname, sep, relative } from "node:path";
+import { join, dirname, sep, relative, resolve } from "node:path";
 import {
   runGitRepositoryCommand,
   runWorkflow,
@@ -1391,6 +1391,38 @@ test.each(["HOME", "XDG_CONFIG_HOME"])(
     expect(git("cat-file", "-p", "HEAD")).not.toContain("encoding ISO-8859-1");
   },
 );
+
+test("publication keeps GIT_CONFIG bound to a removed component", async () => {
+  const { directory } = await publicationRepository(fixtures);
+  const caller = join(directory, "src");
+  const selector = "selector-settings";
+  const environment = { GIT_CONFIG: selector };
+  const selections: string[] = [];
+  const outcome = await runPublicationWorkflow("issue", {
+    currentDirectory: caller,
+    environment,
+    onRepositoryCommand: configuredPublicationCommand(
+      environment,
+      (command, args, cwd, options) => {
+        if (command === "gh" && args[1] === "create") {
+          const path = options?.environment?.["GIT_CONFIG"];
+          selections.push(resolve(options?.directory ?? cwd, path!));
+        }
+      },
+    ),
+    onCodex: async (_args, output) => {
+      await rm(caller, { recursive: true });
+      await writeFile(
+        join(directory, selector),
+        '[remote "origin"]\n gh-resolved = decoy/repository\n',
+      );
+      output?.stdout.write("Synthetic patch complete.");
+      return 0;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(selections).toEqual([join(caller, selector)]);
+});
 
 test("assessment and publication protect the outside caller after rebinding Git", async () => {
   const { directory } = await publicationRepository(fixtures);

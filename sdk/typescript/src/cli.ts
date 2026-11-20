@@ -101,6 +101,7 @@ import {
   capturePatchGitAdministrationReferences,
   activePatchPublicationHooks,
   capturePatchGitControls,
+  publicationConfigSelector,
   defaultSshConfigs,
   githubConfigDirectory,
   githubConfigFiles,
@@ -14651,6 +14652,11 @@ async function patchCommandContext(
       ? {}
       : { GIT_WORK_TREE: repository }),
   };
+  const selector = await publicationConfigSelector(
+    physicalDirectory,
+    dependencies.environment,
+  );
+  if (selector) environment["GIT_CONFIG"] = selector;
   // Git enters the worktree from a component, but keeps an external caller's cwd.
   const transportDirectory = isOutsidePath(
     relative(physicalRoot, physicalDirectory),

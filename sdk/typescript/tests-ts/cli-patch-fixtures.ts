@@ -332,6 +332,9 @@ export async function runWorkflow(
   };
 }
 
+export const directoryLinkType =
+  process.platform === "win32" ? "junction" : "dir";
+
 export function patchDirectories() {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
@@ -364,20 +367,25 @@ export function runIssuePatch(
 
 export async function observeIssuePatch(
   directory: string,
-  edit: () => Promise<void>,
+  edit: (output: Parameters<OnCodex>[1]) => Promise<void>,
+  environment?: NodeJS.ProcessEnv,
 ) {
+  const runGit = environment
+    ? gitWithEnvironment(environment)
+    : runGitRepositoryCommand;
   let launches = 0;
   const afterTurn: string[][] = [];
   let controls: readonly string[] = [];
   const outcome = await runIssuePatch(directory, {
+    ...(environment && { environment }),
     onRepositoryCommand: (command, args, cwd, options) => {
       if (launches > 0) afterTurn.push([...args]);
-      return runGitRepositoryCommand(command, args, cwd, options);
+      return runGit(command, args, cwd, options);
     },
     onCodex: async (_args, output) => {
       launches++;
       controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
-      await edit();
+      await edit(output);
       output?.stdout.write("Synthetic patch complete.\n");
       return 0;
     },
@@ -459,10 +467,14 @@ export function gitWithEnvironment(
     });
 }
 
-export function repositoryGit(repository: string) {
+export function repositoryGit(
+  repository: string,
+  environment?: NodeJS.ProcessEnv,
+) {
   return (...args: string[]) =>
     execFileSync("git", args, {
       cwd: repository,
+      ...(environment && { env: { ...process.env, ...environment } }),
       encoding: "utf8",
       maxBuffer: Infinity,
       stdio: ["ignore", "pipe", "pipe"],
