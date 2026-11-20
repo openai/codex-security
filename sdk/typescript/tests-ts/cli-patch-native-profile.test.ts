@@ -613,6 +613,13 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         // command the exact live endpoint under the same sandbox account.
         const marker = join(context.repository, "snapshot-path");
         const done = join(context.repository, "snapshot-done");
+        const readPipe = `function readPipe(file) {
+  const fs = require("node:fs");
+  const fd = fs.openSync(file, "r");
+  try { return fs.readSync(fd, Buffer.alloc(1)); }
+  catch (error) { if (error.code === "EPIPE") return 0; throw error; }
+  finally { fs.closeSync(fd); }
+}`;
         const launch = (input: string) =>
           runRepositoryCommand(
             "git",
@@ -622,13 +629,16 @@ if (git.stdout) process.stdout.write(git.stdout);`;
           );
         const running = launch(`const fs = require("node:fs");
 const git = require("node:util").promisify(require("node:child_process").execFile);
+${readPipe}
 async function read() {
   const { stdout } = await git("git", ["config", "--get", "synthetic.source"]);
   if (stdout.trim() !== "Included fixture") throw new Error("Missing snapshot config");
 }
 async function check() {
   await Promise.all([read(), read(), read(), read()]);
-  fs.writeFileSync("path.tmp", process.env.GIT_CONFIG_GLOBAL);
+  const endpoint = process.env.GIT_CONFIG_GLOBAL;
+  if (!readPipe(endpoint)) throw new Error("Empty snapshot config");
+  fs.writeFileSync("path.tmp", endpoint);
   fs.renameSync("path.tmp", "snapshot-path");
   const end = setTimeout(() => process.exit(1), 10000);
   while (!fs.existsSync("snapshot-done")) await new Promise(resolve => setTimeout(resolve, 10));
@@ -650,10 +660,8 @@ check().catch(error => { console.error(error); process.exitCode = 1; });`);
           const endpoint = await readFile(marker, "utf8");
           expect(endpoint).toStartWith("//./pipe/");
           expect(
-            await inspectModel(`const { spawnSync } = require("node:child_process");
-const result = spawnSync("git", ["config", "--file", ${JSON.stringify(endpoint)}, "--list"]);
-if (result.error) throw result.error;
-process.stdout.write(String(result.stdout.length));`),
+            await inspectModel(`${readPipe}
+process.stdout.write(String(readPipe(${JSON.stringify(endpoint)})));`),
           ).toBe("0");
         } finally {
           await writeFile(done, "");
