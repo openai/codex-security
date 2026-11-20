@@ -41,6 +41,7 @@
 - accept indexed stack misses ([#2761](https://github.com/openai/codex-security/pull/2761))
 - honor configured caller scope in captured stack investigations ([#2765](https://github.com/openai/codex-security/pull/2765))
 - bump ruff from 0.17.4 to 0.17.5 in /plugins/codex-security ([#2769](https://github.com/openai/codex-security/pull/2769))
+- bump the codex group across 3 directories with 2 updates ([#2770](https://github.com/openai/codex-security/pull/2770))
 
 </details>
 
