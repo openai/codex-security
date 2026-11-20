@@ -1352,11 +1352,10 @@ Include custom provider definitions in the file so the scan
 can use them from its isolated Codex home. An absent file contributes no
 settings. Existing inline `profiles` tables still work.
 
-For an API Route scan, save this profile as `$CODEX_HOME/api-route.config.toml`
-(default `~/.codex/api-route.config.toml`). Replace `<model-id>` with a model
-available to your key. The selected model and route must support streaming on
-the [Responses API](https://www.api-route.com/openapi.json) and accept the
-scanner's namespaced tools and, when enabled, web search.
+For API Route, set `API_ROUTE_API_KEY` in the scan environment and use these
+settings in the `review.config.toml` example above. Choose a model available
+to your key that supports [streaming Responses](https://www.api-route.com/openapi.json),
+namespaced tools, and web search when enabled.
 
 ```toml
 model = "<model-id>"
@@ -1369,9 +1368,6 @@ wire_api = "responses"
 env_key = "API_ROUTE_API_KEY"
 ```
 
-Set `API_ROUTE_API_KEY` in the scan environment. Run
-`codex-security scan . --codex "profile='api-route'"` or use
-`codexOverrides: { profile: "api-route" }` in the SDK.
 The profile was tested against a local Responses endpoint. Hosted scan
 completion remains unverified.
 
