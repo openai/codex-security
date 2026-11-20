@@ -116,6 +116,8 @@ test.each([
   ["POM", "First.RELEASE", "Next.RELEASE", "First.RELEASE", ["Next.RELEASE"]],
   ["POM", "LATEST", "RELEASE", null, []],
   ["JAR", "latest.integration", "[1.3,2.0)", null, []],
+  ["POM", "1.2.3", "NotAvailable", "1.2.3", []],
+  ["JAR", "1.2.3", "NotAvailable", "1.2.3", []],
   [
     "PYTHONPKG",
     "1.0+linux.x.1",
