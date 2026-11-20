@@ -2985,8 +2985,11 @@ Credentials in the standard gcloud directory, the same file under
 `CLOUDSDK_CONFIG`, and the file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
 the standard `glab-cli` configuration directories and Git administration.
-PostgreSQL password file protection covers `PGPASSFILE`, `~/.pgpass` on
-Unix and `%APPDATA%\postgresql\pgpass.conf` on Windows.
+PostgreSQL password and service file protection covers `PGPASSFILE`,
+`PGSERVICEFILE`, the standard per-user files and `pg_service.conf` in
+the directory selected by `PGSYSCONFDIR`.
+TLS client identity protection covers `PGSSLKEY`, `PGSSLCERT`, and the
+standard per-user `postgresql.key` and `postgresql.crt` files.
 The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
@@ -3078,8 +3081,13 @@ files before dispatch. If they change, inspect them before retrying.
 With `--external-sandbox`, the operator supplies the filesystem isolation.
 For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
 publication also rechecks the selected executable before starting Git.
-For multiple push URLs, use a proxy executable with a single hard link.
-Git can run a pre-push hook between connections in the same process.
+A pre-push hook can run before Git launches another process for packing
+or authentication, or between connections to multiple push URLs. Publication
+checks hard links on the executables and input files Git can use after a hook.
+It accepts links confined to the protected installation directories, including
+Git's `libexec/git-core` and `bin`. On Unix it also accepts files owned by
+another account when their permissions prevent modification. If a launcher
+has an alias in a writable checkout, select a separate external executable.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
 

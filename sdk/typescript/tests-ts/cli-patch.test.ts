@@ -5272,10 +5272,6 @@ describe("patch publication integrity", () => {
         GIT_CONFIG_PARAMETERS:
           "'remote.origin.gh-resolved=upstream/repository'",
       };
-      const hostedRemote = "https://github.example.test/example/repository.git";
-      const localRemotes = new Map([[hostedRemote, remote]]);
-      if (collisionRemote !== remote)
-        localRemotes.set(`${hostedRemote}-secondary`, collisionRemote);
       let identityCalls = 0;
       const result = resultWithFindings(["high"]);
       const onCodex = mock(() => 0);
@@ -5295,29 +5291,8 @@ describe("patch publication integrity", () => {
                 ...options?.environment,
               } as NodeJS.ProcessEnv,
             };
-            if (command === "git") {
-              for (const key of Object.keys(selected.environment)) {
-                if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
-                for (const [hosted, local] of localRemotes)
-                  if (selected.environment[key] === `url.${hosted}.insteadOf`)
-                    selected.environment[key] = `url.${local}.insteadOf`;
-              }
-              const run = options?.patchTransport
-                ? runLocalHostingTransport
-                : runGitRepositoryCommand;
-              const output = await run(command, args, cwd, selected);
-              if (args[args.indexOf("remote") + 1] === "get-url")
-                return output
-                  .split("\n")
-                  .map(
-                    (url) =>
-                      [...localRemotes].find(
-                        ([, local]) => local === url,
-                      )?.[0] ?? url,
-                  )
-                  .join("\n");
-              return output;
-            }
+            if (command === "git")
+              return runGitRepositoryCommand(command, args, cwd, selected);
             if (args[0] === "repo") {
               identityCalls++;
               expect(selected.environment["GH_REPO"]).toBe("");
@@ -5369,7 +5344,7 @@ describe("patch publication integrity", () => {
               : "";
           },
         },
-        { localHosting: false },
+        { localHosting: "git" },
       );
       expect(outcome.exitCode).toBe(2);
       expect(git("ls-remote", collisionRemote, `refs/heads/${branch}`)).toBe(

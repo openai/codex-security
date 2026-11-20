@@ -173,7 +173,7 @@ test.each([
             : kind === "expanded profile"
               ? "%USERPROFILE%/xdg"
               : kind === "drive-relative xdg"
-                ? `${directory[0]?.toUpperCase() === "D" ? "E" : "D"}:xdg`
+                ? `${directory.slice(0, 2)}xdg`
                 : kind === "home"
                   ? undefined
                   : relative(caller, xdg),

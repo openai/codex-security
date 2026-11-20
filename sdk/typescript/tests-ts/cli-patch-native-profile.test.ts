@@ -427,6 +427,8 @@ glob_scan_max_depth = 8
       ...profiles[name],
       filesystem: snapshotFilesystem,
     });
+    const cacheAccess =
+      process.platform === "linux" && !existingStorage ? "deny" : "read";
     expect(profiles[name]!["filesystem"]).toEqual({
       ...snapshotFilesystem,
       ...Object.fromEntries(
@@ -437,7 +439,7 @@ glob_scan_max_depth = 8
               (configured && dirname(path) === extra),
           ),
           ...(configured ? (permissions.externalCachePaths ?? []) : []),
-        ].map((path) => [path, { ".": "read" }]),
+        ].map((path) => [path, { ".": cacheAccess }]),
       ),
       ...Object.fromEntries(
         (permissions.externalConfigPaths ?? []).map((path) => [
@@ -935,11 +937,18 @@ test("patch model and clean filters cannot read selected authentication files", 
   const gh = join(operator, "selected gh");
   const glab = join(operator, "selected glab");
   const pgpass = join(operator, "selected pgpass");
+  const pgservice = join(operator, "selected pg service");
+  const pgKey = join(operator, "selected pg key");
+  const pgCert = join(operator, "selected pg cert");
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
   const cloudDefault = "application_default_credentials.json";
   const appdata = join(operator, "Roaming");
+  const pgTlsDir =
+    process.platform === "win32"
+      ? join(appdata, "postgresql")
+      : join(operator, ".postgresql");
   const ssh = join(operator, ".ssh");
   await mkdir(gh);
   await mkdir(ssh);
@@ -956,6 +965,9 @@ test("patch model and clean filters cannot read selected authentication files", 
     GH_CONFIG_DIR: gh,
     GLAB_CONFIG_DIR: glab,
     PGPASSFILE: pgpass,
+    PGSERVICEFILE: pgservice,
+    PGSSLKEY: pgKey,
+    PGSSLCERT: pgCert,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
@@ -971,6 +983,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     CLOUDSDK_CONFIG: cloudConfig,
     APPDATA: appdata,
+    PGSYSCONFDIR: operator,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -1030,6 +1043,15 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(gh, "hosts.yml"),
     join(defaultGh, "hosts.yml"),
     pgpass,
+    pgservice,
+    pgKey,
+    pgCert,
+    join(pgTlsDir, "postgresql.key"),
+    join(pgTlsDir, "postgresql.crt"),
+    join(operator, "pg_service.conf"),
+    process.platform === "win32"
+      ? join(appdata, "postgresql", ".pg_service.conf")
+      : join(operator, ".pg_service.conf"),
     process.platform === "win32"
       ? join(appdata, "postgresql", "pgpass.conf")
       : join(operator, ".pgpass"),
@@ -1075,8 +1097,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       for (const directory of glabDirectories)
         await mkdir(directory, { recursive: true });
       await mkdir(cloudConfig);
-      if (process.platform === "win32")
-        await mkdir(join(appdata, "postgresql"), { recursive: true });
+      await mkdir(pgTlsDir, { recursive: true });
       await mkdir(join(operator, ".config", "gcloud"));
       if (process.platform === "win32")
         await mkdir(join(appdata, "gcloud"), { recursive: true });
@@ -1202,12 +1223,18 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
         ],
       ] as const)
         execFileSync("git", ["config", "--file", config, setting, value]);
-      return captureFilterPermissions(
+      const permissions = await captureFilterPermissions(
         repository,
         environment,
         "auth-file",
         program,
       );
+      // The operator fixture lives outside the app-server's synthetic user
+      // profile. Give both tools read access so the file denies are exercised.
+      return {
+        ...permissions,
+        readOnlyPaths: [...permissions.readOnlyPaths, operator],
+      };
     },
     { set: policySet, paths: [policyCluster] },
   );
