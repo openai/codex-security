@@ -132,35 +132,10 @@ def test_instruction_directory_link_is_never_followed(
     assert bundled_instruction_digest(root) is None
 
 
-def test_replacing_the_installation_during_measurement_yields_no_digest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api
-) -> None:
-    import workbench_instruction_digest as instructions
-
-    selected, replacement = tmp_path / "selected", tmp_path / "replacement"
-    for root in (selected, replacement):
-        for directory in ("skills", "references"):
-            (root / directory).mkdir(parents=True)
-            (root / directory / "instructions.md").write_text(root.name)
-    original_open = instructions._open_instruction_file
-    opened = 0
-
-    def open_during_update(*args, **kwargs):
-        nonlocal opened
-        opened += 1
-        if opened == 2:
-            selected.rename(tmp_path / "old")
-            replacement.rename(selected)
-        return original_open(*args, **kwargs)
-
-    monkeypatch.setattr(instructions, "_open_instruction_file", open_during_update)
-    assert instructions.bundled_instruction_digest(selected) is None
-    assert opened == 2
-
-
 @pytest.mark.parametrize(
     "update",
     [
+        "replace-installation",
         "replace-subtree",
         "add-markdown",
         pytest.param(
@@ -171,19 +146,19 @@ def test_replacing_the_installation_during_measurement_yields_no_digest(
         ),
     ],
 )
-def test_changing_instructions_inside_the_installation_yields_no_digest(
+def test_changing_instructions_during_measurement_yields_no_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api, update: str
 ) -> None:
     import workbench_instruction_digest as instructions
 
     selected = tmp_path / "selected"
-    (selected / "skills").mkdir(parents=True)
-    references = selected / "references"
     replacement = tmp_path / "replacement"
-    for directory in (references, replacement):
-        directory.mkdir()
+    for root in (selected, replacement):
+        (root / "skills").mkdir(parents=True)
+        (root / "references").mkdir()
         for name in ("first.md", "second.md"):
-            (directory / name).write_text(f"{directory.name}: {name}")
+            (root / "references" / name).write_text(f"{root.name}: {name}")
+    references = selected / "references"
     installation = selected.stat()
     before = instructions.bundled_instruction_digest(selected)
     open_file = instructions._open_instruction_file
@@ -193,13 +168,16 @@ def test_changing_instructions_inside_the_installation_yields_no_digest(
         nonlocal opened
         opened += 1
         if opened == 2:
-            # The first file has been hashed and closed. The parent installation stays in place.
-            if update in ("replace-subtree", "restore-after-open"):
+            # The first file has been hashed and closed.
+            if update == "replace-installation":
+                selected.rename(tmp_path / "old")
+                replacement.rename(selected)
+            elif update in ("replace-subtree", "restore-after-open"):
                 references.rename(tmp_path / "old")
-                replacement.rename(references)
+                (replacement / "references").rename(references)
                 if update == "restore-after-open":
                     descriptor = open_file(*args, **kwargs)
-                    references.rename(replacement)
+                    references.rename(replacement / "references")
                     (tmp_path / "old").rename(references)
                     return descriptor
             else:
@@ -210,7 +188,8 @@ def test_changing_instructions_inside_the_installation_yields_no_digest(
         patch.setattr(instructions, "_open_instruction_file", update_after_first_read)
         measured = instructions.bundled_instruction_digest(selected)
     after = instructions.bundled_instruction_digest(selected)
-    assert opened >= 2 and os.path.samestat(installation, selected.stat())
+    assert opened == 2
+    assert os.path.samestat(installation, selected.stat()) == (update != "replace-installation")
     assert before and after
     assert (before == after) == (update == "restore-after-open")
     assert measured is None, f"measured {measured}, stable digests were {before} and {after}"
@@ -226,7 +205,7 @@ def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
     connection.executescript(digest_migration[2])
     record_migration(connection, preview, digest_migration[1], "preview timestamp")
     digest = "sha256:" + "a" * 64
-    try:
+    with closing(connection):
         if preview == 61:
             connection.execute("ALTER TABLE scans ADD COLUMN launch_surface TEXT")
         insert_legacy_scan(connection, "timestamp", instruction_digest=digest)
@@ -239,8 +218,6 @@ def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
             )
         ] == EXPECTED_MIGRATIONS
         assert connection.execute("SELECT instruction_digest FROM scans").fetchone()[0] == digest
-    finally:
-        connection.close()
 
 
 def test_instruction_digest_migration_rolls_back_on_unknown_receipt(workbench_api) -> None:

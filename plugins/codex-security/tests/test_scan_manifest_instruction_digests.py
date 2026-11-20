@@ -108,22 +108,39 @@ def test_deep_seal_collects_only_started_workers(tmp_path: Path, unknown_worker:
         assert producer["instructionDigests"] == [parent, first_worker, later_worker]
 
 
+def register_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, measured: bool = True
+) -> tuple[Path, Path, Path, str]:
+    state, target = empty_target_paths(tmp_path)
+    output = tmp_path / "scan"
+    if measured:
+        monkeypatch.setenv(
+            "_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1])
+        )
+    else:
+        monkeypatch.delenv("_CODEX_SECURITY_INSTRUCTION_ROOT", raising=False)
+    scan_id = register_cli_scan(state, target, output)["scanId"]
+    write_completed_contract(output, scan_id, target)
+    return state, target, output, scan_id
+
+
+def registered_digest(state: Path, scan_id: str) -> str:
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        (digest,) = db.execute(
+            "SELECT instruction_digest FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()
+    assert digest
+    return digest
+
+
 @pytest.mark.parametrize("measured", [False, True], ids=["absent", "matching"])
 @pytest.mark.parametrize("restore_draft", [False, True], ids=["sealed", "restored-draft"])
 def test_replaying_a_seal_preserves_its_original_producer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, measured: bool, restore_draft: bool
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    monkeypatch.setenv("_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1]))
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    with sqlite3.connect(state / "workbench.sqlite3") as db:
-        (registered,) = db.execute(
-            "SELECT instruction_digest FROM scans WHERE id = ?", (scan_id,)
-        ).fetchone()
-    assert registered
+    state, target, output, scan_id = register_draft(tmp_path, monkeypatch)
+    registered = registered_digest(state, scan_id)
     reported = [registered] if measured else None
-    write_completed_contract(output, scan_id, target)
     manifest = output / "scan-manifest.json"
     draft = manifest.read_bytes()
     if reported:
@@ -151,11 +168,7 @@ def test_replaying_a_seal_preserves_its_original_producer(
 def test_rejected_legacy_seal_does_not_pin_an_absent_instruction_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    monkeypatch.setenv("_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1]))
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    write_completed_contract(output, scan_id, target)
+    state, target, output, scan_id = register_draft(tmp_path, monkeypatch)
     path = output / "scan-manifest.json"
     draft = path.read_bytes()
     _seal_draft(output, target)
@@ -187,11 +200,7 @@ def test_rejected_legacy_seal_does_not_pin_an_absent_instruction_digest(
 def test_completed_seal_receipt_authenticates_legacy_producer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    monkeypatch.setenv("_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1]))
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    write_completed_contract(output, scan_id, target)
+    state, _, output, scan_id = register_draft(tmp_path, monkeypatch)
     scan_command(state, "complete-scan", scan_id)
     path = output / "scan-manifest.json"
     original = path.read_bytes()
@@ -229,11 +238,7 @@ def test_completed_seal_receipt_authenticates_legacy_producer(
 def test_completed_legacy_row_checks_restored_draft_before_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, claim: str
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    monkeypatch.setenv("_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1]))
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    write_completed_contract(output, scan_id, target)
+    state, _, output, scan_id = register_draft(tmp_path, monkeypatch)
     path = output / "scan-manifest.json"
     draft = json.loads(path.read_bytes())
     findings = output / "findings.json"
@@ -289,16 +294,9 @@ def test_completed_legacy_row_checks_restored_draft_before_writing(
 def test_rejects_unsupported_instruction_digests_in_a_first_seen_seal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    if case == "unmeasured":
-        monkeypatch.delenv("_CODEX_SECURITY_INSTRUCTION_ROOT", raising=False)
-    else:
-        monkeypatch.setenv(
-            "_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1])
-        )
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    write_completed_contract(output, scan_id, target)
+    state, target, output, scan_id = register_draft(
+        tmp_path, monkeypatch, measured=case != "unmeasured"
+    )
     path = output / "scan-manifest.json"
     manifest = json.loads(path.read_bytes())
     manifest["scan"]["producer"]["instructionDigests"] = ["sha256:" + "b" * 64]
@@ -331,15 +329,8 @@ def test_rejects_unsupported_instruction_digests_in_a_first_seen_seal(
 def test_get_scan_exposes_the_threat_model_only_for_a_supported_sealed_producer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    monkeypatch.setenv("_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1]))
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    with sqlite3.connect(state / "workbench.sqlite3") as db:
-        (measured,) = db.execute(
-            "SELECT instruction_digest FROM scans WHERE id = ?", (scan_id,)
-        ).fetchone()
-    write_completed_contract(output, scan_id, target)
+    state, target, output, scan_id = register_draft(tmp_path, monkeypatch)
+    measured = registered_digest(state, scan_id)
     path = output / "scan-manifest.json"
     manifest = json.loads(path.read_bytes())
     manifest["scan"]["producer"]["instructionDigests"] = [measured]
@@ -396,16 +387,7 @@ def test_resuming_deep_scan_rejects_an_unmeasured_sealed_producer(
 def test_completion_rejects_changed_prepared_instruction_digests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: str, interrupted_command: str | None
 ) -> None:
-    state, target = empty_target_paths(tmp_path)
-    output = tmp_path / "scan"
-    if edit != "add":
-        monkeypatch.setenv(
-            "_CODEX_SECURITY_INSTRUCTION_ROOT", str(Path(__file__).resolve().parents[1])
-        )
-    else:
-        monkeypatch.delenv("_CODEX_SECURITY_INSTRUCTION_ROOT", raising=False)
-    scan_id = register_cli_scan(state, target, output)["scanId"]
-    write_completed_contract(output, scan_id, target)
+    state, _, output, scan_id = register_draft(tmp_path, monkeypatch, measured=edit != "add")
     if interrupted_command:
         from test_workbench_standard_deep_results import run_workbench_with_fault
 

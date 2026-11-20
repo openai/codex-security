@@ -45,6 +45,7 @@ import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 from finalize_scan_contract import (
+    PRODUCER_NAME,
     ContractError,
     RecoverableContractError,
     _prepare_scan_finalization,
@@ -82,6 +83,7 @@ from workbench_native_indexes import indexed_scan_findings
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
+    loaded_plugin_version,
     parse_scan_recipe,
     prepare_cli_scan_target,
     register_windows_resume_output,
@@ -115,8 +117,6 @@ from workbench_source_scopes import (
     expected_target_kinds,
     public_scan_recipe,
     requested_exclude_paths,
-    requested_finding_scope,
-    requested_scan_file_paths,
     requested_scan_paths,
 )
 from workbench_target import (
@@ -125,6 +125,7 @@ from workbench_target import (
     copy_directory_excluding,
     copy_git_worktree_files,
     diff_scope_file_count,
+    diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_command,
@@ -336,6 +337,21 @@ def apply_migrations(
     )
 
 
+def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
+    # Older scans did not record path kinds. Retain their lexical scope semantics
+    # rather than infer the original target from a possibly changed checkout.
+    if scan["recipe_json"] is None:
+        return []
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    return recipe.get("scopeFilePaths", [])
+
+
+def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    """Return requested paths paired with whether the stored recipe identified each one as a file."""
+    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
+    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     """Return the target identity, scope requirements, and diff target recorded for this scan."""
     target = Path(scan["target_path"])
@@ -378,9 +394,41 @@ def workbench_completion_binding(
     completed_at: str,
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return scan_history.workbench_completion_binding(
-        _WORKBENCH_DB_CONTEXT, connection, scan, completed_at, manifest
-    )
+    """Build the scan ID, timestamps, producer, target, and scope used to bind output artifacts at completion."""
+    contract = scan_contract(scan)
+    target_contract = contract["target"]
+    plugin_version = loaded_plugin_version()
+    target: dict[str, Any] = {
+        "targetId": target_contract["targetId"],
+        "displayName": target_contract["displayName"],
+    }
+    if scan["mode"] == "diff":
+        target["baseRevision"] = scan["diff_base_revision"]
+        target["headRevision"] = scan["diff_head_revision"]
+        if snapshot_digest := diff_snapshot_digest(scan, manifest):
+            target["snapshotDigest"] = snapshot_digest
+    else:
+        if scan["target_revision"] != "unversioned":
+            target["revision"] = scan["target_revision"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
+
+    scope: dict[str, Any] = {
+        "includePaths": requested_scan_paths(scan),
+        "excludePaths": contract["scope"]["requiredExcludePaths"],
+    }
+
+    binding: dict[str, Any] = {
+        "scanId": scan["id"],
+        "startedAt": scan["started_at"],
+        "completedAt": completed_at,
+        "producer": {"name": PRODUCER_NAME, "version": plugin_version},
+        "target": target,
+        "allowedTargetKinds": target_contract["allowedKinds"],
+        "scope": scope,
+        "coverageMode": expected_coverage_mode(scan),
+    }
+    return scan_history.bind_completion_provenance(connection, scan, binding, manifest)
 
 
 def verify_manifest_binding(

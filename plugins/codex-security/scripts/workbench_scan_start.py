@@ -409,7 +409,7 @@ def insert_running_scan(
     target_summary: str | None,
     scope_file_count: int | None,
     timestamp: str,
-    instruction_digest: str | None,
+    instruction_digest: str | None = None,
     handoff_status: str = "pending",
     model: str | None = None,
     reasoning_effort: str | None = None,

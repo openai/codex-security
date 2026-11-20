@@ -18,7 +18,6 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import (
-    PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
     _read_scan_local_json_bytes,
@@ -30,9 +29,8 @@ from review_state import review_state
 from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE, PRIMARY_FINDING_LOCATION_SQL
 from workbench_instruction_digest import scan_instruction_digests, verify_sealed_instruction_digests
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_source_scopes import public_scan_recipe, requested_scan_paths
+from workbench_source_scopes import public_scan_recipe
 from workbench_target import (
-    diff_snapshot_digest,
     has_windows_checkout_binding,
     require_remediation_target,
     require_scan_target_identity,
@@ -105,51 +103,13 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def workbench_completion_binding(
-    wb: Any,
+def bind_completion_provenance(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
-    completed_at: str,
-    manifest: dict[str, Any] | None = None,
+    binding: dict[str, Any],
+    manifest: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Build the scan ID, timestamps, producer, target, and scope used to bind output artifacts at completion."""
-    from workbench_scan_start import loaded_plugin_version
-
-    contract = wb.scan_contract(scan)
-    target_contract = contract["target"]
-    plugin_version = loaded_plugin_version()
-    target: dict[str, Any] = {
-        "targetId": target_contract["targetId"],
-        "displayName": target_contract["displayName"],
-    }
-    if scan["mode"] == "diff":
-        target["baseRevision"] = scan["diff_base_revision"]
-        target["headRevision"] = scan["diff_head_revision"]
-        if snapshot_digest := diff_snapshot_digest(scan, manifest):
-            target["snapshotDigest"] = snapshot_digest
-    else:
-        if scan["target_revision"] != "unversioned":
-            target["revision"] = scan["target_revision"]
-        if "requiredSnapshotDigest" in target_contract:
-            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
-
-    scope: dict[str, Any] = {
-        "includePaths": requested_scan_paths(scan),
-        "excludePaths": contract["scope"]["requiredExcludePaths"],
-    }
-
-    binding: dict[str, Any] = {
-        "scanId": scan["id"],
-        "startedAt": scan["started_at"],
-        "completedAt": completed_at,
-        "producer": {"name": PRODUCER_NAME, "version": plugin_version},
-        "target": target,
-        "allowedTargetKinds": target_contract["allowedKinds"],
-        "scope": scope,
-        "coverageMode": expected_coverage_mode(scan),
-    }
-    if (digests := scan_instruction_digests(connection, scan)) is not None:
-        binding["producer"]["instructionDigests"] = digests
+    """Use the sealed timestamps and producer on replay, or bind the registered measurements."""
     manifest_scan = manifest.get("scan") if manifest is not None else None
     if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
         binding["startedAt"] = manifest_scan.get("startedAt")
@@ -160,8 +120,9 @@ def workbench_completion_binding(
             binding["producer"]["version"] = producer.get("version")
             if "instructionDigests" in producer:
                 binding["producer"]["instructionDigests"] = producer["instructionDigests"]
-            else:
-                binding["producer"].pop("instructionDigests", None)
+            return binding
+    if (digests := scan_instruction_digests(connection, scan)) is not None:
+        binding["producer"]["instructionDigests"] = digests
     return binding
 
 
