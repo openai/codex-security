@@ -2233,8 +2233,10 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
   const client = resumeDependencies(f, () =>
     fail("Unexpected new model session"),
   ).createSecurity({});
-  let outputDir = f.scanDir;
-  if (process.platform !== "win32") {
+  let outputDir;
+  if (process.platform === "win32") {
+    outputDir = join(f.root, basename(f.scanDir).toUpperCase());
+  } else {
     const parentAlias = join(
       await temporaryDirectory(),
       "original-output-parent",
