@@ -1,5 +1,5 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import type { ScanOptions } from "../src/index.js";
@@ -79,19 +79,22 @@ test.each([
       ? { knowledgeBasePaths: [promptFile], knowledgeBaseSnapshot: snapshot }
       : {};
     const workflow = new FindingWorkflow(workflowId, environment);
+    const outputDir =
+      scenario === "completed" ? relative(process.cwd(), scanDir) : undefined;
     const expectedDigest =
-      snapshot &&
+      (snapshot || outputDir) &&
       workflowDigest({
         config: {},
         options: {
           target: "repository",
           mode: "standard",
-          ...(scenario === "saved-knowledge-documents"
+          outputDir: outputDir ? resolve(outputDir) : undefined,
+          ...(scenario === "saved-knowledge-documents" && snapshot
             ? { knowledgeBaseSnapshot: { documents: snapshot.documents } }
             : knowledgeOptions),
         },
       });
-    if (scenario === "saved-knowledge-documents")
+    if (outputDir || scenario === "saved-knowledge-documents")
       await workflow.bind({ scanRequestDigest: expectedDigest });
     const ownerScenario = scenario.startsWith("owner-");
     const ownerFailure = scenario.startsWith("owner-failure");
@@ -172,6 +175,7 @@ test.each([
     try {
       const options = {
         workflowId,
+        outputDir,
         ...knowledgeOptions,
         ownerSuggestions: ownerScenario || undefined,
         ...(scenario === "prompt-files" ? { scanPromptFile: promptFile } : {}),
@@ -191,6 +195,7 @@ test.each([
       if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
       const result = await resumed.run(repository, {
         workflowId,
+        outputDir,
         ...knowledgeOptions,
         ...(preparedKnowledge
           ? {

@@ -75,6 +75,21 @@ export function scanArtifactDigest({
   return workflowDigest({ manifest, findings, review });
 }
 
+// Workflow bindings hash the caller's prepared options, including its resolved output path.
+function workflowOptions(options: ScanOptions) {
+  return {
+    ...options,
+    target: options.target ?? "repository",
+    mode: options.mode ?? DEFAULT_SCAN_MODE,
+    workflowId: undefined,
+    severityRubric: undefined,
+    rubricPath: undefined,
+    signal: undefined,
+    auth: undefined,
+    archiveExisting: undefined,
+  };
+}
+
 /** Registered scans identify prepared knowledge by staged names and text. */
 export function scanRequestDigest(
   config: CodexSecurityConfig,
@@ -82,25 +97,13 @@ export function scanRequestDigest(
   repository?: string,
   legacyTelemetryContext?: ScanOptions["telemetryContext"],
 ): string {
-  // Registration identifies the scan inputs independently of attempt telemetry.
-  return requestDigest(
-    config,
-    { ...options, telemetryContext: legacyTelemetryContext },
-    repository,
-    options.knowledgeBaseSnapshot?.documents,
-  );
-}
-
-function requestDigest(
-  config: CodexSecurityConfig,
-  options: ScanOptions,
-  repository?: string,
-  stagedDocuments?: Readonly<Record<string, string>>,
-): string {
+  const prepared = workflowOptions(options);
+  const documents = options.knowledgeBaseSnapshot?.documents;
   return workflowDigest({
     config,
     options: {
-      ...options,
+      ...prepared,
+      telemetryContext: legacyTelemetryContext,
       target:
         repository !== undefined && Array.isArray(options.target)
           ? {
@@ -108,24 +111,17 @@ function requestDigest(
                 resolveTargetPath(expandHome(path), repository),
               ),
             }
-          : (options.target ?? "repository"),
-      mode: options.mode ?? DEFAULT_SCAN_MODE,
-      ...(stagedDocuments === undefined
+          : prepared.target,
+      ...(documents === undefined
         ? {}
         : {
             knowledgeBasePaths: undefined,
-            knowledgeBaseSnapshot: { documents: stagedDocuments },
+            knowledgeBaseSnapshot: { documents },
           }),
       outputDir:
         options.outputDir === undefined
           ? undefined
           : resolve(expandHome(options.outputDir)),
-      workflowId: undefined,
-      severityRubric: undefined,
-      rubricPath: undefined,
-      signal: undefined,
-      auth: undefined,
-      archiveExisting: undefined,
     },
   });
 }
@@ -195,7 +191,7 @@ export class FindingWorkflow {
       saved ===
         scanRequestDigest(config, options, undefined, options.telemetryContext)
         ? saved
-        : requestDigest(config, options);
+        : workflowDigest({ config, options: workflowOptions(options) });
     return this.bind({ repositoryPath, scanRequestDigest: digest });
   }
 
