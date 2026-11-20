@@ -33,6 +33,42 @@ function stringValues(value: unknown): string[] {
   });
 }
 
+function normalizeLocations(
+  values: readonly unknown[],
+): NonNullable<ExternalFindingEvidence["locations"]> {
+  return values.flatMap((value) => {
+    if (!isRecord(value)) return [];
+    const path = repositoryFilePath(
+      value["path"] ?? value["filePath"] ?? value["file"],
+    );
+    if (!path) return [];
+    const line = value["line"] ?? value["startLine"] ?? value["lineNumber"];
+    return [
+      {
+        path,
+        line:
+          Number.isSafeInteger(line) && Number(line) > 0 ? Number(line) : null,
+      },
+    ];
+  });
+}
+
+function armorCodeLocations(
+  finding: ArmorCodeFinding,
+): NonNullable<ExternalFindingEvidence["locations"]> {
+  for (const candidates of [
+    Array.isArray(finding["locations"]) ? finding["locations"] : [],
+    isRecord(finding["location"]) ? [finding["location"]] : [],
+    text(finding["filePath"])
+      ? [{ path: finding["filePath"], line: finding["lineNumber"] }]
+      : [],
+  ]) {
+    const locations = normalizeLocations(candidates);
+    if (locations.length > 0) return locations;
+  }
+  return [];
+}
+
 /** Recover the source repository independently of the finding's scan type. */
 export function armorCodeRepositoryUrl(
   finding: ArmorCodeFinding | null | undefined,
@@ -80,14 +116,6 @@ export function normalizeArmorCodeFindings(
     raw as ArmorCodeFinding[],
     (finding) => {
       const severity = (text(finding["severity"]) ?? "unknown").toLowerCase();
-      const locations =
-        Array.isArray(finding["locations"]) && finding["locations"].length > 0
-          ? finding["locations"]
-          : isRecord(finding["location"])
-            ? [finding["location"]]
-            : text(finding["filePath"])
-              ? [{ path: finding["filePath"], line: finding["lineNumber"] }]
-              : [];
       const description = text(
         finding["description"] ??
           finding["details"] ??
@@ -141,24 +169,7 @@ export function normalizeArmorCodeFindings(
             ),
           ),
         ],
-        locations: locations.flatMap((value) => {
-          if (!isRecord(value)) return [];
-          const path = repositoryFilePath(
-            value["path"] ?? value["filePath"] ?? value["file"],
-          );
-          if (!path) return [];
-          const line =
-            value["line"] ?? value["startLine"] ?? value["lineNumber"];
-          return [
-            {
-              path,
-              line:
-                Number.isSafeInteger(line) && Number(line) > 0
-                  ? Number(line)
-                  : null,
-            },
-          ];
-        }),
+        locations: armorCodeLocations(finding),
         ...(typeof lastUpdated === "number" &&
           Number.isSafeInteger(lastUpdated) && {
             source_updated_at: Math.floor(lastUpdated / 1000),

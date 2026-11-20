@@ -244,4 +244,64 @@ describe("ArmorCode finding imports", () => {
       },
     });
   });
+
+  test("falls back to location or filePath when locations contain only non-repository paths", () => {
+    const result = normalizeArmorCodeFindings({
+      data: {
+        findings: [
+          {
+            id: 201,
+            title: "Service configuration exposure",
+            severity: "MEDIUM",
+            locations: [{ path: "/etc/service.conf" }],
+            filePath: "src/service.ts",
+            lineNumber: 11,
+          },
+          {
+            id: 202,
+            title: "Fallback through non-repository location object",
+            severity: "LOW",
+            locations: [{ path: "/var/log/app.log" }],
+            location: { path: "https://app.example/status" },
+            filePath: "src/status.ts",
+            lineNumber: 5,
+          },
+          {
+            id: 203,
+            title:
+              "Fallback to location object when locations are non-repository",
+            severity: "HIGH",
+            locations: [{ path: "/etc/service.conf" }],
+            location: { filePath: "src/handler.ts", startLine: 19 },
+          },
+        ],
+      },
+    });
+
+    expect(result.excluded).toEqual([]);
+    expect(result.findings).toHaveLength(3);
+    expect(result.findings[0]).toMatchObject({
+      source_finding_id: "201",
+      evidence: {
+        locations: [{ path: "src/service.ts", line: 11 }],
+        source_data: {
+          locations: [{ path: "/etc/service.conf" }],
+          filePath: "src/service.ts",
+          lineNumber: 11,
+        },
+      },
+    });
+    expect(result.findings[1]).toMatchObject({
+      source_finding_id: "202",
+      evidence: {
+        locations: [{ path: "src/status.ts", line: 5 }],
+      },
+    });
+    expect(result.findings[2]).toMatchObject({
+      source_finding_id: "203",
+      evidence: {
+        locations: [{ path: "src/handler.ts", line: 19 }],
+      },
+    });
+  });
 });
