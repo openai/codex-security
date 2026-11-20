@@ -6495,7 +6495,6 @@ export async function runScanEvents(
         findings,
         reviewState,
       });
-      options.signal.throwIfAborted();
       return draft.complete !== false;
     };
     let turn: Awaited<ReturnType<typeof execute>> | undefined;
@@ -6512,6 +6511,7 @@ export async function runScanEvents(
       turn ??= { ...saved, threadId: saved.threadId, status: saved.status };
       complete = await accept(turn);
     }
+    options.signal.throwIfAborted();
     if (!complete)
       throw new IncompleteScanError(
         "Codex Security produced only an unfinished audit checkpoint.",
