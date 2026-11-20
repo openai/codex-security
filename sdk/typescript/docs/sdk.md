@@ -248,8 +248,12 @@ outputs, and requirements. Omit the provider to keep source-only validation.
 
 Public types are `ValidationProviderSettings`, `ValidationProvider`,
 `ValidationProviderContext`, `ValidationProviderAssessment`,
-`ValidationProvenance`, `ValidationItemRecord`, `ValidationBasis`, and
-`ValidationClaimMatch`. The built-in `ContinuumValidationProvider` constructor
+`ValidationProvenance`, `ValidationItemRecord`, `ValidationBasis`,
+`ValidationResultScope`, and `ValidationClaimMatch`. Continuum records distinguish
+finding-scoped results from issue-scoped results with `resultScope`; issue-scoped
+results retain Codex severity and expose `issueFindingCount`. `ValidationBasis`
+includes `FINDING` (a statement from the finding, not independently checked by the
+scorer), and preserves unknown future values. The built-in `ContinuumValidationProvider` constructor
 accepts `ContinuumValidationOptions`. Provider authors implement `validate()`
 and optionally `validateBatch()`; external registry discovery is not supported.
 
