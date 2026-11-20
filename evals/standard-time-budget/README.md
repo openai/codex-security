@@ -131,10 +131,26 @@ Each attempt's top-level `usage` includes delegated
 workers, even when completion or grading fails. Missing usage stays unknown,
 cached input is a subset of input tokens, and no dollar cost is inferred.
 
+## Release baselines
+
+Export a portable baseline (`schemaVersion: 1`) from a saved run directory, or compare two runs or exported baseline files offline:
+
+```sh
+node --experimental-strip-types evals/standard-time-budget/baseline.mts export evals/standard-time-budget/reports/run-baseline baseline.json
+node --experimental-strip-types evals/standard-time-budget/baseline.mts compare baseline.json evals/standard-time-budget/reports/run-candidate
+```
+
+Exported baselines preserve experiment settings, evaluator/source/plugin/SDK/executable SHA-256 digests, positive and safe-control case definitions with per-file SHA-256 hashes, and per-attempt semantic outcomes, while omitting structured host path fields (`scanDir`, `reportPath`, executable paths) and raw fixture source text. Failed attempts keep `error` diagnostics verbatim in both `baseline.json` and `compare` output so execution failures remain inspectable; because failure messages can include absolute local paths, command output, or secrets, complete a disclosure review before sharing or publishing exported baselines or comparison reports.
+
+Comparisons match `comparable` cases only when both the case ID and its definition (relative path, line span, accepted CWE set, and cited source-file SHA-256) are unchanged. Added, removed, and changed cases, plus changes to shared source or context files (`sourceFiles`), are reported separately so expanding the corpus does not mask regressions or fabricate recall drops. Failed runs, unattempted pairs (`missing`), unknown token usage, duplicate findings, safe-control overlaps, evidence errors, per-run recall ranges (`min`/`max`/`mean`), and `needsAdjudication` runs stay explicit alongside comparable-case deltas.
+
+Use this suite to measure end-to-end Standard-scan discovery recall across the synthetic corpus's vulnerability families, verbatim source-evidence grounding, safe-control separation, completion rate, and per-run token/latency shifts across prompt, validation, deduplication, or model/provider changes (accounting for stochastic variance across pairs). Manual review or separate suites are still required to adjudicate unmatched findings and control overlaps, test secret discovery ([`../secret-discovery/README.md`](../secret-discovery/README.md)), triage supplied findings ([`../triage-finding/README.md`](../triage-finding/README.md)), verify workflow routing ([`../workflow-routing/README.md`](../workflow-routing/README.md)), exercise Deep Scan iteration, recovery, and publication ([`../../plugins/codex-security/mcp-app/TESTING.md`](../../plugins/codex-security/mcp-app/TESTING.md)), or evaluate generalization on larger public repositories.
+
 ## Interpretation and checks
 
 Use the `fixtures.mts` hash in `experiment.json` to identify the corpus revision.
-If two runs have different revisions, compare their results on the shared case IDs.
+If two runs have different revisions, compare their results on `comparable` cases
+with the baseline comparison tool above.
 
 Review findings
 without variant labels and compare grounded recall, adjudicated false
