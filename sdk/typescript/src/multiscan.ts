@@ -1738,8 +1738,9 @@ async function loadResumableScan(
     // Otherwise invalid saved evidence starts a new scan at the original CSV target.
     if (
       recoverScan !== undefined &&
-      (await lstat(join(scanDir, "report.md")).catch(undefinedIfMissingFile)) ===
-        undefined
+      (await lstat(join(scanDir, "report.md")).catch(
+        undefinedIfMissingFile,
+      )) === undefined
     )
       throw accepted;
     return undefined;
