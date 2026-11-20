@@ -1,6 +1,9 @@
 import { readReviewState } from "./support/review-state.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { useTestPython } from "./support/python.js";
+import { nodeCommand } from "./support/shell.js";
+import { startMcpClient } from "../../../plugins/codex-security/mcp-app/tests/support/mcp-client.js";
+import { readOnlyParentSandboxState } from "../../../plugins/codex-security/mcp-app/tests/sandbox-state.js";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
@@ -34,6 +37,33 @@ afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
 const invalidArchive = /unknown frame descriptor|invalid zstd data/i;
+
+async function rejoinSelectedScanThroughMcp(
+  env: NodeJS.ProcessEnv,
+  scanId: string,
+) {
+  const client = await startMcpClient(
+    {
+      command: nodeCommand().command,
+      args: [join(PLUGIN_ROOT, "mcp/server.mjs"), "--stdio"],
+      env: env as Record<string, string>,
+    },
+    "sdk-owner-completion",
+  );
+  try {
+    const result = await client.request("tools/call", {
+      name: "start_codex_security_deep_scan",
+      arguments: { scanId },
+      _meta: {
+        "openai/threadId": threadId,
+        "codex/sandbox-state-meta": readOnlyParentSandboxState(PLUGIN_ROOT),
+      },
+    });
+    return result["structuredContent"];
+  } finally {
+    await client.close();
+  }
+}
 
 for (const boundary of ["registration", "stream-start"] as const) {
   test(`SDK cancels registered Deep Scan before first thread event: ${boundary}`, async () => {
@@ -126,6 +156,7 @@ for (const boundary of ["registration", "stream-start"] as const) {
 const outcomes = [
   "failed",
   "completed",
+  "completed-after-mcp-rejoin",
   "restart",
   "restart-without-session",
   "restart-archived-session",
@@ -251,6 +282,7 @@ for (const {
   const closed = outcome.startsWith("closed-");
   const budgeted = outcome.startsWith("budget-");
   const canceledFollowUp = outcome.endsWith("followup-canceled");
+  const rejoin = outcome === "completed-after-mcp-rejoin";
   const loseCompletionResponse = outcome.startsWith("lost-completion-response");
   const corruptArchive = compressionRuntime?.startsWith("corrupt-") === true;
   const name =
@@ -292,6 +324,7 @@ for (const {
     let lostCancellationDeepState: unknown;
     let originalFinalizationInput!: { resultPath: string };
     let selectedPath = "";
+    let rejoinedResult: unknown;
     let selectedBytes: Buffer<ArrayBuffer>;
     let originalResumeSignal: AbortSignal | undefined;
     let acceptedReport = "";
@@ -442,6 +475,12 @@ for (const {
                 "Synthetic budget completion failure before commit",
               );
             const result = await runWorkbench(options, args, input);
+            if (args[0] === "finish-deep-scan" && rejoin) {
+              rejoinedResult = await rejoinSelectedScanThroughMcp(
+                environment,
+                scanId,
+              );
+            }
             if (
               args[0] === "get-deep-scan" &&
               cancellation.signal.aborted &&
@@ -698,7 +737,7 @@ for (const {
                   );
                   if (outcome === "canceled-before-publication")
                     cancellation.abort("Synthetic user cancellation");
-                  if (outcome === "completed") {
+                  if (outcome === "completed" || rejoin) {
                     yield {
                       type: "turn.completed",
                       usage: {
@@ -1304,7 +1343,14 @@ for (const {
           commands.filter((command) => command === "complete-scan"),
         ).toHaveLength(2);
       }
-      if (outcome === "completed") {
+      if (rejoin) {
+        expect(rejoinedResult).toMatchObject({
+          scanId,
+          manifestPath: expect.any(String),
+        });
+        expect(rejoinedResult).not.toHaveProperty("completion");
+      }
+      if (outcome === "completed" || rejoin) {
         // This transport emits an explicit zero-usage completion receipt.
         expect(result.cost).toMatchObject({
           inputTokens: 0,

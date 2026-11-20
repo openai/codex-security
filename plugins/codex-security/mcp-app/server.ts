@@ -953,10 +953,7 @@ export function createCodexSecurityServer(): McpServer {
         return toolErrorResult(deepScanInvocationFailureMessage(error));
       }
       const completeDeepScan = async (run: DeepScanRunState) => {
-        if (
-          run.status !== "succeeded" ||
-          (run.sdkOwnsCompletion && !run.finalizationInput)
-        )
+        if (run.status !== "succeeded" || run.sdkOwnsCompletion)
           return deepScanTerminalResult(run);
         try {
           const completion = await workbench("complete-scan", {
