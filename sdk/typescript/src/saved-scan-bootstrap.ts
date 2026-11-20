@@ -19,6 +19,7 @@ import {
   runWorkbench,
   sameFile,
   workbenchEnvironment,
+  type PluginPythonOptions,
   type ProcessEnvironment,
   sqliteDatabaseOpener,
   type RuntimeDatabase,
@@ -29,7 +30,8 @@ interface ScanTarget {
   target_path: string;
   executableSourcePaths?: string[];
   sourceRoots?: string[];
-  missingProfileSources?: boolean;
+  pythonDiscoveryRoots?: string[];
+  excludeCheckoutPython?: PluginPythonOptions["excludeCheckoutPython"];
   repository_generation?: string | null;
   originFallback?: boolean;
   protectPython?: boolean;
@@ -43,8 +45,9 @@ interface SavedCheckout {
 interface SavedBoundaries {
   byTarget: Map<string, string | null>;
   roots: string[];
+  pythonDiscoveryRoots: string[];
   complete: boolean;
-  missingProfileSources: boolean;
+  excludeCheckoutPython: PluginPythonOptions["excludeCheckoutPython"];
 }
 
 export interface SavedToolDiscovery {
@@ -163,7 +166,7 @@ export async function savedScanWorkbench(
       protectedRoot: protectedRoots,
       discoveryProtectedRoots,
       allowPathLookup: checkouts.complete,
-      excludeCheckoutPython: checkouts.missingProfileSources,
+      excludeCheckoutPython: checkouts.excludeCheckoutPython,
       currentDirectory: options.currentDirectory,
       signal,
     });
@@ -330,6 +333,9 @@ function loadRecipeSources(
     throw new CodexSecurityError(invalidPaths);
   };
   target.executableSourcePaths = paths("executableSourcePaths");
+  // Older Deep Scan recipes kept document contents without their source paths.
+  if (recipe["mode"] === "deep" && recipe["pythonDiscoveryRoots"] === undefined)
+    target.excludeCheckoutPython = "discovery";
   // Older recipes recorded some file inputs only in the selected configuration.
   const config = recipe["config"];
   if (isRecord(config)) {
@@ -347,11 +353,14 @@ function loadRecipeSources(
       !(isRecord(profiles) && isRecord(profiles[profile]));
     // Even receipts with model file identities could omit inherited skills.
     // Reading today's profile cannot recover the original source checkouts.
-    target.missingProfileSources =
+    if (
       recipe["mode"] === "deep" &&
       nativeProfile &&
-      !Array.isArray(recipe["executableSourceRoots"]);
+      !Array.isArray(recipe["executableSourceRoots"])
+    )
+      target.excludeCheckoutPython = true;
   }
+  target.pythonDiscoveryRoots = paths("pythonDiscoveryRoots");
   target.sourceRoots = [
     ...paths("executableSourceRoots"),
     ...paths("knowledgeBasePaths"),
@@ -421,7 +430,13 @@ export async function savedDiscoveryRoots(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const targets = [...new Set([...paths, ...(checkouts?.roots ?? [])])];
+  const targets = [
+    ...new Set([
+      ...paths,
+      ...(checkouts?.roots ?? []),
+      ...(checkouts?.pythonDiscoveryRoots ?? []),
+    ]),
+  ];
   const currentRoots = await Promise.all(
     targets.map((path) => gitProtectionRoots(path, signal)),
   );
@@ -582,14 +597,17 @@ function savedCheckouts(
       ).map((row) => row.root)
     : [];
   const roots = [...rows.map((row) => row.checkout_root), ...rejected];
-  const missingProfileSources = targets.some(
-    (target) => target.missingProfileSources,
-  );
+  const exclusions = targets.map((target) => target.excludeCheckoutPython);
   return {
     byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
     roots: roots.filter((root): root is string => root !== null),
+    pythonDiscoveryRoots: targets.flatMap(
+      (target) => target.pythonDiscoveryRoots ?? [],
+    ),
     complete: !roots.includes(null),
-    missingProfileSources,
+    excludeCheckoutPython: exclusions.includes(true)
+      ? true
+      : exclusions.find((exclusion) => exclusion === "discovery"),
   };
 }
 
