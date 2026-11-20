@@ -668,6 +668,10 @@ function savedReceiptOwners(drafts: ScanDraftInput[]): Map<string, JsonObject> {
   return owners;
 }
 
+function workerReceiptPrefix(context: ArtifactContext): string {
+  return `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+}
+
 export function workerCoverageReceiptLocation(
   context: ArtifactContext,
   surface: JsonObject,
@@ -675,7 +679,7 @@ export function workerCoverageReceiptLocation(
 ): { context: ArtifactContext; components: string[] } {
   const components = coverageReceiptComponents(ref);
   if (context.layout !== "worker") return { context, components };
-  const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const workerPrefix = workerReceiptPrefix(context);
   const normalized = components.join("/");
   if (
     recordedScanReceiptRefs(surface).includes(ref) ||
@@ -734,7 +738,7 @@ async function qualifyWorkerReceipts(
   canBindShared = true,
 ): Promise<boolean> {
   let qualified = true;
-  const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const workerPrefix = workerReceiptPrefix(context);
   const activePrefix = `${workerPrefix}output/`;
   const archivePrefix = `${workerPrefix}attempts/`;
   const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
@@ -961,14 +965,10 @@ async function preserveScanDraft(
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
   );
-  const archivedReceipts = new Map<
-    string,
-    { context: ArtifactContext; components: string[] }
-  >();
+  const archivedReceipts = new Map<string, ReceiptLocation>();
   const copiedArchiveRefs = new Map<string, string>();
-  const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const workerPrefix = workerReceiptPrefix(context);
   const archivePrefix = `${workerPrefix}attempts/`;
-  const activePrefix = `${workerPrefix}output/`;
   const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
   for (const source of archived) {
     for (const row of source.input.reviewState.surfaces as JsonObject[]) {
@@ -1046,167 +1046,21 @@ async function preserveScanDraft(
     input = structuredClone(result);
     if (saveObservation) await saveScanDraftCheckpoint(context, input, false);
   }
-  const reconciliation = prepareScanDraftReconciliation(
-    input,
-    result,
-    savedSources,
-    sources,
-    (result, source, ambiguousIds, resolvedSurfaces) =>
-      retainSavedReceiptOwnership(
-        result,
-        source,
-        ambiguousIds,
-        resolvedSurfaces,
-        sameSavedSurface,
-      ),
-  );
-  if (saveCheckpoint && requiresClosureValidation)
-    await saveScanDraftCheckpoint(context, input, false);
-  result = reconciliation.complete();
-  const { selectedReceiptsBySurface, closedDeferredIds, resolvedSurfaces } =
-    reconciliation;
+  const merged = await mergeSavedDraft(input, result, savedSources, {
+    sameSavedSurface,
+    checkpoint:
+      saveCheckpoint && requiresClosureValidation ? context : undefined,
+  });
+  result = merged.result;
   if (context.layout === "worker") {
     // Older checkpoints predate the coordinator's requested-path binding.
     result.findings = workerFindingsWithinScope(context, result.findings);
   }
-  const receiptOwners = savedReceiptOwners([result, ...sources]);
-  const receiptLocation = (ref: string) =>
-    workerCoverageReceiptLocation(context, receiptOwners.get(ref) ?? {}, ref);
-  // Archived attempts move their receipt files with them. Copy only evidence
-  // still retained by this draft into its current, independently bound output.
-  // Superseded surfaces must not reserve a discarded receipt's spelling.
-  for (const ref of new Set(
-    result.reviewState.surfaces.flatMap((row) => row.receiptRefs ?? []),
-  )) {
-    if (!currentReceipts.has(ref) || !archivedReceipts.has(ref)) continue;
-    try {
-      const location = receiptLocation(ref);
-      await artifactSourcePath(
-        location.context,
-        location.components,
-        "saved coverage receipt",
-      );
-      archivedReceipts.delete(ref);
-    } catch {
-      // A saved reference may outlive its copied receipt. Keep its archive
-      // origin for the normal copy/repair path, including destination checks.
-    }
-  }
-  const receiptPaths = await selectedReceiptPaths(
-    result,
-    selectedReceiptsBySurface,
-    async (ref) => {
-      const origin = archivedReceipts.get(ref);
-      await artifactSourcePath(
-        origin?.context ?? receiptLocation(ref).context,
-        origin
-          ? coverageReceiptComponents(origin.components.join("/"))
-          : receiptLocation(ref).components,
-        "selected coverage receipt",
-      );
-    },
-  );
-  for (const row of result.reviewState.surfaces as JsonObject[]) {
-    for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
-      const normalized = ref
-        .split("/")
-        .filter((part) => part !== "" && part !== ".")
-        .join("/");
-      const key = normalized.toLowerCase();
-      const origin = archivedReceipts.get(ref);
-      if (
-        !origin &&
-        selectedReceiptsBySurface.get(row.id as string)?.has(ref)
-      ) {
-        if (!receiptPaths.has(key)) receiptPaths.set(key, normalized);
-        continue;
-      }
-      let source: string;
-      try {
-        const components = coverageReceiptComponents(
-          origin
-            ? origin.components.join("/")
-            : receiptLocation(ref).components.join("/"),
-        );
-        coverageReceiptComponents(ref);
-        const previous = receiptPaths.get(key);
-        if (previous !== undefined && previous !== normalized)
-          throw Object.assign(
-            new Error(
-              `coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
-            ),
-            { code: "invalid_coverage_receipt_path" },
-          );
-        source = await artifactSourcePath(
-          origin?.context ?? receiptLocation(ref).context,
-          components,
-          origin ? "archived coverage receipt" : "saved coverage receipt",
-        );
-      } catch (error) {
-        const repair = await findSavedReceiptRepair(
-          input,
-          sources,
-          row,
-          ref,
-          closedDeferredIds,
-          resolvedSurfaces,
-          error,
-          async (replacementRef) => {
-            const saved = archivedReceipts.get(replacementRef);
-            await artifactSourcePath(
-              saved?.context ?? receiptLocation(replacementRef).context,
-              coverageReceiptComponents(
-                saved
-                  ? saved.components.join("/")
-                  : receiptLocation(replacementRef).components.join("/"),
-              ),
-              "replacement coverage receipt",
-            );
-          },
-        );
-        if (repair === undefined) {
-          if (!origin) continue;
-          throw error;
-        }
-        const { repaired, replacementError, unchangedDisposition } = repair;
-        if (!repaired) {
-          // Current drafts may still be incomplete; ordinary discovery admission
-          // diagnoses unrepaired refs as before. Archived repair keeps its errors.
-          if (!origin) continue;
-          if (
-            unchangedDisposition &&
-            replacementError === error &&
-            repair.error.message.includes("unavailable")
-          ) {
-            // Missing historical evidence remains bound to its original owner.
-            // Preserve progress for recovery; discovery admission still rejects it.
-            row.receiptRefs = (row.receiptRefs as string[]).map((value) =>
-              value === ref ? origin.components.join("/") : value,
-            );
-            continue;
-          }
-          throw replacementError;
-        }
-        row.receiptRefs = (row.receiptRefs as string[]).filter(
-          (value) => value !== ref,
-        );
-        warnings.push(
-          `Replaced ${repair.error.message.includes("unavailable") ? "missing" : "invalid"} ${origin ? "archived" : "saved"} coverage receipt ${ref}: ${repair.error.message}`,
-        );
-        continue;
-      }
-      if (origin) {
-        const location = receiptLocation(ref);
-        const destination = await artifactDestination(
-          location.context,
-          location.components,
-          "retained coverage receipt",
-        );
-        await fs.copyFile(source, destination);
-      }
-      receiptPaths.set(key, normalized);
-    }
-  }
+  await reconcileSavedReceipts(context, merged, {
+    archivedReceipts,
+    currentReceipts,
+    warnings,
+  });
   result = (
     context.layout === "scan"
       ? canonicalScanDraftInputSchema
@@ -1220,244 +1074,16 @@ async function preserveScanDraft(
   };
 }
 
-/** Read usable current checkpoints without changing the accepted terminal result. */
-export async function readAcceptedWorkerCheckpoints(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-): Promise<SavedScanDraft[]> {
-  return readSavedCheckpoints(
-    context,
-    "current",
-    scanDraftCheckpointName(input),
-    true,
-  ).catch(() => []);
-}
-
-function copiedArchiveReceiptRef(workerPrefix: string, ref: string): string {
-  return `${workerPrefix}output/artifacts/archived-receipts/${ref.slice(`${workerPrefix}attempts/`.length)}`;
-}
-
-/** Reconcile accepted history and validate retained receipts without modifying artifacts. */
-export async function reconcileAcceptedWorkerHistory(
-  context: ArtifactContext,
-  input: ScanDraftInput,
-  history: SavedScanDraft[],
-  receiptDigests: ReadonlyMap<string, string>,
-): Promise<ScanDraftInput> {
-  requireFiniteNumbers(input);
-  const savedSources = structuredClone(history);
-  const initial = structuredClone(input);
-  // Legacy terminal drafts may lack the IDs assigned to their archived occurrences.
-  initial.reviewState.deferred = normalizeDeferred(
-    initial.reviewState.deferred,
-  );
-  const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
-  const archivePrefix = `${workerPrefix}attempts/`;
-  const currentReceiptRefs = new Set(
-    [
-      initial,
-      ...savedSources
-        .filter((source) => !source.attempt)
-        .map(({ input }) => input),
-    ]
-      .flatMap((draft) => draft.reviewState.surfaces as JsonObject[])
-      .flatMap((surface) => {
-        const shared = recordedScanReceiptRefs(surface);
-        return ((surface.receiptRefs as string[] | undefined) ?? []).filter(
-          (ref) => !shared.includes(ref),
-        );
-      }),
-  );
-  for (const { input, attempt } of savedSources) {
-    if (!attempt) continue;
-    for (const surface of input.reviewState.surfaces as JsonObject[]) {
-      if (!Array.isArray(surface.receiptRefs)) continue;
-      const shared = recordedScanReceiptRefs(surface);
-      surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) => {
-        if (shared.includes(ref) || !ref.startsWith(archivePrefix)) return ref;
-        const copied = copiedArchiveReceiptRef(workerPrefix, ref);
-        if (!currentReceiptRefs.has(copied)) return ref;
-        const digest = receiptDigests.get(JSON.stringify([false, ref]));
-        // Use an existing writer copy only when its bound source and bytes agree.
-        return digest !== undefined &&
-          digest === receiptDigests.get(JSON.stringify([false, copied]))
-          ? copied
-          : ref;
-      });
-    }
-  }
-  const sources = savedSources.map(({ input }) => input);
-  const reconciliation = prepareScanDraftReconciliation(
-    input,
-    initial,
-    savedSources,
-    sources,
-    // A reader retains authenticated source rows but cannot authenticate new
-    // receipt ownership from a surface match in a different payload.
-    () => {},
-  );
-  const result = reconciliation.complete();
-  const { selectedReceiptsBySurface, closedDeferredIds, resolvedSurfaces } =
-    reconciliation;
-  const receiptOwners = savedReceiptOwners([result, ...sources]);
-  const receiptLocation = (ref: string) =>
-    workerCoverageReceiptLocation(context, receiptOwners.get(ref) ?? {}, ref);
-  const readReceipt = async (ref: string) => {
-    const location = receiptLocation(ref);
-    return artifactSourcePath(
-      location.context,
-      coverageReceiptComponents(location.components.join("/")),
-      "saved coverage receipt",
-    );
-  };
-  const receiptPath = (ref: string) =>
-    !receiptOwners.has(ref) && ref.startsWith(archivePrefix)
-      ? copiedArchiveReceiptRef(workerPrefix, ref)
-      : ref;
-  const receiptPaths = await selectedReceiptPaths(
-    result,
-    selectedReceiptsBySurface,
-    readReceipt,
-    receiptPath,
-  );
-  for (const row of result.reviewState.surfaces as JsonObject[]) {
-    const refs = (row.receiptRefs as string[] | undefined) ?? [];
-    for (const ref of refs) {
-      // A missing writer copy can fall back to its readable original on this same surface.
-      if (
-        !receiptDigests.has(JSON.stringify([false, ref])) &&
-        refs.some(
-          (original) =>
-            original.startsWith(archivePrefix) &&
-            copiedArchiveReceiptRef(workerPrefix, original) === ref &&
-            receiptDigests.has(JSON.stringify([false, original])),
-        )
-      ) {
-        try {
-          await readReceipt(ref);
-        } catch (error) {
-          if (!(
-            error instanceof Error &&
-            error.message.endsWith("the requested artifact is unavailable.")
-          ))
-            throw error;
-          row.receiptRefs = (row.receiptRefs as string[]).filter(
-            (value) => value !== ref,
-          );
-          continue;
-        }
-      }
-      const normalized = receiptPath(ref)
-        .split("/")
-        .filter((part) => part !== "" && part !== ".")
-        .join("/");
-      const key = normalized.toLowerCase();
-      if (selectedReceiptsBySurface.get(row.id as string)?.has(ref)) {
-        if (!receiptPaths.has(key)) receiptPaths.set(key, normalized);
-        continue;
-      }
-      try {
-        coverageReceiptComponents(ref);
-        const previous = receiptPaths.get(key);
-        if (previous !== undefined && previous !== normalized)
-          throw Object.assign(
-            new Error(
-              `coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
-            ),
-            { code: "invalid_coverage_receipt_path" },
-          );
-        await readReceipt(ref);
-      } catch (error) {
-        const repair = await findSavedReceiptRepair(
-          input,
-          sources,
-          row,
-          ref,
-          closedDeferredIds,
-          resolvedSurfaces,
-          error,
-          readReceipt,
-        );
-        if (repair?.repaired)
-          row.receiptRefs = (row.receiptRefs as string[]).filter(
-            (value) => value !== ref,
-          );
-        continue;
-      }
-      receiptPaths.set(key, normalized);
-    }
-  }
-  result.findings = workerFindingsWithinScope(context, result.findings);
-  return parsePersistedScanDraft(result);
-}
-
-function savedSurfaceIdentity(
-  result: ScanDraftInput,
-  sources: ScanDraftInput[],
-) {
-  const ambiguousSurfaceIds = new Set<string>();
-  for (const draft of [result, ...sources]) {
-    const seen = new Set<string>();
-    for (const surface of draft.reviewState.surfaces as JsonObject[]) {
-      if (typeof surface.id !== "string") continue;
-      if (seen.has(surface.id)) ambiguousSurfaceIds.add(surface.id);
-      seen.add(surface.id);
-    }
-  }
-  // A new disposition resolves fresh evidence before closeout joins prior receipts.
-  const sameSavedSurface = (left: JsonObject, right: JsonObject) =>
-    (typeof left.id === "string" &&
-      left.id === right.id &&
-      left.disposition === right.disposition &&
-      !ambiguousSurfaceIds.has(left.id)) ||
-    sameAuthoredSurface(left, right);
-  return { ambiguousSurfaceIds, sameSavedSurface };
-}
-
-function retainSavedReceiptOwnership(
-  result: ScanDraftInput,
-  source: ScanDraftInput,
-  ambiguousDeferredIds: Set<string>,
-  resolvedSurfaces: Set<JsonObject>,
-  sameSavedSurface: (left: JsonObject, right: JsonObject) => boolean,
-) {
-  for (const previous of source.reviewState.surfaces as JsonObject[]) {
-    const current = (result.reviewState.surfaces as JsonObject[]).find(
-      (surface) =>
-        coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
-        (sameSavedSurface(surface, previous) || resolvedSurfaces.has(previous)),
-    );
-    if (!current) continue;
-    const inherited = recordedScanReceiptRefs(previous);
-    if (!inherited.length) continue;
-    const refs = new Set(
-      ((current.receiptRefs as string[] | undefined) ?? []).map((ref) =>
-        posix.normalize(ref),
-      ),
-    );
-    const retained = inherited.filter(
-      (ref) => typeof ref === "string" && refs.has(ref),
-    );
-    if (retained.length === 0) continue;
-    setRecordedScanReceiptRefs(current, [
-      ...recordedScanReceiptRefs(current),
-      ...retained,
-    ]);
-  }
-}
-
-function prepareScanDraftReconciliation(
+async function mergeSavedDraft(
   input: ScanDraftInput,
   result: ScanDraftInput,
   savedSources: SavedScanDraft[],
-  sources: ScanDraftInput[],
-  retainReceiptOwnership: (
-    result: ScanDraftInput,
-    source: ScanDraftInput,
-    ambiguousIds: Set<string>,
-    resolvedSurfaces: Set<JsonObject>,
-  ) => void,
+  publication?: {
+    sameSavedSurface: (left: JsonObject, right: JsonObject) => boolean;
+    checkpoint?: ArtifactContext;
+  },
 ) {
+  const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const drafts = [result, ...sources];
   const savedSurfaces = drafts.flatMap((draft) => draft.reviewState.surfaces);
@@ -1692,273 +1318,589 @@ function prepareScanDraftReconciliation(
     retainedFinal?.input,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
-  return {
-    selectedReceiptsBySurface,
-    closedDeferredIds,
-    resolvedSurfaces,
-    complete,
+  if (publication?.checkpoint)
+    await saveScanDraftCheckpoint(publication.checkpoint, input, false);
+  const resolvedFollowUpSurfaces = sources.flatMap((source) => {
+    const pending = source.reviewState.deferred;
+    if (
+      pending.length === 0 ||
+      pending.some((item) => {
+        const candidateId = item.candidateId ?? item.id;
+        return (
+          keepsGenericWork(item) ||
+          typeof candidateId !== "string" ||
+          !currentCandidateIds.has(candidateId)
+        );
+      })
+    )
+      return [];
+    return source.reviewState.surfaces.filter(
+      (surface) => surface.disposition === "needs_follow_up",
+    );
+  });
+
+  const preserveDetails = (current: JsonObject, previous: JsonObject) => {
+    const reservedIdentity =
+      current.identity === undefined &&
+      previous.identity !== undefined &&
+      result.findings.some(
+        (finding) =>
+          finding !== current &&
+          finding.identity !== undefined &&
+          sameSavedFinding(finding, previous),
+      );
+    preserveFindingDetails(current, previous);
+    if (reservedIdentity) delete current.identity;
   };
 
-  function complete(): ScanDraftInput {
-    const resolvedFollowUpSurfaces = sources.flatMap((source) => {
-      const pending = source.reviewState.deferred;
-      if (
-        pending.length === 0 ||
-        pending.some((item) => {
-          const candidateId = item.candidateId ?? item.id;
-          return (
-            keepsGenericWork(item) ||
-            typeof candidateId !== "string" ||
-            !currentCandidateIds.has(candidateId)
-          );
-        })
-      )
-        return [];
-      return source.reviewState.surfaces.filter(
-        (surface) => surface.disposition === "needs_follow_up",
-      );
-    });
-
-    const preserveDetails = (current: JsonObject, previous: JsonObject) => {
-      const reservedIdentity =
-        current.identity === undefined &&
-        previous.identity !== undefined &&
-        result.findings.some(
-          (finding) =>
-            finding !== current &&
-            finding.identity !== undefined &&
-            sameSavedFinding(finding, previous),
-        );
-      preserveFindingDetails(current, previous);
-      if (reservedIdentity) delete current.identity;
-    };
-
-    for (const source of sources) {
-      retainReceiptOwnership(
+  for (const source of sources) {
+    // Only a writer may assign new receipt ownership from another saved draft.
+    if (publication)
+      retainSavedReceiptOwnership(
         result,
         source,
         ambiguousDeferredIds,
         resolvedSurfaces,
+        publication.sameSavedSurface,
       );
-      const deferred = result.reviewState.deferred as JsonObject[];
-      const dispositions = [
-        ...result.reviewState.surfaces,
-        ...result.reviewState.explicitExclusions,
-      ].filter(
-        (surface) =>
-          (surface.disposition === "rejected" ||
-            surface.disposition === "not_applicable") &&
-          typeof surface.candidateId === "string",
+    const deferred = result.reviewState.deferred as JsonObject[];
+    const dispositions = [
+      ...result.reviewState.surfaces,
+      ...result.reviewState.explicitExclusions,
+    ].filter(
+      (surface) =>
+        (surface.disposition === "rejected" ||
+          surface.disposition === "not_applicable") &&
+        typeof surface.candidateId === "string",
+    );
+    const candidateRows = [...deferred, ...dispositions];
+    for (const pending of source.reviewState.deferred) {
+      const candidateId = pending.candidateId ?? pending.id;
+      if (typeof candidateId !== "string") continue;
+      const finding = result.findings.find(
+        (item) => findingCandidateId(item) === candidateId,
       );
-      const candidateRows = [...deferred, ...dispositions];
-      for (const pending of source.reviewState.deferred) {
-        const candidateId = pending.candidateId ?? pending.id;
-        if (typeof candidateId !== "string") continue;
-        const finding = result.findings.find(
-          (item) => findingCandidateId(item) === candidateId,
-        );
-        if (finding) {
-          const provenance = finding.provenance as JsonObject;
-          if (pending.candidate !== undefined)
-            provenance.originalCandidates = exactUnion(
-              Array.isArray(provenance.originalCandidates)
-                ? provenance.originalCandidates
-                : [],
-              [pending.candidate],
-            );
-          if (isObject(pending.finding))
-            preserveFindingDetails(finding, pending.finding);
-        } else {
-          const candidateRow = candidateRows.find(
-            (item) =>
-              !keepsGenericWork(item) &&
-              (item.candidateId === candidateId || item.id === candidateId),
+      if (finding) {
+        const provenance = finding.provenance as JsonObject;
+        if (pending.candidate !== undefined)
+          provenance.originalCandidates = exactUnion(
+            Array.isArray(provenance.originalCandidates)
+              ? provenance.originalCandidates
+              : [],
+            [pending.candidate],
           );
-          if (candidateRow) {
-            for (const field of ["candidate", "finding"] as const) {
-              if (pending[field] !== undefined)
-                candidateRow[field] ??= structuredClone(pending[field]);
-            }
+        if (isObject(pending.finding))
+          preserveFindingDetails(finding, pending.finding);
+      } else {
+        const candidateRow = candidateRows.find(
+          (item) =>
+            !keepsGenericWork(item) &&
+            (item.candidateId === candidateId || item.id === candidateId),
+        );
+        if (candidateRow) {
+          for (const field of ["candidate", "finding"] as const) {
+            if (pending[field] !== undefined)
+              candidateRow[field] ??= structuredClone(pending[field]);
           }
         }
       }
-      const assignedFindings = new Set<JsonObject>();
-      const unmatchedFindings = new Set(
-        source.findings.filter((previous) => {
-          const matches = result.findings.filter(
-            (current) =>
-              current.identity !== undefined &&
-              previous.identity !== undefined &&
-              sameSavedFinding(current, previous),
-          );
-          for (const current of matches) assignedFindings.add(current);
-          return matches.length === 0;
-        }),
-      );
-      for (const finding of source.findings) {
-        const candidateId = findingCandidateId(finding);
-        const disposition =
-          candidateId === undefined
-            ? undefined
-            : dispositions.find(
-                (item) =>
-                  item.candidateId === candidateId || item.id === candidateId,
-              );
-        if (disposition) {
-          disposition.finding ??= structuredClone(finding);
-          continue;
-        }
-        const available = result.findings.filter(
+    }
+    const assignedFindings = new Set<JsonObject>();
+    const unmatchedFindings = new Set(
+      source.findings.filter((previous) => {
+        const matches = result.findings.filter(
           (current) =>
-            !assignedFindings.has(current) ||
-            (current.identity !== undefined &&
-              finding.identity !== undefined &&
-              sameSavedFinding(current, finding)),
+            current.identity !== undefined &&
+            previous.identity !== undefined &&
+            sameSavedFinding(current, previous),
         );
-        const matches = available.filter((current) =>
-          sameSavedFinding(current, finding),
-        );
-        const containing = matches.filter((current) =>
-          containsSavedFinding(current, finding),
-        );
-        const revisions = matches.filter((current) =>
-          sameSavedRevision(current, finding),
-        );
-        if (
-          matches.length === 1 &&
-          source.findings.filter(
-            (current) =>
-              (finding.identity === undefined ||
-                matches[0]!.identity === undefined ||
-                current.identity !== undefined) &&
-              (current === finding ||
-                unmatchedFindings.has(current) ||
-                (current.identity !== undefined &&
-                  finding.identity !== undefined &&
-                  sameSavedFinding(current, finding))) &&
-              sameSavedFinding(
-                current,
-                containing.length === 1 ? finding : matches[0]!,
-              ),
-          ).length === 1
-        ) {
-          preserveDetails(matches[0]!, finding);
-          assignedFindings.add(matches[0]!);
-        } else if (
-          containing.length === 1 &&
-          source.findings.filter((previous) =>
-            containsSavedFinding(containing[0]!, previous),
-          ).length === 1
-        ) {
-          // An unchanged sibling still owns its previously published identity.
-          preserveDetails(containing[0]!, finding);
-          assignedFindings.add(containing[0]!);
-        } else if (
-          revisions.length === 1 &&
-          source.findings.filter((current) =>
-            sameSavedRevision(current, revisions[0]!),
-          ).length === 1
-        ) {
-          preserveDetails(revisions[0]!, finding);
-          assignedFindings.add(revisions[0]!);
-        } else if (
-          !available.some((current) => {
-            const history = (current.provenance as JsonObject).previousFindings;
-            return (
-              Array.isArray(history) &&
-              history.some((previous) => {
-                if (
-                  !isObject(previous) ||
-                  !containsSavedFinding(previous, finding) ||
-                  source.findings.filter((sibling) =>
-                    containsSavedFinding(previous, sibling),
-                  ).length !== 1
-                )
-                  return false;
-                preserveFindingDetails(previous, finding);
-                return true;
-              })
+        for (const current of matches) assignedFindings.add(current);
+        return matches.length === 0;
+      }),
+    );
+    for (const finding of source.findings) {
+      const candidateId = findingCandidateId(finding);
+      const disposition =
+        candidateId === undefined
+          ? undefined
+          : dispositions.find(
+              (item) =>
+                item.candidateId === candidateId || item.id === candidateId,
             );
-          }) &&
-          containing.length === 0
-        ) {
-          const retained = structuredClone(finding);
-          result.findings.push(retained);
-          assignedFindings.add(retained);
-        }
+      if (disposition) {
+        disposition.finding ??= structuredClone(finding);
+        continue;
       }
-      const resolvedIds = new Set(
-        [
-          ...result.findings.map(findingCandidateId),
-          ...dispositions
-            .filter((item) => !keepsGenericWork(item))
-            .map((item) => item.candidateId ?? item.id),
-        ].filter((value): value is string => typeof value === "string"),
+      const available = result.findings.filter(
+        (current) =>
+          !assignedFindings.has(current) ||
+          (current.identity !== undefined &&
+            finding.identity !== undefined &&
+            sameSavedFinding(current, finding)),
       );
-      const pendingIds = new Set(
-        deferred
+      const matches = available.filter((current) =>
+        sameSavedFinding(current, finding),
+      );
+      const containing = matches.filter((current) =>
+        containsSavedFinding(current, finding),
+      );
+      const revisions = matches.filter((current) =>
+        sameSavedRevision(current, finding),
+      );
+      if (
+        matches.length === 1 &&
+        source.findings.filter(
+          (current) =>
+            (finding.identity === undefined ||
+              matches[0]!.identity === undefined ||
+              current.identity !== undefined) &&
+            (current === finding ||
+              unmatchedFindings.has(current) ||
+              (current.identity !== undefined &&
+                finding.identity !== undefined &&
+                sameSavedFinding(current, finding))) &&
+            sameSavedFinding(
+              current,
+              containing.length === 1 ? finding : matches[0]!,
+            ),
+        ).length === 1
+      ) {
+        preserveDetails(matches[0]!, finding);
+        assignedFindings.add(matches[0]!);
+      } else if (
+        containing.length === 1 &&
+        source.findings.filter((previous) =>
+          containsSavedFinding(containing[0]!, previous),
+        ).length === 1
+      ) {
+        // An unchanged sibling still owns its previously published identity.
+        preserveDetails(containing[0]!, finding);
+        assignedFindings.add(containing[0]!);
+      } else if (
+        revisions.length === 1 &&
+        source.findings.filter((current) =>
+          sameSavedRevision(current, revisions[0]!),
+        ).length === 1
+      ) {
+        preserveDetails(revisions[0]!, finding);
+        assignedFindings.add(revisions[0]!);
+      } else if (
+        !available.some((current) => {
+          const history = (current.provenance as JsonObject).previousFindings;
+          return (
+            Array.isArray(history) &&
+            history.some((previous) => {
+              if (
+                !isObject(previous) ||
+                !containsSavedFinding(previous, finding) ||
+                source.findings.filter((sibling) =>
+                  containsSavedFinding(previous, sibling),
+                ).length !== 1
+              )
+                return false;
+              preserveFindingDetails(previous, finding);
+              return true;
+            })
+          );
+        }) &&
+        containing.length === 0
+      ) {
+        const retained = structuredClone(finding);
+        result.findings.push(retained);
+        assignedFindings.add(retained);
+      }
+    }
+    const resolvedIds = new Set(
+      [
+        ...result.findings.map(findingCandidateId),
+        ...dispositions
           .filter((item) => !keepsGenericWork(item))
           .map((item) => item.candidateId ?? item.id),
-      );
-      const previousCoverage = {
-        ...source.reviewState,
-        deferred: source.reviewState.deferred.filter((item) => {
-          const candidateId = item.candidateId ?? item.id;
-          return (
-            (keepsGenericWork(item) ||
-              typeof candidateId !== "string" ||
-              !resolvedIds.has(candidateId)) &&
-            !closedDeferredIds.has(item.id as string)
-          );
-        }),
-        surfaces: source.reviewState.surfaces.filter((surface) => {
-          if (resolvedSurfaces.has(surface)) return false;
-          const candidateId = surface.candidateId ?? surface.id;
-          return (
-            (keepsGenericWork(surface) ||
-              typeof candidateId !== "string" ||
-              (!resolvedIds.has(candidateId) &&
-                (surface.disposition === "needs_follow_up" ||
-                  !pendingIds.has(candidateId)))) &&
-            !coverageEntryPresent(
-              result.reviewState.surfaces as unknown[],
-              surface,
-              ambiguousDeferredIds,
-            ) &&
-            !(
-              surface.disposition === "needs_follow_up" &&
-              coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+      ].filter((value): value is string => typeof value === "string"),
+    );
+    const pendingIds = new Set(
+      deferred
+        .filter((item) => !keepsGenericWork(item))
+        .map((item) => item.candidateId ?? item.id),
+    );
+    const previousCoverage = {
+      ...source.reviewState,
+      deferred: source.reviewState.deferred.filter((item) => {
+        const candidateId = item.candidateId ?? item.id;
+        return (
+          (keepsGenericWork(item) ||
+            typeof candidateId !== "string" ||
+            !resolvedIds.has(candidateId)) &&
+          !closedDeferredIds.has(item.id as string)
+        );
+      }),
+      surfaces: source.reviewState.surfaces.filter((surface) => {
+        if (resolvedSurfaces.has(surface)) return false;
+        const candidateId = surface.candidateId ?? surface.id;
+        return (
+          (keepsGenericWork(surface) ||
+            typeof candidateId !== "string" ||
+            (!resolvedIds.has(candidateId) &&
+              (surface.disposition === "needs_follow_up" ||
+                !pendingIds.has(candidateId)))) &&
+          !coverageEntryPresent(
+            result.reviewState.surfaces as unknown[],
+            surface,
+            ambiguousDeferredIds,
+          ) &&
+          !(
+            surface.disposition === "needs_follow_up" &&
+            coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+          )
+        );
+      }),
+      openQuestions:
+        result.complete === false
+          ? (source.reviewState.openQuestions ?? []).filter(
+              (question) =>
+                !coverageEntryPresent(
+                  result.reviewState.openQuestions ?? [],
+                  question,
+                ),
             )
-          );
-        }),
-        openQuestions:
-          result.complete === false
-            ? (source.reviewState.openQuestions ?? []).filter(
-                (question) =>
-                  !coverageEntryPresent(
-                    result.reviewState.openQuestions ?? [],
-                    question,
-                  ),
-              )
-            : [],
-      };
-      result.reviewState.surfaces = exactUnion(
-        result.reviewState.surfaces,
-        previousCoverage.surfaces,
-      );
-      result.reviewState = preserveScanCoverage(
-        result.reviewState,
-        previousCoverage,
-        ambiguousDeferredIds,
-      );
-    }
-    result.reviewState.deferred = normalizeDeferred(
-      result.reviewState.deferred,
-    );
-    result.reviewState.surfaces = normalizeSurfaces(
+          : [],
+    };
+    result.reviewState.surfaces = exactUnion(
       result.reviewState.surfaces,
+      previousCoverage.surfaces,
     );
-    return result;
+    result.reviewState = preserveScanCoverage(
+      result.reviewState,
+      previousCoverage,
+      ambiguousDeferredIds,
+    );
+  }
+  result.reviewState.deferred = normalizeDeferred(result.reviewState.deferred);
+  result.reviewState.surfaces = normalizeSurfaces(result.reviewState.surfaces);
+  return {
+    input,
+    result,
+    sources,
+    selectedReceiptsBySurface,
+    closedDeferredIds,
+    resolvedSurfaces,
+  };
+}
+
+type ReceiptLocation = ReturnType<typeof workerCoverageReceiptLocation>;
+
+async function reconcileSavedReceipts(
+  context: ArtifactContext,
+  merged: Awaited<ReturnType<typeof mergeSavedDraft>>,
+  state:
+    | {
+        archivedReceipts: Map<string, ReceiptLocation>;
+        currentReceipts: ReadonlySet<string>;
+        warnings: string[];
+      }
+    | { receiptDigests: ReadonlyMap<string, string> },
+) {
+  const {
+    input,
+    result,
+    sources,
+    selectedReceiptsBySurface,
+    closedDeferredIds,
+    resolvedSurfaces,
+  } = merged;
+  const publication = "archivedReceipts" in state ? state : undefined;
+  const receiptDigests =
+    "receiptDigests" in state ? state.receiptDigests : undefined;
+  const workerPrefix = workerReceiptPrefix(context);
+  const archivePrefix = `${workerPrefix}attempts/`;
+  const receiptOwners = savedReceiptOwners([result, ...sources]);
+  const receiptLocation = (ref: string) =>
+    workerCoverageReceiptLocation(context, receiptOwners.get(ref) ?? {}, ref);
+  if (publication) {
+    const { archivedReceipts, currentReceipts } = publication;
+    // Archived attempts move their receipt files with them. Copy only evidence
+    // still retained by this draft into its current, independently bound output.
+    // Superseded surfaces must not reserve a discarded receipt's spelling.
+    for (const ref of new Set(
+      result.reviewState.surfaces.flatMap((row) => row.receiptRefs ?? []),
+    )) {
+      if (!currentReceipts.has(ref) || !archivedReceipts.has(ref)) continue;
+      try {
+        const location = receiptLocation(ref);
+        await artifactSourcePath(
+          location.context,
+          location.components,
+          "saved coverage receipt",
+        );
+        archivedReceipts.delete(ref);
+      } catch {
+        // A saved reference may outlive its copied receipt. Keep its archive
+        // origin for the normal copy/repair path, including destination checks.
+      }
+    }
+  }
+  const readReceipt = (ref: string, description = "saved coverage receipt") => {
+    const location =
+      publication?.archivedReceipts.get(ref) ?? receiptLocation(ref);
+    return artifactSourcePath(
+      location.context,
+      coverageReceiptComponents(location.components.join("/")),
+      description,
+    );
+  };
+  const receiptPath = (ref: string) =>
+    receiptDigests && !receiptOwners.has(ref) && ref.startsWith(archivePrefix)
+      ? copiedArchiveReceiptRef(workerPrefix, ref)
+      : ref;
+  const receiptPaths = await selectedReceiptPaths(
+    result,
+    selectedReceiptsBySurface,
+    readReceipt,
+    receiptPath,
+  );
+  for (const row of result.reviewState.surfaces as JsonObject[]) {
+    const refs = (row.receiptRefs as string[] | undefined) ?? [];
+    for (const ref of refs) {
+      // A missing writer copy can fall back to its readable original on this same surface.
+      if (
+        receiptDigests &&
+        !receiptDigests.has(JSON.stringify([false, ref])) &&
+        refs.some(
+          (original) =>
+            original.startsWith(archivePrefix) &&
+            copiedArchiveReceiptRef(workerPrefix, original) === ref &&
+            receiptDigests.has(JSON.stringify([false, original])),
+        )
+      ) {
+        try {
+          await readReceipt(ref);
+        } catch (error) {
+          if (!(
+            error instanceof Error &&
+            error.message.endsWith("the requested artifact is unavailable.")
+          ))
+            throw error;
+          row.receiptRefs = (row.receiptRefs as string[]).filter(
+            (value) => value !== ref,
+          );
+          continue;
+        }
+      }
+      const normalized = receiptPath(ref)
+        .split("/")
+        .filter((part) => part !== "" && part !== ".")
+        .join("/");
+      const key = normalized.toLowerCase();
+      const origin = publication?.archivedReceipts.get(ref);
+      if (
+        !origin &&
+        selectedReceiptsBySurface.get(row.id as string)?.has(ref)
+      ) {
+        if (!receiptPaths.has(key)) receiptPaths.set(key, normalized);
+        continue;
+      }
+      let source: string;
+      try {
+        coverageReceiptComponents(ref);
+        const previous = receiptPaths.get(key);
+        if (previous !== undefined && previous !== normalized)
+          throw Object.assign(
+            new Error(
+              `coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
+            ),
+            { code: "invalid_coverage_receipt_path" },
+          );
+        source = await readReceipt(
+          ref,
+          origin ? "archived coverage receipt" : "saved coverage receipt",
+        );
+      } catch (error) {
+        const repair = await findSavedReceiptRepair(
+          input,
+          sources,
+          row,
+          ref,
+          closedDeferredIds,
+          resolvedSurfaces,
+          error,
+          (ref) =>
+            readReceipt(
+              ref,
+              publication
+                ? "replacement coverage receipt"
+                : "saved coverage receipt",
+            ),
+        );
+        if (repair === undefined) {
+          if (!origin) continue;
+          throw error;
+        }
+        const { repaired, replacementError, unchangedDisposition } = repair;
+        if (!repaired) {
+          // Current drafts may still be incomplete; ordinary discovery admission
+          // diagnoses unrepaired refs as before. Archived repair keeps its errors.
+          if (!origin) continue;
+          if (
+            unchangedDisposition &&
+            replacementError === error &&
+            repair.error.message.includes("unavailable")
+          ) {
+            // Missing historical evidence remains bound to its original owner.
+            // Preserve progress for recovery; discovery admission still rejects it.
+            row.receiptRefs = (row.receiptRefs as string[]).map((value) =>
+              value === ref ? origin.components.join("/") : value,
+            );
+            continue;
+          }
+          throw replacementError;
+        }
+        row.receiptRefs = (row.receiptRefs as string[]).filter(
+          (value) => value !== ref,
+        );
+        publication?.warnings.push(
+          `Replaced ${repair.error.message.includes("unavailable") ? "missing" : "invalid"} ${origin ? "archived" : "saved"} coverage receipt ${ref}: ${repair.error.message}`,
+        );
+        continue;
+      }
+      if (origin) {
+        const location = receiptLocation(ref);
+        const destination = await artifactDestination(
+          location.context,
+          location.components,
+          "retained coverage receipt",
+        );
+        await fs.copyFile(source, destination);
+      }
+      receiptPaths.set(key, normalized);
+    }
+  }
+}
+
+/** Read usable current checkpoints without changing the accepted terminal result. */
+export async function readAcceptedWorkerCheckpoints(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<SavedScanDraft[]> {
+  return readSavedCheckpoints(
+    context,
+    "current",
+    scanDraftCheckpointName(input),
+    true,
+  ).catch(() => []);
+}
+
+function copiedArchiveReceiptRef(workerPrefix: string, ref: string): string {
+  return `${workerPrefix}output/artifacts/archived-receipts/${ref.slice(`${workerPrefix}attempts/`.length)}`;
+}
+
+/** Reconcile accepted history and validate retained receipts without modifying artifacts. */
+export async function reconcileAcceptedWorkerHistory(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+  history: SavedScanDraft[],
+  receiptDigests: ReadonlyMap<string, string>,
+): Promise<ScanDraftInput> {
+  requireFiniteNumbers(input);
+  const savedSources = structuredClone(history);
+  const initial = structuredClone(input);
+  // Legacy terminal drafts may lack the IDs assigned to their archived occurrences.
+  initial.reviewState.deferred = normalizeDeferred(
+    initial.reviewState.deferred,
+  );
+  const workerPrefix = workerReceiptPrefix(context);
+  const archivePrefix = `${workerPrefix}attempts/`;
+  const currentReceiptRefs = new Set(
+    [
+      initial,
+      ...savedSources
+        .filter((source) => !source.attempt)
+        .map(({ input }) => input),
+    ]
+      .flatMap((draft) => draft.reviewState.surfaces as JsonObject[])
+      .flatMap((surface) => {
+        const shared = recordedScanReceiptRefs(surface);
+        return ((surface.receiptRefs as string[] | undefined) ?? []).filter(
+          (ref) => !shared.includes(ref),
+        );
+      }),
+  );
+  for (const { input, attempt } of savedSources) {
+    if (!attempt) continue;
+    for (const surface of input.reviewState.surfaces as JsonObject[]) {
+      if (!Array.isArray(surface.receiptRefs)) continue;
+      const shared = recordedScanReceiptRefs(surface);
+      surface.receiptRefs = (surface.receiptRefs as string[]).map((ref) => {
+        if (shared.includes(ref) || !ref.startsWith(archivePrefix)) return ref;
+        const copied = copiedArchiveReceiptRef(workerPrefix, ref);
+        if (!currentReceiptRefs.has(copied)) return ref;
+        const digest = receiptDigests.get(JSON.stringify([false, ref]));
+        // Use an existing writer copy only when its bound source and bytes agree.
+        return digest !== undefined &&
+          digest === receiptDigests.get(JSON.stringify([false, copied]))
+          ? copied
+          : ref;
+      });
+    }
+  }
+  const merged = await mergeSavedDraft(input, initial, savedSources);
+  await reconcileSavedReceipts(context, merged, { receiptDigests });
+  const { result } = merged;
+  result.findings = workerFindingsWithinScope(context, result.findings);
+  return parsePersistedScanDraft(result);
+}
+
+function savedSurfaceIdentity(
+  result: ScanDraftInput,
+  sources: ScanDraftInput[],
+) {
+  const ambiguousSurfaceIds = new Set<string>();
+  for (const draft of [result, ...sources]) {
+    const seen = new Set<string>();
+    for (const surface of draft.reviewState.surfaces as JsonObject[]) {
+      if (typeof surface.id !== "string") continue;
+      if (seen.has(surface.id)) ambiguousSurfaceIds.add(surface.id);
+      seen.add(surface.id);
+    }
+  }
+  // A new disposition resolves fresh evidence before closeout joins prior receipts.
+  const sameSavedSurface = (left: JsonObject, right: JsonObject) =>
+    (typeof left.id === "string" &&
+      left.id === right.id &&
+      left.disposition === right.disposition &&
+      !ambiguousSurfaceIds.has(left.id)) ||
+    sameAuthoredSurface(left, right);
+  return { ambiguousSurfaceIds, sameSavedSurface };
+}
+
+function retainSavedReceiptOwnership(
+  result: ScanDraftInput,
+  source: ScanDraftInput,
+  ambiguousDeferredIds: Set<string>,
+  resolvedSurfaces: Set<JsonObject>,
+  sameSavedSurface: (left: JsonObject, right: JsonObject) => boolean,
+) {
+  for (const previous of source.reviewState.surfaces as JsonObject[]) {
+    const current = (result.reviewState.surfaces as JsonObject[]).find(
+      (surface) =>
+        coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
+        (sameSavedSurface(surface, previous) || resolvedSurfaces.has(previous)),
+    );
+    if (!current) continue;
+    const inherited = recordedScanReceiptRefs(previous);
+    if (!inherited.length) continue;
+    const refs = new Set(
+      ((current.receiptRefs as string[] | undefined) ?? []).map((ref) =>
+        posix.normalize(ref),
+      ),
+    );
+    const retained = inherited.filter(
+      (ref) => typeof ref === "string" && refs.has(ref),
+    );
+    if (retained.length === 0) continue;
+    setRecordedScanReceiptRefs(current, [
+      ...recordedScanReceiptRefs(current),
+      ...retained,
+    ]);
   }
 }
 

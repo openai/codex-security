@@ -9,7 +9,7 @@ import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import {
   workerHistoryFixture,
-  workerDraft,
+  reviewDraft,
   scanId,
   finding,
 } from "./scan-draft-fixture.ts";
@@ -19,19 +19,14 @@ import {
 } from "./deep_scan_coverage_fixture.ts";
 
 const source = fileURLToPath(new URL("../src", import.meta.url));
-const { recordCodexSecurityWorkerScanDraft, parsePersistedScanDraft } =
-  await importSource(path.join(source, "artifact-scan-draft.ts"));
-const {
-  readAcceptedDiscovery,
-  validateDiscoveryArtifacts,
-  persistedScanUnion,
-  parseScanUnion,
-} = await importSource(path.join(source, "deep-scan/artifact-validation.ts"));
+const { parsePersistedScanDraft } = await importSource(
+  path.join(source, "artifact-scan-draft.ts"),
+);
+const { persistedScanUnion, parseScanUnion } = await importSource(
+  path.join(source, "deep-scan/artifact-validation.ts"),
+);
 const { mergeBatch } = await importSource(
   path.join(source, "deep-scan/iteration.ts"),
-);
-const { archiveDirectory, createDeepScanArtifacts } = await importSource(
-  path.join(source, "deep-scan/artifacts.ts"),
 );
 
 async function artifactTree(
@@ -66,11 +61,7 @@ async function publishAndReplay(
   f: Awaited<ReturnType<typeof workerHistoryFixture>>,
 ) {
   async function aggregate() {
-    const worker = await readAcceptedDiscovery(
-      createDeepScanArtifacts(f.scanRoot),
-      f.worker,
-      scanId,
-    );
+    const worker = await f.readAccepted();
     const result: ScanUnion = { scanId, complete: true, findings: [] };
     await mergeBatch(
       result,
@@ -101,43 +92,27 @@ for (const close of [false, true]) {
       id: "review",
       reason: "Synthetic review still needs evidence.",
     };
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: false,
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [pending],
-        },
+    await f.record(
+      reviewDraft(false, {
+        deferred: [pending],
       }),
     );
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: true,
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: close ? [] : [pending],
-          ...(close
-            ? {
-                resolvedDeferred: [
-                  { id: "review", reason: "Synthetic review completed." },
-                ],
-              }
-            : {}),
-        },
+    await f.record(
+      reviewDraft(true, {
+        deferred: close ? [] : [pending],
+        ...(close
+          ? {
+              resolvedDeferred: [
+                { id: "review", reason: "Synthetic review completed." },
+              ],
+            }
+          : {}),
       }),
     );
     const original = await readFile(f.resultPath);
     const accepted = parsePersistedScanDraft(JSON.parse(original.toString()));
     if (close) assert.equal(accepted.reviewState.resolvedDeferred.length, 1);
-    await validateDiscoveryArtifacts(
-      { workersRoot: path.dirname(f.workerRoot) },
-      f.resultPath,
-      scanId,
-    );
+    await f.validate();
     const { sourceCoverage: coverage } = await publishAndReplay(f);
     if (close) {
       assert.equal(coverage.resolvedDeferred?.length, 1);
@@ -161,39 +136,26 @@ for (const close of [false, true]) {
 for (const changed of [false, true]) {
   test(`typed retry closure keeps its originating attempt, changed=${changed}`, async (t) => {
     const f = await workerHistoryFixture(t, 2);
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: false,
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [{ id: "review", reason: "Synthetic pending review." }],
-        },
+    await f.record(
+      reviewDraft(false, {
+        deferred: [{ id: "review", reason: "Synthetic pending review." }],
       }),
     );
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: true,
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [],
-          resolvedDeferred: [{ id: "review", reason: "Original closure." }],
-        },
+    await f.record(
+      reviewDraft(true, {
+        resolvedDeferred: [{ id: "review", reason: "Original closure." }],
       }),
     );
     const archive = path.join(f.workerRoot, "attempts/attempt-01");
-    await archiveDirectory(f.output, archive);
+    await f.archive(archive);
     const historical = await readFile(path.join(archive, "result.json"));
     await mkdir(f.output, { recursive: true });
-    const current = workerDraft([], { complete: true });
+    const current = reviewDraft(true);
     if (changed)
       Object.assign(current.reviewState, {
         resolvedDeferred: [{ id: "review", reason: "Updated closure." }],
       });
-    await recordCodexSecurityWorkerScanDraft(f.workerContext, current);
+    await f.record(current);
     const original = await readFile(f.resultPath);
     const acceptedReduction = await publishAndReplay(f);
     const { sourceCoverage } = acceptedReduction;
@@ -212,12 +174,9 @@ for (const changed of [false, true]) {
     assert.equal(sourceCoverage.deferred.length, 0);
     assert.deepEqual(await readFile(f.resultPath), original);
     const secondArchive = path.join(f.workerRoot, "attempts/attempt-02");
-    await archiveDirectory(f.output, secondArchive);
+    await f.archive(secondArchive);
     f.worker.attempt = 3;
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], { complete: true }),
-    );
+    await f.record(reviewDraft(true));
     const repeated = await publishAndReplay(f);
     assert.deepEqual(
       repeated.sourceCoverage.resolvedDeferred,
@@ -248,39 +207,35 @@ for (const history of [
   const archived = history.includes("archived");
   test(`an accepted direct-file result retains ${history} checkpoint coverage without rewriting artifacts`, async (t) => {
     const f = await workerHistoryFixture(t, 2);
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: false,
-        reviewState: {
-          surfaces: [
-            {
-              id: "saved-surface",
-              label: "Synthetic archived-only surface",
-              disposition: "needs_follow_up",
-              receiptRefs: [],
-            },
-          ],
-          explicitExclusions: [
-            {
-              pattern: "synthetic-excluded/**",
-              reason: "Synthetic archived exclusion.",
-            },
-          ],
-          deferred: [
-            {
-              id: "saved-task",
-              reason: "Synthetic archived proof remains.",
-              surfaceIds: ["saved-surface"],
-            },
-          ],
-        },
+    await f.record(
+      reviewDraft(false, {
+        surfaces: [
+          {
+            id: "saved-surface",
+            label: "Synthetic archived-only surface",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          },
+        ],
+        explicitExclusions: [
+          {
+            pattern: "synthetic-excluded/**",
+            reason: "Synthetic archived exclusion.",
+          },
+        ],
+        deferred: [
+          {
+            id: "saved-task",
+            reason: "Synthetic archived proof remains.",
+            surfaceIds: ["saved-surface"],
+          },
+        ],
       }),
     );
     const saved = archived
       ? path.join(f.workerRoot, "attempts/attempt-01")
       : f.output;
-    if (archived) await archiveDirectory(f.output, saved);
+    if (archived) await f.archive(saved);
     if (history.startsWith("malformed")) {
       await writeFile(path.join(saved, "checkpoints/unusable.json"), "{");
       const head = path.join(saved, "checkpoint-head.json");
@@ -294,21 +249,13 @@ for (const history of [
       }
     }
     await mkdir(f.output, { recursive: true });
-    const terminal = workerDraft([], { complete: true });
+    const terminal = reviewDraft(true);
     await writeFile(f.resultPath, JSON.stringify(terminal));
     const before = await artifactTree(f.scanRoot);
-    const admitted = await validateDiscoveryArtifacts(
-      createDeepScanArtifacts(f.scanRoot),
-      f.resultPath,
-      scanId,
-    );
+    const admitted = await f.validate();
     assert.deepEqual(admitted.findings, terminal.findings);
     assert.equal(admitted.reviewState.surfaces.length, 0);
-    const source = await readAcceptedDiscovery(
-      createDeepScanArtifacts(f.scanRoot),
-      f.worker,
-      scanId,
-    );
+    const source = await f.readAccepted();
     assert.deepEqual(source.result.findings, admitted.findings);
     assert.equal(Object.hasOwn(source.result, "coverage"), false);
     assert.deepEqual(await artifactTree(f.scanRoot), before);
@@ -364,44 +311,36 @@ for (const repair of [
       path.join(f.output, original),
       "Synthetic original evidence.\n",
     );
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: false,
-        reviewState: {
-          surfaces: [
-            {
-              id: "review",
-              label: "Synthetic review",
-              disposition: "needs_follow_up",
-              receiptRefs: [original, missing],
-            },
-            ...(repair === "independent source"
-              ? [
-                  {
-                    id: "independent",
-                    label: "Independent incomplete review",
-                    disposition: "needs_follow_up",
-                    receiptRefs: [missing],
-                  },
-                ]
-              : []),
-          ],
-          explicitExclusions: [],
-          deferred: [
-            {
-              id: "review-gap",
-              reason: "Synthetic pending evidence.",
-              surfaceIds: ["review"],
-            },
-          ],
-        },
+    await f.record(
+      reviewDraft(false, {
+        surfaces: [
+          {
+            id: "review",
+            label: "Synthetic review",
+            disposition: "needs_follow_up",
+            receiptRefs: [original, missing],
+          },
+          ...(repair === "independent source"
+            ? [
+                {
+                  id: "independent",
+                  label: "Independent incomplete review",
+                  disposition: "needs_follow_up",
+                  receiptRefs: [missing],
+                },
+              ]
+            : []),
+        ],
+        deferred: [
+          {
+            id: "review-gap",
+            reason: "Synthetic pending evidence.",
+            surfaceIds: ["review"],
+          },
+        ],
       }),
     );
-    await archiveDirectory(
-      f.output,
-      path.join(f.workerRoot, "attempts/attempt-01"),
-    );
+    await f.archive();
     await mkdir(path.join(f.output, "artifacts"), { recursive: true });
     await writeFile(
       path.join(f.output, replacement),
@@ -410,38 +349,24 @@ for (const repair of [
     await writeFile(
       f.resultPath,
       JSON.stringify(
-        workerDraft([], {
-          complete: true,
-          reviewState: {
-            surfaces: [
-              {
-                id: "review",
-                label: "Synthetic review",
-                disposition: "no_issue_found",
-                receiptRefs:
-                  repair === "no valid replacement" ? [] : [replacement],
-              },
-            ],
-            explicitExclusions: [],
-            deferred: [],
-            resolvedDeferred: [
-              { id: "review-gap", reason: "Synthetic completed evidence." },
-            ],
-          },
+        reviewDraft(true, {
+          surfaces: [
+            {
+              id: "review",
+              label: "Synthetic review",
+              disposition: "no_issue_found",
+              receiptRefs:
+                repair === "no valid replacement" ? [] : [replacement],
+            },
+          ],
+          resolvedDeferred: [
+            { id: "review-gap", reason: "Synthetic completed evidence." },
+          ],
         }),
       ),
     );
-    await validateDiscoveryArtifacts(
-      createDeepScanArtifacts(f.scanRoot),
-      f.resultPath,
-      scanId,
-    );
-    const readDiscovery = () =>
-      readAcceptedDiscovery(
-        createDeepScanArtifacts(f.scanRoot),
-        f.worker,
-        scanId,
-      );
+    await f.validate();
+    const readDiscovery = () => f.readAccepted();
     const before = await artifactTree(f.scanRoot);
     if (repair !== "matching closeout") {
       // A missing receipt still needed by any observation prevents acceptance.
@@ -486,25 +411,20 @@ for (const copy of [
       disposition: "needs_follow_up",
       receiptRefs: [receipt],
     };
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: false,
-        reviewState: {
-          surfaces: [surface],
-          explicitExclusions: [],
-          deferred: [
-            {
-              id: "review-gap",
-              reason: "Synthetic pending proof.",
-              surfaceIds: [surface.id],
-            },
-          ],
-        },
+    await f.record(
+      reviewDraft(false, {
+        surfaces: [surface],
+        deferred: [
+          {
+            id: "review-gap",
+            reason: "Synthetic pending proof.",
+            surfaceIds: [surface.id],
+          },
+        ],
       }),
     );
     const archive = path.join(f.workerRoot, "attempts/attempt-01");
-    await archiveDirectory(f.output, archive);
+    await f.archive(archive);
     await mkdir(path.dirname(path.join(f.output, receipt)), {
       recursive: true,
     });
@@ -514,18 +434,12 @@ for (const copy of [
         ? originalBytes
         : "Synthetic current receipt.\n",
     );
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: true,
-        reviewState: {
-          surfaces: [{ ...surface, disposition: "no_issue_found" }],
-          explicitExclusions: [],
-          deferred: [],
-          resolvedDeferred: [
-            { id: "review-gap", reason: "Synthetic completed proof." },
-          ],
-        },
+    await f.record(
+      reviewDraft(true, {
+        surfaces: [{ ...surface, disposition: "no_issue_found" }],
+        resolvedDeferred: [
+          { id: "review-gap", reason: "Synthetic completed proof." },
+        ],
       }),
     );
     const accepted = JSON.parse(await readFile(f.resultPath, "utf8"));
@@ -534,11 +448,7 @@ for (const copy of [
     const copied = `${prefix}output/artifacts/archived-receipts/attempt-01/${receipt}`;
     const original = `${prefix}attempts/attempt-01/${receipt}`;
     assert.ok(accepted.reviewState.surfaces[0].receiptRefs.includes(copied));
-    await validateDiscoveryArtifacts(
-      createDeepScanArtifacts(f.scanRoot),
-      f.resultPath,
-      scanId,
-    );
+    await f.validate();
     if (copy === "changed")
       await writeFile(
         path.join(f.scanRoot, copied),
@@ -546,11 +456,7 @@ for (const copy of [
       );
     if (copy === "missing") await rm(path.join(f.scanRoot, copied));
     const before = await artifactTree(f.scanRoot);
-    const source = await readAcceptedDiscovery(
-      createDeepScanArtifacts(f.scanRoot),
-      f.worker,
-      scanId,
-    );
+    const source = await f.readAccepted();
     assert.deepEqual(await artifactTree(f.scanRoot), before);
     assert.equal(source.coverage.surfaces.length, 1);
     const refs = source.coverage.surfaces[0].receiptRefs;
@@ -588,32 +494,21 @@ for (const local of [false, true]) {
       provenance: { scanReceiptRefs: [ref] },
     };
     const draft = (surface: typeof checkpoint, complete: boolean) =>
-      workerDraft([], {
-        complete,
-        reviewState: {
-          surfaces: [surface],
-          explicitExclusions: [],
-          deferred: [],
-        },
+      reviewDraft(complete, {
+        surfaces: [surface],
       });
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      draft(checkpoint, false),
-    );
+    await f.record(draft(checkpoint, false));
     if (local) {
       await mkdir(path.dirname(path.join(f.output, ref)), { recursive: true });
       await writeFile(path.join(f.output, ref), "worker-owned evidence");
     }
     await writeFile(f.resultPath, JSON.stringify(draft(direct, true)));
-    const artifacts = createDeepScanArtifacts(f.scanRoot);
-    const first = validateDiscoveryArtifacts(artifacts, f.resultPath, scanId);
+
+    const first = f.validate();
     if (local) await first;
     else await assert.rejects(first, /artifact is unavailable/);
-    await archiveDirectory(
-      f.output,
-      path.join(f.workerRoot, "attempts/attempt-01"),
-    );
-    const terminal = workerDraft([], { complete: true });
+    await f.archive();
+    const terminal = reviewDraft(true);
     await writeFile(f.resultPath, JSON.stringify(terminal));
     for (const viaWriter of [false, true]) {
       if (viaWriter) {
@@ -621,14 +516,10 @@ for (const local of [false, true]) {
         await cp(path.join(f.workerRoot, "attempts/attempt-01"), f.output, {
           recursive: true,
         });
-        await recordCodexSecurityWorkerScanDraft(f.workerContext, terminal);
+        await f.record(terminal);
       }
       const before = await artifactTree(f.scanRoot);
-      const { coverage } = await readAcceptedDiscovery(
-        artifacts,
-        f.worker,
-        scanId,
-      );
+      const { coverage } = await f.readAccepted();
       assert.deepEqual(await artifactTree(f.scanRoot), before);
       assert.equal(coverage.surfaces.length, local ? 2 : 1);
       for (const row of coverage.surfaces) {
@@ -659,63 +550,41 @@ test("a direct-file surface cannot inherit archived shared receipt ownership fro
     disposition: "no_issue_found",
     receiptRefs: [ref],
   };
-  await recordCodexSecurityWorkerScanDraft(
-    f.workerContext,
-    workerDraft([], {
-      complete: false,
-      reviewState: {
-        surfaces: [
-          repeated,
-          {
-            id: "independent-review",
-            label: "Synthetic independent archived review",
-            disposition: "needs_follow_up",
-            receiptRefs: [ref],
-          },
-        ],
-        explicitExclusions: [],
-        deferred: [],
-      },
+  await f.record(
+    reviewDraft(false, {
+      surfaces: [
+        repeated,
+        {
+          id: "independent-review",
+          label: "Synthetic independent archived review",
+          disposition: "needs_follow_up",
+          receiptRefs: [ref],
+        },
+      ],
     }),
   );
   const recorded = JSON.parse(await readFile(f.resultPath, "utf8"));
   for (const surface of recorded.reviewState.surfaces) {
     assert.deepEqual(surface.provenance.scanReceiptRefs, [ref]);
   }
-  await archiveDirectory(
-    f.output,
-    path.join(f.workerRoot, "attempts/attempt-01"),
-  );
+  await f.archive();
   await mkdir(path.dirname(path.join(f.output, ref)), { recursive: true });
   await writeFile(path.join(f.output, ref), localBytes);
   await writeFile(
     f.resultPath,
     JSON.stringify(
-      workerDraft([], {
-        complete: true,
-        reviewState: {
-          surfaces: [{ ...repeated, provenance: { scanReceiptRefs: [ref] } }],
-          explicitExclusions: [],
-          deferred: [],
-        },
+      reviewDraft(true, {
+        surfaces: [{ ...repeated, provenance: { scanReceiptRefs: [ref] } }],
       }),
     ),
   );
   const before = await artifactTree(f.scanRoot);
-  const admitted = await validateDiscoveryArtifacts(
-    createDeepScanArtifacts(f.scanRoot),
-    f.resultPath,
-    scanId,
-  );
+  const admitted = await f.validate();
   assert.equal(
     admitted.reviewState.surfaces[0].provenance.scanReceiptRefs,
     undefined,
   );
-  const { coverage } = await readAcceptedDiscovery(
-    createDeepScanArtifacts(f.scanRoot),
-    f.worker,
-    scanId,
-  );
+  const { coverage } = await f.readAccepted();
   assert.deepEqual(await artifactTree(f.scanRoot), before);
   const current = coverage.surfaces.find(
     (surface: { label: string }) => surface.label === repeated.label,
@@ -747,41 +616,22 @@ test("an archived generic closure cannot close a new candidate with the same raw
   const f = await workerHistoryFixture(t, 2);
   const pending = { id: "review", reason: "Synthetic pending review." };
   const closure = { id: "review", reason: "Synthetic review completed." };
-  await recordCodexSecurityWorkerScanDraft(
-    f.workerContext,
-    workerDraft([], {
-      complete: false,
-      reviewState: {
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [pending],
-      },
+  await f.record(
+    reviewDraft(false, {
+      deferred: [pending],
     }),
   );
-  await recordCodexSecurityWorkerScanDraft(
-    f.workerContext,
-    workerDraft([], {
-      complete: true,
-      reviewState: {
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [],
-        resolvedDeferred: [closure],
-      },
+  await f.record(
+    reviewDraft(true, {
+      resolvedDeferred: [closure],
     }),
   );
   const archive = path.join(f.workerRoot, "attempts/attempt-01");
-  await archiveDirectory(f.output, archive);
+  await f.archive(archive);
   const archived = await readFile(path.join(archive, "result.json"));
-  await recordCodexSecurityWorkerScanDraft(
-    f.workerContext,
-    workerDraft([], {
-      complete: true,
-      reviewState: {
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [{ ...pending, candidateId: "review" }],
-      },
+  await f.record(
+    reviewDraft(true, {
+      deferred: [{ ...pending, candidateId: "review" }],
     }),
   );
   const current = await readFile(f.resultPath);
@@ -793,16 +643,9 @@ test("an archived generic closure cannot close a new candidate with the same raw
   assert.equal(reduced.sourceCoverage.deferred.length, 1);
   assert.equal(reduced.sourceCoverage.resolvedDeferred?.length ?? 0, 0);
   await assert.rejects(
-    recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([], {
-        complete: true,
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
-          deferred: [],
-          resolvedDeferred: [closure],
-        },
+    f.record(
+      reviewDraft(true, {
+        resolvedDeferred: [closure],
       }),
     ),
     /reviewState\.resolvedDeferred cannot close candidate review/,
@@ -823,13 +666,10 @@ for (const outcome of [
       ...finding("archived-exclusion", "src/synthetic.ts"),
       provenance: { source: "local_plugin", candidateId: "candidate-1" },
     };
-    await recordCodexSecurityWorkerScanDraft(
-      f.workerContext,
-      workerDraft([archivedFinding], {
-        complete: true,
-        reviewState: {
-          surfaces: [],
-          explicitExclusions: [],
+    await f.record(
+      reviewDraft(
+        true,
+        {
           deferred: [
             {
               id: "generic-review",
@@ -837,10 +677,11 @@ for (const outcome of [
             },
           ],
         },
-      }),
+        [archivedFinding],
+      ),
     );
     const archive = path.join(f.workerRoot, "attempts/attempt-01");
-    await archiveDirectory(f.output, archive);
+    await f.archive(archive);
     const historical = await readFile(path.join(archive, "result.json"));
     await mkdir(f.output, { recursive: true });
     const terminal = outcome === "rejected" || outcome === "not_applicable";
@@ -855,26 +696,13 @@ for (const outcome of [
             disposition: terminal ? outcome : "rejected",
           }),
     };
-    const submitted = workerDraft([], {
-      complete: true,
-      reviewState: {
-        surfaces: [],
-        explicitExclusions: [exclusion],
-        deferred: [],
-      },
+    const submitted = reviewDraft(true, {
+      explicitExclusions: [exclusion],
     });
-    await recordCodexSecurityWorkerScanDraft(f.workerContext, submitted);
-    await validateDiscoveryArtifacts(
-      { workersRoot: path.dirname(f.workerRoot) },
-      f.resultPath,
-      scanId,
-    );
+    await f.record(submitted);
+    await f.validate();
     const current = await readFile(f.resultPath);
-    const accepted = await readAcceptedDiscovery(
-      createDeepScanArtifacts(f.scanRoot),
-      f.worker,
-      scanId,
-    );
+    const accepted = await f.readAccepted();
     assert.equal(accepted.result.findings.length, terminal ? 0 : 1);
     assert.equal(accepted.coverage.deferred.length, 1);
     assert.equal(
