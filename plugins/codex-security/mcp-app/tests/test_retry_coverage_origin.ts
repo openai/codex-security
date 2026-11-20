@@ -1150,6 +1150,51 @@ for (const copies of [1, 2]) {
   }
 }
 
+for (const [count, selected, current] of [
+  [2, 1, false],
+  [3, 2, false],
+  [2, 0, false],
+  [2, 1, true],
+] as const) {
+  test(`typed retry retains omitted anonymous occurrences (count=${count}, selected=${selected}, current=${current})`, async (t) => {
+    const f = await workerHistoryFixture(t, current ? 1 : 2);
+    const draft = reviewDraft(true, {
+      surfaces: Array.from({ length: count }, () => ({
+        label: "Repeated review",
+        disposition: "no_issue_found",
+        receiptRefs: [],
+      })),
+    });
+    const normalized = parseScanDraft(draft).reviewState.surfaces;
+    const savedPath = current
+      ? f.resultPath
+      : path.join(f.workerRoot, "attempts/attempt-01/result.json");
+    await mkdir(path.dirname(savedPath), { recursive: true });
+    await writeFile(savedPath, JSON.stringify(draft));
+    const original = await readFile(savedPath);
+    const written = await f.record(
+      reviewDraft(true, { surfaces: [normalized[selected]] }),
+    );
+    assert.equal(written.surfaceCount, count);
+    assert.deepEqual(
+      written.reviewState.surfaces.map((row: { id: string }) => row.id).sort(),
+      normalized.map((row: { id: string }) => row.id).sort(),
+    );
+    if (!current) assert.deepEqual(await readFile(savedPath), original);
+    const result = await readFile(f.resultPath);
+    const accepted = await f.readAccepted();
+    assert.equal(accepted.coverage.surfaces.length, count);
+    assert.deepEqual(
+      accepted.coverage.surfaces.map(
+        (row: { provenance: { attempt: number } }) => row.provenance.attempt,
+      ),
+      Array(count).fill(1),
+    );
+    assert.deepEqual(await readFile(f.resultPath), result);
+    if (!current) assert.deepEqual(await readFile(savedPath), original);
+  });
+}
+
 for (const [reservedSuffix, completed, reversed, roundtrip] of [
   [false, false, false, false],
   [false, true, false, false],

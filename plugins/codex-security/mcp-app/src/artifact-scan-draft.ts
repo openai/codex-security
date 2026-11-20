@@ -1163,29 +1163,51 @@ function inferSavedIds<T extends JsonObject>(
       if (typeof row.candidateId === "string" && !identity(row))
         reserved.add(row.candidateId);
     }
-    for (const [index, row] of rows.entries()) {
-      if (typeof row.id === "string") continue;
-      const content = identity(row);
-      if (!content) continue;
-      const matches = (saved: (typeof known)[number]) =>
-        !reserved.has(saved.id) && isDeepStrictEqual(saved.content, content);
-      const preferred = originalId?.(rows, index);
-      const matching =
-        (preferred === undefined
-          ? undefined
-          : known.find((saved) => saved.id === preferred && matches(saved))) ??
-        known.find(matches);
-      if (matching) {
-        rows[index] = { ...row, id: matching.id };
-        reserved.add(matching.id);
+    const missing = rows.flatMap((row, index) =>
+      typeof row.id === "string"
+        ? []
+        : [
+            {
+              index,
+              row,
+              content: identity(row),
+              preferred: originalId?.(rows, index),
+            },
+          ],
+    );
+    // Reserve matching occurrence names before another unnamed row can take them.
+    for (const preferOriginal of [true, false]) {
+      for (const { index, row, content, preferred } of missing) {
+        if (
+          typeof rows[index]!.id === "string" ||
+          !content ||
+          (preferOriginal && preferred === undefined)
+        )
+          continue;
+        const matching = known.find(
+          (saved) =>
+            !reserved.has(saved.id) &&
+            (!preferOriginal || saved.id === preferred) &&
+            isDeepStrictEqual(saved.content, content),
+        );
+        if (matching) {
+          rows[index] = { ...row, id: matching.id };
+          reserved.add(matching.id);
+        }
+      }
+    }
+    const remaining = missing.filter(
+      ({ index }) => typeof rows[index]!.id !== "string",
+    );
+    for (const { index, row, preferred } of remaining) {
+      if (preferred !== undefined && !reserved.has(preferred)) {
+        rows[index] = { ...row, id: preferred };
+        reserved.add(preferred);
       }
     }
     const normalized = normalize(rows);
-    for (const [index, row] of rows.entries()) {
-      if (typeof row.id === "string") continue;
-      const id = originalId?.(rows, index);
-      rows[index] =
-        id === undefined ? normalized[index]! : { ...normalized[index]!, id };
+    for (const { index } of remaining) {
+      rows[index] = normalized[index]!;
       remember(rows[index]!);
     }
   }
