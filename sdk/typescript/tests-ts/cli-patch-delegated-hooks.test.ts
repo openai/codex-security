@@ -386,6 +386,7 @@ for (const mode of ["veto", "hardlink", "junction"]) {
           [
             "#!/bin/sh",
             "set -eu",
+            'test -z "${LD_LIBRARY_PATH-}"',
             'for argument in "$@"; do last=$argument; done',
             'case "${last-}" in */COMMIT_EDITMSG)',
             '  if test -e "$last"; then echo "private message existed before sandbox provisioning" >&2; exit 73; fi',
@@ -473,7 +474,7 @@ try {
         ["commit", "--allow-empty", "-m", subject],
         directory,
         {
-          environment,
+          environment: { ...environment, LD_LIBRARY_PATH: directory },
           publicationHooks: {
             gitDirectory: admin,
             events: new Set(["commit-msg"]),

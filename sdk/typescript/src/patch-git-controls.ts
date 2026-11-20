@@ -27,13 +27,17 @@ import {
   sep,
 } from "node:path";
 import {
-  credentialFileVariable,
+  patchCredentialKind,
   gitSecretSetting,
   httpCredentialFile,
   proxyUserinfo,
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
-import { awsAccountHome, awsProfileFiles } from "./continuum-aws.js";
+import {
+  awsAccountHome,
+  awsProfileFiles,
+  expandCredentialPath,
+} from "./continuum-aws.js";
 import { configuredCodexHome, environmentEntry } from "./auth.js";
 import {
   codexSecurityCredentialHome,
@@ -514,11 +518,11 @@ function accountHomeDirectory(): string | undefined {
   }
 }
 
-function gitLabConfigRoots(
+function clientConfigRoots(
   environment: NodeJS.ProcessEnv,
   homes: Set<string | undefined>,
 ): Set<string> {
-  // glab searches the legacy home location and the platform's XDG roots.
+  // Include legacy homes and the platform's user and system config roots.
   const windows = process.platform === "win32";
   const homePrefix = windows ? /^%USERPROFILE%/u : /^(?:~|\$HOME)/u;
   const roots = new Set<string>();
@@ -528,8 +532,8 @@ function gitLabConfigRoots(
   ];
   for (const dir of xdg) {
     if (!dir) continue;
-    if (isAbsolute(dir)) roots.add(dir);
-    else if (homePrefix.test(dir))
+    roots.add(dir);
+    if (homePrefix.test(dir))
       for (const home of homes)
         if (home) roots.add(join(home, dir.replace(homePrefix, "")));
   }
@@ -577,6 +581,7 @@ async function collectCredentialPointers(
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
   const selected = paths.files;
+  const pipConfig = process.platform === "win32" ? "pip.ini" : "pip.conf";
   const terraformHomes = new Set<string>();
   const selectFile = (directory: string, file: string, paths = selected) => {
     // A delegate can use the literal path or a client's normalized spelling.
@@ -660,8 +665,26 @@ async function collectCredentialPointers(
       join(".kube", "config"),
       ".npmrc",
       ".pypirc",
+      ".boto",
+      join(process.platform === "win32" ? "pip" : ".pip", pipConfig),
     ])
       selectFile(home, file);
+    for (const name of [
+      "BOTO_CONFIG",
+      "AWS_CREDENTIAL_FILE",
+      "PIP_CLIENT_CERT",
+    ]) {
+      const value = environment[name];
+      if (value)
+        selected.add(
+          expandCredentialPath(
+            name,
+            value,
+            home,
+            name === "BOTO_CONFIG" ? environment : undefined,
+          ),
+        );
+    }
     for (const { defaultPath, path } of awsProfileFiles(home, environment)) {
       selected.add(defaultPath);
       if (path) selected.add(path);
@@ -686,8 +709,19 @@ async function collectCredentialPointers(
   }
   if (environment["GH_CONFIG_DIR"])
     selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
-  for (const root of gitLabConfigRoots(environment, homes))
+  for (const root of clientConfigRoots(environment, homes)) {
     selectFile(root, join("glab-cli", "config.yml"));
+    selectFile(root, join("pip", pipConfig));
+  }
+  if (process.platform !== "win32") {
+    selectFile("/etc", pipConfig);
+    selectFile("/etc", "boto.cfg");
+  }
+  for (const prefix of [
+    environment["VIRTUAL_ENV"],
+    environment["CONDA_PREFIX"],
+  ])
+    if (prefix) selectFile(prefix, pipConfig);
   // Capture physical targets too when a profile is a link into a dotfile tree.
   for (const dir of profileDirs)
     await selectFragments(dir, /\.config\.toml(?:\.tmp)?$/iu);
@@ -735,8 +769,10 @@ async function collectCredentialPointers(
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
     const variable = name.toUpperCase();
-    if (credentialFileVariable.test(variable)) {
+    if (patchCredentialKind(variable) === "file") {
       selected.add(value);
+      if (/^~[\\/]/u.test(value))
+        for (const home of homes) if (home) selectFile(home, value.slice(2));
       const path = variable.startsWith("NPM_CONFIG_")
         ? npmConfigPath(value)
         : normalize(value);
@@ -1077,7 +1113,6 @@ export async function capturePatchGitControls(
     "GIT_CONFIG_PARAMETERS",
   );
   const userProfile = environmentEntry(environment, "USERPROFILE");
-  const netrc = environmentEntry(environment, "NETRC");
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
       ...options,
@@ -1722,10 +1757,6 @@ export async function capturePatchGitControls(
       return entries;
     };
     await protectPointers(checkout, inheritedPointers);
-    if (mode !== "external" && netrc) {
-      hostMayReadStore = true;
-      await protectTransportFile(checkout, netrc);
-    }
     filterCheckouts.add(checkout);
     const records = await runConfigFields(checkout, [
       "config",

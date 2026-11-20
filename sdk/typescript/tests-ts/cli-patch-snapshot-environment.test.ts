@@ -159,6 +159,7 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
       },
     }),
     DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
+    AWS_BEARER_TOKEN_BEDROCK: "synthetic-service-token",
     TF_TOKEN_registry_example_test: "synthetic-terraform-token",
     TF_VAR_workspace: "example",
     SNAPSHOT_USER_SETTING: "preserved",
@@ -185,7 +186,7 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
 process.stdout.write(JSON.stringify({
   input, setting: process.env.SNAPSHOT_USER_SETTING, proxy: process.env.ALL_PROXY,
   workspace: process.env.TF_VAR_workspace, links: process.env.PIP_FIND_LINKS,
-  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "TF_TOKEN_registry_example_test", "PIP_INDEX_URL", "pip_extra_index_url", "UV_INDEX", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
+  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "AWS_BEARER_TOKEN_BEDROCK", "TF_TOKEN_registry_example_test", "PIP_INDEX_URL", "pip_extra_index_url", "UV_INDEX", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
 }));`,
   );
   const add = [
@@ -208,6 +209,7 @@ process.stdout.write(JSON.stringify({
     credentialKeys: [
       "DOCKER_AUTH_CONFIG",
       "DATABASE_URL",
+      "AWS_BEARER_TOKEN_BEDROCK",
       "TF_TOKEN_registry_example_test",
       "PIP_INDEX_URL",
       "pip_extra_index_url",

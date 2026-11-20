@@ -110,7 +110,7 @@ import {
   withPatchGitIndex,
 } from "./patch-git-controls.js";
 import {
-  credentialFileVariable,
+  patchCredentialKind,
   filterCommandConfig,
   proxyUserinfo,
   removePatchCredentials,
@@ -2088,7 +2088,7 @@ for (const [name, value] of bindings) {
   else process.env[name] = value;
 }
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
+removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${patchCredentialKind});
 if (windowsConfig) {
   const { prefix, binding, coordinator, config } = windowsConfig;
   const files = (${snapshotConfigBytes})(config.files, prefix);
@@ -2389,6 +2389,11 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
+    // Git starts host helpers after a delegated hook can edit a library through a hard link.
+    if (hooks && process.platform !== "win32") {
+      for (const name of Object.keys(environment))
+        if (/^(?:LD|DYLD)_/u.test(name)) delete environment[name];
+    }
     const credentialNames = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
