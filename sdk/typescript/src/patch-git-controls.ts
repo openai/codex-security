@@ -560,12 +560,12 @@ async function credentialPointerFiles(
   const selected = new Set<string>();
   const terraformHomes = new Set<string>();
   const gcloudCredentials = "application_default_credentials.json";
-  const selectFile = (directory: string, file: string) => {
+  const selectFile = (directory: string, file: string, paths = selected) => {
     // A delegate can use the literal path or a client's normalized spelling.
-    selected.add(relativeFile(directory, file));
-    selected.add(join(directory, file));
+    paths.add(relativeFile(directory, file));
+    paths.add(join(directory, file));
     if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
-      selected.add(directory + file);
+      paths.add(directory + file);
   };
   const selectPgDefaults = (home: string) => {
     selectFile(home, process.platform === "win32" ? "pgpass.conf" : ".pgpass");
@@ -582,7 +582,24 @@ async function credentialPointerFiles(
     awsAccountHome(environment),
     accountHomeDirectory(),
   ]);
+  const selectFragments = async (dir: string, pattern: RegExp) => {
+    const entries = await readdir(httpCredentialPath(checkout, dir), {
+      withFileTypes: true,
+    }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+      throw error;
+    });
+    for (const entry of entries)
+      if (!entry.isDirectory() && pattern.test(entry.name))
+        selectFile(
+          dir,
+          entry.name.replace(pattern, (suffix) => suffix.toLowerCase()),
+        );
+  };
+  const profileDirs = new Set<string>();
   const protectCodexHome = (home: string, subdirectory = "") => {
+    if (subdirectory) selectFile(home, subdirectory, profileDirs);
+    else profileDirs.add(home);
     for (const file of ["auth.json", ".credentials.json", "config.toml"])
       selectFile(home, join(subdirectory, file));
   };
@@ -637,21 +654,15 @@ async function credentialPointerFiles(
     selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
   for (const root of gitLabConfigRoots(environment, homes))
     selectFile(root, join("glab-cli", "config.yml"));
+  // Capture physical targets too when a profile is a link into a dotfile tree.
+  for (const dir of profileDirs)
+    await selectFragments(dir, /\.config\.toml(?:\.tmp)?$/iu);
   for (const home of terraformHomes) {
     const windows = process.platform === "win32";
     selectFile(home, windows ? "terraform.rc" : ".terraformrc");
     const dir = join(home, windows ? "terraform.d" : ".terraform.d");
     selectFile(dir, "credentials.tfrc.json");
-    // Terraform merges these direct children into its CLI credentials.
-    const entries = await readdir(httpCredentialPath(checkout, dir), {
-      withFileTypes: true,
-    }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
-      throw error;
-    });
-    for (const entry of entries)
-      if (!entry.isDirectory() && /\.tfrc(?:\.json)?$/u.test(entry.name))
-        selectFile(dir, entry.name);
+    await selectFragments(dir, /\.tfrc(?:\.json)?$/u);
   }
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;

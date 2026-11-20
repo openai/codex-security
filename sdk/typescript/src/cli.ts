@@ -1440,6 +1440,7 @@ interface SkillPermissions {
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
   readonly credentialStorePaths?: readonly string[];
+  readonly codexProfileHomes?: readonly string[];
   readonly protectShellCredentialFiles?: PatchGitControls["protectShellCredentialFiles"];
   readonly unavailableFilters?: readonly string[];
   readonly externalConfigPaths?: readonly string[];
@@ -1563,7 +1564,7 @@ async function removeSnapshotProfiles(profiles: PatchSnapshotProfiles) {
 
 // Use the ordinary spelling only when removing a verbatim prefix preserves
 // Win32 lookup. Device names, dot components and legacy-length handling differ.
-function windowsMissingStorePattern(path: string): string {
+function ordinaryWindowsGlobPath(path: string): string {
   if (/^\\\\[?.]\\/u.test(path)) {
     const drive = /^\\\\\?\\([a-z]:\\)/iu;
     const unc = /^\\\\\?\\UNC\\/iu;
@@ -1587,18 +1588,41 @@ function windowsMissingStorePattern(path: string): string {
       );
     path = ordinary;
   }
-  const escape = (part: string) => part.replace(/[*?[\]{},]/gu, "[$&]");
-  const file = escape(basename(path));
+  return path;
+}
+
+function escapeCredentialGlob(path: string): string {
+  return process.platform === "win32"
+    ? ordinaryWindowsGlobPath(path).replace(/[*?[\]{},]/gu, "[$&]")
+    : path.replace(/[\\*?[\]{},]/gu, "\\$&");
+}
+
+async function managedCodexHomes(environment: NodeJS.ProcessEnv) {
+  const homes = [
+    configuredCodexHome(environment),
+    codexSecurityCredentialHome(environment),
+  ];
+  return [
+    ...new Set(
+      await Promise.all(homes.map((home) => canonicalConfigPath(home))),
+    ),
+  ];
+}
+
+function windowsMissingStorePattern(path: string): string {
+  const escaped = escapeCredentialGlob(path);
+  const file = basename(escaped);
   // A missing literal can become a directory during native Windows ACL setup.
   // Braces alone do not select a native glob. The other alternative is a literal
   // question mark, which cannot name a Windows file.
-  return join(escape(dirname(path)), `{${file},[?]}`);
+  return join(dirname(escaped), `{${file},[?]}`);
 }
 
 function patchWorkspaceProfile(
   workspace: JsonObject,
   readOnlyPaths: readonly string[],
   credentialStorePaths: readonly string[] = [],
+  codexProfileHomes: readonly string[] = [],
 ) {
   return {
     extends: ":workspace",
@@ -1613,6 +1637,17 @@ function patchWorkspaceProfile(
       ...Object.fromEntries(
         readOnlyPaths.map((path) => [path, { ".": "read" }]),
       ),
+      // Native snapshot profiles carrying provider settings are created
+      // in the managed homes after the initial credential inventory.
+      ...Object.fromEntries(
+        codexProfileHomes.map((home) => [
+          join(
+            escapeCredentialGlob(home),
+            "{*.config.toml,.*.config.toml.tmp}",
+          ),
+          "deny",
+        ]),
+      ),
       ...Object.fromEntries(
         credentialStorePaths.map((path) => {
           if (process.platform === "win32" && !existsSync(path))
@@ -1620,13 +1655,11 @@ function patchWorkspaceProfile(
           if (process.platform === "linux" && !existsSync(dirname(path))) {
             // A literal deny under an absent directory makes bubblewrap mount
             // a missing parent. Expand the exact filename at each tool launch.
-            const escape = (part: string) =>
-              part.replace(/[\\*?[\]{},]/gu, "\\$&");
-            const name = escape(basename(path)).replace(
+            const name = escapeCredentialGlob(basename(path)).replace(
               /[a-zA-Z0-9.]/u,
               "[$&]",
             );
-            return [join(escape(dirname(path)), name), "deny"];
+            return [join(escapeCredentialGlob(dirname(path)), name), "deny"];
           }
           return [path, { ".": "deny" }];
         }),
@@ -1727,6 +1760,7 @@ async function resumeHookSandbox(
       workspace,
       gitDirectories,
       await readCredentialStorePaths(config),
+      await managedCodexHomes(environment),
     ),
     configuration: {
       sandbox_workspace_write: {
@@ -2286,12 +2320,29 @@ export async function runRepositoryCommand(
         await file.chmod(0o600);
         await requirePrivateSnapshotProfileFile(path);
         const permissions = { ...sandbox.profile };
-        if (hookDirectory)
-          permissions["filesystem"] = {
+        if (hookDirectory) {
+          const home = dirname(hookDirectory);
+          const filesystem = {
             ...(permissions["filesystem"] as JsonObject | undefined),
-            [dirname(hookDirectory)]: { ".": "deny" },
-            [hookDataDirectory!]: { ".": "read" },
           };
+          // Bubblewrap cannot mount individual masks inside the empty
+          // read-only directory it mounts over the hook's credential home.
+          if (process.platform === "linux") {
+            const globPrefix = escapeCredentialGlob(home) + sep;
+            for (const [path, rule] of Object.entries(filesystem)) {
+              if (
+                (rule === "deny" && path.startsWith(globPrefix)) ||
+                (isJsonObject(rule) &&
+                  rule["."] === "deny" &&
+                  path.startsWith(home + sep))
+              )
+                delete filesystem[path];
+            }
+          }
+          filesystem[home] = { ".": "deny" };
+          filesystem[hookDataDirectory!] = { ".": "read" };
+          permissions["filesystem"] = filesystem;
+        }
         const profiles = { [profile]: permissions };
         for (const [event, messageDirectory] of Object.entries(
           messageDirectories,
@@ -17325,6 +17376,9 @@ async function runSkill(
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
                         credentialStorePaths: gitControls!.credentialStorePaths,
+                        codexProfileHomes: await managedCodexHomes(
+                          dependencies.environment,
+                        ),
                         protectShellCredentialFiles:
                           gitControls!.protectShellCredentialFiles,
                         unavailableFilters: gitControls!.unavailableFilters,
@@ -17740,6 +17794,7 @@ export async function readSkillCommandOutput(
                 shellEnvironmentSettings(config),
                 shellEnvironmentSettings(resolvedConfig),
               )) ?? appServer.permissions.credentialStorePaths,
+              appServer.permissions.codexProfileHomes,
             );
             // Keep the shared Windows sandbox account denied at the original
             // paths. Snapshot Git reads its private staged configuration.

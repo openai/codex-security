@@ -491,10 +491,13 @@ glob_scan_max_depth = 8
       ...(permissions.credentialStorePaths ?? []),
       ...(shellPolicy?.paths ?? []),
     ]);
-    expect(storeDenies).toHaveLength(stores.size);
+    const fileDenies = storeDenies.filter(
+      ([path]) => !path.endsWith("{*.config.toml,.*.config.toml.tmp}"),
+    );
+    expect(fileDenies).toHaveLength(stores.size);
     for (const store of stores) {
       expect(
-        storeDenies.filter(([key, access]) =>
+        fileDenies.filter(([key, access]) =>
           access === "deny" ? matchesGlob(store, key) : key === store,
         ),
       ).toHaveLength(1);
@@ -936,6 +939,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     netrc,
     proxyKey,
     clientCert,
+    join(operator, "selected.config.toml"),
     join(terraformDir, "registry.tfrc"),
     join(terraformDir, "workspace.tfrc.json"),
   ];
@@ -954,6 +958,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
+    join(operator, "after-capture.config.toml"),
+    join(operator, "codex-home", "after-capture.config.toml"),
     ...[".codex", ".", "codex-home"].flatMap((home) =>
       ["auth.json", ".credentials.json", "config.toml"].map((file) =>
         join(operator, home, file),
