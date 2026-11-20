@@ -30,6 +30,7 @@ import { isRecord } from "./record.js";
 
 const text = z.string().trim().min(1);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
+const status = z.enum(["observed", "no_match", "no_coverage"]);
 const verdict = dependencyUseSchema.shape.verdict;
 const useFields = dependencyUseSchema.shape;
 const stackUse = z.strictObject({
@@ -114,14 +115,13 @@ const coverageSchema = z.strictObject({
   observed: z.number().int().nonnegative(),
   noMatch: z.array(text),
   noCoverage: z.array(text),
-  noIndexedMatch: z.array(text).optional(),
   scopeConflicts: z.array(text),
   truncated: z.array(text),
   truncationUnknown: z.array(text),
 });
 const querySchema = sampledStacksSchema.shape.queries.element;
-const groupSchema = querySchema.shape.groups.element;
-const captured = groupSchema.shape.observations.element.shape;
+const captured =
+  querySchema.shape.groups.element.shape.observations.element.shape;
 const observationCitation = z.strictObject({
   id: text,
   stackHash: text,
@@ -153,7 +153,7 @@ export const stackInvestigationReportSchema = z.strictObject({
     itemInput.extend({
       queryId: text,
       groupId: text,
-      status: groupSchema.shape.status,
+      status,
       queryScope: querySchema.shape.scope,
       scope: querySchema.shape.scope,
       scopeConflicts: z.array(text),
@@ -616,15 +616,15 @@ export function summarizeStackCoverage(
   const assessed = new Set(assessments.map((a) => a.workItemId));
   const ids = (predicate: (w: StackWorkItem) => boolean) =>
     items.filter(predicate).map((w) => w.id);
-  const noIndexedMatch = ids((w) => w.status === "no_indexed_match");
   return {
     total: items.length,
     assessed: items.filter((w) => assessed.has(w.id)).length,
     outstanding: ids((w) => !assessed.has(w.id)),
     observed: items.filter((w) => w.status === "observed").length,
     noMatch: ids((w) => w.status === "no_match"),
-    noCoverage: ids((w) => w.status === "no_coverage"),
-    ...(noIndexedMatch.length && { noIndexedMatch }),
+    noCoverage: ids(
+      (w) => w.status === "no_coverage" || w.status === "no_indexed_match",
+    ),
     scopeConflicts: ids((w) => w.scopeConflicts.length > 0),
     truncated: ids(
       (w) => w.truncated === true || w.observation?.framesTruncated === true,
@@ -659,7 +659,7 @@ export function finalizeStackReport(
       ...saved,
       queryId: w.queryId,
       groupId: w.groupId,
-      status: w.status,
+      status: w.status === "no_indexed_match" ? "no_coverage" : w.status,
       queryScope: w.queryScope,
       scope: w.scope,
       scopeConflicts: w.scopeConflicts,
@@ -699,7 +699,6 @@ export function finalizeStackReport(
         coverage.truncationUnknown.length ||
         coverage.noMatch.length ||
         coverage.noCoverage.length ||
-        coverage.noIndexedMatch?.length ||
         coverage.scopeConflicts.length
       ),
     }),

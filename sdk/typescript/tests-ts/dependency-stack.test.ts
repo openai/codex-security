@@ -250,7 +250,6 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
       reviewPolicy: "single_agent",
       coverage: { total: 1, assessed: 1 },
     });
-    expect(report).not.toHaveProperty("coverage.noIndexedMatch");
     expect(report).toEqual(await readFinalStackReport(state));
     await expect(
       call("record-evidence", {
@@ -698,15 +697,14 @@ test("an indexed miss stays unknown and other capture groups can be assessed", a
   expect(report).toMatchObject({
     verdict: "unknown",
     assessments: [
-      { status: "no_indexed_match", verdict: "unknown", observation: null },
+      { status: "no_coverage", verdict: "unknown", observation: null },
       { status: "observed", observation: { id: "call" } },
     ],
     coverage: {
       assessed: 2,
       observed: 1,
       noMatch: [],
-      noCoverage: [],
-      noIndexedMatch: [miss!.id],
+      noCoverage: [miss!.id],
     },
   });
   expect(report).toEqual(await readFinalStackReport(state));
