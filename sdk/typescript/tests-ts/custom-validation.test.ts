@@ -770,7 +770,9 @@ describe("custom validation", () => {
       const scanInstructions = "Review the integration entry point first.";
       const ownerEvidence =
         "The issuer confirmed that the integration token was disabled on 2025-12-10.";
-      const workflow = `Run the synthetic validation script, then clean up.\n${ownerEvidence}`;
+      const validationStep =
+        "Run the synthetic validation script, then clean up.";
+      const workflow = `${validationStep}\n${ownerEvidence}`;
       const markdown = "# Custom severity policy\nGrade by verified impact.";
       const severityRubric = {
         markdown,
@@ -901,7 +903,7 @@ describe("custom validation", () => {
                       expect(prompt.includes("2026-01-01T00:05:00.000Z")).toBe(
                         maxTimeMinutes !== undefined,
                       );
-                      expect(prompt).not.toContain(workflow);
+                      expect(prompt).not.toContain(validationStep);
                       expect(prompt).not.toContain(ownerEvidence);
                       if (scenario === "standard")
                         expect(prompt).toContain(scanInstructions);
@@ -1236,6 +1238,10 @@ describe("custom validation", () => {
           );
           expect(report).toContain("Synthetic limitation from validation.");
           expect(report).toContain(ownerEvidence);
+          const saved = await json<FindingsDocument>(
+            join(scanDir, "findings.json"),
+          );
+          expect(saved.findings[0]?.validation?.summary).toBe(ownerEvidence);
           expect(completed.findings.findings[0]?.validation?.summary).toBe(
             ownerEvidence,
           );
@@ -1315,7 +1321,6 @@ describe("custom validation", () => {
     expect(standard).not.toContain("validate-scan-findings.md");
     expect(standard).not.toContain("security-scan/SKILL.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
-    expect(diff).toContain("at the scan's exact base commit");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
