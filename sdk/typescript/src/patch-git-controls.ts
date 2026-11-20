@@ -34,6 +34,8 @@ import {
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
 import { awsAccountHome, awsProfileFiles } from "./continuum-aws.js";
+import { configuredCodexHome } from "./auth.js";
+import { codexSecurityCredentialHome } from "./runtime.js";
 import { gitAlternatePathBytes, gitMarkerRoot } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
@@ -586,6 +588,8 @@ async function credentialPointerFiles(
     awsAccountHome(environment),
     accountHomeDirectory(),
   ]);
+  selectFile(configuredCodexHome(environment), "auth.json");
+  selectFile(codexSecurityCredentialHome(environment), "auth.json");
   if (
     process.platform === "win32" &&
     environment["HOMEDRIVE"] &&
@@ -603,6 +607,7 @@ async function credentialPointerFiles(
         : home,
     );
     for (const file of [
+      join(".codex", "auth.json"),
       join(".config", "gh", "hosts.yml"),
       join(".config", "gcloud", gcloudCredentials),
       join(".docker", "config.json"),

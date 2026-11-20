@@ -986,6 +986,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   };
   const environment = {
     ...pointers,
+    CODEX_HOME: operator,
+    CODEX_SECURITY_STATE_DIR: operator,
     FILTER_FIXTURE_SETTING: "from host",
     AWS_CONFIG_FILE: awsConfig,
     AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
@@ -1044,6 +1046,9 @@ test("patch model and clean filters cannot read selected authentication files", 
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
+    join(operator, ".codex", "auth.json"),
+    join(operator, "auth.json"),
+    join(operator, "codex-home", "auth.json"),
     join(operator, "_netrc"),
     scopedProxyKey,
     proxyCert,
@@ -1114,6 +1119,8 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
     async (context, inspectModel) => {
       // An operator may have no AWS profile directory when the first model tool runs.
       expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
+      await mkdir(join(operator, ".codex"), { recursive: true });
+      await mkdir(join(operator, "codex-home"), { recursive: true });
       await mkdir(awsDirectory);
       await mkdir(join(operator, ".docker"));
       await mkdir(join(operator, ".kube"));
