@@ -684,22 +684,25 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def open_review_source(root: Path, path: str) -> BinaryIO:
+    """Open a regular file under the registered root without following symbolic links."""
+    from finalize_scan_contract import open_scan_local_file_descriptor
+
+    descriptor = open_scan_local_file_descriptor(root, path, "reviewed file", portable=False)
+    return os.fdopen(descriptor, "rb")
+
+
 def _update_regular_file_digest(
     digest: Any, path: Path, prefix: bytes = b"", *, source_root: Path | None = None
 ) -> bytes:
     """Record the file kind, byte count, and SHA-256 in the snapshot digest."""
     content = hashlib.sha256()
     size = 0
-    if source_root is None:
-        handle = path.open("rb")
-    else:
-        from finalize_scan_contract import open_scan_local_file_descriptor
-
-        relative = path.relative_to(source_root).as_posix()
-        descriptor = open_scan_local_file_descriptor(
-            source_root, relative, "review source", portable=False
-        )
-        handle = os.fdopen(descriptor, "rb")
+    handle = (
+        path.open("rb")
+        if source_root is None
+        else open_review_source(source_root, path.relative_to(source_root).as_posix())
+    )
     with handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             content.update(chunk)

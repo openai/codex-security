@@ -75,7 +75,7 @@ from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )
-from workbench_standard_review import review_file_digests
+from workbench_source_scopes import review_file_digests
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
