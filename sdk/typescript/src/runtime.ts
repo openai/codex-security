@@ -4118,10 +4118,12 @@ export async function resolvePluginPython(
   return (await resolvePluginPythonCommand(options)).executable;
 }
 
-export async function resolvePluginPythonCommand(
-  options: PluginPythonOptions = {},
-): Promise<TrustedExecutable> {
-  const environment = options.environment ?? process.env;
+export async function pluginPythonLookupRoots(
+  options: Pick<
+    PluginPythonOptions,
+    "protectedRoot" | "currentDirectory" | "signal"
+  >,
+) {
   const cwd = process.cwd();
   const requestedRoots = options.protectedRoot ?? cwd;
   const protectedRoot =
@@ -4132,6 +4134,15 @@ export async function resolvePluginPythonCommand(
     for (const checkout of await gitProtectionRoots(directory, options.signal))
       if (!protectedRoot.includes(checkout)) protectedRoot.push(checkout);
   }
+  return { cwd, protectedRoot, callerDirectories };
+}
+
+export async function resolvePluginPythonCommand(
+  options: PluginPythonOptions = {},
+): Promise<TrustedExecutable> {
+  const environment = options.environment ?? process.env;
+  const { cwd, protectedRoot, callerDirectories } =
+    await pluginPythonLookupRoots(options);
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
   const discoveryRoots = [

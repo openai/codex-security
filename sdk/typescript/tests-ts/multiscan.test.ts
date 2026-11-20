@@ -3030,6 +3030,11 @@ for (const selection of [
             join(checkout, "retained.txt"),
             "Preserve interrupted data.\n",
           );
+        } else if (selection === "padded") {
+          const checkout = dirname(alias);
+          git(paths.root, "clone", "--quiet", source.path, checkout);
+          await rm(alias);
+          await writeFile(alias + " ", "Ordinary file.\n", { mode: 0o600 });
         }
         await expectReused(campaign);
         expect(runs).toHaveBeenCalledTimes(1);

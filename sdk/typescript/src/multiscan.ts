@@ -70,6 +70,7 @@ import {
   isPythonPathCandidate,
   executablePathForSpawn,
   pluginHelperEnvironment,
+  pluginPythonLookupRoots,
   requireSecureOutputAncestry,
   requireWindowsOutputPath,
   validateOutputDir,
@@ -1981,19 +1982,33 @@ async function loadResumableScan(
         }
         for (const pythonPath of paths) {
           const candidate =
-            expandHomeForLookup(pythonPath, environment) +
+            expandHomeForLookup(pythonPath, helperEnvironment) +
             (process.platform === "win32" && extname(pythonPath) === ""
               ? ".exe"
               : "");
-          if (await realpath(candidate).catch(undefinedIfMissingFile)) break;
-          const selected = await canonicalPythonPath(candidate);
-          if (
-            selected.startsWith(matchedRoot + sep) ||
-            !relativePathIsOutside(relative(matchedRoot, selected))
-          ) {
-            await restorePaths(matchedRoot, [selected]);
-            if (await realpath(candidate).catch(undefinedIfMissingFile)) break;
+          if (!(await realpath(candidate).catch(undefinedIfMissingFile))) {
+            const selected = await canonicalPythonPath(candidate);
+            if (
+              selected.startsWith(matchedRoot + sep) ||
+              !relativePathIsOutside(relative(matchedRoot, selected))
+            )
+              await restorePaths(matchedRoot, [selected]);
           }
+          if (pythonPath === configuredPythonPath) break;
+          // Only a trusted, executable literal path takes precedence over
+          // the trimmed interpreter alias when the report helper starts.
+          const { protectedRoot } = await pluginPythonLookupRoots({
+            protectedRoot: matchedRoot,
+            signal,
+          });
+          if (
+            await resolveTrustedExecutable(
+              candidate,
+              helperEnvironment,
+              protectedRoot,
+            )
+          )
+            break;
         }
       }
       await restoreReport(path, pluginRoot, matchedRoot);
