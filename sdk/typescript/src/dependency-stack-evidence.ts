@@ -33,7 +33,7 @@ export interface BoundDependencyInventoryReceipt {
   key: string;
   server: string;
   originalPayloadSha256: string;
-  origin: { tool: string; arguments: Record<string, string> };
+  origin: { tool: string; arguments: Record<string, unknown> };
   selection?: Omit<DependencyInventoryReceiptSelection, "receiptId">;
   result: unknown;
 }
