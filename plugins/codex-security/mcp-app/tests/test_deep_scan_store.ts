@@ -16,6 +16,7 @@ await testBeginProtocolAndParsing();
 await testScopeResponseParsing();
 await testCanonicalCommitProtocol();
 await testTerminalProtocol();
+await testFinalizationSelectionReplay();
 testRunErrorParsing();
 testLegacyResponseNormalization();
 testConfiguredMaximumDurationParsing();
@@ -507,6 +508,64 @@ async function testTerminalProtocol() {
     flagValue(calls[1], "--manifest-path"),
     "/fixture/scans/run/coordinator-failure-manifest.json",
   );
+}
+
+async function testFinalizationSelectionReplay() {
+  const scanId = randomUUID();
+  const selection = {
+    version: 1,
+    resultPath: "artifacts/merge/checkpoints/aggregate.json",
+    resultSha256: "a".repeat(64),
+    terminalReason: "saturated",
+    omittedWorkerIds: [],
+    selectedAt: "2026-01-01T00:00:00Z",
+  };
+  const response = stateResult(scanId, {
+    deepScan: {
+      scanDir: "/scan",
+      schemaVersion: 1,
+      workflowVersion: "deep-security-scan/v2",
+      coordinatorGeneration: 2,
+      finalizationInput: selection,
+    },
+  });
+  const calls: unknown[][] = [];
+  const store = new WorkbenchDeepScanStore(async (...args: unknown[]) => {
+    calls.push(structuredClone(args));
+    if (calls.length === 1)
+      throw Object.assign(new Error("Synthetic lost selection response"), {
+        code: "ETIMEDOUT",
+      });
+    return response;
+  });
+  const result = await store.selectFinalization({
+    scanId,
+    coordinatorGeneration: 2,
+    reason: "saturated",
+    manifestPath: "/scan/scan-manifest.json",
+    resultPath: "/scan/artifacts/merge/checkpoints/aggregate.json",
+    omittedWorkerIds: [],
+  });
+  assert.deepEqual(result.finalizationInput, selection);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], calls[0]);
+  assert.deepEqual(calls[0], [
+    [
+      "finish-deep-scan",
+      "--scan-id",
+      scanId,
+      "--coordinator-generation",
+      "2",
+      "--terminal-reason",
+      "saturated",
+      "--manifest-path",
+      "/scan/scan-manifest.json",
+    ],
+    JSON.stringify({
+      resultPath: "/scan/artifacts/merge/checkpoints/aggregate.json",
+    }),
+    true,
+  ]);
 }
 
 async function testTransientIdempotentPersistenceRetries() {
