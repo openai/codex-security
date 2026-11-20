@@ -441,11 +441,6 @@ class SavedCoverageOrigins:
         rows = self.sources[relative][0].get(field, [])
         if not isinstance(rows, list) or not 0 < index <= len(rows):
             return attempt
-        current = rows[index - 1]
-        occurrence = sum(
-            self.same_row(field, row, relative, current, relative, worker["id"])
-            for row in rows[:index]
-        )
         for path, (coverage, owner) in self.sources.items():
             previous_attempt = self.worker_attempts.get(
                 self.directory(path).as_posix(), (owner, worker["attempt"])
@@ -453,13 +448,28 @@ class SavedCoverageOrigins:
             if owner != worker["id"] or not 0 < previous_attempt < attempt:
                 continue
             previous = coverage.get(field, [])
-            if (
-                isinstance(previous, list)
-                and sum(
-                    self.same_row(field, row, path, current, relative, owner) for row in previous
+            if not isinstance(previous, list):
+                continue
+            # Prefer explicit IDs before consuming an otherwise identical unnamed occurrence.
+            unmatched = sorted(
+                previous,
+                key=lambda row: isinstance(row, dict) and "id" in row,
+                reverse=True,
+            )
+            matched = False
+            for current in rows[:index]:
+                match = next(
+                    (
+                        offset
+                        for offset, row in enumerate(unmatched)
+                        if self.same_row(field, row, path, current, relative, owner)
+                    ),
+                    None,
                 )
-                >= occurrence
-            ):
+                matched = match is not None
+                if match is not None:
+                    unmatched.pop(match)
+            if matched:
                 attempt = previous_attempt
                 self.origin_sources[key] = path
         self.attempts[key] = attempt

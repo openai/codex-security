@@ -253,6 +253,55 @@ def test_recovered_surface_with_assigned_id_keeps_legacy_attempt(
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+@pytest.mark.parametrize(
+    ("history_variant", "named_history"),
+    [("plain", False), ("origin", False), ("receipt", False), ("origin", True), ("receipt", True)],
+)
+def test_recovered_legacy_surface_occurrence_is_consumed_once(
+    workbench_api, workbench_db, publication_scan, monkeypatch, history_variant, named_history
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    surface = {
+        "label": "Synthetic surface",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/review.txt"] if history_variant == "receipt" else [],
+    }
+    old_surfaces = [dict(surface)]
+    if history_variant == "origin":
+        old_surfaces[0]["provenance"] = {"workerId": "stale-worker", "attempt": 9}
+    if named_history:
+        old_surfaces.append({**surface, "id": "surface-beta"})
+    coverage = {"completeness": "complete", "explicitExclusions": [], "deferred": []}
+    archived = result.parent.parent / "attempts/attempt-01"
+    archived.mkdir(parents=True)
+    if history_variant == "receipt":
+        for directory in (archived, result.parent):
+            receipt = directory / "artifacts/review.txt"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text("Synthetic same evidence.\n")
+    draft = {"scanId": scan.scan_id, "findings": []}
+    old = {**draft, "complete": False, "coverage": {**coverage, "surfaces": old_surfaces}}
+    (archived / "result.json").write_text(json.dumps(old))
+    checkpoint = write_checkpoint(archived / "checkpoints", old)
+    (archived / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    identities = (
+        ("surface-beta", "surface-alpha") if named_history else ("surface-alpha", "surface-beta")
+    )
+    current = [{**surface, "id": identity} for identity in identities]
+    accepted = {**draft, "complete": True, "reviewState": {**coverage, "surfaces": current}}
+    result.write_text(json.dumps(accepted))
+    originals = {path: path.read_bytes() for path in (result, archived / "result.json", checkpoint)}
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    assert len(recovered["surfaces"]) == len(current)
+    assert {
+        row["provenance"]["sourceId"]: row["provenance"]["attempt"] for row in recovered["surfaces"]
+    } == {"surface-alpha": 1, "surface-beta": 1 if named_history else 2}
+    assert {review["attempt"] for review in recovered["reviews"]} == {1, 2}
+    assert all(row["provenance"]["workerId"] == worker_id for row in recovered["surfaces"])
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize(
     "receipt_state",
