@@ -10,7 +10,7 @@ import { ScanResult } from "../src/result.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
 const fixtureUrl = new URL(
-  "../../../plugins/codex-security/mcp-app/tests/deep_scan_coverage_fixture.mjs",
+  "../../../plugins/codex-security/mcp-app/tests/deep_scan_publication_fixture.mjs",
   import.meta.url,
 );
 
