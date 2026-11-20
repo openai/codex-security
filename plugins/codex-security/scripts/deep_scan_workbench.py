@@ -598,8 +598,7 @@ def existing_deep_scan_for_target(
         SELECT scans.*
         FROM scans
         JOIN workspaces ON workspaces.id = scans.workspace_id
-        WHERE (workspaces.thread_id = ? OR workspaces.thread_id IS NULL)
-            AND COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ?
+        WHERE COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ?
             AND scans.target_path = ?
             AND scans.scope = ?
             AND scans.mode = 'deep'
@@ -607,7 +606,7 @@ def existing_deep_scan_for_target(
         ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id
         LIMIT 1
         """,
-        (thread_id, thread_id, target_path, scope),
+        (thread_id, target_path, scope),
     ).fetchone()
 
 

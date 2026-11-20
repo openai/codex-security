@@ -1682,9 +1682,11 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
 
 
 @pytest.mark.cross_platform
-@pytest.mark.parametrize("replace_checkout", [False, True])
+@pytest.mark.parametrize(
+    "replace_checkout, join_only", [(False, False), (False, True), (True, True)]
+)
 def test_terminal_evidence_repair_rechecks_checkout_after_acquiring_completion_lock(
-    tmp_path, monkeypatch, workbench_api, capsys, replace_checkout
+    tmp_path, monkeypatch, workbench_api, capsys, replace_checkout, join_only
 ):
     state, target = empty_target_paths(tmp_path)
     home, outputs = tmp_path / "home", tmp_path / "scans"
@@ -1755,6 +1757,35 @@ def test_terminal_evidence_repair_rechecks_checkout_after_acquiring_completion_l
             "SELECT deep_scan_owner_thread_id FROM scans WHERE id = ?", (scan_id,)
         ).fetchone()[0]
     assert owner == ("first-owner" if replace_checkout else "next-owner")
+    if replace_checkout:
+        return
+
+    claimed = scan_command(
+        state, "claim-deep-scan-coordinator", scan_id, "--thread-id", "next-owner"
+    )
+    assert claimed["coordinatorDisposition"] == "adopted"
+    repair = claimed["deepScan"]
+    assert (repair["status"], repair["phase"]) == ("running", "reducing")
+    retried = begin_deep_scan(
+        state,
+        "next-owner",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(outputs),
+        "--scope",
+        ".",
+        *(("--join-only",) if join_only else ()),
+    )
+    assert retried.get("startDisposition") == "joined"
+    for key in ("scanId", "coordinatorGeneration", "completionSequence"):
+        assert retried["deepScan"][key] == repair[key]
+    wrong_owner = begin_deep_scan(state, "first-owner", "--scan-id", scan_id, check=False)
+    assert "owning Codex thread" in wrong_owner["stderr"]
+    with sqlite3.connect(database) as connection:
+        for table in ("workspaces", "scans", "deep_scan_runs"):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,)
+        assert connection.execute("SELECT thread_id FROM workspaces").fetchone() == ("first-owner",)
 
 
 def test_target_continuation_does_not_reuse_a_different_snapshot(
