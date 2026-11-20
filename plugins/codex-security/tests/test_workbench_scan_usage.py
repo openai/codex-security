@@ -3739,6 +3739,28 @@ def test_delayed_receipt_replaces_only_its_own_turn_counters(scan_usage, tmp_pat
     assert usage.warnings == set()
 
 
+@pytest.mark.parametrize(
+    ("kind", "payload", "expected"),
+    [
+        ("turn_context", {"turn_id": "second"}, 160),
+        ("session_meta", {"id": "scan-parent"}, 160),
+        ("turn_context", {"turn_id": "first"}, 100),
+    ],
+)
+def test_lower_counter_after_new_turn_or_reconnect(scan_usage, tmp_path, kind, payload, expected):
+    at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    events = [
+        _event(at, "turn_context", {"turn_id": "first"}),
+        _token_event(at, 100, 10),
+        _event(at, kind, payload),
+        _token_event(at, 30, 3),
+        _token_event(at, 60, 6),
+    ]
+    usage = _measure_rollout(scan_usage, _rollout(tmp_path, "scan-parent", events), at, at)
+    assert usage.tokens == _counts(expected, 0, expected // 10)
+    assert usage.warnings == {"token_counter_regressed"}
+
+
 def test_receipt_does_not_resolve_another_turns_counter_regression(scan_usage, tmp_path):
     at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     events = [
