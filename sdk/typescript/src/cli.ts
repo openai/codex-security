@@ -104,6 +104,7 @@ import {
   defaultSshConfigs,
   githubConfigDirectory,
   githubConfigFiles,
+  githubSocketSetting,
   gitlabConfigFiles,
   patchFilterParameters,
   PATCH_LOCAL_GIT_ENVIRONMENT,
@@ -1982,9 +1983,11 @@ type PatchTransportFile = {
 
 interface PatchTransportAccess {
   sshPatterns?: Map<string, () => Promise<void>>;
-  verifyHostingConfig?: Record<
-    PatchPublicationTool,
-    (directory?: string) => Promise<NodeJS.ProcessEnv>
+  verifyHostingConfig?: Partial<
+    Record<
+      PatchPublicationTool,
+      (directory?: string) => Promise<NodeJS.ProcessEnv>
+    >
   >;
   readonly writable: Set<string>;
   readonly invocations: Map<string, string>;
@@ -4040,8 +4043,8 @@ export async function main(
         options.environment = {
           ...environment,
           ...(!Object.hasOwn(environment, "GIT_CONFIG") &&
-            (await verify.git())),
-          ...(await verify[command](repository)),
+            (await verify.git?.())),
+          ...(await verify[command]?.(repository)),
         };
       }
       // The hostname probe invokes the same selected SSH launcher as the transport.
@@ -12090,6 +12093,17 @@ async function patchPublicationDestination(
   const gitlab =
     host === "gitlab.com" || (host !== undefined && host === configuredHost);
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
+  const access = dependencies.patchTransportAccess;
+  // Discovery itself sends credentials. Check the selected client before its first request.
+  if (access)
+    access.verifyHostingConfig ??= {
+      [command]: await captureHostingConfig(
+        command,
+        repository,
+        dependencies,
+        false,
+      ),
+    };
   const fetchProject =
     fetchRemote === remote
       ? source
@@ -12152,8 +12166,8 @@ async function patchPublicationDestination(
   }[];
   // Capture after trusted provider reads, which can migrate or refresh credentials.
   // Branch-conditioned settings can select the other provider after checkout.
-  if (dependencies.patchTransportAccess)
-    dependencies.patchTransportAccess.verifyHostingConfig ??= {
+  if (access && !access.verifyHostingConfig?.git)
+    access.verifyHostingConfig = {
       git: await captureHostingConfig("git", repository, dependencies),
       gh: await captureHostingConfig("gh", repository, dependencies),
       glab: await captureHostingConfig("glab", repository, dependencies),
@@ -12327,7 +12341,7 @@ async function patchTransportIdentity(
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
   options: {
-    sshConfig?: { includes: string[]; commands: string[] };
+    inspectContents?: (bytes: Buffer) => void | Promise<void>;
     updatedHostKeys?: boolean;
     writers?: PatchTransportAccess;
   } = {},
@@ -12363,10 +12377,9 @@ async function patchTransportIdentity(
         "Patch publication requires regular files for SSH transport operands.",
       );
     let digest: string;
-    if (options.sshConfig) {
+    if (options.inspectContents) {
       const bytes = await file.readFile();
-      const { includes, commands } = options.sshConfig;
-      sshConfigReferences(bytes.toString("utf8"), includes, commands);
+      await options.inspectContents(bytes);
       digest = createHash("sha256").update(bytes).digest("hex");
     } else {
       digest = await hashPatchFile(file.createReadStream({ autoClose: false }));
@@ -12386,28 +12399,110 @@ async function patchTransportIdentity(
 const processRelativePaths =
   process.platform === "win32" ? [] : ["/proc", "/dev/fd"];
 
-async function captureGithubInputs(
-  config: string | undefined,
-  socket: string,
+async function captureHostingClientConfig(
+  provider: "gh" | "glab",
   cwd: string,
+  repository: string,
   dependencies: CliDependencies,
+  captureFiles: boolean,
 ) {
-  if (!config) return;
-  const { root, caller } = await patchTransportDirectories(cwd, dependencies);
-  const access = dependencies.patchTransportAccess;
-  const identity = async (directory: string) => {
-    // A patch writer can replace a denied file by renaming its parent directory.
-    const host = await trustedHostPathResolver(directory, [
-      root,
-      caller,
-      ...processRelativePaths,
-      ...(access?.writable ?? []),
-    ]);
-    if (
-      access?.unknownWriters ||
-      githubConfigFiles.some((name) => !host(join(config, name)))
-    )
-      throw patchTransportChanged("gh");
+  const { protectedRoots } = await publicationToolDirectories(
+    repository,
+    dependencies,
+    true,
+  );
+  protectedRoots.push(...processRelativePaths);
+  const access = dependencies.patchTransportAccess!;
+  const resolvePath = () =>
+    trustedHostPathResolver(cwd, [...protectedRoots, ...access.writable]);
+  const unsafe = (path: string) =>
+    new CodexSecurityError(
+      `Patch publication requires ${hostingConfigLabels[provider]} paths outside patch-writable and process-relative directories: ${path}.`,
+    );
+  const key = provider === "gh" ? "GH_CONFIG_DIR" : "GLAB_CONFIG_DIR";
+  const inherited = dependencies.environment;
+  const pinned = await access.verifyHostingConfig?.[provider]?.(cwd);
+  const selected =
+    pinned?.[key] ??
+    (provider === "gh"
+      ? githubConfigDirectory(inherited)
+      : environmentEntry(inherited, key));
+  let config = selected ? resolve(cwd, selected) : undefined;
+  let paths = config
+    ? []
+    : gitlabConfigFiles(inherited).map((path) => resolve(cwd, path));
+  const host = await resolvePath();
+  const writable = paths.filter((path) => !host(path));
+  if (!captureFiles && writable.length) {
+    // glab versions differ on XDG expansion and file precedence. Ask the
+    // selected client about missing candidates before its first request.
+    const existing = writable.find(existsSync);
+    if (existing) throw unsafe(existing);
+    const reported = (
+      await dependencies.runRepositoryCommand(
+        "glab",
+        ["config", "path"],
+        repository,
+        { trim: false },
+      )
+    ).replace(/\r?\n$/u, "");
+    const path = resolve(cwd, reported);
+    if (!paths.includes(path)) throw patchTransportChanged(provider);
+    config = dirname(path);
+  }
+  const environment: NodeJS.ProcessEnv = {};
+  if (config) {
+    const physical = await trustedHostPathResolver(cwd, processRelativePaths);
+    const target = physical(config);
+    if (!target) throw unsafe(config);
+    config = target;
+    environment[key] = config;
+    const names = provider === "gh" ? githubConfigFiles : ["config.yml"];
+    paths = names.map((name) => join(config!, name));
+  }
+  const local = new Set<string>();
+  if (provider === "glab") {
+    const roots = await patchGitDirectories(repository, dependencies);
+    roots.add(join(cwd, ".git"));
+    for (const root of roots) local.add(join(root, "glab-cli", "config.yml"));
+  }
+  const files = new Map<string, PatchTransportFile>();
+  const socketConfig =
+    provider === "gh" ? join(config!, "config.yml") : undefined;
+  const verify = async (directory: string) => {
+    // Every link the client follows after this check must stay outside the
+    // current write grants, including grants added by a later turn.
+    const host = await resolvePath();
+    const requireStablePath = (path: string) => {
+      if (!host(path) || access.unknownWriters) throw unsafe(path);
+    };
+    for (const path of paths) requireStablePath(path);
+    for (const path of local) {
+      // Git administration itself is read-only. Verify redirects out of it.
+      for (const entry of [dirname(path), path]) {
+        if (lstatSync(entry, { throwIfNoEntry: false })?.isSymbolicLink())
+          requireStablePath(
+            resolveGitControlPath(dirname(entry), await readlink(entry)),
+          );
+      }
+    }
+    // Even gh config get can authenticate while migrating legacy accounts.
+    let socket = "";
+    const readSocket = async (bytes: Buffer) => {
+      socket = await githubSocketSetting(bytes);
+    };
+    for (const path of [...paths, ...local]) {
+      const file = await patchTransportIdentity(
+        path,
+        provider,
+        files.get(path),
+        {
+          writers: access,
+          ...(path === socketConfig && { inspectContents: readSocket }),
+        },
+      );
+      if (captureFiles) files.set(path, file);
+    }
     // Linux abstract sockets have no pathname to replace.
     if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
       return;
@@ -12415,13 +12510,14 @@ async function captureGithubInputs(
       process.platform === "win32"
         ? resolve(directory, socket)
         : resolveGitControlPath(directory, socket);
-    if (!host(path)) throw patchTransportChanged("gh");
+    requireStablePath(path);
     return patchFileStamp(await stat(path, { bigint: true }));
   };
-  const endpoint = await identity(cwd);
-  return async (directory: string) => {
-    if (endpoint !== (await identity(directory)))
-      throw patchTransportChanged("gh");
+  const endpoint = await verify(cwd);
+  return async (directory = cwd) => {
+    if (endpoint !== (await verify(directory)))
+      throw patchTransportChanged(provider);
+    return environment;
   };
 }
 
@@ -12429,76 +12525,39 @@ async function captureHostingConfig(
   provider: PatchPublicationTool,
   repository: string,
   dependencies: CliDependencies,
+  captureFiles = true,
 ) {
   try {
-    const { environment } = dependencies;
     const cwd =
       process.platform === "win32"
         ? repository
         : await canonicalConfigPath(repository);
-    const pinned: NodeJS.ProcessEnv = {};
-    const paths = new Set<string>();
-    const files = new Map<string, PatchTransportFile>();
-    if (provider === "git") {
-      const selector = await publicationConfigSelector(cwd, environment);
-      if (selector) {
-        const file = await patchTransportIdentity(selector, provider);
-        pinned["GIT_CONFIG"] = file.target;
-        const local = await patchGitOutput(
-          repository,
-          ["rev-parse", "--path-format=absolute", "--git-path", "config"],
-          dependencies,
-        );
-        // Git administration is already protected and our checkpoints write it.
-        if (file.target !== (await realpath(local).catch(() => undefined)))
-          files.set(file.target, file);
-      }
-    } else if (provider === "gh") {
-      const physical = await trustedHostPathResolver(cwd, processRelativePaths);
-      const directory = physical(
-        resolve(cwd, githubConfigDirectory(environment)),
+    if (provider !== "git")
+      return await captureHostingClientConfig(
+        provider,
+        cwd,
+        repository,
+        dependencies,
+        captureFiles,
       );
-      if (!directory) throw patchTransportChanged(provider);
-      pinned["GH_CONFIG_DIR"] = directory;
-      for (const name of githubConfigFiles) paths.add(join(directory, name));
-    } else {
-      const directory = environmentEntry(environment, "GLAB_CONFIG_DIR");
-      if (directory) pinned["GLAB_CONFIG_DIR"] = resolve(cwd, directory);
-      for (const path of gitlabConfigFiles(environment))
-        paths.add(resolve(cwd, path));
-      const local = await patchGitDirectories(repository, dependencies);
-      local.add(join(cwd, ".git"));
-      for (const root of local) paths.add(join(root, "glab-cli", "config.yml"));
-    }
-    for (const path of paths)
-      files.set(path, await patchTransportIdentity(path, provider));
-    const config = pinned["GH_CONFIG_DIR"];
-    let socket = "";
-    if (config && files.get(join(config, "config.yml"))?.digest) {
-      socket = (
-        await dependencies.runRepositoryCommand(
-          "gh",
-          ["config", "get", "http_unix_socket"],
-          repository,
-          { trim: false, environment: pinned },
-        )
-      ).replace(/\n$/u, "");
-    }
-    const verifyGithub = await captureGithubInputs(
-      config,
-      socket,
+    const selector = await publicationConfigSelector(
       cwd,
+      dependencies.environment,
+    );
+    if (!selector) return async () => ({});
+    const file = await patchTransportIdentity(selector, "git");
+    const local = await patchGitOutput(
+      repository,
+      ["rev-parse", "--path-format=absolute", "--git-path", "config"],
       dependencies,
     );
-    const checks =
-      config && dependencies.patchTransportAccess
-        ? { writers: dependencies.patchTransportAccess }
-        : {};
-    return async (directory = cwd) => {
-      for (const [path, file] of files)
-        await patchTransportIdentity(path, provider, file, checks);
-      await verifyGithub?.(directory);
-      return pinned;
+    // Git administration is already protected and our checkpoints write it.
+    const protectedConfig =
+      file.target === (await realpath(local).catch(() => undefined));
+    return async () => {
+      if (!protectedConfig)
+        await patchTransportIdentity(file.target, "git", file);
+      return { GIT_CONFIG: file.target };
     };
   } catch (error) {
     // Surface capture errors when invoking the affected provider.
@@ -13518,7 +13577,8 @@ async function bindSshConfiguration(
       "ssh-input",
       files?.get(path),
       {
-        sshConfig: { includes, commands },
+        inspectContents: (bytes) =>
+          sshConfigReferences(bytes.toString("utf8"), includes, commands),
       },
     );
     files?.set(path, config);
@@ -13825,24 +13885,20 @@ async function pinPublicationCommand(
   };
 }
 
-async function publicationSshCommand(
+async function publicationToolDirectories(
   repository: string,
   dependencies: CliDependencies,
-): Promise<PatchTransportCommand> {
-  const environmentCommand = environmentEntry(
-    dependencies.environment,
-    "GIT_SSH_COMMAND",
-  );
-  let directory: string;
-  let protectedRoots: string[];
+  allowGitAdmin: boolean,
+) {
   try {
-    const location = await patchTransportDirectories(repository, dependencies);
-    directory = location.directory;
-    protectedRoots = [location.root, location.caller];
+    const { root, caller, directory } = await patchTransportDirectories(
+      repository,
+      dependencies,
+    );
+    return { directory, protectedRoots: [root, caller] };
   } catch (error) {
-    // An existing PR can be returned from inside Git administration without a
-    // worktree. Git invokes an explicit SSH command from that directory.
-    if (environmentCommand === undefined) throw error;
+    // An existing PR can be returned from inside Git administration without a worktree.
+    if (!allowGitAdmin) throw error;
     const read = (args: string[]) =>
       dependencies.runRepositoryCommand("git", args, repository, {
         trim: false,
@@ -13853,7 +13909,7 @@ async function publicationSshCommand(
       ).trim() !== "true"
     )
       throw error;
-    directory = await realpath(repository);
+    const directory = await realpath(repository);
     const admin = await realpath(
       (await read(["rev-parse", "--absolute-git-dir"])).replace(/\n$/u, ""),
     );
@@ -13863,7 +13919,7 @@ async function publicationSshCommand(
         await read(["rev-parse", "--path-format=absolute", "--git-common-dir"])
       ).replace(/\n$/u, ""),
     );
-    protectedRoots = [directory, admin, common];
+    const protectedRoots = [directory, admin, common];
     if (basename(common) === ".git") protectedRoots.push(dirname(common));
     // Linked worktrees may reside elsewhere. Protect all registered checkouts.
     const records = await dependencies.runRepositoryCommand(
@@ -13884,7 +13940,23 @@ async function publicationSshCommand(
       );
       if (checkout) protectedRoots.push(checkout);
     }
+    return { directory, protectedRoots };
   }
+}
+
+async function publicationSshCommand(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<PatchTransportCommand> {
+  const environmentCommand = environmentEntry(
+    dependencies.environment,
+    "GIT_SSH_COMMAND",
+  );
+  const { directory, protectedRoots } = await publicationToolDirectories(
+    repository,
+    dependencies,
+    environmentCommand !== undefined,
+  );
   const pin = (command: string | [string]) =>
     pinPublicationCommand(
       command,

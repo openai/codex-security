@@ -3742,14 +3742,14 @@ describe("patch publication integrity", () => {
         ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"],
         {
           onCodex,
-          onRepositoryCommand: (command, args, cwd) => {
+          onRepositoryCommand: (command, args) => {
             if (command === "git") {
               if (args[0] === "config")
                 return args.at(-1)?.endsWith("PatchCommit")
                   ? "verified-commit"
                   : "Synthetic body";
-              if (args.includes("--show-toplevel")) return cwd;
-              if (args[0] === "rev-parse") return "verified-commit";
+              if (args[0] === "rev-parse")
+                return args[1] === "--verify" ? "verified-commit" : undefined;
               if (args[0] === "remote")
                 return `https://${client === "glab" ? "gitlab.com" : "github.example.test"}/example/repository.git`;
               if (args[0] === "push") pushes += 1;

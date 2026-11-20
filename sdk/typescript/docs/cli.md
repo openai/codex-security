@@ -3292,12 +3292,15 @@ hosting command’s working directory. Publication verifies that selection befor
 subsequent hosting commands. Git stores the verified commit and branch settings
 in the repository configuration.
 
-Publication uses the GitHub CLI configuration directory resolved before the
-patch. Keep that directory, its configuration files and any configured
-`http_unix_socket` outside the checkout and other directories the patch
-can write to. The socket path must reach the same socket from every
-publication directory. On Unix, keep these paths and their symlinks outside
-`/proc` and `/dev/fd`.
+Publication checks the hosting client's configuration before its first
+request. Keep the configuration files and any GitHub CLI `http_unix_socket`
+outside the checkout and other directories the patch can write to. Use
+`GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` to select an external directory.
+The socket path must reach the same socket from every publication directory.
+For socket paths with line breaks, use a double-quoted YAML value on one line
+with escapes such as `\n`.
+On Unix, keep these paths and their symlinks outside `/proc` and `/dev/fd`.
+
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.

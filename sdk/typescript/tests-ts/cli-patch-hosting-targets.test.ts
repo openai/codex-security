@@ -23,6 +23,7 @@ describe("GitHub patch destinations", () => {
     "replaced",
     "writable",
     "writable alias",
+    "mutable ancestor",
     "config alias",
     "config hard link",
   ];
@@ -42,6 +43,7 @@ describe("GitHub patch destinations", () => {
         name,
       );
       let socket = mode.startsWith("config") ? "" : relative(caller, endpoint);
+      if (mode === "mutable ancestor") socket = "src/../" + socket;
       if (mode === "process-relative")
         socket = "/proc/self/cwd/" + relative(process.cwd(), endpoint);
       if (mode === "writable alias") {
@@ -50,7 +52,9 @@ describe("GitHub patch destinations", () => {
       }
       await writeFile(
         join(config, "config.yml"),
-        `http_unix_socket: "${socket}"\n`,
+        mode === "stable"
+          ? `http_unix_socket: |\n  ${socket}`
+          : `http_unix_socket: "${socket}"\n`,
       );
       if (mode === "config hard link")
         await link(join(config, "config.yml"), join(caller, "settings.yml"));
@@ -60,20 +64,16 @@ describe("GitHub patch destinations", () => {
         Bun.serve({ unix: endpoint, fetch: () => new Response() });
       const sockets = [listen()];
       let edited = false;
-      let callsAfterEdit = 0;
+      const blocked = mode !== "stable" && mode !== "replaced";
+      let requests = 0;
       try {
         const outcome = await runPublicationWorkflow("issue", {
           currentDirectory: caller,
           environment: { GH_CONFIG_DIR: "gh-config" },
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "gh") {
-              if (edited) callsAfterEdit++;
-              if (edited && mode === "stable")
-                expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(config);
-              if (args[0] === "config") {
-                expect(args).toEqual(["config", "get", "http_unix_socket"]);
-                return socket + "\n";
-              }
+              if (edited || blocked) requests++;
+              expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(config);
             }
             return runPublicationCommand(command, args, cwd, options);
           },
@@ -88,18 +88,20 @@ describe("GitHub patch destinations", () => {
             return 0;
           },
         });
-        expect(edited, outcome.stderr).toBe(true);
+        expect(edited, outcome.stderr).toBe(!blocked);
         if (mode === "stable") {
           expect(outcome.exitCode, outcome.stderr).toBe(0);
-          expect(callsAfterEdit).toBeGreaterThan(0);
+          expect(requests).toBeGreaterThan(0);
         } else {
           expect(outcome.exitCode, outcome.stderr).toBe(2);
           expect(outcome.stderr).toContain(
             mode === "config hard link"
               ? "hard-linked transport file"
-              : "GitHub CLI configuration changed before publication",
+              : blocked
+                ? "outside patch-writable"
+                : "GitHub CLI configuration changed before publication",
           );
-          expect(callsAfterEdit).toBe(0);
+          expect(requests).toBe(0);
         }
       } finally {
         for (const socket of sockets) await socket.stop(true);
@@ -107,50 +109,62 @@ describe("GitHub patch destinations", () => {
     },
   );
 
-  test.each([
-    ["GitHub", "creation"],
-    ["GitHub", "in a writable directory"],
-    ["GitLab", "creation"],
-    ...(process.platform === "win32"
-      ? []
-      : [["GitLab", "symlink replacement"]]),
-  ])(
-    "rejects %s CLI config %s during the patch before reusing the provider",
-    async (provider, mutation) => {
+  test.each(
+    ["GitHub", "GitLab"].flatMap((provider) =>
+      [
+        "creation",
+        "writable directory",
+        "writable empty directory",
+        ...(process.platform === "win32" ? [] : ["symlink replacement"]),
+      ].map((mutation) => ({ provider, mutation })),
+    ),
+  )(
+    "rejects unsafe $provider CLI configuration before publication: $mutation",
+    async ({ provider, mutation }) => {
       const { directory, git } = await publicationRepository(fixtures);
       const gitlab = provider === "GitLab";
       const host = gitlab ? "gitlab.com" : "github.example.test";
-      const config = join(directory, "src/config.yml");
+      const writable =
+        mutation === "writable directory" ||
+        mutation === "writable empty directory";
+      const settings = writable
+        ? join(directory, "src")
+        : await fixtures.create("hosting-");
+      const config = join(settings, "config.yml");
       const replace = mutation === "symlink replacement";
-      if (replace) {
+      if (replace || mutation === "writable directory") {
         await writeFile(config, "{}\n");
+      }
+      if (mutation === "writable directory") {
         git("add", "src/config.yml");
         git("commit", "-m", "Initial provider configuration");
       }
       let edited = false;
-      let providerCallsAfterEdit = 0;
+      let unsafeCalls = 0;
       const outcome = await runPublicationWorkflow(
         "issue",
         {
           currentDirectory: directory,
           environment: gitlab
-            ? { GLAB_CONFIG_DIR: "src" }
-            : { GH_CONFIG_DIR: "src" },
+            ? { GLAB_CONFIG_DIR: settings }
+            : { GH_CONFIG_DIR: settings },
           onRepositoryCommand: (command, args, cwd, options) => {
-            if ((command === "gh" || command === "glab") && edited)
-              providerCallsAfterEdit++;
+            if (
+              (command === "gh" || command === "glab") &&
+              (edited || writable)
+            )
+              unsafeCalls++;
             if (command === "glab" && args[1] === "list") return "";
             return runPublicationCommand(command, args, cwd, options);
           },
           onCodex: async (_args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
             if (replace) {
               await unlink(config);
               await symlink("routing.yml", config);
             }
             await writeFile(
-              mutation === "in a writable directory"
-                ? join(directory, "src/example.yml")
-                : config,
+              config,
               gitlab
                 ? "hosts:\n  gitlab.com:\n    api_host: redirect.example.test\n"
                 : "http_unix_socket: synthetic.sock\n",
@@ -164,9 +178,11 @@ describe("GitHub patch destinations", () => {
       );
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain(
-        `${provider} CLI configuration changed before publication`,
+        writable
+          ? "outside patch-writable"
+          : `${provider} CLI configuration changed before publication`,
       );
-      expect(providerCallsAfterEdit).toBe(0);
+      expect(unsafeCalls).toBe(0);
     },
   );
 

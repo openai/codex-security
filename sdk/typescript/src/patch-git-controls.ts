@@ -526,6 +526,75 @@ function accountHomeDirectory(): string | undefined {
 
 export const githubConfigFiles = ["config.yml", "hosts.yml"] as const;
 
+export async function githubSocketSetting(bytes: Buffer): Promise<string> {
+  const { parseAllDocuments, isMap, isScalar, isAlias, visit } =
+    await import("yaml");
+  const encoding =
+    bytes[0] === 0xff && bytes[1] === 0xfe
+      ? "utf-16le"
+      : bytes[0] === 0xfe && bytes[1] === 0xff
+        ? "utf-16be"
+        : "utf-8";
+  const source = new TextDecoder(encoding, { fatal: true })
+    .decode(bytes)
+    .replace(/\r\n?/gu, "\n");
+  // go-yaml recognizes YAML 1.1 line breaks and reads the first document.
+  const [doc] = parseAllDocuments(
+    source.replace(/[\u0085\u2028\u2029]/gu, "\n"),
+    {
+      schema: "failsafe",
+      resolveKnownTags: false,
+      uniqueKeys: false,
+      prettyErrors: false,
+    },
+  );
+  if (doc?.errors.length) throw doc.errors[0];
+  if (!isMap(doc?.contents)) return "";
+  // A quoted scalar ending in an escaped quote can continue into the next
+  // apparent mapping entry in go-yaml. Require its closing delimiter.
+  visit(doc, {
+    Scalar(_, node) {
+      if (node.type !== "QUOTE_DOUBLE" && node.type !== "QUOTE_SINGLE") return;
+      const [start, end] = node.range!;
+      if (
+        !/^(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*")$/su.test(
+          source.slice(start, end),
+        )
+      )
+        throw new Error("Close quoted values in the GitHub CLI configuration.");
+    },
+  });
+  // go-gh takes the first matching key and reads the node's literal value.
+  function literal(node: unknown, key = false) {
+    if (isAlias(node)) return node.source;
+    if (!isScalar(node)) return "";
+    const value = node.source ?? "";
+    if (key && value.replace(/\s/gu, "") !== "http_unix_socket") return value;
+    const [start, end] = node.range!;
+    const raw = source.slice(start, end);
+    const block = node.type === "BLOCK_LITERAL" || node.type === "BLOCK_FOLDED";
+    const whitespace = source.slice(end).match(/^[ \n]*/u)![0];
+    // go-yaml and yaml fold these forms of whitespace differently.
+    if (
+      /[\u0085\u2028\u2029]/u.test(raw) ||
+      (node.type === "QUOTE_DOUBLE" && /\\\n[ \t]*\n/u.test(raw)) ||
+      (block &&
+        (/\n +$/u.test(raw) ||
+          (/^[|>][+-]?[1-9]/u.test(raw) && /^ +$/mu.test(raw + whitespace))))
+    )
+      throw new Error(
+        "Write http_unix_socket on one line using quoted escapes for whitespace.",
+      );
+    // yaml adds a trailing line break to unterminated block scalars at EOF.
+    return block && !raw.endsWith("\n") ? value.replace(/\n$/u, "") : value;
+  }
+  return literal(
+    doc.contents.items.find(
+      ({ key }) => literal(key, true) === "http_unix_socket",
+    )?.value,
+  );
+}
+
 export function githubConfigDirectory(environment: NodeJS.ProcessEnv) {
   const explicit = environmentEntry(environment, "GH_CONFIG_DIR");
   if (explicit) return explicit;
