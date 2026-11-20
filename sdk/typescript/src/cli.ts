@@ -7775,7 +7775,7 @@ export async function main(
               },
             );
             exitCode = patchExitCode(patches);
-            const files = await changedPatchFiles(
+            const { files } = await inspectPatchChanges(
               selected.repository,
               patchBase,
               dependencies,
@@ -7899,7 +7899,7 @@ export async function main(
           );
           directReport = report.text();
           if (!jsonOutput) await writeCliOutput(output, directReport);
-          const files = await changedPatchFiles(
+          const { files } = await inspectPatchChanges(
             repository,
             patchBase,
             dependencies,
@@ -10298,21 +10298,20 @@ async function requireCleanPatchPullRequestBase(
   }
 }
 
-async function changedPatchFiles(
+async function inspectPatchChanges(
   repository: string,
   base: string | Map<string, string>,
   dependencies: CliDependencies,
   includeSubmodules = false,
-  observedTree?: string,
-): Promise<string[]> {
+) {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
-    return [...new Set([...base.keys(), ...head.keys()])]
+    const files = [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
+    return { files };
   }
-  const head =
-    observedTree ?? (await snapshotPatchTree(repository, dependencies));
+  const head = await snapshotPatchTree(repository, dependencies);
   const output = await dependencies.runRepositoryCommand(
     "git",
     [
@@ -10327,7 +10326,7 @@ async function changedPatchFiles(
     repository,
     { trim: false },
   );
-  return output.split("\0").filter(Boolean);
+  return { files: output.split("\0").filter(Boolean), base, head };
 }
 
 async function snapshotPatchState(
@@ -10661,11 +10660,9 @@ async function runFindingPatches(
       },
     });
     let status: number;
-    let changedFiles: string[];
-    let observedTree: string | undefined;
-    let base: string | Map<string, string>;
+    let changes: Awaited<ReturnType<typeof inspectPatchChanges>>;
     try {
-      base = await snapshotPatchState(selected.repository, dependencies);
+      const base = await snapshotPatchState(selected.repository, dependencies);
       status = await runSkill(
         "fix-finding",
         [],
@@ -10686,18 +10683,11 @@ async function runFindingPatches(
       if (status === 130 || status === 143) {
         throw new CodexSecurityError("Patch operation was interrupted.");
       }
-      if (publication && typeof base === "string") {
-        observedTree = await snapshotPatchTree(
-          selected.repository,
-          dependencies,
-        );
-      }
-      changedFiles = await changedPatchFiles(
+      changes = await inspectPatchChanges(
         selected.repository,
         base,
         dependencies,
         publication !== undefined,
-        observedTree,
       );
     } finally {
       progress.stop();
@@ -10718,31 +10708,33 @@ async function runFindingPatches(
           response.text(),
           finding.occurrenceId,
         );
-        if (reported.status === "verified" && changedFiles.length === 0) {
+        if (reported.status === "verified" && changes.files.length === 0) {
           patch = failed("No patch was applied; 0 files changed.");
-        } else if (reported.status === "no_change" && changedFiles.length > 0) {
+        } else if (
+          reported.status === "no_change" &&
+          changes.files.length > 0
+        ) {
           patch = failed(
             "The patch reported no change but modified files.",
-            changedFiles,
+            changes.files,
           );
         } else {
           patch = reported;
         }
       } catch (error) {
-        patch = failed(errorMessage(error), changedFiles);
+        patch = failed(errorMessage(error), changes.files);
       }
     }
 
     if (
       publication &&
-      typeof base === "string" &&
-      observedTree !== undefined &&
+      changes.head !== undefined &&
       patch.status === "verified"
     ) {
       const reason = await publication.record(
         verifiedPatchFiles(selected, [patch]),
-        base,
-        observedTree,
+        changes.base,
+        changes.head,
       );
       if (reason) patch = failed(reason);
     }

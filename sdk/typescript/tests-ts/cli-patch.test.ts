@@ -70,7 +70,11 @@ function savedScan(
 function completePatches(
   args: readonly string[],
   output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-  status: "verified" | "blocked" = "verified",
+  status: "verified" | "no_change" | "blocked" = "verified",
+  report?: {
+    verification: string;
+    credentialRevocationPending: boolean | undefined;
+  },
 ): Finding[] {
   const prompt = output?.appServer?.prompt ?? args.at(-1)!;
   const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
@@ -80,11 +84,11 @@ function completePatches(
         occurrenceId: finding.occurrenceId,
         status,
         files: status === "verified" ? [finding.locations[0]!.path] : [],
-        ...(status === "verified"
-          ? {
+        ...(status !== "blocked"
+          ? (report ?? {
               verification: "The exploit fails and focused tests pass.",
               credentialRevocationPending: false,
-            }
+            })
           : { reason: "The required service is unavailable." }),
       })),
     }),
@@ -2150,24 +2154,17 @@ describe("scan and patch workflow", () => {
     const fixtures = await publicationFixtures({
       [path]: "TOKEN=synthetic-fixture\n",
     });
-    const patch = {
-      occurrenceId: "occ_1",
-      status: "no_change",
-      files: [],
-      verification: "The deployment reads the token from its environment.",
-      credentialRevocationPending: false,
-    };
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
       {
         ...fixtures,
         onRepositoryCommand: runGitRepositoryCommand,
-        onCodex: async (_args, output) => {
+        onCodex: async (args, output) => {
           await writeFile(
             join(fixtures.currentDirectory, path),
             "TOKEN=${REGISTRY_TOKEN}\n",
           );
-          output?.stdout.write(JSON.stringify({ patches: [patch] }));
+          completePatches(args, output, "no_change");
           return 0;
         },
       },
@@ -2194,7 +2191,6 @@ describe("scan and patch workflow", () => {
   ] as const)(
     "gates credential retirement after %s with pending=%p",
     async (status, pending, exitCode) => {
-      const files = status === "verified" ? ["src/finding-1.ts"] : [];
       const fixtures = await publicationFixtures(initialPatchFiles);
       let publishedBody: string | undefined;
       const outcome = await runWorkflow(
@@ -2208,28 +2204,19 @@ describe("scan and patch workflow", () => {
         ],
         {
           ...fixtures,
-          onCodex: async (_args, output) => {
+          onCodex: async (args, output) => {
             if (status === "verified")
               await writeFile(
-                join(fixtures.currentDirectory, files[0]!),
+                join(fixtures.currentDirectory, "src/finding-1.ts"),
                 "fixed\n",
               );
-            output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status,
-                    files,
-                    verification:
-                      pending === false
-                        ? "The old password was removed and its owner confirmed it was disabled."
-                        : "The application reads its password from the secret store. Ask the database owner to rotate the old password.",
-                    credentialRevocationPending: pending,
-                  },
-                ],
-              }),
-            );
+            completePatches(args, output, status, {
+              verification:
+                pending === false
+                  ? "The old password was removed and its owner confirmed it was disabled."
+                  : "The application reads its password from the secret store. Ask the database owner to rotate the old password.",
+              credentialRevocationPending: pending,
+            });
             return 0;
           },
           onRepositoryCommand: (command, args, cwd, options) => {

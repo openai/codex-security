@@ -50,6 +50,8 @@ interface TestResult extends Result {
   resolved_questions?: TestFinding[];
 }
 const fixture = createFixture();
+const positiveIndex = (id: string) =>
+  fixture.positives.findIndex((entry) => entry.id === id);
 
 function retainedResult(source = fixture): TestResult {
   return {
@@ -349,7 +351,7 @@ test("public status access corroborates only the independently identified runtim
 
 test("recognizes the embedded signing key at its declaration with CWE-321", () => {
   const result = retainedResult();
-  const index = fixture.positives.findIndex(({ id }) => id === "private-key");
+  const index = positiveIndex("private-key");
   const key = fixture.positives[index];
   const finding = result.findings[index];
   for (const category of [
@@ -401,9 +403,7 @@ test("sensitive information disclosure requires a credential-specific CWE for so
 
 test("response-specific categories identify the runtime leak with CWE-201", () => {
   const result = retainedResult();
-  const index = fixture.positives.findIndex(
-    (expected) => expected.id === "runtime-disclosure",
-  );
+  const index = positiveIndex("runtime-disclosure");
   const runtime = result.findings[index];
   for (const category of [
     "Sensitive information in response",
@@ -424,9 +424,7 @@ test("response-specific categories identify the runtime leak with CWE-201", () =
 
 test("runtime taxonomy distinguishes denied leaks from missing protections", () => {
   const result = retainedResult();
-  const index = fixture.positives.findIndex(
-    (expected) => expected.id === "runtime-disclosure",
-  );
+  const index = positiveIndex("runtime-disclosure");
   for (const [category, cwe, found] of [
     ["not a data leak", "CWE-200", false],
     ["not an exposure", "CWE-200", false],
@@ -536,9 +534,7 @@ test("matches path casing only on Windows while preserving citation checks", () 
 for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
   test(`accepts ${cwe} for the password in the database configuration`, () => {
     const result = retainedResult();
-    const databaseIndex = fixture.positives.findIndex(
-      (entry) => entry.id === "dotenv-url",
-    );
+    const databaseIndex = positiveIndex("dotenv-url");
     result.findings[databaseIndex].taxonomy.cwe = [cwe];
     result.findings[databaseIndex].taxonomy.category =
       "password-in-configuration";
@@ -562,7 +558,7 @@ for (const cwe of ["CWE-312", "CWE-313"]) {
 }
 
 test("accepts cryptographic-key categories only for a matching CWE-321 exposure", () => {
-  const index = fixture.positives.findIndex(({ id }) => id === "private-key");
+  const index = positiveIndex("private-key");
   for (const [category, cwe, passes] of [
     ["Embedded cryptographic key", "CWE-321", true],
     ["cryptographic_keys", "CWE-321", true],
@@ -835,7 +831,7 @@ test("consumer evidence and sinks must cover credential use, not function framin
     ["private-key", 5],
     ["private-key", 7],
   ] as const) {
-    const index = fixture.positives.findIndex((expected) => expected.id === id);
+    const index = positiveIndex(id);
     const expected = fixture.positives[index];
     const result = retainedResult();
     result.findings[index].codeEvidence = [
@@ -898,9 +894,7 @@ test("multiple expected exposures can share a finding", () => {
 
 test("grouped exposures retain their applicable CWE classifications", () => {
   const result = retainedResult();
-  const indices = ["dotenv-url", "private-key"].map((id) =>
-    fixture.positives.findIndex((expected) => expected.id === id),
-  );
+  const indices = ["dotenv-url", "private-key"].map(positiveIndex);
   const grouped = indices.map((index) => result.findings[index]);
   const finding = {
     ...grouped[0],
@@ -1013,9 +1007,7 @@ test("path normalization does not make unrelated or unsafe source locations vali
 
 test("accepts the private-key body and rejects reversed source ranges", () => {
   const result = retainedResult();
-  const keyIndex = fixture.positives.findIndex(
-    (entry) => entry.id === "private-key",
-  );
+  const keyIndex = positiveIndex("private-key");
   result.findings[keyIndex].locations[0].startLine++;
   assert.equal(gradeResult(result, fixture).passed, true);
   result.findings[keyIndex].locations[0].endLine =
@@ -1026,9 +1018,7 @@ test("accepts the private-key body and rejects reversed source ranges", () => {
 for (const footerLocation of [true, false]) {
   test(`rejects footer-only private-key evidence with ${footerLocation ? "footer" : "declaration"} location`, () => {
     const result = retainedResult();
-    const keyIndex = fixture.positives.findIndex(
-      (entry) => entry.id === "private-key",
-    );
+    const keyIndex = positiveIndex("private-key");
     const path = fixture.positives[keyIndex].path;
     const footerLine =
       fixture.files[path]

@@ -116,7 +116,7 @@ function matches(
   if (
     expected.id === "private-key" &&
     cwes.includes("CWE-321") &&
-    /^(?:embedded[- ]+)?(?:cryptographic(?:[- ]+signing)?|signing)[- ]+keys?(?:[- ]+(?:exposure|disclosure))?$/i.test(
+    /^(?:embedded )?(?:cryptographic(?: signing)?|signing) keys?(?: (?:exposure|disclosure))?$/.test(
       category,
     )
   )
@@ -126,7 +126,7 @@ function matches(
     if (exact) return cwes.includes(exact);
     // The endpoint returns a value loaded at runtime. Source storage is a different defect.
     return (
-      (/disclos|expos|leak|authenticat|authoriz|access[- ]control/i.test(
+      (/disclos|expos|leak|authenticat|authoriz|access control/.test(
         category,
       ) ||
         (explicitSecretCategory.test(category) &&
@@ -148,7 +148,8 @@ function matches(
   );
 }
 
-function matchesConsumer(location: SourceLocation, expected: Expected) {
+function citesExpectedSource(location: SourceLocation, expected: Expected) {
+  if (matchesLocation(location, expected)) return true;
   return (
     expected.consumerLine !== null &&
     matchesLocation(location, {
@@ -189,11 +190,7 @@ function evidenceIssues(
   const missingCaseEvidence = matchedCases
     .filter(
       (expected) =>
-        !evidence.some(
-          (entry) =>
-            matchesLocation(entry, expected) ||
-            matchesConsumer(entry, expected),
-        ),
+        !evidence.some((entry) => citesExpectedSource(entry, expected)),
     )
     .map(({ id }) => id);
   return !evidence.length ||
@@ -208,18 +205,17 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
   const errors = [];
   const findings = Array.isArray(result?.findings) ? result.findings : [];
   if (!Array.isArray(result?.findings)) errors.push("missing findings array");
+  const isSourceCredential = (expected: Expected) =>
+    expected.category !== "sensitive-data-exposure";
   const evaluated = findings.map((finding) => {
-    const matchesForFinding = fixture.positives.filter((expected) =>
+    const matchedCases = fixture.positives.filter((expected) =>
       matches(finding, expected),
     );
-    const sourceCases = matchesForFinding.filter(
-      (expected) => expected.category !== "sensitive-data-exposure",
-    );
+    const sourceCases = matchedCases.filter(isSourceCredential);
     // Source exposures can share a finding. The endpoint needs its own code fix.
     return {
       finding,
-      matchedCases: sourceCases.length ? sourceCases : matchesForFinding,
-      sourceCredential: sourceCases.length > 0,
+      matchedCases: sourceCases.length ? sourceCases : matchedCases,
     };
   });
   const cases = fixture.positives.map((expected) => ({
@@ -240,15 +236,14 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
           (!supportingLocation(location) &&
             !matchedCases.some(
               (expected) =>
-                matchesLocation(location, expected) ||
+                citesExpectedSource(location, expected) ||
                 // This sentence establishes the audience of the independently matched status route.
                 (expected.category === "sensitive-data-exposure" &&
                   normalizeSourcePath(location.path) ===
                     normalizeSourcePath("README.md") &&
                   location.startLine === fixture.statusAccessLine &&
                   (location.endLine ?? location.startLine) ===
-                    fixture.statusAccessLine) ||
-                matchesConsumer(location, expected),
+                    fixture.statusAccessLine),
             )),
       )
       .map((location) => location.path);
@@ -275,7 +270,9 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
   );
   if (evidenceFailures.length) errors.push("missing or invalid code evidence");
   const discoveryPassed = errors.length === 0;
-  const retained = evaluated.filter(({ sourceCredential }) => sourceCredential);
+  const retained = evaluated.filter(({ matchedCases }) =>
+    matchedCases.some(isSourceCredential),
+  );
   const withStatus = retained.filter(({ finding }) =>
     [
       finding.title,
