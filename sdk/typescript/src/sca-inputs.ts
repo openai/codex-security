@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { SaxesParser } from "saxes";
+import { parseAllDocuments } from "yaml";
 import { parse as parseToml } from "smol-toml";
 
 import { isRecord as record } from "./record.js";
@@ -20,6 +21,8 @@ export interface InputInspection {
   status: "scanned" | "unsupported";
   reason: string | null;
   references: ScaUnresolvedReference[];
+  /** Source-bearing Cargo tuples: first unresolved origin, or null for crates.io only. */
+  cargoSources?: Map<string, string | null>;
   diagnostics: string[];
   limitations: string[];
 }
@@ -59,6 +62,15 @@ export function scaInputFormat(path: string): ScaInput["format"] | null {
     return "requirements";
   if (name.endsWith(".pom")) return "maven";
   return null;
+}
+
+export function parseNodeLockfiles(content: string, pnpm: boolean): unknown[] {
+  if (!pnpm) return [JSON.parse(content)];
+  return parseAllDocuments(content).map((document) => {
+    for (const warning of document.warnings) process.emitWarning(warning);
+    if (document.errors.length > 0) throw document.errors[0];
+    return document.toJS();
+  });
 }
 
 function inspection(): InputInspection {
@@ -246,13 +258,23 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
 
 function inspectCargo(content: string, sourcePath: string): InputInspection {
   const { result, addReference } = referenceInspection(sourcePath, "crates.io");
+  const registry = "registry+https://github.com/rust-lang/crates.io-index";
+  const sources = new Map<string, string | null>();
   for (const pkg of packagesInToml(content)) {
     const name = packageName(pkg);
+    const version = text(pkg["version"]);
     const source = text(pkg["source"]);
+    if (source !== null && version !== null) {
+      const id = `${name}@${version}`;
+      if (sources.get(id) == null)
+        sources.set(id, source === registry ? null : source);
+    }
     // The upstream extractor drops source identity, including alternate registries.
-    if (source !== "registry+https://github.com/rust-lang/crates.io-index")
-      addReference(name, text(pkg["version"]), source ?? "workspace-or-path");
+    if (source !== registry)
+      addReference(name, version, source ?? "workspace-or-path");
   }
+  if (result.references.some((ref) => ref.resolution === "workspace-or-path"))
+    result.cargoSources = sources;
   return result;
 }
 

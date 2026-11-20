@@ -201,6 +201,7 @@ const distModules = [
   "retry-windows-rename",
   "runtime",
   "sca",
+  "sca-context",
   "sca-inputs",
   "sca-osv",
   "sca-report",
