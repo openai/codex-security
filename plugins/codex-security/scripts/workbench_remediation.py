@@ -65,24 +65,70 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
+    mail = pending_mail_header = signature = False
+    mail_separator = None
+    hunk_lines = 0
+    expect_hunk = False
+    # Older saved previews can contain a bare Git header followed directly by changes.
+    bare_git_diff = False
     at_line_start = True
     try:
         with open_scan_file(scan_dir, relative_path) as patch:
             while chunk := patch.readline(1024 * 1024):
                 digest.update(chunk)
+                if not preview:
+                    mail = _FORMAT_PATCH_FROM.fullmatch(chunk) is not None
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
+                if at_line_start and mail:
+                    line = chunk.rstrip(b"\r\n")
+                    # A quoted patch can include a signature or an unfinished hunk.
+                    # Git can list file creations, modes and renames after the diffstat total.
+                    if line == b"---":
+                        mail_separator = "diffstat"
+                    elif mail_separator in ("diffstat", "summary") and line.startswith(b" "):
+                        if re.match(rb" [0-9]+ files? changed(?:,|$)", line):
+                            mail_separator = "summary"
+                    elif mail_separator == "summary" and not line:
+                        mail_separator = "patch"
+                    else:
+                        if mail_separator == "patch" and line.startswith(b"diff --git "):
+                            file_count = additions = deletions = old_headers = new_headers = 0
+                            hunk_lines = 0
+                            expect_hunk = signature = pending_mail_header = False
+                        mail_separator = None
+                    if not (hunk_lines or signature):
+                        if pending_mail_header and re.match(_GIT_FILE_METADATA, chunk):
+                            file_count += 1
+                        pending_mail_header = chunk.startswith(b"diff --git ")
+                        if file_count and line == b"-- ":
+                            signature = True
+                if at_line_start and not signature and (not mail or file_count):
+                    if hunk_lines:
+                        # Both sides count a context line; neither counts a no-newline marker.
+                        if not chunk.startswith(b"\\"):
+                            additions += chunk.startswith(b"+")
+                            deletions += chunk.startswith(b"-")
+                            hunk_lines -= 1 if chunk.startswith((b"+", b"-")) else 2
+                    elif expect_hunk and (hunk := _HUNK_HEADER.match(chunk)):
+                        try:
+                            hunk_lines = _hunk_count(hunk[1]) + _hunk_count(hunk[2])
+                        except ValueError:
+                            # Malformed counts must not prevent displaying the saved patch.
+                            expect_hunk = False
+                    elif not chunk.startswith(b"\\"):
+                        expect_hunk = chunk.startswith(b"+++ ")
+                        if chunk.startswith(b"diff --git ") and not mail:
+                            file_count += 1
+                            bare_git_diff = True
+                        elif chunk.startswith(b"--- "):
+                            old_headers += 1
+                            bare_git_diff = False
+                        elif expect_hunk:
+                            new_headers += 1
+                        elif bare_git_diff:
+                            additions += chunk.startswith(b"+")
+                            deletions += chunk.startswith(b"-")
                 at_line_start = chunk.endswith(b"\n")
     except SystemExit:
         return None, None
@@ -221,6 +267,13 @@ def latest_attempt(connection: sqlite3.Connection, occurrence_id: str) -> sqlite
     ).fetchone()
 
 
+_FORMAT_PATCH_FROM = re.compile(
+    rb"From (?:[0-9a-f]{40}|[0-9a-f]{64}) Mon Sep 17 00:00:00 2001\r?\n"
+)
+_GIT_FILE_METADATA = (
+    rb"index |--- |@@ |old mode|new mode|new file|deleted file"
+    rb"|(?:dis)?similarity index|(?:rename|copy) |GIT binary patch|Binary files |Files |Only in "
+)
 _HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 _QUOTED_GIT_PATH = rb'"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)"'
 _SUBMODULE_SUMMARY_END = re.compile(
@@ -230,6 +283,11 @@ _SUBMODULE_SUMMARY_END = re.compile(
 _SUBMODULE_ERROR = (
     "A remediation patch cannot update Git submodules. Regenerate without gitlink changes."
 )
+
+
+def _hunk_count(digits: bytes | None) -> int:
+    # An omitted count means one. Git also accepts counts padded with leading zeros.
+    return 1 if digits is None else int(digits.lstrip(b"0") or b"0")
 
 
 def _git_path(field: bytes) -> bytes:
@@ -264,7 +322,7 @@ def _matches_git_paths(header: bytes, old_field: bytes, new_field: bytes) -> boo
 
 
 def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
-    mail = re.match(rb"From (?:[0-9a-f]{40}|[0-9a-f]{64}) Mon Sep 17 00:00:00 2001\r?\n", patch)
+    mail = _FORMAT_PATCH_FROM.match(patch)
     if mail:
         first = re.search(rb"(?m)^diff --git [^\n]+\n", patch)
         if first:
@@ -282,8 +340,7 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
                 # With --no-stat Git can retain a quoted header as the preimage of
                 # the first change. Ignore it only for the same in-place file edit.
                 file = re.compile(
-                    rb"(?m)^diff --git [^\n]+\n(?=index |--- |@@ |old mode|new mode|new file|deleted file"
-                    rb"|(?:dis)?similarity index|(?:rename|copy) |GIT binary patch|Binary files |Files |Only in )"
+                    rb"(?m)^diff --git [^\n]+\n(?=" + _GIT_FILE_METADATA + rb")"
                 ).search(patch, start)
                 if (
                     file
@@ -379,8 +436,8 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
                 continue
             git_paths = b""
         if hunk:
-            old_lines = int(hunk[1] or b"1")
-            new_lines = int(hunk[2] or b"1")
+            old_lines = _hunk_count(hunk[1])
+            new_lines = _hunk_count(hunk[2])
         elif (
             line.startswith((b"Binary files ", b"Files "))
             and line.endswith(b" differ")
