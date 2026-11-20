@@ -7,7 +7,7 @@ not-affected, and an unresolved configuration. The labels come from the fixture
 specification; none has independent human review.
 
 The suite distinguishes a correctly matched dependency advisory from application
-applicability. The original match remains in each frozen `osv.json`, including
+applicability. The original match remains in each staged `osv.json`, including
 when the application assessment is negative, unresolved, malformed, or fails.
 SDK tests separately exercise actual scanner invocation and artifact retention.
 
@@ -54,9 +54,12 @@ current static triage skill and a typed-match prompt prototype. This prototype
 isolates prompt behavior; it is **not** an end-to-end benchmark of the SDK's
 `scanDependencies` orchestration. Run SDK process-boundary tests for that.
 
-The runner stages only label-free case files and its provider adapter in a temporary
-directory. It uses the checkout's plugin runtime and the selected Node executable,
-including for Promptfoo, Codex, and the security-policy helper. The provider keeps
+`fixtures/corpus.json` stores one scanner response per advisory family and each
+application’s source, deployment notes, and expected evidence. The runner
+writes six files per case in a temporary directory. The digest tests check the
+exact staged bytes against the frozen snapshots. It uses the checkout's plugin
+runtime and the selected Node executable for Promptfoo, Codex, and the
+security-policy helper. The provider keeps
 the existing named read-only filesystem profile, allowing the plugin, the selected
 case, the Node executable directory, and the installed native Codex CLI package. Tool network
 access, web search, inherited MCP servers, apps, and plugin/memory context remain

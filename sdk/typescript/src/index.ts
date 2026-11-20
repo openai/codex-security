@@ -332,8 +332,8 @@ export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
 
 export type { DependencyScanOptions, DependencyScanResult } from "./api.js";
-export type { DependencyScanProgress } from "./sca-progress.js";
 export type {
+  DependencyScanProgress,
   ScaResult,
   ScaScanner,
   ScaCoverage,

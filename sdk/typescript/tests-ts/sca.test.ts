@@ -32,15 +32,13 @@ import {
   ScanInterruptedError,
   ScanCostLimitExceededError,
   OutputInsideProtectedRootError,
+  type DependencyScanProgress,
+  type ScanActivity,
+  type ScanCost,
+  type ScanTokenUsage,
 } from "../src/index.js";
 import type { OsvScanResult } from "../src/sca-osv.js";
 import type { ScaResult, TriageFinding } from "../src/sca-types.js";
-import type {
-  DependencyScanProgress,
-  ScanActivity,
-  ScanCost,
-  ScanTokenUsage,
-} from "../src/index.js";
 import * as runtime from "../src/runtime.js";
 import {
   codexSecurityCredentialHome,
@@ -1669,6 +1667,19 @@ test("dependency triage preserves scanner evidence when MCP configuration cannot
   );
 });
 
+function observeAssessments(outputDir: string) {
+  const progress: DependencyScanProgress[] = [];
+  const persisted: ScaResult[] = [];
+  function onProgress(event: DependencyScanProgress) {
+    progress.push(event);
+    if (event.phase === "assessing" && event.current === null)
+      persisted.push(
+        JSON.parse(readFileSync(join(outputDir, "sca-result.json"), "utf8")),
+      );
+  }
+  return { progress, persisted, onProgress };
+}
+
 test.each(["setup", "source snapshot", "source drift"] as const)(
   "dependency observers report saved bulk assessment failures after %s",
   async (failure) => {
@@ -1678,20 +1689,11 @@ test.each(["setup", "source snapshot", "source drift"] as const)(
       ...(failure === "source snapshot" ? { snapshotErrorAt: 1 } : {}),
     });
     await using security = f.client;
-    const progress: DependencyScanProgress[] = [];
-    const persisted: ScaResult[] = [];
+    const { progress, persisted, onProgress } = observeAssessments(f.outputDir);
     const result = await security.scanDependencies({
       repositoryPath: f.repository,
       outputDir: f.outputDir,
-      onProgress(event) {
-        progress.push(event);
-        if (event.phase === "assessing" && event.current === null)
-          persisted.push(
-            JSON.parse(
-              readFileSync(join(f.outputDir, "sca-result.json"), "utf8"),
-            ),
-          );
-      },
+      onProgress,
     });
     const completed = failure === "source drift" ? 1 : 0;
     expect(result.status).toBe("partial");
@@ -1721,8 +1723,7 @@ test("dependency observers report saved assessments, activity, usage, and total 
     commandActivity: true,
   });
   await using security = f.client;
-  const progress: DependencyScanProgress[] = [];
-  const persisted: ScaResult[] = [];
+  const { progress, persisted, onProgress } = observeAssessments(f.outputDir);
   const activity: ScanActivity[] = [];
   const costs: Readonly<ScanCost>[] = [];
   const usage: Readonly<ScanTokenUsage>[] = [];
@@ -1731,15 +1732,7 @@ test("dependency observers report saved assessments, activity, usage, and total 
   const result = await security.scanDependencies({
     repositoryPath: f.repository,
     outputDir: f.outputDir,
-    onProgress(event) {
-      progress.push(event);
-      if (event.phase === "assessing" && event.current === null)
-        persisted.push(
-          JSON.parse(
-            readFileSync(join(f.outputDir, "sca-result.json"), "utf8"),
-          ),
-        );
-    },
+    onProgress,
     onActivity: (event) => {
       activity.push(event);
     },

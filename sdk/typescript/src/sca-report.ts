@@ -1,4 +1,5 @@
 import { posix, win32 } from "node:path";
+import { scaPackageName } from "./sca-inputs.js";
 import type { ScaComponent, ScaMatch, ScaResult } from "./sca-types.js";
 
 export interface ScaMatchCorrelation {
@@ -303,13 +304,6 @@ function comparabilityReasons(
   return reasons;
 }
 
-function comparisonPackageName(component: ScaComponent): string {
-  if (component.ecosystem === "NuGet") return component.name.toLowerCase();
-  if (component.ecosystem === "PyPI")
-    return component.name.toLowerCase().replace(/[-_.]+/gu, "-");
-  return component.name;
-}
-
 /** Correlate package/advisory facts independently of model assessments. */
 export function compareScaResults(
   base: ScaResult,
@@ -340,12 +334,16 @@ export function compareScaResults(
   for (const before of base.matches) {
     const beforeComponent = baseComponents.get(before.id)!;
     const beforeIds = new Set(identifiers(before));
+    const name = scaPackageName(
+      beforeComponent.ecosystem,
+      beforeComponent.name,
+    );
     const candidates = head.matches
       .filter((after) => {
         const afterComponent = headComponents.get(after.id)!;
         return (
-          comparisonPackageName(beforeComponent) ===
-            comparisonPackageName(afterComponent) &&
+          name ===
+            scaPackageName(afterComponent.ecosystem, afterComponent.name) &&
           beforeComponent.ecosystem === afterComponent.ecosystem &&
           identity(beforeComponent.sourcePath, base.repository.path) ===
             identity(afterComponent.sourcePath, head.repository.path) &&

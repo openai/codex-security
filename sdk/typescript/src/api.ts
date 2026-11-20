@@ -15,11 +15,12 @@ import {
   dependencyTriageContract,
   dependencyTriagePrompt,
 } from "./sca-triage.js";
-import type { ScaAssessment, ScaResult } from "./sca-types.js";
-import {
-  assessmentProgress,
-  type DependencyScanProgress,
-} from "./sca-progress.js";
+import type {
+  DependencyScanProgress,
+  ScaAssessment,
+  ScaMatch,
+  ScaResult,
+} from "./sca-types.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   explicitlyCanceled,
@@ -1076,7 +1077,8 @@ export class CodexSecurity {
   ): Promise<DependencyScanResult> {
     const { onProgress, ...scanOptions } = options;
     const reportProgress = onProgress && notifyObserver(options, "onProgress");
-    const onActivity = notifyObserver(options, "onActivity");
+    const onActivity =
+      options.onActivity && notifyObserver(options, "onActivity");
     const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
     const signal = AbortSignal.any([
@@ -1297,7 +1299,8 @@ export class CodexSecurity {
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
-          if (cost === null) {
+          if (cost !== null) reportCost(cost);
+          else {
             result!.model.costUsd = null;
             if (options.maxCostUsd !== undefined)
               budgetController.abort(
@@ -1305,7 +1308,7 @@ export class CodexSecurity {
                   "Could not verify the dependency assessment cost limit.",
                 ),
               );
-          } else reportCost(cost);
+          }
         };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
@@ -1346,14 +1349,15 @@ export class CodexSecurity {
                     tracker.recordUsage(null, event["thread_id"]);
                     tracker.start(event["thread_id"]);
                   }
-                  for (const activity of scanActivitiesFromEvent(
-                    event,
-                    inputs.repository,
-                  ))
-                    onActivity({
-                      ...activity,
-                      id: `${match.id}:${activity.id}`,
-                    });
+                  if (onActivity)
+                    for (const activity of scanActivitiesFromEvent(
+                      event,
+                      inputs.repository,
+                    ))
+                      onActivity({
+                        ...activity,
+                        id: `${match.id}:${activity.id}`,
+                      });
                   throwIfAborted(signal, outputDir);
                   // The SDK can continue draining its stream after the terminal event.
                   if (
@@ -7617,6 +7621,33 @@ function observeSettledScan(
   } catch {
     // Preserve the original failure when its persisted outcome cannot be read.
   }
+}
+
+function assessmentProgress(
+  result: ScaResult,
+  match: ScaMatch | null,
+): DependencyScanProgress {
+  let assessmentsCompleted = 0;
+  let assessmentsFailed = 0;
+  for (const assessment of result.assessments) {
+    if (assessment.status === "completed") assessmentsCompleted++;
+    else if (assessment.status === "failed") assessmentsFailed++;
+  }
+  const component =
+    match && result.components.find((item) => item.id === match.componentId);
+  return {
+    phase: "assessing",
+    assessmentsTotal: result.matches.length,
+    assessmentsCompleted,
+    assessmentsFailed,
+    current: match && {
+      matchId: match.id,
+      componentId: match.componentId,
+      packageName: component?.name ?? null,
+      packageVersion: component?.version ?? null,
+      advisoryIds: [...match.advisoryIds],
+    },
+  };
 }
 
 function notifyObserver<

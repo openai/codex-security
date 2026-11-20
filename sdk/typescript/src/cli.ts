@@ -17,7 +17,7 @@ import {
 } from "./provider-profile.js";
 import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
-import type { DependencyScanProgress } from "./sca-progress.js";
+import type { DependencyScanProgress } from "./sca-types.js";
 
 import {
   execFile as execFileCallback,
@@ -9205,10 +9205,9 @@ async function runDependencyScan(
     dependencies.environment["CI"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
   );
-  let update: DependencyScanProgress = { phase: "preparing" };
-  let cost: Readonly<ScanCost> | null = null;
+  let description = dependencyProgressDescription({ phase: "preparing" });
+  let estimate = "n/a";
   let lastObservedAt = dependencies.now();
-  let activity: string | undefined;
   let lastMilestone: string | undefined;
   let stopped = false;
   const removeSignals = listenForAbort(dependencies, controller, (signal) => {
@@ -9219,27 +9218,32 @@ async function runDependencyScan(
     dependencies.forceExit(signal);
   });
   const showCost = presentation.showCost || options.maxCostUsd !== undefined;
+  const limit =
+    options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`;
   const timerMessage = (): string => {
-    const { summary, detail } = dependencyProgressDescription(update);
     const seconds = Math.max(
       0,
       Math.floor((dependencies.now() - lastObservedAt) / 1_000),
     );
     return diagnosticValue(
       [
-        summary,
+        description.summary,
         `last event ${seconds}s`,
-        showCost
-          ? `est. ${cost === null ? "n/a" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`}`
-          : undefined,
-        activity ?? detail,
+        showCost ? `est. ${estimate}${limit}` : undefined,
+        description.detail,
       ]
         .filter((part) => part !== undefined)
         .join(" · "),
     );
   };
+  const observe = (handle: () => void) =>
+    notify(() => {
+      if (stopped) return;
+      lastObservedAt = dependencies.now();
+      handle();
+    });
   const milestone = (message: string): void => {
-    if (stopped || message === lastMilestone) return;
+    if (message === lastMilestone) return;
     lastMilestone = message;
     progress.writeAboveTimer(() => progress.stage(diagnosticValue(message)));
   };
@@ -9256,7 +9260,7 @@ async function runDependencyScan(
       );
     }
     notify(() => {
-      if (verbose) milestone(dependencyProgressDescription(update).summary);
+      if (verbose) milestone(description.summary);
       if (progress.interactive) progress.startTimer(timerMessage);
     });
     security = (
@@ -9300,37 +9304,29 @@ async function runDependencyScan(
       ...options,
       signal: controller.signal,
       onProgress: (event) =>
-        notify(() => {
-          if (stopped) return;
-          update = event;
-          lastObservedAt = dependencies.now();
-          activity = undefined;
-          if (verbose) {
-            const { summary, detail } = dependencyProgressDescription(event);
+        observe(() => {
+          description = dependencyProgressDescription(event);
+          const { summary, detail } = description;
+          if (verbose)
             milestone(
               detail === undefined ? summary : `${summary} · ${detail}`,
             );
-          }
         }),
       onActivity: (event) =>
-        notify(() => {
-          if (stopped) return;
-          lastObservedAt = dependencies.now();
+        observe(() => {
           const label =
             event.kind === "command" || event.kind === "tool"
               ? "Tool"
               : "Codex";
-          activity = `${label} ${event.status}: ${event.description}`;
-          if (verbose) milestone(activity);
+          description.detail = `${label} ${event.status}: ${event.description}`;
+          if (verbose) milestone(description.detail);
         }),
-      onCost: (estimate) => {
-        if (stopped) return;
-        cost = estimate;
-        lastObservedAt = dependencies.now();
-      },
+      onCost: (cost) =>
+        observe(() => {
+          estimate = formatUsd(cost.estimatedUsd);
+        }),
       onOutputDirReady: (directory) =>
-        notify(() => {
-          lastObservedAt = dependencies.now();
+        observe(() => {
           if (verbose || progress.interactive)
             milestone(`Artifacts: ${directory}`);
         }),
@@ -14685,7 +14681,7 @@ export class Progress {
   readonly #startedAt: number;
   readonly #interactive: boolean;
   #timer: NodeJS.Timeout | null = null;
-  #timerMessage: string | (() => string) | null = null;
+  #timerMessage: (() => string) | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
   readonly #terminalErrors: TerminalErrorListener;
@@ -14721,18 +14717,19 @@ export class Progress {
     this.#stream.write(`${this.#line(message)}\n`);
   }
 
-  public startTimer(message: string | (() => string)): void {
+  public startTimer(value: string | (() => string)): void {
+    const message = typeof value === "function" ? value : () => value;
     this.#terminalErrors.start();
     if (!this.interactive) {
-      this.stage(typeof message === "function" ? message() : message);
+      this.stage(message());
       return;
     }
     this.#stream.write(HIDE_CURSOR);
     this.#cursorHidden = true;
-    this.#renderTimer(message);
+    this.#renderTimer(message());
     this.#timer = this.#dependencies.setInterval(() => {
       try {
-        this.#renderTimer(message);
+        this.#renderTimer(message());
       } catch {}
     }, PROGRESS_REFRESH_MILLISECONDS);
     this.#timerMessage = message;
@@ -14777,12 +14774,9 @@ export class Progress {
     return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
   }
 
-  #renderTimer(message: string | (() => string)): void {
+  #renderTimer(message: string): void {
     const width = Math.max(0, (this.#stream.columns ?? 80) - 1);
-    const line = fitProgressLine(
-      this.#line(typeof message === "function" ? message() : message),
-      width,
-    );
+    const line = fitProgressLine(this.#line(message), width);
     this.#stream.write(`${this.#timerLineActive ? "\r\u001B[K" : ""}${line}`);
     this.#timerLineActive = true;
   }

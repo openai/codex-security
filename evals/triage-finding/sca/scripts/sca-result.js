@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createRequire } = require("node:module");
+const { CORPUS } = require("./fixtures.js");
 const {
   extractTriageResult,
 } = require("../../sastbench/scripts/sastbench-result.mts");
@@ -26,10 +27,6 @@ const EXPECTED = {
   not_affected: "not_actionable",
   unresolved: "needs_review",
 };
-const FIXTURE_ROOT = path.resolve(__dirname, "../fixtures");
-const CORPUS = JSON.parse(
-  fs.readFileSync(path.join(FIXTURE_ROOT, "corpus.json"), "utf8"),
-);
 
 function finiteOrNull(value) {
   return Number.isFinite(value) && value >= 0 ? value : null;
@@ -78,12 +75,7 @@ function inspectEvidence(finding, testCase) {
   // that span. Merely repeating a filename, package name, or case ID is not evidence.
   const evidence = [...finding.evidence, ...finding.counterevidence];
   for (const required of testCase.required_evidence) {
-    const source = fs
-      .readFileSync(
-        path.join(FIXTURE_ROOT, testCase.case_id, required.path),
-        "utf8",
-      )
-      .split(/\r?\n/);
+    const source = testCase.files[required.path].split(/\r?\n/);
     const cited = evidence.some((text) => {
       const citations = [
         ...text.matchAll(/([A-Za-z0-9_./-]+):(\d+)(?:-(\d+))?/g),
@@ -362,7 +354,6 @@ if (require.main === module) {
 module.exports = {
   CORPUS,
   EXPECTED,
-  FIXTURE_ROOT,
   caseById,
   evidenceFailures,
   parseOutcome,

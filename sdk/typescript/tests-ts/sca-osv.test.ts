@@ -24,8 +24,7 @@ import {
   type OsvProcessResult,
   type OsvScanResult,
 } from "../src/sca-osv.js";
-import type { ScaInput } from "../src/sca-types.js";
-import type { DependencyScanProgress } from "../src/sca-progress.js";
+import type { DependencyScanProgress, ScaInput } from "../src/sca-types.js";
 import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
@@ -121,58 +120,54 @@ async function scanFixture(
   );
 }
 
-test("matching progress counts finished invocations, including failures, independently of input selection", async () => {
-  const { repository, output } = await setup();
+async function matchingFixture() {
+  const { repository, output, root } = await setup();
   await mkdir(join(repository, "nested"));
   await writeFile(join(repository, "package-lock.json"), npmLock());
   await writeFile(join(repository, "nested", "package-lock.json"), npmLock());
   const events: DependencyScanProgress[] = [];
+  const scan = (dependencies: Parameters<typeof runOsvScan>[1]) =>
+    runOsvScan(
+      {
+        repositoryPath: repository,
+        outputDir: output,
+        onProgress: (event) => events.push(event),
+      },
+      dependencies,
+    );
+  return { events, scan, root };
+}
+
+test("matching progress counts finished invocations, including failures, independently of input selection", async () => {
+  const { events, scan } = await matchingFixture();
   const observedDuringProcess: DependencyScanProgress[] = [];
-  let invocations = 0;
-  const result = await runOsvScan(
-    {
-      repositoryPath: repository,
-      outputDir: output,
-      onProgress: (event) => {
-        events.push(event);
-      },
+  const result = await scan({
+    executable: process.execPath,
+    runProcess: async (_executable, argv) => {
+      if (argv[0] === "--version")
+        return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+      observedDuringProcess.push(events.at(-1)!);
+      return observedDuringProcess.length === 1
+        ? {
+            stdout: JSON.stringify(
+              rawOutput(argv.at(-1)!, [advisory("SYNTHETIC-1")]),
+            ),
+            stderr: "",
+            exitCode: 1,
+          }
+        : { stdout: "", stderr: "synthetic scanner failure", exitCode: 2 };
     },
-    {
-      executable: process.execPath,
-      runProcess: async (_executable, argv) => {
-        if (argv[0] === "--version")
-          return { stdout: "2.6.0", stderr: "", exitCode: 0 };
-        observedDuringProcess.push(events.at(-1)!);
-        invocations++;
-        return invocations === 1
-          ? {
-              stdout: JSON.stringify(
-                rawOutput(argv.at(-1)!, [advisory("SYNTHETIC-1")]),
-              ),
-              stderr: "",
-              exitCode: 1,
-            }
-          : { stdout: "", stderr: "synthetic scanner failure", exitCode: 2 };
-      },
-    },
-  );
+  });
   expect(events[0]).toEqual({ phase: "discovering" });
-  expect(observedDuringProcess).toEqual([
-    expect.objectContaining({
+  expect(observedDuringProcess).toHaveLength(2);
+  for (const [index, event] of observedDuringProcess.entries())
+    expect(event).toMatchObject({
       phase: "matching",
       inputsTotal: 2,
-      inputsProcessed: 0,
+      inputsProcessed: index,
       inputsFailed: 0,
       currentInput: expect.any(String),
-    }),
-    expect.objectContaining({
-      phase: "matching",
-      inputsTotal: 2,
-      inputsProcessed: 1,
-      inputsFailed: 0,
-      currentInput: expect.any(String),
-    }),
-  ]);
+    });
   expect(events.at(-1)).toEqual({
     phase: "matching",
     inputsTotal: 2,
@@ -222,33 +217,20 @@ test.each(["throw", "reject", "pending"] as const)(
 test.each(["missing", "version", "invocation"] as const)(
   "matching progress includes inputs that fail before processing: %s",
   async (failure) => {
-    const { repository, output, root } = await setup();
-    await mkdir(join(repository, "nested"));
-    await writeFile(join(repository, "package-lock.json"), npmLock());
-    await writeFile(join(repository, "nested", "package-lock.json"), npmLock());
-    const progress: DependencyScanProgress[] = [];
-    const result = await runOsvScan(
-      {
-        repositoryPath: repository,
-        outputDir: output,
-        onProgress: (event) => {
-          progress.push(event);
-        },
+    const { events, scan, root } = await matchingFixture();
+    const result = await scan({
+      executable:
+        failure === "missing"
+          ? join(root, "missing-scanner")
+          : process.execPath,
+      runProcess: async (_executable, argv) => {
+        if (failure === "version" || argv[0] !== "--version")
+          throw new Error("synthetic scanner failure");
+        return { stdout: "2.6.0", stderr: "", exitCode: 0 };
       },
-      {
-        executable:
-          failure === "missing"
-            ? join(root, "missing-scanner")
-            : process.execPath,
-        runProcess: async (_executable, argv) => {
-          if (failure === "version" || argv[0] !== "--version")
-            throw new Error("synthetic scanner failure");
-          return { stdout: "2.6.0", stderr: "", exitCode: 0 };
-        },
-      },
-    );
+    });
     expect(result.status).toBe("failed");
-    expect(progress.at(-1)).toMatchObject({
+    expect(events.at(-1)).toMatchObject({
       phase: "matching",
       inputsTotal: 2,
       inputsProcessed: failure === "invocation" ? 1 : 0,

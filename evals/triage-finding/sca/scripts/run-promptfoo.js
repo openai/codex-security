@@ -8,7 +8,7 @@ const { createRequire } = require("node:module");
 const { pathToFileURL } = require("node:url");
 const childProcess = require("node:child_process");
 const runtimeVars = require("../../scripts/runtime-vars.mts").default;
-const { CORPUS, FIXTURE_ROOT } = require("./sca-result.js");
+const { CORPUS, stageCase } = require("./fixtures.js");
 
 const EVAL_ROOT = path.resolve(__dirname, "../..");
 
@@ -94,11 +94,7 @@ function stageRuntime() {
   const runtime = fs.mkdtempSync(path.join(os.tmpdir(), "codex-security-sca-"));
   try {
     for (const testCase of CORPUS.cases) {
-      fs.cpSync(
-        path.join(FIXTURE_ROOT, testCase.case_id),
-        path.join(runtime, "cases", testCase.case_id),
-        { recursive: true },
-      );
+      stageCase(path.join(runtime, "cases"), testCase);
     }
     return runtime;
   } catch (error) {
