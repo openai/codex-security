@@ -675,7 +675,10 @@ for (const decision of ["suppressed", "not_applicable"]) {
       const candidate = JSON.parse(
         (
           await readFile(
-            join(f.parent.root, "artifacts/02_discovery/candidate_ledger.jsonl"),
+            join(
+              f.parent.root,
+              "artifacts/02_discovery/candidate_ledger.jsonl",
+            ),
             "utf8",
           )
         )

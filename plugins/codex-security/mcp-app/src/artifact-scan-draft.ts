@@ -3848,7 +3848,9 @@ function normalizeSurfaces<Item extends JsonObject>(
 ) {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
-      idSource === "semantic" ? [surface.id] : [surface.id, surface.candidateId],
+      idSource === "semantic"
+        ? [surface.id]
+        : [surface.id, surface.candidateId],
     ),
   );
   const surfaceIds = new Set<string>();

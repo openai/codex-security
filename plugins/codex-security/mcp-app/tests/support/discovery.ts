@@ -53,7 +53,10 @@ export async function createTestWorkbench(
   };
 }
 
-export async function startDiffScan(directory: string, pluginRoot = sourceRoot) {
+export async function startDiffScan(
+  directory: string,
+  pluginRoot = sourceRoot,
+) {
   const workbench = await createTestWorkbench(directory, pluginRoot);
   const repository = path.join(directory, "repository");
   await mkdir(repository);

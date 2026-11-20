@@ -350,7 +350,10 @@ for (const shared of [false, true]) {
         },
         context,
       );
-      const listed = await discoveryApi.listCodexSecurityCandidates({}, context);
+      const listed = await discoveryApi.listCodexSecurityCandidates(
+        {},
+        context,
+      );
       assert.equal(listed.rows.length, 2);
       const acceptedId = listed.rows.find(
         (row: { summary: string }) => row.summary === "Candidate a",
