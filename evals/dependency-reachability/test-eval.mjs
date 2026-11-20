@@ -781,14 +781,40 @@ test("the optional suite grades a caller's actual route and config in the same a
   };
   const baseline = gradeSnapshot(report, scenario, repo, commit, "enabled");
   assert.equal(baseline.pass, true);
+  assert.equal(baseline.strictPass, true);
   assert.equal(baseline.selectedEvidenceCorrect, true);
   const selected = structuredClone(report);
   selected.claims[0].decision.evidenceKeys.pop();
   selected.uses[0].decidingEvidence.pop();
-  assert.deepEqual(gradeSnapshot(selected, scenario, repo, commit), {
+  const regularOnly = {
     ...baseline,
+    strictPass: false,
     selectedEvidenceCorrect: false,
-  });
+  };
+  assert.deepEqual(
+    gradeSnapshot(selected, scenario, repo, commit),
+    regularOnly,
+  );
+  // A second use selects every required citation. It must also satisfy all
+  // ordinary requirements itself to earn a strict pass.
+  for (const [version, strictPass] of [
+    ["0.0.0", false],
+    [use.version, true],
+  ]) {
+    const second = {
+      ...use,
+      version,
+      location: "second",
+      conclusionClaim: { id: "second", revision: 1, hash: sha256("second") },
+    };
+    const pair = structuredClone(selected);
+    pair.claims.push(approvedUseClaim(second, pair.claimEvidence.sources));
+    pair.uses.push(second);
+    assert.deepEqual(gradeSnapshot(pair, scenario, repo, commit), {
+      ...regularOnly,
+      strictPass,
+    });
+  }
   const disabled = structuredClone(report);
   disabled.reviewer = "disabled";
   disabled.claims[0].state = "unreviewed";
@@ -823,6 +849,7 @@ test("the optional suite grades a caller's actual route and config in the same a
     commit,
   );
   assert.equal(untraced.pass, false);
+  assert.equal(untraced.strictPass, false);
   assert.match(untraced.errors.join(" "), /checkout tracer outcome/u);
   assert.equal(untraced.verdictLabelCorrect, true);
   const partial = structuredClone(report);
@@ -1056,4 +1083,28 @@ test("pairs attempts by case, counts failures, and identifies changed inputs", (
   assert.equal(score.disabled.decidingEvidence, 1);
   assert.equal(score.disabled.reviewBatches, 0);
   assert.equal(score.medianPairedElapsedDeltaMs, 100);
+});
+
+test("pairs strict passes independently of ordinary passes and supports earlier modules", () => {
+  const on = { reviewer: "enabled", status: "passed" };
+  const off = { reviewer: "disabled", status: "passed" };
+  const regularOnly = { pass: true, selectedEvidenceCorrect: false };
+  const rows = [
+    { ...on, id: "a", grade: { ...regularOnly, strictPass: true } },
+    { ...off, id: "a", grade: regularOnly },
+    { ...on, id: "b", grade: regularOnly },
+    { ...off, id: "b", grade: { pass: true, selectedEvidenceCorrect: true } },
+  ];
+  const score = compareRuns(["a", "b"], rows);
+  assert.deepEqual(score.gainedWithReview, []);
+  assert.deepEqual(score.lostWithReview, []);
+  assert.equal(score.enabled.strictPassed, 1);
+  assert.equal(score.disabled.strictPassed, 1);
+  assert.deepEqual(score.strictGainedWithReview, ["a"]);
+  assert.deepEqual(score.strictLostWithReview, ["b"]);
+
+  rows[1].grade = { pass: true };
+  const incomplete = compareRuns(["a"], rows);
+  assert.equal(incomplete.disabled.strictPassed, null);
+  assert.deepEqual(incomplete.strictGainedWithReview, []);
 });

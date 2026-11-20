@@ -11,6 +11,14 @@ function sum(values) {
   return values.length ? values.reduce((a, b) => a + b, 0) : null;
 }
 
+function strictPass({ status, grade }) {
+  if (status !== "passed") return false;
+  // Earlier case modules checked the selected evidence on their best match.
+  return (
+    grade?.strictPass ?? (grade?.pass && grade.selectedEvidenceCorrect) ?? null
+  );
+}
+
 function score(results) {
   const correct = (field) =>
     results.some((r) => typeof r.grade?.[field] === "boolean")
@@ -20,9 +28,11 @@ function score(results) {
   const verdict = correct("verdictLabelCorrect");
   const batches = results.map((r) => r.reviewBatches).filter(Number.isFinite);
   const usage = results.map((r) => r.usage).filter(Boolean);
+  const strict = results.map(strictPass);
   return {
     cases: results.length,
     passed: results.filter((r) => r.status === "passed").length,
+    strictPassed: strict.includes(null) ? null : strict.filter(Boolean).length,
     executionErrors: results.filter((r) => r.status === "execution_error")
       .length,
     verdict,
@@ -54,6 +64,8 @@ export function compareRuns(ids, results) {
   const inputMismatch = [];
   const gainedWithReview = [];
   const lostWithReview = [];
+  const strictGainedWithReview = [];
+  const strictLostWithReview = [];
   const elapsedDeltas = [];
   let matchedAdvisories = 0;
   for (const id of ids) {
@@ -81,6 +93,10 @@ export function compareRuns(ids, results) {
       gainedWithReview.push(id);
     if (off.status === "passed" && on.status !== "passed")
       lostWithReview.push(id);
+    const strictOn = strictPass(on);
+    const strictOff = strictPass(off);
+    if (strictOn && strictOff === false) strictGainedWithReview.push(id);
+    if (strictOff && strictOn === false) strictLostWithReview.push(id);
     if (Number.isFinite(on.elapsedMs) && Number.isFinite(off.elapsedMs))
       elapsedDeltas.push(on.elapsedMs - off.elapsedMs);
   }
@@ -91,6 +107,8 @@ export function compareRuns(ids, results) {
     matchedAdvisories,
     gainedWithReview,
     lostWithReview,
+    strictGainedWithReview,
+    strictLostWithReview,
     inputMismatch,
     pending,
   };

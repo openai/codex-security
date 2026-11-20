@@ -420,7 +420,13 @@ if (paired) {
       enabled: score.enabled[metric],
     };
   console.table(table);
-  for (const field of ["gainedWithReview", "lostWithReview", "inputMismatch"])
+  for (const field of [
+    "gainedWithReview",
+    "lostWithReview",
+    "strictGainedWithReview",
+    "strictLostWithReview",
+    "inputMismatch",
+  ])
     console.log(field + ": " + (score[field].join(", ") || "none"));
   if (score.inputMismatch.length) process.exitCode ||= 1;
 }

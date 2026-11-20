@@ -311,8 +311,12 @@ export function gradeSnapshot(
       a.errors.length - b.errors.length,
   )[0];
   if (best) errors.push(...best.errors);
+  const pass = errors.length === 0;
   return {
-    pass: errors.length === 0,
+    pass,
+    strictPass:
+      pass &&
+      grades.some((g) => g.errors.length === 0 && g.selectedEvidenceCorrect),
     target: scenario.target,
     expectedVerdict: scenario.verdict,
     auditCorrect,
