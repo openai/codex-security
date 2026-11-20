@@ -1665,7 +1665,7 @@ describe("multiscan", () => {
       const clientDependencies = dependencies({
         currentDirectory: paths.root,
         environment: {
-          CODEX_SECURITY_STATE_DIR: process.env["CODEX_SECURITY_STATE_DIR"],
+          CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
           PYTHON,
         },
         result,

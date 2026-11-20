@@ -1,20 +1,33 @@
 import { gitText } from "./shell.js";
-import { readJsonLines } from "./json.js";
+import { readJson, readJsonLines, writeJson } from "./json.js";
 import { reseal as resealArtifacts } from "./sealed-scan.js";
-import { setFindingIdentity } from "./finding-identity.js";
+import { setFindingIdentity, sha256 } from "./finding-identity.js";
 import { Database } from "bun:sqlite";
-import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, join, posix, relative, sep } from "node:path";
 import { zipSync } from "fflate";
 import Papa from "papaparse";
 import type { CoverageDocument } from "../../src/models.js";
-import type { ScanResult } from "../../src/result.js";
+import { ScanResult } from "../../src/result.js";
 import type { runMultiscan } from "../../src/multiscan.js";
-import { normalizeTarget, type NormalizedTarget } from "../../src/targets.js";
+import {
+  normalizeExcludedPaths,
+  normalizeTarget,
+  type NormalizedTarget,
+} from "../../src/targets.js";
 import { scanRequestDigest } from "../../src/finding-workflow.js";
-import { runWorkbench } from "../../src/runtime.js";
+import { resolvePluginPython, runWorkbench } from "../../src/runtime.js";
 import { PYTHON } from "./security-policy.js";
+import { loadContract } from "../../src/contract.js";
+import { workbenchCommand } from "./workbench-command.js";
 import { fakeResult } from "../cli-fixtures.js";
 import { createApiTestFixtures } from "./temporary-directories.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "../plugin-root.js";
@@ -95,6 +108,117 @@ export function client<Run extends SecurityClient["run"]>(
 
 export const results = readJsonLines<Record<string, unknown>>;
 
+/** Run the real registration and completion commands with synthetic scanner output. */
+export async function registeredCampaignResult(
+  environment: NodeJS.ProcessEnv,
+  config: MultiscanOptions["config"],
+  repository: string,
+  scan: NonNullable<Parameters<SecurityClient["run"]>[1]>,
+  outcome: "findings" | "empty" | "interrupted",
+): Promise<ScanResult> {
+  const checkout = await realpath(repository);
+  const scanDir = scan.outputDir!;
+  const target = await normalizeTarget(checkout, scan.target ?? "repository");
+  const excludePaths = normalizeExcludedPaths(scan.excludePaths);
+  const includePaths = target.kind === "paths" ? [...target.paths] : ["."];
+  await mkdir(scanDir, { recursive: true, mode: 0o700 });
+  const python = await resolvePluginPython({ environment });
+  const workbench = workbenchCommand(python, () => environment);
+  const registered = await workbench(
+    [
+      "register-cli-scan",
+      "--repository",
+      checkout,
+      "--scan-dir",
+      scanDir,
+      "--registration-json-stdin",
+    ],
+    JSON.stringify({
+      recipe: {
+        ...(excludePaths.length ? { excludePaths } : {}),
+        repository: checkout,
+        mode: scan.mode,
+        target,
+        config: config.codexOverrides ?? {},
+        maxCostUsd: scan.maxCostUsd,
+        ownerSuggestions: scan.ownerSuggestions,
+        scanRequestDigest: scanRequestDigest(config, scan, checkout),
+      },
+      userContext: scan.scanPrompt,
+    }),
+  );
+  if (outcome === "interrupted")
+    throw new Error("Synthetic interruption after private registration.");
+
+  await cp(join(PLUGIN_ROOT, "examples/completed-scan"), scanDir, {
+    recursive: true,
+  });
+  const manifestPath = join(scanDir, "scan-manifest.json");
+  const findingsPath = join(scanDir, "findings.json");
+  const manifest = await readJson<ScanResult["manifest"]>(manifestPath);
+  const findings = await readJson<ScanResult["findings"]>(findingsPath);
+  const scanId = String(registered["scanId"]);
+  manifest.scan.id = scanId;
+  findings.scanId = scanId;
+  manifest.scan.target = {
+    kind: "git_revision",
+    targetId: String(registered["targetId"]),
+    displayName: basename(checkout),
+    revision: git(checkout, "rev-parse", "HEAD"),
+  };
+  manifest.scan.scope = { includePaths, excludePaths };
+  manifest.scan.mode =
+    target.kind === "paths"
+      ? "scoped_path"
+      : scan.mode === "deep"
+        ? "deep_repository"
+        : "repository";
+  if (outcome === "empty") findings.findings = [];
+  for (const finding of findings.findings) {
+    setFindingIdentity(manifest.scan, finding);
+    for (const location of finding.locations)
+      location.path = `${includePaths[0]}/index.ts`;
+  }
+  await writeJson(findingsPath, findings);
+  await writeJson(manifestPath, {
+    ...manifest,
+    scan: { ...manifest.scan, sealedAt: undefined, artifacts: undefined },
+  });
+  if (scan.mode === "deep") {
+    await workbench([
+      "begin-deep-scan",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      randomUUID(),
+      "--available-parallelism",
+      "4",
+      "--workflow-version",
+      "deep-scan-mcp/v1",
+    ]);
+    const database = new Database(
+      join(environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
+    );
+    try {
+      database.run(
+        `UPDATE deep_scan_runs SET status='succeeded', phase='terminal',
+         terminal_reason='saturated', manifest_path=?, completed_at=updated_at
+         WHERE scan_id=?`,
+        [manifestPath, scanId],
+      );
+    } finally {
+      database.close();
+    }
+  }
+  await workbench(["complete-scan", "--scan-id", scanId]);
+  return new ScanResult({
+    ...(await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT })),
+    scanDir,
+    threadId: "synthetic-thread",
+    turnResult: {},
+  });
+}
+
 export function createMultiscanFixtures() {
   const { temporaryDirectory, cleanup: cleanupDirectories } =
     createApiTestFixtures("codex-security-multiscan-");
@@ -103,34 +227,35 @@ export function createMultiscanFixtures() {
   const fixtureRequests = new Map<
     string,
     {
+      id: string;
       repository: string;
       revision: string;
       digest: string;
       target: NormalizedTarget;
     }
   >();
-  const fixtureScanIds = new Map<string, string>();
-  const originalState = process.env["CODEX_SECURITY_STATE_DIR"];
   let fixtureState: string | undefined;
   async function cleanup() {
     await cleanupDirectories();
     fixtureRoots.clear();
     fixtureInputs.clear();
     fixtureRequests.clear();
-    fixtureScanIds.clear();
     fixtureState = undefined;
-    if (originalState === undefined)
-      delete process.env["CODEX_SECURITY_STATE_DIR"];
-    else process.env["CODEX_SECURITY_STATE_DIR"] = originalState;
   }
   async function fixture() {
     const root = await temporaryDirectory();
     fixtureRoots.add(root);
     if (fixtureState === undefined) {
       fixtureState = join(root, "state");
-      process.env["CODEX_SECURITY_STATE_DIR"] = fixtureState;
       await runWorkbench(
-        { python: PYTHON, pluginRoot: PLUGIN_ROOT, environment: process.env },
+        {
+          python: PYTHON,
+          pluginRoot: PLUGIN_ROOT,
+          environment: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: fixtureState,
+          },
+        },
         ["database-info"],
       );
     }
@@ -174,7 +299,8 @@ export function createMultiscanFixtures() {
     completeness: "complete" | "partial" | "unknown" = "complete",
     targetRoot?: string,
   ) {
-    targetRoot ??= fixtureRequests.get(outputDir)?.repository;
+    const request = fixtureRequests.get(outputDir);
+    targetRoot ??= request?.repository;
     await mkdir(outputDir, { recursive: true, mode: 0o700 });
     await chmod(outputDir, 0o700);
     await copyCompletedScanFixture(outputDir);
@@ -182,42 +308,29 @@ export function createMultiscanFixtures() {
     const manifestPath = join(outputDir, "scan-manifest.json");
     const findingsPath = join(outputDir, "findings.json");
     const coveragePath = join(outputDir, "coverage.json");
-    const manifest = JSON.parse(
-      await readFile(manifestPath, "utf8"),
-    ) as ScanResult["manifest"];
-    const findings = JSON.parse(
-      await readFile(findingsPath, "utf8"),
-    ) as ScanResult["findings"];
-    const coverage = JSON.parse(
-      await readFile(coveragePath, "utf8"),
-    ) as CoverageDocument;
-    if (fixtureRequests.has(outputDir)) {
-      manifest.scan.id = fixtureScanIds.get(outputDir) ?? randomUUID();
-      findings.scanId = manifest.scan.id;
-      coverage.scanId = manifest.scan.id;
-      fixtureScanIds.set(outputDir, manifest.scan.id);
-      if (targetRoot !== undefined)
-        fixtureRequests.get(outputDir)!.repository = targetRoot;
+    const manifest = await readJson<ScanResult["manifest"]>(manifestPath);
+    const findings = await readJson<ScanResult["findings"]>(findingsPath);
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    if (request) {
+      manifest.scan.id = request.id;
+      findings.scanId = request.id;
+      coverage.scanId = request.id;
+      if (targetRoot !== undefined) request.repository = targetRoot;
     }
     const id = basename(dirname(outputDir));
     const campaignRoot = dirname(dirname(dirname(outputDir)));
     const task = await fixtureTask(outputDir);
     if (task !== undefined) {
+      const checkout = targetRoot ?? join(campaignRoot, "checkouts", id);
       manifest.scan.target.kind = "git_revision";
-      manifest.scan.target.targetId = `target_sha256_${createHash("sha256")
-        .update(
-          `local-workspace\0${targetRoot ?? join(campaignRoot, "checkouts", id)}`,
-        )
-        .digest("hex")}`;
-      manifest.scan.target.displayName = basename(
-        targetRoot ?? join(campaignRoot, "checkouts", id),
-      );
+      const digest = sha256(`local-workspace\0${checkout}`);
+      manifest.scan.target.targetId = `target_sha256_${digest}`;
+      manifest.scan.target.displayName = basename(checkout);
       manifest.scan.target.revision = task["revision"]!;
       delete manifest.scan.target.snapshotDigest;
       const scope = task["scope"]?.trim();
       let normalizedScope = scope ? posix.normalize(scope) : ".";
       if (scope) {
-        const checkout = targetRoot ?? join(campaignRoot, "checkouts", id);
         const canonicalScope = await realpath(join(checkout, scope)).catch(
           () => undefined,
         );
@@ -241,9 +354,9 @@ export function createMultiscanFixtures() {
     for (const finding of findings.findings)
       setFindingIdentity(manifest.scan, finding);
     coverage["completeness"] = completeness;
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
-    await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
+    await writeJson(manifestPath, manifest);
+    await writeJson(findingsPath, findings);
+    await writeJson(coveragePath, coverage);
     await reseal(outputDir);
     return {
       manifest,
@@ -272,6 +385,7 @@ export function createMultiscanFixtures() {
     if (revision === undefined)
       throw new Error("Fixture scan has no pinned task revision.");
     fixtureRequests.set(settings.outputDir!, {
+      id: fixtureRequests.get(settings.outputDir!)?.id ?? randomUUID(),
       repository,
       revision,
       digest: scanRequestDigest(config, settings, repository),
@@ -293,11 +407,10 @@ export function createMultiscanFixtures() {
     } catch {
       return;
     }
-    if (manifest && manifest.scan.id !== fixtureScanIds.get(outputDir)) return;
-    const id = fixtureScanIds.get(outputDir) ?? randomUUID();
-    fixtureScanIds.set(outputDir, id);
+    if (manifest && manifest.scan.id !== request.id) return;
     const database = new Database(join(fixtureState, "workbench.sqlite3"));
     try {
+      const { id } = request;
       const prior = database
         .query("SELECT id FROM scans WHERE scan_dir = ?")
         .get(outputDir) as { id: string } | null;
@@ -326,9 +439,7 @@ export function createMultiscanFixtures() {
             scanRequestDigest: request.digest,
             target: request.target,
           }),
-          bytes
-            ? `sha256:${createHash("sha256").update(bytes).digest("hex")}`
-            : null,
+          bytes ? `sha256:${sha256(bytes)}` : null,
         ],
       );
     } finally {
@@ -345,6 +456,7 @@ export function createMultiscanFixtures() {
     overrides: Partial<MultiscanOptions> = {},
   ): MultiscanOptions {
     const selected: MultiscanOptions = {
+      environment: { ...process.env, CODEX_SECURITY_STATE_DIR: fixtureState },
       inputPath: paths.input,
       outputDir: paths.output,
       workers: 1,

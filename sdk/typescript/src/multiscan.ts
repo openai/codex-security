@@ -130,6 +130,16 @@ interface MultiscanHistory {
   scan?: MultiscanReceipt;
 }
 
+interface CampaignAttempt {
+  options: MultiscanOptions;
+  task: MultiscanTask;
+  scanDir: string;
+  checkout: string;
+  recoveryCheckout: string;
+  receipt?: MultiscanReceipt;
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+}
+
 type MultiscanKnowledge = Partial<
   Record<
     ScanMode,
@@ -399,8 +409,26 @@ async function runCampaign(
     task: MultiscanTask;
     receipt: MultiscanReceipt | undefined;
     maxAttempt: number;
+    rejectedAttempt: number | undefined;
   }[] = [];
-  const rejectedAttempts = new Set<string>();
+  const selectAttempt = (
+    task: MultiscanTask,
+    scanDir: string,
+    receipt?: MultiscanReceipt,
+  ): CampaignAttempt => ({
+    options,
+    task,
+    scanDir,
+    receipt,
+    checkout: join(checkoutRoot, task.id),
+    recoveryCheckout: join(
+      dirname(dirname(dirname(scanDir))),
+      "recovery-checkouts",
+      task.id,
+      basename(scanDir),
+    ),
+    knowledgeBaseSnapshot: knowledgeByMode[task.mode]?.snapshot,
+  });
   let completed = 0;
   let policyFailed = false;
   const warnings: NonNullable<MultiscanResult["warnings"]> = [];
@@ -412,12 +440,12 @@ async function runCampaign(
     const history = receipts.get(task.id.toLowerCase());
     const saved = history?.scan;
     const receipt = saved && matchesTask(saved, task) ? saved : undefined;
-    if (saved !== undefined && receipt === undefined) {
-      rejectedAttempts.add(
-        join(output, "artifacts", task.id, `attempt-${saved.attempt}`),
-      );
-    }
-    const work = { task, receipt, maxAttempt: history?.maxAttempt ?? 0 };
+    const work = {
+      task,
+      receipt,
+      maxAttempt: history?.maxAttempt ?? 0,
+      rejectedAttempt: receipt === undefined ? saved?.attempt : undefined,
+    };
     if (
       receipt === undefined ||
       knowledgeByMode[task.mode]?.failure !== undefined
@@ -448,10 +476,6 @@ async function runCampaign(
       task.id,
       attemptName,
     );
-    const completedReceipt =
-      receipt.status === "completed" ||
-      (receipt.status === "failed" &&
-        receipt.error === "Multiscan repository coverage is incomplete.");
     const selectedOutputMatches =
       receipt.outputDir === artifactOutput ||
       receipt.outputDir === selectedArtifactOutput;
@@ -463,10 +487,10 @@ async function runCampaign(
         options.signal,
       );
       if (
-        completedReceipt &&
+        isCompletedReceipt(receipt) &&
         loaded?.contract.manifest.scan.status !== "completed"
       ) {
-        rejectedAttempts.add(artifactOutput);
+        work.rejectedAttempt = receipt.attempt;
         pending.push(work);
         continue;
       }
@@ -493,44 +517,25 @@ async function runCampaign(
           "Multiscan recovery is required: saved artifacts are outside their expected campaign directory.",
         );
       }
-      const checkout = join(checkoutRoot, task.id);
-      const resumed = await loadResumableScan(
-        loaded,
-        options,
-        artifactOutput,
-        receipt,
-        checkout,
-        (registered) =>
-          matchesRegisteredRequest(
-            registered,
-            options,
-            task,
-            artifactOutput,
-            knowledgeByMode[task.mode]?.snapshot,
-            receipt.operationId,
-          ),
-        (warning) => {
-          warnings.push({ repository: task.id, warnings: [warning] });
+      const emitWarnings = (messages: string[]) => {
+        warnings.push({ repository: task.id, warnings: messages });
+        for (const warning of messages) {
           notifyProgress(options, {
             repository: task.id,
             status: receipt.status,
             attempt: receipt.attempt,
             warning,
           });
-        },
+        }
+      };
+      const resumed = await loadResumableScan(
+        loaded,
+        selectAttempt(task, artifactOutput, receipt),
+        (warning) => emitWarnings([warning]),
       );
       if (resumed !== undefined) {
-        if (receipt.status !== "failed" && receipt.warnings?.length) {
-          warnings.push({ repository: task.id, warnings: receipt.warnings });
-          for (const warning of receipt.warnings) {
-            notifyProgress(options, {
-              repository: task.id,
-              status: receipt.status,
-              attempt: receipt.attempt,
-              warning,
-            });
-          }
-        }
+        if (receipt.status !== "failed" && receipt.warnings?.length)
+          emitWarnings(receipt.warnings);
         const failureSeverity =
           options.scanOptionsByMode?.[task.mode]?.failureSeverity;
         policyFailed ||=
@@ -652,17 +657,16 @@ async function runCampaign(
             options.recoverScan !== undefined &&
             retry === 0 &&
             attempt > 0 &&
-            !rejectedAttempts.has(scanDir)
+            work.rejectedAttempt !== attempt
           ) {
             const existing = await lstat(scanDir).catch(undefinedIfMissingFile);
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
-              const retainedCheckout = join(
-                output,
-                "recovery-checkouts",
-                task.id,
-                `attempt-${attempt}`,
-              );
+              const recorded =
+                previous?.attempt === attempt ? previous : undefined;
+              const selected = selectAttempt(task, scanDir, recorded);
+              const normalCheckout = selected.checkout;
+              const retainedCheckout = selected.recoveryCheckout;
               const retained = await lstat(retainedCheckout).catch(
                 undefinedIfMissingFile,
               );
@@ -683,30 +687,18 @@ async function runCampaign(
                 environment,
                 options.signal,
               );
-              const recorded =
-                previous?.attempt === attempt ? previous : undefined;
-              const normalCheckout = join(checkoutRoot, task.id);
               const roots = await campaignCheckoutRoots(
                 normalCheckout,
                 retainedCheckout,
                 authority !== undefined &&
                   resolve(authority.target_path) !== resolve(normalCheckout),
               );
-              const matchesRequest = (registered: RegisteredScanAuthority) =>
-                matchesRegisteredRequest(
-                  registered,
-                  options,
-                  task,
-                  scanDir,
-                  knowledge?.snapshot,
-                  recorded?.operationId,
-                );
               if (
                 authority !== undefined &&
                 registeredTaskMatches(authority, task.revision, roots) &&
                 (recorded?.scanId === undefined ||
                   recorded.scanId === authority.id) &&
-                matchesRequest(authority)
+                matchesRegisteredRequest(authority, selected)
               ) {
                 protectedRoot = authority.target_path;
                 const loadRegistered = async () => {
@@ -716,19 +708,13 @@ async function runCampaign(
                       await resolveResumePluginRoot(),
                       options.signal,
                     ),
-                    matchesRequest,
-                    environment,
-                    options.signal,
+                    selected,
                   );
                   if (accepted instanceof Error) throw accepted;
                   if (accepted === undefined) return undefined;
                   const root = await verifiedCampaignCheckout(
                     accepted,
-                    options,
-                    task,
-                    normalCheckout,
-                    retainedCheckout,
-                    recorded,
+                    selected,
                   );
                   return root === undefined ? undefined : accepted;
                 };
@@ -992,12 +978,7 @@ async function runCampaign(
           completed += 1;
           break;
         }
-        if (
-          exhaustedBudget ||
-          attemptedResume ||
-          requiresRecovery ||
-          checkoutOccupied
-        ) {
+        if (exhaustedBudget || attemptedResume || requiresRecovery) {
           failed += 1;
           break;
         }
@@ -1419,6 +1400,14 @@ async function ensureManifest(
   }
 }
 
+function isCompletedReceipt(receipt: MultiscanReceipt): boolean {
+  return (
+    receipt.status === "completed" ||
+    (receipt.status === "failed" &&
+      receipt.error === "Multiscan repository coverage is incomplete.")
+  );
+}
+
 function matchesTask(receipt: MultiscanReceipt, task: MultiscanTask): boolean {
   return (
     receipt.id === task.id &&
@@ -1585,12 +1574,9 @@ function campaignScanOptions(
 
 function matchesRegisteredRequest(
   { recipe, target_path: checkout }: RegisteredScanAuthority,
-  options: MultiscanOptions,
-  task: MultiscanTask,
-  scanDir: string,
-  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
-  operationId?: string,
+  { options, task, scanDir, knowledgeBaseSnapshot, receipt }: CampaignAttempt,
 ): boolean {
+  const operationId = receipt?.operationId;
   const saved = recipe["scanRequestDigest"];
   if (typeof saved !== "string") return false;
   const scan = campaignScanOptions(
@@ -1601,9 +1587,9 @@ function matchesRegisteredRequest(
     knowledgeBaseSnapshot,
   );
   const matches = (settings: ScanOptions): boolean => {
-    if (scanRequestDigest(options.config, settings, checkout) === saved)
-      return true;
     if (Array.isArray(settings.target)) {
+      if (scanRequestDigest(options.config, settings, checkout) === saved)
+        return true;
       // A legacy digest could collapse symlink/.. traversal. Confirm the
       // scope against the private registration before accepting that digest.
       const scope = recipe["target"];
@@ -1708,14 +1694,13 @@ type CampaignContract = Awaited<ReturnType<typeof readCampaignContract>>;
 
 async function loadRegisteredCampaignScan(
   loaded: CampaignContract,
-  matchesRequest: (authority: RegisteredScanAuthority) => boolean,
-  environment: NodeJS.ProcessEnv,
-  signal?: AbortSignal,
+  attempt: CampaignAttempt,
 ) {
   if (loaded === undefined) return undefined;
+  const { environment, signal } = attempt.options;
   const authority = await readRegisteredScanAuthority(
     loaded.scanDirectory,
-    environment,
+    environment ?? process.env,
     signal,
   );
   if (authority === undefined) return undefined;
@@ -1725,7 +1710,7 @@ async function loadRegisteredCampaignScan(
     );
   if (
     authority.status !== "complete" ||
-    !matchesRequest(authority) ||
+    !matchesRegisteredRequest(authority, attempt) ||
     authority.seal_manifest_digest !==
       `sha256:${validatedFileDigests.get(loaded.contract.manifest)!.get("scan-manifest.json")!}`
   )
@@ -1742,58 +1727,27 @@ async function hasCampaignReport(scanDir: string): Promise<boolean> {
 
 async function loadResumableScan(
   loaded: CampaignContract,
-  options: MultiscanOptions,
-  path: string,
-  receipt: MultiscanReceipt,
-  checkout: string,
-  matchesRequest: (authority: RegisteredScanAuthority) => boolean,
+  attempt: CampaignAttempt,
   onWarning: (warning: string) => void,
 ) {
+  const { options, scanDir, receipt, checkout, recoveryCheckout } = attempt;
   const { signal, recoverScan } = options;
-  const environment = options.environment ?? process.env;
-  const accepted = await loadRegisteredCampaignScan(
-    loaded,
-    matchesRequest,
-    environment,
-    signal,
-  );
+  const accepted = await loadRegisteredCampaignScan(loaded, attempt);
   if (accepted instanceof Error) {
     // Registered report recovery must retain its selected-scan integrity error.
     // Otherwise invalid saved evidence starts a new scan at the original CSV target.
     if (
       recoverScan !== undefined &&
-      (await lstat(join(path, "report.md")).catch(undefinedIfMissingFile)) ===
+      (await lstat(join(scanDir, "report.md")).catch(undefinedIfMissingFile)) ===
         undefined
     )
       throw accepted;
     return undefined;
   }
-  if (accepted === undefined) return undefined;
-  if (
-    receipt.status !== "completed" &&
-    !(
-      receipt.status === "failed" &&
-      receipt.error === "Multiscan repository coverage is incomplete."
-    )
-  )
-    return undefined;
-  const campaignRoot = dirname(dirname(dirname(path)));
-  const recoveryCheckout = join(
-    campaignRoot,
-    "recovery-checkouts",
-    receipt.id,
-    `attempt-${receipt.attempt}`,
-  );
-  const matchedRoot = await verifiedCampaignCheckout(
-    accepted,
-    options,
-    receipt,
-    checkout,
-    recoveryCheckout,
-    receipt,
-  );
+  if (!accepted || !receipt || !isCompletedReceipt(receipt)) return undefined;
+  const matchedRoot = await verifiedCampaignCheckout(accepted, attempt);
   if (matchedRoot === undefined) return undefined;
-  if (!(await hasCampaignReport(path))) return undefined;
+  if (!(await hasCampaignReport(scanDir))) return undefined;
 
   // The ledger can request cleanup only of the checkout bound to this scan.
   const cleanupKind =
@@ -1810,7 +1764,7 @@ async function loadResumableScan(
         const parent = await ensureOutputDirectory(dirname(selected));
         if (relative(parent, dirname(matchedRoot)) !== "")
           throw new Error("The registered checkout directory has moved.");
-        const warning = await removeCheckout(selected, path, signal);
+        const warning = await removeCheckout(selected, scanDir, signal);
         if (warning !== undefined) onWarning(warning);
       }
     } catch (error) {
@@ -1827,11 +1781,7 @@ type RegisteredCampaignScan = Exclude<
 
 async function verifiedCampaignCheckout(
   { contract, authority }: RegisteredCampaignScan,
-  options: MultiscanOptions,
-  task: MultiscanTask,
-  checkout: string,
-  recoveryCheckout: string,
-  receipt?: MultiscanReceipt,
+  { options, task, checkout, recoveryCheckout, receipt }: CampaignAttempt,
 ): Promise<string | undefined> {
   const { manifest, mode } = contract;
   const { target, scope, producer } = manifest.scan;
