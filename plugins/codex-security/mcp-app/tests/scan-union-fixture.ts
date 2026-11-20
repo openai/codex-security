@@ -7,11 +7,15 @@ const load = (file: string) =>
     fileURLToPath(new URL(`../src/deep-scan/${file}.ts`, import.meta.url)),
   );
 
-const { createDeepScanArtifacts } = await load("artifacts");
+export const { createDeepScanArtifacts } = await load("artifacts");
 const validation = await load("artifact-validation");
 const { mergeBatch } = await load("iteration");
-export const { scanUnionToDraft, persistedScanUnion, parseScanUnion } =
-  validation;
+export const {
+  validateDiscoveryArtifacts,
+  scanUnionToDraft,
+  persistedScanUnion,
+  parseScanUnion,
+} = validation;
 
 // Admit worker output and merge it through the coordinator's normal entry points.
 export async function mergeWorkerFiles(

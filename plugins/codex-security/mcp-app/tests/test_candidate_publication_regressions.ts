@@ -1,3 +1,4 @@
+import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
@@ -26,6 +27,19 @@ const { addScanCoverage, validateDiscoveryArtifacts } = await importSource(
 const { preserveDiffCandidateDecisions } = await importSource(
   fileURLToPath(new URL("../src/artifact-diff-candidates.ts", import.meta.url)),
 );
+
+async function captureCheckpoints(directory: string) {
+  const originals = await Promise.all(
+    (await readdir(directory)).map(async (name) => {
+      const file = path.join(directory, name);
+      return [file, await readFile(file, "utf8")] as const;
+    }),
+  );
+  return async () => {
+    for (const [file, contents] of originals)
+      assert.equal(await readFile(file, "utf8"), contents);
+  };
+}
 
 for (const layout of ["standard", "diff", "deep"] as const) {
   test(`${layout}: a retained finding only suppresses late progress from the same owner`, async (t) => {
@@ -258,15 +272,7 @@ for (const layout of ["standard", "deep"] as const) {
         }),
       );
       const checkpointRoot = path.join(f.root, "checkpoints");
-      const checkpoints = await Promise.all(
-        (await readdir(checkpointRoot)).map(
-          async (name) =>
-            [
-              name,
-              await readFile(path.join(checkpointRoot, name), "utf8"),
-            ] as const,
-        ),
-      );
+      const assertPreserved = await captureCheckpoints(checkpointRoot);
       await f.write({
         ...f.draft({}, layout !== "deep"),
         findings: [
@@ -288,11 +294,7 @@ for (const layout of ["standard", "deep"] as const) {
         );
         await f.write(f.draft({}, layout !== "deep"));
       }
-      for (const [name, contents] of checkpoints)
-        assert.equal(
-          await readFile(path.join(checkpointRoot, name), "utf8"),
-          contents,
-        );
+      await assertPreserved();
     });
   }
 }
@@ -411,9 +413,7 @@ test("Diff ledger retains verified merged candidate resolutions on later saves",
   const coverage = await f.read();
   assert.deepEqual(coverage.deferred, []);
   assert.equal(coverage.completeness, undefined);
-  const saved = JSON.parse(
-    await readFile(path.join(f.root, "findings.json"), "utf8"),
-  );
+  const saved = await readJson(f.root, "findings.json");
   assert.equal(saved.findings.length, 1);
   assert.ok(
     saved.findings[0].provenance.previousFindings.some(
@@ -482,9 +482,7 @@ for name,document in zip(['scan-manifest.json','findings.json','coverage.json'],
       row.provenance?.candidateId === "review" &&
       row.provenance.workerId === "worker";
     assert.ok(coverage.deferred.some(workerCandidate));
-    const saved = JSON.parse(
-      await readFile(path.join(f.root, "findings.json"), "utf8"),
-    );
+    const saved = await readJson(f.root, "findings.json");
     assert.equal(saved.findings.length, 1);
     assert.equal(saved.findings[0].provenance.candidateReopened, true);
     assert.equal(
@@ -536,7 +534,7 @@ for (const mode of ["standard", "diff", "worker"] as const) {
               f.root,
               mode === "worker" ? "result.json" : "coverage.json",
             );
-            const saved = JSON.parse(await readFile(file, "utf8"));
+            const saved = await readJson(file);
             const coverage = mode === "worker" ? saved.reviewState : saved;
             coverage[field][0].sourceWorkerId = owner;
             const earlierFiles = [
@@ -549,15 +547,7 @@ for (const mode of ["standard", "diff", "worker"] as const) {
             await writeFile(file, JSON.stringify(saved, null, 2) + "\n");
           }
           const checkpointRoot = path.join(f.root, "checkpoints");
-          const checkpoints = await Promise.all(
-            (await readdir(checkpointRoot)).map(
-              async (name) =>
-                [
-                  name,
-                  await readFile(path.join(checkpointRoot, name), "utf8"),
-                ] as const,
-            ),
-          );
+          const assertPreserved = await captureCheckpoints(checkpointRoot);
           await f.write(
             f.draft({
               deferred: [
@@ -568,11 +558,7 @@ for (const mode of ["standard", "diff", "worker"] as const) {
               ],
             }),
           );
-          for (const [name, contents] of checkpoints)
-            assert.equal(
-              await readFile(path.join(checkpointRoot, name), "utf8"),
-              contents,
-            );
+          await assertPreserved();
           const restored = await f.read();
           assert.ok(
             restored[field].some(
@@ -620,7 +606,7 @@ for (const field of ["surfaces", "deferred"] as const) {
         complete: true,
       });
       const resultPath = path.join(f.root, "result.json");
-      const saved = JSON.parse(await readFile(resultPath, "utf8"));
+      const saved = await readJson(resultPath);
       saved.reviewState[field][0].sourceWorkerId = owner;
       const contents = JSON.stringify(saved, null, 2) + "\n";
       await writeFile(resultPath, contents);
@@ -715,14 +701,9 @@ for (const candidateId of ["legacy-candidate", "review/auth"]) {
               ),
             );
             if (sameOwner && outcome === "reported") {
-              const saved = JSON.parse(
-                await readFile(
-                  path.join(
-                    f.root,
-                    mode === "worker" ? "result.json" : "findings.json",
-                  ),
-                  "utf8",
-                ),
+              const saved = await readJson(
+                f.root,
+                mode === "worker" ? "result.json" : "findings.json",
               );
               assert.ok(
                 JSON.stringify(saved.findings[0].provenance).includes(
@@ -770,9 +751,7 @@ test("publishes colliding worker-local deferred IDs without changing their evide
     context,
     { ...projected, handoffClaimToken: context.handoffClaimToken },
     async (args: string[]) => {
-      const draft = JSON.parse(
-        await readFile(args[args.indexOf("--draft-path") + 1]!, "utf8"),
-      );
+      const draft = await readJson(args[args.indexOf("--draft-path") + 1]!);
       const rows = draft.reviewState.deferred;
       assert.equal(new Set(rows.map((row: { id: string }) => row.id)).size, 3);
       assert.equal(rows[2].id, "candidate-review-2");
@@ -829,9 +808,7 @@ for (const mode of ["standard", "diff"] as const) {
             ...draft({}, true),
             findings: [current],
           });
-          const saved = JSON.parse(
-            await readFile(path.join(context.root, "findings.json"), "utf8"),
-          );
+          const saved = await readJson(context.root, "findings.json");
           assert.equal(saved.findings.length, 1, `replay=${replay}`);
           assert.equal(saved.findings[0].severity.level, "low");
           assert.equal(saved.findings[0].summary, current.summary);
@@ -859,9 +836,7 @@ for (const mode of ["standard", "diff"] as const) {
             },
           ],
         });
-        const independent = JSON.parse(
-          await readFile(path.join(independentRoot, "findings.json"), "utf8"),
-        );
+        const independent = await readJson(independentRoot, "findings.json");
         assert.equal(independent.findings.length, 2);
       });
     }
@@ -903,9 +878,7 @@ for (const mode of ["standard", "diff"] as const) {
             ...draft({}, true),
             findings: [current],
           });
-          const saved = JSON.parse(
-            await readFile(path.join(context.root, "findings.json"), "utf8"),
-          );
+          const saved = await readJson(context.root, "findings.json");
           assert.equal(saved.findings.length, 2, `replay=${replay}`);
           assert.deepEqual(
             saved.findings.map(
@@ -1134,7 +1107,7 @@ for (const mode of ["standard", "diff"] as const) {
           );
         } else {
           const file = path.join(f.root, "coverage.json");
-          const coverage = JSON.parse(await readFile(file, "utf8"));
+          const coverage = await readJson(file);
           coverage.surfaces[0].candidateId = previous.candidateId;
           const earlierFiles = [
             path.join(f.root, "checkpoint-head.json"),
@@ -1263,9 +1236,7 @@ for (const mode of ["standard", "diff"] as const) {
           coverage.deferred,
           independentPending ? [pending("worker-c")] : [],
         );
-        const saved = JSON.parse(
-          await readFile(path.join(f.root, "findings.json"), "utf8"),
-        );
+        const saved = await readJson(f.root, "findings.json");
         assert.equal(saved.findings.length, 1);
         assert.equal(saved.findings[0].provenance.sourceWorkerId, "worker-a");
         assert.ok(
@@ -1359,9 +1330,7 @@ for (const reopened of [false, true]) {
           ),
           dismissed,
         );
-        const saved = JSON.parse(
-          await readFile(path.join(f.root, "findings.json"), "utf8"),
-        );
+        const saved = await readJson(f.root, "findings.json");
         assert.equal(saved.findings.length, dismissed ? 0 : 1);
         if (!dismissed)
           assert.equal(
@@ -1383,22 +1352,10 @@ for (const reopened of [false, true]) {
       };
       await assertCurrent();
       const checkpoints = path.join(f.root, "checkpoints");
-      const originals = await Promise.all(
-        (await readdir(checkpoints)).map(
-          async (name) =>
-            [
-              name,
-              await readFile(path.join(checkpoints, name), "utf8"),
-            ] as const,
-        ),
-      );
+      const assertPreserved = await captureCheckpoints(checkpoints);
       await f.write(f.draft());
       await assertCurrent();
-      for (const [name, contents] of originals)
-        assert.equal(
-          await readFile(path.join(checkpoints, name), "utf8"),
-          contents,
-        );
+      await assertPreserved();
     });
   }
 
@@ -1466,9 +1423,7 @@ for (const reopened of [false, true]) {
         handoffClaimToken,
       });
       const coverage = await f.read();
-      const published = JSON.parse(
-        await readFile(path.join(f.root, "findings.json"), "utf8"),
-      );
+      const published = await readJson(f.root, "findings.json");
       assert.equal(
         unresolvedCandidates(coverage, published.findings).length,
         expected.length,
@@ -1526,7 +1481,7 @@ test("Deep Scan clears historical reopening after the same worker accepts the ca
     findings: [],
   });
   const previousPath = path.join(f.root, "saved-iteration.json");
-  await writeFile(previousPath, JSON.stringify(persistedScanUnion(previous)));
+  await writeJson(previousPath, persistedScanUnion(previous));
   const previousBytes = await readFile(previousPath, "utf8");
   assert.equal(previous.unresolvedCandidates.length, 1);
   await f.write({ ...scanUnionToDraft(previous), handoffClaimToken });
@@ -1584,15 +1539,7 @@ for (const mode of ["standard", "diff"] as const) {
         findings: [previous],
       });
       const checkpointRoot = path.join(f.root, "checkpoints");
-      const originals = await Promise.all(
-        (await readdir(checkpointRoot)).map(
-          async (name) =>
-            [
-              name,
-              await readFile(path.join(checkpointRoot, name), "utf8"),
-            ] as const,
-        ),
-      );
+      const assertPreserved = await captureCheckpoints(checkpointRoot);
       const current = {
         ...previous,
         provenance: {
@@ -1603,13 +1550,11 @@ for (const mode of ["standard", "diff"] as const) {
       };
       for (const replay of [false, true]) {
         await f.write({ ...f.draft({}, true), findings: [current] });
-        const savedFindings = JSON.parse(
-          await readFile(path.join(f.root, "findings.json"), "utf8"),
-        );
+        const savedFindings = await readJson(f.root, "findings.json");
         const coverage = await f.read();
         const checkpoints = await Promise.all(
-          (await readdir(checkpointRoot)).map(async (name) =>
-            JSON.parse(await readFile(path.join(checkpointRoot, name), "utf8")),
+          (await readdir(checkpointRoot)).map(
+            async (name) => await readJson(checkpointRoot, name),
           ),
         );
         const checkpoint = checkpoints.find(
@@ -1665,11 +1610,7 @@ for (const mode of ["standard", "diff"] as const) {
               );
           }
         }
-        for (const [name, contents] of originals)
-          assert.equal(
-            await readFile(path.join(checkpointRoot, name), "utf8"),
-            contents,
-          );
+        await assertPreserved();
       }
     });
   }

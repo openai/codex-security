@@ -1,4 +1,4 @@
-import { readSavedReviewState } from "./support/json.ts";
+import { readJson, readSavedReviewState, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -51,24 +51,23 @@ for (const complete of [false, true]) {
     test(`unmarked saved findings survive diff replay (${complete ? "final" : "checkpoint"}, ${currentTerminal ? "new decision" : "empty"})`, async (t) => {
       const reviewed = candidate("legacy-accepted", "suppressed");
       const context = await fixture(t, [reviewed]);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete,
-        findings: [finding(reviewed.candidate_id)],
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete, findings: [finding(reviewed.candidate_id)] }),
+      );
       const findingsPath = path.join(context.root, "findings.json");
-      const saved = JSON.parse(await readFile(findingsPath, "utf8"));
+      const saved = await readJson(findingsPath);
       delete saved.findings[0].provenance.diffCandidateDecision;
-      await writeFile(findingsPath, JSON.stringify(saved));
+      await writeJson(findingsPath, saved);
       const checkpoints = path.join(context.root, "checkpoints");
       for (const name of await readdir(checkpoints)) {
         const file = path.join(checkpoints, name);
-        const checkpoint = JSON.parse(await readFile(file, "utf8"));
+        const checkpoint = await readJson(file);
         for (const previous of checkpoint.findings ?? [])
           delete previous.provenance.diffCandidateDecision;
-        await writeFile(file, JSON.stringify(checkpoint));
+        await writeJson(file, checkpoint);
       }
-      const next = { ...draft(), complete };
+      const next = draft({ complete });
       if (currentTerminal)
         next.reviewState.surfaces.push({
           candidateId: reviewed.candidate_id,
@@ -77,7 +76,7 @@ for (const complete of [false, true]) {
           notes: "A new review supersedes the saved finding.",
         });
       await recordCodexSecurityScanDraft(context, next);
-      const actual = JSON.parse(await readFile(findingsPath, "utf8"));
+      const actual = await readJson(findingsPath);
       assert.equal(actual.findings.length, currentTerminal ? 0 : 1);
       if (!currentTerminal)
         assert.equal(
@@ -147,7 +146,21 @@ function candidate(
   };
 }
 
-function draft(deferred: FixtureObject[] = []): FixtureDraft {
+function containsValue(value: unknown, expected: unknown): boolean {
+  if (isDeepStrictEqual(value, expected)) return true;
+  if (Array.isArray(value))
+    return value.some((child) => containsValue(child, expected));
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    Object.values(value).some((child) => containsValue(child, expected))
+  );
+}
+
+function draft({
+  deferred = [],
+  ...fields
+}: Partial<FixtureDraft> & { deferred?: FixtureObject[] } = {}): FixtureDraft {
   return {
     scanId: "11111111-1111-4111-8111-111111111111",
     findings: [],
@@ -156,6 +169,7 @@ function draft(deferred: FixtureObject[] = []): FixtureDraft {
       explicitExclusions: [],
       deferred,
     },
+    ...fields,
   };
 }
 
@@ -193,13 +207,15 @@ async function fixture(
 test("Diff candidate recovery preserves generic review closeout", async (t) => {
   const pending = candidate("pending-review");
   const context = await fixture(t, [pending]);
-  const first = draft([
-    {
-      id: "ordinary-review",
-      reason: "Review the caller.",
-      surfaceIds: ["caller"],
-    },
-  ]);
+  const first = draft({
+    deferred: [
+      {
+        id: "ordinary-review",
+        reason: "Review the caller.",
+        surfaceIds: ["caller"],
+      },
+    ],
+  });
   first.complete = false;
   first.reviewState.completeness = "partial";
   first.reviewState.surfaces = [
@@ -242,7 +258,7 @@ test("Diff candidate recovery preserves generic review closeout", async (t) => {
       caller.receiptRefs,
       first.reviewState.surfaces[0].receiptRefs,
     );
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+    await recordCodexSecurityScanDraft(context, draft({ complete }));
   }
 });
 
@@ -253,10 +269,7 @@ for (const disposition of ["deferred", "not_applicable"]) {
       initial.validation.counterevidence_or_proof_gap =
         "Earlier generated decision.";
       const context = await fixture(t, [initial]);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       const coverage = await readCoverage(context);
       assert.equal(coverage.mode, "branch_diff");
       assert.equal(coverage.inventoryStrategy, "diff");
@@ -279,11 +292,10 @@ for (const disposition of ["deferred", "not_applicable"]) {
         inventoryStrategy: _inventoryStrategy,
         ...semanticCoverage
       } = coverage;
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        reviewState: semanticCoverage,
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ reviewState: semanticCoverage, complete: true }),
+      );
       const saved = await readCoverage(context);
       assert.equal(
         saved.deferred.length,
@@ -380,15 +392,20 @@ test("diff reconciliation enriches pending records and retains general coverage 
   const general = { reason: "A source directory still needs review." };
   const result = await reconcileDiffCandidates(
     context,
-    draft([
-      {
-        id: "pending-row",
-        candidateId: "pending",
-        reason: "Keep the original follow-up question.",
-      },
-      { candidateId: "rejected", reason: "An earlier incomplete checkpoint." },
-      general,
-    ]),
+    draft({
+      deferred: [
+        {
+          id: "pending-row",
+          candidateId: "pending",
+          reason: "Keep the original follow-up question.",
+        },
+        {
+          candidateId: "rejected",
+          reason: "An earlier incomplete checkpoint.",
+        },
+        general,
+      ],
+    }),
   );
   assert.deepEqual(result.reviewState.deferred, [
     {
@@ -422,7 +439,7 @@ for (const resolution of ["finding", "ledger rejection"]) {
       notes: general.reason,
       receiptRefs: [],
     };
-    const initial = { ...draft([general]), complete: false };
+    const initial = draft({ deferred: [general], complete: false });
     initial.reviewState.completeness = "partial";
     initial.reviewState.surfaces = [surface];
     await recordCodexSecurityScanDraft(context, initial);
@@ -445,7 +462,7 @@ for (const resolution of ["finding", "ledger rejection"]) {
       surface,
     );
 
-    const resolved = { ...draft(), complete: true };
+    const resolved = draft({ complete: true });
     if (resolution === "finding")
       resolved.findings = [finding(pending.candidate_id)];
     else
@@ -461,7 +478,7 @@ for (const resolution of ["finding", "ledger rejection"]) {
         surface,
       );
       assert.equal(saved.completeness, undefined);
-      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      await recordCodexSecurityScanDraft(context, draft({ complete }));
     }
   });
 }
@@ -475,27 +492,21 @@ for (const metadata of [
   test(`non-string and blank owner metadata do not leave confirmed Diff candidates unresolved: ${JSON.stringify(metadata)}`, async (t) => {
     const pending = candidate("pending", "deferred");
     const context = await fixture(t, [pending]);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: false,
-    });
+    await recordCodexSecurityScanDraft(context, draft({ complete: false }));
     const confirmed = finding(pending.candidate_id);
     Object.assign(confirmed.provenance, {
       sourceWorkerId: metadata,
       workerId: metadata,
     });
     for (const complete of [true, false]) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete,
-        findings: [confirmed],
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete, findings: [confirmed] }),
+      );
       const saved = await readCoverage(context);
       assert.deepEqual(saved.deferred, []);
       assert.equal(saved.completeness, undefined);
-      const findings = JSON.parse(
-        await readFile(path.join(context.root, "findings.json"), "utf8"),
-      ).findings;
+      const findings = (await readJson(context.root, "findings.json")).findings;
       assert.equal(findings.length, 1);
       assert.deepEqual(findings[0].provenance.sourceWorkerId, metadata);
       assert.deepEqual(findings[0].provenance.workerId, metadata);
@@ -519,24 +530,23 @@ for (const fallback of ["workerId", "extensions"]) {
       sourceWorkerId: "other-worker",
       reason: "Independent worker review.",
     };
-    const initial = {
-      ...draft([
+    const initial = draft({
+      deferred: [
         {
           candidateId: "pending",
           sourceWorkerId: "actual-worker",
           reason: "Candidate review.",
         },
         unrelated,
-      ]),
+      ],
       complete: false,
-    };
+    });
     initial.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, initial);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      findings: [confirmed],
-      complete: true,
-    });
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({ findings: [confirmed], complete: true }),
+    );
     assert.deepEqual(
       (await readCoverage(context)).deferred.map(
         ({ candidateId, sourceWorkerId }: FixtureObject) => ({
@@ -557,26 +567,23 @@ test("bound worker ownership overrides imported metadata and preserves its evide
     details: ["retained"],
   };
   confirmed.provenance.workerId = "imported-worker";
-  const initial = {
-    ...draft([
+  const initial = draft({
+    deferred: [
       {
         candidateId: "pending",
         sourceWorkerId: "different-import",
         reason: "Review in the bound worker.",
       },
-    ]),
+    ],
     complete: false,
-  };
+  });
   initial.reviewState.completeness = "partial";
   await recordCodexSecurityWorkerScanDraft(context, initial);
-  await recordCodexSecurityWorkerScanDraft(context, {
-    ...draft(),
-    complete: true,
-    findings: [confirmed],
-  });
-  const saved = JSON.parse(
-    await readFile(path.join(context.root, "result.json"), "utf8"),
+  await recordCodexSecurityWorkerScanDraft(
+    context,
+    draft({ complete: true, findings: [confirmed] }),
   );
+  const saved = await readJson(context.root, "result.json");
   assert.deepEqual(saved.reviewState.deferred, []);
   for (const workerId of ["actual-worker", "imported-worker"]) {
     const reduced = await validateDiscoveryArtifacts(
@@ -614,7 +621,7 @@ test("structured exclusion owner metadata does not resolve an unowned candidate"
   };
   const unrelated = finding("unrelated");
   delete unrelated.provenance.candidateId;
-  const initial = { ...draft(), complete: false, findings: [unrelated] };
+  const initial = draft({ complete: false, findings: [unrelated] });
   initial.reviewState.explicitExclusions = [exclusion];
   await recordCodexSecurityScanDraft(context, initial);
   for (const complete of [true, false]) {
@@ -623,7 +630,7 @@ test("structured exclusion owner metadata does not resolve an unowned candidate"
     assert.equal(saved.deferred.length, 1);
     assert.equal(saved.deferred[0].candidateId, pending.candidate_id);
     assert.equal(saved.completeness, undefined);
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+    await recordCodexSecurityScanDraft(context, draft({ complete }));
   }
 });
 
@@ -668,13 +675,17 @@ for (const mapping of ["candidateId", "surfaceIds"]) {
   test(`pending diff candidates preserve a shared reported surface linked by ${mapping}`, async (t) => {
     const pending = candidate("pending-review", "deferred");
     const context = await fixture(t, [pending]);
-    const input = draft([
-      {
-        candidateId: pending.candidate_id,
-        reason: "The second candidate still needs validation.",
-        ...(mapping === "surfaceIds" ? { surfaceIds: ["shared-surface"] } : {}),
-      },
-    ]);
+    const input = draft({
+      deferred: [
+        {
+          candidateId: pending.candidate_id,
+          reason: "The second candidate still needs validation.",
+          ...(mapping === "surfaceIds"
+            ? { surfaceIds: ["shared-surface"] }
+            : {}),
+        },
+      ],
+    });
     input.findings = [{ provenance: { candidateId: "confirmed-review" } }];
     input.reviewState.surfaces = [
       {
@@ -708,7 +719,7 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
   test(`terminal diff decisions close a saved checkpoint with ${remaining} remaining`, async (t) => {
     const pending = candidate("pending-review");
     const context = await fixture(t, [pending]);
-    const checkpoint = { ...draft(), complete: false };
+    const checkpoint = draft({ complete: false });
     if (remaining === "deferred") {
       checkpoint.reviewState.completeness = "partial";
       checkpoint.reviewState.deferred.push({
@@ -741,7 +752,7 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
     await writeLedger(context, [
       { ...pending, validation: { disposition: "suppressed" } },
     ]);
-    const finalDraft = { ...draft(), complete: true };
+    const finalDraft = draft({ complete: true });
     if (remaining === "explicit partial")
       finalDraft.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, finalDraft);
@@ -797,16 +808,16 @@ for (const remaining of [
       notes: "The linked candidate needs validation.",
       receiptRefs: ["artifacts/review/shared.json"],
     };
-    const checkpoint = {
-      ...draft([
+    const checkpoint = draft({
+      deferred: [
         {
           candidateId: pending.candidate_id,
           reason: "Validate the linked candidate.",
           surfaceIds: [linkedSurface.id],
         },
-      ]),
+      ],
       complete: false,
-    };
+    });
     checkpoint.reviewState.completeness = "partial";
     checkpoint.reviewState.surfaces.push(linkedSurface);
     if (
@@ -840,7 +851,10 @@ for (const remaining of [
     };
     if (remaining === "shared checkpoint") {
       await writeLedger(context, [pending, other]);
-      const sharedCheckpoint = { ...draft([otherDeferred]), complete: false };
+      const sharedCheckpoint = draft({
+        deferred: [otherDeferred],
+        complete: false,
+      });
       sharedCheckpoint.reviewState.completeness = "partial";
       await recordCodexSecurityScanDraft(context, sharedCheckpoint);
     }
@@ -849,10 +863,10 @@ for (const remaining of [
       { ...pending, validation: { disposition: "suppressed" } },
       ...(shared ? [other] : []),
     ]);
-    const finalDraft = {
-      ...draft(remaining === "shared current" ? [otherDeferred] : []),
+    const finalDraft = draft({
+      deferred: remaining === "shared current" ? [otherDeferred] : [],
       complete: true,
-    };
+    });
     if (remaining === "shared current" || remaining === "current follow-up")
       finalDraft.reviewState.completeness = "partial";
     if (remaining === "current follow-up") {
@@ -916,16 +930,16 @@ for (const resolution of ["finding", "exclusion"]) {
     const automatic = candidate("automatic-review");
     const linked = candidate("linked-review");
     const context = await fixture(t, [automatic, linked]);
-    const checkpoint = {
-      ...draft([
+    const checkpoint = draft({
+      deferred: [
         {
           candidateId: linked.candidate_id,
           reason: "Validate the linked candidate.",
           surfaceIds: ["linked-boundary"],
         },
-      ]),
+      ],
       complete: false,
-    };
+    });
     checkpoint.reviewState.completeness = "partial";
     checkpoint.reviewState.surfaces.push({
       id: "linked-boundary",
@@ -934,7 +948,7 @@ for (const resolution of ["finding", "exclusion"]) {
     });
     await recordCodexSecurityScanDraft(context, checkpoint);
 
-    const resolved = { ...draft(), complete: false };
+    const resolved = draft({ complete: false });
     if (resolution === "finding") {
       resolved.findings.push(finding(linked.candidate_id));
     } else {
@@ -971,9 +985,7 @@ for (const resolution of ["finding", "exclusion"]) {
           linked.candidate_id,
         );
       } else {
-        const findings = JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        );
+        const findings = await readJson(context.root, "findings.json");
         assert.equal(
           findings.findings[0].provenance.candidateId,
           linked.candidate_id,
@@ -986,16 +998,16 @@ for (const resolution of ["finding", "exclusion"]) {
 for (const resolution of ["finding", "exclusion"]) {
   test(`retained ${resolution} decisions keep historical references resolved on an empty final save`, async (t) => {
     const context = await fixture(t);
-    const checkpoint = {
-      ...draft([
+    const checkpoint = draft({
+      deferred: [
         {
           candidateId: "resolved-review",
           reason: "Validate the linked candidate.",
           surfaceIds: ["linked-boundary"],
         },
-      ]),
+      ],
       complete: false,
-    };
+    });
     checkpoint.reviewState.completeness = "partial";
     checkpoint.reviewState.surfaces.push({
       id: "linked-boundary",
@@ -1004,7 +1016,7 @@ for (const resolution of ["finding", "exclusion"]) {
       disposition: "needs_follow_up",
     });
     await recordCodexSecurityScanDraft(context, checkpoint);
-    const finalDraft = { ...draft(), complete: true };
+    const finalDraft = draft({ complete: true });
     if (resolution === "finding") {
       finalDraft.findings.push(finding("resolved-review"));
     } else {
@@ -1017,10 +1029,7 @@ for (const resolution of ["finding", "exclusion"]) {
     }
     await recordCodexSecurityScanDraft(context, finalDraft);
     for (let attempt = 0; attempt < 2; attempt++) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.deferred, []);
@@ -1032,12 +1041,12 @@ for (const resolution of ["finding", "exclusion"]) {
 for (const disposition of ["rejected", "not_applicable"]) {
   test(`a current ${disposition} exclusion preserves unrelated historical follow-ups`, async (t) => {
     const context = await fixture(t);
-    const checkpoint = {
-      ...draft([
+    const checkpoint = draft({
+      deferred: [
         { candidateId: "resolved-review", reason: "Candidate review." },
-      ]),
+      ],
       complete: false,
-    };
+    });
     const unrelated = {
       id: "generic-boundary",
       label: "Independent source review",
@@ -1048,7 +1057,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     checkpoint.reviewState.completeness = "partial";
     checkpoint.reviewState.surfaces.push(unrelated);
     await recordCodexSecurityScanDraft(context, checkpoint);
-    const finalDraft = { ...draft(), complete: true };
+    const finalDraft = draft({ complete: true });
     finalDraft.reviewState.explicitExclusions.push({
       candidateId: "resolved-review",
       disposition,
@@ -1079,30 +1088,30 @@ for (const mapping of ["surfaceIds", "candidateId"]) {
           ? { candidateId: "resolved-review" }
           : {}),
       };
-      const checkpoint = {
-        ...draft([
+      const checkpoint = draft({
+        deferred: [
           {
             candidateId: "resolved-review",
             reason: "Validate this synthetic candidate.",
             surfaceIds: [shared.id],
           },
-        ]),
+        ],
         complete: false,
-      };
+      });
       checkpoint.reviewState.completeness = "partial";
       checkpoint.reviewState.surfaces.push(shared);
       await recordCodexSecurityScanDraft(context, checkpoint);
-      const finalDraft = {
-        ...draft([
+      const finalDraft = draft({
+        deferred: [
           {
             candidateId: "pending-review",
             reason:
               "Another candidate still requires the shared review evidence.",
             surfaceIds: [shared.id],
           },
-        ]),
+        ],
         complete: true,
-      };
+      });
       finalDraft.reviewState.completeness = "partial";
       finalDraft.reviewState.explicitExclusions.push({
         candidateId: "resolved-review",
@@ -1138,11 +1147,8 @@ for (const disposition of ["rejected", "not_applicable"]) {
   test(`explicit ${disposition} exclusions resolve diff candidates through later drafts`, async (t) => {
     const pending = candidate("excluded-review");
     const context = await fixture(t, [pending]);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: false,
-    });
-    const finalDraft = { ...draft(), complete: true };
+    await recordCodexSecurityScanDraft(context, draft({ complete: false }));
+    const finalDraft = draft({ complete: true });
     finalDraft.reviewState.explicitExclusions.push({
       candidateId: pending.candidate_id,
       disposition,
@@ -1156,7 +1162,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.deepEqual(resolved.explicitExclusions[0].candidate, pending);
     assert.equal(resolved.explicitExclusions[0].disposition, disposition);
 
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
     const retained = await readCoverage(context);
     assert.equal(retained.completeness, undefined);
     assert.deepEqual(retained.deferred, []);
@@ -1176,7 +1182,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
       pattern: "vendor/**",
       reason: "The independent vendor scope remains excluded.",
     };
-    const earlier = { ...draft(), complete: false };
+    const earlier = draft({ complete: false });
     earlier.reviewState.explicitExclusions.push(
       earlierExclusion,
       unrelatedExclusion,
@@ -1202,15 +1208,15 @@ for (const disposition of ["rejected", "not_applicable"]) {
       pattern: "src/other.ts",
       reason: "This current exclusion remains authoritative.",
     };
-    const followup = {
-      ...draft([
+    const followup = draft({
+      deferred: [
         {
           candidateId: pending.candidate_id,
           reason: "Later evidence requires another review.",
         },
-      ]),
+      ],
       complete: false,
-    };
+    });
     followup.reviewState.completeness = "partial";
     followup.reviewState.explicitExclusions.push(currentExclusion);
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -1241,7 +1247,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
   test(`terminal diff ledger resolution retains saved ${disposition} surface rationale`, async (t) => {
     const pending = candidate("resolved-review");
     const context = await fixture(t, [pending]);
-    const checkpoint = { ...draft(), complete: false };
+    const checkpoint = draft({ complete: false });
     checkpoint.reviewState.completeness = "partial";
     checkpoint.reviewState.surfaces.push({
       candidateId: pending.candidate_id,
@@ -1252,7 +1258,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     await writeLedger(context, [
       { ...pending, validation: { disposition: "suppressed" } },
     ]);
-    const finalDraft = { ...draft(), complete: true };
+    const finalDraft = draft({ complete: true });
     finalDraft.reviewState.surfaces.push({
       candidateId: pending.candidate_id,
       label: "Synthetic candidate review",
@@ -1267,7 +1273,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     assert.equal(resolved.surfaces[0].disposition, disposition);
     assert.deepEqual(resolved.surfaces[0].candidate, pending);
 
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
     const retained = await readCoverage(context);
     assert.equal(retained.completeness, undefined);
     assert.deepEqual(retained.deferred, []);
@@ -1282,11 +1288,10 @@ for (const complete of [false, true]) {
       const context = await fixture(t, [
         candidate(candidateId, "reportable", "reportable"),
       ]);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete,
-        findings: [finding(candidateId)],
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete, findings: [finding(candidateId)] }),
+      );
       const authoredDecision = {
         candidateId,
         label: "Authored final review label.",
@@ -1314,7 +1319,7 @@ for (const complete of [false, true]) {
             "Current ignored counterevidence.";
         await writeLedger(context, [reviewed]);
         for (let attempt = 0; attempt < 2; attempt++) {
-          const input = { ...draft(), complete };
+          const input = draft({ complete });
           if (authored && stage === "ignored" && attempt === 0)
             input.reviewState.surfaces.push(authoredDecision);
           await recordCodexSecurityScanDraft(context, input);
@@ -1356,27 +1361,19 @@ for (const complete of [false, true]) {
               assert.match(saved.deferred[0].reason, /no saved finding/u);
           }
           assert.deepEqual(
-            JSON.parse(
-              await readFile(path.join(context.root, "findings.json"), "utf8"),
-            ).findings,
+            (await readJson(context.root, "findings.json")).findings,
             [],
           );
         }
       }
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-        findings: [finding(candidateId)],
-      });
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete: true, findings: [finding(candidateId)] }),
+      );
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       assert.deepEqual((await readCoverage(context)).deferred, []);
       assert.equal(
-        JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        ).findings.length,
+        (await readJson(context.root, "findings.json")).findings.length,
         1,
       );
     });
@@ -1392,11 +1389,10 @@ for (const [validation, attackPath, disposition] of [
   test(`terminal ${validation}/${attackPath ?? "unreviewed"} ledger decisions demote saved findings`, async (t) => {
     const pending = candidate("resolved-finding", "reportable", "reportable");
     const context = await fixture(t, [pending]);
-    const earlier = {
-      ...draft(),
+    const earlier = draft({
       complete: true,
       findings: [finding(pending.candidate_id)],
-    };
+    });
     await recordCodexSecurityScanDraft(context, earlier);
     const terminal = candidate(pending.candidate_id, validation, attackPath);
     const reason = "Synthetic source evidence resolved this candidate.";
@@ -1408,10 +1404,7 @@ for (const [validation, attackPath, disposition] of [
           : reason;
     await writeLedger(context, [terminal]);
     for (const complete of [false, true, true]) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.deferred, []);
@@ -1425,9 +1418,7 @@ for (const [validation, attackPath, disposition] of [
         pending.candidate_id,
       );
       assert.deepEqual(
-        JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        ).findings,
+        (await readJson(context.root, "findings.json")).findings,
         [],
       );
     }
@@ -1440,7 +1431,7 @@ for (const authored of [false, true]) {
     previous.validation.counterevidence_or_proof_gap = "Validation evidence.";
     previous.attack_path.counterevidence = "Earlier attack-path evidence.";
     const context = await fixture(t, [previous]);
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
     const coverage = await readCoverage(context);
     coverage.surfaces[0].notes = authored
       ? "Independent authored evidence."
@@ -1453,13 +1444,10 @@ for (const authored of [false, true]) {
       ),
     ];
     await Promise.all(earlierFiles.map((file) => utimes(file, 1, 1)));
-    await writeFile(
-      path.join(context.root, "coverage.json"),
-      JSON.stringify(coverage),
-    );
+    await writeJson(path.join(context.root, "coverage.json"), coverage);
     await writeLedger(context, [candidate(previous.candidate_id, "deferred")]);
     for (const complete of [false, true]) {
-      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      await recordCodexSecurityScanDraft(context, draft({ complete }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.equal(saved.deferred.length, authored ? 0 : 1);
@@ -1477,17 +1465,14 @@ for (const complete of [false, true]) {
   test(`reportable diff ledger rows remain pending until a finding is saved in a ${complete ? "final draft" : "checkpoint"}`, async (t) => {
     const pending = candidate("reportable-review");
     const context = await fixture(t, [pending]);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: false,
-    });
+    await recordCodexSecurityScanDraft(context, draft({ complete: false }));
     const reportable = candidate(
       pending.candidate_id,
       "reportable",
       "reportable",
     );
     await writeLedger(context, [reportable]);
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
     const missingFinding = await readCoverage(context);
     assert.equal(missingFinding.completeness, undefined);
     assert.equal(missingFinding.deferred.length, 1);
@@ -1495,7 +1480,7 @@ for (const complete of [false, true]) {
     assert.deepEqual(missingFinding.deferred[0].candidate, reportable);
     assert.match(missingFinding.deferred[0].reason, /no saved finding/u);
 
-    const finalDraft = { ...draft(), complete };
+    const finalDraft = draft({ complete });
     finalDraft.findings.push(finding(pending.candidate_id));
     await recordCodexSecurityScanDraft(context, finalDraft);
     const saved = await readCoverage(context);
@@ -1507,10 +1492,10 @@ for (const complete of [false, true]) {
       ),
     );
     for (const repeatComplete of [false, true, false]) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: repeatComplete,
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete: repeatComplete }),
+      );
       const repeated = await readCoverage(context);
       assert.equal(repeated.completeness, undefined);
       assert.deepEqual(repeated.deferred, []);
@@ -1523,9 +1508,7 @@ for (const complete of [false, true]) {
     const retained = await readCoverage(context);
     assert.equal(retained.completeness, undefined);
     assert.deepEqual(retained.deferred, []);
-    const findings = JSON.parse(
-      await readFile(path.join(context.root, "findings.json"), "utf8"),
-    );
+    const findings = await readJson(context.root, "findings.json");
     assert.equal(findings.findings.length, 1);
     assert.equal(
       findings.findings[0].provenance.candidateId,
@@ -1539,12 +1522,9 @@ for (const section of ["surfaces", "explicitExclusions"]) {
     test(`a ${disposition} ${section} checkpoint resolves inherited generated coverage`, async (t) => {
       const pending = candidate("checkpoint-decision");
       const context = await fixture(t, [pending]);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       const generated = await readCoverage(context);
-      const initial = { ...draft(), complete: true };
+      const initial = draft({ complete: true });
       Object.assign(initial.reviewState, {
         completeness: generated.completeness,
         completenessBeforeCandidates: generated.completenessBeforeCandidates,
@@ -1556,7 +1536,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
         analystAnnotation: "Keep this evidence annotation.",
       });
       await recordCodexSecurityScanDraft(context, initial);
-      const current = { ...draft(), complete: false };
+      const current = draft({ complete: false });
       const reason = "Current source evidence resolves this candidate.";
       const decision: FixtureObject = {
         candidateId: pending.candidate_id,
@@ -1594,7 +1574,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
             surface.receiptRefs.includes("artifacts/review/decision.json"),
           );
         assert.deepEqual(saved[section][0].candidate, pending);
-        await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+        await recordCodexSecurityScanDraft(context, draft({ complete }));
       }
     });
   }
@@ -1603,7 +1583,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
     test(`a terminal ${section} checkpoint retains ${remaining} follow-up evidence`, async (t) => {
       const pending = candidate("owned-review");
       const context = await fixture(t, [pending]);
-      const initial = { ...draft(), complete: true };
+      const initial = draft({ complete: true });
       initial.reviewState.completeness = "partial";
       const shared = remaining === "shared with another owner";
       const evidence = {
@@ -1625,7 +1605,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
           surfaceIds: [evidence.id],
         });
       await recordCodexSecurityScanDraft(context, initial);
-      const current = { ...draft(), complete: false };
+      const current = draft({ complete: false });
       current.reviewState[section].push({
         candidateId: pending.candidate_id,
         disposition: "rejected",
@@ -1651,10 +1631,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
             (item: FixtureObject) => item.disposition === "rejected",
           ),
         );
-        await recordCodexSecurityScanDraft(context, {
-          ...draft(),
-          complete: false,
-        });
+        await recordCodexSecurityScanDraft(context, draft({ complete: false }));
       }
     });
   }
@@ -1664,7 +1641,7 @@ for (const authored of [false, true]) {
   test(`diff checkpoints refresh ledger evidence and ${authored ? "retain authored" : "update generated"} coverage`, async (t) => {
     const pending = candidate("updated-review");
     const context = await fixture(t, [pending]);
-    const checkpoint = { ...draft(), complete: false };
+    const checkpoint = draft({ complete: false });
     const authoredReason = "Retain the analyst's specific follow-up request.";
     const authoredNote = "Keep the analyst's candidate annotation.";
     const authoredSurface = {
@@ -1710,10 +1687,7 @@ for (const authored of [false, true]) {
     };
     for (const reviewed of [validation, attackPath, rediscovered]) {
       await writeLedger(context, [reviewed]);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.equal(saved.deferred.length, 1);
@@ -1763,11 +1737,8 @@ for (const uncertainty of ["  A runtime check is still required.\n", " \t "]) {
     });
     assert.equal(accepted.rowsWritten, 1);
 
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: false,
-    });
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: false }));
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
 
     const saved = await readCoverage(context);
     const expectedReason = uncertainty.trim()
@@ -1788,7 +1759,7 @@ for (const complete of [false, true]) {
         "Earlier synthetic decision.";
       const context = await fixture(t, [reviewed]);
       if (inheritedFinal) {
-        const older = { ...draft(), complete: true };
+        const older = draft({ complete: true });
         older.reviewState.surfaces.push({
           candidateId: reviewed.candidate_id,
           label: "Older authored decision",
@@ -1797,15 +1768,12 @@ for (const complete of [false, true]) {
         });
         await recordCodexSecurityScanDraft(context, older);
       }
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete,
-        findings: [finding(reviewed.candidate_id)],
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete, findings: [finding(reviewed.candidate_id)] }),
+      );
       const savedFindings = async () =>
-        JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        ).findings;
+        (await readJson(context.root, "findings.json")).findings;
       const expectedDecision = { validation: reviewed.validation };
       assert.deepEqual(
         (await savedFindings())[0].provenance.diffCandidateDecision,
@@ -1813,13 +1781,7 @@ for (const complete of [false, true]) {
       );
       const checkpoints = await Promise.all(
         (await readdir(path.join(context.root, "checkpoints"))).map(
-          async (name) =>
-            JSON.parse(
-              await readFile(
-                path.join(context.root, "checkpoints", name),
-                "utf8",
-              ),
-            ),
+          async (name) => await readJson(context.root, "checkpoints", name),
         ),
       );
       assert.ok(
@@ -1833,18 +1795,20 @@ for (const complete of [false, true]) {
         ),
       );
       for (const unrelated of [false, true, false]) {
-        await recordCodexSecurityScanDraft(context, {
-          ...draft(),
-          complete,
-          findings: unrelated
-            ? [
-                {
-                  ...finding("unrelated-finding"),
-                  identity: { anchor: "unrelated-finding" },
-                },
-              ]
-            : [],
-        });
+        await recordCodexSecurityScanDraft(
+          context,
+          draft({
+            complete,
+            findings: unrelated
+              ? [
+                  {
+                    ...finding("unrelated-finding"),
+                    identity: { anchor: "unrelated-finding" },
+                  },
+                ]
+              : [],
+          }),
+        );
         assert.equal(
           (await savedFindings()).filter(
             (item: FixtureObject) =>
@@ -1869,7 +1833,7 @@ for (const complete of [false, true]) {
         },
       };
       await writeLedger(context, [newer]);
-      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      await recordCodexSecurityScanDraft(context, draft({ complete }));
       assert.equal(
         (await savedFindings()).some(
           (item: FixtureObject) =>
@@ -1891,7 +1855,7 @@ for (const complete of [false, true]) {
         expectedDecision,
       );
       await writeLedger(context, [reviewed]);
-      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      await recordCodexSecurityScanDraft(context, draft({ complete }));
       assert.equal(
         (await savedFindings()).some(
           (item: FixtureObject) =>
@@ -1899,12 +1863,11 @@ for (const complete of [false, true]) {
         ),
         false,
       );
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-        findings: [finding(reviewed.candidate_id)],
-      });
-      const authored = { ...draft(), complete: true };
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete: true, findings: [finding(reviewed.candidate_id)] }),
+      );
+      const authored = draft({ complete: true });
       authored.reviewState.surfaces.push({
         candidateId: reviewed.candidate_id,
         label: "New authored decision",
@@ -1912,10 +1875,7 @@ for (const complete of [false, true]) {
         notes: "A newer author decision supersedes the finding.",
       });
       await recordCodexSecurityScanDraft(context, authored);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       assert.equal(
         (await savedFindings()).some(
           (item: FixtureObject) =>
@@ -1946,7 +1906,7 @@ for (const remaining of [
   test(`a checkpoint refreshes inherited final candidate coverage with ${remaining} work remaining`, async (t) => {
     const pending = candidate("inherited-pending");
     const context = await fixture(t, [pending]);
-    const initial = { ...draft(), complete: true };
+    const initial = draft({ complete: true });
     if (
       ![
         "none",
@@ -1988,7 +1948,7 @@ for (const remaining of [
       remaining === "later partial" ||
       remaining === "later checkpoint partial"
     ) {
-      const authored = { ...draft(), complete: remaining === "later partial" };
+      const authored = draft({ complete: remaining === "later partial" });
       authored.reviewState.completeness = "partial";
       await recordCodexSecurityScanDraft(context, authored);
       assert.equal(
@@ -2000,10 +1960,7 @@ for (const remaining of [
       { ...pending, validation: { disposition: "suppressed" } },
     ]);
     for (let attempt = 0; attempt < 2; attempt++) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: false,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: false }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.equal(saved.completenessBeforeCandidates, undefined);
@@ -2041,7 +1998,7 @@ for (const resolution of ["surface", "exclusion", "finding"]) {
   test(`Diff ${resolution} resolution retains the same candidate ID owned by another worker`, async (t) => {
     const pending = candidate("shared-candidate-id");
     const context = await fixture(t, [pending]);
-    const initial = { ...draft(), complete: true };
+    const initial = draft({ complete: true });
     initial.reviewState.completeness = "partial";
     const decision: FixtureObject = {
       candidateId: pending.candidate_id,
@@ -2086,10 +2043,7 @@ for (const resolution of ["surface", "exclusion", "finding"]) {
       { ...pending, validation: { disposition: "suppressed" } },
     ]);
     for (let attempt = 0; attempt < 2; attempt++) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: false,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: false }));
       saved = await readCoverage(context);
       assert.equal(saved.deferred.length, 1);
       assert.equal(saved.deferred[0].sourceWorkerId, "pending-worker");
@@ -2102,9 +2056,8 @@ for (const resolution of ["surface", "exclusion", "finding"]) {
         "Independent candidate evidence must remain.",
       );
       if (resolution === "finding") {
-        const findings = JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        ).findings;
+        const findings = (await readJson(context.root, "findings.json"))
+          .findings;
         assert.equal(findings.length, 1);
         assert.equal(findings[0].provenance.sourceWorkerId, "other-worker");
       }
@@ -2116,7 +2069,7 @@ for (const validation of ["deferred", undefined]) {
   test(`changed ${validation ?? "removed"} ledger phases reopen an explicit finding override`, async (t) => {
     const reviewed = candidate("reopened-override", "suppressed", "ignore");
     const context = await fixture(t, [reviewed]);
-    const older = { ...draft(), complete: true };
+    const older = draft({ complete: true });
     older.reviewState.surfaces.push({
       candidateId: reviewed.candidate_id,
       label: "Older authored review",
@@ -2124,15 +2077,14 @@ for (const validation of ["deferred", undefined]) {
       notes: "An authored decision before the accepted finding.",
     });
     await recordCodexSecurityScanDraft(context, older);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: true,
-      findings: [finding(reviewed.candidate_id)],
-    });
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({ complete: true, findings: [finding(reviewed.candidate_id)] }),
+    );
     const reopened = candidate(reviewed.candidate_id, validation);
     await writeLedger(context, [reopened]);
     for (const complete of [false, true, false]) {
-      await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+      await recordCodexSecurityScanDraft(context, draft({ complete }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.equal(saved.deferred.length, 1);
@@ -2142,9 +2094,7 @@ for (const validation of ["deferred", undefined]) {
         reviewed.candidate_id,
       );
       assert.equal(
-        JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        ).findings.length,
+        (await readJson(context.root, "findings.json")).findings.length,
         0,
       );
     }
@@ -2154,19 +2104,21 @@ for (const validation of ["deferred", undefined]) {
 test("owned surface references survive canonical ID collisions and local resolution", async (t) => {
   const local = candidate("local-review");
   const context = await fixture(t, [local]);
-  const initial = draft([
-    {
-      candidateId: local.candidate_id,
-      reason: "Local review.",
-      surfaceIds: ["review-surface", "shared-evidence"],
-    },
-    {
-      candidateId: "imported-review",
-      sourceWorkerId: "other-worker",
-      reason: "Independent imported review.",
-      surfaceIds: ["review-surface", "shared-evidence"],
-    },
-  ]);
+  const initial = draft({
+    deferred: [
+      {
+        candidateId: local.candidate_id,
+        reason: "Local review.",
+        surfaceIds: ["review-surface", "shared-evidence"],
+      },
+      {
+        candidateId: "imported-review",
+        sourceWorkerId: "other-worker",
+        reason: "Independent imported review.",
+        surfaceIds: ["review-surface", "shared-evidence"],
+      },
+    ],
+  });
   initial.complete = true;
   initial.reviewState.completeness = "partial";
   initial.reviewState.surfaces = [
@@ -2215,7 +2167,7 @@ test("owned surface references survive canonical ID collisions and local resolut
     { ...local, validation: { disposition: "suppressed" } },
   ]);
   for (const complete of [true, false, true]) {
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+    await recordCodexSecurityScanDraft(context, draft({ complete }));
     const saved = await readCoverage(context);
     const imported = saved.surfaces.find(
       (item: FixtureObject) => item.sourceWorkerId === "other-worker",
@@ -2261,11 +2213,11 @@ for (const complete of [false, true]) {
       notes: "The public boundary review is complete.",
       receiptRefs: ["artifacts/review/public.json"],
     };
-    const first = { ...draft(), complete };
+    const first = draft({ complete });
     first.reviewState.completeness = "partial";
     first.reviewState.surfaces.push(unfinished);
     await recordCodexSecurityScanDraft(context, first);
-    const second = { ...draft(), complete };
+    const second = draft({ complete });
     second.reviewState.surfaces.push(reviewed);
     await recordCodexSecurityScanDraft(context, second);
     const expected = await readCoverage(context);
@@ -2283,18 +2235,16 @@ for (const complete of [false, true]) {
       assert.deepEqual(saved, original);
     }
     for (const nextComplete of [false, true, false]) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: nextComplete,
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete: nextComplete }),
+      );
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.surfaces, expected.surfaces);
     }
     for (const name of await readdir(path.join(context.root, "checkpoints"))) {
-      const checkpoint = JSON.parse(
-        await readFile(path.join(context.root, "checkpoints", name), "utf8"),
-      );
+      const checkpoint = await readJson(context.root, "checkpoints", name);
       assert.ok(
         checkpoint.reviewState.surfaces.every(
           (surface: FixtureObject) =>
@@ -2321,7 +2271,7 @@ for (const remaining of [
     const shared = remaining.startsWith("shared");
     const sibling = candidate("shared-review");
     const context = await fixture(t, shared ? [pending, sibling] : [pending]);
-    const initial = { ...draft(), complete: true };
+    const initial = draft({ complete: true });
     if (remaining === "unknown") initial.reviewState.completeness = "unknown";
     else initial.reviewState.completeness = "partial";
     if (remaining === "authored" || shared)
@@ -2343,11 +2293,10 @@ for (const remaining of [
         surfaceIds: ["review-evidence"],
       });
     await recordCodexSecurityScanDraft(context, initial);
-    const current = {
-      ...draft(),
+    const current = draft({
       complete: false,
       findings: [finding(pending.candidate_id)],
-    };
+    });
     if (remaining === "shared confirmed")
       current.findings.push({
         ...finding(sibling.candidate_id),
@@ -2383,15 +2332,10 @@ for (const remaining of [
         );
       }
       assert.equal(
-        JSON.parse(
-          await readFile(path.join(context.root, "findings.json"), "utf8"),
-        ).findings.length,
+        (await readJson(context.root, "findings.json")).findings.length,
         remaining === "shared confirmed" ? 2 : 1,
       );
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: false,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: false }));
     }
   });
 }
@@ -2404,8 +2348,8 @@ for (const legacy of [true, false]) {
         candidate_id: "saved-review",
         evidence: "Retain saved candidate evidence.",
       };
-      const initial = {
-        ...draft([
+      const initial = draft({
+        deferred: [
           {
             id: "saved-review",
             candidateId: "saved-review",
@@ -2413,30 +2357,30 @@ for (const legacy of [true, false]) {
             reason: "Saved proof gap.",
             analystNote: "Saved annotation.",
           },
-        ]),
+        ],
         complete: false,
-      };
+      });
       initial.reviewState.completeness = "partial";
       await recordCodexSecurityScanDraft(context, initial);
       if (legacy) {
         const coveragePath = path.join(context.root, "coverage.json");
-        const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+        const coverage = await readJson(coveragePath);
         coverage.deferred.forEach(
           (row: FixtureObject) => delete row.candidateId,
         );
-        await writeFile(coveragePath, JSON.stringify(coverage));
+        await writeJson(coveragePath, coverage);
         for (const name of await readdir(
           path.join(context.root, "checkpoints"),
         )) {
           const checkpointPath = path.join(context.root, "checkpoints", name);
-          const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+          const checkpoint = await readJson(checkpointPath);
           checkpoint.reviewState.deferred.forEach(
             (row: FixtureObject) => delete row.candidateId,
           );
-          await writeFile(checkpointPath, JSON.stringify(checkpoint));
+          await writeJson(checkpointPath, checkpoint);
         }
       }
-      const next = { ...draft(), complete: true };
+      const next = draft({ complete: true });
       if (resolution === "finding") next.findings = [finding("saved-review")];
       else
         next.reviewState.surfaces.push({
@@ -2448,9 +2392,7 @@ for (const legacy of [true, false]) {
       await recordCodexSecurityScanDraft(context, next);
       const saved = await readCoverage(context);
       assert.equal(saved.deferred.length, 0);
-      const savedFindings = JSON.parse(
-        await readFile(path.join(context.root, "findings.json"), "utf8"),
-      );
+      const savedFindings = await readJson(context.root, "findings.json");
       assert.ok(
         JSON.stringify(
           resolution === "finding" ? savedFindings : saved.surfaces,
@@ -2463,22 +2405,19 @@ for (const legacy of [true, false]) {
 for (const legacyId of ["review/auth", "review\\auth", "review-auth"]) {
   test(`legacy task ID remains readable ${legacyId}`, async (t) => {
     const context = await fixture(t);
-    const initial = {
-      ...draft([
+    const initial = draft({
+      deferred: [
         {
           id: legacyId,
           candidate: { evidence: "Saved legacy payload." },
           reason: "Pending validation.",
         },
-      ]),
-      complete: false,
-    };
-    initial.reviewState.completeness = "partial";
-    await recordCodexSecurityScanDraft(context, initial);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
+      ],
       complete: false,
     });
+    initial.reviewState.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, initial);
+    await recordCodexSecurityScanDraft(context, draft({ complete: false }));
     const saved = await readCoverage(context);
     assert.equal(saved.deferred[0].id, legacyId);
     assert.equal(saved.deferred[0].candidate.evidence, "Saved legacy payload.");
@@ -2499,20 +2438,16 @@ for (const changed of [true, false]) {
       identity: { anchor: "shared-anchor", instance: "second" },
       summary: "Second saved sibling evidence.",
     };
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: true,
-      findings: [first, second],
-    });
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({ complete: true, findings: [first, second] }),
+    );
     if (changed)
       await writeLedger(context, [
         candidate(reviewed.candidate_id, "deferred"),
       ]);
     for (let attempt = 0; attempt < 2; attempt++) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: false,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: false }));
       const text = changed
         ? JSON.stringify((await readCoverage(context)).deferred)
         : await readFile(path.join(context.root, "findings.json"), "utf8");
@@ -2550,7 +2485,7 @@ for (const sharedCandidate of [true, false]) {
       {
         id: "worker-one",
         resultPath: "/scan/workers/worker-one/output/result.json",
-        result: draft(rows),
+        result: draft({ deferred: rows }),
       },
       "/scan",
     );
@@ -2632,8 +2567,7 @@ for (const termination of ["complete-scan", "cancel-scan"] as const) {
       }
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
-        {
-          ...draft(),
+        draft({
           scanId: context.scanId,
           complete: termination === "complete-scan",
           reviewState: {
@@ -2664,7 +2598,7 @@ for (const termination of ["complete-scan", "cancel-scan"] as const) {
               },
             ],
           },
-        },
+        }),
         workbench,
       );
       await rm(
@@ -2723,12 +2657,11 @@ for (const disposition of ["rejected", "not_applicable"]) {
       test(`authored checkpoint ${disposition} supersedes saved finding with ledger=${ledgerDisposition ?? "unreviewed"}, renewed=${renewedFinding}`, async (t) => {
         const reviewed = candidate("checkpoint-dismissal", ledgerDisposition);
         const context = await fixture(t, [reviewed]);
-        await recordCodexSecurityScanDraft(context, {
-          ...draft(),
-          complete: true,
-          findings: [finding(reviewed.candidate_id)],
-        });
-        const next = { ...draft(), complete: false };
+        await recordCodexSecurityScanDraft(
+          context,
+          draft({ complete: true, findings: [finding(reviewed.candidate_id)] }),
+        );
+        const next = draft({ complete: false });
         next.reviewState.surfaces.push({
           candidateId: reviewed.candidate_id,
           label: "Authored checkpoint review",
@@ -2738,9 +2671,8 @@ for (const disposition of ["rejected", "not_applicable"]) {
         if (renewedFinding) next.findings = [finding(reviewed.candidate_id)];
         await recordCodexSecurityScanDraft(context, next);
         for (let attempt = 0; attempt < 2; attempt++) {
-          const findings = JSON.parse(
-            await readFile(path.join(context.root, "findings.json"), "utf8"),
-          ).findings;
+          const findings = (await readJson(context.root, "findings.json"))
+            .findings;
           const saved = await readCoverage(context);
           assert.equal(findings.length, renewedFinding ? 1 : 0);
           const decisions = saved.surfaces.filter(
@@ -2767,10 +2699,10 @@ for (const disposition of ["rejected", "not_applicable"]) {
             );
           }
           if (attempt === 0)
-            await recordCodexSecurityScanDraft(context, {
-              ...draft(),
-              complete: true,
-            });
+            await recordCodexSecurityScanDraft(
+              context,
+              draft({ complete: true }),
+            );
         }
       });
     }
@@ -2791,18 +2723,14 @@ for (const validation of ["suppressed", "not_applicable"]) {
         },
         summary: `Distinct saved evidence ${index}.`,
       }));
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-        findings: previous,
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete: true, findings: previous }),
+      );
       await writeLedger(context, [
         candidate(reviewed.candidate_id, validation),
       ]);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: false,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: false }));
       for (let attempt = 0; attempt < 2; attempt++) {
         const saved = await readCoverage(context);
         const decisions = saved.surfaces.filter(
@@ -2826,16 +2754,14 @@ for (const validation of ["suppressed", "not_applicable"]) {
             ),
           );
         assert.equal(
-          JSON.parse(
-            await readFile(path.join(context.root, "findings.json"), "utf8"),
-          ).findings.length,
+          (await readJson(context.root, "findings.json")).findings.length,
           0,
         );
         if (attempt === 0)
-          await recordCodexSecurityScanDraft(context, {
-            ...draft(),
-            complete: true,
-          });
+          await recordCodexSecurityScanDraft(
+            context,
+            draft({ complete: true }),
+          );
       }
     });
   }
@@ -2845,8 +2771,8 @@ for (const owner of [undefined, "other-worker"]) {
   test(`post-final Diff checkpoint preserves ${owner ?? "local"} candidate ownership`, async (t) => {
     const pending = candidate("post-final-shared-candidate");
     const context = await fixture(t, [pending]);
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
-    const next = { ...draft(), complete: false };
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
+    const next = draft({ complete: false });
     next.reviewState.completeness = "partial";
     next.reviewState.deferred.push({
       candidateId: pending.candidate_id,
@@ -2882,18 +2808,17 @@ for (const provenance of [undefined, null, "Saved annotation", {}]) {
       );
       const context = await fixture(t, [reportable]);
       const canonical = finding(reportable.candidate_id);
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-        findings: [canonical],
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({ complete: true, findings: [canonical] }),
+      );
       const terminal = candidate(reportable.candidate_id, disposition);
       await writeLedger(context, [terminal]);
       const compact = {
         title: "Saved annotation",
         ...(provenance === undefined ? {} : { provenance }),
       };
-      const decision = { ...draft(), complete: true };
+      const decision = draft({ complete: true });
       decision.reviewState.surfaces = [
         {
           candidateId: terminal.candidate_id,
@@ -2910,7 +2835,7 @@ for (const provenance of [undefined, null, "Saved annotation", {}]) {
         candidate(terminal.candidate_id, "deferred"),
       ]);
       for (const complete of [false, true]) {
-        await recordCodexSecurityScanDraft(context, { ...draft(), complete });
+        await recordCodexSecurityScanDraft(context, draft({ complete }));
         const coverage = await readCoverage(context);
         const pending = coverage.deferred.find(
           (row: FixtureObject) => row.candidateId === terminal.candidate_id,
@@ -2940,13 +2865,15 @@ for (const multiple of [false, true]) {
     test(`confirmation closes generated custom proof-gap followup, shared=${shared}, multiple=${multiple}`, async (t) => {
       const current = candidate("authored-gap");
       const context = await fixture(t, [current]);
-      const initial = draft([
-        {
-          candidateId: current.candidate_id,
-          candidate: current,
-          reason: "An authored runtime proof remains missing.",
-        },
-      ]);
+      const initial = draft({
+        deferred: [
+          {
+            candidateId: current.candidate_id,
+            candidate: current,
+            reason: "An authored runtime proof remains missing.",
+          },
+        ],
+      });
       if (multiple)
         initial.reviewState.deferred.push({
           candidateId: current.candidate_id,
@@ -2972,17 +2899,19 @@ for (const multiple of [false, true]) {
           reason: "Independent unfinished review.",
           surfaceIds: [followup.id],
         });
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-        findings: [finding(current.candidate_id)],
-        reviewState: {
-          completeness: coverage.completeness,
-          surfaces: coverage.surfaces,
-          explicitExclusions: coverage.explicitExclusions,
-          deferred: coverage.deferred,
-        },
-      });
+      await recordCodexSecurityScanDraft(
+        context,
+        draft({
+          complete: true,
+          findings: [finding(current.candidate_id)],
+          reviewState: {
+            completeness: coverage.completeness,
+            surfaces: coverage.surfaces,
+            explicitExclusions: coverage.explicitExclusions,
+            deferred: coverage.deferred,
+          },
+        }),
+      );
       const saved = await readCoverage(context);
       assert.equal(
         saved.deferred.some(
@@ -3050,9 +2979,9 @@ for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
               ? [otherEvidence]
               : otherEvidence,
         };
-        const input = draft(
-          section === "deferred" ? [pending, otherPending] : [],
-        );
+        const input = draft({
+          deferred: section === "deferred" ? [pending, otherPending] : [],
+        });
         if (section !== "deferred")
           input.reviewState[section] = [pending, otherPending].map((row) => ({
             ...row,
@@ -3077,32 +3006,16 @@ for (const outcome of ["finding", "rejected", "not_applicable"] as const) {
         await recordCodexSecurityScanDraft(context, input);
         const canonical =
           outcome === "finding"
-            ? JSON.parse(
-                await readFile(
-                  path.join(context.root, "findings.json"),
-                  "utf8",
-                ),
-              )
+            ? await readJson(context.root, "findings.json")
             : await readCoverage(context);
-        const contains = (value: unknown, expected: unknown): boolean => {
-          if (isDeepStrictEqual(value, expected)) return true;
-          if (Array.isArray(value))
-            return value.some((child) => contains(child, expected));
-          return (
-            value !== null &&
-            typeof value === "object" &&
-            Object.values(value).some((child) => contains(child, expected))
-          );
-        };
+
         for (const expected of [evidence, otherEvidence])
-          assert.ok(contains(canonical, expected));
+          assert.ok(containsValue(canonical, expected));
         const checkpointRoot = path.join(context.root, "checkpoints");
         for (const name of await readdir(checkpointRoot)) {
-          const saved = JSON.parse(
-            await readFile(path.join(checkpointRoot, name), "utf8"),
-          );
+          const saved = await readJson(checkpointRoot, name);
           for (const expected of [evidence, otherEvidence])
-            assert.ok(contains(saved, expected));
+            assert.ok(containsValue(saved, expected));
         }
         assert.equal(
           (await readCoverage(context)).deferred.some(
@@ -3127,11 +3040,10 @@ for (const payload of ["complete", "compact", "omitted"] as const) {
     earlier.summary = "Earlier validated finding evidence.";
     earlier.provenance.reviewEvidence =
       "Original synthetic validation details.";
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: true,
-      findings: [earlier],
-    });
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({ complete: true, findings: [earlier] }),
+    );
     const checkpointRoot = path.join(context.root, "checkpoints");
     const checkpoints = await Promise.all(
       (await readdir(checkpointRoot)).map(
@@ -3150,14 +3062,16 @@ for (const payload of ["complete", "compact", "omitted"] as const) {
             ...finding(original.candidate_id),
             summary: "Current authored finding detail.",
           };
-    const submitted = draft([
-      {
-        id: "current-proof-gap",
-        candidateId: original.candidate_id,
-        reason: "The reopened review still needs proof.",
-        ...(payload === "omitted" ? {} : { finding: newer }),
-      },
-    ]);
+    const submitted = draft({
+      deferred: [
+        {
+          id: "current-proof-gap",
+          candidateId: original.candidate_id,
+          reason: "The reopened review still needs proof.",
+          ...(payload === "omitted" ? {} : { finding: newer }),
+        },
+      ],
+    });
     submitted.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, {
       ...submitted,
@@ -3200,7 +3114,7 @@ for (const confirmed of [false, true]) {
   test(`receipt holdback preserves only a surviving Diff terminal decision: finding=${confirmed}`, async (t) => {
     const reviewed = candidate("receipt-confirmation", "deferred");
     const context = await fixture(t, [reviewed]);
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
     const saved = await readCoverage(context);
     await writeFile(
       path.join(context.root, "artifacts", "review-receipt.txt"),
@@ -3225,12 +3139,14 @@ for (const confirmed of [false, true]) {
       inventoryStrategy: _inventory,
       ...submittedCoverage
     } = saved;
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: true,
-      reviewState: submittedCoverage,
-      findings: confirmed ? [finding(reviewed.candidate_id)] : [],
-    });
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({
+        complete: true,
+        reviewState: submittedCoverage,
+        findings: confirmed ? [finding(reviewed.candidate_id)] : [],
+      }),
+    );
     const published = await readCoverage(context);
     assert.equal(
       published.deferred.filter(
@@ -3265,7 +3181,7 @@ for (const outcome of [
       reason: "The saved proof remains unfinished.",
       previousFindings: [history],
     };
-    const initial = draft([pending]);
+    const initial = draft({ deferred: [pending] });
     initial.complete = false;
     initial.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, initial);
@@ -3297,21 +3213,11 @@ for (const outcome of [
     await recordCodexSecurityScanDraft(context, next);
     const canonical =
       outcome === "finding"
-        ? JSON.parse(
-            await readFile(path.join(context.root, "findings.json"), "utf8"),
-          )
+        ? await readJson(context.root, "findings.json")
         : await readCoverage(context);
-    const contains = (value: unknown): boolean => {
-      if (isDeepStrictEqual(value, history)) return true;
-      if (Array.isArray(value)) return value.some(contains);
-      return (
-        value !== null &&
-        typeof value === "object" &&
-        Object.values(value).some(contains)
-      );
-    };
+
     assert.ok(
-      contains(canonical),
+      containsValue(canonical, history),
       "the published history retains its original full finding",
     );
     const saved = await readCoverage(context);
@@ -3369,19 +3275,11 @@ for (const outcome of ["finding", "not_applicable"] as const) {
     await recordCodexSecurityScanDraft(context, next);
     const saved =
       outcome === "finding"
-        ? JSON.parse(
-            await readFile(path.join(context.root, "findings.json"), "utf8"),
-          )
+        ? await readJson(context.root, "findings.json")
         : await readCoverage(context);
-    const contains = (value: unknown): boolean =>
-      isDeepStrictEqual(value, evidence) ||
-      (Array.isArray(value)
-        ? value.some(contains)
-        : value !== null &&
-          typeof value === "object" &&
-          Object.values(value).some(contains));
+
     assert.ok(
-      contains(saved),
+      containsValue(saved, evidence),
       "reassessment retains evidence unique to the prior terminal exclusion",
     );
   });
@@ -3394,14 +3292,16 @@ for (const decision of ["suppressed", "not_applicable"] as const) {
       ...reviewed,
       annotation: "Additional saved candidate evidence.",
     };
-    const old = draft([
-      {
-        id: "authored-gap",
-        candidateId: reviewed.candidate_id,
-        candidate: evidence,
-        reason: "Saved authored proof gap.",
-      },
-    ]);
+    const old = draft({
+      deferred: [
+        {
+          id: "authored-gap",
+          candidateId: reviewed.candidate_id,
+          candidate: evidence,
+          reason: "Saved authored proof gap.",
+        },
+      ],
+    });
     old.complete = false;
     old.reviewState.completeness = "partial";
     old.reviewState.surfaces = [
@@ -3419,15 +3319,9 @@ for (const decision of ["suppressed", "not_applicable"] as const) {
     next.complete = true;
     await recordCodexSecurityScanDraft(context, next);
     const saved = await readCoverage(context);
-    const contains = (value: unknown): boolean =>
-      isDeepStrictEqual(value, evidence) ||
-      (Array.isArray(value)
-        ? value.some(contains)
-        : value !== null &&
-          typeof value === "object" &&
-          Object.values(value).some(contains));
+
     assert.ok(
-      contains(saved),
+      containsValue(saved, evidence),
       "ledger dismissal archives the saved candidate beyond its current ledger payload",
     );
     assert.equal(
@@ -3456,13 +3350,15 @@ for (const variant of ["identical", "evidence", "phases"] as const) {
         evidence: "Earlier attack-path details.",
       };
     }
-    const input = draft([
-      {
-        candidateId: current.candidate_id,
-        candidate: original,
-        reason: "Authored proof remains pending.",
-      },
-    ]);
+    const input = draft({
+      deferred: [
+        {
+          candidateId: current.candidate_id,
+          candidate: original,
+          reason: "Authored proof remains pending.",
+        },
+      ],
+    });
     input.reviewState.completeness = "partial";
     const surfaceOriginal = structuredClone(current);
     if (variant === "evidence")
@@ -3501,9 +3397,7 @@ for (const variant of ["identical", "evidence", "phases"] as const) {
       variant === "identical" ? [] : [original],
     );
     for (const name of await readdir(path.join(context.root, "checkpoints"))) {
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "checkpoints", name), "utf8"),
-      );
+      const saved = await readJson(context.root, "checkpoints", name);
       const row = saved.reviewState.deferred.find(
         (entry: FixtureObject) => entry.candidateId === current.candidate_id,
       );
@@ -3530,13 +3424,15 @@ for (const outcome of ["reportable", "suppressed", "not_applicable"] as const) {
       ...current,
       evidence: "Original authored snapshot evidence.",
     };
-    const first = draft([
-      {
-        candidateId: current.candidate_id,
-        candidate: authored,
-        reason: "Original authored review remains pending.",
-      },
-    ]);
+    const first = draft({
+      deferred: [
+        {
+          candidateId: current.candidate_id,
+          candidate: authored,
+          reason: "Original authored review remains pending.",
+        },
+      ],
+    });
     first.complete = false;
     first.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, first);
@@ -3552,19 +3448,11 @@ for (const outcome of ["reportable", "suppressed", "not_applicable"] as const) {
       if (replay) await recordCodexSecurityScanDraft(context, resolved);
       const saved =
         outcome === "reportable"
-          ? JSON.parse(
-              await readFile(path.join(context.root, "findings.json"), "utf8"),
-            )
+          ? await readJson(context.root, "findings.json")
           : await readCoverage(context);
-      const contains = (value: unknown): boolean =>
-        isDeepStrictEqual(value, authored) ||
-        (Array.isArray(value)
-          ? value.some(contains)
-          : value !== null &&
-            typeof value === "object" &&
-            Object.values(value).some(contains));
+
       assert.ok(
-        contains(saved),
+        containsValue(saved, authored),
         "Resolution retains the original saved snapshot evidence.",
       );
       assert.equal(
@@ -3598,7 +3486,7 @@ for (const complete of [false, true]) {
         },
       };
       const context = await fixture(t, [original]);
-      const first = { ...draft(), complete };
+      const first = draft({ complete });
       if (transition === "authored")
         first.reviewState.surfaces.push({
           candidateId: original.candidate_id,
@@ -3621,19 +3509,13 @@ for (const complete of [false, true]) {
               evidence: "New discovery evidence.",
             };
       await writeLedger(context, [updated]);
-      const current = { ...draft(), complete };
+      const current = draft({ complete });
       for (const replay of [false, true]) {
         await recordCodexSecurityScanDraft(context, current);
         const published = await readCoverage(context);
-        const contains = (value: unknown): boolean =>
-          isDeepStrictEqual(value, original) ||
-          (Array.isArray(value)
-            ? value.some(contains)
-            : value !== null &&
-              typeof value === "object" &&
-              Object.values(value).some(contains));
+
         assert.ok(
-          contains(published),
+          containsValue(published, original),
           `prior accepted phase/evidence snapshot survives replay=${replay}`,
         );
         assert.equal(
@@ -3663,14 +3545,16 @@ for (const candidate of [
 ]) {
   test(`preserves opaque historical deferred candidate extensions: ${JSON.stringify(candidate)}`, async (t) => {
     const context = await fixture(t);
-    const input = draft([
-      {
-        id: "opaque-proof",
-        candidateId: "opaque-candidate",
-        reason: "Saved opaque proof remains pending.",
-        candidate,
-      },
-    ]);
+    const input = draft({
+      deferred: [
+        {
+          id: "opaque-proof",
+          candidateId: "opaque-candidate",
+          reason: "Saved opaque proof remains pending.",
+          candidate,
+        },
+      ],
+    });
     input.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, input);
     assert.deepEqual(
@@ -3695,14 +3579,16 @@ for (const payload of [
     const context = await fixture(t);
     const current = candidate("opaque-pending");
     await writeLedger(context, [current]);
-    const input = draft([
-      {
-        id: "opaque",
-        candidateId: current.candidate_id,
-        reason: "Original proof gap.",
-        candidate: payload,
-      },
-    ]);
+    const input = draft({
+      deferred: [
+        {
+          id: "opaque",
+          candidateId: current.candidate_id,
+          reason: "Original proof gap.",
+          candidate: payload,
+        },
+      ],
+    });
     input.reviewState.completeness = "partial";
     await recordCodexSecurityScanDraft(context, input);
     const row = (await readCoverage(context)).deferred.find(
@@ -3711,9 +3597,7 @@ for (const payload of [
     assert.deepEqual(row.candidate, current);
     assert.deepEqual(row.originalCandidates, [payload]);
     for (const name of await readdir(path.join(context.root, "checkpoints"))) {
-      const saved = JSON.parse(
-        await readFile(path.join(context.root, "checkpoints", name), "utf8"),
-      );
+      const saved = await readJson(context.root, "checkpoints", name);
       const row = saved.reviewState.deferred.find(
         (entry: FixtureObject) => entry.candidateId === current.candidate_id,
       );
@@ -3775,7 +3659,7 @@ for (const resolution of ["pending", "accepted", "rejected"] as const) {
         { ...input, scanId: context.scanId, complete: false },
         workbench,
       );
-    await publish({ ...draft(), findings: [original] });
+    await publish(draft({ findings: [original] }));
     await recordCodexSecurityCandidateValidations(context, {
       validations: [
         {
@@ -3815,7 +3699,7 @@ for (const resolution of ["pending", "accepted", "rejected"] as const) {
     );
     assert.equal(pending.finding.title, original.title);
     if (resolution === "accepted")
-      await publish({ ...draft(), findings: [original] });
+      await publish(draft({ findings: [original] }));
     if (resolution === "rejected") {
       const input = draft();
       input.reviewState.surfaces.push({
@@ -3853,9 +3737,7 @@ for (const resolution of ["pending", "accepted", "rejected"] as const) {
             isDeepStrictEqual(saved, before.candidate),
           ),
         );
-      const findings = JSON.parse(
-        await readFile(path.join(context.root, "findings.json"), "utf8"),
-      );
+      const findings = await readJson(context.root, "findings.json");
       assert.ok(
         JSON.stringify({ findings, coverage }).includes(original.summary),
         "Historical finding evidence survives.",
@@ -3884,7 +3766,7 @@ for (const initial of ["suppressed", "not_applicable"] as const) {
         "artifacts/02_discovery/candidate_ledger.jsonl",
       );
       const originalLedger = await readFile(ledgerPath);
-      const first = { ...draft([authored]), complete: true };
+      const first = draft({ deferred: [authored], complete: true });
       first.reviewState.completeness = "partial";
       await recordCodexSecurityScanDraft(context, first);
       assert.deepEqual(first.reviewState.deferred, [authored]);
@@ -3898,10 +3780,7 @@ for (const initial of ["suppressed", "not_applicable"] as const) {
         ),
       );
       for (let retry = 0; retry < 2; retry++) {
-        await recordCodexSecurityScanDraft(context, {
-          ...draft(),
-          complete: true,
-        });
+        await recordCodexSecurityScanDraft(context, draft({ complete: true }));
         const coverage = await readCoverage(context);
         assert.equal(coverage.deferred.length, 1);
         assert.equal(coverage.deferred[0].reason, authored.reason);
@@ -3914,7 +3793,7 @@ for (const initial of ["suppressed", "not_applicable"] as const) {
         );
         assert.deepEqual(await readFile(ledgerPath), originalLedger);
       }
-      const current = { ...draft(), complete: true };
+      const current = draft({ complete: true });
       if (next === "ledger")
         await writeLedger(context, [
           {
@@ -3936,17 +3815,12 @@ for (const initial of ["suppressed", "not_applicable"] as const) {
         });
       await recordCodexSecurityScanDraft(context, current);
       for (let retry = 0; retry < 2; retry++) {
-        await recordCodexSecurityScanDraft(context, {
-          ...draft(),
-          complete: true,
-        });
+        await recordCodexSecurityScanDraft(context, draft({ complete: true }));
         const coverage = await readCoverage(context);
         assert.equal(coverage.deferred.length, next === "pending" ? 1 : 0);
         if (next === "finding")
           assert.equal(
-            JSON.parse(
-              await readFile(path.join(context.root, "findings.json"), "utf8"),
-            ).findings.length,
+            (await readJson(context.root, "findings.json")).findings.length,
             1,
           );
         if (next === "decision")
@@ -3967,12 +3841,14 @@ for (const initial of ["suppressed", "not_applicable"] as const) {
 test("authored Diff proof gap keeps its original phase through a publication conflict", async (t) => {
   const original = candidate("conflicting-proof", "suppressed");
   const context = await fixture(t, [original]);
-  const input = draft([
-    {
-      candidateId: original.candidate_id,
-      reason: "New proof requires review.",
-    },
-  ]);
+  const input = draft({
+    deferred: [
+      {
+        candidateId: original.candidate_id,
+        reason: "New proof requires review.",
+      },
+    ],
+  });
   input.reviewState.completeness = "partial";
   const next = {
     ...original,
@@ -3986,9 +3862,7 @@ test("authored Diff proof gap keeps its original phase through a publication con
     context,
     input,
     async (args: string[]) => {
-      const published = JSON.parse(
-        await readFile(args[args.indexOf("--draft-path") + 1], "utf8"),
-      );
+      const published = await readJson(args[args.indexOf("--draft-path") + 1]);
       attempts++;
       if (attempts === 1) {
         assert.deepEqual(published.reviewState.deferred[0].candidate, original);
@@ -4013,7 +3887,7 @@ for (const variant of ["generated", "authored", "shared"] as const) {
   test(`reopening an accepted candidate refreshes its ${variant} reported surface`, async (t) => {
     const original = candidate("reopened-report");
     const context = await fixture(t, [original]);
-    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    await recordCodexSecurityScanDraft(context, draft({ complete: true }));
     const accepted = candidate(
       original.candidate_id,
       "reportable",
@@ -4028,26 +3902,27 @@ for (const variant of ["generated", "authored", "shared"] as const) {
       completeness,
       completenessBeforeCandidates,
     } = await readCoverage(context);
-    await recordCodexSecurityScanDraft(context, {
-      ...draft(),
-      complete: true,
-      findings: [report],
-      reviewState: {
-        surfaces,
-        deferred,
-        explicitExclusions,
-        completeness,
-        completenessBeforeCandidates,
-      },
-    });
+    await recordCodexSecurityScanDraft(
+      context,
+      draft({
+        complete: true,
+        findings: [report],
+        reviewState: {
+          surfaces,
+          deferred,
+          explicitExclusions,
+          completeness,
+          completenessBeforeCandidates,
+        },
+      }),
+    );
     const published = await readCoverage(context);
     const surface = published.surfaces.find(
       (row: FixtureObject) => row.candidateId === original.candidate_id,
     );
     assert.equal(surface.disposition, "reported");
     if (variant !== "generated") {
-      const current = {
-        ...draft(),
+      const current = draft({
         complete: true,
         findings: [report],
         reviewState: {
@@ -4056,7 +3931,7 @@ for (const variant of ["generated", "authored", "shared"] as const) {
           surfaces: published.surfaces,
           deferred: published.deferred,
         },
-      };
+      });
       if (variant === "authored")
         surface.notes = "Authored reviewed surface evidence.";
       else
@@ -4077,10 +3952,7 @@ for (const variant of ["generated", "authored", "shared"] as const) {
       },
     ]);
     for (let replay = 0; replay < 2; replay++) {
-      await recordCodexSecurityScanDraft(context, {
-        ...draft(),
-        complete: true,
-      });
+      await recordCodexSecurityScanDraft(context, draft({ complete: true }));
       const saved = await readCoverage(context);
       assert.equal(saved.completeness, undefined);
       assert.equal(
@@ -4108,26 +3980,30 @@ test("a resumed checkpoint updates a retained reopened candidate", async (t) => 
   const context = await fixture(t);
   const historical = finding("reopened-review");
   historical.provenance.candidateReopened = true;
-  const prior = draft([
-    {
-      id: "reopened-gap",
-      candidateId: "reopened-review",
-      reason: "Old proof gap.",
-      finding: historical,
-    },
-  ]);
+  const prior = draft({
+    deferred: [
+      {
+        id: "reopened-gap",
+        candidateId: "reopened-review",
+        reason: "Old proof gap.",
+        finding: historical,
+      },
+    ],
+  });
   prior.complete = true;
   prior.reviewState.completeness = "partial";
   prior.findings = [historical];
   await recordCodexSecurityScanDraft(context, prior);
-  const next = draft([
-    {
-      id: "reopened-gap",
-      candidateId: "reopened-review",
-      reason: "New proof gap.",
-      evidence: "New checkpoint evidence.",
-    },
-  ]);
+  const next = draft({
+    deferred: [
+      {
+        id: "reopened-gap",
+        candidateId: "reopened-review",
+        reason: "New proof gap.",
+        evidence: "New checkpoint evidence.",
+      },
+    ],
+  });
   next.complete = false;
   next.reviewState.completeness = "partial";
   for (let replay = 0; replay < 2; replay++) {

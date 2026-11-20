@@ -1,3 +1,4 @@
+import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -107,7 +108,7 @@ for (const { label, candidateId, receipt, disposition } of cases) {
       findings: [],
       reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
     });
-    const recovered = JSON.parse(await readFile(resultPath, "utf8"));
+    const recovered = await readJson(resultPath);
     assert.equal(
       await readFile(path.join(archived, "result.json"), "utf8"),
       original,

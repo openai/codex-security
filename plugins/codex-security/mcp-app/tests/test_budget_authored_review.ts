@@ -1,4 +1,4 @@
-import { readJson, readSavedReviewState } from "./support/json.ts";
+import { readJson, readSavedReviewState, writeJson } from "./support/json.ts";
 import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
 import {
   discoveryPluginRoot,
@@ -514,20 +514,17 @@ for (const disposition of ["rejected", "not_applicable"]) {
         );
       // Replay a file-authored legacy exclusion alongside the accepted modern checkpoint.
       const manifestPath = path.join(scan.scanDir, "scan-manifest.json");
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const manifest = await readJson(manifestPath);
       delete manifest.scan.reviewState;
       manifest.scan.coverageRef = "coverage.json";
       const coveragePath = path.join(scan.scanDir, manifest.scan.coverageRef);
-      await writeFile(
-        coveragePath,
-        JSON.stringify({
-          ...publication.reviewState,
-          schemaVersion: "1.0",
-          scanId: scan.scanId,
-          explicitExclusions: [exclusion],
-        }),
-      );
-      await writeFile(manifestPath, JSON.stringify(manifest));
+      await writeJson(coveragePath, {
+        ...publication.reviewState,
+        schemaVersion: "1.0",
+        scanId: scan.scanId,
+        explicitExclusions: [exclusion],
+      });
+      await writeJson(manifestPath, manifest);
       const checkpoints = path.join(scan.scanDir, "checkpoints");
       const before = new Map(
         await Promise.all(
@@ -573,9 +570,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
           saved.progress.candidates.unresolved,
           kind === "valid" ? 0 : 1,
         );
-        const { scan: sealed } = JSON.parse(
-          await readFile(manifestPath, "utf8"),
-        );
+        const { scan: sealed } = await readJson(manifestPath);
         const retained = (sealed.review?.unresolvedCandidates ?? []).filter(
           (row: { candidateId?: string }) =>
             row.candidateId === candidate.candidate_id,

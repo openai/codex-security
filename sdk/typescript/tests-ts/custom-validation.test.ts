@@ -220,6 +220,45 @@ async function fixture(count = 1) {
   };
 }
 
+async function candidateFixture(candidateId: string, sourceWorkerId?: string) {
+  const f = await fixture();
+  const { provenance } = f.findings.findings[0]!;
+  provenance["candidateId"] = candidateId;
+  if (sourceWorkerId !== undefined)
+    provenance["sourceWorkerId"] = sourceWorkerId;
+  await save(join(f.scanDir, "findings.json"), f.findings);
+  const coverage = await json<CoverageDocument>(
+    join(f.scanDir, "coverage.json"),
+  );
+  return { f, coverage };
+}
+
+async function validateCoverage(
+  f: Awaited<ReturnType<typeof fixture>>,
+  coverage: CoverageDocument,
+  validation: CustomValidationResult,
+) {
+  await save(join(f.scanDir, "coverage.json"), coverage);
+  await runCustomValidation({
+    ...f,
+    run: async () => JSON.stringify(validation),
+  });
+  return loadResult(f.scanDir);
+}
+
+const dispositions = [
+  "reportable",
+  "deferred",
+  "suppressed",
+  "not_applicable",
+] as const;
+const surfaceDisposition = {
+  reportable: "reported",
+  deferred: "needs_follow_up",
+  suppressed: "rejected",
+  not_applicable: "not_applicable",
+} as const;
+
 async function* responseEvents(
   value: unknown,
   activity?: string,
@@ -242,13 +281,9 @@ for (const section of ["surfaces", "explicitExclusions"] as const) {
       test.each(["sourceWorkerId", "workerId"])(
         `current custom validation replaces ${section}/${disposition}/${sameOwner ? "same" : "other"} owner decisions (%s)`,
         async (ownerField) => {
-          const f = await fixture();
-          const finding = f.findings.findings[0]!;
-          finding.provenance["candidateId"] = "validated-candidate";
-          finding.provenance["sourceWorkerId"] = "worker-current";
-          await save(join(f.scanDir, "findings.json"), f.findings);
-          const coverage = await json<CoverageDocument>(
-            join(f.scanDir, "coverage.json"),
+          const { f, coverage } = await candidateFixture(
+            "validated-candidate",
+            "worker-current",
           );
           const previous = {
             id: "older-decision",
@@ -262,12 +297,7 @@ for (const section of ["surfaces", "explicitExclusions"] as const) {
             receiptRefs: [],
           };
           coverage[section].push(previous);
-          await save(join(f.scanDir, "coverage.json"), coverage);
-          await runCustomValidation({
-            ...f,
-            run: async () => JSON.stringify(result("deferred")),
-          });
-          const saved = await loadResult(f.scanDir);
+          const saved = await validateCoverage(f, coverage, result("deferred"));
           expect(saved.unresolvedCandidates).toHaveLength(1);
           expect(saved.unresolvedCandidates[0]!.candidateId).toBe(
             "validated-candidate",
@@ -286,20 +316,9 @@ for (const section of ["surfaces", "explicitExclusions"] as const) {
   }
 }
 
-for (const disposition of [
-  "reportable",
-  "deferred",
-  "suppressed",
-  "not_applicable",
-] as const) {
+for (const disposition of dispositions) {
   test(`independent shared surface candidate survives custom ${disposition}`, async () => {
-    const f = await fixture();
-    f.findings.findings[0]!.provenance["candidateId"] = "validated-b";
-    f.findings.findings[0]!.provenance["sourceWorkerId"] = "worker-b";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const coverage = await json<CoverageDocument>(
-      join(f.scanDir, "coverage.json"),
-    );
+    const { f, coverage } = await candidateFixture("validated-b", "worker-b");
     coverage.surfaces[0]!.candidateId = "independent-a";
     coverage.surfaces[0]!["sourceWorkerId"] = "worker-a";
     const independent = {
@@ -311,23 +330,12 @@ for (const disposition of [
     };
     coverage["completeness"] = "partial";
     coverage.deferred = [independent];
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () => JSON.stringify(result(disposition)),
-    });
-    const saved = await loadResult(f.scanDir);
+    const saved = await validateCoverage(f, coverage, result(disposition));
     expect(saved.unresolvedCandidates).toContainEqual(independent);
   });
 
   test(`saved custom validation evidence survives ${disposition}`, async () => {
-    const f = await fixture();
-    const finding = f.findings.findings[0]!;
-    finding.provenance["candidateId"] = "saved-candidate";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const coverage = await json<CoverageDocument>(
-      join(f.scanDir, "coverage.json"),
-    );
+    const { f, coverage } = await candidateFixture("saved-candidate");
     const previous = [1, 2].map((index) => ({
       id: `saved-review-${index}`,
       candidateId: "saved-candidate",
@@ -338,18 +346,13 @@ for (const disposition of [
         evidence: `Original source evidence ${index}.`,
       },
       finding: {
-        ...structuredClone(finding),
+        ...structuredClone(f.findings.findings[0]!),
         title: `Earlier finding ${index}`,
       },
     }));
     coverage["completeness"] = "partial";
     coverage.deferred = previous;
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () => JSON.stringify(result(disposition)),
-    });
-    const saved = await loadResult(f.scanDir);
+    const saved = await validateCoverage(f, coverage, result(disposition));
     const current =
       disposition === "reportable"
         ? saved.findings.findings[0]
@@ -440,12 +443,7 @@ describe("custom validation", () => {
         { ...old, id: "duplicate-checkpoint" },
         ...unrelated,
       ];
-      await save(join(f.scanDir, "coverage.json"), coverage);
-      await runCustomValidation({
-        ...f,
-        run: async () => JSON.stringify(result("deferred")),
-      });
-      const saved = await loadResult(f.scanDir);
+      const saved = await validateCoverage(f, coverage, result("deferred"));
       expect(saved.unresolvedCandidateCount).toBe(2);
       expect(saved.reviewState.deferred).toEqual([
         ...unrelated,
@@ -510,15 +508,11 @@ describe("custom validation", () => {
       };
       coverage["completeness"] = "partial";
       coverage.deferred = [previous, unrelated];
-      await save(join(f.scanDir, "coverage.json"), coverage);
-      await runCustomValidation({
-        ...f,
-        run: async () =>
-          JSON.stringify(
-            shared ? result(disposition, "reportable") : result(disposition),
-          ),
-      });
-      const saved = await loadResult(f.scanDir);
+      const saved = await validateCoverage(
+        f,
+        coverage,
+        shared ? result(disposition, "reportable") : result(disposition),
+      );
       expect(saved.findings.findings).toHaveLength(shared ? 1 : 0);
       expect(saved.reviewState.deferred).toEqual([unrelated]);
       expect(saved.unresolvedCandidateCount).toBe(1);
@@ -621,12 +615,7 @@ describe("custom validation", () => {
             disposition: "needs_follow_up",
             receiptRefs: [],
           });
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         expect(saved.unresolvedCandidateCount).toBe(0);
         expect(saved.reviewState["completeness"]).toBe(undefined);
         expect(saved.reviewState["completenessBeforeCandidates"]).toBe(
@@ -647,12 +636,11 @@ describe("custom validation", () => {
       join(f.scanDir, "coverage.json"),
     );
     coverage.surfaces = [{ ...coverage.surfaces[0]!, candidateId: "source-0" }];
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () => JSON.stringify(result("deferred", "reportable")),
-    });
-    const saved = await loadResult(f.scanDir);
+    const saved = await validateCoverage(
+      f,
+      coverage,
+      result("deferred", "reportable"),
+    );
     expect(saved.findings.findings).toHaveLength(1);
     expect(saved.reviewState.surfaces[0]!.disposition).toBe("reported");
     expect(saved.unresolvedCandidateCount).toBe(1);
@@ -688,15 +676,11 @@ describe("custom validation", () => {
       candidateId: `reviewer-attempt-1-candidate-${new Bun.CryptoHasher("sha256").update(priorId).digest("hex")}`,
       provenance: { workerId: "reviewer", attempt: 1, candidateId: priorId },
     });
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () =>
-        JSON.stringify(
-          result("reportable", "reportable", "reportable", "deferred"),
-        ),
-    });
-    const saved = await loadResult(f.scanDir);
+    const saved = await validateCoverage(
+      f,
+      coverage,
+      result("reportable", "reportable", "reportable", "deferred"),
+    );
     expect(saved.unresolvedCandidateCount).toBe(1);
     expect(saved.unresolvedCandidates[0]).toMatchObject({
       id: "custom-validation-candidate-4-6",
@@ -2182,21 +2166,12 @@ describe("custom validation", () => {
 const unexpectedValidation = rejecting("unexpected validation");
 
 for (const prior of ["rejected", "not_applicable"] as const) {
-  for (const disposition of [
-    "reportable",
-    "deferred",
-    "suppressed",
-    "not_applicable",
-  ] as const) {
+  for (const disposition of dispositions) {
     for (const gap of ["generic", "other-worker", "none"] as const) {
       test(`unmapped terminal surface retains referenced evidence: ${prior}/${disposition}/${gap}`, async () => {
-        const f = await fixture();
-        const finding = f.findings.findings[0]!;
-        finding.provenance["candidateId"] = "validated-candidate";
-        finding.provenance["sourceWorkerId"] = "worker-current";
-        await save(join(f.scanDir, "findings.json"), f.findings);
-        const coverage = await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
+        const { f, coverage } = await candidateFixture(
+          "validated-candidate",
+          "worker-current",
         );
         const previous = {
           id: "saved-terminal-review",
@@ -2222,12 +2197,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
           surfaceIds: [previous.id],
         };
         coverage.deferred = gap === "none" ? [] : [independent];
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         const reopened = saved.unresolvedCandidates.filter(
           (row) =>
             row.candidateId === "validated-candidate" &&
@@ -2258,13 +2228,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
       ["synthetic-worker"],
     ]) {
       test(`structured exclusion owner remains independent: ${prior}/${disposition}/${Array.isArray(owner) ? "array" : "object"}`, async () => {
-        const f = await fixture();
-        f.findings.findings[0]!.provenance["candidateId"] =
-          "validated-candidate";
-        await save(join(f.scanDir, "findings.json"), f.findings);
-        const coverage = await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
-        );
+        const { f, coverage } = await candidateFixture("validated-candidate");
         const previous = {
           id: "independent-exclusion",
           candidateId: "validated-candidate",
@@ -2275,34 +2239,20 @@ for (const prior of ["rejected", "not_applicable"] as const) {
           annotation: "Retain this authored annotation.",
         };
         coverage.explicitExclusions.push(previous);
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         expect(saved.reviewState.explicitExclusions).toContainEqual(previous);
       });
     }
   }
 }
 
-for (const disposition of [
-  "reportable",
-  "deferred",
-  "suppressed",
-  "not_applicable",
-] as const) {
+for (const disposition of dispositions) {
   for (const sameOwner of [false, true]) {
     for (const shared of [false, true]) {
       test(`saved unmapped follow-up reconciles custom ${disposition}, sameOwner=${sameOwner}, shared=${shared}`, async () => {
-        const f = await fixture();
-        const finding = f.findings.findings[0]!;
-        finding.provenance["candidateId"] = "validated-candidate";
-        finding.provenance["sourceWorkerId"] = "worker-current";
-        await save(join(f.scanDir, "findings.json"), f.findings);
-        const coverage = await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
+        const { f, coverage } = await candidateFixture(
+          "validated-candidate",
+          "worker-current",
         );
         const previous = {
           id: "saved-follow-up",
@@ -2331,12 +2281,7 @@ for (const disposition of [
             reason: "Independent work still needs this surface.",
             surfaceIds: [previous.id],
           });
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         const retained = saved.reviewState.surfaces.find(
           (row) => row.id === previous.id,
         )!;
@@ -2345,13 +2290,7 @@ for (const disposition of [
         expect(retained.notes).toBe(previous.notes);
         const resolved = sameOwner && !shared && disposition !== "deferred";
         expect(retained.disposition).toBe(
-          resolved
-            ? disposition === "reportable"
-              ? "reported"
-              : disposition === "suppressed"
-                ? "rejected"
-                : "not_applicable"
-            : "needs_follow_up",
+          resolved ? surfaceDisposition[disposition] : "needs_follow_up",
         );
         if (shared)
           expect(saved.reviewState.deferred).toContainEqual({
@@ -2365,21 +2304,10 @@ for (const disposition of [
 }
 
 for (const prior of ["rejected", "not_applicable"] as const) {
-  for (const disposition of [
-    "reportable",
-    "deferred",
-    "suppressed",
-    "not_applicable",
-  ] as const) {
+  for (const disposition of dispositions) {
     for (const sameCandidate of [true, false]) {
       test(`custom validation preserves shared terminal ${prior} after ${disposition}, sameCandidate=${sameCandidate}`, async () => {
-        const f = await fixture();
-        f.findings.findings[0]!.provenance["candidateId"] =
-          "validated-candidate";
-        await save(join(f.scanDir, "findings.json"), f.findings);
-        const coverage = await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
-        );
+        const { f, coverage } = await candidateFixture("validated-candidate");
         coverage.surfaces[0]!.candidateId = sameCandidate
           ? "validated-candidate"
           : "independent-candidate";
@@ -2394,12 +2322,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
             surfaceIds: [coverage.surfaces[0]!.id],
           },
         ];
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         if (!sameCandidate) {
           const retained = saved.reviewState.surfaces.find(
             (row) =>
@@ -2410,13 +2333,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
           expect(retained!["annotation"]).toBe("Saved terminal annotation.");
         } else {
           expect(saved.reviewState.surfaces[0]!.disposition).toBe(
-            disposition === "reportable"
-              ? "reported"
-              : disposition === "deferred"
-                ? "needs_follow_up"
-                : disposition === "suppressed"
-                  ? "rejected"
-                  : "not_applicable",
+            surfaceDisposition[disposition],
           );
         }
       });
@@ -2426,13 +2343,9 @@ for (const prior of ["rejected", "not_applicable"] as const) {
 
 for (const mapped of [false, true]) {
   test(`repeated custom validation retains legacy-owned follow-up links, mapped=${mapped}`, async () => {
-    const f = await fixture();
-    const finding = f.findings.findings[0]!;
-    finding.provenance["candidateId"] = "validated-candidate";
-    finding.provenance["sourceWorkerId"] = "worker-current";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const coverage = await json<CoverageDocument>(
-      join(f.scanDir, "coverage.json"),
+    const { f, coverage } = await candidateFixture(
+      "validated-candidate",
+      "worker-current",
     );
     const previous = {
       id: "saved-follow-up",
@@ -2455,12 +2368,7 @@ for (const mapped of [false, true]) {
         surfaceIds: [previous.id],
       },
     ];
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () => JSON.stringify(result("deferred")),
-    });
-    const pending = await loadResult(f.scanDir);
+    const pending = await validateCoverage(f, coverage, result("deferred"));
     if (!mapped)
       expect(pending.reviewState.deferred[0]!.surfaceIds).toContain(
         previous.id,
@@ -2489,19 +2397,11 @@ for (const mapped of [false, true]) {
 }
 
 for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
-  for (const disposition of [
-    "reportable",
-    "deferred",
-    "suppressed",
-    "not_applicable",
-  ] as const) {
+  for (const disposition of dispositions) {
     test(`historical structured deferred remains independent: ${Array.isArray(owner) ? "array" : "object"}/${disposition}`, async () => {
-      const f = await fixture();
-      f.findings.findings[0]!.provenance["candidateId"] = "validated-candidate";
-      f.findings.findings[0]!.provenance["sourceWorkerId"] = "worker-current";
-      await save(join(f.scanDir, "findings.json"), f.findings);
-      const coverage = await json<CoverageDocument>(
-        join(f.scanDir, "coverage.json"),
+      const { f, coverage } = await candidateFixture(
+        "validated-candidate",
+        "worker-current",
       );
       const historical = {
         id: "historical-deferred",
@@ -2513,12 +2413,7 @@ for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
       };
       coverage.deferred = [historical];
       coverage["completeness"] = "partial";
-      await save(join(f.scanDir, "coverage.json"), coverage);
-      await runCustomValidation({
-        ...f,
-        run: async () => JSON.stringify(result(disposition)),
-      });
-      const saved = await loadResult(f.scanDir);
+      const saved = await validateCoverage(f, coverage, result(disposition));
       expect(saved.reviewState.deferred).toContainEqual(historical);
       expect(saved.unresolvedCandidates).toHaveLength(
         disposition === "deferred" ? 1 : 0,
@@ -2578,12 +2473,7 @@ for (const outcomes of [
       };
       if (independent) coverage.deferred.push(shared);
       coverage["completeness"] = "partial";
-      await save(join(f.scanDir, "coverage.json"), coverage);
-      await runCustomValidation({
-        ...f,
-        run: async () => JSON.stringify(result(...outcomes)),
-      });
-      const saved = await loadResult(f.scanDir);
+      const saved = await validateCoverage(f, coverage, result(...outcomes));
       const historicalSurface = saved.reviewState.surfaces.find(
         (row) => row.id === historical.id,
       )!;
@@ -2616,12 +2506,7 @@ for (const owner of [
   ["historical-worker"],
 ]) {
   for (const mapped of [false, true]) {
-    for (const disposition of [
-      "reportable",
-      "deferred",
-      "suppressed",
-      "not_applicable",
-    ] as const) {
+    for (const disposition of dispositions) {
       test(`historical follow-up owner remains independent: ${JSON.stringify(owner)}/${mapped}/${disposition}`, async () => {
         const f = await fixture();
         const finding = f.findings.findings[0]!;
@@ -2647,12 +2532,7 @@ for (const owner of [
         };
         coverage.surfaces.push(historical);
         coverage["completeness"] = "partial";
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         const independent = !mapped && owner !== undefined;
         const retained = saved.reviewState.surfaces.find(
           (row) => row.id === historical.id,
@@ -2679,20 +2559,9 @@ for (const owner of [
 }
 
 for (const owner of [undefined, "", " ", "other-worker"]) {
-  for (const disposition of [
-    "reportable",
-    "deferred",
-    "suppressed",
-    "not_applicable",
-  ] as const) {
+  for (const disposition of dispositions) {
     test(`legacy linked follow-up uses effective owner: ${JSON.stringify(owner)}/${disposition}`, async () => {
-      const f = await fixture();
-      const finding = f.findings.findings[0]!;
-      finding.provenance["candidateId"] = "validated-candidate";
-      await save(join(f.scanDir, "findings.json"), f.findings);
-      const coverage = await json<CoverageDocument>(
-        join(f.scanDir, "coverage.json"),
-      );
+      const { f, coverage } = await candidateFixture("validated-candidate");
       const historical = {
         id: "legacy-linked-proof",
         ...(owner === undefined ? {} : { sourceWorkerId: owner }),
@@ -2712,12 +2581,7 @@ for (const owner of [undefined, "", " ", "other-worker"]) {
           surfaceIds: [historical.id],
         },
       ];
-      await save(join(f.scanDir, "coverage.json"), coverage);
-      await runCustomValidation({
-        ...f,
-        run: async () => JSON.stringify(result(disposition)),
-      });
-      const saved = await loadResult(f.scanDir);
+      const saved = await validateCoverage(f, coverage, result(disposition));
       const row = saved.reviewState.surfaces.find(
         (item) => item.id === historical.id,
       )!;
@@ -2727,15 +2591,7 @@ for (const owner of [undefined, "", " ", "other-worker"]) {
           saved.reviewState.deferred.some((item) => item.id === "legacy-gap"),
         ).toBe(true);
       } else {
-        expect(row.disposition).toBe(
-          disposition === "reportable"
-            ? "reported"
-            : disposition === "deferred"
-              ? "needs_follow_up"
-              : disposition === "suppressed"
-                ? "rejected"
-                : "not_applicable",
-        );
+        expect(row.disposition).toBe(surfaceDisposition[disposition]);
         expect(
           saved.reviewState.deferred.some((item) => item.id === "legacy-gap"),
         ).toBe(disposition === "deferred");
@@ -2750,13 +2606,9 @@ for (const disposition of ["reportable", "suppressed"] as const) {
   for (const independent of [false, true]) {
     for (const linked of [false, true]) {
       test(`unique cross-owner historical follow-up ${disposition}/${independent}/${linked}`, async () => {
-        const f = await fixture();
-        const finding = f.findings.findings[0]!;
-        finding.provenance["candidateId"] = "current-candidate";
-        finding.provenance["sourceWorkerId"] = "worker-current";
-        await save(join(f.scanDir, "findings.json"), f.findings);
-        const coverage = await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
+        const { f, coverage } = await candidateFixture(
+          "current-candidate",
+          "worker-current",
         );
         const historical = {
           id: "historical-proof",
@@ -2783,12 +2635,7 @@ for (const disposition of ["reportable", "suppressed"] as const) {
           surfaceIds: [historical.id],
         };
         if (independent) coverage.deferred.push(generic);
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result(disposition)),
-        });
-        const saved = await loadResult(f.scanDir);
+        const saved = await validateCoverage(f, coverage, result(disposition));
         const surface = saved.reviewState.surfaces.find(
           (row) => row.id === historical.id,
         )!;
@@ -2836,17 +2683,11 @@ for (const reassessed of [false, true]) {
         notes: "Original candidate B rejection evidence.",
       };
       coverage.surfaces[0] = previous;
-      await save(join(f.scanDir, "coverage.json"), coverage);
-      await runCustomValidation({
-        ...f,
-        run: async () =>
-          JSON.stringify(
-            reassessed
-              ? result("reportable", "deferred")
-              : result("reportable"),
-          ),
-      });
-      const saved = await loadResult(f.scanDir);
+      const saved = await validateCoverage(
+        f,
+        coverage,
+        reassessed ? result("reportable", "deferred") : result("reportable"),
+      );
       const old = saved.reviewState.surfaces.filter(
         (row) =>
           row.candidateId === "candidate-b" && row.disposition === "rejected",
@@ -2887,12 +2728,11 @@ for (const section of ["surfaces", "explicitExclusions"] as const) {
       receiptRefs: [],
     };
     coverage[section].push(previous);
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () => JSON.stringify(result("reportable", "suppressed")),
-    });
-    const saved = await loadResult(f.scanDir);
+    const saved = await validateCoverage(
+      f,
+      coverage,
+      result("reportable", "suppressed"),
+    );
     expect(saved.findings.findings).toHaveLength(1);
     expect(saved.reviewState[section]).not.toContainEqual(previous);
     expect(
