@@ -3,7 +3,12 @@ import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
-import { jsonLines, readJson, readJsonLines, writeJson } from "./support/json.js";
+import {
+  jsonLines,
+  readJson,
+  readJsonLines,
+  writeJson,
+} from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
