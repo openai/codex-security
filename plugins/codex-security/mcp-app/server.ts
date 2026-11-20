@@ -1568,7 +1568,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Complete Codex Security Scan",
       description:
-        "Finalization only: validate and seal already-authored scan-manifest.json and findings.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+        "Finalization only: validate and seal already-authored scan-manifest.json and findings.json, generate report.md, publish the validated files to bundleDirectory, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -1576,15 +1576,20 @@ export function createCodexSecurityServer(): McpServer {
     async ({ scanId, handoffClaimToken }, extra) => {
       try {
         const threadId = threadIdFromExtra(extra);
-        const completed = await workbench("complete-scan", {
-          scanId,
-          claimToken: handoffClaimToken,
-          threadId,
-          modelThreadId: threadId ?? "",
-          turnId: securityScanTurnId(extra),
-        });
+        const { publicationDigests: _publicationDigests, ...completed } =
+          await workbench("complete-scan", {
+            scanId,
+            claimToken: handoffClaimToken,
+            threadId,
+            modelThreadId: threadId ?? "",
+            turnId: securityScanTurnId(extra),
+            publishBundle: true,
+          });
+        if (typeof completed.bundleDirectory !== "string") {
+          throw new Error("The workbench did not publish the scan bundle.");
+        }
         return scanActionResult(
-          modelScanContext(completed),
+          { ...modelScanContext(completed), completed: true },
           "Validated and indexed the completed Codex Security scan.",
           isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
         );

@@ -331,6 +331,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
     complete_scan.add_argument("--turn-id")
+    complete_scan.add_argument("--publish-bundle", action="store_true")
+
+    add_command("publish-scan-bundle", "--scan-id")
 
     finalize_scan_usage = add_command(
         "finalize-scan-usage", "--scan-id", "--thread-id", "--turn-id"

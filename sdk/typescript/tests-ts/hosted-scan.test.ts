@@ -5,10 +5,12 @@ import { PassThrough, Writable } from "node:stream";
 import {
   appendFile,
   readFile,
+  readdir,
   realpath,
   stat,
   symlink,
   unlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
@@ -383,8 +385,9 @@ test.each(sealedScopes)(
     expect(result.status, JSON.stringify(result)).toBe("completed");
     expect(executor.run).toHaveBeenCalledTimes(1);
     expect(result.scope.paths).toEqual(normalized);
+    if (result.status !== "completed") throw new Error(result.status);
     const manifest = await readJson<any>(
-      join(result.outputDirectory, "scan-manifest.json"),
+      join(result.bundleDirectory, "scan-manifest.json"),
     );
     expect(manifest.scan.scope.includePaths).toEqual(normalized);
     expect(manifest.scan.target.revision).toBe(input.revision);
@@ -394,19 +397,19 @@ test.each(sealedScopes)(
       mode: normalized[0] === "." ? "repository" : "scoped_path",
     });
     const report = await readFile(
-      join(result.outputDirectory, "report.md"),
+      join(result.bundleDirectory, "report.md"),
       "utf8",
     );
     for (const path of reported) expect(report).toContain(path);
     if (normalized.length > 1) expect(report).not.toContain("service-c");
     for (const artifact of result.artifacts) {
-      const data = await readFile(join(result.outputDirectory, artifact.path));
+      const data = await readFile(join(result.bundleDirectory, artifact.path));
       expect(artifact.sha256).toBe(hash("sha256", data));
       expect(artifact.bytes).toBe(data.byteLength);
     }
     const artifactPaths = result.artifacts.map((artifact) => artifact.path);
     for (const path of Object.keys(manifest.scan.preservedSources ?? {}))
-      expect(artifactPaths).toContain(path);
+      expect(artifactPaths).not.toContain(path);
     for (const artifact of manifest.scan.artifacts)
       expect(artifactPaths).toContain(artifact.path);
   },
@@ -697,7 +700,12 @@ test("sealed review with follow-up diagnostics remains completed", async () => {
   );
 });
 
-test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
+test.each([
+  "scan-manifest.json",
+  "findings.json",
+  "artifacts/evidence.txt",
+  "report.md",
+])(
   "changed bytes in %s cannot produce a completed hosted receipt",
   async (path) => {
     const original = CodexSecurity.prototype.run;
@@ -726,12 +734,13 @@ test.each(["scan-manifest.json", "findings.json", "artifacts/evidence.txt"])(
     expect(result.artifacts).toEqual([]);
     expect(result).toHaveProperty(
       "error",
-      `The sealed file ${path} changed before the hosted receipt was created.`,
+      expect.stringMatching(/sealed.*changed/i),
     );
+    expect(result).not.toHaveProperty("bundleDirectory");
   },
 );
 
-test("hosted receipts hash MCP checkpoints as written", async () => {
+test("hosted bundles omit the retained MCP checkpoints", async () => {
   const { saveScanDraftCheckpoint } = await import(
     new URL(
       "../../../plugins/codex-security/mcp-app/src/artifact-scan-draft.ts",
@@ -755,21 +764,21 @@ test("hosted receipts hash MCP checkpoints as written", async () => {
       },
     },
   });
-  expect(result.status).toBe("completed");
+  expect(result.status, JSON.stringify(result)).toBe("completed");
   const manifest = await readJson<{
     scan: { preservedSources: Record<string, string> };
   }>(join(input.outputDirectory, "scan-manifest.json"));
-  const checkpoint = result.artifacts.find(
-    ({ path, sha256 }) =>
-      path.startsWith("checkpoints/") &&
-      Object.hasOwn(manifest.scan.preservedSources, path) &&
-      sha256 !== manifest.scan.preservedSources[path],
-  );
-  expect(checkpoint).toBeDefined();
-  const contents = await readFile(
-    join(input.outputDirectory, checkpoint!.path),
-  );
-  expect(checkpoint!.sha256).toBe(hash("sha256", contents));
+  expect(
+    Object.keys(manifest.scan.preservedSources).some((path) =>
+      path.startsWith("checkpoints/"),
+    ),
+  ).toBe(true);
+  expect(
+    result.artifacts.some(
+      ({ path }) =>
+        path.startsWith("checkpoints/") || path === "checkpoint-head.json",
+    ),
+  ).toBe(false);
 });
 
 test("a changed checkout cannot produce accepted completed output", async () => {
@@ -876,9 +885,10 @@ test("--host=false leaves a scan preview in CLI mode", async () => {
   expect(JSON.parse(stdout.text()).dryRun).toBe(true);
 });
 
-test.each([false, true])(
-  "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
-  async (cancel) => {
+test.each(["completed", "canceled", "empty report"] as const)(
+  "scan --host reports progress and a terminal result for %s",
+  async (outcome) => {
+    const cancel = outcome === "canceled";
     const input = await fixture();
     if (!cancel) {
       input.reasoningEffort = "synthetic-future-effort";
@@ -940,7 +950,59 @@ test.each([false, true])(
           if (cancel) {
             send(child.stdin, { method: "cancel", params: { id: "run" } });
           } else {
-            await writeDraft(message.params);
+            const request: ScanExecutionRequest = message.params;
+            if (outcome === "completed") {
+              writeSource(
+                request.runtime.outputDirectory,
+                "artifacts/evidence.txt",
+                "scan evidence\n",
+              );
+              writeSource(
+                request.runtime.outputDirectory,
+                "artifacts/scratch.txt",
+                "scratch\n",
+              );
+            }
+            await writeDraft(
+              request,
+              outcome === "completed" ? ["artifacts/evidence.txt"] : [],
+            );
+            if (outcome === "empty report") {
+              await runWorkbench(
+                {
+                  python: pythonExecutable()!,
+                  pluginRoot: request.runtime.pluginRoot,
+                  environment: {
+                    ...process.env,
+                    CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+                  },
+                },
+                ["prepare-scan-completion", "--scan-id", request.scanId],
+              );
+              const manifestFile = join(
+                request.runtime.outputDirectory,
+                "scan-manifest.json",
+              );
+              const manifest = await readJson<{
+                scan: {
+                  artifacts: {
+                    mediaType: string;
+                    path: string;
+                    sha256: string;
+                  }[];
+                };
+              }>(manifestFile);
+              await writeFile(
+                join(request.runtime.outputDirectory, "report.md"),
+                "",
+              );
+              manifest.scan.artifacts.push({
+                mediaType: "text/markdown",
+                path: "report.md",
+                sha256: hash("sha256", ""),
+              });
+              await writeJson(manifestFile, manifest);
+            }
             send(child.stdin, {
               id: message.id,
               result: receipt(message.params, {
@@ -961,7 +1023,7 @@ test.each([false, true])(
           });
         }
       }
-      expect(await closed, stderr).toBe(cancel ? 1 : 0);
+      expect(await closed, stderr).toBe(outcome === "completed" ? 0 : 1);
       expect(
         messages.filter((message) => message.method === "execution.run"),
       ).toHaveLength(1);
@@ -975,20 +1037,38 @@ test.each([false, true])(
       expect(response).toMatchObject({
         id: "run",
         result: {
-          status: cancel ? "canceled" : "completed",
+          status: outcome === "empty report" ? "failed" : outcome,
           execution: { sessionId: "fake-host", usage },
         },
       });
       if (cancel) {
         expect(response.result).not.toHaveProperty("severityRubric");
+      } else if (outcome === "empty report") {
+        expect(response.result.error).toContain(
+          "report.md: expected a nonempty report",
+        );
+        expect(response.result.artifacts).toEqual([]);
+        expect(response.result).not.toHaveProperty("bundleDirectory");
+        expect(await readdir(input.outputDirectory)).not.toContain("bundle");
       } else {
+        expect(response.result.outputDirectory).toBe(input.outputDirectory);
+        const bundle = join(input.outputDirectory, "bundle");
+        expect(response.result.bundleDirectory).toBe(bundle);
+        expect(await readdir(join(bundle, "artifacts"))).toEqual([
+          "evidence.txt",
+        ]);
+        expect(
+          await readFile(join(bundle, "artifacts/evidence.txt"), "utf8"),
+        ).toBe("scan evidence\n");
+        expect(await readdir(bundle)).not.toContain("checkpoints");
+        expect(await readdir(bundle)).toContain("report.md");
         expect(response.result.severityRubric).toEqual(severityRubric);
         expect(response.result).not.toHaveProperty("ownerSuggestionsError");
         expect(response.result.artifacts).toContainEqual(
           expect.objectContaining({ path: "owner-suggestions.json" }),
         );
         expect(
-          await readJson(join(input.outputDirectory, "owner-suggestions.json")),
+          await readJson(join(bundle, "owner-suggestions.json")),
         ).toMatchObject({
           schemaVersion: 2,
           revision: input.revision,

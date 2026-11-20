@@ -9,7 +9,7 @@ type DraftFinding = Omit<
   "findingId" | "occurrenceId" | "fingerprints"
 >;
 
-// Entirely synthetic examples; the paths and snippets do not come from the target.
+// Entirely synthetic examples; snippets do not come from the target.
 const EXAMPLES = [
   {
     id: "command-injection",
@@ -120,13 +120,41 @@ const EXAMPLES = [
   },
 ] as const;
 
-function mockFindings(scanId: string): DraftFinding[] {
-  const findings = EXAMPLES.map((example, index): DraftFinding => {
+function mockFindings(
+  scanId: string,
+  scope: {
+    requiredIncludePaths?: string[];
+    requiredExcludePaths: string[];
+    filePaths: string[];
+  },
+): DraftFinding[] {
+  const findings = EXAMPLES.map((example, index): DraftFinding | undefined => {
     const unique = index >= 6;
-    const path = `mock/${example.id}${unique ? `-${scanId}` : ""}.ts`;
+    const syntheticPath = `mock/${example.id}${unique ? `-${scanId}` : ""}.ts`;
+    const path = (scope.requiredIncludePaths ?? ["."])
+      .map((included) =>
+        included === "."
+          ? syntheticPath
+          : scope.filePaths.includes(included)
+            ? included
+            : `${included}/${syntheticPath}`,
+      )
+      .find(
+        (candidate) =>
+          !scope.requiredExcludePaths.some(
+            (excluded) =>
+              excluded === "." ||
+              candidate === excluded ||
+              candidate.startsWith(`${excluded}/`),
+          ),
+      );
+    if (path === undefined) return;
     return {
       ruleId: `mock.${example.id}`,
-      identity: { anchor: example.id, ...(unique ? { instance: scanId } : {}) },
+      identity: {
+        anchor: example.id,
+        ...(unique ? { instance: scanId } : {}),
+      },
       title: `[Mock] ${example.title}`,
       summary: `Synthetic test finding. ${example.summary}`,
       severity: { level: example.severity },
@@ -175,13 +203,16 @@ function mockFindings(scanId: string): DraftFinding[] {
         mockRecurrence: unique ? "unique" : "shared",
       },
     };
-  });
+  }).filter((finding) => finding !== undefined);
   // Alternate reports have distinct identities but describe the same root causes.
   for (const [index, title] of [
     [0, "Shell metacharacters in the export name execute commands"],
     [1, "Parent-directory archive names overwrite files outside extraction"],
   ] as const) {
-    const original = findings[index]!;
+    const original = findings.find(
+      ({ ruleId }) => ruleId === `mock.${EXAMPLES[index]!.id}`,
+    );
+    if (original === undefined) continue;
     findings.push({
       ...structuredClone(original),
       identity: { anchor: `${EXAMPLES[index]!.id}-alternate-report` },
@@ -199,6 +230,7 @@ export async function writeMockScanDraft(
 ): Promise<void> {
   const contract = registration["contract"] as {
     target: { allowedKinds: string[] };
+    scope: Parameters<typeof mockFindings>[1];
     diffTarget?: {
       kind: string;
       baseRevision: string;
@@ -211,7 +243,8 @@ export async function writeMockScanDraft(
       ? `codex-security-snapshot/v1:sha256:${createHash("sha256").update(["codex-security-diff/v1", diff.kind, diff.baseRevision, diff.headRevision].join("\0")).digest("hex")}`
       : undefined;
   const description =
-    "Synthetic mock scan for testing. No LLM calls or security analysis were performed. Locations and code snippets describe fictional examples.";
+    "Synthetic mock scan for testing. No LLM calls or security analysis were performed. Findings use fictional examples within the requested scope.";
+  const findings = mockFindings(scanId, contract.scope);
   const documents = {
     "scan-manifest.json": {
       scan: {
@@ -228,7 +261,11 @@ export async function writeMockScanDraft(
           surfaces: EXAMPLES.map((example) => ({
             id: `mock-${example.id}`,
             label: `[Mock] ${example.title}`,
-            disposition: "reported",
+            disposition: findings.some(
+              ({ ruleId }) => ruleId === `mock.${example.id}`,
+            )
+              ? "reported"
+              : "not_applicable",
             receiptRefs: [],
             notes: description,
           })),
@@ -238,7 +275,7 @@ export async function writeMockScanDraft(
         extensions: { mock: true },
       },
     },
-    "findings.json": { findings: mockFindings(scanId) },
+    "findings.json": { findings },
   };
   for (const [name, document] of Object.entries(documents)) {
     await writeFile(

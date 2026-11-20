@@ -1,11 +1,7 @@
 import { hash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import {
-  readScanFile,
-  safeScopePath,
-  validatedFileDigests,
-} from "./contract.js";
-import { isRecord } from "./record.js";
+import { safeScopePath, validatedFileDigests } from "./contract.js";
+import { bundledPluginRoot, runWorkbench } from "./runtime.js";
 import { VERSION } from "./version.js";
 import {
   hostedScanFailureStatus,
@@ -56,6 +52,14 @@ export const HostedScanInputSchema = z.strictObject({
 });
 
 export type HostedScanInput = z.infer<typeof HostedScanInputSchema>;
+
+const publishedBundleSchema = z.object({
+  bundleDirectory: z.string().min(1),
+  artifacts: z.array(
+    z.object({ path: z.string(), sha256: z.string(), bytes: z.number() }),
+  ),
+});
+
 export class HostedScanPreparationError extends Error {
   constructor(
     readonly reason:
@@ -338,43 +342,26 @@ export async function runHostedScanInternal(
       result.manifest.scan.scope.excludePaths.length !== 0
     )
       throw new Error("Completed artifacts do not match the requested scope.");
-    const sources = result.manifest.scan["preservedSources"];
-    const sealedDigests = validatedFileDigests.get(result.manifest)!;
-    const names = new Set([
-      "scan-manifest.json",
-      "findings.json",
-      "report.md",
-      ...result.manifest.scan.artifacts.map(({ path }) => path),
-      ...(isRecord(sources) ? Object.keys(sources) : []),
-    ]);
-    if (result.ownerSuggestionsPath !== undefined)
-      names.add("owner-suggestions.json");
-    const artifacts = await Promise.all(
-      [...names].sort().map(async (path) => {
-        const contents = await readScanFile(outputDirectory, path, path);
-        return {
-          path,
-          sha256: hash("sha256", contents),
-          bytes: contents.byteLength,
-        };
-      }),
+    const bundle = publishedBundleSchema.parse(
+      await runWorkbench(
+        {
+          pluginRoot: await bundledPluginRoot(),
+          environment: hostedScanEnvironment(input.stateDirectory),
+          protectedRoot: context.repository,
+        },
+        ["publish-scan-bundle", "--scan-id", result.manifest.scan.id],
+        JSON.stringify(
+          Object.fromEntries(validatedFileDigests.get(result.manifest)!),
+        ),
+      ),
     );
-    // Report a seal mismatch after the concurrent reads have closed their files.
-    for (const { path, sha256 } of artifacts) {
-      const expected = sealedDigests.get(path);
-      if (expected !== undefined && expected !== sha256) {
-        throw new Error(
-          `The sealed file ${path} changed before the hosted receipt was created.`,
-        );
-      }
-    }
     return {
       ...base(),
       status: "completed" as const,
       ...(result.ownerSuggestionsError === undefined
         ? {}
         : { ownerSuggestionsError: result.ownerSuggestionsError }),
-      artifacts,
+      ...bundle,
     };
   } catch (error) {
     if (error instanceof ScanExecutionError) execution = error.result;

@@ -54,6 +54,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
+from validate_scan_contract import publish_scan_bundle, validate_contract
 from windows_scan_local_files import pin_replay_metadata
 from workbench import handoff
 from workbench.storage import (
@@ -1044,6 +1045,17 @@ def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
     return expected
 
 
+def validate_completed_bundle(
+    scan: sqlite3.Row, scan_dir: Path, binding: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the files a successful completion will make available."""
+    return validate_contract(
+        scan_dir,
+        completion_binding=binding,
+        finding_scope=requested_finding_scope(scan) if scan["mode"] != "diff" else None,
+    )
+
+
 def require_recorded_manifest_digest(scan: sqlite3.Row, scan_dir: Path) -> None:
     """Raise SystemExit if the saved manifest differs from the digest recorded when the scan was sealed."""
     expected = scan["seal_manifest_digest"]
@@ -1085,6 +1097,7 @@ def complete_scan(
             args.claim_token,
             cost_json,
             prepare_only=prepare_only,
+            publish_bundle=getattr(args, "publish_bundle", False),
             thread_id=getattr(args, "thread_id", None),
             turn_id=getattr(args, "turn_id", None),
             model_thread_id=getattr(args, "model_thread_id", None),
@@ -1293,6 +1306,7 @@ def complete_scan_locked(
     cost_json: str | None,
     *,
     prepare_only: bool = False,
+    publish_bundle: bool = False,
     thread_id: str | None = None,
     turn_id: str | None = None,
     model_thread_id: str | None = None,
@@ -1308,7 +1322,7 @@ def complete_scan_locked(
     )
     if scan["status"] == "complete":
         return saved_results.refresh_completed_scan(
-            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json, publish_bundle=publish_bundle
         )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
@@ -1417,6 +1431,9 @@ def complete_scan_locked(
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
         )
+        if not prepare_only:
+            validated = validate_completed_bundle(scan, scan_dir, completion_binding)
+            manifest, findings = validated["manifest"], validated["findings"]
     except ContractError as exc:
         # Only a coordinator-selected parent is fenced for output-write replay.
         selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
@@ -1467,6 +1484,15 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
+    publication_digests = {
+        "scan-manifest.json": manifest_digest.removeprefix("sha256:"),
+        "report.md": validated["reportSha256"],
+    }
+    bundle = (
+        {"bundleDirectory": publish_scan_bundle(validated)["bundleDirectory"]}
+        if publish_bundle
+        else {}
+    )
     measured_usage = scan_usage.collect_scan_usage_safely(
         connection,
         scan,
@@ -1503,7 +1529,11 @@ def complete_scan_locked(
         )
         if scan["status"] == "complete":
             connection.commit()
-            return scan_context(connection, scan["id"])
+            return {
+                **scan_context(connection, scan["id"]),
+                "publicationDigests": publication_digests,
+                **bundle,
+            }
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         if scan["scan_dir"] != str(scan_dir):
             reported_count = None
@@ -1556,6 +1586,8 @@ def complete_scan_locked(
             raise SystemExit("Only a running scan can be completed.")
     context = scan_context(connection, scan["id"])
     context["targetWarnings"] = target_warnings
+    context["publicationDigests"] = publication_digests
+    context.update(bundle)
     return context
 
 
@@ -3479,6 +3511,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
+            )
+        elif args.command == "publish-scan-bundle":
+            result = saved_results.publish_completed_bundle(
+                _WORKBENCH_DB_CONTEXT, connection, args.scan_id, json.load(sys.stdin)
             )
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(

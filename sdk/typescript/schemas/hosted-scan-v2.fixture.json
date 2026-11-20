@@ -116,6 +116,7 @@
       },
       "outputDirectory": "/scan/output",
       "status": "completed",
+      "bundleDirectory": "/scan/output/bundle",
       "scanId": "scan-1",
       "pluginVersion": "0.1.95",
       "provenance": {

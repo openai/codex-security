@@ -268,10 +268,36 @@ test("mock scans preserve output protection and archive existing completed resul
     expect(second.manifest.scan.id).not.toBe(first.manifest.scan.id);
     expect(first.manifest.scan.mode).toBe("scoped_path");
     expect(first.manifest.scan.scope.includePaths).toEqual(["example.ts"]);
+    expect(first.findings.findings).toHaveLength(12);
+    expect(
+      first.findings.findings.flatMap((finding) =>
+        finding.locations.map(({ path }) => path),
+      ),
+    ).toEqual(Array(12).fill("example.ts"));
     const resumed = await client.run(repository, firstOptions);
     expect(resumed.manifest).toEqual(first.manifest);
     expect(resumed.scanDir).toBe(archive);
     expect(resumed.sarifPath).toBe(join(archive, "exports", "results.sarif"));
+  } finally {
+    await client.close();
+  }
+});
+
+test("mock findings use an included file when another target is excluded", async () => {
+  const { repository, client } = await fixture();
+  try {
+    await writeFile(join(repository, "other.ts"), "export const other = 1;\n");
+    const result = await client.run(repository, {
+      mock: true,
+      target: ["example.ts", "other.ts"],
+      excludePaths: ["example.ts"],
+    });
+    expect(result.findings.findings).toHaveLength(12);
+    expect(
+      result.findings.findings.flatMap((finding) =>
+        finding.locations.map(({ path }) => path),
+      ),
+    ).toEqual(Array(12).fill("other.ts"));
   } finally {
     await client.close();
   }
