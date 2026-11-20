@@ -18,7 +18,7 @@ const branch = "codex-security/patch-scan-1";
 describe("GitHub patch destinations", () => {
   const fixtures = patchDirectories();
 
-  const socketCases = ["stable", "replaced"];
+  const socketCases = ["stable", "replaced", "writable", "writable alias"];
   if (process.platform === "linux") socketCases.push("process-relative");
   test.skipIf(process.platform === "win32").each(socketCases)(
     "binds the configured GitHub CLI socket across the patch: %s",
@@ -26,17 +26,24 @@ describe("GitHub patch destinations", () => {
       const { directory: caller } = await publicationRepository(fixtures);
       const config = await fixtures.create("gh-");
       const name = " gh";
-      const socket =
-        mode === "process-relative"
-          ? "/proc/self/cwd/" + relative(process.cwd(), join(caller, name))
-          : name;
+      const endpoint = join(
+        mode.startsWith("writable") ? caller : config,
+        name,
+      );
+      let socket = relative(caller, endpoint);
+      if (mode === "process-relative")
+        socket = "/proc/self/cwd/" + relative(process.cwd(), endpoint);
+      if (mode === "writable alias") {
+        socket = join(config, name);
+        await symlink(endpoint, socket);
+      }
       await writeFile(
         join(config, "config.yml"),
         `http_unix_socket: "${socket}"\n`,
       );
-      const listen = (base: string) =>
-        Bun.serve({ unix: join(base, name), fetch: () => new Response() });
-      const sockets = [listen(caller)];
+      const listen = () =>
+        Bun.serve({ unix: endpoint, fetch: () => new Response() });
+      const sockets = [listen()];
       let edited = false;
       let callsAfterEdit = 0;
       try {
@@ -56,8 +63,8 @@ describe("GitHub patch destinations", () => {
           onCodex: async (_args, output) => {
             await writeFile(join(caller, "src/finding-1.ts"), "fixed\n");
             if (mode === "replaced") {
-              await unlink(join(caller, name));
-              sockets.push(listen(caller));
+              await unlink(endpoint);
+              sockets.push(listen());
             }
             edited = true;
             output?.stdout.write("Synthetic patch complete.\n");

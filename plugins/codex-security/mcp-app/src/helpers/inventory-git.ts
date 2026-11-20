@@ -249,9 +249,19 @@ function linkTarget(path: string): string | undefined {
 }
 
 function canonicalComponent(path: string): string {
-  return sep === "\\"
-    ? windowsLinkPath(canonical(path, false))
-    : decodePosixBytes(resolvePosixPath(encodePosixPath(path), false));
+  if (sep === "\\") return windowsLinkPath(canonical(path, false));
+  const name = encodePosixPath(path);
+  try {
+    return decodePosixBytes(resolvePosixPath(name, false));
+  } catch (error) {
+    // macOS realpath rejects sockets. The parent components are already resolved.
+    if (
+      (error as NodeJS.ErrnoException).code === "EOPNOTSUPP" &&
+      lstatSync(name).isSocket()
+    )
+      return path;
+    throw error;
+  }
 }
 
 // A campaign can replace files in its checkouts after preparing the workers.

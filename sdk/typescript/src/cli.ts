@@ -12365,24 +12365,37 @@ async function patchTransportIdentity(
   }
 }
 
-async function githubSocketIdentity(socket: string, directory: string) {
+async function captureGithubSocket(
+  socket: string,
+  cwd: string,
+  dependencies: CliDependencies,
+) {
   // Linux abstract sockets have no pathname to replace.
   if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
     return;
-  const path =
-    process.platform === "win32"
-      ? resolve(directory, socket)
-      : resolveGitControlPath(directory, socket);
-  if (process.platform !== "win32") {
-    // A link through /proc/self/cwd can select a different socket inside gh.
-    const host = await trustedHostPathResolver("/", ["/proc", "/dev/fd"]);
-    if (!host(path)) throw patchTransportChanged("gh");
-  }
-  return (
-    (await realpath(path)) +
-    ":" +
-    patchFileStamp(await stat(path, { bigint: true }))
-  );
+  const { root, caller } = await patchTransportDirectories(cwd, dependencies);
+  const protectedRoots = [root, caller];
+  if (process.platform === "linux") protectedRoots.push("/proc", "/dev/fd");
+  const access = dependencies.patchTransportAccess;
+  const identity = async (directory: string) => {
+    const path =
+      process.platform === "win32"
+        ? resolve(directory, socket)
+        : resolveGitControlPath(directory, socket);
+    // gh opens this path after verification. A writable ancestor could redirect it.
+    const host = await trustedHostPathResolver(directory, [
+      ...protectedRoots,
+      ...(access?.writable ?? []),
+    ]);
+    if (!host(path) || access?.unknownWriters)
+      throw patchTransportChanged("gh");
+    return patchFileStamp(await stat(path, { bigint: true }));
+  };
+  const endpoint = await identity(cwd);
+  return async (directory: string) => {
+    if (endpoint !== (await identity(directory)))
+      throw patchTransportChanged("gh");
+  };
 }
 
 async function captureHostingConfig(
@@ -12440,12 +12453,11 @@ async function captureHostingConfig(
         )
       ).replace(/\n$/u, "");
     }
-    const endpoint = await githubSocketIdentity(socket, cwd);
+    const verifySocket = await captureGithubSocket(socket, cwd, dependencies);
     return async (directory = cwd) => {
       for (const [path, file] of files)
         await patchTransportIdentity(path, provider, file);
-      if (endpoint !== (await githubSocketIdentity(socket, directory)))
-        throw patchTransportChanged(provider);
+      await verifySocket?.(directory);
       return pinned;
     };
   } catch (error) {
