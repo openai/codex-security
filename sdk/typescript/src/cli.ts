@@ -2066,6 +2066,7 @@ interface CliDependencies {
     args: readonly string[],
     repository: string,
     options?: {
+      protectedRoots?: readonly string[];
       trim?: boolean;
       encoding?: "base64";
       environment?: NodeJS.ProcessEnv;
@@ -2218,11 +2219,19 @@ export async function runRepositoryCommand(
         );
     }
   }
-  const executable = await resolveTrustedExecutable(
-    command,
-    sandbox?.environment ?? process.env,
+  const protectedRoots = [
     repository,
-  );
+    ...(options?.protectedRoots ?? []),
+    ...processRelativePaths,
+  ];
+  const resolveTool = (name: string) =>
+    resolveTrustedExecutable(
+      name,
+      sandbox?.environment ?? process.env,
+      protectedRoots,
+      { hostDirectory: repository },
+    );
+  const executable = await resolveTool(command);
   if (executable === null) {
     throw new CodexSecurityError(
       `${command} is not available on a trusted PATH.`,
@@ -2232,7 +2241,7 @@ export async function runRepositoryCommand(
   // Node preserves inherited handles and reports errors after stdin closes.
   const bridgeRuntime =
     sandbox !== undefined && process.versions["bun"]
-      ? await resolveTrustedExecutable("node", sandbox.environment, repository)
+      ? await resolveTool("node")
       : undefined;
   if (bridgeRuntime === null) {
     throw new CodexSecurityError("Node.js is not available on a trusted PATH.");
@@ -3857,6 +3866,10 @@ export async function main(
     async runRepositoryCommand(command, args, repository, options) {
       options = {
         ...options,
+        protectedRoots: [
+          ...(options?.protectedRoots ?? []),
+          ...patchTransportAccess.writable,
+        ],
         signal: options?.signal ?? patchPreparationSignal,
       };
       options.signal?.throwIfAborted();
@@ -3919,19 +3932,24 @@ export async function main(
           parentDependencies.environment["GIT_DIR"] === undefined &&
           gitEnvironment["GIT_DIR"] === undefined
         ) {
+          const discovery = {
+            environment: gitEnvironment,
+            signal: options.signal,
+            protectedRoots: options.protectedRoots,
+          };
           if (parentDependencies.environment["GIT_WORK_TREE"] === undefined) {
             gitEnvironment["GIT_WORK_TREE"] = await patchGitOutput(
               gitRepository,
               ["rev-parse", "--show-toplevel"],
               parentDependencies,
-              { environment: gitEnvironment, signal: options.signal },
+              discovery,
             );
           }
           gitEnvironment["GIT_DIR"] = await patchGitOutput(
             gitRepository,
             ["rev-parse", "--absolute-git-dir"],
             parentDependencies,
-            { environment: gitEnvironment, signal: options.signal },
+            discovery,
           );
         }
       }

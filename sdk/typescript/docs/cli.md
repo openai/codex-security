@@ -3080,6 +3080,10 @@ including SMTP passwords for individual identities and CVS passwords for
 specific access methods. The CLI also removes these secrets from the command
 configuration that Git delegates inherit.
 
+When looking up Git and hosting clients on `PATH`, publication skips
+directories granted to patch turns for writing. Install those tools outside
+the patch's writable roots.
+
 Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 `PYTHONHOME`, `NODE_OPTIONS`, and `BASH_ENV` before launching Git, hosting
 clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
