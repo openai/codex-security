@@ -28,7 +28,7 @@ import {
 } from "node:path";
 import {
   credentialFileVariable,
-  gitPasswordSetting,
+  gitSecretSetting,
   httpCredentialFile,
   proxyUserinfo,
   withoutUrlCredentials,
@@ -287,7 +287,7 @@ async function readConfiguredHooks(
 // These settings can hold authentication material in the file itself. A
 // credential helper name or ordinary SSH command alone is not an inline secret.
 function hasInlineGitAuthentication(key: string, value: string): boolean {
-  if (value && gitPasswordSetting.test(key)) return true;
+  if (value && gitSecretSetting.test(key)) return true;
   if (
     withoutUrlCredentials(key) !== key ||
     withoutUrlCredentials(value) !== value
@@ -393,12 +393,19 @@ export async function activePatchPublicationHooks(
 }
 
 export interface PatchSnapshotConfig {
-  root: string;
-  // The Windows Git runner stages each base64 config at its decimal index.
+  // Latin-1 maps each captured Git byte to one character. Git's NUL-delimited
+  // records leave NUL available to mark the prefix of an included file.
   files: string[];
   global?: number;
   system?: number;
   commands: Record<string, number>;
+}
+
+// Embedded in the sandbox bridge, where each invocation has its own endpoints.
+export function snapshotConfigBytes(files: string[], prefix: string): Buffer[] {
+  return files.map((text) =>
+    Buffer.from(text.replaceAll("\0", prefix), "latin1"),
+  );
 }
 
 const includeSetting = /^include(?:if\..*)?\.path$/u;
@@ -1341,12 +1348,16 @@ export async function capturePatchGitControls(
       throw error;
     }
   };
-  const expandConfigurationPath = async (path: string) => {
+  const expandConfigurationPath = async (
+    path: string,
+    checkout = root,
+    optional = true,
+  ) => {
     try {
       return (
         await runControl(
           root,
-          root,
+          checkout,
           [
             "-c",
             `codexsecurity.patchcontrolpath=${path}`,
@@ -1360,8 +1371,9 @@ export async function capturePatchGitControls(
         )
       ).replace(/\0$/u, "");
     } catch (error) {
-      // Git omits the per-user defaults when it cannot expand HOME.
+      // Per-user defaults and inactive includes can name an unavailable home.
       if (
+        optional &&
         error instanceof Error &&
         error.message.includes("failed to expand user dir")
       )
@@ -1865,36 +1877,10 @@ export async function capturePatchGitControls(
       optional: boolean,
       userSelected: boolean,
     ): Promise<void> => {
-      let path = configPath(value);
-      if (path.length === 0) return;
-      try {
-        // Expand each value with Git without expanding inactive values as a group.
-        path = (
-          await runControl(
-            root,
-            checkout,
-            [
-              "-c",
-              `codexsecurity.patchcontrolpath=${path}`,
-              "config",
-              "--null",
-              "--type=path",
-              "--get",
-              "codexsecurity.patchcontrolpath",
-            ],
-            { environment: configurationEnvironment },
-          )
-        ).replace(/\0$/u, "");
-      } catch (error) {
-        // Active includes already passed Git's normal --includes read above.
-        if (
-          optional &&
-          error instanceof Error &&
-          error.message.includes("failed to expand user dir")
-        )
-          return;
-        throw error;
-      }
+      const rawPath = configPath(value);
+      if (rawPath.length === 0) return;
+      const path = await expandConfigurationPath(rawPath, checkout, optional);
+      if (path === undefined) return;
       const includePath = relativeFile(relativeTo, path);
       if (projectConfig) expandedIncludes.set(value, path);
       try {
@@ -2083,7 +2069,7 @@ export async function capturePatchGitControls(
               if (expanded) {
                 const target = relativeFile(dirname(path), expanded);
                 const child = await numberFor(target);
-                value = child === undefined ? pathBytes(target) : String(child);
+                value = child === undefined ? pathBytes(target) : "\0" + child;
               }
             }
             text += serializeConfigEntry(key, value);
@@ -2129,15 +2115,8 @@ export async function capturePatchGitControls(
         if (!snapshotConfig && !files.length) return;
         // The launch context retains this object as shell policy can supply
         // additional credential paths before the native permissions resolve.
-        snapshotConfig ??= { root, files: [], commands };
-        Object.assign(snapshotConfig, {
-          files: files.map((text) =>
-            Buffer.from(text, "latin1").toString("base64"),
-          ),
-          global,
-          system,
-          commands,
-        });
+        snapshotConfig ??= { files, commands };
+        Object.assign(snapshotConfig, { files, global, system, commands });
         onSnapshotConfig?.(snapshotConfig);
       };
     if (mode === "resumed-hook") return;

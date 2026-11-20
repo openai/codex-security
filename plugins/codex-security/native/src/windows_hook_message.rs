@@ -75,11 +75,6 @@ pub struct WindowsHookMessageStage {
 
 #[napi]
 impl WindowsHookMessageStage {
-    #[napi(getter)]
-    pub fn coordinator(&self) -> napi::Result<String> {
-        current_user_sid().map_err(win_error)
-    }
-
     #[napi]
     pub fn close(&mut self) -> napi::Result<()> {
         self.stage.take().map_or(Ok(()), Stage::remove)

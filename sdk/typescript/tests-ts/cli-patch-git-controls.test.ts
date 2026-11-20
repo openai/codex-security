@@ -21,6 +21,7 @@ import { runCodexSkillCommand } from "../src/cli.js";
 import {
   capturePatchGitAdministrationReferences,
   capturePatchGitControls,
+  snapshotConfigBytes,
 } from "../src/patch-git-controls.js";
 import { capture } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -274,9 +275,12 @@ describe("patch Git administration", () => {
     );
     const config = controls!.snapshotConfig!;
     await controls!.protectShellCredentialFiles({ PGSERVICEFILE: service });
-    const file = (index: number) => join(staged, String(index));
-    for (const [index, bytes] of config.files.entries()) {
-      const contents = Buffer.from(bytes, "base64");
+    const prefix = "fixture-";
+    const file = (index: number) => join(staged, prefix + index);
+    for (const [index, contents] of snapshotConfigBytes(
+      config.files,
+      prefix,
+    ).entries()) {
       expect(contents.includes("synthetic-value")).toBe(false);
       await writeFile(file(index), contents);
     }
