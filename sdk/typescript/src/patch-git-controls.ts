@@ -549,10 +549,11 @@ function gitLabConfigRoots(
   return roots;
 }
 
-function credentialPointerFiles(
+async function credentialPointerFiles(
+  checkout: string,
   inherited: Readonly<Record<string, unknown>>,
   settings?: Readonly<Record<string, unknown>>,
-): Set<string> {
+): Promise<Set<string>> {
   const environment: NodeJS.ProcessEnv = Object.create(null);
   const key = (name: string) =>
     process.platform === "win32" ? name.toUpperCase() : name;
@@ -560,6 +561,7 @@ function credentialPointerFiles(
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
+  const terraformHomes = new Set<string>();
   const gcloudCredentials = "application_default_credentials.json";
   const selectFile = (directory: string, file: string) => {
     // A delegate can use the literal path or a client's normalized spelling.
@@ -591,6 +593,9 @@ function credentialPointerFiles(
     homes.add(environment["HOMEDRIVE"] + environment["HOMEPATH"]);
   for (const home of homes) {
     if (home === undefined) continue;
+    terraformHomes.add(
+      process.platform === "win32" ? join(home, "AppData", "Roaming") : home,
+    );
     selectPgDefaults(
       process.platform === "win32"
         ? relativeFile(home, join("AppData", "Roaming", "postgresql"))
@@ -614,6 +619,7 @@ function credentialPointerFiles(
   if (process.platform === "win32") {
     const appData = environment["APPDATA"];
     if (appData) {
+      terraformHomes.add(appData);
       selected.add(join(appData, "GitHub CLI", "hosts.yml"));
       selectPgDefaults(relativeFile(appData, "postgresql"));
     }
@@ -627,6 +633,22 @@ function credentialPointerFiles(
     selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
   for (const root of gitLabConfigRoots(environment, homes))
     selectFile(root, join("glab-cli", "config.yml"));
+  for (const home of terraformHomes) {
+    const windows = process.platform === "win32";
+    selectFile(home, windows ? "terraform.rc" : ".terraformrc");
+    const dir = join(home, windows ? "terraform.d" : ".terraform.d");
+    selectFile(dir, "credentials.tfrc.json");
+    // Terraform merges these direct children into its CLI credentials.
+    const entries = await readdir(httpCredentialPath(checkout, dir), {
+      withFileTypes: true,
+    }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+      throw error;
+    });
+    for (const entry of entries)
+      if (!entry.isDirectory() && /\.tfrc(?:\.json)?$/u.test(entry.name))
+        selectFile(dir, entry.name);
+  }
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
     switch (name.toUpperCase()) {
@@ -650,6 +672,8 @@ function credentialPointerFiles(
       case "PGSERVICEFILE":
       case "PGSSLKEY":
       case "PGSSLCERT":
+      case "TF_CLI_CONFIG_FILE":
+      case "TERRAFORM_CONFIG":
         selected.add(value);
         selected.add(normalize(value));
         break;
@@ -1573,9 +1597,10 @@ export async function capturePatchGitControls(
   const inheritedPointerFiles =
     mode === "external"
       ? new Set<string>()
-      : credentialPointerFiles(pointerEnvironment);
+      : await credentialPointerFiles(root, pointerEnvironment);
   if (mode !== "external" && shellSettings)
-    for (const file of credentialPointerFiles(
+    for (const file of await credentialPointerFiles(
+      root,
       pointerEnvironment,
       shellSettings,
     ))
@@ -2737,7 +2762,11 @@ export async function capturePatchGitControls(
       const newFiles = new Set<string>();
       for (const source of new Set(settings))
         if (source)
-          for (const file of credentialPointerFiles(pointerEnvironment, source))
+          for (const file of await credentialPointerFiles(
+            root,
+            pointerEnvironment,
+            source,
+          ))
             if (!inheritedPointerFiles.has(file)) newFiles.add(file);
       const previouslyUnisolated = unisolatedCredentialHelper;
       for (const checkout of filterCheckouts)

@@ -17,6 +17,7 @@ export function removePatchCredentials(
 ): void {
   for (const [name, value] of Object.entries(environment)) {
     if (
+      /^(?:TF_CLI_CONFIG_FILE$|TERRAFORM_CONFIG$|TF_TOKEN_)/iu.test(name) ||
       /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PG(?:PASSFILE|PASSWORD|SERVICEFILE|SSLCERT|SSLKEY))$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
         name,
       ) ||

@@ -2985,6 +2985,10 @@ PostgreSQL password and service file protection covers `PGPASSFILE`,
 the directory selected by `PGSYSCONFDIR`.
 TLS client identity protection covers `PGSSLKEY`, `PGSSLCERT`, and the
 standard per-user `postgresql.key` and `postgresql.crt` files.
+Terraform protection covers `TF_CLI_CONFIG_FILE`, `TERRAFORM_CONFIG`, the
+standard CLI configuration and login files, and existing `*.tfrc` and
+`*.tfrc.json` fragments in the user's Terraform configuration directory.
+Git delegates also run with Terraform's `TF_TOKEN_*` variables removed.
 The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
