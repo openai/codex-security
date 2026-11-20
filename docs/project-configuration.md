@@ -136,11 +136,11 @@ limits, and aggregation and reporting can continue afterward.
 
 ### Worker speed
 
-When the Codex host supplies the launching turn’s speed, Deep Scan saves it for
-discovery workers and finding comparisons, including after a resume. Selecting
-Default overrides a faster tier in the worker’s Codex config. If the host omits
-the speed when creating the scan, workers use the Codex configuration they load.
-To keep such a scan at Default, leave `service_tier = "default"` in the worker’s
+If the host supplies the launching turn’s speed at scan creation, Deep Scan
+saves it for discovery workers and finding comparisons across resumes. Selecting
+Default overrides a faster tier in the worker’s Codex config. On hosts that omit the
+turn’s speed, each worker uses the Codex configuration it loads. To keep a scan
+at Default on those hosts, leave `service_tier = "default"` in the worker’s
 config for the duration of the scan, including any resumes. Other scans that
 load the same config also use that setting. The usual config file is
 `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `$CODEX_HOME` is unset.
