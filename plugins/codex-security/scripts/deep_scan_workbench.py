@@ -1006,13 +1006,12 @@ def claim_deep_scan_coordinator_locked(
             """,
             (int(args.coordinator_generation != run["coordinator_generation"]), timestamp, scan_id),
         )
-    result = deep_scan_result(connection, scan_id)
     # The cancellable target probe resolves ambient Git against this workbench's history.
     database = connection.execute(
         "SELECT CAST(file AS BLOB) FROM pragma_database_list WHERE name = 'main'"
     ).fetchone()[0]
     return {
-        **result,
+        **deep_scan_result(connection, scan_id),
         "coordinatorDisposition": disposition,
         "workbenchDatabasePath": os.fsdecode(database),
     }

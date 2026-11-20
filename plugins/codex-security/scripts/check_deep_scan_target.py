@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from snapshot_sqlite import readonly_sqlite_uri
 from workbench_schema import migration_target_paths, recorded_git_checkout_roots
-from workbench_target import git_directory_snapshot_paths, scoped_git_discovery
+from workbench_target import git_directory_paths, scoped_git_discovery
 
 
 def check_selected_targets(root: Path, selections: list[str], file_paths: list[str]) -> None:
@@ -63,7 +63,7 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
         target, regular = check_path(selection)
         if regular:
             return True
-        paths = git_directory_snapshot_paths(target, onerror=record_error)
+        paths = git_directory_paths(target, onerror=record_error)
         if paths is not None:
             for path in paths:
                 try:

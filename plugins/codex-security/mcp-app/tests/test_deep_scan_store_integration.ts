@@ -52,11 +52,11 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 });
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
-await testJoiningCallerAdmission("fresh", "with-source", "empty");
-await testJoiningCallerAdmission("fresh", "ignored-only", "ignored-only");
-await testJoiningCallerAdmission("resumed", "with-source", "empty");
-await testJoiningCallerAdmission("resumed", "with-source", "ignored-only");
-await testJoiningCallerAdmission("resumed", "ignored-only", "with-source");
+await testJoiningCallerAdmission("fresh-empty");
+await testJoiningCallerAdmission("resumed-empty");
+await testJoiningCallerAdmission("fresh-empty", "ignored-only");
+await testJoiningCallerAdmission("resumed-empty", "with-source");
+await testJoiningCallerAdmission("resumed-with-source", "ignored-only");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -79,9 +79,8 @@ await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
 async function testJoiningCallerAdmission(
-  claim: "fresh" | "resumed",
-  atRegistration: "ignored-only" | "with-source",
-  atAdmission: "empty" | "ignored-only" | "with-source",
+  scenario: "fresh-empty" | "resumed-empty" | "resumed-with-source",
+  gitAtRegistration?: "ignored-only" | "with-source",
 ) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-joining-caller-",
@@ -96,14 +95,34 @@ async function testJoiningCallerAdmission(
   const start = registry.start.bind(registry);
   registry.start = (options: CoordinatorOptions) =>
     start({ ...options, executor });
+  const originalPath = process.env.PATH!;
+  const originalGit = process.env.CODEX_SECURITY_GIT;
   try {
     const source = path.join(targetPath, "fixture.py");
-    if (atRegistration === "ignored-only" || atAdmission === "ignored-only") {
-      await execFileAsync("git", ["init", "-q", fixtureRoot]);
-      await writeFile(path.join(fixtureRoot, ".gitignore"), "*.ignored\n");
+    if (gitAtRegistration) {
+      await execFileAsync("git", ["init", "-q", targetPath]);
+      await writeFile(
+        path.join(targetPath, ".git", "info", "exclude"),
+        "*.ignored\n",
+      );
       await writeFile(path.join(targetPath, "cache.ignored"), "");
+      if (gitAtRegistration === "ignored-only") await rm(source);
     }
-    if (atRegistration === "ignored-only") await rm(source);
+    if (gitAtRegistration && scenario === "fresh-empty") {
+      // Only host Git can identify the ignored file. The probe must exclude
+      // the unusable Git executable in this workbench's other saved target.
+      const historical = path.join(fixtureRoot, "historical");
+      await mkdir(historical);
+      const name = process.platform === "win32" ? "git.exe" : "git";
+      await writeFile(path.join(historical, name), "", { mode: 0o755 });
+      await owner.begin({
+        targetPath: historical,
+        threadId: "other",
+        scanRoot,
+      });
+      delete process.env.CODEX_SECURITY_GIT;
+      process.env.PATH = historical + path.delimiter + originalPath;
+    }
     const created = await owner.begin({ targetPath, threadId, scanRoot });
     const lease = { scanId: created.scanId, threadId };
     // Admission uses the later claim, even if the owner entered discovery before it expired.
@@ -113,9 +132,10 @@ async function testJoiningCallerAdmission(
     } as const;
     const joined = await joiner.begin({ ...lease, scanRoot });
     assert.equal(joined.discoveryStarted, false);
-    if (claim === "resumed") {
+    if (scenario !== "fresh-empty") {
       const claimed = await owner.claimCoordinator(lease);
       assert.equal(claimed.acquired, true);
+      assert.equal("workbenchDatabasePath" in claimed.run, false);
       await owner.updateProgress(discoveryProgress);
       const observer = await joiner.claimCoordinator(lease);
       assert.equal(observer.acquired, false);
@@ -123,8 +143,8 @@ async function testJoiningCallerAdmission(
       assert.equal(observer.run.dispatchedCount, 0);
       await expireLease(environment, created.scanId);
     }
-    if (atAdmission === "with-source") await writeFile(source, "");
-    else if (atRegistration === "with-source") await rm(source);
+    if (scenario === "resumed-with-source") await writeFile(source, "");
+    else await rm(source, { force: true });
     const { coordinator } = await startDeepScanEngine({
       run: joined,
       store: joiner,
@@ -141,8 +161,9 @@ async function testJoiningCallerAdmission(
         coordinator.wait(undefined, 30_000),
       ]);
       const persisted = await joiner.get(created.scanId, threadId);
-      if (claim === "resumed") assert.equal(persisted.coordinatorGeneration, 3);
-      if (atAdmission === "with-source") {
+      if (scenario !== "fresh-empty")
+        assert.equal(persisted.coordinatorGeneration, 3);
+      if (scenario === "resumed-with-source") {
         assert.ok(executor.discoveryCalls > 0, terminal?.error);
         assert.ok(persisted.dispatchedCount > 0);
         await assert.rejects(
@@ -150,9 +171,9 @@ async function testJoiningCallerAdmission(
           /newer generation/,
         );
       } else {
-        assert.equal(executor.discoveryCalls, 0, atAdmission);
         assert.equal(terminal?.status, "failed");
         assert.match(terminal.error, /target is empty.*no security audit/iu);
+        assert.equal(executor.discoveryCalls, 0);
         assert.equal(persisted.status, "failed");
         assert.deepEqual(persisted.persistedWorkers, []);
         assert.equal(persisted.dispatchedCount, 0);
@@ -166,6 +187,8 @@ async function testJoiningCallerAdmission(
       await coordinator.wait(undefined, 30_000);
     }
   } finally {
+    process.env.PATH = originalPath;
+    if (originalGit !== undefined) process.env.CODEX_SECURITY_GIT = originalGit;
     await rm(fixtureRoot, { recursive: true, force: true });
   }
 }

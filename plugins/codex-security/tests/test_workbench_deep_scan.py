@@ -6,10 +6,7 @@ import hashlib
 import json
 import os
 import runpy
-import shutil
 import sqlite3
-import subprocess
-import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -129,44 +126,6 @@ def test_target_admission_stops_at_the_first_non_directory_entry(
     monkeypatch.setattr(os, "scandir", scandir)
     check_selected_targets(tmp_path, ["."], [])
     assert events == ["read", "closed"]
-
-
-@pytest.mark.cross_platform
-def test_admission_excludes_git_in_another_saved_workbench_target(tmp_path, monkeypatch):
-    historical = tmp_path / "historical"
-    historical.mkdir()
-    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
-    deep = start_empty_target_scan(tmp_path)
-    begin_target_scan(
-        deep.state_dir, deep.codex_home, historical, tmp_path / "scans", thread_id="other"
-    )
-    host_git = shutil.which("git")
-    assert host_git is not None
-    target = tmp_path / "target"
-    subprocess.run([host_git, "init", "-q", target], check=True)
-    (target / ".git" / "info" / "exclude").write_text("ignored.dat\n")
-    (target / "ignored.dat").touch()
-    # Only real Git can classify the ignored-only worktree as empty.
-    if os.name == "nt":
-        shutil.copy(
-            Path(os.environ["SystemRoot"]) / "System32" / "where.exe", historical / "git.exe"
-        )
-    else:
-        witness = shutil.which("false", path=os.defpath)
-        assert witness is not None
-        shutil.copy(witness, historical / "git")
-    monkeypatch.setenv("PATH", str(historical) + os.pathsep + os.environ["PATH"])
-    claimed = deep.command("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan")
-    request = {**claimed["deepScan"], "workbenchDatabasePath": claimed["workbenchDatabasePath"]}
-    script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
-    result = subprocess.run(
-        [sys.executable, "-I", "-B", str(script)],
-        input=json.dumps(request),
-        text=True,
-        capture_output=True,
-    )
-    assert result.returncode == 1
-    assert result.stderr.strip() == "Deep Scan target is empty; no security audit was performed."
 
 
 def restore_v53_schema(state_dir: Path) -> None:

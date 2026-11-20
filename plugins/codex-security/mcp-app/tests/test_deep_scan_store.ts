@@ -242,14 +242,11 @@ async function testHeartbeatBypassesBlockedWriteQueue() {
         deepScan: { coordinatorGeneration: 2, scanDir },
       }),
       coordinatorDisposition: "claimed",
-      workbenchDatabasePath: "/fixture/state/workbench.sqlite3",
     };
   };
   const store = new WorkbenchDeepScanStore(runner);
   const lease = { scanId, threadId: "thread-fixture", handoffClaimToken };
-  const claim = await store.claimCoordinator(lease);
-  assert.equal(claim.workbenchDatabasePath, "/fixture/state/workbench.sqlite3");
-  assert.equal("workbenchDatabasePath" in claim.run, false);
+  await store.claimCoordinator(lease);
   const blockedWrite = store.updateProgress({ scanId, phase: "discovery" });
   await new Promise((resolve) => setImmediate(resolve));
   const heartbeat = store.heartbeatCoordinator(lease);
