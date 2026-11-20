@@ -352,7 +352,6 @@ async function originalParentSettings(
 
 /** Read recorded execution settings or original legacy facts. */
 export async function loadDeepScanExecutionSettings(
-  _scanDir: string,
   original?: Pick<
     DeepScanRunState,
     | "model"

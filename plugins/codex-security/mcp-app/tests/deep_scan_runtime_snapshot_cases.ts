@@ -4,30 +4,20 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import {
-  assertConfigOverrides,
-  workerPermissionProfileOverride,
-} from "./assertions.ts";
+import { assertConfigOverrides } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import type { createFakeCodexFixture } from "./support/fake-codex-fixture.ts";
 
-interface Dependencies {
-  CodexSdkWorkerExecutor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
-  captureDeepScanExecutionSettings: typeof import("../src/deep-scan/recovery-settings.js").captureDeepScanExecutionSettings;
-  restoredDeepScanWorkerSettings: typeof import("../src/deep-scan/recovery-settings.js").restoredDeepScanWorkerSettings;
-  fakeCodexFixture: () => ReturnType<typeof createFakeCodexFixture>;
-  parentSandbox: DeepWorkerParentSandbox;
-}
-
-export async function testDurableWorkerRuntimeSnapshots({
+import {
   CodexSdkWorkerExecutor,
   captureDeepScanExecutionSettings,
   restoredDeepScanWorkerSettings,
   fakeCodexFixture,
-  parentSandbox,
-}: Dependencies) {
+  workerPermissionProfileOverride,
+} from "./deep_scan_executor_fixture.ts";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
+
+export async function testDurableWorkerRuntimeSnapshots() {
   async function prepareOwner(
     name: string,
     context: number,

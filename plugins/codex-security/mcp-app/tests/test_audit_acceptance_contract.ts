@@ -18,8 +18,7 @@ const module = await importModule({
   stdin: {
     contents: `export * from "./src/artifact-scan-draft.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
-      export * from "./src/deep-scan/artifacts.ts";
-      export * from "./src/accepted-audit.ts";`,
+      export * from "./src/deep-scan/artifacts.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
 
@@ -29,9 +28,6 @@ const {
   createDeepScanArtifacts,
   recordCodexSecurityWorkerScanDraft,
   validateDiscoveryArtifacts,
-  readDiscoveryAuditDraft,
-  auditEvidence,
-  runAcceptedAudit,
 } = module;
 
 const scanId = "811aef98-3709-4c2d-8b7a-742977521865";
@@ -136,28 +132,6 @@ for (const completeness of ["complete", "partial", "unknown"]) {
         ).scan.complete,
         false,
       );
-      const controller = new AbortController();
-      const execute = async () => ({
-        threadId: "audit-conversation",
-        usage: null,
-      });
-      const accept = async () =>
-        auditEvidence(
-          await readDiscoveryAuditDraft(
-            artifacts,
-            path.join(workerRoot, "result.json"),
-            scanId,
-          ),
-        );
-      const unfinished = await runAcceptedAudit({
-        signal: controller.signal,
-        execute,
-        accept,
-      });
-      assert.equal(unfinished.status, "checkpoint");
-      assert.equal(unfinished.checkpoint.complete, false);
-      assert.equal(unfinished.accepted, undefined);
-      assert.equal(unfinished.execution.usage, null);
       const standardWrite = await recordCodexSecurityScanDraft(
         standard,
         semantic,
@@ -197,39 +171,6 @@ for (const completeness of ["complete", "partial", "unknown"]) {
         assert.deepEqual(coverage[field], accepted.reviewState[field]);
       }
       assert.equal(accepted.scanId, scanId);
-      const audit = await runAcceptedAudit({
-        signal: controller.signal,
-        execute,
-        accept,
-      });
-      assert.equal(audit.status, "accepted");
-      assert.deepEqual(audit.accepted, accepted);
-      assert.deepEqual(audit.checkpoint, accepted);
-      const failure = new Error("Synthetic execution failure");
-      await assert.rejects(
-        runAcceptedAudit({
-          signal: controller.signal,
-          execute: async () => {
-            throw failure;
-          },
-          accept: async () => {
-            assert.fail("An execution failure cannot accept old output");
-          },
-        }),
-        (error) => error === failure,
-      );
-      await assert.rejects(
-        runAcceptedAudit({
-          signal: controller.signal,
-          execute,
-          accept: async () => {
-            const evidence = await accept();
-            controller.abort("user canceled");
-            return evidence;
-          },
-        }),
-        (error) => error === controller.signal.reason,
-      );
       assert.equal(manifest.scan.sealedAt, undefined);
       assert.equal(manifest.scan.artifacts, undefined);
       assert.equal(

@@ -9,10 +9,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 
@@ -26,9 +24,35 @@ const {
   beginDeepScanWithCapturedSettings: beginWithCapturedSettings,
   captureDeepScanExecutionSettings: captureSettings,
   restoredDeepScanWorkerSettings: restoreSettings,
-  loadDeepScanExecutionSettings: loadSettings,
+  loadDeepScanExecutionSettings: loadRecordedSettings,
 } = module;
+function loadSnapshot(settings, run = {}) {
+  return loadRecordedSettings({
+    ...run,
+    executionSettings: { version: 1, settings },
+  });
+}
+
+function rollout(records) {
+  return records.map((record) => JSON.stringify(record) + "\n").join("");
+}
+
+function settingsApplied(timestamp, thread_id, thread_settings) {
+  return {
+    type: "event_msg",
+    timestamp,
+    payload: { type: "thread_settings_applied", thread_id, thread_settings },
+  };
+}
+
+const noDenials = { filesystemDenies: [] };
 try {
+  const parentEnvironment = {
+    CODEX_CLI_PATH: process.execPath,
+    CODEX_HOME: root,
+  };
+  const capture = (original, parent) =>
+    captureSettings(original, noDenials, parentEnvironment, parent);
   const ownerHome = join(root, "owner-home");
   const ownerId = "00000000-0000-4000-8000-000000000001";
   const otherId = "00000000-0000-4000-8000-000000000002";
@@ -285,68 +309,14 @@ try {
     2,
     "exact denials do not change glob expansion",
   );
-  const writeSnapshot = async (directory, value) => {
-    const path = join(
-      directory,
-      "artifacts",
-      "deep_discovery",
-      "execution-settings.json",
-    );
-    await mkdir(join(directory, "artifacts", "deep_discovery"), {
-      recursive: true,
-    });
-    await writeFile(
-      path,
-      JSON.stringify({ version: 1, settings: value }, null, 2) + "\n",
-    );
-  };
-  const boundRun = (value) => ({
-    workflowVersion: "deep-security-scan/v2",
-    executionSettings: { version: 1, settings: value },
-  });
-  await assert.rejects(
-    loadSettings(join(root, "missing")),
-    /no recorded original execution settings/,
-  );
-  await writeSnapshot(join(root, "one"), settings);
-  await writeSnapshot(join(root, "two"), { ...settings, model: "other-model" });
-  const savedPath = join(
-    root,
-    "one",
-    "artifacts",
-    "deep_discovery",
-    "execution-settings.json",
-  );
-  const saved = await readFile(savedPath, "utf8");
   const [recovered, concurrent] = await Promise.all([
-    loadSettings(join(root, "one"), boundRun(settings)),
-    loadSettings(
-      join(root, "two"),
-      boundRun({ ...settings, model: "other-model" }),
-    ),
+    loadSnapshot(settings),
+    loadSnapshot({ ...settings, model: "other-model" }),
   ]);
   assert.deepEqual(recovered, settings);
   assert.equal(concurrent.model, "other-model");
-  assert.equal(await readFile(savedPath, "utf8"), saved);
   recovered.model = "caller-mutation";
-  assert.deepEqual(
-    await loadSettings(join(root, "one"), boundRun(settings)),
-    settings,
-  );
-  await writeSnapshot(join(root, "one"), {
-    ...settings,
-    codexPath: "/fixture/substituted/codex",
-    codexHome: "/fixture/substituted/home",
-  });
-  assert.deepEqual(
-    await loadSettings(join(root, "one"), boundRun(settings)),
-    settings,
-  );
-  await assert.rejects(
-    loadSettings(join(root, "one")),
-    /no recorded original execution settings/,
-  );
-
+  assert.equal(settings.model, "fixture-model");
   const configPath = join(root, "runtime.toml");
   await writeFile(
     configPath,
@@ -425,15 +395,7 @@ profile = "fixture-profile"
 access_key_id = "synthetic-secret"
 `,
     );
-    const selected = await captureSettings(
-      {},
-      { filesystemDenies: [] },
-      {
-        CODEX_CLI_PATH: process.execPath,
-        CODEX_HOME: root,
-        CODEX_SECURITY_CONFIG_PATH: configPath,
-      },
-    );
+    const selected = await captureSettings({}, noDenials, captureEnvironment);
     assert.equal(selected.modelProvider, modelProvider);
     const expectedProvider =
       modelProvider === "amazon-bedrock"
@@ -448,22 +410,12 @@ access_key_id = "synthetic-secret"
       expectedProvider,
       "saved selections exclude catalog definitions and retain Bedrock selectors",
     );
-    const providerDir = join(root, modelProvider);
-    await writeSnapshot(providerDir, selected);
-    const path = join(
-      providerDir,
-      "artifacts",
-      "deep_discovery",
-      "execution-settings.json",
-    );
-    const bytes = await readFile(path, "utf8");
-    assert.equal(bytes.includes("synthetic-secret"), false);
+    assert.equal(JSON.stringify(selected).includes("synthetic-secret"), false);
     const restoredProvider = restoreSettings(
-      await loadSettings(providerDir, boundRun(selected)),
-      { filesystemDenies: [] },
+      await loadSnapshot(selected),
+      noDenials,
     ).codexOptions.config.model_providers;
     assert.deepEqual(restoredProvider, expectedProvider);
-    assert.equal(await readFile(path, "utf8"), bytes);
     await writeFile(
       join(root, "config.toml"),
       `model_provider = ${JSON.stringify(modelProvider)}
@@ -475,11 +427,7 @@ region = "us-west-2"
 profile = "fixture-profile"
 `,
     );
-    const native = await captureSettings(
-      {},
-      { filesystemDenies: [] },
-      { CODEX_CLI_PATH: process.execPath, CODEX_HOME: root },
-    );
+    const native = await capture({});
     const nativeConfig = restoreSettings(native, { filesystemDenies: [] })
       .codexOptions.config;
     assert.equal(nativeConfig.model_provider, modelProvider);
@@ -495,22 +443,16 @@ profile = "fixture-profile"
           wire_api: "responses",
         },
       };
-      await writeSnapshot(providerDir, {
+      const legacy = await loadSnapshot({
         ...selected,
         providerConfig: legacyProvider,
       });
-      const legacyBytes = await readFile(path, "utf8");
-      const legacy = await loadSettings(
-        providerDir,
-        boundRun({ ...selected, providerConfig: legacyProvider }),
-      );
       assert.equal(legacy.providerConfig, undefined);
       assert.deepEqual(
         restoreSettings(legacy, { filesystemDenies: [] }).codexOptions.config
           .model_providers,
         restoredProvider,
       );
-      assert.equal(await readFile(path, "utf8"), legacyBytes);
     }
   }
   let credential = "synthetic-first";
@@ -534,17 +476,13 @@ profile = "fixture-profile"
   ]);
   assert.equal(restored.codexOptions.config.model_reasoning_effort, "ultra");
   await writeFile(join(root, "config.toml"), 'model = "native-home-model"\n');
-  const native = await captureSettings(
-    {},
-    { filesystemDenies: [] },
-    { CODEX_CLI_PATH: process.execPath, CODEX_HOME: root },
-  );
+  const native = await capture({});
   assert.equal(native.model, "native-home-model");
   const sessionDirectory = join(root, "sessions");
   await mkdir(sessionDirectory);
   await writeFile(
     join(sessionDirectory, "parent.jsonl"),
-    [
+    rollout([
       {
         type: "session_meta",
         timestamp: "2026-01-01T00:00:00Z",
@@ -570,9 +508,7 @@ profile = "fixture-profile"
           summary: "detailed",
         },
       },
-    ]
-      .map(JSON.stringify)
-      .join("\n") + "\n",
+    ]),
   );
   await writeFile(
     join(sessionDirectory, "other.jsonl"),
@@ -591,12 +527,7 @@ profile = "fixture-profile"
       "base64",
     ),
   );
-  const archived = await captureSettings(
-    {},
-    { filesystemDenies: [] },
-    { CODEX_HOME: root, CODEX_CLI_PATH: process.execPath },
-    { threadId: "archived-parent" },
-  );
+  const archived = await capture({}, { threadId: "archived-parent" });
   assert.equal(archived.modelProvider, "archived-provider");
   const badHistoryHome = join(root, "unreadable-history");
   await mkdir(badHistoryHome);
@@ -616,15 +547,11 @@ profile = "fixture-profile"
     ),
     { code: "ENOTDIR" },
   );
-  const parentSettings = await captureSettings(
-    {},
-    { filesystemDenies: [] },
-    {
-      CODEX_CLI_PATH: process.execPath,
-      CODEX_HOME: root,
-    },
-    { threadId: "fixture-parent", startedAt: "2026-01-01T00:01:00Z" },
-  );
+  const originalParentTurn = {
+    threadId: "fixture-parent",
+    startedAt: "2026-01-01T00:01:00Z",
+  };
+  const parentSettings = await capture({}, originalParentTurn);
   assert.equal(
     parentSettings.model,
     "native-home-model",
@@ -638,24 +565,16 @@ profile = "fixture-profile"
   );
   assert.equal(parentSettings.reasoningEffort, "high");
   await writeFile(join(root, "config.toml"), "");
-  const parentEnvironment = {
-    CODEX_CLI_PATH: process.execPath,
-    CODEX_HOME: root,
-  };
+  const atFirstTurn = (threadId) => ({
+    threadId,
+    startedAt: "2026-01-01T00:00:01Z",
+  });
   const [originalParent, otherParent, unavailableParent] = await Promise.all([
-    captureSettings({}, { filesystemDenies: [] }, parentEnvironment, {
-      threadId: "fixture-parent",
-      startedAt: "2026-01-01T00:00:01Z",
-    }),
-    captureSettings({}, { filesystemDenies: [] }, parentEnvironment, {
-      threadId: "fixture-other",
-      startedAt: "2026-01-01T00:00:01Z",
-    }),
-    captureSettings(
+    capture({}, atFirstTurn("fixture-parent")),
+    capture({}, atFirstTurn("fixture-other")),
+    capture(
       { model: "stored-model", reasoningEffort: "ultra" },
-      { filesystemDenies: [] },
-      parentEnvironment,
-      { threadId: "fixture-unavailable", startedAt: "2026-01-01T00:00:01Z" },
+      atFirstTurn("fixture-unavailable"),
     ),
   ]);
   assert.equal(originalParent.model, "parent-model");
@@ -691,9 +610,7 @@ profile = "fixture-profile"
     startedAt: "2026-01-01T00:00:00Z",
   };
   for (const workflowVersion of ["deep-security-scan/v1", "deep-scan-mcp/v1"]) {
-    const legacyDir = join(root, workflowVersion.replaceAll("/", "-"));
-    const legacy = await loadSettings(
-      legacyDir,
+    const legacy = await loadRecordedSettings(
       {
         workflowVersion,
         model: "recorded-model",
@@ -750,16 +667,9 @@ profile = "fixture-profile"
       restoredLegacy.codexOptions.config.model_reasoning_summary,
       "concise",
     );
-    await assert.rejects(
-      readFile(
-        join(legacyDir, "artifacts/deep_discovery/execution-settings.json"),
-      ),
-      { code: "ENOENT" },
-    );
   }
   await assert.rejects(
-    loadSettings(
-      join(root, "missing-v2"),
+    loadRecordedSettings(
       { workflowVersion: "deep-security-scan/v2" },
       async () =>
         assert.fail(
@@ -768,19 +678,13 @@ profile = "fixture-profile"
     ),
     /no recorded original/,
   );
+  const continuation = {
+    threadId: "fixture-other",
+    startedAt: "2026-01-01T00:03:00Z",
+  };
   const [rebound, unboundLegacy] = await Promise.all([
-    captureSettings(
-      { usageOwner: originalOwner },
-      { filesystemDenies: [] },
-      parentEnvironment,
-      { threadId: "fixture-other", startedAt: "2026-01-01T00:03:00Z" },
-    ),
-    captureSettings(
-      { model: "stored-model", usageOwner: null },
-      { filesystemDenies: [] },
-      parentEnvironment,
-      { threadId: "fixture-other", startedAt: "2026-01-01T00:03:00Z" },
-    ),
+    capture({ usageOwner: originalOwner }, continuation),
+    capture({ model: "stored-model", usageOwner: null }, continuation),
   ]);
   assert.equal(
     rebound.modelProvider,
@@ -800,9 +704,10 @@ profile = "fixture-profile"
     "unrecorded legacy ownership cannot recover caller selections",
   );
   assert.equal(unboundLegacy.reasoningSummary, undefined);
+
   await writeFile(
     join(sessionDirectory, "legacy-auto.jsonl"),
-    [
+    rollout([
       {
         type: "session_meta",
         payload: {
@@ -820,15 +725,11 @@ profile = "fixture-profile"
           summary: "auto",
         },
       },
-    ]
-      .map(JSON.stringify)
-      .join("\n") + "\n",
+    ]),
   );
-  const legacyAuto = await captureSettings(
-    { usageOwner: { threadId: "fixture-legacy-auto", turnId: "legacy-turn" } },
-    { filesystemDenies: [] },
-    parentEnvironment,
-  );
+  const legacyAuto = await capture({
+    usageOwner: { threadId: "fixture-legacy-auto", turnId: "legacy-turn" },
+  });
   assert.equal(
     legacyAuto.reasoningSummary,
     "auto",
@@ -838,7 +739,7 @@ profile = "fixture-profile"
     const threadId = `fixture-fresh-${version}`;
     await writeFile(
       join(sessionDirectory, `${threadId}.jsonl`),
-      [
+      rollout([
         {
           type: "session_meta",
           timestamp: "2026-01-01T00:00:00Z",
@@ -858,33 +759,19 @@ profile = "fixture-profile"
             summary: "auto",
           },
         },
-        {
-          type: "event_msg",
-          timestamp: "2026-01-01T00:02:00Z",
-          payload: {
-            type: "thread_settings_applied",
-            thread_id: threadId,
-            thread_settings: {
-              model: "fresh-model",
-              model_provider_id: "openai",
-              reasoning_summary: "detailed",
-            },
-          },
-        },
-      ]
-        .map(JSON.stringify)
-        .join("\n") + "\n",
+        settingsApplied("2026-01-01T00:02:00Z", threadId, {
+          model: "fresh-model",
+          model_provider_id: "openai",
+          reasoning_summary: "detailed",
+        }),
+      ]),
     );
     const owner = {
       threadId,
       turnId: "fresh-turn",
       startedAt: "2026-01-01T00:01:00Z",
     };
-    const fresh = await captureSettings(
-      { usageOwner: owner },
-      { filesystemDenies: [] },
-      parentEnvironment,
-    );
+    const fresh = await capture({ usageOwner: owner });
     assert.equal(fresh.model, "fresh-model");
     assert.equal(
       fresh.reasoningSummary,
@@ -892,41 +779,23 @@ profile = "fixture-profile"
       "fresh native compatibility auto is not an original selection",
     );
     assert.equal(
-      restoreSettings(fresh, { filesystemDenies: [] }).codexOptions.config
+      restoreSettings(fresh, noDenials).codexOptions.config
         .model_reasoning_summary,
       undefined,
     );
-    const freshDir = join(root, threadId);
-    await writeSnapshot(freshDir, fresh);
-    const freshPath = join(
-      freshDir,
-      "artifacts",
-      "deep_discovery",
-      "execution-settings.json",
-    );
-    const freshBytes = await readFile(freshPath, "utf8");
     assert.deepEqual(
-      await loadSettings(freshDir, {
-        ...boundRun(fresh),
+      await loadSnapshot(fresh, {
         usageOwner: owner,
         createdAt: owner.startedAt,
       }),
       fresh,
-    );
-    assert.equal(
-      await readFile(freshPath, "utf8"),
-      freshBytes,
       "unknown summary is not replaced by a compatibility field or a later selection",
     );
     await writeFile(
       join(root, "config.toml"),
       'model_reasoning_summary = "auto"\n',
     );
-    const explicit = await captureSettings(
-      { usageOwner: owner },
-      { filesystemDenies: [] },
-      parentEnvironment,
-    );
+    const explicit = await capture({ usageOwner: owner });
     assert.equal(
       explicit.reasoningSummary,
       "auto",
@@ -934,29 +803,25 @@ profile = "fixture-profile"
     );
     await writeFile(join(root, "config.toml"), "");
   }
+  const appliedPath = join(sessionDirectory, "applied.jsonl");
+  const modelSettings = {
+    model: "applied-model",
+    model_provider_id: "openai",
+    reasoning_effort: "high",
+  };
   await writeFile(
-    join(sessionDirectory, "applied.jsonl"),
-    [
+    appliedPath,
+    rollout([
       {
         type: "session_meta",
         timestamp: "2026-01-01T00:00:00Z",
         payload: { id: "fixture-applied", model_provider: "previous-provider" },
       },
-      {
-        type: "event_msg",
-        timestamp: "2026-01-01T00:00:01Z",
-        payload: {
-          type: "thread_settings_applied",
-          thread_id: "fixture-applied",
-          thread_settings: {
-            model: "applied-model",
-            model_provider_id: "openai",
-            service_tier: "default",
-            reasoning_effort: "high",
-            reasoning_summary: "concise",
-          },
-        },
-      },
+      settingsApplied("2026-01-01T00:00:01Z", "fixture-applied", {
+        ...modelSettings,
+        service_tier: "default",
+        reasoning_summary: "concise",
+      }),
       {
         type: "turn_context",
         timestamp: "2026-01-01T00:00:02Z",
@@ -967,49 +832,31 @@ profile = "fixture-profile"
           summary: "none",
         },
       },
-      {
-        type: "event_msg",
-        timestamp: "2026-01-01T00:00:03Z",
-        payload: {
-          type: "thread_settings_applied",
-          thread_id: "fixture-copied-owner",
-          thread_settings: {
-            model: "copied-model",
-            model_provider_id: "copied-provider",
-            service_tier: "flex",
-            reasoning_summary: "detailed",
-          },
-        },
-      },
-      {
-        type: "event_msg",
-        timestamp: "2026-01-01T00:02:00Z",
-        payload: {
-          type: "thread_settings_applied",
-          thread_id: "fixture-applied",
-          thread_settings: {
-            model: "later-model",
-            model_provider_id: "later-provider",
-            service_tier: "fast",
-            reasoning_summary: "detailed",
-          },
-        },
-      },
-    ]
-      .map(JSON.stringify)
-      .join("\n") + "\n",
+      settingsApplied("2026-01-01T00:00:03Z", "fixture-copied-owner", {
+        model: "copied-model",
+        model_provider_id: "copied-provider",
+        service_tier: "flex",
+        reasoning_summary: "detailed",
+      }),
+      settingsApplied("2026-01-01T00:02:00Z", "fixture-applied", {
+        model: "later-model",
+        model_provider_id: "later-provider",
+        service_tier: "fast",
+        reasoning_summary: "detailed",
+      }),
+    ]),
   );
   const appliedOwner = {
     threadId: "fixture-applied",
     turnId: "applied-turn",
     startedAt: "2026-01-01T00:00:00Z",
   };
-  const applied = await captureSettings(
-    { usageOwner: appliedOwner },
-    { filesystemDenies: [] },
-    parentEnvironment,
-    { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" },
-  );
+  const readApplied = () =>
+    capture(
+      { usageOwner: appliedOwner },
+      { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" },
+    );
+  const applied = await readApplied();
   assert.equal(
     applied.serviceTier,
     "default",
@@ -1036,71 +883,36 @@ profile = "fixture-profile"
     undefined,
     "explicit native standard remains an explicit selection",
   );
-  const tierDir = join(root, "missing-tier");
-  const { serviceTier: omittedTier, ...withoutTier } = applied;
-  assert.equal(omittedTier, "default");
-  await writeSnapshot(tierDir, withoutTier);
-  const repairedTier = await loadSettings(tierDir, {
-    ...boundRun(withoutTier),
+  const withoutTier = { ...applied };
+  delete withoutTier.serviceTier;
+  const repairedTier = await loadSnapshot(withoutTier, {
     usageOwner: appliedOwner,
     createdAt: "2026-01-01T00:01:00Z",
   });
   assert.equal(repairedTier.serviceTier, "default");
-  await writeFile(
-    join(sessionDirectory, "applied.jsonl"),
-    (await readFile(join(sessionDirectory, "applied.jsonl"), "utf8")) +
-      JSON.stringify({
-        type: "event_msg",
-        timestamp: "2026-01-01T00:00:04Z",
-        payload: {
-          type: "thread_settings_applied",
-          thread_id: "fixture-applied",
-          thread_settings: {
-            model: "applied-model",
-            model_provider_id: "openai",
-            reasoning_effort: "high",
-            service_tier: "priority",
-          },
-        },
-      }) +
-      "\n",
+  await appendFile(
+    appliedPath,
+    rollout([
+      settingsApplied("2026-01-01T00:00:04Z", "fixture-applied", {
+        ...modelSettings,
+        service_tier: "priority",
+      }),
+    ]),
   );
-  const nativeTier = await captureSettings(
-    { usageOwner: appliedOwner },
-    { filesystemDenies: [] },
-    parentEnvironment,
-    { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" },
-  );
+  const nativeTier = await readApplied();
   assert.equal(
     nativeTier.serviceTier,
     "priority",
     "an effective tier selected by native remains unchanged",
   );
   assert.equal(nativeTier.nativeServiceTierAbsent, undefined);
-  await writeFile(
-    join(sessionDirectory, "applied.jsonl"),
-    (await readFile(join(sessionDirectory, "applied.jsonl"), "utf8")) +
-      JSON.stringify({
-        type: "event_msg",
-        timestamp: "2026-01-01T00:00:05Z",
-        payload: {
-          type: "thread_settings_applied",
-          thread_id: "fixture-applied",
-          thread_settings: {
-            model: "applied-model",
-            model_provider_id: "openai",
-            reasoning_effort: "high",
-          },
-        },
-      }) +
-      "\n",
+  await appendFile(
+    appliedPath,
+    rollout([
+      settingsApplied("2026-01-01T00:00:05Z", "fixture-applied", modelSettings),
+    ]),
   );
-  const nativeDefaults = await captureSettings(
-    { usageOwner: appliedOwner },
-    { filesystemDenies: [] },
-    parentEnvironment,
-    { threadId: "fixture-other", startedAt: "2026-01-01T00:01:00Z" },
-  );
+  const nativeDefaults = await readApplied();
   assert.equal(
     nativeDefaults.model,
     "applied-model",
@@ -1127,90 +939,26 @@ profile = "fixture-profile"
     undefined,
     "a compatibility summary is not a recorded native default",
   );
-  const incompleteDir = join(root, "incomplete");
-  const incomplete = {
+  const incomplete = Object.freeze({
     codexPath: process.execPath,
     codexHome: root,
     serviceTier: "flex",
-  };
-  await writeSnapshot(incompleteDir, incomplete);
+  });
   await writeFile(
     join(root, "config.toml"),
     'model_provider = "observer-provider"\nmodel_reasoning_summary = "detailed"\n',
   );
   const originalRun = {
-    ...boundRun(incomplete),
     model: "stored-model",
     reasoningEffort: "ultra",
     usageOwner: originalOwner,
     createdAt: "2026-01-01T00:01:00Z",
   };
-  const raceDir = join(root, "concurrent-recovery");
-  await writeSnapshot(raceDir, incomplete);
-  const racePath = join(
-    raceDir,
-    "artifacts",
-    "deep_discovery",
-    "execution-settings.json",
-  );
-  const originalCreateReadStream = fs.createReadStream;
-  const readingHistory = Promise.withResolvers();
-  const releaseHistory = Promise.withResolvers();
-  let held = false;
-  let pendingRead;
-  fs.createReadStream = (path, options) => {
-    const source = originalCreateReadStream(path, options);
-    if (path !== join(sessionDirectory, "parent.jsonl") || held) return source;
-    held = true;
-    const delayed = new PassThrough();
-    source.once("error", (error) => delayed.destroy(error));
-    delayed.once("close", () => source.destroy());
-    void releaseHistory.promise.then(() => source.pipe(delayed));
-    readingHistory.resolve();
-    return delayed;
-  };
-  syncBuiltinESMExports();
-  try {
-    pendingRead = loadSettings(raceDir, originalRun);
-    await Promise.race([
-      readingHistory.promise,
-      pendingRead.then(() =>
-        assert.fail(
-          "historical recovery must reach the controlled history read",
-        ),
-      ),
-    ]);
-    const newer = {
-      ...settings,
-      modelProvider: "newer-provider",
-      reasoningSummary: "concise",
-    };
-    await writeSnapshot(raceDir, newer);
-    const newerBytes = await readFile(racePath, "utf8");
-    releaseHistory.resolve();
-    const delayedProjection = await pendingRead;
-    assert.equal(delayedProjection.modelProvider, "openai");
-    assert.equal(delayedProjection.reasoningSummary, "none");
-    assert.equal(
-      await readFile(racePath, "utf8"),
-      newerBytes,
-      "a delayed historical projection must not overwrite a newer snapshot",
-    );
-    assert.deepEqual(await loadSettings(raceDir, boundRun(newer)), newer);
-  } finally {
-    releaseHistory.resolve();
-    await pendingRead?.catch(() => {});
-    fs.createReadStream = originalCreateReadStream;
-    syncBuiltinESMExports();
-  }
-  const incompletePath = join(
-    incompleteDir,
-    "artifacts",
-    "deep_discovery",
-    "execution-settings.json",
-  );
-  const incompleteBytes = await readFile(incompletePath, "utf8");
-  const repaired = await loadSettings(incompleteDir, originalRun);
+  const [repaired, newer] = await Promise.all([
+    loadSnapshot(incomplete, originalRun),
+    loadSnapshot(settings),
+  ]);
+  assert.deepEqual(newer, settings);
   assert.deepEqual(repaired, {
     ...incomplete,
     model: "stored-model",
@@ -1218,13 +966,8 @@ profile = "fixture-profile"
     modelProvider: "openai",
     reasoningSummary: "none",
   });
-  assert.equal(
-    await readFile(incompletePath, "utf8"),
-    incompleteBytes,
-    "recovering historical fields is read-only",
-  );
   await rm(sessionDirectory, { recursive: true });
-  const unavailable = await loadSettings(incompleteDir, originalRun);
+  const unavailable = await loadSnapshot(incomplete, originalRun);
   assert.equal(unavailable.model, "stored-model");
   assert.equal(unavailable.reasoningEffort, "ultra");
   assert.equal(
@@ -1233,10 +976,7 @@ profile = "fixture-profile"
     "unavailable history remains unknown",
   );
   assert.equal(unavailable.reasoningSummary, undefined);
-  assert.equal(await readFile(incompletePath, "utf8"), incompleteBytes);
-  const unknownDir = join(root, "unknown");
-  await writeSnapshot(unknownDir, incomplete);
-  const unknown = await loadSettings(unknownDir, {
+  const unknown = await loadSnapshot(incomplete, {
     ...originalRun,
     usageOwner: null,
   });
@@ -1248,16 +988,40 @@ profile = "fixture-profile"
   );
   assert.equal(unknown.reasoningSummary, undefined);
   assert.equal(unknown.nativeServiceTierAbsent, undefined);
-  const unsupported = JSON.stringify({ version: 99, settings });
-  await writeFile(savedPath, unsupported);
   await assert.rejects(
-    loadSettings(join(root, "one"), {
-      workflowVersion: "deep-security-scan/v2",
-      executionSettings: { version: 99, settings },
-    }),
+    loadRecordedSettings({ executionSettings: { version: 99, settings } }),
     /unsupported/,
   );
-  assert.equal(await readFile(savedPath, "utf8"), unsupported);
+
+  // Model-writable artifacts cannot supply or override trusted launch settings.
+  const directory = join(root, "artifacts", "deep_discovery");
+  await mkdir(directory, { recursive: true });
+  const artifact = join(directory, "execution-settings.json");
+  for (const version of [undefined, 1, 99]) {
+    const bytes = JSON.stringify({ version, settings: incomplete });
+    if (version !== undefined) await writeFile(artifact, bytes);
+    const run = { scanDir: root, workflowVersion: "deep-security-scan/v2" };
+    assert.deepEqual(await loadSnapshot(settings, run), settings);
+    await assert.rejects(loadRecordedSettings(run), /no recorded original/);
+    let reads = 0;
+    const legacy = await loadRecordedSettings(
+      { ...run, workflowVersion: "deep-security-scan/v1" },
+      async () => {
+        reads++;
+        return {
+          config: { model: "original", model_reasoning_effort: "high" },
+        };
+      },
+    );
+    assert.equal(reads, 1);
+    assert.equal(legacy.model, "original");
+    assert.equal(legacy.reasoningEffort, "high");
+    assert.equal(legacy.codexPath, undefined);
+    assert.equal(legacy.codexHome, undefined);
+    if (version === undefined)
+      await assert.rejects(readFile(artifact), { code: "ENOENT" });
+    else assert.equal(await readFile(artifact, "utf8"), bytes);
+  }
 } finally {
   await rm(root, { recursive: true, force: true });
 }

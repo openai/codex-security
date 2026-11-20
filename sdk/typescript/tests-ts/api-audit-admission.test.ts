@@ -10,10 +10,19 @@ import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { runNodePython } from "./support/python-probe.js";
-import type { ScanDraftInput } from "../src/accepted-audit.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { completedEvents } from "./support/api-events.js";
+
+interface ScanDraftInput {
+  scanId: string;
+  complete?: boolean;
+  handoffClaimToken?: string;
+  scope?: Record<string, unknown>;
+  threatModel?: Record<string, unknown>;
+  findings: Record<string, unknown>[];
+  reviewState: Record<string, unknown>;
+}
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -24,7 +33,7 @@ const {
   parseScanDraft,
   recordCodexSecurityScanDraft,
   recordCodexSecurityScanDraftViaWorkbench,
-  readDiscoveryAuditDraft,
+  validateDiscoveryArtifacts,
   DeepScanWorkerRunner,
 } = await importNativeModule({
   stdin: {
@@ -267,7 +276,7 @@ for (const scenario of cases) {
     if (scenario.accepted) {
       expect(deepResult.status, deepResult.error?.message).toBe("succeeded");
       expect(acceptedPaths).toEqual([deepResult.worker.resultPath]);
-      const deepDraft: ScanDraftInput = await readDiscoveryAuditDraft(
+      const deepDraft: ScanDraftInput = await validateDiscoveryArtifacts(
         artifacts,
         deepResult.worker.resultPath,
         scanId,

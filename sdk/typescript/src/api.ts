@@ -7,11 +7,6 @@ export { scanPreflightCodexConfig } from "./preflight-config.js";
 import { resumeSelectedDeepScan } from "./deep-scan-finalization.js";
 import { recoverSelectedScanStartup } from "./selected-scan-recovery.js";
 import {
-  auditEvidence,
-  runAcceptedAudit,
-  type ScanDraftInput,
-} from "./accepted-audit.js";
-import {
   explicitlyCanceled,
   hostedScanFailureStatus,
   ScanExecutionError,
@@ -49,6 +44,7 @@ import {
   win32,
 } from "node:path";
 import {
+  Codex,
   type CodexOptions,
   type ModelReasoningEffort,
   type ThreadOptions,
@@ -69,13 +65,6 @@ import {
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
-
-import {
-  createCodexClient,
-  type CodexSessionClient as CodexClientLike,
-  type CodexSessionThread as CodexThreadLike,
-  type CodexSessionEvent as ScanEvent,
-} from "./codex-session.js";
 import {
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
@@ -352,6 +341,24 @@ import {
   isWithin,
   type InspectedExecutable,
 } from "./trusted-executable.js";
+
+interface CodexThreadLike {
+  readonly id: string | null;
+  runStreamed(
+    input: string,
+    options: TurnOptions,
+  ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
+}
+
+interface ScanEvent {
+  readonly type: string;
+  readonly [key: string]: unknown;
+}
+
+interface CodexClientLike {
+  startThread(options: ThreadOptions): CodexThreadLike;
+  resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
+}
 
 interface PreparedRuntime {
   codexHome: string;
@@ -791,7 +798,7 @@ interface ClientDependencies {
 export const DEFAULT_DEPENDENCIES: ClientDependencies = {
   createCodex: ({ nativeProfile, ...options }) =>
     nativeProfile === undefined
-      ? createCodexClient(options)
+      ? new Codex(options)
       : createProfileCodex(options, nativeProfile),
   environment: process.env,
 };
@@ -6547,12 +6554,6 @@ export async function runScanEvents(
   let tacStatusReported = false;
   try {
     options.signal.throwIfAborted();
-    let completedTurn:
-      | (Awaited<ReturnType<typeof readCodexTurn>> & {
-          threadId: string;
-          status: "completed";
-        })
-      | undefined;
     const execute = async () => {
       const turn =
         options.savedCompletion ??
@@ -6639,19 +6640,19 @@ export async function runScanEvents(
           "Codex Security did not report a thread ID.",
         );
       }
-      return (completedTurn = { ...turn, threadId, status });
+      return { ...turn, threadId, status };
     };
     let managedFinalized = false;
-    const accept = async () => {
+    const accept = async (execution: Awaited<ReturnType<typeof execute>>) => {
+      options.signal.throwIfAborted();
       // Managed completion reconciles saved checkpoints before canonical admission.
       if (
         options.workbenchValidated &&
         options.onFinalize !== undefined &&
-        completedTurn !== undefined &&
         !managedFinalized
       ) {
-        const finalizedUsage = await options.onFinalize(completedTurn.usage);
-        if (finalizedUsage !== undefined) completedTurn.usage = finalizedUsage;
+        const finalizedUsage = await options.onFinalize(execution.usage);
+        if (finalizedUsage !== undefined) execution.usage = finalizedUsage;
         managedFinalized = true;
       }
       options.signal.throwIfAborted();
@@ -6690,43 +6691,33 @@ export async function runScanEvents(
           pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
         )
       ).default;
-      const draft: ScanDraftInput = helper.parseCanonicalScanDraft(
+      const draft = helper.parseCanonicalScanDraft(
         { scanId: options.scanId ?? documents.manifest.scan.id, ...documents },
         options.acceptedFindings?.(documents),
       );
-      return auditEvidence(draft);
+      return draft.complete !== false;
     };
-    let audit;
+    let turn: Awaited<ReturnType<typeof execute>> | undefined;
+    let complete: boolean;
     try {
-      audit = await runAcceptedAudit({
-        signal: options.signal,
-        execute,
-        accept,
-      });
+      turn = await execute();
+      complete = await accept(turn);
     } catch (error) {
       if (options.signal.aborted) throw error;
       const saved = await options.recoverCompletion?.();
       if (!saved || saved.status !== "completed" || saved.threadId === null)
         throw error;
       // The enclosing scan publishes its saved selection; acceptance then reads it.
-      const recovered = completedTurn ?? {
-        ...saved,
-        threadId: saved.threadId,
-        status: "completed" as const,
-      };
-      completedTurn = recovered;
-      audit = await runAcceptedAudit({
-        signal: options.signal,
-        execute: async () => recovered,
-        accept,
-      });
+      turn ??= { ...saved, threadId: saved.threadId, status: saved.status };
+      complete = await accept(turn);
     }
-    if (audit.status === "checkpoint")
+    options.signal.throwIfAborted();
+    if (!complete)
       throw new IncompleteScanError(
         "Codex Security produced only an unfinished audit checkpoint.",
       );
-    const { status, threadId, finalResponse } = audit.execution;
-    let { usage } = audit.execution;
+    const { status, threadId, finalResponse } = turn;
+    let { usage } = turn;
     if (!options.workbenchValidated && options.onFinalize !== undefined) {
       const finalizedUsage = await options.onFinalize(usage);
       if (finalizedUsage !== undefined) usage = finalizedUsage;

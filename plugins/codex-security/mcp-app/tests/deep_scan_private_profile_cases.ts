@@ -5,38 +5,21 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import {
-  assertConfigOverrides,
-  workerPermissionProfileOverride,
-} from "./assertions.ts";
+import { assertConfigOverrides } from "./assertions.ts";
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
-import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import type { fakeCodexFixture as createFixture } from "./deep_scan_executor_fixture.ts";
 
-interface Dependencies {
-  CodexSdkWorkerExecutor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
-  captureDeepScanExecutionSettings: typeof import("../src/deep-scan/recovery-settings.js").captureDeepScanExecutionSettings;
-  restoredDeepScanWorkerSettings: typeof import("../src/deep-scan/recovery-settings.js").restoredDeepScanWorkerSettings;
-  fakeCodexFixture: typeof createFixture;
-  workerRequest: (
-    promptPath: string,
-    workingDirectory: string,
-    options?: Partial<CodexWorkerRequest>,
-  ) => CodexWorkerRequest;
-  emptyWorkerPermissionProfile: NonNullable<
-    Parameters<typeof createFixture>[0]
-  >;
-}
-
-export async function testRestoredPrivateProfileHomes({
+import {
   CodexSdkWorkerExecutor,
   captureDeepScanExecutionSettings,
   restoredDeepScanWorkerSettings,
   fakeCodexFixture,
+  workerPermissionProfileOverride,
   workerRequest,
-  emptyWorkerPermissionProfile,
-}: Dependencies) {
+} from "./deep_scan_executor_fixture.ts";
+import { emptyWorkerPermissionProfile } from "./support/fake-codex-fixture.ts";
+
+export async function testRestoredPrivateProfileHomes() {
   const providerSource = new URL(
     "../../../../sdk/typescript/src/provider-profile.ts",
     import.meta.url,

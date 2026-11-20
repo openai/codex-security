@@ -13,41 +13,26 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
+import { assertConfigOverrides, assertFlagPair } from "./assertions.ts";
+
 import {
-  assertConfigOverrides,
-  assertFlagPair,
-  assertReadOnlyWorkerPolicy,
-  assertWorkerSubagentPolicy,
-  workerPermissionProfileOverride,
-} from "./assertions.ts";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { fakeCodexFixture as createFixture } from "./deep_scan_executor_fixture.ts";
-
-interface Dependencies {
-  CodexSdkWorkerExecutor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor;
-  WorkbenchDeepScanStore: typeof import("../src/deep-scan/store.js").WorkbenchDeepScanStore;
-  captureDeepScanExecutionSettings: typeof import("../src/deep-scan/recovery-settings.js").captureDeepScanExecutionSettings;
-  loadDeepScanExecutionSettings: typeof import("../src/deep-scan/recovery-settings.js").loadDeepScanExecutionSettings;
-  restoredDeepScanWorkerSettings: typeof import("../src/deep-scan/recovery-settings.js").restoredDeepScanWorkerSettings;
-  fakeCodexFixture: typeof createFixture;
-  trustedParentSandboxWithDenials: DeepWorkerParentSandbox;
-  deniedWorkerPermissionProfile: NonNullable<
-    Parameters<typeof createFixture>[0]
-  >;
-  restoreEnv: (name: string, value: string | undefined) => void;
-}
-
-export async function testReconstructedWorkers({
   CodexSdkWorkerExecutor,
-  WorkbenchDeepScanStore,
   captureDeepScanExecutionSettings,
-  loadDeepScanExecutionSettings,
   restoredDeepScanWorkerSettings,
   fakeCodexFixture,
+  workerPermissionProfileOverride,
+  assertReadOnlyWorkerPolicy,
+  assertWorkerSubagentPolicy,
+  WorkbenchDeepScanStore,
+  loadDeepScanExecutionSettings,
+} from "./deep_scan_executor_fixture.ts";
+import {
   trustedParentSandboxWithDenials,
   deniedWorkerPermissionProfile,
-  restoreEnv,
-}: Dependencies) {
+} from "./support/fake-codex-fixture.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
+
+export async function testReconstructedWorkers() {
   const launchFailures: string[] = [];
   const previousMarker = process.env.FAKE_CODEX_MARKER;
   const originalSpawn = childProcess.spawn;
@@ -302,10 +287,7 @@ export async function testReconstructedWorkers({
       threadId: beginInput.threadId,
     });
     assert.equal(claim.acquired, true);
-    assert.deepEqual(
-      await loadDeepScanExecutionSettings(recordedScanDir, claim.run),
-      saved,
-    );
+    assert.deepEqual(await loadDeepScanExecutionSettings(claim.run), saved);
     assert.deepEqual(
       (await store.get(run.scanId, beginInput.threadId)).executionSettings,
       run.executionSettings,
@@ -404,14 +386,11 @@ export async function testReconstructedWorkers({
             scan.run.executionSettings = saved;
           }
           const snapshotBeforeRead = await readFile(scan.snapshotPath, "utf8");
-          const recorded = await loadDeepScanExecutionSettings(
-            scan.recordedScanDir,
-            {
-              ...scan.run,
-              ...scan.settings,
-              createdAt: "2026-01-01T00:01:00Z",
-            },
-          );
+          const recorded = await loadDeepScanExecutionSettings({
+            ...scan.run,
+            ...scan.settings,
+            createdAt: "2026-01-01T00:01:00Z",
+          });
           const restored = restoredDeepScanWorkerSettings(
             recorded,
             scan.currentParentSandbox,

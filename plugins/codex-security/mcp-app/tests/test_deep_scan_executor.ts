@@ -2,10 +2,7 @@ import { importSource } from "./import-module.ts";
 import {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
-  WorkbenchDeepScanStore,
   captureDeepScanExecutionSettings,
-  loadDeepScanExecutionSettings,
-  restoredDeepScanWorkerSettings,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
   parseDeepScan,
@@ -129,47 +126,9 @@ try {
         }),
       "selected profile files",
     );
-    await check(
-      t,
-      () =>
-        testDurableWorkerRuntimeSnapshots({
-          CodexSdkWorkerExecutor,
-          captureDeepScanExecutionSettings,
-          restoredDeepScanWorkerSettings,
-          fakeCodexFixture,
-          parentSandbox: trustedParentSandbox,
-        }),
-      testDurableWorkerRuntimeSnapshots.name,
-    );
-    await check(
-      t,
-      () =>
-        testReconstructedWorkers({
-          CodexSdkWorkerExecutor,
-          WorkbenchDeepScanStore,
-          captureDeepScanExecutionSettings,
-          loadDeepScanExecutionSettings,
-          restoredDeepScanWorkerSettings,
-          fakeCodexFixture,
-          trustedParentSandboxWithDenials,
-          deniedWorkerPermissionProfile,
-          restoreEnv,
-        }),
-      testReconstructedWorkers.name,
-    );
-    await check(
-      t,
-      () =>
-        testRestoredPrivateProfileHomes({
-          CodexSdkWorkerExecutor,
-          captureDeepScanExecutionSettings,
-          restoredDeepScanWorkerSettings,
-          fakeCodexFixture,
-          workerRequest,
-          emptyWorkerPermissionProfile,
-        }),
-      testRestoredPrivateProfileHomes.name,
-    );
+    await check(t, testDurableWorkerRuntimeSnapshots);
+    await check(t, testReconstructedWorkers);
+    await check(t, testRestoredPrivateProfileHomes);
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
@@ -217,19 +176,7 @@ try {
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
-      await check(
-        t,
-        () =>
-          testHome(
-            CodexSdkWorkerExecutor,
-            captureDeepScanExecutionSettings,
-            restoredDeepScanWorkerSettings,
-            loadDeepScanExecutionSettings,
-            withWorkerFixture,
-            trustedParentSandbox,
-          ),
-        "saved Codex home",
-      );
+      await check(t, () => testHome(withWorkerFixture), "saved Codex home");
       await check(
         t,
         testConcurrentWorkerExecutableAliases,

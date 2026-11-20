@@ -1,9 +1,8 @@
-import { auditEvidence, runAcceptedAudit } from "../accepted-audit.js";
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
-import { readDiscoveryAuditDraft } from "./artifact-validation.js";
+import { validateDiscoveryArtifacts } from "./artifact-validation.js";
 import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
@@ -137,7 +136,7 @@ export class DeepScanWorkerRunner {
       promptRoot,
       artifactDir,
       validate: async () => {
-        discoveryResult = await readDiscoveryAuditDraft(
+        discoveryResult = await validateDiscoveryArtifacts(
           artifacts,
           resultPath,
           run.scanId,
@@ -148,10 +147,9 @@ export class DeepScanWorkerRunner {
             },
           },
         );
-        return discoveryResult;
       },
     });
-    if (!discoveryResult || discoveryResult.complete === false) {
+    if (!discoveryResult) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
@@ -232,7 +230,7 @@ export class DeepScanWorkerRunner {
     promptPath: string;
     promptRoot: string;
     artifactDir: string;
-    validate: () => Promise<ScanDraftInput>;
+    validate: () => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -346,102 +344,88 @@ export class DeepScanWorkerRunner {
         const resumePrompt = resumableThreadId
           ? (continuationPrompt ?? transientExecutionContinuation(attempt))
           : undefined;
-        const execute = async () => {
-          const result = await this.options.executor.run({
-            attemptId,
-            workerUsageDirectory: run.workerUsageDirectory,
-            kind: "discovery",
-            promptPath: executionPromptPath,
-            workingDirectory: input.artifactDir,
-            subagents: run.config.subagents,
-            signal,
-            onNonRetryableError: (error) => {
-              if (signal.aborted || terminalFailure) return;
-              terminalFailure = this.options.store
-                .updateWorker({
-                  ...baseMutation,
-                  threadId: activeThreadId,
-                  status: "failed",
-                  error: deepScanErrorMessage(error),
-                  terminalFailure: true,
-                })
-                .then(() => error);
-              // Await this write after executor cleanup, even if it rejects first.
-              void terminalFailure.catch(() => {});
-              this.options.onNonRetryableError?.(error);
-            },
-            resumeThreadId: resumableThreadId,
-            continuationPrompt:
-              resumePrompt && run.severityRubric
-                ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
-                : resumePrompt,
-            artifactContext: {
-              root: input.artifactDir,
-              layout: "worker",
-              discoveryBoard: {
-                root: this.options.artifacts.peerNotesRoot,
-                author: input.workerLabel,
-              },
-            },
-            onAttribution: (value) => {
-              attribution = value;
-              logStarted();
-            },
-            onUsage: async (usage, turnId) => {
-              receipt.usage = usage;
-              receipt.turnId = turnId;
-              await persistUsage();
-            },
-            onThreadStarted: async (threadId) => {
-              logStarted();
-              activeThreadId = threadId;
-              lastThreadId = threadId;
-              receipt.threadId = threadId;
-              await this.options.store.updateWorker({
+        signal.throwIfAborted();
+        const result = await this.options.executor.run({
+          attemptId,
+          workerUsageDirectory: run.workerUsageDirectory,
+          kind: "discovery",
+          promptPath: executionPromptPath,
+          workingDirectory: input.artifactDir,
+          subagents: run.config.subagents,
+          signal,
+          onNonRetryableError: (error) => {
+            if (signal.aborted || terminalFailure) return;
+            terminalFailure = this.options.store
+              .updateWorker({
                 ...baseMutation,
-                threadId,
-              });
-              await persistUsage();
-              this.log({
-                event: "worker_thread_started",
-                scanId: run.scanId,
-                workerId: input.workerId,
-                kind: "discovery",
-                attempt,
-                threadId,
-              });
+                threadId: activeThreadId,
+                status: "failed",
+                error: deepScanErrorMessage(error),
+                terminalFailure: true,
+              })
+              .then(() => error);
+            // Await this write after executor cleanup, even if it rejects first.
+            void terminalFailure.catch(() => {});
+            this.options.onNonRetryableError?.(error);
+          },
+          resumeThreadId: resumableThreadId,
+          continuationPrompt:
+            resumePrompt && run.severityRubric
+              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
+              : resumePrompt,
+          artifactContext: {
+            root: input.artifactDir,
+            layout: "worker",
+            discoveryBoard: {
+              root: this.options.artifacts.peerNotesRoot,
+              author: input.workerLabel,
             },
-          });
-          logStarted();
-          activeThreadId = result.threadId ?? activeThreadId;
-          receipt.threadId = activeThreadId;
-          receipt.turnId = result.turnId ?? receipt.turnId;
-          if (result.usage !== undefined) receipt.usage = result.usage;
-          await persistUsage();
-          return result;
-        };
-        const accept = async (result: Awaited<ReturnType<typeof execute>>) => {
-          if (terminalFailure) throw await terminalFailure;
-          validationStarted = true;
-          let accepted: ScanDraftInput;
-          try {
-            accepted = await input.validate();
-          } catch (validationError) {
-            throw withWorkerDiagnostics(validationError, result.diagnostics);
-          }
-          validationCompleted = accepted?.complete !== false;
-          return auditEvidence(accepted);
-        };
-        const audit = await runAcceptedAudit({ signal, execute, accept });
-        if (audit.status === "checkpoint") {
-          throw withWorkerDiagnostics(
-            new Error(
-              "Standard scan worker wrote only a checkpoint; its audit is not complete.",
-            ),
-            audit.execution.diagnostics,
-          );
+          },
+          onAttribution: (value) => {
+            attribution = value;
+            logStarted();
+          },
+          onUsage: async (usage, turnId) => {
+            receipt.usage = usage;
+            receipt.turnId = turnId;
+            await persistUsage();
+          },
+          onThreadStarted: async (threadId) => {
+            logStarted();
+            activeThreadId = threadId;
+            lastThreadId = threadId;
+            receipt.threadId = threadId;
+            await this.options.store.updateWorker({
+              ...baseMutation,
+              threadId,
+            });
+            await persistUsage();
+            this.log({
+              event: "worker_thread_started",
+              scanId: run.scanId,
+              workerId: input.workerId,
+              kind: "discovery",
+              attempt,
+              threadId,
+            });
+          },
+        });
+        logStarted();
+        activeThreadId = result.threadId ?? activeThreadId;
+        receipt.threadId = activeThreadId;
+        receipt.turnId = result.turnId ?? receipt.turnId;
+        if (result.usage !== undefined) receipt.usage = result.usage;
+        await persistUsage();
+        signal.throwIfAborted();
+        if (terminalFailure) throw await terminalFailure;
+        validationStarted = true;
+        try {
+          await input.validate();
+        } catch (validationError) {
+          throw withWorkerDiagnostics(validationError, result.diagnostics);
         }
-        const result = audit.execution;
+        validationCompleted = true;
+        signal.throwIfAborted();
         outcome = "validated";
         return {
           status: "validated",

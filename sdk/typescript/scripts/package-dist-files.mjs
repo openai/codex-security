@@ -1,5 +1,4 @@
 const distModules = [
-  "accepted-audit",
   "api",
   "dependency-stack-advisory",
   "dependency-stack-assessment",
@@ -139,7 +138,6 @@ const distModules = [
   "codex-profile",
   "codex-prompt",
   "codex-sdk-environment",
-  "codex-session",
   "component-plan",
   "component-scan",
   "config",

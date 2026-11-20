@@ -49,28 +49,24 @@ export function startDeepScanEngine(options: {
         new CodexSdkWorkerExecutor({
           parentTurn: options.parentTurn,
           ...restoredDeepScanWorkerSettings(
-            await loadDeepScanExecutionSettings(
-              owned.scanDir,
-              owned,
-              async () => {
-                const context = await runWorkbench([
-                  "get-scan",
-                  "--scan-id",
-                  owned.scanId,
-                ]);
-                const recipe = context.recipe as
-                  Pick<DeepScanLegacySettingsContext, "config"> | undefined;
-                const scan = context.scan as {
-                  executionAttribution?: {
-                    owner: DeepScanRunState["usageOwner"];
-                  };
+            await loadDeepScanExecutionSettings(owned, async () => {
+              const context = await runWorkbench([
+                "get-scan",
+                "--scan-id",
+                owned.scanId,
+              ]);
+              const recipe = context.recipe as
+                Pick<DeepScanLegacySettingsContext, "config"> | undefined;
+              const scan = context.scan as {
+                executionAttribution?: {
+                  owner: DeepScanRunState["usageOwner"];
                 };
-                return {
-                  config: recipe?.config,
-                  usageOwner: scan.executionAttribution?.owner,
-                };
-              },
-            ),
+              };
+              return {
+                config: recipe?.config,
+                usageOwner: scan.executionAttribution?.owner,
+              };
+            }),
             options.parentSandbox,
           ),
           serviceTier: owned.serviceTier,

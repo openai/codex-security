@@ -3,15 +3,17 @@ import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertConfigOverrides } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
+import {
+  CodexSdkWorkerExecutor as Executor,
+  captureDeepScanExecutionSettings as capture,
+  restoredDeepScanWorkerSettings as restore,
+  loadDeepScanExecutionSettings as load,
+} from "./deep_scan_executor_fixture.ts";
+import { trustedParentSandbox as sandbox } from "./support/fake-codex-fixture.ts";
 
 type Fixture = { root: string; executablePath: string; markerPath: string };
 
 export async function testHome(
-  Executor: typeof import("../src/deep-scan/executor.js").CodexSdkWorkerExecutor,
-  capture: typeof import("../src/deep-scan/recovery-settings.js").captureDeepScanExecutionSettings,
-  restore: typeof import("../src/deep-scan/recovery-settings.js").restoredDeepScanWorkerSettings,
-  load: typeof import("../src/deep-scan/recovery-settings.js").loadDeepScanExecutionSettings,
   withFixture: (
     action: (
       fixture: Fixture,
@@ -19,7 +21,6 @@ export async function testHome(
       workingDirectory: string,
     ) => Promise<void>,
   ) => Promise<void>,
-  sandbox: DeepWorkerParentSandbox,
 ) {
   return withFixture(async (fixture, promptPath, workingDirectory) => {
     const home = path.join(fixture.root, "selected-home");
@@ -175,7 +176,7 @@ export async function testHome(
         },
       }),
     );
-    const recovered = await load(fixture.root, {
+    const recovered = await load({
       usageOwner: owner,
       createdAt: owner.startedAt,
       executionSettings: snapshot,

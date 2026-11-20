@@ -85,25 +85,6 @@ export async function validateDiscoveryArtifacts(
   expectedScanId: string,
   options: DiscoveryAuditOptions = {},
 ): Promise<ScanDraftInput> {
-  const result = await readDiscoveryAuditDraft(
-    artifacts,
-    resultPath,
-    expectedScanId,
-    options,
-  );
-  if (result.complete === false)
-    throw new Error(
-      "Standard scan worker wrote only a checkpoint; its audit is not complete.",
-    );
-  return result;
-}
-
-export async function readDiscoveryAuditDraft(
-  artifacts: DeepScanArtifacts,
-  resultPath: string,
-  expectedScanId: string,
-  options: DiscoveryAuditOptions = {},
-): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = options.artifactDir ?? dirname(resultPath);
   const context = {
@@ -128,8 +109,10 @@ export async function readDiscoveryAuditDraft(
     expectedScanId,
     options.accepted ? parseAcceptedDiscoveryDraft : parsePersistedScanDraft,
   );
-  // Unfinished drafts remain resumable; complete drafts must retain their evidence.
-  if (result.complete === false) return result;
+  if (result.complete === false)
+    throw new Error(
+      "Standard scan worker wrote only a checkpoint; its audit is not complete.",
+    );
   if (options.validateWriteups !== false)
     await validateWriteupFiles(artifacts, result);
   if (!options.accepted) validateWorkerReport(result);

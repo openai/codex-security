@@ -19,8 +19,7 @@ import {
   sep,
   win32,
 } from "node:path";
-import { createCodexClient } from "../codex-session.js";
-import type { CodexOptions } from "@openai/codex-sdk";
+import { Codex, type CodexOptions } from "@openai/codex-sdk";
 import type { CyberAccessProgram, ThreadEvent } from "@openai/codex-sdk";
 import { readCodexSessionTurn } from "../../../scripts/codex_session.mjs";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -561,7 +560,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       };
       const codex =
         runtimeSettings.nativeProfile === undefined
-          ? createCodexClient(codexOptions)
+          ? new Codex(codexOptions)
           : createCodexProfileClient<ThreadEvent>({
               ...codexOptions,
               profileName: runtimeSettings.nativeProfile,

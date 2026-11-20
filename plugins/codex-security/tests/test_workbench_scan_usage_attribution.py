@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -716,14 +717,27 @@ def test_legacy_worker_usage_requires_turn_ownership_timestamps(
 
 
 @pytest.mark.parametrize(
-    ("worker_kind", "legacy_archive"),
-    [("discovery", False), ("discovery", True), ("dedup", False)],
+    ("worker_kind", "legacy_archive", "dedicated", "short_archive"),
+    [
+        *(
+            (kind, legacy, dedicated, False)
+            for kind, legacy in [("discovery", False), ("discovery", True), ("dedup", False)]
+            for dedicated in (False, True)
+        ),
+        pytest.param(
+            "discovery",
+            True,
+            True,
+            True,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX archive naming"),
+        ),
+    ],
 )
 def test_completion_recovers_replaced_deep_worker_threads(
-    tmp_path: Path, worker_kind: str, legacy_archive: bool
+    tmp_path: Path, worker_kind: str, legacy_archive: bool, dedicated: bool, short_archive: bool
 ) -> None:
     # Compressed variants exercise the bundled Node decoder in the SDK runtime lane.
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=dedicated)
     fixture = replace(
         fixture,
         started_at=(fixture.started_at - timedelta(seconds=1)).replace(microsecond=500123),
@@ -773,15 +787,6 @@ def test_completion_recovers_replaced_deep_worker_threads(
             "--sdk-thread-id",
             thread_id,
             environment=fixture.environment,
-        )
-    # Legacy runs have no durable owner turn or earlier worker session records.
-    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE deep_scan_runs SET usage_owner_json = NULL WHERE scan_id = ?",
-            (fixture.scan_id,),
-        )
-        connection.execute(
-            "DELETE FROM deep_scan_attempt_sessions WHERE scan_id = ?", (fixture.scan_id,)
         )
     _state_graph(
         fixture.environment,
@@ -874,6 +879,13 @@ def test_completion_recovers_replaced_deep_worker_threads(
             "threadCount": 5,
         }.items()
     )
+    archived_arguments = []
+    if short_archive:
+        digest = hashlib.sha256(fixture.scan_dir.name.encode()).hexdigest()
+        archived = fixture.scan_dir.with_name(f".previous-{digest}-fixture")
+        fixture.scan_dir.rename(archived)
+        fixture.scan_dir.mkdir(mode=0o700)
+        archived_arguments = ["--archived-scan-dir", str(archived)]
     run_workbench(
         fixture.state_dir,
         "register-cli-scan",
@@ -882,6 +894,7 @@ def test_completion_recovers_replaced_deep_worker_threads(
         "--scan-dir",
         str(fixture.scan_dir),
         "--archive-existing",
+        *archived_arguments,
         "--recipe-json",
         json.dumps(
             {
@@ -1264,22 +1277,24 @@ def test_completion_preserves_receipts_when_later_worker_usage_is_missing(
     assert usage["byRole"]["workers"]["totalTokens"] == 25
 
 
+@pytest.mark.parametrize("timed_restart", [False, True])
 @pytest.mark.parametrize("worker", [False, True])
 @pytest.mark.parametrize("terminal", ["task_complete", "turn_aborted"])
 @pytest.mark.parametrize("receipt", ["none", "native", "legacy", "zero"])
 def test_closed_turn_coverage_survives_later_success(
-    scan_usage, tmp_path: Path, worker: bool, terminal: str, receipt: str
+    scan_usage, tmp_path: Path, worker: bool, terminal: str, receipt: str, timed_restart: bool
 ) -> None:
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     thread_id = "worker" if worker else "scan-parent"
     parent_id = "scan-parent" if worker else None
-    events = [
-        _event(
-            started,
-            "event_msg",
-            {"type": "task_started", "turn_id": "first", "started_at": int(started.timestamp())},
-        )
-    ]
+
+    def start_turn(turn_id):
+        payload = {"type": "task_started", "turn_id": turn_id}
+        if turn_id == "first" or timed_restart:
+            payload["started_at"] = int(started.timestamp())
+        return _event(started, "event_msg", payload)
+
+    events = [start_turn("first")]
     if receipt in {"native", "zero"}:
         events.append(
             _response_event(
@@ -1296,7 +1311,7 @@ def test_closed_turn_coverage_survives_later_success(
     events.extend(
         [
             _event(started, "event_msg", {"type": terminal, "turn_id": "first"}),
-            _event(started, "event_msg", {"type": "task_started", "turn_id": "second"}),
+            start_turn("second"),
             _response_event(started, thread_id, "second-response", 10, 2, turn_id="second"),
             _event(started, "event_msg", {"type": "task_complete", "turn_id": "second"}),
         ]
