@@ -894,6 +894,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
   const cloudDefault = "application_default_credentials.json";
+  const legacyCloud = join(cloudConfig, "legacy_credentials", "fixture");
+  await mkdir(legacyCloud, { recursive: true });
   const appdata = join(operator, "Roaming");
   const terraformDir =
     process.platform === "win32"
@@ -980,6 +982,9 @@ test("patch model and clean filters cannot read selected authentication files", 
     proxyKey,
     clientCert,
     join(operator, ".pypirc"),
+    join(cloudConfig, "credentials.db"),
+    join(cloudConfig, "credentials.db-wal"),
+    join(legacyCloud, ".boto"),
     join(operator, "selected.config.toml"),
     join(terraformDir, "registry.tfrc"),
     join(terraformDir, "workspace.tfrc.json"),
@@ -1041,9 +1046,15 @@ test("patch model and clean filters cannot read selected authentication files", 
     ...glabDirectories.map((directory) => join(directory, "config.yml")),
     cloudKey,
     join(cloudConfig, cloudDefault),
+    join(cloudConfig, "access_tokens.db"),
+    join(cloudConfig, "access_tokens.db-journal"),
+    join(operator, ".config", "gcloud", "credentials.db"),
     join(operator, ".config", "gcloud", cloudDefault),
     ...(process.platform === "win32"
-      ? [join(appdata, "gcloud", cloudDefault)]
+      ? [
+          join(appdata, "gcloud", cloudDefault),
+          join(appdata, "gcloud", "access_tokens.db"),
+        ]
       : []),
     join(ssh, "id_rsa"),
     join(operator, ".docker", "config.json"),
@@ -1084,7 +1095,6 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       await mkdir(join(operator, ".kube"));
       for (const directory of glabDirectories)
         await mkdir(directory, { recursive: true });
-      await mkdir(cloudConfig);
       await mkdir(pgTlsDir, { recursive: true });
       await writeFile(join(terraformDir, "ordinary.txt"), "Terraform sibling");
       await mkdir(join(operator, ".config", "gcloud"));

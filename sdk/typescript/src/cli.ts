@@ -12058,6 +12058,7 @@ interface PatchPublication {
   dirtyFiles: Set<string>;
   ignoredFiles: Set<string>;
   ignoredDigests: Set<string>;
+  worktreeDigests: Set<string>;
   nestedRepositoryDigests: Set<string>;
   stagedBlobs: Set<string>;
   tree: string;
@@ -14901,7 +14902,19 @@ async function preparePatchPublication(
     repository,
   );
   // A fresh index reads worktree edits hidden by assume-unchanged flags.
-  const tree = await snapshotPatchTree(repository, dependencies);
+  const worktreeDigests = new Set<string>();
+  // Inspect the same private index that captured the checkout, including
+  // untracked additions whose original bytes Git normalized.
+  const tree = await snapshotPatchTree(repository, dependencies, (indexFile) =>
+    captureHiddenPatchContent(
+      root,
+      root,
+      dependencies,
+      { GIT_INDEX_FILE: indexFile, GIT_OPTIONAL_LOCKS: "0" },
+      worktreeDigests,
+      signal,
+    ),
+  );
   const worktreeChanges = await patchGitRecords(
     root,
     [
@@ -15088,6 +15101,7 @@ async function preparePatchPublication(
     ignoredDigests,
     hostFilterSettings: gitControls?.hostFilterSettings,
     hostRefreshFilters: gitControls?.hostRefreshFilters,
+    worktreeDigests,
     nestedRepositoryDigests,
     stagedBlobs,
     sshCommand,
@@ -15826,6 +15840,7 @@ async function createPatchPullRequest(
   }
   const checkFileDigests =
     publication.ignoredDigests.size > 0 ||
+    publication.worktreeDigests.size > 0 ||
     publication.nestedRepositoryDigests.size > 0;
   if (checkFileDigests || publication.stagedBlobs.size) {
     const changed = await patchGitRecords(
@@ -15873,7 +15888,9 @@ async function createPatchPullRequest(
           ? "ignored"
           : matches(publication.nestedRepositoryDigests)
             ? "nested repository"
-            : undefined;
+            : matches(publication.worktreeDigests)
+              ? "worktree"
+              : undefined;
       if (source !== undefined)
         throw new CodexSecurityError(
           `Cannot automatically publish ${patchPathText(local)}: it matches pre-existing ${source} content. Local edits and patches were kept; review and publish them separately.`,
@@ -17442,6 +17459,7 @@ async function requiredSnapshotFilterEnvironment(
 async function snapshotPatchTree(
   repository: string,
   dependencies: CliDependencies,
+  inspectIndex?: (indexFile: string) => Promise<void>,
 ): Promise<string> {
   const sourcePathspecs = [
     "--",
@@ -17487,7 +17505,12 @@ async function snapshotPatchTree(
     });
   return withPatchGitIndex(
     workingIndex,
-    async (run) => {
+    async (run, indexFile) => {
+      const writeTree = async () => {
+        const tree = (await run(["write-tree"])).trim();
+        await inspectIndex?.(indexFile);
+        return tree;
+      };
       const sparseSetting = await run(
         [
           "config",
@@ -17631,7 +17654,7 @@ async function snapshotPatchTree(
               ),
             },
           );
-        const tree = (await run(["write-tree"])).trim();
+        const tree = await writeTree();
         // Keep unmaterialized index entries until a completed snapshot has
         // observed the file in this checkout. Its later removal is a real edit.
         dependencies.sparsePatchSnapshots?.set(checkout, {
@@ -17642,7 +17665,7 @@ async function snapshotPatchTree(
         });
         return tree;
       }
-      return (await run(["write-tree"])).trim();
+      return writeTree();
     },
     undefined,
     sourcePathspecs,
