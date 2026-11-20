@@ -83,6 +83,18 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertNotIn("\x9b", result.stderr)
         self.assertIn(r"missing\x1b[31m\x9b2J", result.stderr)
 
+    def test_cli_rejects_non_string_status_in_sealed_manifest(self) -> None:
+        manifest = self.seal_and_read_json("scan-manifest.json")
+        for status in (["completed"], {"outcome": "completed"}):
+            with self.subTest(status=status):
+                manifest["scan"]["status"] = status
+                self.write_json("scan-manifest.json", manifest)
+                result = self.run_finalizer()
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(
+                    "manifest.scan.status: expected a terminal scan outcome", result.stderr
+                )
+
     def test_cli_resolves_noncanonical_scan_directory_arguments(self) -> None:
         self.write_scan()
         for spelling in (

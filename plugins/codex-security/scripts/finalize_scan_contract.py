@@ -1989,7 +1989,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     for key in ("id", "startedAt", "completedAt", "sealedAt"):
         _require_str(scan, key, "manifest.scan")
-    if scan.get("status") not in {"completed", "failed", "canceled", "interrupted"}:
+    if scan.get("status") not in ("completed", "failed", "canceled", "interrupted"):
         raise ContractError("manifest.scan.status: expected a terminal scan outcome")
     producer = _require_dict(scan, "producer", "manifest.scan")
     _require_str(producer, "name", "manifest.scan.producer")
@@ -3171,7 +3171,7 @@ def _prepare_scan_finalization(
 
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
         raise ContractError(f"manifest.schemaVersion: expected {SCHEMA_VERSION}")
-    if scan.get("status") not in {"completed", "failed", "canceled", "interrupted"}:
+    if scan.get("status") not in ("completed", "failed", "canceled", "interrupted"):
         raise ContractError("manifest.scan.status: expected a terminal scan outcome before sealing")
     if (
         expected_coverage_mode is not None
