@@ -367,6 +367,7 @@ interface SessionUsage {
   usageAtCounterBoundary: ScanTokenUsage | null | undefined;
   priorCounterEpochs: ScanTokenUsage | null;
   currentTurnId: string | null;
+  turnModels: Map<string | null, string | null>;
   previousUsage: ScanTokenUsage | null;
   responseIds: Set<string>;
   responseTurns: Set<string | null>;
@@ -502,6 +503,7 @@ function createSessionUsage(observeUsage: boolean): SessionUsage {
     usageAtCounterBoundary: undefined,
     priorCounterEpochs: null,
     currentTurnId: null,
+    turnModels: new Map(),
     previousUsage: null,
     responseIds: new Set(),
     responseTurns: new Set(),
@@ -3946,6 +3948,30 @@ function readSessionBytes(
   }
 }
 
+function modelForTurn(
+  session: SessionUsage,
+  turnId: string | null,
+  model: unknown,
+): string | null {
+  if (typeof model === "string") return model;
+  const recorded = session.turnModels.get(turnId);
+  // A known turn can have no model. Only use the running context for older logs.
+  return recorded === undefined ? session.model : recorded;
+}
+
+function updateSessionTurn(
+  session: SessionUsage,
+  turnId: unknown,
+  model?: unknown,
+): void {
+  if (typeof turnId === "string" && turnId !== session.currentTurnId) {
+    session.usageAtCounterBoundary = session.usage;
+    session.currentTurnId = turnId;
+  }
+  session.model = modelForTurn(session, session.currentTurnId, model);
+  session.turnModels.set(session.currentTurnId, session.model);
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
@@ -3996,26 +4022,17 @@ function readSessionEvent(
       sessionOwnsTurn(session, payload)
     ) {
       session.replaying = false;
+      updateSessionTurn(session, payload["turn_id"]);
       session.events?.push(sessionObservation(session, event));
     }
     return;
   }
   if (event["type"] === "compacted")
     session.usageAtCounterBoundary = session.usage;
-  if (
-    (event["type"] === "turn_context" || payload["type"] === "task_started") &&
-    typeof payload["turn_id"] === "string"
-  ) {
-    if (session.currentTurnId !== payload["turn_id"])
-      session.usageAtCounterBoundary = session.usage;
-    session.currentTurnId = payload["turn_id"];
-  }
-  if (
-    event["type"] === "turn_context" &&
-    typeof payload["model"] === "string"
-  ) {
-    session.model = payload["model"];
-  }
+  if (event["type"] === "turn_context")
+    updateSessionTurn(session, payload["turn_id"], payload["model"]);
+  else if (payload["type"] === "task_started")
+    updateSessionTurn(session, payload["turn_id"]);
   const position = ++session.position;
   const responseUsageObserved = session.responseTurns.size > 0;
   if (event["type"] === "token_usage_record") {
@@ -4118,8 +4135,7 @@ function readSessionEvent(
       }
       session.legacyTurnUsage.delete(turnId);
     }
-    const model =
-      typeof payload["model"] === "string" ? payload["model"] : session.model;
+    const model = modelForTurn(session, turnId, payload["model"]);
     const measured = addTokenUsage(session.usage, usage);
     observeUsageEvent(session, event["timestamp"], measured);
     session.usage = measured;

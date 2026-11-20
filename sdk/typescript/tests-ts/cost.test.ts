@@ -2181,8 +2181,13 @@ test.each([
   "continuous-counter",
   "distinct-turn-receipt",
   "delayed-receipt",
+  "delayed-without-model",
 ] as const)("retains earlier owned usage across %s", async (scenario) => {
   const home = await codexHome();
+  const firstModel =
+    scenario === "delayed-without-model" ? null : "gpt-6-astra";
+  const delayed =
+    scenario === "delayed-receipt" || scenario === "delayed-without-model";
   const start = "2026-07-26T10:00:00Z";
   const parent = await writeSession(home, "parent", {}, { timestamp: start });
   const path = await writeSession(home, "worker", {}, { timestamp: start });
@@ -2207,7 +2212,10 @@ test.each([
   await appendFile(
     path,
     jsonLines([
-      event("turn_context", { turn_id: "first", model: "gpt-5.6-sol" }),
+      event("event_msg", { type: "task_started", turn_id: "first" }),
+      ...(firstModel === null
+        ? []
+        : [event("turn_context", { model: firstModel })]),
       counter(1000),
       ...(scenario === "compacted" || scenario === "continuous-counter"
         ? [
@@ -2216,7 +2224,7 @@ test.each([
             counter(scenario === "compacted" ? 300 : 1300),
           ]
         : [
-            event("turn_context", { turn_id: "second", model: "gpt-5.6-sol" }),
+            event("turn_context", { turn_id: "second", model: "gpt-6-luna" }),
             event("token_usage_record", {
               thread_id: "worker",
               turn_id: "second",
@@ -2225,12 +2233,11 @@ test.each([
               usage: counts(500),
               thread_token_usage: counts(1500),
             }),
-            ...(scenario === "delayed-receipt"
+            ...(delayed
               ? [
                   event("token_usage_record", {
                     thread_id: "worker",
                     turn_id: "first",
-                    model: "gpt-5.6-sol",
                     response_id: "first-response",
                     usage: counts(1000),
                     thread_token_usage: counts(1000),
@@ -2253,7 +2260,18 @@ test.each([
   const expected =
     scenario === "compacted" || scenario === "continuous-counter" ? 1300 : 1500;
   expect(snapshot.usage).toMatchObject({ input_tokens: expected });
-  expect(snapshot.measurement.cost?.inputTokens).toBe(expected);
+  if (firstModel !== null)
+    expect(snapshot.measurement.cost?.inputTokens).toBe(expected);
+  if (delayed) {
+    expect(snapshot.usage).toMatchObject({
+      modelUsage: expect.arrayContaining([
+        expect.objectContaining({ model: firstModel, input_tokens: 1000 }),
+        expect.objectContaining({ model: "gpt-5.6-sol", input_tokens: 500 }),
+      ]),
+    });
+    if (firstModel === null) expect(snapshot.cost).toBeNull();
+    else expect(snapshot.cost?.estimatedUsd).toBeCloseTo(0.012, 10);
+  }
 });
 
 test.each([
