@@ -1,5 +1,6 @@
 import {
   advisoryFunctions,
+  sectionAdvisories,
   servicesFor,
   inputFor,
   verdictOrder,
@@ -254,12 +255,15 @@ function packages(details: Advisory[]) {
   return [...result];
 }
 
-function advisoryDetails(section: Section) {
-  const details = section.check?.advisoryDetails ?? [];
+function advisoryDetails(
+  section: Section,
+  details: Advisory[],
+  urls: string[],
+) {
   const functions = advisoryFunctions(details).map(
     (name) => `<code>${esc(name)}</code>`,
   );
-  const sources = [...new Set(section.check?.advisories ?? [])].map((url) => {
+  const sources = [...new Set(urls)].map((url) => {
     const item = details.find((d) => d.url === url);
     return safeLink(url, item?.id || url);
   });
@@ -275,11 +279,12 @@ function advisoryDetails(section: Section) {
     field("Vulnerable functions", functions) +
     field("Applies when", applicability) +
     field("Advisory sources", sources);
-  const body = section.stack
-    ? "<p>This capture omits the advisory description.</p>"
-    : rows
-      ? `<dl class="facts">${rows}</dl>`
-      : "";
+  const body =
+    section.stack && !details.length
+      ? "<p>This capture omits the advisory description.</p>"
+      : rows
+        ? `<dl class="facts">${rows}</dl>`
+        : "";
   return body
     ? `<details class="advisory-more"><summary>Advisory details</summary>${body}</details>`
     : "";
@@ -292,7 +297,7 @@ export function checkout(target: Report["target"]) {
 }
 
 export function advisoryHeader(report: Report, section: Section): string {
-  const details = section.check?.advisoryDetails ?? [];
+  const { details, urls } = sectionAdvisories(section);
   const summary = details.find((d) => d.summary)?.summary;
   const overview =
     details.find((d) => d.overview)?.overview ?? report.description;
@@ -307,6 +312,6 @@ export function advisoryHeader(report: Report, section: Section): string {
    ${eyebrow ? `<p class="eyebrow">${esc(eyebrow)}</p>` : ""}
    <h1>${prose(title)}</h1>
    ${overview && overview !== title ? `<p class="overview">${prose(overview)}</p>` : ""}
-   ${advisoryDetails(section)}
+   ${advisoryDetails(section, details, urls)}
  </header>`;
 }
