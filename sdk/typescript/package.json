@@ -110,13 +110,13 @@
     "fflate": "0.8.3",
     "incur": "0.7.1",
     "ink": "8.0.0",
-    "papaparse": "5.7.0",
+    "papaparse": "5.7.1",
     "pdfjs-dist": "6.5.438",
     "react": "19.3.1",
     "saxes": "6.0.0",
     "semver": "7.8.6",
     "smol-toml": "1.9.1",
-    "string-width": "8.3.0",
+    "string-width": "9.0.0",
     "strip-ansi": "7.2.0",
     "tokenx": "2.2.0",
     "yaml": "2.9.1",
@@ -136,7 +136,7 @@
     "js-tiktoken": "1.0.21",
     "json-schema-to-typescript": "16.0.0",
     "json5": "2.2.3",
-    "prettier": "3.9.10",
+    "prettier": "3.10.1",
     "typescript": "7.0.2"
   }
 }

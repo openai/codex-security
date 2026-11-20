@@ -891,6 +891,65 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   }
 }
 
+test("offline finalize renders the saved assessment and protects existing output", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-render-");
+  const files = await sample(dir.path, false);
+  const { state, call, row, claims } = await startProof(dir.path, files);
+  const question = "Which source commit ran?";
+  await call("record-assessments", {
+    items: [
+      {
+        workItemId: row.workItemId,
+        verdict: "unknown",
+        reason: "Source identity is missing.",
+        remainingQuestions: [question],
+        supportingClaims: claims,
+        questionChecks: [
+          {
+            question,
+            checked: "Read the captured package binding and the pinned caller.",
+            missingEvidence:
+              "The source revision used to build the captured image.",
+            claims,
+          },
+        ],
+      },
+    ],
+  });
+  await call("finalize");
+  const readDeps = dependencies({ currentDirectory: files.repo });
+  readDeps.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
+  const args = ["exploitability", "run", "finalize", "--state", state];
+  const markdown = createCliTest(main);
+  expect(await markdown.runCli([...args, "--format", "md"], readDeps)).toBe(0);
+  expect(markdown.stdout.text()).toContain(cve);
+  expect(markdown.stdout.text()).toContain("Source identity is missing.");
+  expect(markdown.stdout.text()).not.toContain("[object Object]");
+  const saved = createCliTest(main);
+  const htmlPath = join(dir.path, "saved.html");
+  expect(
+    await saved.runCli(
+      [...args, "--format=html", "--report-file", htmlPath],
+      readDeps,
+    ),
+  ).toBe(0);
+  expect(saved.stdout.text().trimEnd()).toEndWith(htmlPath);
+  expect(saved.stdout.text()).not.toContain("<!doctype html>");
+  expect(saved.stdout.text()).toContain("Next: Which source commit ran?");
+  const html = await readFile(htmlPath, "utf8");
+  expect(html).toStartWith("<!doctype html>");
+  expect(html).toContain("Source identity is missing.");
+  const duplicate = createCliTest(main);
+  expect(
+    await duplicate.runCli(
+      [...args, "--format", "html", "--report-file", htmlPath],
+      readDeps,
+    ),
+  ).not.toBe(0);
+  expect(duplicate.stdout.text()).toBe("");
+  expect(await readFile(htmlPath, "utf8")).toBe(html);
+});
+
 test("offline finalize rejects a stored unknown without question checks", async () => {
   await using dir = await scopedTemporaryDirectory("stack-finalize-question-");
   const files = await sample(dir.path, true);

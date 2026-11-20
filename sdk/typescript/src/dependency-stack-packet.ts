@@ -14,7 +14,10 @@ import {
   validateStackTriggerAnalysis,
 } from "./dependency-stack-advisory.js";
 import { stackJsonValue } from "./dependency-stack-evidence.js";
-import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
+import {
+  dependencyGitCommitSchema,
+  dependencyTargetSchema as target,
+} from "./dependency-source-identity.js";
 import { readRegularInputFileBytes } from "./prompt-files.js";
 import { canonicalJson } from "./record.js";
 import { repositoryRevision } from "./targets.js";
@@ -31,10 +34,6 @@ const runtimeWindowSchema = z
 
 const cveId = z.string().regex(/^CVE-\d{4}-\d{4,}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
-const target = z.strictObject({
-  repository: text,
-  sha: dependencyGitCommitSchema,
-});
 // Producers may attach further JSON metadata. The investigator addresses each
 // endpoint by its stable ID and uses its named function to validate the sink.
 const endpoint = z

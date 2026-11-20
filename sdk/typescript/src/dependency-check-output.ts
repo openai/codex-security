@@ -15,8 +15,10 @@ import type { DependencyPackage } from "./dependency-advisory.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+import type { DependencyTarget } from "./dependency-source-identity.js";
 
 export type BlockedCheck = {
+  target?: DependencyTarget;
   status: "blocked";
   code: "INVESTIGATION_BLOCKED";
   reason: string;
@@ -192,12 +194,42 @@ function reportSummary(report: unknown) {
   return { verdicts, limitations };
 }
 
+export async function writeDependencyReportFile(
+  reportFile: string,
+  result: unknown,
+  signal: AbortSignal,
+  format: "html" | "json" = "json",
+) {
+  signal.throwIfAborted();
+  const content =
+    format === "html"
+      ? (
+          await import("./dependency-report-renderer.js")
+        ).renderDependencyReport(result)
+      : JSON.stringify(result, null, 2) + "\n";
+  const staging = await mkdtemp(
+    join(dirname(reportFile), ".dependency-report-"),
+  );
+  const path = join(staging, "report");
+  try {
+    await writeFile(path, content, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    signal.throwIfAborted();
+    await link(path, reportFile);
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export async function withDependencyCheckOutput<T>(
   options: {
     subject: string;
     checkout?: string;
     display?: (line: string) => void;
     reportFile?: string;
+    reportFormat?: "html" | "json";
     progressEvents?: string;
     signal: AbortSignal;
     warn: (message: string) => void;
@@ -309,22 +341,13 @@ export async function withDependencyCheckOutput<T>(
     });
     const result = await run(emit);
     signal.throwIfAborted();
-    if (reportFile) {
-      const staging = await mkdtemp(
-        join(dirname(reportFile), ".dependency-report-"),
+    if (reportFile)
+      await writeDependencyReportFile(
+        reportFile,
+        result,
+        signal,
+        options.reportFormat,
       );
-      const path = join(staging, "report.json");
-      try {
-        await writeFile(path, JSON.stringify(result, null, 2) + "\n", {
-          flag: "wx",
-          mode: 0o600,
-        });
-        signal.throwIfAborted();
-        await link(path, reportFile);
-      } finally {
-        await rm(staging, { recursive: true, force: true }).catch(() => {});
-      }
-    }
     emit("report_ready", options.subject, {
       ...reportSummary(result),
       ...(reportFile && { path: reportFile }),

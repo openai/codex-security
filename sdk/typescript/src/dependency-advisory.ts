@@ -108,13 +108,9 @@ type OsvRecord = z.infer<typeof osvRecord>;
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 const cvePattern = /^CVE-\d{4}-\d{4,}$/u;
 
-// The normalized record emitted by OSV/GitHub lookup, also accepted when
-// replaying a captured-stack investigation without a network lookup.
-const advisoryRecord = z.strictObject({
-  id: z.string().min(1),
+const advisoryFields = {
   aliases: z.array(z.string()).optional(),
   url: z.string(),
-  modified: z.string().optional(),
   references: z.array(advisoryReference).optional(),
   source: advisoryReference.optional(),
   type: z.string().optional(),
@@ -128,6 +124,21 @@ const advisoryRecord = z.strictObject({
     }),
   ),
   vulnerableFunctions: z.array(z.string()).optional(),
+};
+
+export const dependencyAdvisoryDetailsSchema = z.object({
+  id: z.string().optional(),
+  ...advisoryFields,
+  overview: z.string().optional(),
+  applicability: z.string().optional(),
+});
+
+// The normalized record emitted by OSV/GitHub lookup, also accepted when
+// replaying a captured-stack investigation without a network lookup.
+const advisoryRecord = z.strictObject({
+  id: z.string().min(1),
+  ...advisoryFields,
+  modified: z.string().optional(),
 });
 type Advisory = z.infer<typeof advisoryRecord>;
 
