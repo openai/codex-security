@@ -32,7 +32,6 @@ from finalize_scan_contract import (
     _validate_completion_binding,
     _write_prepared_scan_finalization,
     finalize_scan,
-    finding_within_scope,
     manifest_is_sealed,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
@@ -76,7 +75,7 @@ from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )
-from workbench_finding_updates import record_finding_updates
+from workbench_finding_updates import record_checkpoint_updates
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
@@ -1187,25 +1186,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if not model_only_checkpoint and (scan["mode"] != "deep" or deep_parent):
             try:
                 with connection:
-                    visible = findings
                     scope = db.requested_finding_scope(scan) if scan["mode"] == "deep" else None
-                    exclusions = db.requested_exclude_paths(scan)
-                    if scope is not None or exclusions:
-                        visible = {
-                            **findings,
-                            "findings": [
-                                f
-                                for f in findings["findings"]
-                                if finding_within_scope(f, scope, exclusions)
-                            ],
-                        }
-                    record_finding_updates(
-                        connection,
-                        scan,
-                        manifest,
-                        visible,
-                        final=False,
-                    )
+                    record_checkpoint_updates(connection, scan, manifest, findings, scope)
             except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                 print(f"Could not record live finding updates: {exc}", file=sys.stderr)
         if scan["mode"] == "standard" and not model_only_checkpoint:
