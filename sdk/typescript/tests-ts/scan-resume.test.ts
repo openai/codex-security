@@ -86,7 +86,7 @@ async function interruptedScan(
     registrationFiles?: Pick<
       ScanOptions,
       "scanPromptFile" | "postScanPromptFile" | "rubricPath"
-    >;
+    > & { codexOverrides?: JsonObject };
     sqliteHome?: string;
     executableSourcePaths?: string[];
     executableSourceRoots?: string[];
@@ -253,8 +253,9 @@ async function interruptedScan(
   let registration: JsonObject | undefined;
   if (registrationFiles) {
     const stop = "Synthetic interruption after registration";
+    const { codexOverrides, ...files } = registrationFiles;
     await using client = new TestClient(
-      { pythonPath: python },
+      { pythonPath: python, ...(codexOverrides && { codexOverrides }) },
       {
         environment,
         prepareRuntime: async () => preparedRuntime(codexHome),
@@ -272,7 +273,7 @@ async function interruptedScan(
       client.run(repository, {
         mode,
         outputDir: scanDir,
-        ...registrationFiles,
+        ...files,
       }),
     ).rejects.toThrow(stop);
   }
@@ -1953,13 +1954,28 @@ test.skipIf(process.platform === "win32").each([
   ["scanPromptFile", "before sealing"],
   ["scanPromptFile", "after sealing"],
   ["rubricPath", "after sealing"],
+  ["telemetry certificate", "after sealing"],
   ["postScanPromptFile", "with post-scan work"],
 ] as const)(
   "SDK recovery excludes the original %s checkout %s",
   async (file, stage) => {
     const { checkout, source, bin, python } = await modelInputCheckout();
     const f = await interruptedScan("deep", false, {
-      registrationFiles: { [file]: source },
+      registrationFiles:
+        file === "telemetry certificate"
+          ? {
+              codexOverrides: {
+                otel: {
+                  trace_exporter: {
+                    "otlp-grpc": {
+                      endpoint: "https://example.test",
+                      tls: { "ca-certificate": source },
+                    },
+                  },
+                },
+              },
+            }
+          : { [file]: source },
     });
     if (stage !== "before sealing") await sealWithOriginalPlugin(f);
     if (stage === "after sealing") await rm(f.repository, { recursive: true });
