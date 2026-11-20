@@ -375,12 +375,12 @@ interface SessionUsage {
   currentTurnId: string | null;
   previousUsage: ScanTokenUsage | null;
   responseIds: Set<string>;
-  responseUsageObserved: boolean;
+  responseTurns: Set<string | null>;
   responseTokens: number;
   expectedResponseTokens: number;
   responseEpochUsageObserved: boolean;
   incompleteResponseEpoch: boolean;
-  counterRegressed: boolean;
+  regressedTurns: Set<string | null>;
   calls: Map<string, ScanActivity>;
   activities: SessionObservation<ScanActivity>[];
   progress: SessionProgress[];
@@ -499,12 +499,12 @@ function createSessionUsage(observeUsage: boolean): SessionUsage {
     currentTurnId: null,
     previousUsage: null,
     responseIds: new Set(),
-    responseUsageObserved: false,
+    responseTurns: new Set(),
     responseTokens: 0,
     expectedResponseTokens: 0,
     responseEpochUsageObserved: false,
     incompleteResponseEpoch: false,
-    counterRegressed: false,
+    regressedTurns: new Set(),
     calls: new Map(),
     activities: [],
     progress: [],
@@ -3071,11 +3071,11 @@ export class ScanCostTracker {
         const remainder = tokenUsageRemainder(selected, session.usage);
         if (remainder.total_tokens > 0) {
           usages.set(threadId, addTokenUsage(session.usage, remainder));
-          if (session.responseUsageObserved) incomplete.add(threadId);
+          if (session.responseTurns.size > 0) incomplete.add(threadId);
         }
       }
       if (
-        (session.counterRegressed && !session.responseUsageObserved) ||
+        session.regressedTurns.size > 0 ||
         session.incompleteResponseEpoch ||
         missingResponseTokens(session)
       )
@@ -4048,6 +4048,7 @@ function readSessionEvent(
     session.model = payload["model"];
   }
   const position = ++session.position;
+  const responseUsageObserved = session.responseTurns.size > 0;
   if (event["type"] === "token_usage_record") {
     const responseId = payload["response_id"];
     const usage = tokenUsage(payload["usage"]);
@@ -4091,9 +4092,10 @@ function readSessionEvent(
     )
       return;
     session.responseEpochUsageObserved = true;
-    if (!session.responseUsageObserved) {
+    session.responseTurns.add(turnId);
+    session.regressedTurns.delete(turnId);
+    if (!responseUsageObserved) {
       // Only counters from a different identified turn are independent of this receipt.
-      session.responseUsageObserved = true;
       session.usage = null;
       session.modelUsage.clear();
       if (turnId === null) session.legacyTurnUsage.clear();
@@ -4391,19 +4393,26 @@ function readSessionEvent(
   const previousTotal =
     (session.inheritedUsage?.total_tokens ?? 0) +
     (session.previousUsage?.total_tokens ?? 0);
+  const priorLegacy = attribution
+    ? session.counterUsage
+    : session.previousUsage
+      ? addTokenUsage(session.priorCounterEpochs, session.previousUsage)
+      : session.priorCounterEpochs;
+  const turnId = session.currentTurnId;
   if (usage.total_tokens < previousTotal) {
-    if (attributable) session.counterRegressed = true;
+    if (attributable && !session.responseTurns.has(turnId))
+      session.regressedTurns.add(turnId);
     // A smaller snapshot in the same identified turn may be stale. Across
     // reconnects and in legacy logs without turn IDs, keep the new epoch.
     if (
       attributable &&
       !session.mayStartCounterEpoch &&
-      (session.currentTurnId !== null || session.responseUsageObserved)
+      (turnId !== null || responseUsageObserved)
     )
       return;
     session.inheritedUsage = null;
     session.previousUsage = null;
-    session.priorCounterEpochs = session.counterUsage;
+    session.priorCounterEpochs = priorLegacy;
   }
   const ownUsage =
     session.inheritedUsage === null
@@ -4420,24 +4429,41 @@ function readSessionEvent(
     if (!attributable) return;
     if (delta !== null) {
       const model =
-        !hadPreviousUsage && session.responseUsageObserved
-          ? null
-          : session.model;
+        !hadPreviousUsage && responseUsageObserved ? null : session.model;
       session.counterModelUsage.set(
         model,
         addTokenUsage(session.counterModelUsage.get(model) ?? null, delta),
       );
-      if (session.currentTurnId !== null && !session.responseUsageObserved) {
+      let provisional = delta;
+      const legacyTurn = turnId !== null && !session.responseTurns.has(turnId);
+      if (legacyTurn) {
+        if (responseUsageObserved && session.usage) {
+          // A cumulative delta can include preceding receipts that had no matching
+          // counter. Credit only its unmeasured portion to this legacy-only turn.
+          const overlap = priorLegacy
+            ? tokenUsageRemainder(session.usage, priorLegacy)
+            : session.usage;
+          provisional = tokenUsageRemainder(delta, overlap);
+          const measured = addTokenUsage(session.usage, provisional);
+          observeUsageEvent(session, event["timestamp"], measured);
+          session.usage = measured;
+        }
         const models =
-          session.legacyTurnUsage.get(session.currentTurnId) ??
+          session.legacyTurnUsage.get(turnId) ??
           new Map<string | null, ScanTokenUsage>();
-        models.set(model, addTokenUsage(models.get(model) ?? null, delta));
-        session.legacyTurnUsage.set(session.currentTurnId, models);
+        models.set(
+          session.model,
+          addTokenUsage(models.get(session.model) ?? null, provisional),
+        );
+        session.legacyTurnUsage.set(turnId, models);
       }
-      if (!session.responseUsageObserved)
+      if (!responseUsageObserved || legacyTurn)
         session.modelUsage.set(
           session.model,
-          addTokenUsage(session.modelUsage.get(session.model) ?? null, delta),
+          addTokenUsage(
+            session.modelUsage.get(session.model) ?? null,
+            provisional,
+          ),
         );
     }
     const counterTotal = session.priorCounterEpochs
@@ -4446,12 +4472,12 @@ function readSessionEvent(
     session.counterUsage =
       attribution && delta !== null
         ? addTokenUsage(session.counterUsage, delta)
-        : session.responseUsageObserved &&
+        : responseUsageObserved &&
             session.counterUsage !== null &&
             session.counterUsage.total_tokens >= counterTotal.total_tokens
           ? session.counterUsage
           : counterTotal;
-    if (!session.responseUsageObserved) {
+    if (!responseUsageObserved) {
       observeUsageEvent(session, event["timestamp"], session.counterUsage);
       session.usage = session.counterUsage;
     }
