@@ -216,6 +216,7 @@ interface SavedScanDraft {
   modifiedMs: number;
   head?: boolean;
   attempt?: string;
+  result?: boolean;
 }
 
 const pendingWorkerDrafts = new Map<string, Promise<void>>();
@@ -1969,6 +1970,37 @@ function prepareScanDraftReconciliation(
           .filter((item) => !keepsGenericWork(item))
           .map((item) => item.candidateId ?? item.id),
       );
+      let previousSurfaces = source.reviewState.surfaces.filter((surface) => {
+        if (resolvedSurfaces.has(surface)) return false;
+        const candidateId = surface.candidateId ?? surface.id;
+        return (
+          (keepsGenericWork(surface) ||
+            typeof candidateId !== "string" ||
+            (!resolvedIds.has(candidateId) &&
+              (surface.disposition === "needs_follow_up" ||
+                !pendingIds.has(candidateId)))) &&
+          !(
+            surface.disposition === "needs_follow_up" &&
+            coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+          )
+        );
+      });
+      const unmatchedSurfaces = [...result.reviewState.surfaces];
+      const present = (previous: JsonObject, current: JsonObject) =>
+        coverageEntryPresent([current], previous, ambiguousDeferredIds);
+      // Match unchanged occurrences before using a shared ID to recognize an update.
+      for (const matches of preserveSurfaceIds
+        ? [sameSurface, present]
+        : [present]) {
+        previousSurfaces = previousSurfaces.filter((surface) => {
+          const index = unmatchedSurfaces.findIndex((current) =>
+            matches(surface, current),
+          );
+          if (index < 0) return true;
+          if (preserveSurfaceIds) unmatchedSurfaces.splice(index, 1);
+          return false;
+        });
+      }
       const previousCoverage = {
         ...source.reviewState,
         deferred: source.reviewState.deferred.filter((item) => {
@@ -1980,26 +2012,7 @@ function prepareScanDraftReconciliation(
             !closedDeferredIds.has(item.id as string)
           );
         }),
-        surfaces: source.reviewState.surfaces.filter((surface) => {
-          if (resolvedSurfaces.has(surface)) return false;
-          const candidateId = surface.candidateId ?? surface.id;
-          return (
-            (keepsGenericWork(surface) ||
-              typeof candidateId !== "string" ||
-              (!resolvedIds.has(candidateId) &&
-                (surface.disposition === "needs_follow_up" ||
-                  !pendingIds.has(candidateId)))) &&
-            !coverageEntryPresent(
-              result.reviewState.surfaces as unknown[],
-              surface,
-              ambiguousDeferredIds,
-            ) &&
-            !(
-              surface.disposition === "needs_follow_up" &&
-              coverageEntryPresent(resolvedFollowUpSurfaces, surface)
-            )
-          );
-        }),
+        surfaces: previousSurfaces,
         openQuestions:
           result.complete === false
             ? (source.reviewState.openQuestions ?? []).filter(
@@ -2011,10 +2024,9 @@ function prepareScanDraftReconciliation(
               )
             : [],
       };
-      result.reviewState.surfaces = exactUnion(
-        result.reviewState.surfaces,
-        previousCoverage.surfaces,
-      );
+      result.reviewState.surfaces = preserveSurfaceIds
+        ? [...result.reviewState.surfaces, ...previousCoverage.surfaces]
+        : exactUnion(result.reviewState.surfaces, previousCoverage.surfaces);
       result.reviewState = preserveScanCoverage(
         result.reviewState,
         previousCoverage,

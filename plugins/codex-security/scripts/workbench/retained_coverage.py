@@ -857,7 +857,16 @@ def merge_saved_results(
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     inferred_coverage_ids = _infer_saved_coverage_ids(all_sources)
     coverage_origins = SavedCoverageOrigins(
-        sources,
+        sorted(
+            sources,
+            key=lambda source: (
+                Path(source[0]).name == "result.json",
+                source_order[source[0]],
+                source[0] in authoritative_heads,
+                source[0],
+            ),
+            reverse=True,
+        ),
         inferred_coverage_ids,
         worker_attempts,
         lambda relative, row, owner: coverage_receipts(row, workers_by_id[owner], relative),
@@ -1517,16 +1526,19 @@ def merge_saved_results(
     def render_worker_closure(relative, owner, closure):
         worker = workers_by_id.get(owner)
         canonical = projected_coverage if parent_is_canonical else {}
-        if projection.is_reviewed_worker(canonical, worker):
-            retained = coverage_origins.retained_closure(
+        if worker is not None:
+            projected = coverage_origins.project_closure(
                 closure,
                 worker,
                 drafts_by_path[relative]["reviewState"],
-                canonical,
+                canonical
+                if project_worker_coverage or projection.is_reviewed_worker(canonical, worker)
+                else {},
                 reviewed_attempts,
+                coverage if project_worker_coverage else None,
             )
-            if retained is not None:
-                return retained
+            if projected is not None:
+                return projected
         return _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
 
     retained_closures = [

@@ -229,7 +229,7 @@ export async function readAcceptedDiscovery(
   );
   const history = [...current, ...archived];
   const receiptDigests = new Map<string, string>();
-  const receiptSources = archived.length
+  const receiptSources = history.length
     ? [result, ...history.map(({ input }) => input)]
     : [];
   for (const source of receiptSources) {
@@ -273,11 +273,11 @@ export async function readAcceptedDiscovery(
     coverage: scanCoverage(
       accepted,
       artifacts.scanDir,
-      archived.flatMap(({ input, attempt }) => {
+      archived.flatMap(({ input, attempt, result }) => {
         const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
         return number === undefined
           ? []
-          : [{ attempt: Number(number), coverage: input.reviewState }];
+          : [{ attempt: Number(number), coverage: input.reviewState, result }];
       }),
       receiptDigests,
       [
@@ -292,7 +292,11 @@ export async function readAcceptedDiscovery(
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
-  archived: { attempt: number; coverage: ScanDraftInput["reviewState"] }[] = [],
+  archived: {
+    attempt: number;
+    coverage: ScanDraftInput["reviewState"];
+    result?: boolean;
+  }[] = [],
   receiptDigests: ReadonlyMap<string, string> = new Map(),
   currentSources: ScanDraftInput["reviewState"][] = [worker.result.reviewState],
 ): ScanDraftInput["reviewState"] {
@@ -309,24 +313,81 @@ export function scanCoverage(
   const reviews = [provenance];
   const namedFirst = (left: JsonObject, right: JsonObject) =>
     Number(right.id !== undefined) - Number(left.id !== undefined);
-  const matchingCoverage = (coverage: ScanDraftInput["reviewState"]) => ({
+  const matchingCoverage = (
+    coverage: ScanDraftInput["reviewState"],
+  ): ScanDraftInput["reviewState"] => ({
     ...coverage,
     // Consume explicitly named rows before an otherwise identical anonymous row.
     surfaces: [...coverage.surfaces].sort(namedFirst),
     deferred: [...coverage.deferred].sort(namedFirst),
   });
   const authored = currentSources.map(matchingCoverage);
-  const history: typeof archived = [...archived]
-    .sort((left, right) => left.attempt - right.attempt)
-    .map(({ attempt, coverage }) => ({
-      attempt,
-      coverage: matchingCoverage(coverage),
-    }));
-  // Each occurrence in one snapshot can account for only one current record.
+  const history = [...archived].sort(
+    // Admission projects the direct result before retained checkpoint rows.
+    (left, right) =>
+      left.attempt - right.attempt ||
+      Number(right.result ?? false) - Number(left.result ?? false),
+  );
   const matchedRows = new Map<
     string,
     Map<ScanDraftInput["reviewState"], Set<number>>
   >();
+  type Origin = { row: JsonObject; attempt: number };
+  const origins = new Map<string, Origin[]>();
+  const matchesOrigin = (
+    field: string,
+    item: JsonObject,
+    previous: JsonObject,
+    reserved: Set<unknown>,
+  ) => {
+    if (
+      item.id === undefined &&
+      typeof previous.id === "string" &&
+      !reserved.has(previous.id) &&
+      (field === "surfaces" ||
+        (field === "deferred" &&
+          !["candidateId", "candidate", "finding"].some((key) => key in item)))
+    )
+      item = { ...item, id: previous.id };
+    return matchesSavedCoverageSource(
+      field,
+      item,
+      previous,
+      artifactPrefix,
+      receiptDigests,
+    );
+  };
+  const savedOrigins = (field: string): Origin[] => {
+    const cached = origins.get(field);
+    if (cached !== undefined) return cached;
+    const occurrences: Origin[] = [];
+    for (const saved of history) {
+      const rows = ((saved.coverage[field] as unknown[] | undefined) ?? []).map(
+        (row) =>
+          typeof row === "string" ? { question: row } : (asRecord(row) ?? {}),
+      );
+      const reserved = new Set(rows.map((row) => row.id));
+      // Preserve each snapshot's occurrence count before assigning its later names.
+      const unmatched = [...occurrences].sort((a, b) =>
+        namedFirst(a.row, b.row),
+      );
+      const added: Origin[] = [];
+      for (const row of rows) {
+        const index = unmatched.findIndex((origin) =>
+          matchesOrigin(field, row, origin.row, reserved),
+        );
+        if (index < 0) added.push({ row, attempt: saved.attempt });
+        else {
+          const [origin] = unmatched.splice(index, 1);
+          if (row.id !== undefined) origin!.row = row;
+        }
+      }
+      occurrences.push(...added);
+    }
+    occurrences.sort((a, b) => namedFirst(a.row, b.row));
+    origins.set(field, occurrences);
+    return occurrences;
+  };
   const project = <T extends Record<string, unknown>>(
     field: string,
     item: T,
@@ -353,18 +414,29 @@ export function scanCoverage(
       return asRecord(rows[index]) ?? {};
     };
     let source: Record<string, unknown> | undefined;
+    let reserved = new Set<unknown>();
     for (const coverage of authored) {
       const row = match(coverage);
-      source ??= row;
+      if (source === undefined && row !== undefined) {
+        source = row;
+        reserved = new Set(
+          ((coverage[field] as JsonObject[] | undefined) ?? []).map(
+            (row) => row.id,
+          ),
+        );
+      }
     }
     let origin = provenance;
-    for (const saved of history) {
-      const row = match(saved.coverage);
-      if (row === undefined) continue;
-      if (origin === provenance) {
-        origin = { workerId: worker.id, attempt: saved.attempt };
-        source ??= row;
-      }
+    const previous = savedOrigins(field);
+    const comparison = { ...item };
+    if (source !== undefined && source.id === undefined) delete comparison.id;
+    const index = previous.findIndex((saved) =>
+      matchesOrigin(field, comparison, saved.row, reserved),
+    );
+    if (index >= 0) {
+      const [saved] = previous.splice(index, 1);
+      origin = { workerId: worker.id, attempt: saved!.attempt };
+      source ??= saved!.row;
     }
     if (!reviews.some((review) => review.attempt === origin.attempt))
       reviews.push(origin);

@@ -316,6 +316,10 @@ def _generic_surface_updates(
             if pending_link:
                 if not closed_ids and not reopened_ids:
                     continue
+                if surface_is_retained is not None and not surface_is_retained(
+                    relative, owner, surface
+                ):
+                    continue
                 # Closing one task cannot complete another task's shared surface.
                 pending_surface = max(
                     (

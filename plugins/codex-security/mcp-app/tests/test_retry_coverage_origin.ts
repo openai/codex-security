@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -446,6 +446,60 @@ test("archived shared receipts follow the surface's reference order", async (t) 
   );
 });
 
+test("current typed checkpoint receipt aliases retain one source observation", async (t) => {
+  const f = await workerHistoryFixture(t, 1);
+  const surface = {
+    label: "Synthetic current evidence",
+    disposition: "no_issue_found",
+    receiptRefs: ["artifacts/evidence.txt"],
+  };
+  await mkdir(path.join(f.output, "artifacts"));
+  await writeFile(
+    path.join(f.output, surface.receiptRefs[0]!),
+    "Synthetic evidence",
+  );
+  await recordCodexSecurityWorkerScanDraft(
+    f.workerContext,
+    workerDraft([], {
+      complete: false,
+      reviewState: {
+        surfaces: [{ ...surface, id: "saved-review" }],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    }),
+  );
+  const checkpointDirectory = path.join(f.output, "checkpoints");
+  const checkpoints = await Promise.all(
+    (await readdir(checkpointDirectory)).map(async (name) => {
+      const file = path.join(checkpointDirectory, name);
+      return [file, await readFile(file, "utf8")] as const;
+    }),
+  );
+  const current = JSON.stringify(
+    workerDraft([], {
+      complete: true,
+      reviewState: {
+        surfaces: [surface],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    }),
+  );
+  await writeFile(f.resultPath, current);
+  const { coverage } = await readAcceptedDiscovery(
+    createDeepScanArtifacts(f.scanRoot),
+    f.worker,
+    scanId,
+  );
+  assert.equal(coverage.surfaces.length, 1);
+  assert.equal(coverage.surfaces[0].provenance.attempt, 1);
+  assert.equal(coverage.surfaces[0].provenance.sourceId, undefined);
+  assert.equal(await readFile(f.resultPath, "utf8"), current);
+  for (const [file, bytes] of checkpoints)
+    assert.equal(await readFile(file, "utf8"), bytes);
+});
+
 for (const changedReceipt of [false, true]) {
   test(`legacy surface identity follows receipt bytes, changed=${changedReceipt}`, async (t) => {
     const f = await workerHistoryFixture(t, 2);
@@ -556,48 +610,78 @@ for (const currentId of [undefined, "different-review"]) {
   });
 }
 
-test("accepted duplicate surface IDs retain each authored occurrence", async (t) => {
-  const f = await workerHistoryFixture(t, 2);
-  const surfaces = ["First review", "Second review"].map((label) => ({
-    id: "api",
-    label,
-    disposition: "no_issue_found",
-    receiptRefs: [],
-  }));
-  const archive = path.join(f.workerRoot, "attempts/attempt-01");
-  await mkdir(archive, { recursive: true });
-  const draft = workerDraft([], {
-    complete: true,
-    reviewState: { surfaces, explicitExclusions: [], deferred: [] },
-  });
-  const old = JSON.stringify({ ...draft, complete: false });
-  const current = JSON.stringify(draft);
-  await writeFile(path.join(archive, "result.json"), old);
-  await writeFile(f.resultPath, current);
-  const { coverage } = await readAcceptedDiscovery(
-    createDeepScanArtifacts(f.scanRoot),
-    f.worker,
-    scanId,
-  );
-  assert.deepEqual(
-    coverage.surfaces.map(
-      (row: { provenance: { sourceId: string; attempt: number } }) => [
-        row.provenance.sourceId,
-        row.provenance.attempt,
+for (const [identical, contracted] of [
+  [false, false],
+  [true, false],
+  [true, true],
+  [false, true],
+] as const) {
+  test(`accepted duplicate surface IDs retain each authored occurrence, identical=${identical}, contracted=${contracted}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const surfaces = [
+      "First review",
+      identical ? "First review" : "Second review",
+    ].map((label) => ({
+      id: "api",
+      label,
+      disposition: "no_issue_found",
+      receiptRefs: [],
+    }));
+    const archive = path.join(f.workerRoot, "attempts/attempt-01");
+    await mkdir(archive, { recursive: true });
+    const draft = workerDraft([], {
+      complete: true,
+      reviewState: { surfaces, explicitExclusions: [], deferred: [] },
+    });
+    const old = JSON.stringify({
+      ...draft,
+      complete: false,
+      reviewState: {
+        ...draft.reviewState,
+        surfaces: identical && !contracted ? surfaces.slice(0, 1) : surfaces,
+      },
+    });
+    const current = JSON.stringify({
+      ...draft,
+      reviewState: {
+        ...draft.reviewState,
+        surfaces: contracted ? surfaces.slice(1) : surfaces,
+      },
+    });
+    await writeFile(path.join(archive, "result.json"), old);
+    await writeFile(f.resultPath, current);
+    const { coverage } = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
+    assert.deepEqual(
+      coverage.surfaces.map(
+        (row: { provenance: { sourceId: string; attempt: number } }) => [
+          row.provenance.sourceId,
+          row.provenance.attempt,
+        ],
+      ),
+      [
+        ["api", 1],
+        ["api", identical && !contracted ? 2 : 1],
       ],
-    ),
-    [
-      ["api", 1],
-      ["api", 1],
-    ],
-  );
-  assert.equal(
-    new Set(coverage.surfaces.map((row: { id: string }) => row.id)).size,
-    2,
-  );
-  assert.equal(await readFile(path.join(archive, "result.json"), "utf8"), old);
-  assert.equal(await readFile(f.resultPath, "utf8"), current);
-});
+    );
+    assert.deepEqual(
+      coverage.surfaces.map((row: { label: string }) => row.label).sort(),
+      surfaces.map((row) => row.label).sort(),
+    );
+    assert.equal(
+      new Set(coverage.surfaces.map((row: { id: string }) => row.id)).size,
+      2,
+    );
+    assert.equal(
+      await readFile(path.join(archive, "result.json"), "utf8"),
+      old,
+    );
+    assert.equal(await readFile(f.resultPath, "utf8"), current);
+  });
+}
 
 for (const shadow of [
   "absent",
@@ -694,5 +778,168 @@ for (const shadow of [
     assert.equal(await readFile(f.resultPath, "utf8"), current);
     for (const [file, bytes] of checkpoints)
       assert.deepEqual(await readFile(file), bytes);
+  });
+}
+
+for (const [field, change] of [
+  ["surfaces", "reordered"],
+  ["surfaces", "omitted"],
+  ["surfaces", "added"],
+  ["surfaces", "changed"],
+  ["surfaces", "anonymous"],
+  ["surfaces", "checkpoint"],
+  ["surfaces", "checkpoint-only-names"],
+  ["deferred", "reordered"],
+] as const) {
+  test(`accepted ${field} keep established retry lineage, ${change}`, async (t) => {
+    const f = await workerHistoryFixture(t, 3);
+    const item =
+      field === "surfaces"
+        ? { label: "Synthetic review", disposition: "no_issue_found" }
+        : { reason: "Complete the synthetic review" };
+    const alpha = { ...item, id: "alpha" };
+    const beta = { ...item, id: "beta" };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
+    const archive = path.join(f.workerRoot, "attempts/attempt-01/result.json");
+    await mkdir(path.dirname(archive), { recursive: true });
+    await writeFile(
+      archive,
+      JSON.stringify({
+        scanId,
+        findings: [],
+        complete: false,
+        coverage: {
+          ...coverage,
+          completeness: "partial",
+          [field]: [change === "anonymous" ? alpha : item],
+        },
+      }),
+    );
+    const checkpoint =
+      change === "checkpoint" || change === "checkpoint-only-names";
+    if (checkpoint) {
+      if (change === "checkpoint-only-names")
+        await recordCodexSecurityWorkerScanDraft(
+          f.workerContext,
+          workerDraft([], {
+            complete: false,
+            reviewState: { ...coverage, [field]: [alpha] },
+          }),
+        );
+      await recordCodexSecurityWorkerScanDraft(
+        f.workerContext,
+        workerDraft([], {
+          complete: false,
+          reviewState: { ...coverage, [field]: [beta, alpha] },
+        }),
+      );
+      for (const name of await readdir(path.join(f.output, "checkpoints")))
+        await utimes(path.join(f.output, "checkpoints", name), 100, 100);
+      await utimes(path.join(f.output, "checkpoint-head.json"), 300, 300);
+    }
+    await writeFile(
+      f.resultPath,
+      JSON.stringify(
+        workerDraft([], {
+          complete: true,
+          reviewState: {
+            ...coverage,
+            [field]:
+              change === "anonymous"
+                ? [item]
+                : change === "checkpoint-only-names"
+                  ? []
+                  : [alpha, beta],
+          },
+        }),
+      ),
+    );
+    if (checkpoint) await utimes(f.resultPath, 200, 200);
+    const baseline = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      { ...f.worker, attempt: 2 },
+      scanId,
+    );
+    const identities = (
+      rows: { provenance: { sourceId?: string; attempt: number } }[],
+    ) =>
+      rows.map(({ provenance }) => [provenance.sourceId, provenance.attempt]);
+    assert.deepEqual(
+      identities(baseline.coverage[field]),
+      change === "anonymous"
+        ? [[undefined, 1]]
+        : change === "checkpoint-only-names"
+          ? [
+              ["beta", 1],
+              ["alpha", 2],
+            ]
+          : [
+              ["alpha", 1],
+              ["beta", 2],
+            ],
+    );
+    const second = path.join(f.workerRoot, "attempts/attempt-02");
+    await archiveDirectory(f.output, second);
+    await mkdir(f.output, { recursive: true });
+    const current =
+      change === "anonymous"
+        ? [alpha]
+        : change === "checkpoint-only-names"
+          ? [alpha, beta]
+          : change === "omitted"
+            ? [beta]
+            : change === "added"
+              ? [beta, { ...item, id: "gamma" }]
+              : change === "changed"
+                ? [{ ...beta, label: "Changed review" }, alpha]
+                : [beta, alpha];
+    await writeFile(
+      f.resultPath,
+      JSON.stringify(
+        workerDraft([], {
+          complete: true,
+          reviewState: { ...coverage, [field]: current },
+        }),
+      ),
+    );
+    const paths = [archive, path.join(second, "result.json"), f.resultPath];
+    if (checkpoint)
+      paths.push(
+        path.join(second, "checkpoint-head.json"),
+        ...(await readdir(path.join(second, "checkpoints"))).map((name) =>
+          path.join(second, "checkpoints", name),
+        ),
+      );
+    const originals = await Promise.all(
+      paths.map((file) => readFile(file, "utf8")),
+    );
+    const accepted = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+    );
+    const expected =
+      change === "anonymous"
+        ? [["alpha", 1]]
+        : change === "added"
+          ? [
+              ["alpha", 1],
+              ["beta", 2],
+              ["gamma", 3],
+            ]
+          : change === "checkpoint-only-names"
+            ? [
+                ["alpha", 2],
+                ["beta", 1],
+              ]
+            : [
+                ["alpha", 1],
+                ["beta", change === "changed" ? 3 : 2],
+              ];
+    assert.deepEqual(identities(accepted.coverage[field]).sort(), expected);
+    assert.deepEqual(
+      await Promise.all(paths.map((file) => readFile(file, "utf8"))),
+      originals,
+    );
   });
 }

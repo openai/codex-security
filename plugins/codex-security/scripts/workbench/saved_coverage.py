@@ -320,7 +320,7 @@ class SavedCoverageOrigins:
             relative: (copy.deepcopy(draft["reviewState"]), owner)
             for relative, draft, owner in sources
         }
-        # Use inferred IDs to match attempts, but preserve ID-less rows in published projections.
+        # Match authored identities chronologically, before later snapshots infer missing IDs.
         self.inferred_rows = {
             (relative, field, index)
             for relative, draft, _ in sources
@@ -328,6 +328,8 @@ class SavedCoverageOrigins:
             for index, row in enumerate(_coverage_rows(draft["reviewState"], field), 1)
             if id(row) in inferred_ids
         }
+        for relative, field, index in self.inferred_rows:
+            self.sources[relative][0][field][index - 1].pop("id", None)
         self.paths = {id(draft["reviewState"]): relative for relative, draft, _ in sources}
         self.worker_attempts = worker_attempts
         self.receipt_resolver = receipt_resolver
@@ -403,19 +405,27 @@ class SavedCoverageOrigins:
             return False
 
         def receipt_identities(refs, path, shared):
-            prefix = self.directory(path).as_posix() + "/"
             identities = []
             for ref in refs:
                 digest = self.receipt_digest(ref)
                 if digest is None:
                     return None
                 scan_owned = ref in shared
-                local = not scan_owned and ref.startswith(prefix)
+                directory = next(
+                    (
+                        parent
+                        for parent in Path(ref).parents
+                        if parent == self.directory(path)
+                        or self.worker_attempts.get(parent.as_posix(), (None, None))[0] == owner
+                    ),
+                    None,
+                )
+                local = not scan_owned and directory is not None
                 logical = (
                     re.sub(
                         r"^(?:artifacts/archived-receipts/attempt-[0-9]+/)+",
                         "",
-                        ref.removeprefix(prefix),
+                        ref.removeprefix(directory.as_posix() + "/"),
                     )
                     if local
                     else ref
@@ -441,43 +451,82 @@ class SavedCoverageOrigins:
             self.directory(relative).as_posix(), (worker["id"], worker["attempt"])
         )[1]
         rows = self.sources[relative][0].get(field, [])
-        if not isinstance(rows, list) or not 0 < index <= len(rows):
+        if attempt <= 0 or not isinstance(rows, list) or not 0 < index <= len(rows):
             return attempt
-        for offset in range(1, len(rows) + 1):
-            self.attempts[relative, field, offset] = attempt
-        for path, (coverage, owner) in self.sources.items():
-            previous_attempt = self.worker_attempts.get(
-                self.directory(path).as_posix(), (owner, worker["attempt"])
-            )[1]
-            if owner != worker["id"] or not 0 < previous_attempt < attempt:
+        snapshots = sorted(
+            (
+                self.worker_attempts.get(
+                    self.directory(path).as_posix(), (owner, worker["attempt"])
+                )[1],
+                order,
+                path,
+                coverage,
+            )
+            for order, (path, (coverage, owner)) in enumerate(self.sources.items())
+            if owner == worker["id"]
+        )
+        occurrences = []
+        for snapshot_attempt, _, path, coverage in snapshots:
+            if snapshot_attempt <= 0:
                 continue
-            previous = coverage.get(field, [])
-            if not isinstance(previous, list):
+            current_rows = coverage.get(field, [])
+            if not isinstance(current_rows, list):
                 continue
-            # Prefer explicit IDs before consuming an otherwise identical unnamed occurrence.
+            reserved = {
+                row["id"]
+                for row in current_rows
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
+            }
+            # One snapshot can consume each established occurrence only once.
             unmatched = sorted(
-                previous,
-                key=lambda row: isinstance(row, dict) and "id" in row,
+                occurrences,
+                key=lambda origin: isinstance(origin["row"], dict) and "id" in origin["row"],
                 reverse=True,
             )
-            for offset, current in enumerate(rows, 1):
-                match = next(
-                    (
-                        previous_index
-                        for previous_index, row in enumerate(unmatched)
-                        if self.same_row(field, row, path, current, relative, owner)
-                    ),
-                    None,
-                )
-                if match is not None:
-                    unmatched.pop(match)
-                    current_key = (relative, field, offset)
-                    if previous_attempt < self.attempts[current_key]:
-                        self.attempts[current_key] = previous_attempt
-                        self.origin_sources[current_key] = path
+            added = []
+            for offset, current in enumerate(current_rows, 1):
+
+                def matches(origin):
+                    previous, previous_path = origin["row"], origin["row_path"]
+                    comparison = current
+                    if (
+                        isinstance(current, dict)
+                        and "id" not in current
+                        and isinstance(previous, dict)
+                        and isinstance(previous.get("id"), str)
+                        and previous["id"] not in reserved
+                        and (
+                            field == "surfaces"
+                            or (field == "deferred" and not _has_candidate_metadata(current))
+                        )
+                    ):
+                        comparison = {**current, "id": previous["id"]}
+                    return self.same_row(
+                        field, previous, previous_path, comparison, path, worker["id"]
+                    )
+
+                match = next((i for i, origin in enumerate(unmatched) if matches(origin)), None)
+                if match is None:
+                    origin = {
+                        "row": current,
+                        "row_path": path,
+                        "attempt": snapshot_attempt,
+                        "source_path": path,
+                    }
+                    added.append(origin)
+                else:
+                    origin = unmatched.pop(match)
+                    if isinstance(current, dict) and "id" in current:
+                        # A later name binds this occurrence; row order cannot reassign it.
+                        origin["row"], origin["row_path"] = current, path
+                current_key = (path, field, offset)
+                self.attempts[current_key] = origin["attempt"]
+                if origin["attempt"] < snapshot_attempt:
+                    self.origin_sources[current_key] = origin["source_path"]
+            occurrences.extend(added)
         return self.attempts[key]
 
-    def retained_closure(self, closure, worker, source, published, reviewed):
+    def project_closure(self, closure, worker, source, published, reviewed, coverage):
         relative = self.paths.get(id(source))
         if relative is None or self.sources[relative][1] != worker["id"]:
             return None
@@ -488,18 +537,28 @@ class SavedCoverageOrigins:
             if row != closure:
                 continue
             attempt = self.attempt("resolvedDeferred", index, worker, source)
-            if (relative, "resolvedDeferred", index) not in self.origin_sources or (
-                worker["id"],
-                attempt,
-            ) not in reviewed:
-                return None
             candidate = {
                 "id": f"{worker['id']}-attempt-{attempt}-resolved-{closure['id']}",
                 "reason": closure["reason"],
             }
             canonical = published.get("resolvedDeferred", [])
-            if isinstance(canonical, list) and candidate in canonical:
-                return copy.deepcopy(candidate)
+            if isinstance(canonical, list):
+                for accepted_attempt in sorted(
+                    saved_attempt
+                    for owner, saved_attempt in reviewed
+                    if owner == worker["id"] and saved_attempt >= attempt
+                ):
+                    accepted = {
+                        **candidate,
+                        "id": f"{worker['id']}-attempt-{accepted_attempt}-resolved-{closure['id']}",
+                    }
+                    if accepted in canonical:
+                        return accepted
+            if coverage is not None:
+                origin = self.origin_sources.get((relative, "resolvedDeferred", index), relative)
+                if add_review(coverage, worker["id"], attempt, self.sources[origin][0]):
+                    reviewed.add((worker["id"], attempt))
+                return candidate
         return None
 
     def relink_deferred(self, retained, surface_ids):
