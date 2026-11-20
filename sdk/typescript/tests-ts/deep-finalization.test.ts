@@ -131,34 +131,170 @@ for (const boundary of ["registration", "stream-start"] as const) {
   }, 30_000);
 }
 
-const outcomes = [
-  "failed",
-  "completed",
-  "completed-owner-suffix",
-  "completed-owner-explicit",
-  "restart",
-  "restart-missing-logs",
-  "restart-missing-knowledge",
-  "restart-deleted-target",
-  "restart-changed-target",
-  "restart-corrupt-selection",
-  "restart-replaced-staged-draft",
-  "restart-unavailable-runtime",
-  "restart-canceled-runtime",
-  "canceled-before-publication",
-  "canceled-during-publication",
-  "canceled-during-resumed-publication",
-  "published-before-cancellation",
-  "closed-during-publication",
-  "budget-during-publication",
-  "budget-after-deep-finish",
-  "budget-during-resumed-publication",
-  "closed-during-resumed-publication",
-  "lost-completion-response",
-  "lost-completion-response-followup-canceled",
-  "completion-before-commit-fails",
-  "followup-canceled",
-] as const;
+async function seedAcceptedSelection({
+  workbenchOptions,
+  scanId,
+  scanDir,
+  environment,
+  historicalFindings,
+  terminalReason,
+}: {
+  workbenchOptions: Parameters<typeof runWorkbench>[0];
+  scanId: string;
+  scanDir: string;
+  environment: NodeJS.ProcessEnv & { CODEX_SECURITY_STATE_DIR: string };
+  historicalFindings?: boolean;
+  terminalReason: "capped" | "saturated";
+}): Promise<{ resultPath: string }> {
+  await runWorkbench(workbenchOptions, [
+    "begin-deep-scan",
+    "--scan-id",
+    scanId,
+    "--thread-id",
+    threadId,
+  ]);
+  const draft = {
+    scanId,
+    complete: true,
+    findings: [
+      {
+        ruleId: "path-traversal.archive",
+        title: "Unsafe archive extraction",
+        summary: "An untrusted entry reaches a filesystem write.",
+        severity: { level: "high" },
+        confidence: {
+          level: "high",
+          rationale: "Source evidence.",
+        },
+        taxonomy: {
+          category: "path-traversal",
+          cwe: ["CWE-22"],
+        },
+        locations: [{ path: "extract.py", startLine: 1 }],
+        remediation: "Validate the resolved destination before writing.",
+        provenance: {
+          source: "local_plugin",
+          candidateId: "archive-entry",
+        },
+        ...(historicalFindings
+          ? {
+              root_cause: {
+                summary: "The original destination is unchecked.",
+                evidence_refs: ["legacy-proof"],
+              },
+              code_evidence: [
+                {
+                  id: "legacy-proof",
+                  code: "write(destination)",
+                },
+              ],
+            }
+          : {}),
+      },
+    ],
+    coverage: {
+      completeness: "partial",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [
+        {
+          id: "dependency",
+          reason: "A dependency remains unreviewed.",
+        },
+      ],
+    },
+  };
+  const seeded = JSON.parse(
+    execFileSync(
+      "python3",
+      [
+        fileURLToPath(
+          new URL("./fixtures/selected-deep-scan.py", import.meta.url),
+        ),
+      ],
+      {
+        input: JSON.stringify({
+          scanId,
+          scanDir,
+          database: join(
+            environment.CODEX_SECURITY_STATE_DIR,
+            "workbench.sqlite3",
+          ),
+          draft,
+        }),
+        encoding: "utf8",
+        env: environment,
+      },
+    ),
+  );
+  // Exercise the dedicated function bridge, without extending CLI arguments.
+  const selectionOutput = execFileSync(
+    "python3",
+    [
+      "-c",
+      "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
+      join(PLUGIN_ROOT, "scripts/workbench_db.py"),
+      "finish-deep-scan",
+      "--scan-id",
+      scanId,
+      "--coordinator-generation",
+      "2",
+      "--terminal-reason",
+      terminalReason,
+      "--manifest-path",
+      join(scanDir, "scan-manifest.json"),
+    ],
+    {
+      input: JSON.stringify({
+        resultPath: seeded.resultPath,
+      }),
+      encoding: "utf8",
+      env: environment,
+    },
+  );
+  return JSON.parse(selectionOutput).deepScan.finalizationInput;
+}
+
+interface PublicationScenario {
+  resume?: "replay" | "missing-input" | "missing-runtime";
+  stop?: "cancel" | "close" | "budget";
+  cancelFollowUp?: boolean;
+  loseCompletionResponse?: boolean;
+}
+
+const scenarios = {
+  failed: {},
+  completed: {},
+  "completed-owner-suffix": {},
+  "completed-owner-explicit": {},
+  restart: { resume: "replay" },
+  "restart-missing-logs": { resume: "missing-input" },
+  "restart-missing-knowledge": { resume: "missing-input" },
+  "restart-deleted-target": { resume: "missing-input" },
+  "restart-changed-target": { resume: "replay" },
+  "restart-corrupt-selection": { resume: "missing-input" },
+  "restart-replaced-staged-draft": { resume: "missing-input" },
+  "restart-unavailable-runtime": { resume: "missing-runtime" },
+  "restart-canceled-runtime": { resume: "missing-runtime" },
+  "canceled-before-publication": { stop: "cancel" },
+  "canceled-during-publication": { stop: "cancel" },
+  "canceled-during-resumed-publication": { resume: "replay", stop: "cancel" },
+  "published-before-cancellation": {},
+  "closed-during-publication": { stop: "close" },
+  "budget-during-publication": { stop: "budget" },
+  "budget-after-deep-finish": { stop: "budget" },
+  "budget-during-resumed-publication": { resume: "replay", stop: "budget" },
+  "closed-during-resumed-publication": { resume: "replay", stop: "close" },
+  "lost-completion-response": { loseCompletionResponse: true },
+  "lost-completion-response-followup-canceled": {
+    loseCompletionResponse: true,
+    cancelFollowUp: true,
+  },
+  "completion-before-commit-fails": {},
+  "followup-canceled": { cancelFollowUp: true },
+} satisfies Record<string, PublicationScenario>;
+
+const outcomes = Object.keys(scenarios) as (keyof typeof scenarios)[];
 type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
 const cases: {
   outcome: (typeof outcomes)[number];
@@ -284,20 +420,22 @@ for (const {
   completeBeforePreparation,
   resumeValidation,
 } of cases) {
-  const resumedStop = outcome.includes("-resumed-");
+  const scenario: PublicationScenario = scenarios[outcome];
+  const restart = scenario.resume !== undefined;
+  const resumedStop = restart && scenario.stop !== undefined;
   const excludePaths =
     outcome === "restart-deleted-target" && !resumeValidation
       ? ["examples"]
       : undefined;
-  const restart = outcome.startsWith("restart") || resumedStop;
   const unavailableStartup =
-    outcome.startsWith("restart-") && outcome !== "restart-changed-target";
+    scenario.resume === "missing-input" ||
+    scenario.resume === "missing-runtime";
   const recoveryBudget =
     outcome === "restart-unavailable-runtime" && initialResumeUsage === true;
-  const closed = outcome.startsWith("closed-");
-  const budgeted = outcome.startsWith("budget-");
-  const canceledFollowUp = outcome.endsWith("followup-canceled");
-  const loseCompletionResponse = outcome.startsWith("lost-completion-response");
+  const closed = scenario.stop === "close";
+  const budgeted = scenario.stop === "budget";
+  const canceledFollowUp = scenario.cancelFollowUp === true;
+  const loseCompletionResponse = scenario.loseCompletionResponse === true;
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
@@ -441,7 +579,7 @@ for (const {
           environment,
           prepareScanArtifactRestorer,
           prepareRuntime: async () => {
-            if (resumedStartup && outcome.endsWith("runtime"))
+            if (resumedStartup && scenario.resume === "missing-runtime")
               throw new Error("Synthetic original runtime unavailable");
             const runtime = preparedRuntime(codexHome);
             const manifest = JSON.parse(
@@ -703,117 +841,16 @@ for (const {
                 expect(modelInputs.length).toBe(1);
                 async function* events(): AsyncGenerator<ThreadEvent> {
                   yield { type: "thread.started", thread_id: threadId };
-                  await runWorkbench(workbenchOptions, [
-                    "begin-deep-scan",
-                    "--scan-id",
+                  originalFinalizationInput = await seedAcceptedSelection({
+                    workbenchOptions,
                     scanId,
-                    "--thread-id",
-                    threadId,
-                  ]);
-                  const draft = {
-                    scanId,
-                    complete: true,
-                    findings: [
-                      {
-                        ruleId: "path-traversal.archive",
-                        title: "Unsafe archive extraction",
-                        summary:
-                          "An untrusted entry reaches a filesystem write.",
-                        severity: { level: "high" },
-                        confidence: {
-                          level: "high",
-                          rationale: "Source evidence.",
-                        },
-                        taxonomy: {
-                          category: "path-traversal",
-                          cwe: ["CWE-22"],
-                        },
-                        locations: [{ path: "extract.py", startLine: 1 }],
-                        remediation:
-                          "Validate the resolved destination before writing.",
-                        provenance: {
-                          source: "local_plugin",
-                          candidateId: "archive-entry",
-                        },
-                        ...(historicalFindings
-                          ? {
-                              root_cause: {
-                                summary:
-                                  "The original destination is unchecked.",
-                                evidence_refs: ["legacy-proof"],
-                              },
-                              code_evidence: [
-                                {
-                                  id: "legacy-proof",
-                                  code: "write(destination)",
-                                },
-                              ],
-                            }
-                          : {}),
-                      },
-                    ],
-                    coverage: {
-                      completeness: "partial",
-                      surfaces: [],
-                      explicitExclusions: [],
-                      deferred: [
-                        {
-                          id: "dependency",
-                          reason: "A dependency remains unreviewed.",
-                        },
-                      ],
-                    },
-                  };
-                  const seeded = JSON.parse(
-                    execFileSync(
-                      "python3",
-                      [
-                        fileURLToPath(
-                          new URL(
-                            "./fixtures/selected-deep-scan.py",
-                            import.meta.url,
-                          ),
-                        ),
-                      ],
-                      {
-                        input: JSON.stringify({
-                          scanId,
-                          scanDir,
-                          database: join(stateDir, "workbench.sqlite3"),
-                          draft,
-                        }),
-                        encoding: "utf8",
-                        env: environment,
-                      },
-                    ),
-                  );
-                  // Exercise the dedicated function bridge, without extending CLI arguments.
-                  const selectionOutput = execFileSync(
-                    "python3",
-                    [
-                      "-c",
-                      "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
-                      join(PLUGIN_ROOT, "scripts/workbench_db.py"),
-                      "finish-deep-scan",
-                      "--scan-id",
-                      scanId,
-                      "--coordinator-generation",
-                      "2",
-                      "--terminal-reason",
-                      loseCompletionResponse ? "capped" : "saturated",
-                      "--manifest-path",
-                      join(scanDir, "scan-manifest.json"),
-                    ],
-                    {
-                      input: JSON.stringify({
-                        resultPath: seeded.resultPath,
-                      }),
-                      encoding: "utf8",
-                      env: environment,
-                    },
-                  );
-                  originalFinalizationInput =
-                    JSON.parse(selectionOutput).deepScan.finalizationInput;
+                    scanDir,
+                    environment,
+                    historicalFindings,
+                    terminalReason: loseCompletionResponse
+                      ? "capped"
+                      : "saturated",
+                  });
                   selectedPath = join(
                     scanDir,
                     originalFinalizationInput.resultPath,
@@ -1170,7 +1207,7 @@ for (const {
         expect(modelInputs).toHaveLength(1);
         return;
       }
-      if (outcome.startsWith("canceled-")) {
+      if (scenario.stop === "cancel") {
         const error = await client
           .run(repository, {
             mode: "deep",
