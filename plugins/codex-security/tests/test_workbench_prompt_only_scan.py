@@ -221,35 +221,6 @@ def test_prompt_only_rejoin_follows_the_attached_continuation(tmp_path: Path) ->
     assert joined["scan"]["userContext"] == context
 
 
-def test_reading_context_from_stdin_leaves_workbench_writable(tmp_path: Path) -> None:
-    state_dir, target = empty_target_paths(tmp_path)
-    started = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
-    scan_id = str(started["scan"]["scanId"])
-
-    def read_context() -> str:
-        with closing(sqlite3.connect(state_dir / "workbench.sqlite3", timeout=0)) as other:
-            other.execute("BEGIN IMMEDIATE")
-        return "Review authentication."
-
-    argv = [
-        str(SCRIPT),
-        "update-scan-context",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-prompt-only-scan",
-        "--user-context-stdin",
-    ]
-    with (
-        mock.patch.dict(os.environ, {"CODEX_SECURITY_STATE_DIR": str(state_dir)}),
-        mock.patch("sys.argv", argv),
-        mock.patch("sys.stdin") as stdin,
-    ):
-        stdin.read.side_effect = read_context
-        runpy.run_path(str(SCRIPT), run_name="__main__")
-    assert get_scan(state_dir, scan_id)["scan"]["userContext"] == "Review authentication."
-
-
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     tmp_path: Path,
 ) -> None:
@@ -294,7 +265,7 @@ def test_native_investigation_policy_survives_retries_and_rejoin(tmp_path: Path,
     scan_id = started["scan"]["scanId"]
     assert "investigationPolicy" not in started
 
-    def request(minutes: str, thread="thread-prompt-only-scan", **kwargs):
+    def request(minutes: str, *args: str, thread="thread-prompt-only-scan", **kwargs):
         return scan_command(
             state,
             "update-scan-context",
@@ -303,24 +274,28 @@ def test_native_investigation_policy_survives_retries_and_rejoin(tmp_path: Path,
             thread,
             "--max-time-minutes",
             minutes,
+            *args,
             **kwargs,
         )
 
-    denied = request("10", "another-thread", check=False)
+    denied = request("10", thread="another-thread", check=False)
     assert denied["returncode"] != 0
     assert "investigationPolicy" not in get_scan(state, scan_id)
     for invalid in ("0", "-1", "nan", "inf", "1e100"):
         assert request(invalid, check=False)["returncode"] != 0
 
-    updated = request("1.5")
-    assert updated["scan"]["userContext"] == started["scan"]["userContext"]
+    context = "Review authentication."
+    updated = request("1.5", "--user-context-stdin", input_text=context)
+    assert updated["scan"]["userContext"] == context
     policy = updated["investigationPolicy"]
     times = re.findall(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z", policy)
     started_at, deadline = (datetime.fromisoformat(t.replace("Z", "+00:00")) for t in times)
     assert deadline - started_at == timedelta(seconds=90)
     assert "{{" not in policy
     assert request("nan", check=False)["returncode"] != 0
-    assert request("10")["investigationPolicy"] == policy
+    retry = request("10")
+    assert retry["investigationPolicy"] == policy
+    assert retry["scan"]["userContext"] == context
     assert get_scan(state, scan_id)["investigationPolicy"] == policy
     joined = start()
     assert joined["startDisposition"] == "joined"
