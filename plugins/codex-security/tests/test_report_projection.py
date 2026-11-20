@@ -872,7 +872,7 @@ def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;`" in markdown
-    assert r"https://example.com/a\_b?first=1&second=2 and \&amp;." in markdown
+    assert r"https://example.com/a_b?first=1&second=2 and \&amp;." in markdown
     assert "Keep https://example.com/`a _b_` as written." in markdown
     assert "- Included paths: `docs/www.example.com/&lt;tag&gt;.md`" in markdown
     assert "``docs/`&lt;tag&gt;`.md``" in markdown
@@ -882,6 +882,42 @@ def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
     assert "`` `&amp;` ``" in markdown
     assert "`` `&amp;.md ``" in markdown
     assert "`` file&amp;` ``" in markdown
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/SQL_Injection_Prevention_Cheat_Sheet.html",
+        "http://example.com/child_process.html#child_process_exec",
+        "www.example.com/a_b_c",
+        "example.com/path_with_underscore?first=1",
+        "//example.com/a_b",
+    ],
+)
+def test_projection_keeps_intraword_underscores_in_bare_urls(url: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = f"Follow {url} and rename snake_case."
+    finding["confidence"]["rationale"] = f"Reference: {url}"
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert f"Follow {url} and rename snake\\_case." in markdown
+    assert f"| Confidence rationale | Reference: {url} |" in markdown
+
+
+def test_projection_escapes_bare_url_underscores_that_can_delimit_emphasis() -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["summary"] = (
+        "Compare https://example.com/pkg/__init__.py with https://example.com/_private_/a_b."
+    )
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert (
+        r"Compare https://example.com/pkg/\_\_init\_\_.py with "
+        r"https://example.com/\_private\_/a_b."
+    ) in markdown
 
 
 @pytest.mark.parametrize("status", ["completed", "interrupted"])

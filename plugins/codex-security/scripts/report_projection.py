@@ -32,6 +32,7 @@ WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
 ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
 WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
+WORD_UNDERSCORE_RE = r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])"
 
 
 class ReportProjectionError(ValueError):
@@ -56,14 +57,17 @@ def _escape_markdown(value: str) -> str:
         if "//" in token or (dot >= 0 and re.search(r"[/?#]", token[dot + 1 :])):
             urls.append(match.span())
     punctuation = r"[\\`*_\[\]<>]|" + ENTITY_AMP_RE
-    pattern = f"(?P<code>{INLINE_CODE_RE})|{punctuation}"
+    pattern = f"(?P<code>{INLINE_CODE_RE})|(?P<word>{WORD_UNDERSCORE_RE})|{punctuation}"
 
     def escape(match: re.Match[str]) -> str:
         if match.lastgroup == "code":
             return match[0]
         # GFM autolinks retain backslashes literally, including in query strings.
-        if match[0] == "&" and any(start <= match.start() < end for start, end in urls):
-            return "&"
+        # An underscore between ASCII letters or digits cannot delimit emphasis.
+        if (match[0] == "&" or match.lastgroup == "word") and any(
+            start <= match.start() < end for start, end in urls
+        ):
+            return match[0]
         return "\\" + match[0]
 
     return re.sub(pattern, escape, value)
