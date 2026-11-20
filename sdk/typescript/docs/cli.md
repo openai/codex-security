@@ -3089,6 +3089,8 @@ Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
 to disable Python’s default user site-packages directory. If your wrapper uses
 `python -E` to ignore environment settings, add `-s` to skip that directory.
+They point `ZDOTDIR` at the system null device so Zsh wrappers skip user startup
+files such as `~/.zshenv`. Put required settings in the trusted wrapper.
 On Unix they also clear native loader overrides (`LD_*` and `DYLD_*`).
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
 `OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default

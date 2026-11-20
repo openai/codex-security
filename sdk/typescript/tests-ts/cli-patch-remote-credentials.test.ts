@@ -760,7 +760,7 @@ test.each([
     await writeFile(startup.OPENSSL_CONF, "");
     const script =
       `const inherited = Object.entries(${JSON.stringify(startup)}).some(([key, value]) => process.env[key] === value);\n` +
-      'const isolated = !inherited && process.env.PYTHONNOUSERSITE === "1";\n' +
+      'const isolated = !inherited && process.env.PYTHONNOUSERSITE === "1" && process.env.ZDOTDIR === require("node:os").devNull;\n' +
       'const phase = isolated ? process.env.PATCH_SSH_PHASE : "inherited";\n' +
       'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
     const checkoutScript = join(directory, name).replaceAll("\\", "/");

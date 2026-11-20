@@ -50,7 +50,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { isIP } from "node:net";
-import { tmpdir } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import {
   basename,
   delimiter,
@@ -2502,6 +2502,8 @@ export async function runRepositoryCommand(
     for (const name of Object.keys(environment))
       if (isPatchStartupOverride(name)) delete environment[name];
     environment["PYTHONNOUSERSITE"] = "1";
+    // Zsh reads $HOME/.zshenv even for a script when ZDOTDIR is unset.
+    environment["ZDOTDIR"] = devNull;
     const credentialNames = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
