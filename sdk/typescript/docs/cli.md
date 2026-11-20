@@ -3196,9 +3196,10 @@ checks each selected directory tree, including nested search locations. It
 omits the whole directory if it finds a link into a writable root or a writable
 hard link whose other names it cannot verify. Before launching a command, it
 checks for changes to files the patch could edit through new hard links.
-It filters out relative entries and ELF loader tokens such as `$ORIGIN`, and clears other `LD_*` and `DYLD_*`
-overrides when launching repository commands. With an external sandbox or
-unknown write permissions, the CLI clears the search paths as well.
+It filters out relative entries and ELF loader tokens such as `$ORIGIN`, and
+clears other `LD_*` and `DYLD_*` overrides when launching repository commands.
+With an external sandbox or unknown write permissions, the CLI clears the
+search paths as well.
 
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
 Publication checks the source of `core.sshCommand` and binds its executable

@@ -357,6 +357,8 @@ exit 1
     ["preflight", "named after reset"],
     ["preflight", "checkout relative"],
     ["preflight", "inherited checkout relative"],
+    ["preflight", "askpass checkout relative"],
+    ["preflight", "askpass checkout absolute"],
   ] as const)(
     "HTTPS %s honors credential helper ownership for %s",
     async (stage, selection) => {
@@ -369,7 +371,7 @@ exit 1
       let challenged = false;
       let authenticated = false;
       const services = new Set<string | null>();
-      const checkoutHelper = selection.endsWith("checkout relative");
+      const checkoutHelper = selection.includes("checkout");
       const retarget = selection === "retargeted helper";
       const alias = join(external, "selected");
       const linkType = process.platform === "win32" ? "junction" : "dir";
@@ -483,6 +485,16 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             "fixture-parameters",
           );
           git("config", "--unset", "alias.fixture-parameters");
+        } else if (selection.startsWith("askpass")) {
+          git(
+            "config",
+            "--file",
+            global,
+            "core.askPass",
+            selection.endsWith("relative")
+              ? "./helper.sh"
+              : join(directory, "helper.sh").replaceAll("\\", "/"),
+          );
         } else {
           addHelper(
             selection === "checkout relative"
