@@ -2256,6 +2256,142 @@ test.each([
   expect(snapshot.measurement.cost?.inputTokens).toBe(expected);
 });
 
+test.each([
+  "legacy",
+  "resumed session",
+  "new turn",
+  "same turn",
+  "compacted fork",
+])("reconciles a lower legacy counter across %s", async (boundary) => {
+  const home = await codexHome();
+  const path = await writeSession(home, "owner", {});
+  const turn = (turn_id: string) => ({
+    type: "turn_context",
+    payload: { turn_id, model: "gpt-5.6-sol" },
+  });
+  const counter = (input_tokens: number) =>
+    legacyUsageRecord({ input_tokens, output_tokens: 0 });
+  const session = (id: string) => ({ type: "session_meta", payload: { id } });
+  const fork = boundary === "compacted fork";
+  await appendFile(
+    path,
+    jsonLines([
+      ...(fork ? [session("parent"), counter(1000), session("owner")] : []),
+      ...(boundary === "legacy" ? [] : [turn("first")]),
+      counter(fork ? 2000 : 1000),
+      ...(fork ? [{ type: "compacted", payload: {} }] : []),
+      ...(boundary === "resumed session" ? [session("owner")] : []),
+      ...(boundary === "new turn" ? [turn("second")] : []),
+      counter(100),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home);
+  tracker.start("owner");
+  try {
+    const base = boundary === "same turn" ? 1000 : 1100;
+    const afterReset = await tracker.refresh();
+    expect(afterReset.measurement.usage?.input_tokens).toBe(base);
+    expect(afterReset.measurement.coverage).toBe("partial");
+    await appendFile(path, jsonLines([counter(200)]) + "\n");
+    const next = await tracker.refresh();
+    expect(next.measurement.usage?.input_tokens).toBe(
+      boundary === "same turn" ? 1000 : 1200,
+    );
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test.each([true, false])(
+  "reconciles warnings and counter epochs by the turn that supplied each receipt (attributed: %s)",
+  async (attributed) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "worker", {});
+    const at = "2026-09-01T00:00:02Z";
+    const append = (...events: Record<string, unknown>[]) =>
+      appendFile(
+        path,
+        jsonLines(events.map((event) => ({ ...event, timestamp: at }))) + "\n",
+      );
+    const turn = (turn_id: string) => ({
+      type: "turn_context",
+      payload: { turn_id, model: "gpt-5.6-sol" },
+    });
+    const usage = (input_tokens: number) => ({
+      input_tokens,
+      output_tokens: 0,
+    });
+    const counter = (count: number) => legacyUsageRecord(usage(count));
+    await append(
+      turn("initial"),
+      nativeUsageRecord("worker", "initial", usage(50)),
+      ...(attributed ? [counter(50)] : []),
+      turn("first"),
+      counter(1000),
+      counter(300),
+      turn("second"),
+      nativeUsageRecord("worker", "second", usage(100), usage(1100)),
+    );
+    const tracker = costTracker(home);
+    if (attributed)
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        startedAt: at,
+        completedAt: null,
+        owner: { threadId: "worker", turnId: null, startedAt: at },
+        executionThreadIds: ["worker"],
+      }));
+    tracker.start("worker");
+    try {
+      const beforeReset = await tracker.refresh();
+      expect(beforeReset.measurement.usage?.input_tokens).toBe(1100);
+      expect(beforeReset.measurement.coverage).toBe("partial");
+
+      await append(counter(100));
+      const afterReset = await tracker.refresh();
+      expect(afterReset.measurement.usage?.input_tokens).toBe(1100);
+      expect(afterReset.measurement.coverage).toBe("partial");
+
+      await append({
+        type: "token_usage_record",
+        payload: { turn_id: "first", response_id: "first", usage: usage(950) },
+      });
+      const completed = await tracker.refresh();
+      expect(completed.measurement.usage?.input_tokens).toBe(1100);
+      expect(completed.measurement.coverage).toBe("complete");
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test("retains exact usage from before a legacy counter resets", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, "worker", {});
+  const turn = (turn_id: string) => ({
+    type: "turn_context",
+    payload: { turn_id },
+  });
+  const usage = (input_tokens: number) => ({ input_tokens, output_tokens: 0 });
+  await appendFile(
+    path,
+    jsonLines([
+      turn("first"),
+      legacyUsageRecord(usage(1000)),
+      nativeUsageRecord("worker", "first", usage(1100)),
+      turn("second"),
+      legacyUsageRecord(usage(100)),
+      legacyUsageRecord(usage(200)),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home);
+  tracker.start("worker");
+  expect((await tracker.stop()).measurement).toMatchObject({
+    usage: { input_tokens: 1300 },
+    coverage: "partial",
+  });
+});
+
 test.each([true, false])(
   "counts a restarted counter once when its receipt arrives first: %p",
   async (receiptFirst) => {
