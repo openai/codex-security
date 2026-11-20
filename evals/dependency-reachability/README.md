@@ -93,6 +93,8 @@ node "$runner" --cache "$cache" --grade-existing "$outputs/clip" --out "$outputs
 
 ### Work on a candidate in parallel
 
+`results.json` records the Git commits of the runner, CLI and optional case module in `checkouts` when their entry points are tracked. It records tracked edits across each worktree for the runner and CLI and within the module directory for external cases. Regrading preserves these records and adds `regradeCheckouts`. Rebuild the CLI after editing its source so the binary matches the recorded checkout.
+
 Keep the baseline worktree at the starting commit. From its root, create a candidate with `git worktree add -b reachability-candidate ../reachability-candidate HEAD`. Give the other worker the starting commit, absolute cache path, case IDs, model, reviewer modes and baseline results directory. Each worker builds in their own worktree, reads the shared cache after fetching and writes to a new output directory outside Git. Workers can split the cases using repeated `--case` flags or run the same cases to compare implementations.
 
 For a CLI change, build the candidate in its worktree. From the baseline root, repeat the one-pair command against that build so both runs use the same fixtures and grading code.

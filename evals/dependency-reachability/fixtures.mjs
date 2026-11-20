@@ -39,6 +39,9 @@ export function commitFixture(repo) {
       repo,
       "-c",
       "commit.gpgSign=false",
+      // Large snapshots can trigger a detached repack that races fixture cleanup.
+      "-c",
+      "maintenance.auto=false",
       "commit",
       "--quiet",
       "-m",
