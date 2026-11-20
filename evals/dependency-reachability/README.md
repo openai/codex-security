@@ -14,25 +14,48 @@ codex-security exploitability check --grader=disabled CVE-2026-54283 --json
 
 The **eval grader** runs after the CLI exits. It scores both reports against the same expected use, version, verdict and evidence. The expected answer stays outside the checkout. The CLI gets the CVE and a project config with the caller’s scope in `exploitability.scope.instructions`. The runner records the actual command, progress events and report for each attempt.
 
-Use Node.js 22.13+ on a supported release line, Python 3.12+, Git and a built CLI. Live checks use OpenGrep, public advisory lookups and the CLI’s normal model credentials. The runner sets the experimental feature flag. Fetch the pinned public sources once (~229 MiB), then validate the checkouts offline. Run the commands from the repository root. [SDK setup](../../sdk/typescript/README.md)
+### Start from a fresh checkout
+
+Run the following from the repository root with Git, Python 3.12+ and Node.js 22.13+, 24 or 26. The first command tests the eval itself in a few seconds using local fixtures. Fetch the pinned public sources once (~229 MiB) and use `--prepare-only` to validate all the case inputs and expected citations offline. Both checks run before building the CLI and require no model credentials.
 
 ```sh
+node --test evals/dependency-reachability/test-eval.mjs
 runner=evals/dependency-reachability/upstream.mjs
-CLI=sdk/typescript/bin/codex-security.mjs
 cache=$(mktemp -d)
 outputs=$(mktemp -d)
 python3 evals/dependency-reachability/upstream/assets.py fetch "$cache"
-node "$runner" --cache "$cache" --prepare-only
+node "$runner" --cache "$cache" --prepare-only --out "$outputs/prepared"
 ```
 
-Start with one case. Then omit `--case` to run the whole suite. `--grader both` launches two independent investigations per case, alternating which mode starts first. `--jobs` limits total concurrent CLI processes and defaults to one. Set `--model` to use a specific model throughout. Each `--out` must be a new directory.
+For live runs, build the CLI **and its plugin** in the worktree you want to evaluate. With the repository’s pinned pnpm and Rust toolchain, these commands build both from source on a Unix host. The last line lets the Node launcher find the local plugin. After rebuilding the SDK, recreate the link because the build replaces `dist/`. If you already have the universal native payload, use `pnpm --dir sdk/typescript run build:plugin` in place of the last three lines. [SDK setup](../../sdk/typescript/TESTING.md#install-dependencies) · [Native build](../../plugins/codex-security/native/README.md#build-the-standalone-plugin-for-this-host)
 
 ```sh
-node "$runner" --cache "$cache" --cli "$CLI" --case clips-handler-validation --grader both --out "$outputs/clip"
-node "$runner" --cache "$cache" --cli "$CLI" --grader both --jobs 4 --out "$outputs/pairs"
+pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+pnpm --dir sdk/typescript run build
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
+node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
+ln -s ../../../plugins/codex-security sdk/typescript/dist/_bundled_plugin
 ```
 
-For a single condition, use `--grader enabled` (the default) or `--grader disabled`. Select `--suite original` for the historical 23 cases, `--suite added` for the eight new cases, or a suite from the table. `--help` lists the case IDs. By default, the CLI uses your existing login. With credentials available from the environment, `--isolated-state` gives each process its own temporary CLI state directory to avoid contention in parallel runs.
+### Run one pair or the full suite
+
+Put `opengrep` on `PATH` and choose a model your account can use. Live checks contact OSV and the model provider. The runner sets the feature flag and invokes the regular repository CLI. With `OPENAI_API_KEY` or `CODEX_API_KEY` in the environment, use `--isolated-state` for a fresh CLI state directory per investigation. To use your stored CLI login, omit that option. [OpenGrep installation](https://github.com/opengrep/opengrep#installation) · [Authentication](../../sdk/typescript/docs/cli.md#authentication)
+
+```sh
+CLI=sdk/typescript/bin/codex-security.mjs
+model=gpt-6.1-sol
+opengrep --version
+node "$runner" --cache "$cache" --cli "$CLI" --model "$model" --isolated-state \
+  --case clips-handler-validation --grader both --out "$outputs/clip"
+```
+
+`--grader both` launches two independent investigations per case, alternating which mode starts first. To reproduce a single failure, supply its `--case ID` and `--grader enabled` (the default) or `--grader disabled` with a fresh `--out` directory. Repeat `--case` to select several IDs. `--help` lists them. Select `--suite original` for the historical 23 cases, `--suite added` for the additions, or a suite from the table. Omit the selectors for a full run. `--jobs` limits concurrent CLI processes and defaults to one.
+
+```sh
+node "$runner" --cache "$cache" --cli "$CLI" --model "$model" --isolated-state \
+  --grader both --jobs 4 --out "$outputs/pairs"
+```
 
 ### What the cases test
 
@@ -62,15 +85,47 @@ In a paired run, open `results.json` for the comparison and `enabled/<case>/` an
 - `gainedWithReview` and `lostWithReview` name cases that passed in only one condition. The comparison checks the Git commit, scope, CVE and available advisory digests. It lists unfinished pairs and input mismatches separately. The process exits nonzero for an execution error, failed grade or mismatched inputs.
 - `medianPairedElapsedDeltaMs` is the median of the per-case time with review minus the time without review. `reviewBatches` counts review events in complete progress logs. Each batch can cover multiple claims and may require another model turn. Token totals cover the reports with usage. One pair per case gives a sample that includes variation between independent investigations.
 
-To regrade the saved reports against the current rubric without model calls, use the same selectors and grader mode as the original run. Regrading reads the original report bytes and re-creates the pinned Git commits.
+Regrade saved reports offline after changing the rubric. The runner infers the cases and reviewer modes from the saved `results.json`, reads the original report bytes and re-creates the pinned Git commits. You can narrow the replay with `--case` and `--grader`. The new results reference the original output directory, which holds the reports and logs.
 
 ```sh
-node "$runner" --cache "$cache" --grade-existing "$outputs/pairs" --grader both --out "$outputs/regraded"
+node "$runner" --cache "$cache" --grade-existing "$outputs/clip" --out "$outputs/regraded"
 ```
 
-### Compare CLI builds or run the historical skill
+### Work on a candidate in parallel
 
-To compare builds, run `upstream.mjs` once per `--cli` path with the same cases, model, reviewer setting and job count. Compare the source and advisory fingerprints in the results.
+Keep the baseline worktree at the starting commit. From its root, create a candidate with `git worktree add -b reachability-candidate ../reachability-candidate HEAD`. Give the other worker the starting commit, absolute cache path, case IDs, model, reviewer modes and baseline results directory. Each worker builds in their own worktree, reads the shared cache after fetching and writes to a new output directory outside Git. Workers can split the cases using repeated `--case` flags or run the same cases to compare implementations.
+
+For a CLI change, build the candidate in its worktree. From the baseline root, repeat the one-pair command against that build so both runs use the same fixtures and grading code.
+
+```sh
+node "$runner" --cache "$cache" --cli "../reachability-candidate/$CLI" --model "$model" --isolated-state \
+  --case clips-handler-validation --grader both --out "$outputs/clip-candidate"
+```
+
+Compare each mode with the corresponding baseline mode at the same model and job count. Check the source, caller scope and advisory fingerprints, then read the changed reports. Repeat a changed case to see if the result recurs. The pinned cases measure the configured caller path and its evidence. The local service cases also exercise confirmation that the affected copy ran and a caller reached it. [Local service cases](#local-service-and-captured-stack-checks)
+
+For a new case, start with a neighboring case definition, add its fixture and register it in `cases`. Keep the caller question separate from the expected answer. Identify the exact source excerpts that decide the verdict. Run `--prepare-only --case ID` and then a live pair for that ID. [Case definitions](upstream/cases.mjs) · [Example with two callers](upstream/application-cases.mjs)
+
+### Load a local case module
+
+Use `--case-module PATH` in place of `--cache` to supply your own cases, fixtures and rubric. The runner imports and executes the module even for `--help`, so supply a trusted local JavaScript file. The same `--suite`, `--case`, CLI and reviewer options apply. Supply the module again when regrading.
+
+```sh
+module=/path/to/cases.mjs
+node "$runner" --case-module "$module" --help
+node "$runner" --case-module "$module" --prepare-only --out "$outputs/local-prepared"
+node "$runner" --case-module "$module" --cli "$CLI" --model "$model" --isolated-state --grader both --out "$outputs/local"
+node "$runner" --case-module "$module" --grade-existing "$outputs/local" --out "$outputs/local-regraded"
+```
+
+Provide four named exports. Each function may be async. [Module example](test-eval.mjs) · [Runner](upstream.mjs) · [Citation helpers](grade.mjs) · [Comparison fields](upstream/compare.mjs)
+
+- `cases` is an array of records with `id`, `suite`, `revision`, `cve` and `callerScope`. Use unique IDs containing letters, digits, underscores or hyphens. Only the CVE and caller scope go to the CLI.
+- `prepare(scenario, scratch, commitFixture)` creates a repository under `scratch` and returns `{ repo, sha }`. Call `commitFixture(repo)` on a fresh fixture directory to obtain a deterministic commit. The runner removes `scratch` after each attempt, including regrades.
+- `validateSnapshot(scenario, repo, sha)` verifies the fixture, throws on invalid inputs and returns JSON evidence metadata for `results.json`.
+- `gradeSnapshot(report, scenario, repo, sha, grader, { verifyClaimCitations, sourceReader })` returns `{ pass: boolean, ... }`. For each assessed use, call `verifyClaimCitations(report, use, sourceReader(repo, sha), sha, grader === "enabled")` to verify its citations. Return individual correctness fields to populate the comparison metrics.
+
+### Run the historical skill
 
 The standalone skill baseline supplies the historical caller questions for the original 23 cases. It runs the production attack-path skill with an isolated Codex home and a read-only checkout. Its own rubric checks the version, verdict and exact source quotations. Build the SDK and install its eval dependencies first. To evaluate a local adapter, append `-- COMMAND [ARG...]` to the skill command. The adapter reads the question on stdin and writes one JSON answer on stdout.
 
