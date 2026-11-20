@@ -353,6 +353,34 @@ def test_issue_cannot_move_to_a_different_finding(tmp_path: Path, operation: str
     assert recorded["receipts"] == [{**conflicting, "scanId": second["manifest"]["scan"]["id"]}]
 
 
+@pytest.mark.parametrize(
+    ("receipt_fields", "message"),
+    [
+        ({"operation": ["create"]}, "requires create, update, or reuse"),
+        ({"readback": {"status": ["verified"]}}, "requires verified or failed status"),
+    ],
+)
+def test_non_string_receipt_values_are_rejected(
+    tmp_path: Path, receipt_fields: dict, message: str
+) -> None:
+    scan_dir, validated = source(tmp_path)
+    result = run_workbench(
+        tmp_path / "state",
+        "finding-issues",
+        input_text=json.dumps(
+            {
+                "action": "record",
+                "scanDirectory": str(scan_dir),
+                "destination": LINEAR,
+                "receipts": [receipt_for(validated, **receipt_fields)],
+            }
+        ),
+        check=False,
+    )
+    assert result["returncode"] != 0
+    assert message in result["stderr"]
+
+
 @pytest.mark.parametrize("mutation", ["finding", "occurrence", "scan", "seal"])
 def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutation: str) -> None:
     scan_dir, validated = source(tmp_path)

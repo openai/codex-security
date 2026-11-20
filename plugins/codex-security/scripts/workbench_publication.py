@@ -156,7 +156,7 @@ def validate_issue_receipts(receipts: Any, selected: dict[str, str]) -> list[dic
             raise SystemExit(
                 "A finding issue receipt does not belong to the selected sealed findings."
             )
-        if receipt.get("operation") not in {"create", "update", "reuse"}:
+        if receipt.get("operation") not in ("create", "update", "reuse"):
             raise SystemExit("A finding issue receipt requires create, update, or reuse.")
         if "url" in receipt and (not isinstance(receipt["url"], str) or not receipt["url"].strip()):
             raise SystemExit("A finding issue URL must be a nonempty string when supplied.")
@@ -164,7 +164,7 @@ def validate_issue_receipts(receipts: Any, selected: dict[str, str]) -> list[dic
             readback = receipt["readback"]
             if (
                 not isinstance(readback, dict)
-                or readback.get("status") not in {"verified", "failed"}
+                or readback.get("status") not in ("verified", "failed")
                 or ("error" in readback and not isinstance(readback["error"], str))
             ):
                 raise SystemExit("A finding issue readback requires verified or failed status.")
