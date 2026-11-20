@@ -546,17 +546,45 @@ export function githubConfigDirectory(environment: NodeJS.ProcessEnv) {
   return join(home ?? "", ".config", "gh");
 }
 
+function selectFilePaths(paths: Set<string>, directory: string, file: string) {
+  // A delegate can use the literal path or a client's normalized spelling.
+  paths.add(relativeFile(directory, file));
+  paths.add(join(directory, file));
+  if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
+    paths.add(directory + file);
+}
+
+function credentialHomes(environment: NodeJS.ProcessEnv) {
+  // A delegate can unset a client override or read the default file directly.
+  // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
+  const homes = new Set([
+    environmentEntry(environment, "HOME"),
+    awsAccountHome(environment),
+    accountHomeDirectory(),
+  ]);
+
+  if (process.platform === "win32") {
+    const drive = environmentEntry(environment, "HOMEDRIVE");
+    const path = environmentEntry(environment, "HOMEPATH");
+    if (drive && path) homes.add(drive + path);
+  }
+  return homes;
+}
+
 function clientConfigRoots(
   environment: NodeJS.ProcessEnv,
   homes: Set<string | undefined>,
 ): Set<string> {
   // Include legacy homes and the platform's user and system config roots.
+  const get = (name: string) => environmentEntry(environment, name);
   const windows = process.platform === "win32";
+  // The XDG library used by glab defaults to / when Unix HOME is empty.
+  if (!windows && !get("HOME")) homes = new Set([...homes, "/"]);
   const homePrefix = windows ? /^%USERPROFILE%/u : /^(?:~|\$HOME)/u;
   const roots = new Set<string>();
   const xdg = [
-    environment["XDG_CONFIG_HOME"],
-    ...goPathList(environment["XDG_CONFIG_DIRS"] ?? ""),
+    get("XDG_CONFIG_HOME"),
+    ...goPathList(get("XDG_CONFIG_DIRS") ?? ""),
   ];
   for (const dir of xdg) {
     if (!dir) continue;
@@ -567,7 +595,7 @@ function clientConfigRoots(
   }
   for (const home of homes) {
     if (!home) continue;
-    roots.add(relativeFile(home, ".config"));
+    selectFilePaths(roots, home, ".config");
     if (windows) {
       roots.add(relativeFile(home, join("AppData", "Local")));
       roots.add(relativeFile(home, join("AppData", "Roaming")));
@@ -582,14 +610,79 @@ function clientConfigRoots(
       "APPDATA",
       "PROGRAMDATA",
       "ALLUSERSPROFILE",
-    ])
-      if (environment[key]) roots.add(environment[key]);
-    roots.add(join((environment["SYSTEMDRIVE"] ?? "C:") + sep, "ProgramData"));
+    ]) {
+      const value = get(key);
+      if (value) roots.add(value);
+    }
+    roots.add(join((get("SYSTEMDRIVE") ?? "C:") + sep, "ProgramData"));
   } else if (process.platform === "darwin") {
     roots.add("/Library/Application Support");
     roots.add("/Library/Preferences");
   } else roots.add("/etc/xdg");
   return roots;
+}
+
+export function defaultSshConfigs(
+  executable: string,
+  environment: NodeJS.ProcessEnv,
+): Map<string, string | undefined> {
+  const configs = new Map<string, string | undefined>();
+  const windows = process.platform === "win32";
+  // The pinned transport starts in its volume root. OpenSSH uses the account
+  // database for the user config. Git for Windows also consults HOME, then
+  // HOMEDRIVE/HOMEPATH and USERPROFILE through the MSYS account database.
+  const cwd = parse(executable).root;
+  const prefix = dirname(dirname(executable));
+  const msys =
+    basename(prefix).toLowerCase() === "usr" ? dirname(prefix) : prefix;
+  const homes = windows
+    ? credentialHomes(environment)
+    : [accountHomeDirectory()];
+  for (let home of homes) {
+    if (home === undefined) continue;
+    if (windows && /^\/(?!\/)/u.test(home)) {
+      const drive = /^\/(?:cygdrive\/)?([a-z])(?:\/|$)/iu;
+      home = drive.test(home) ? home.replace(drive, "$1:/") : msys + home;
+    }
+    configs.set(
+      relativeFile(relativeFile(cwd, home), join(".ssh", "config")),
+      undefined,
+    );
+  }
+
+  // System Includes are relative to the compiled SSHDIR. Cover OS packages,
+  // portable OpenSSH, Homebrew and the bundled Git for Windows client.
+  const system = (dir: string) =>
+    configs.set(relativeFile(dir, "ssh_config"), dir);
+  if (windows) {
+    const data = environmentEntry(environment, "ProgramData");
+    if (data) system(relativeFile(relativeFile(cwd, data), "ssh"));
+    system(join(msys, "etc", "ssh"));
+  } else {
+    system("/etc/ssh");
+    system(join(prefix, "etc", "ssh"));
+    system(join(prefix, "etc"));
+    const cellar = /^(.*)\/Cellar\/openssh\//u.exec(executable);
+    if (cellar) system(join(cellar[1]! || "/", "etc", "ssh"));
+  }
+  return configs;
+}
+
+const gitlabConfigFile = join("glab-cli", "config.yml");
+
+// Bind logical candidates, including absent higher-priority files. glab versions
+// differ on the order of legacy and XDG roots. An explicit directory wins in all.
+export function gitlabConfigFiles(environment: NodeJS.ProcessEnv): string[] {
+  const explicit = environmentEntry(environment, "GLAB_CONFIG_DIR");
+  const paths = new Set<string>();
+  if (explicit) selectFilePaths(paths, explicit, "config.yml");
+  else
+    for (const directory of clientConfigRoots(
+      environment,
+      credentialHomes(environment),
+    ))
+      selectFilePaths(paths, directory, gitlabConfigFile);
+  return [...paths];
 }
 
 function selectStoreDirectory(paths: Set<string>, path: string) {
@@ -599,6 +692,136 @@ function selectStoreDirectory(paths: Set<string>, path: string) {
 
 function credentialPointers() {
   return { files: new Set<string>(), directories: new Set<string>() };
+}
+
+const npmGlobal = join("etc", "npmrc");
+const devpiFiles = ["auth.json", "current.json"];
+
+function selectClientFiles(
+  selected: Set<string>,
+  environment: NodeJS.ProcessEnv,
+  homes: Set<string | undefined>,
+) {
+  const nuget = "NuGet/NuGet.Config";
+  const uvCredentials = "uv/credentials/credentials.toml";
+  const keyringFiles = (dir: string) => [
+    join(dir, "keyring_pass.cfg"),
+    join(dir, "crypted_pass.cfg"),
+  ];
+  const nugetCache = "MicrosoftCredentialProvider/SessionTokenCache.dat";
+  const maven = [
+    "settings.xml",
+    "settings-security.xml",
+    "settings-security4.xml",
+  ];
+  const helm = ["registry/config.json", "repositories.yaml"];
+  const helmConfig = helm.map((file) => join("helm", file));
+  const podmanAuth = "containers/auth.json";
+  const pnpm = (dir = "pnpm") =>
+    ["rc", "auth.ini", "config.yaml"].map((file) => join(dir, file));
+  const npmPrefix =
+    process.platform === "win32"
+      ? dirname(process.execPath)
+      : dirname(dirname(process.execPath));
+  selectFilePaths(selected, npmPrefix, npmGlobal);
+  if (process.platform !== "win32" && environment["DESTDIR"])
+    selectFilePaths(
+      selected,
+      join(environment["DESTDIR"], npmPrefix),
+      npmGlobal,
+    );
+  // Client homes also contain executables and caches. Protect just these
+  // files under each default and each directory selected by the operator.
+  const clientStores: [string | null, string[], ...string[]][] = [
+    [
+      ".azure",
+      ["AZURE_CONFIG_DIR"],
+      "accessTokens.json",
+      "msal_token_cache.json",
+      "msal_token_cache.bin",
+      "service_principal_entries.json",
+      "service_principal_entries.bin",
+    ],
+    [".docker", ["DOCKER_CONFIG"], "config.json", "cert.pem", "key.pem"],
+    [".", ["XDG_CONFIG_HOME"], ".bunfig.toml"],
+    [null, ["PREFIX", "NPM_CONFIG_PREFIX"], npmGlobal],
+    [null, ["DOCKER_CERT_PATH"], "cert.pem", "key.pem"],
+    [".cargo", ["CARGO_HOME"], "credentials", "credentials.toml"],
+    [null, ["POETRY_CONFIG_DIR"], "auth.toml", "config.toml"],
+    [null, ["UV_CREDENTIALS_DIR"], "credentials.toml"],
+    [".rye", ["RYE_HOME"], "credentials", "config.toml"],
+    [".devpi/client", [], ...devpiFiles],
+    [
+      ".local/share",
+      ["XDG_DATA_HOME"],
+      uvCredentials,
+      "gem/credentials",
+      nugetCache,
+      ...keyringFiles("python_keyring"),
+    ],
+    [".gradle", ["GRADLE_HOME", "GRADLE_USER_HOME"], "gradle.properties"],
+    [".m2", [], ...maven],
+    [null, ["MAVEN_HOME", "M2_HOME"], "conf/settings.xml"],
+    [".anaconda", [], "keyring", "config.toml"],
+    [".mamba", [], "auth/authentication.json"],
+    [".rattler", [], "credentials.json"],
+    [".bundle", ["BUNDLE_USER_HOME", "BUNDLE_APP_CONFIG"], "config"],
+    [".", ["DOTNET_CLI_HOME"], join(".nuget", nuget)],
+    [
+      ".config",
+      ["XDG_CONFIG_HOME"],
+      nuget,
+      "gem/gemrc",
+      podmanAuth,
+      ...helmConfig,
+      ...pnpm(),
+    ],
+    [null, ["HELM_CONFIG_HOME"], ...helm],
+    [null, ["XDG_RUNTIME_DIR"], podmanAuth],
+  ];
+  if (process.platform === "win32")
+    clientStores.push(
+      ["AppData/Local", ["LOCALAPPDATA"], nugetCache, ...pnpm("pnpm/config")],
+      [
+        "AppData/Roaming",
+        ["APPDATA"],
+        nuget,
+        ...helmConfig,
+        join("npm", npmGlobal),
+        uvCredentials,
+        "uv/data/credentials/credentials.toml",
+      ],
+      [
+        "AppData/Local",
+        ["LOCALAPPDATA", "PROGRAMDATA"],
+        ...keyringFiles("Python Keyring"),
+      ],
+    );
+  if (process.platform === "darwin")
+    clientStores.push(
+      ["Library/Preferences", [], ...helmConfig, ...pnpm()],
+      ["Library/Application Support", [], nugetCache, uvCredentials],
+    );
+  const entries = Object.entries(environment);
+  for (const [subdir, selectors, ...files] of clientStores) {
+    for (const [name, dir] of entries) {
+      if (!dir || !selectors.includes(name.toUpperCase())) continue;
+      for (const file of files) selectFilePaths(selected, dir, normalize(file));
+    }
+    if (subdir === null) continue;
+    for (const home of homes) {
+      if (home === undefined) continue;
+      for (const file of files)
+        selectFilePaths(selected, home, join(subdir, file));
+    }
+  }
+  for (const file of (environment["GEMRC"] ?? "").split(delimiter))
+    if (file) selected.add(file);
+  if (process.platform === "linux" && process.getuid) {
+    const uid = String(process.getuid());
+    selectFilePaths(selected, join("/run/containers", uid), "auth.json");
+    selectFilePaths(selected, join("/run/user", uid), podmanAuth);
+  }
 }
 
 async function collectCredentialPointers(
@@ -615,13 +838,24 @@ async function collectCredentialPointers(
       if (typeof value === "string") environment[key(name)] = value;
   const selected = paths.files;
   const pipConfig = process.platform === "win32" ? "pip.ini" : "pip.conf";
+  const binstarDirs = new Set<string>();
+  const devpi = environment["DEVPI_CLIENTDIR"];
   const terraformHomes = new Set<string>();
-  const selectFile = (directory: string, file: string, paths = selected) => {
-    // A delegate can use the literal path or a client's normalized spelling.
-    paths.add(relativeFile(directory, file));
-    paths.add(join(directory, file));
-    if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
-      paths.add(directory + file);
+  const selectFile = (directory: string, file: string, paths = selected) =>
+    selectFilePaths(paths, directory, file);
+  const selectComposer = (dir: string) => {
+    // Platform::expandPath substitutes only a leading ~, $NAME or %NAME%.
+    const expanded = dir.replace(
+      /^(?:~(?=[\\/])|\$(\w+)|%(\w+)%)/u,
+      (_match, dollar?: string, percent?: string) => {
+        const name = dollar ?? percent;
+        if (!name || (name === "HOME" && process.platform === "win32"))
+          return environment["HOME"] || awsAccountHome(environment);
+        return environment[key(name)] ?? "";
+      },
+    );
+    for (const file of ["auth.json", "config.json"])
+      selectFile(expanded || sep, file);
   };
   const selectGh = (directory: string) => {
     for (const file of githubConfigFiles) selectFile(directory, file);
@@ -648,18 +882,18 @@ async function collectCredentialPointers(
     selectFile(client, "postgresql.key");
     selectFile(client, "postgresql.crt");
   };
-  // A delegate can unset a client override or read the default file directly.
-  // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
-  const homes = new Set([
-    environment["HOME"],
-    awsAccountHome(environment),
-    accountHomeDirectory(),
-  ]);
-  const selectFragments = async (dir: string, pattern: RegExp) => {
+  const homes = credentialHomes(environment);
+  const selectFragments = async (
+    dir: string,
+    pattern: RegExp,
+    optional = false,
+  ) => {
     const entries = await readdir(httpCredentialPath(checkout, dir), {
       withFileTypes: true,
     }).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+      if (optional && hasErrorCode(error, "EACCES", "EPERM", "ELOOP"))
+        return [];
       throw error;
     });
     for (const entry of entries)
@@ -678,12 +912,6 @@ async function collectCredentialPointers(
   };
   protectCodexHome(configuredCodexHome(environment));
   protectCodexHome(codexSecurityCredentialHome(environment));
-  if (
-    process.platform === "win32" &&
-    environment["HOMEDRIVE"] &&
-    environment["HOMEPATH"]
-  )
-    homes.add(environment["HOMEDRIVE"] + environment["HOMEPATH"]);
   for (const home of homes) {
     if (home === undefined) continue;
     terraformHomes.add(
@@ -694,6 +922,11 @@ async function collectCredentialPointers(
         ? relativeFile(home, join("AppData", "Roaming", "postgresql"))
         : home,
     );
+    if (devpi !== undefined) {
+      const dir = expandCredentialPath("DEVPI_CLIENTDIR", devpi, home) || ".";
+      for (const file of devpiFiles) selectFile(dir, file);
+    }
+    selectFile(home, join(".continuum", "anaconda-client"), binstarDirs);
     selectFile(home, ".gnupg", paths.directories);
     if (process.platform === "win32")
       selectFile(home, join("AppData", "Roaming", "gnupg"), paths.directories);
@@ -713,12 +946,19 @@ async function collectCredentialPointers(
         ),
       );
     selectGh(join(home, ".config", "gh"));
+    selectComposer(relativeFile(home, ".composer"));
+    selectComposer(relativeFile(home, ".config/composer"));
+    if (process.platform === "win32")
+      selectComposer(relativeFile(home, "AppData/Roaming/Composer"));
     for (const file of [
       ".dockercfg",
       ".gemrc",
       join(".gem", "credentials"),
       join(".kube", "config"),
       ".npmrc",
+      ".yarnrc",
+      ".yarnrc.yml",
+      ".condarc",
       ".pypirc",
       join(".gcm", "msal.cache"),
       join(".gcm", "msal", "app.cache"),
@@ -728,6 +968,9 @@ async function collectCredentialPointers(
     ])
       selectFile(home, file);
     for (const name of [
+      "ANACONDA_AUTH_KEYRING_PATH",
+      "ANACONDA_CLOUD_KEYRING_PATH",
+      "ANACONDA_CONFIG_TOML",
       "BOTO_CONFIG",
       "AWS_CREDENTIAL_FILE",
       "PIP_CLIENT_CERT",
@@ -739,7 +982,9 @@ async function collectCredentialPointers(
             name,
             value,
             home,
-            name === "BOTO_CONFIG" ? environment : undefined,
+            name === "BOTO_CONFIG" || name.startsWith("ANACONDA_")
+              ? environment
+              : undefined,
           ),
         );
     }
@@ -748,79 +993,14 @@ async function collectCredentialPointers(
       if (path) selected.add(path);
     }
   }
-  const nuget = "NuGet/NuGet.Config";
-  const nugetCache = "MicrosoftCredentialProvider/SessionTokenCache.dat";
-  const maven = [
-    "settings.xml",
-    "settings-security.xml",
-    "settings-security4.xml",
-  ];
-  const helm = ["registry/config.json", "repositories.yaml"];
-  const helmConfig = helm.map((file) => join("helm", file));
-  const podmanAuth = "containers/auth.json";
-  // Client homes also contain executables and caches. Protect just these
-  // files under each default and each directory selected by the operator.
-  const clientStores: [string | null, string[], ...string[]][] = [
-    [
-      ".azure",
-      ["AZURE_CONFIG_DIR"],
-      "accessTokens.json",
-      "msal_token_cache.json",
-      "msal_token_cache.bin",
-      "service_principal_entries.json",
-      "service_principal_entries.bin",
-    ],
-    [".docker", ["DOCKER_CONFIG"], "config.json", "cert.pem", "key.pem"],
-    [null, ["DOCKER_CERT_PATH"], "cert.pem", "key.pem"],
-    [".cargo", ["CARGO_HOME"], "credentials", "credentials.toml"],
-    [".gradle", ["GRADLE_HOME", "GRADLE_USER_HOME"], "gradle.properties"],
-    [".m2", [], ...maven],
-    [null, ["MAVEN_HOME", "M2_HOME"], "conf/settings.xml"],
-    [".bundle", ["BUNDLE_USER_HOME", "BUNDLE_APP_CONFIG"], "config"],
-    [".local/share", ["XDG_DATA_HOME"], "gem/credentials", nugetCache],
-    [".", ["DOTNET_CLI_HOME"], join(".nuget", nuget)],
-    [
-      ".config",
-      ["XDG_CONFIG_HOME"],
-      nuget,
-      "gem/gemrc",
-      podmanAuth,
-      ...helmConfig,
-    ],
-    [null, ["HELM_CONFIG_HOME"], ...helm],
-    [null, ["XDG_RUNTIME_DIR"], podmanAuth],
-  ];
-  if (process.platform === "win32")
-    clientStores.push(
-      ["AppData/Local", ["LOCALAPPDATA"], nugetCache],
-      ["AppData/Roaming", ["APPDATA"], nuget, ...helmConfig],
-    );
-  if (process.platform === "darwin")
-    clientStores.push(
-      ["Library/Preferences", [], ...helmConfig],
-      ["Library/Application Support", [], nugetCache],
-    );
+  selectClientFiles(selected, environment, homes);
   const entries = Object.entries(environment);
-  for (const [subdir, selectors, ...files] of clientStores) {
-    for (const [name, dir] of entries) {
-      if (!dir || !selectors.includes(name.toUpperCase())) continue;
-      for (const file of files) selectFile(dir, normalize(file));
-    }
-    if (subdir === null) continue;
-    for (const home of homes) {
-      if (home === undefined) continue;
-      for (const file of files) selectFile(home, join(subdir, file));
-    }
-  }
-  for (const file of (environment["GEMRC"] ?? "").split(delimiter))
-    if (file) selected.add(file);
-  if (process.platform === "linux" && process.getuid) {
-    const uid = String(process.getuid());
-    selectFile(join("/run/containers", uid), "auth.json");
-    selectFile(join("/run/user", uid), podmanAuth);
-  }
-  if (environment["XDG_CONFIG_HOME"])
+  if (environment["COMPOSER_HOME"])
+    selectComposer(environment["COMPOSER_HOME"]);
+  if (environment["XDG_CONFIG_HOME"]) {
     selectGh(join(environment["XDG_CONFIG_HOME"], "gh"));
+    selectComposer(relativeFile(environment["XDG_CONFIG_HOME"], "composer"));
+  }
   if (process.platform === "win32") {
     const appData = environment["APPDATA"];
     // Native GnuPG asks Windows for Roaming AppData and falls back to C:/gnupg.
@@ -830,6 +1010,7 @@ async function collectCredentialPointers(
     if (appData) {
       terraformHomes.add(appData);
       selectGh(join(appData, "GitHub CLI"));
+      selectComposer(relativeFile(appData, "Composer"));
       selectPgDefaults(relativeFile(appData, "postgresql"));
     }
     // google-auth treats an empty APPDATA as a relative directory.
@@ -841,8 +1022,27 @@ async function collectCredentialPointers(
     );
   }
   selectGh(githubConfigDirectory(environment));
-  for (const root of clientConfigRoots(environment, homes)) {
-    selectFile(root, join("glab-cli", "config.yml"));
+  // uv falls back to a relative state directory if home discovery fails.
+  selected.add(join(".uv", "credentials", "credentials.toml"));
+  const roots = clientConfigRoots(environment, homes);
+  if (process.platform === "win32")
+    for (const [name, dir] of entries)
+      if (dir && /^WIN_PD_OVERRIDE_(?:(?:LOCAL|COMMON)_)?APPDATA$/u.test(name))
+        roots.add(dir);
+  for (const root of roots) {
+    selectFile(root, join("pypoetry", "auth.toml"));
+    selectFile(root, join("pypoetry", "config.toml"));
+    selectFile(root, join("hatch", "config.toml"));
+    selectFile(root, join("pdm", "config.toml"));
+    if (process.platform === "win32")
+      selectFile(root, join("pdm", "pdm", "config.toml"));
+    selectFile(root, join("uv", "uv.toml"));
+    selectFile(
+      root,
+      process.platform === "win32" ? join("ContinuumIO", "binstar") : "binstar",
+      binstarDirs,
+    );
+    selectFile(root, gitlabConfigFile);
     selectFile(root, join("pip", pipConfig));
     selectFile(root, join("sops", "age", "keys.txt"));
     if (process.platform === "win32")
@@ -862,14 +1062,25 @@ async function collectCredentialPointers(
     // An explicitly empty AWS_LOGIN_CACHE_DIRECTORY stores SHA-256 session files in cwd.
     const local = resolve(checkout, dir) === resolve(checkout);
     if (!local) paths.directories.add(dir);
-    try {
-      await selectFragments(
-        dir || ".",
-        local ? /^[0-9a-f]{64}\.json$/u : /\.json$/u,
-      );
-    } catch (error) {
-      if (!hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) throw error;
-    }
+    await selectFragments(
+      dir || ".",
+      local ? /^[0-9a-f]{64}\.json$/u : /\.json$/u,
+      true,
+    );
+  }
+  // The defaults are dedicated stores. An explicit override can instead
+  // point to a shared data directory, including ./data in the checkout.
+  for (const dir of binstarDirs) paths.directories.add(dir);
+  const binstar = environment["BINSTAR_CONFIG_DIR"];
+  if (binstar !== undefined) {
+    const dir = binstar || ".";
+    selectFile(dir, "data", binstarDirs);
+    selectFile(dir, join("data", "config.yaml"));
+    selectFile(dir, join("data", "tokens"), paths.directories);
+  }
+  for (const dir of binstarDirs) {
+    await selectFragments(dir, /(?:\.token|^config\.yaml)$/u, true);
+    await selectFragments(relativeFile(dir, "tokens"), /\.token$/u, true);
   }
   for (const dir of profileDirs)
     await selectFragments(dir, /\.config\.toml(?:\.tmp)?$/iu);
@@ -928,6 +1139,12 @@ async function collectCredentialPointers(
       continue;
     }
     switch (variable) {
+      case "NPM_CONFIG_PREFIX":
+        selectFile(npmConfigPath(value), npmGlobal);
+        break;
+      case "YARN_RC_FILENAME":
+        for (const home of homes) if (home) selectFile(home, value);
+        break;
       case "GNUPGHOME": {
         // GnuPG interprets C:name as C:\name on Windows.
         const dir =
@@ -1459,7 +1676,7 @@ export async function capturePatchGitControls(
     const metadata = await stat(path, { bigint: true });
     // glab config set can save a token in the repository configuration.
     if (mode !== "external" && !administrationRoots.has(path))
-      await protectStore(join(path, "glab-cli", "config.yml"));
+      await protectStore(join(path, gitlabConfigFile));
     administrationRoots.set(path, { dev: metadata.dev, ino: metadata.ino });
   };
   const controlPaths = new Map<

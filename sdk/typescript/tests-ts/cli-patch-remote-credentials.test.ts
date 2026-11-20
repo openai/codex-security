@@ -526,6 +526,7 @@ async function runSshPreflight(
   global: string,
   marker: string,
   inspectHostname = false,
+  afterHostname?: () => Promise<void>,
 ) {
   repositoryGit(selected)(
     "remote",
@@ -552,7 +553,7 @@ async function runSshPreflight(
       environment,
 
       onCodex: model,
-      onRepositoryCommand: (command, args, cwd, options) => {
+      onRepositoryCommand: async (command, args, cwd, options) => {
         if (command !== "git") return "[]";
         const phase = args.includes("codex-security-ssh-config")
           ? "hostname"
@@ -564,7 +565,7 @@ async function runSshPreflight(
           inspectHostname && phase
             ? runRepositoryCommand
             : runGitRepositoryCommand;
-        return run(command, args, cwd, {
+        const result = await run(command, args, cwd, {
           ...options,
           environment: {
             ...environment,
@@ -572,6 +573,8 @@ async function runSshPreflight(
             PATCH_SSH_PHASE: phase,
           },
         });
+        if (phase === "hostname") await afterHostname?.();
+        return result;
       },
     },
     { localHosting: false },
@@ -672,8 +675,13 @@ test.each([".", "src"])(
   },
 );
 
-test.each(["checkout-relative", "operator-absolute"] as const)(
-  "external OpenSSH configuration resolves %s commands during hostname lookup and transport",
+test.each([
+  "checkout-relative",
+  "operator-absolute",
+  "checkout-include",
+  "changed-config",
+] as const)(
+  "binds %s OpenSSH configuration during hostname lookup and transport",
   async (location) => {
     const { directory, git } = await publicationRepository(fixtures);
     const external = await fixtures.create("patch-ssh-config-");
@@ -685,16 +693,31 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
       'const phase = process.env.PYTHONPATH || process.env.NODE_PATH ? "inherited" : process.env.PATCH_SSH_PHASE;\n' +
       'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
     await writeFile(join(directory, name), script);
-    if (location === "operator-absolute")
+    if (location !== "checkout-relative")
       await writeFile(join(external, name), script);
-    git("add", name);
-    git("commit", "-m", "Add synthetic repository SSH command");
+    const checkoutInclude = location === "checkout-include";
+    const leaf =
+      checkoutInclude ||
+      (process.platform !== "win32" && location !== "checkout-relative")
+        ? join(checkoutInclude ? directory : external, "included config")
+        : config;
+    if (leaf !== config) {
+      const nested = join(external, "intermediate config");
+      const include = (file: string) =>
+        `Include "${file.replaceAll("\\", "/")}"\n`;
+      await writeFile(config, include(nested));
+      await writeFile(
+        nested,
+        include(location === "changed-config" ? leaf + "*" : leaf),
+        { mode: 0o600 },
+      );
+    }
     const target =
-      location === "operator-absolute"
-        ? join(external, name).replaceAll("\\", "/")
-        : "./" + name;
+      location === "checkout-relative"
+        ? "./" + name
+        : join(external, name).replaceAll("\\", "/");
     await writeFile(
-      config,
+      leaf,
       [
         "Host *",
         "  BatchMode yes",
@@ -703,17 +726,21 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
         "  LogLevel ERROR",
         "",
       ].join("\n"),
+      { mode: 0o600 },
     );
-    const sshCommand = `ssh -F "${config.replaceAll("\\", "/")}"`;
-    git("config", "--file", global, "core.sshCommand", sshCommand);
+    git("add", ".");
+    git("commit", "-m", "Add synthetic repository SSH command");
+    const sshCommand = (file: string) =>
+      `ssh -F "${file.replaceAll("\\", "/")}"`;
+    git("config", "--file", global, "core.sshCommand", sshCommand(config));
 
     // Raw Git selects the SSH client and invokes Match exec from this checkout.
-    // Prove the fixture command runs there before testing publication's safe cwd.
+    // MSYS can treat a drive-qualified Include as relative. Exercise the leaf directly there.
     const control = spawnSync(
       "git",
       [
         "-c",
-        `alias.test-ssh-config=!${sshCommand} -G`,
+        `alias.test-ssh-config=!${sshCommand(process.platform === "win32" ? leaf : config)} -G`,
         "test-ssh-config",
         "127.0.0.1",
       ],
@@ -757,11 +784,24 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
       global,
       marker,
       true,
+      location === "changed-config"
+        ? () => writeFile(leaf, "# changed\n", { flag: "a" })
+        : undefined,
     );
+    if (checkoutInclude) {
+      expect(hostnameCommand, stderr).toBeUndefined();
+      expect(invoked, stderr).toBe("");
+      expect(stderr).toMatch(/SSH|transport/iu);
+      return;
+    }
     expect(hostnameCommand, stderr).toContain(
       executable.replaceAll("'", "'\\''"),
     );
-    if (location === "operator-absolute") {
+    if (location === "changed-config") {
+      expect(invoked, stderr).toContain("hostname:match");
+      expect(invoked, stderr).not.toContain("preflight:");
+      expect(stderr).toContain("transport file changed");
+    } else if (location === "operator-absolute") {
       const records = invoked.split(/\r?\n/u);
       expect(records, stderr).toContain("hostname:match");
       expect(records, stderr).toContain("preflight:match");

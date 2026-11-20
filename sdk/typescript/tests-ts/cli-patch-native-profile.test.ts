@@ -913,6 +913,19 @@ test("patch model and clean filters cannot read selected authentication files", 
   const legacyCloud = join(cloudConfig, "legacy_credentials", "fixture");
   await mkdir(legacyCloud, { recursive: true });
   const appdata = join(operator, "Roaming");
+  const pythonConfig =
+    process.platform === "win32"
+      ? appdata
+      : join(
+          operator,
+          process.platform === "darwin"
+            ? "Library/Application Support"
+            : ".config",
+        );
+  const pythonLocal =
+    process.platform === "win32"
+      ? join(operator, "AppData/Local")
+      : pythonConfig;
   const terraformDir =
     process.platform === "win32"
       ? join(appdata, "terraform.d")
@@ -941,6 +954,10 @@ test("patch model and clean filters cannot read selected authentication files", 
       "AWS_WEB_IDENTITY_TOKEN_FILE",
       "PNPM_CONFIG_NPMRC_AUTH_FILE",
       "BUNDLE_USER_CONFIG",
+      "HATCH_CONFIG",
+      "PDM_CONFIG_FILE",
+      "KEYRING_PROPERTY_FILE_PATH",
+      "POETRY_CERTIFICATES_PRIVATE_CLIENT_CERT",
       "REGISTRY_AUTH_FILE",
       "SSL_CLIENT_CERT",
       "SOPS_AGE_KEY_FILE",
@@ -953,11 +970,21 @@ test("patch model and clean filters cannot read selected authentication files", 
     DOCKER_CONFIG: registry,
     DOCKER_CERT_PATH: join(operator, "docker tls"),
     GH_CONFIG_DIR: gh,
+    BINSTAR_CONFIG_DIR: join(operator, "selected binstar"),
+    ANACONDA_AUTH_KEYRING_PATH: "~/${LOGIN_CACHE_NAME}.keyring",
+    RATTLER_AUTH_FILE: join(operator, "selected rattler"),
     GNUPGHOME: join(operator, "selected signing home"),
     GLAB_CONFIG_DIR: glab,
     GCM_PLAINTEXT_STORE_PATH: join(operator, "selected plaintext store"),
     SOPS_AGE_KEY: "synthetic age identity",
     PIP_CONFIG_FILE: join(operator, "selected pip config"),
+    POETRY_CONFIG_DIR: join(operator, "poetry"),
+    UV_CREDENTIALS_DIR: join(operator, "uv credentials"),
+    DEVPI_CLIENTDIR: "~/selected devpi",
+    POETRY_PYPI_TOKEN_PRIVATE: "synthetic token",
+    POETRY_HTTP_BASIC_PRIVATE_USERNAME: "synthetic auth",
+    HATCH_INDEX_AUTH: "synthetic auth",
+    UV_INDEX: "private=https://synthetic@example.test/simple",
     PIP_CLIENT_CERT: "~/pip client.pem",
     AZURE_CONFIG_DIR: azure,
     AWS_LOGIN_CACHE_DIRECTORY: "~/${LOGIN_CACHE_NAME}",
@@ -969,6 +996,10 @@ test("patch model and clean filters cannot read selected authentication files", 
     TF_CLI_CONFIG_FILE: terraformConfig,
     TERRAFORM_CONFIG: legacyTerraformConfig,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
+    COMPOSER_AUTH: '{"bearer":{"example.invalid":"synthetic"}}',
+    PNPM_CONFIG__AUTH: '{"example.invalid":{"authToken":"synthetic"}}',
+    YARN_NPM_AUTH_IDENT: "operator:synthetic",
+    DENO_AUTH_TOKENS: "synthetic@example.invalid",
     NPM_CONFIG_USERCONFIG: npm,
     npm_config_globalconfig: "${HOME}/selected global npmrc",
   };
@@ -989,6 +1020,10 @@ test("patch model and clean filters cannot read selected authentication files", 
     APPDATA: appdata,
     DOTNET_CLI_HOME: join(operator, "dotnet"),
     CARGO_HOME: join(operator, "cargo"),
+    RYE_HOME: join(operator, "selected rye"),
+    COMPOSER_HOME: "$HOME/selected composer",
+    NPM_CONFIG_PREFIX: "~/selected prefix",
+    YARN_RC_FILENAME: ".operator-yarnrc.yml",
     GRADLE_USER_HOME: join(operator, "gradle"),
     MAVEN_HOME: join(operator, "maven"),
     BUNDLE_USER_HOME: join(operator, "bundle"),
@@ -1035,6 +1070,14 @@ test("patch model and clean filters cannot read selected authentication files", 
     proxyKey,
     clientCert,
     join(operator, ".pypirc"),
+    join(operator, ".anaconda", "keyring"),
+    join(operator, ".anaconda", "config.toml"),
+    join(operator, ".mamba", "auth", "authentication.json"),
+    join(operator, ".rattler", "credentials.json"),
+    join(operator, ".continuum", "anaconda-client", "tokens", "example.token"),
+    join(pointers.BINSTAR_CONFIG_DIR, "data", "example.token"),
+    join(operator, "selected login cache.keyring"),
+    pointers.RATTLER_AUTH_FILE,
     join(operator, ".gnupg", "private-keys-v1.d", "default.key"),
     join(pointers.GNUPGHOME, "private-keys-v1.d", "selected.key"),
     ...(process.platform === "win32"
@@ -1161,6 +1204,26 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(operator, ".dockercfg"),
     join(operator, ".cargo", "credentials"),
     join(environment.CARGO_HOME, "credentials.toml"),
+    join(pointers.POETRY_CONFIG_DIR, "auth.toml"),
+    join(pointers.UV_CREDENTIALS_DIR, "credentials.toml"),
+    join(environment.XDG_CONFIG_HOME, "pypoetry", "auth.toml"),
+    join(environment.XDG_DATA_HOME, "uv", "credentials", "credentials.toml"),
+    join(environment.XDG_DATA_HOME, "python_keyring", "keyring_pass.cfg"),
+    join(operator, ".rye", "credentials"),
+    join(environment.RYE_HOME, "credentials"),
+    join(operator, ".devpi/client/auth.json"),
+    join(operator, "selected devpi/auth.json"),
+    join(pythonConfig, "pypoetry/auth.toml"),
+    join(pythonConfig, "pypoetry/config.toml"),
+    join(pythonConfig, "uv/uv.toml"),
+    join(pythonLocal, "hatch/config.toml"),
+    join(
+      pythonLocal,
+      process.platform === "win32" ? "pdm/pdm/config.toml" : "pdm/config.toml",
+    ),
+    ...(process.platform === "win32"
+      ? [join(appdata, "uv/data/credentials/credentials.toml")]
+      : []),
     join(operator, ".gradle", "gradle.properties"),
     join(environment.GRADLE_USER_HOME, "gradle.properties"),
     join(operator, ".m2", "settings.xml"),
@@ -1192,6 +1255,17 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(operator, ".docker", "config.json"),
     join(operator, ".kube", "config"),
     join(operator, ".npmrc"),
+    join(operator, "selected prefix", "etc", "npmrc"),
+    join(operator, ".yarnrc"),
+    join(operator, ".yarnrc.yml"),
+    join(operator, environment.YARN_RC_FILENAME),
+    join(environment.XDG_CONFIG_HOME, ".bunfig.toml"),
+    join(environment.XDG_CONFIG_HOME, "pnpm", "auth.ini"),
+    join(operator, ".config", "pnpm", "rc"),
+    join(operator, ".config", "pnpm", "config.yaml"),
+    join(operator, ".composer", "auth.json"),
+    join(operator, "selected composer", "auth.json"),
+    join(environment.XDG_CONFIG_HOME, "composer", "config.json"),
     npm,
     npmGlobal,
   ];
@@ -1213,7 +1287,9 @@ if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
 if (fs.readFileSync(${JSON.stringify(join(terraformDir, "ordinary.txt"))}, "utf8") !== "Terraform sibling")
   throw new Error("Cannot read the ordinary Terraform sibling");
 const contents = [];
-for (const path of ${JSON.stringify(protectedPaths)}) {
+const { resolve } = require("node:path");
+for (const file of ${JSON.stringify(protectedPaths.map((path) => relative(operator, path)))}) {
+  const path = resolve(${JSON.stringify(operator)}, file);
   try { contents.push(fs.readFileSync(path, "utf8")); }
   catch (error) { if (!["EACCES", "EPERM", "ENOENT"].includes(error.code)) throw error; }
 }`;
