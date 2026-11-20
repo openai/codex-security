@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -121,6 +122,39 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
         assert response["canceledScanId"] == scan_id
         assert response["results"]["scanId"] == (replacement_id if app else scan_id)
         assert response["results"]["progress"]["status"] == ("running" if app else "canceled")
+
+
+@pytest.mark.parametrize(
+    ("name", "statement"),
+    [
+        (
+            "bind new finding decisions to admitted scans",
+            "ALTER TABLE finding_decisions ADD COLUMN scan_sequence INTEGER;",
+        ),
+        (
+            "persist selected deep scan finalization input",
+            "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;",
+        ),
+    ],
+)
+@pytest.mark.parametrize("already_added", [False, True])
+def test_saved_phase_on_another_version_74_preview(tmp_path, name, statement, already_added):
+    state_dir, _, scan_id, _ = empty_target_scan(tmp_path)
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        if not already_added:
+            connection.execute("ALTER TABLE scan_progress DROP COLUMN last_observed_phase_json")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 79")
+        connection.execute(statement)
+        connection.execute("INSERT INTO schema_migrations VALUES (74, ?, 'preview-time')", (name,))
+
+    for _ in range(2):
+        scan = get_scan(state_dir, scan_id, "--progress-only")["scan"]
+        assert "lastObservedPhase" not in scan["progress"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name, applied_at FROM schema_migrations WHERE version = 74"
+        ).fetchone() == (name, "preview-time")
 
 
 @pytest.mark.parametrize("stop", ["fail-scan", "cancel-scan"])
