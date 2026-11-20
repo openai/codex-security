@@ -17,7 +17,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     FlushFileBuffers, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
-    PIPE_ACCESS_OUTBOUND,
+    PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
@@ -324,7 +324,7 @@ pub fn serve_windows_git_configs(
             let pipe = unsafe {
                 CreateNamedPipeW(
                     name.as_ptr(),
-                    PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | first,
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first,
                     PIPE_REJECT_REMOTE_CLIENTS,
                     INSTANCES,
                     0,
