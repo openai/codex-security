@@ -13,25 +13,13 @@ export interface ScanExecutionAttribution {
 }
 
 export function attributedScanThreads(
-  sessions: Iterable<{
-    threadId: string | null;
-    parentThreadId: string | null;
-  }>,
+  children: ReadonlyMap<string | null, readonly { threadId: string | null }[]>,
   attribution: ScanExecutionAttribution,
 ): Set<string> {
   const included = new Set(attribution.executionThreadIds);
-  const pending = [...included];
-  const all = [...sessions];
-  for (const parent of pending) {
-    for (const session of all) {
-      if (
-        session.threadId !== null &&
-        session.parentThreadId === parent &&
-        !included.has(session.threadId)
-      ) {
-        included.add(session.threadId);
-        pending.push(session.threadId);
-      }
+  for (const parent of included) {
+    for (const child of children.get(parent) ?? []) {
+      if (child.threadId !== null) included.add(child.threadId);
     }
   }
   if (attribution.owner.threadId) included.add(attribution.owner.threadId);

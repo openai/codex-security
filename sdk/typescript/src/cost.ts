@@ -2714,10 +2714,16 @@ export class ScanCostTracker {
       if (id !== this.#attribution?.owner.threadId) executionRoots.add(id);
     }
     const included = this.#attribution
-      ? attributedScanThreads(this.#sessions.values(), {
-          ...this.#attribution,
-          executionThreadIds: [...executionRoots],
-        })
+      ? attributedScanThreads(
+          Map.groupBy(
+            this.#sessions.values(),
+            (session) => session.parentThreadId,
+          ),
+          {
+            ...this.#attribution,
+            executionThreadIds: [...executionRoots],
+          },
+        )
       : new Set([
           this.#threadId,
           ...this.#receipts.keys(),

@@ -153,11 +153,12 @@ export async function readScanLogs(options: ScanLogOptions) {
   const attribution = options.executionAttribution?.legacy
     ? null
     : options.executionAttribution;
+  const children = Map.groupBy(
+    logs.values().map(([session]) => session),
+    (session) => session.parentThreadId,
+  );
   const included = attribution
-    ? attributedScanThreads(
-        Array.from(logs.values(), ([session]) => session),
-        attribution,
-      )
+    ? attributedScanThreads(children, attribution)
     : new Set([
         ...(options.threadId ? [options.threadId] : []),
         ...(options.threadIds ?? []),
@@ -167,10 +168,6 @@ export async function readScanLogs(options: ScanLogOptions) {
   // the whole conversation tree as part of this scan.
   const traversed = new Set(
     attribution?.executionThreadIds ?? options.executionThreadIds ?? included,
-  );
-  const children = Map.groupBy(
-    logs.values().map(([session]) => session),
-    (session) => session.parentThreadId,
   );
   // Comparisons have no spawn edge. The saved scan window also works for a
   // shared Desktop owner, whose unrelated child threads must stay excluded.
