@@ -3146,6 +3146,7 @@ export class CodexSecurity {
           "openai_base_url",
           "chatgpt_base_url",
           "model_providers",
+          ...(mode === "deep" ? ["developer_instructions"] : []),
         ]) {
           const value = workerRuntimeConfig[key];
           if (

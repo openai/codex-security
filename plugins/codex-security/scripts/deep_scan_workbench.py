@@ -493,23 +493,30 @@ MODEL_FILE_DIGEST_KEYS = {
     "experimental_compact_prompt_file": "compactPromptFileSha256",
     "model_catalog_json": "modelCatalogFileSha256",
 }
+MODEL_INPUT_KEYS = (*MODEL_FILE_DIGEST_KEYS, "developer_instructions")
 
 
 def checked_model_file_inputs(value: Any, *, stored: bool = False) -> dict[str, Any]:
-    if not isinstance(value, dict) or (not stored and set(value) != set(MODEL_FILE_DIGEST_KEYS)):
+    if not isinstance(value, dict) or (
+        not stored and value.keys() - {"developer_instructions"} != set(MODEL_FILE_DIGEST_KEYS)
+    ):
         raise SystemExit("Invalid Deep Scan model file inputs.")
-    known = {key: value[key] for key in MODEL_FILE_DIGEST_KEYS if key in value}
-    for receipt in known.values():
+    known = {key: value[key] for key in MODEL_INPUT_KEYS if key in value}
+    for key, receipt in known.items():
         if receipt is None:
             continue
+        fields = {"sha256", "path"} if key in MODEL_FILE_DIGEST_KEYS else {"sha256"}
         if (
             not isinstance(receipt, dict)
-            or set(receipt) != {"path", "sha256"}
-            or not isinstance(receipt["path"], str)
-            or "\x00" in receipt["path"]
-            or not Path(receipt["path"]).is_absolute()
+            or set(receipt) != fields
             or not isinstance(receipt["sha256"], str)
             or not re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
+        ):
+            raise SystemExit("Invalid Deep Scan model file input receipt.")
+        if "path" in receipt and (
+            not isinstance(receipt["path"], str)
+            or "\x00" in receipt["path"]
+            or not Path(receipt["path"]).is_absolute()
         ):
             raise SystemExit("Invalid Deep Scan model file input receipt.")
     return known
@@ -696,7 +703,7 @@ def terminal_deep_scan_for_target_snapshot(
             snapshot_digest,
             target_device,
             target_inode,
-            json.dumps(model_file_inputs or dict.fromkeys(MODEL_FILE_DIGEST_KEYS)),
+            json.dumps({**dict.fromkeys(MODEL_INPUT_KEYS), **(model_file_inputs or {})}),
             thread_id,
         ),
     ).fetchone()

@@ -2305,7 +2305,10 @@ cannot verify it, resume with the Python runtime that started the scan or use
 `codex-security scans rerun SCAN_ID` to start a new scan.
 
 Resume keeps the scan ID, saved settings and instructions, completed workers, artifacts,
-and accumulated cost. A Standard scan continues in its original Codex session with
+and accumulated cost. Before continuing model work, Deep Scan checks that
+`developer_instructions` and the selected model instruction, compact prompt,
+and catalog files match the saved inputs. If a setting changed, restore its
+original value and resume the scan. A Standard scan continues in its original Codex session with
 the same `--max-cost` limit and `--max-time` deadline. Only one CLI or SDK call
 can run it at a time. If the connection fails after the session is saved, the CLI
 prints the resume command. Work since the last checkpoint may need to be repeated.

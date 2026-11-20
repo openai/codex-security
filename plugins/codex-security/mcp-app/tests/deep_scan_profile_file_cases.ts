@@ -82,7 +82,7 @@ export async function testWorkerSelectedProfileFiles({
       true,
     ],
     [
-      'model_reasoning_summary = "concise"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      'model_reasoning_summary = "concise"\ndeveloper_instructions = "Inline instructions"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
       "concise",
     ],
     [
@@ -268,6 +268,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                 ),
               )
               .replace(
+                '"Inline instructions"',
+                `"Inline instructions ${index}"`,
+              )
+              .replace(
                 '"profile-compact.md"',
                 JSON.stringify(compactPath(index)),
               )
@@ -299,6 +303,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                   {
                     codexOverrides: {
                       profile,
+                      developer_instructions: null,
                       model_instructions_file: null,
                       model_catalog_json: null,
                       experimental_compact_prompt_file: null,
@@ -425,6 +430,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           const clearedFiles = modelFiles && index % 2 === 0;
           assertConfigOverrides(invocation.argv, {
             model_reasoning_summary: expected,
+            developer_instructions:
+              modelFiles && !clearedFiles
+                ? `Inline instructions ${index}`
+                : undefined,
             model_catalog_json:
               modelFiles && !clearedFiles
                 ? path.join(fixture.root, `catalog-${index}.json`)
