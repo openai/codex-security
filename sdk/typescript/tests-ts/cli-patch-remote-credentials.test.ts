@@ -515,7 +515,7 @@ async function runSshPreflight(
   selected: string,
   global: string,
   marker: string,
-  inspectHostname = false,
+  hostnameEnvironment?: NodeJS.ProcessEnv,
   afterHostname?: () => Promise<void>,
 ) {
   repositoryGit(selected)(
@@ -529,10 +529,11 @@ async function runSshPreflight(
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_SSH_VARIANT: "ssh",
     PATCH_SSH_MARKER: marker,
-    ...(inspectHostname && {
+    ...(hostnameEnvironment && {
       GITLAB_HOST: "gitlab.example.invalid",
       PYTHONPATH: selected,
       NODE_PATH: selected,
+      ...hostnameEnvironment,
     }),
   };
   let hostnameCommand: string | undefined;
@@ -552,7 +553,7 @@ async function runSshPreflight(
             : undefined;
         if (phase === "hostname") hostnameCommand = args[1];
         const run =
-          inspectHostname && phase
+          hostnameEnvironment && phase
             ? runRepositoryCommand
             : runGitRepositoryCommand;
         const result = await run(command, args, cwd, {
@@ -669,6 +670,9 @@ test.each([
   "checkout-relative",
   "operator-absolute",
   "checkout-include",
+  "checkout-proxy",
+  "checkout-match",
+  ...(process.platform === "win32" ? [] : ["checkout-shell"]),
   "changed-config",
 ] as const)(
   "binds %s OpenSSH configuration during hostname lookup and transport",
@@ -682,7 +686,12 @@ test.each([
     const script =
       'const phase = process.env.PYTHONPATH || process.env.NODE_PATH ? "inherited" : process.env.PATCH_SSH_PHASE;\n' +
       'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
-    await writeFile(join(directory, name), script);
+    const checkoutScript = join(directory, name).replaceAll("\\", "/");
+    const shell =
+      location === "checkout-shell" ? { SHELL: checkoutScript } : {};
+    await writeFile(checkoutScript, "#!/usr/bin/env node\n" + script, {
+      mode: 0o755,
+    });
     if (location !== "checkout-relative")
       await writeFile(join(external, name), script);
     const checkoutInclude = location === "checkout-include";
@@ -706,13 +715,21 @@ test.each([
       location === "checkout-relative"
         ? "./" + name
         : join(external, name).replaceAll("\\", "/");
+    const checkoutProxy = location === "checkout-proxy";
+    const checkoutMatch = location === "checkout-match";
+    const proxy =
+      checkoutProxy && process.platform !== "win32"
+        ? `"${checkoutScript}"`
+        : `node "${checkoutProxy ? checkoutScript : target}"`;
+    const proxyArgs =
+      location === "operator-absolute" ? " route/local/socket %p [%h]:%p" : "";
     await writeFile(
       leaf,
       [
         "Host *",
         "  BatchMode yes",
-        `  ProxyCommand node "${target}" proxy`,
-        `Match exec "node \\\"${target}\\\" match"`,
+        `  ProxyCommand ${proxy} proxy${proxyArgs}`,
+        `Match exec "node \\\"${checkoutMatch ? checkoutScript : target}\\\" match"`,
         "  LogLevel ERROR",
         "",
       ].join("\n"),
@@ -724,13 +741,13 @@ test.each([
       `ssh -F "${file.replaceAll("\\", "/")}"`;
     git("config", "--file", global, "core.sshCommand", sshCommand(config));
 
-    // Raw Git selects the SSH client and invokes Match exec from this checkout.
+    // The raw SSH connection invokes both commands from this checkout.
     // MSYS can treat a drive-qualified Include as relative. Exercise the leaf directly there.
     const control = spawnSync(
       "git",
       [
         "-c",
-        `alias.test-ssh-config=!${sshCommand(process.platform === "win32" ? leaf : config)} -G`,
+        `alias.test-ssh-config=!${sshCommand(process.platform === "win32" ? leaf : config)}`,
         "test-ssh-config",
         "127.0.0.1",
       ],
@@ -739,21 +756,25 @@ test.each([
         encoding: "utf8",
         env: {
           ...process.env,
+          ...shell,
           PATCH_SSH_MARKER: marker,
           PYTHONPATH: directory,
           NODE_PATH: directory,
         },
       },
     );
-    expect(control.status, control.stderr).toBe(0);
-    expect(control.stdout, control.stderr).toContain("hostname 127.0.0.1");
     const rawMarker = await readFile(marker, "utf8").catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
         return "";
       },
     );
-    expect(rawMarker, control.stderr).toContain("inherited:match");
+    if (shell.SHELL)
+      expect(rawMarker, control.stderr).toContain("inherited:-c");
+    else {
+      expect(rawMarker, control.stderr).toContain("inherited:match");
+      expect(rawMarker, control.stderr).toContain("inherited:proxy");
+    }
     await unlink(marker);
 
     // Git's POSIX shell may find its bundled OpenSSH before the Windows client.
@@ -773,14 +794,18 @@ test.each([
       directory,
       global,
       marker,
-      true,
+      shell,
       location === "changed-config"
         ? () => writeFile(leaf, "# changed\n", { flag: "a" })
         : undefined,
     );
-    if (checkoutInclude) {
-      expect(hostnameCommand, stderr).toBeUndefined();
+    if (shell.SHELL) {
+      expect(invoked, stderr).not.toContain(":-c");
+      return;
+    }
+    if (checkoutInclude || checkoutProxy || checkoutMatch) {
       expect(invoked, stderr).toBe("");
+      expect(hostnameCommand, stderr).toBeUndefined();
       expect(stderr).toMatch(/SSH|transport/iu);
       return;
     }
