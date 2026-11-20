@@ -2,6 +2,7 @@ import { requestMetadata } from "./support/request-metadata.js";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  appendFile,
   chmod,
   link,
   mkdir,
@@ -1994,6 +1995,58 @@ describe("CodexSecurity policy API", () => {
         ...(limited ? { failureCategory: "execution" } : {}),
       });
       await f.security.close();
+    }
+  });
+
+  test("does not accept an overflowed policy-stage total as a verified cost", async () => {
+    for (const limited of [false, true]) {
+      const f = await setup();
+      const session = await writeSession(
+        f.runtime.codexHome,
+        "policy-architecture",
+        { input_tokens: 0, output_tokens: 0 },
+      );
+      const record = (
+        responseId: string,
+        inputTokens: number,
+        outputTokens: number,
+      ) =>
+        JSON.stringify({
+          type: "token_usage_record",
+          payload: {
+            thread_id: "policy-architecture",
+            response_id: responseId,
+            usage: {
+              input_tokens: inputTokens,
+              output_tokens: outputTokens,
+            },
+          },
+        });
+      await appendFile(
+        session,
+        [
+          record("first", Number.MAX_SAFE_INTEGER, 0),
+          record("second", 0, 2),
+          "",
+        ].join("\n"),
+      );
+      try {
+        const run = f.security.generatePolicy(f.repository, {
+          outputDir: f.outputDir,
+          ...(limited ? { maxCostUsd: 1 } : {}),
+        });
+        if (limited) {
+          await expect(run).rejects.toThrow(
+            "Could not verify the requested policy-generation cost limit.",
+          );
+          expect(f.threads).toHaveLength(1);
+        } else {
+          expect((await run).cost).toBeNull();
+          expect(f.threads).toHaveLength(3);
+        }
+      } finally {
+        await f.security.close();
+      }
     }
   });
 

@@ -150,7 +150,8 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
     !isSafeNonNegativeInteger(output) ||
     !isSafeNonNegativeInteger(reasoning) ||
     cached + cacheWrite > input ||
-    reasoning > output
+    reasoning > output ||
+    !isSafeNonNegativeInteger(input + output)
   ) {
     return null;
   }
