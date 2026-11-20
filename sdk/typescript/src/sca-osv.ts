@@ -28,6 +28,7 @@ import { isRecord as record } from "./record.js";
 import { errorMessage } from "./errors.js";
 import {
   scaInputFormat,
+  scaPackageName,
   inspectAdditionalScaInput,
   scaInputBasename,
   type ScaUnresolvedReference,
@@ -102,8 +103,6 @@ function unique(values: string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-type DependencyLocalReference = ScaUnresolvedReference;
-
 const supportedEcosystems = new Set([
   "npm",
   "PyPI",
@@ -126,22 +125,17 @@ function resolvedPackage(
     (ecosystem !== "npm" || semverValid(version) !== null)
   );
 }
-function packageName(ecosystem: string | null, name: string): string {
-  if (ecosystem === "PyPI") return name.toLowerCase().replace(/[-_.]+/gu, "-");
-  if (ecosystem === "NuGet") return name.toLowerCase();
-  return name;
-}
 function sameReferenceName(
-  reference: DependencyLocalReference,
+  reference: ScaUnresolvedReference,
   component: ScaComponent,
 ): boolean {
   return (
-    packageName(reference.ecosystem, component.name) ===
-    packageName(reference.ecosystem, reference.name)
+    scaPackageName(reference.ecosystem, component.name) ===
+    scaPackageName(reference.ecosystem, reference.name)
   );
 }
 function referenceVersionMatches(
-  reference: DependencyLocalReference,
+  reference: ScaUnresolvedReference,
   version: string | null,
 ): boolean {
   return (
@@ -167,8 +161,8 @@ function alternateNpmTarball(value: string): boolean {
 function pnpmLocalReferences(
   parsed: Record<string, unknown>,
   sourcePath: string,
-): DependencyLocalReference[] {
-  const references = new Map<string, DependencyLocalReference>();
+): ScaUnresolvedReference[] {
+  const references = new Map<string, ScaUnresolvedReference>();
   // The pinned extractor emits packages-entry identities, not importer aliases or
   // file references. Explicit name/version fields override the v9 package key.
   const packages = parsed["packages"];
@@ -272,7 +266,7 @@ function pnpmLocalReferences(
 function npmLocalReferences(
   parsed: Record<string, unknown>,
   sourcePath: string,
-): DependencyLocalReference[] {
+): ScaUnresolvedReference[] {
   const packages = parsed["packages"];
   if (!record(packages)) return [];
   // A matching dependency specifier records an explicit direct URL origin even
@@ -292,7 +286,7 @@ function npmLocalReferences(
           directUrls.add(specifier);
     }
   }
-  const references = new Map<string, DependencyLocalReference>();
+  const references = new Map<string, ScaUnresolvedReference>();
   for (const [path, dependency] of Object.entries(packages)) {
     if (!path || !record(dependency)) continue;
     const resolved = dependency["resolved"];
@@ -324,7 +318,7 @@ function npmLocalReferences(
 }
 
 function uncountedLocalReferences(
-  references: DependencyLocalReference[],
+  references: ScaUnresolvedReference[],
   components: ScaComponent[],
   stderr = "",
 ): number {
@@ -353,7 +347,7 @@ function packageFilteringReceipts(stderr: string): string[] {
 }
 
 function excludedLocalReference(
-  reference: DependencyLocalReference,
+  reference: ScaUnresolvedReference,
   components: ScaComponent[],
   stderr: string,
 ): boolean {
@@ -369,7 +363,7 @@ function excludedLocalReference(
     )
   )
     return false;
-  const prefix = `Package ${reference.ecosystem}/${packageName(reference.ecosystem, reference.name)}/`;
+  const prefix = `Package ${reference.ecosystem}/${scaPackageName(reference.ecosystem, reference.name)}/`;
   return packageFilteringReceipts(stderr).some((line) => {
     // NuGet package IDs are case-insensitive; OSV receipts retain the lockfile spelling.
     const matchesPrefix =
@@ -662,7 +656,7 @@ type ScaInputDiscovery = Pick<
   ScaCoverage,
   "inputs" | "configFiles" | "limitations"
 > & {
-  localReferences: DependencyLocalReference[];
+  localReferences: ScaUnresolvedReference[];
   diagnostics: string[];
 };
 
@@ -695,7 +689,7 @@ export async function discoverScaInputs(
     .sort();
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
-  const localReferences: DependencyLocalReference[] = [];
+  const localReferences: ScaUnresolvedReference[] = [];
   const diagnostics = [
     ...pathDiagnostics,
     ...submodules.map(
@@ -1107,8 +1101,8 @@ export function normalizeOsvOutput(
               !record(affected) ||
               !record(affected["package"]) ||
               typeof affected["package"]["name"] !== "string" ||
-              packageName(ecosystem, affected["package"]["name"]) !==
-                packageName(ecosystem, name) ||
+              scaPackageName(ecosystem, affected["package"]["name"]) !==
+                scaPackageName(ecosystem, name) ||
               affected["package"]["ecosystem"] !== ecosystem ||
               !Array.isArray(affected["ranges"])
             )
@@ -1270,7 +1264,7 @@ export async function runOsvScan(
     writeFile(scanner.stderrPath, ""),
   ]);
   const environment = { ...(options.environment ?? process.env) };
-  let localReferences: DependencyLocalReference[] = [];
+  let localReferences: ScaUnresolvedReference[] = [];
   let repository = options.repositoryPath;
   let selected: ScaInput[] = [];
   let pending: {

@@ -57,8 +57,9 @@ isolates prompt behavior; it is **not** an end-to-end benchmark of the SDK's
 `fixtures/corpus.json` stores one scanner response per advisory family and each
 application’s source, deployment notes, and expected evidence. The runner
 writes six files per case in a temporary directory. The digest tests check the
-exact staged bytes against the frozen snapshots. It uses the checkout's plugin runtime and the selected Node executable,
-including for Promptfoo, Codex, and the security-policy helper. The provider keeps
+exact staged bytes against the frozen snapshots. It uses the checkout's plugin
+runtime and the selected Node executable for Promptfoo, Codex, and the
+security-policy helper. The provider keeps
 the existing named read-only filesystem profile, allowing the plugin, the selected
 case, the Node executable directory, and the installed native Codex CLI package. Tool network
 access, web search, inherited MCP servers, apps, and plugin/memory context remain

@@ -361,48 +361,57 @@ test("does not apply an exclusion receipt to the same local package in another s
   expect(result.matches).toHaveLength(1);
 });
 
-test.each(["failure", "cancel", "success"] as const)(
+const outcomes = ["failure", "cancel", "success"] as const;
+
+async function scanEmptyInputThen(
+  outcome: (typeof outcomes)[number],
+  path: string,
+  content: string,
+) {
+  const { repository, output } = await setup([path, "b/package-lock.json"]);
+  await writeFile(join(repository, path), content);
+  const controller = new AbortController();
+  const operation = runOsvScan(
+    {
+      repositoryPath: repository,
+      outputDir: output,
+      signal: controller.signal,
+    },
+    {
+      executable: process.execPath,
+      runProcess: async (_executable, argv) => {
+        if (argv[0] === "--version") return version;
+        if (argv.at(-1) === join(repository, path))
+          return {
+            stdout: "",
+            stderr: `Scanned ${argv.at(-1)} file and found 0 packages\n`,
+            exitCode: 128,
+          };
+        if (outcome === "cancel") controller.abort(new Error("requested stop"));
+        if (outcome !== "success")
+          throw new Error("Synthetic later process failure");
+        return { stdout: outputFor(argv.at(-1)!), stderr: "", exitCode: 1 };
+      },
+    },
+  );
+  if (outcome === "cancel")
+    return operation.catch(
+      (error: { osvResult: OsvScanResult }) => error.osvResult,
+    );
+  return operation;
+}
+
+test.each(outcomes)(
   "a completed empty input survives a later %s",
   async (outcome) => {
-    const paths = ["a/package-lock.json", "b/package-lock.json"];
-    const { repository, output } = await setup(paths);
-    await writeFile(
-      join(repository, paths[0]!),
+    const path = "a/package-lock.json";
+    const result = await scanEmptyInputThen(
+      outcome,
+      path,
       JSON.stringify({ lockfileVersion: 3, packages: {} }),
     );
-    const controller = new AbortController();
-    const operation = runOsvScan(
-      {
-        repositoryPath: repository,
-        outputDir: output,
-        signal: controller.signal,
-      },
-      {
-        executable: process.execPath,
-        runProcess: async (_executable, argv) => {
-          if (argv[0] === "--version") return version;
-          if (argv.at(-1) === join(repository, paths[0]!))
-            return {
-              stdout: "",
-              stderr: `Scanned ${argv.at(-1)} file and found 0 packages\n`,
-              exitCode: 128,
-            };
-          if (outcome === "cancel")
-            controller.abort(new Error("requested stop"));
-          if (outcome !== "success")
-            throw new Error("Synthetic later process failure");
-          return { stdout: outputFor(argv.at(-1)!), stderr: "", exitCode: 1 };
-        },
-      },
-    );
-    const result =
-      outcome === "cancel"
-        ? await operation.catch(
-            (error: { osvResult: OsvScanResult }) => error.osvResult,
-          )
-        : await operation;
     expect(result.coverage.inputs[0]).toMatchObject({
-      path: paths[0],
+      path,
       status: "scanned",
       reason: "OSV extracted no packages from this lockfile.",
     });
@@ -421,13 +430,12 @@ test.each(["failure", "cancel", "success"] as const)(
   },
 );
 
-test.each(["failure", "cancel", "success"] as const)(
+test.each(outcomes)(
   "an empty linked inventory retains unresolved references after later %s",
   async (outcome) => {
-    const paths = ["a/pnpm-lock.yaml", "b/package-lock.json"];
-    const { repository, output } = await setup(paths);
-    await writeFile(
-      join(repository, paths[0]!),
+    const result = await scanEmptyInputThen(
+      outcome,
+      "a/pnpm-lock.yaml",
       `lockfileVersion: '9.0'
 importers:
   .:
@@ -435,37 +443,6 @@ importers:
       local-lib: {specifier: 'link:../local-lib', version: 'link:../local-lib'}
 `,
     );
-    const controller = new AbortController();
-    const operation = runOsvScan(
-      {
-        repositoryPath: repository,
-        outputDir: output,
-        signal: controller.signal,
-      },
-      {
-        executable: process.execPath,
-        runProcess: async (_executable, argv) => {
-          if (argv[0] === "--version") return version;
-          if (argv.at(-1) === join(repository, paths[0]!))
-            return {
-              stdout: "",
-              stderr: `Scanned ${argv.at(-1)} file and found 0 packages\n`,
-              exitCode: 128,
-            };
-          if (outcome === "cancel")
-            controller.abort(new Error("requested stop"));
-          if (outcome !== "success")
-            throw new Error("Synthetic later process failure");
-          return { stdout: outputFor(argv.at(-1)!), stderr: "", exitCode: 1 };
-        },
-      },
-    );
-    const result =
-      outcome === "cancel"
-        ? await operation.catch(
-            (error: { osvResult: OsvScanResult }) => error.osvResult,
-          )
-        : await operation;
     expect(result.coverage.unresolvedPackages).toBe(1);
     expect(result.coverage.status).not.toBe("complete");
     expect(result.coverage.inputs[0]?.status).toBe("scanned");
