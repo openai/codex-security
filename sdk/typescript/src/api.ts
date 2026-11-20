@@ -318,7 +318,7 @@ import {
   resolvePluginSource,
   resolveScanOutputPath,
   runWorkbench,
-  sameFile,
+  sameOutputDirectory,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginInstall,
@@ -2412,7 +2412,8 @@ export class CodexSecurity {
       context["scanId"] !== scanId ||
       typeof scanDir !== "string" ||
       !isAbsolute(scanDir) ||
-      !(await sameFile(selectedScanDir, scanDir)) ||
+      (scanDir !== selectedScanDir &&
+        !(await sameOutputDirectory(selectedScanDir, scanDir))) ||
       typeof recipe["repository"] !== "string" ||
       typeof repo !== "string" ||
       !isAbsolute(repo) ||

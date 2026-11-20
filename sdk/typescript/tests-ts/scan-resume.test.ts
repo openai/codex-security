@@ -5,6 +5,7 @@ import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
 import { readJson, readJsonLines, writeJson } from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -2263,16 +2264,16 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
   const client = resumeDependencies(f, () =>
     fail("Unexpected new model session"),
   ).createSecurity({});
-  let outputDir;
-  if (process.platform === "win32") {
-    outputDir = join(f.root, basename(f.scanDir).toUpperCase());
-  } else {
+  const upperOutput = join(f.root, basename(f.scanDir).toUpperCase());
+  const caseInsensitive = existsSync(upperOutput);
+  let outputDir = caseInsensitive ? upperOutput : f.scanDir;
+  if (process.platform !== "win32") {
     const parentAlias = join(
       await temporaryDirectory(),
       "original-output-parent",
     );
     await symlink(f.root, parentAlias);
-    outputDir = join(parentAlias, basename(f.scanDir));
+    outputDir = join(parentAlias, basename(outputDir));
   }
   const options = {
     mode: "deep" as const,
@@ -2280,7 +2281,9 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
     outputDir,
   };
   try {
-    const unrelatedOutput = join(f.root, "unrelated-output");
+    const unrelatedOutput = caseInsensitive
+      ? join(f.root, "unrelated-output")
+      : upperOutput;
     await mkdir(unrelatedOutput, { mode: 0o700 });
     await cp(
       join(f.scanDir, "scan-manifest.json"),
