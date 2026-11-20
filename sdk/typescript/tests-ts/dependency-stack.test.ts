@@ -152,13 +152,11 @@ async function sample(
 async function startProof(
   root: string,
   files: Awaited<ReturnType<typeof sample>>,
-  callerScope?: string,
 ) {
   const inputs = join(root, "packet"),
     state = join(root, "attempt.sqlite");
   await prepareStackPacket({
     cve,
-    callerScope,
     ...files,
     repository: files.repo,
     inputsDir: inputs,
@@ -915,12 +913,7 @@ async function reviewedStackCheck(
 test("offline finalize renders the saved assessment and protects existing output", async () => {
   await using dir = await scopedTemporaryDirectory("stack-render-");
   const files = await sample(dir.path, false);
-  const callerScope = "Assess callers with upload access";
-  const { state, call, row, claims } = await startProof(
-    dir.path,
-    files,
-    callerScope,
-  );
+  const { state, call, row, claims } = await startProof(dir.path, files);
   const question = "Which source commit ran?";
   await call("record-assessments", {
     items: [
@@ -949,7 +942,6 @@ test("offline finalize renders the saved assessment and protects existing output
   const markdown = createCliTest(main);
   expect(await markdown.runCli([...args, "--format", "md"], readDeps)).toBe(0);
   expect(markdown.stdout.text()).toContain(cve);
-  expect(markdown.stdout.text()).toContain(callerScope);
   expect(markdown.stdout.text()).toContain("Source identity is missing.");
   expect(markdown.stdout.text()).not.toContain("[object Object]");
   const saved = createCliTest(main);
@@ -965,7 +957,6 @@ test("offline finalize renders the saved assessment and protects existing output
   expect(saved.stdout.text()).toContain("Next: Which source commit ran?");
   const html = await readFile(htmlPath, "utf8");
   expect(html).toStartWith("<!doctype html>");
-  expect(html).toContain(callerScope);
   expect(html).toContain("Source identity is missing.");
   const duplicate = createCliTest(main);
   expect(
