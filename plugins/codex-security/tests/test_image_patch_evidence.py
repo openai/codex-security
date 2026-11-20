@@ -10,9 +10,14 @@ compare = load_script("image_patch_evidence").compare
 pytestmark = pytest.mark.cross_platform
 
 
-def reports():
+def reports(package_type="apk"):
     descriptor = {"version": "1", "configuration": {"search": {"scope": "squashed"}}}
-    package = {"name": "example", "type": "apk", "version": "1", "purl": "pkg:apk/vendor/example@1"}
+    package = {
+        "name": "example",
+        "type": package_type,
+        "version": "1",
+        "purl": f"pkg:{package_type}/vendor/example@1",
+    }
     metadata = {"manifestDigest": "sha256:" + "a" * 64, "os": "linux", "architecture": "amd64"}
     sbom = {
         "descriptor": {**descriptor, "name": "syft"},
@@ -47,7 +52,7 @@ def reports():
     after, scanned = deepcopy((sbom, scan))
     after["source"]["metadata"]["manifestDigest"] = "sha256:" + "b" * 64
     after["artifacts"][0]["version"] = "2"
-    after["artifacts"][0]["purl"] = "pkg:apk/vendor/example@2"
+    after["artifacts"][0]["purl"] = f"pkg:{package_type}/vendor/example@2"
     scanned["matches"] = []
     return sbom, scan, after, scanned
 
@@ -112,21 +117,26 @@ def test_other_package_namespace_cannot_supply_fix():
 
 
 @pytest.mark.parametrize(
-    ("qualifiers", "outcome"),
+    ("package_type", "distro", "next_distro"),
     [
-        ("?arch=x86_64&distro=alpine-3.18", "reported_fix_present"),
-        ("?distro=alpine-3.19", "inconclusive"),
-        ("", "inconclusive"),
+        ("apk", "alpine-3.18", "alpine-3.19"),
+        ("deb", "debian-11", "debian-12"),
+        ("rpm", "rhel-8.4", "rhel-9.0"),
     ],
 )
-def test_apk_fixed_version_applies_to_its_distribution(qualifiers, outcome):
-    items = reports()
-    items[0]["artifacts"][0]["purl"] += "?distro=alpine-3.18"
+def test_fixed_version_applies_to_its_distribution(package_type, distro, next_distro):
+    items = reports(package_type)
+    items[0]["artifacts"][0]["purl"] += f"?distro={distro}"
     package = items[2]["artifacts"][0]
-    package["purl"] += qualifiers
-    assert run(items)["scanner_evidence"] == outcome
+    args = (*items, "test-advisory", "example", package_type)
+    purl = package["purl"]
+    assert compare(*args)["scanner_evidence"] == "inconclusive"
+    package["purl"] = f"{purl}?arch=x86_64&distro={distro}"
+    assert compare(*args)["scanner_evidence"] == "reported_fix_present"
+    package["purl"] = f"{purl}?distro={next_distro}"
+    assert compare(*args)["scanner_evidence"] == "inconclusive"
     items[3]["matches"] = [{**items[1]["matches"][0], "artifact": package}]
-    assert run(items)["scanner_evidence"] == "still_reported"
+    assert compare(*args)["scanner_evidence"] == "still_reported"
 
 
 def test_related_advisory_selects_native_match():

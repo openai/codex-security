@@ -34,7 +34,7 @@ def package_identity(artifact):
     return name
 
 
-def apk_distro(artifact):
+def package_distro(artifact):
     query = urlsplit(artifact["purl"]).query
     return parse_qs(query).get("distro", [None])[0]
 
@@ -77,10 +77,8 @@ def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=Non
         and package_identity(a) == identity_key
     ]
     versions = sorted({required_text(a["version"], "installed version") for a in installed})
-    distros = set()
-    if package_type == "apk":
-        distros.update(apk_distro(a) for a in installed)
-        distros.update(apk_distro(match["artifact"]) for match in active)
+    distros = {package_distro(a) for a in installed}
+    distros.update(package_distro(match["artifact"]) for match in active)
     summary = {
         "manifest_digest": identity[0],
         "platform": identity[1],

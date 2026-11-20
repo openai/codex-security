@@ -10,6 +10,6 @@ GRYPE_DB_AUTO_UPDATE=false python scripts/image_patch_evidence.py \
   --advisory ADVISORY --package PACKAGE --package-type TYPE
 ```
 
-For APK packages, the helper carries a reported fixed version across images only when the selected package has a consistent `distro` qualifier across the match and inventories, including when all omit it. If the qualifier changes and the advisory disappears, the result is `inconclusive`. A remaining match yields `still_reported`.
+The helper compares the distribution recorded in each selected package URL. For example, Syft can record `distro` for APK, DEB and RPM packages. A reported fixed version applies across images only when the qualifier agrees across the match and inventories, including when all omit it. If the qualifier changes and the advisory disappears, the result is `inconclusive`. A remaining match yields `still_reported`.
 
 Alongside the patch, show the build definition, manifest digests, platform, package versions, database date, selected match and total counts. Report `reported_fix_present` as scanner evidence. Record the behavioral regression check separately. Establish deployment only with independent rollout evidence.
