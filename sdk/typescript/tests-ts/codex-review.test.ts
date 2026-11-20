@@ -155,6 +155,9 @@ const failureReasons: Record<string, string> = {
   "text-only": "Codex did not submit a validated review",
   "failed-turn": "Rate limit exceeded",
   "rate-limit-turn": "Rate limit reached",
+  "flex-unavailable-turn": "Flex capacity unavailable.",
+  "restricted-capacity-turn":
+    "Policy-restricted capacity is unavailable. Please try again later.",
   "server-error": "Provider temporarily unavailable",
   "service-unavailable":
     "Connection refused: safety policy service unavailable",
@@ -224,6 +227,7 @@ const retriedFailures = new Set([
   "text-only",
   "failed-turn",
   "rate-limit-turn",
+  "restricted-capacity-turn",
   "server-error",
   "service-unavailable",
   "network-request-error",
@@ -247,6 +251,7 @@ const retriedFailures = new Set([
 const recoveredScenarios: Record<string, string> = {
   "recover-rate-limit": "failed-turn",
   "recover-rate-limit-code": "rate-limit-turn",
+  "recover-restricted-capacity": "restricted-capacity-turn",
   "recover-server-error": "server-error",
   "recover-service-unavailable": "service-unavailable",
   "recover-network-request-error": "network-request-error",
@@ -279,6 +284,8 @@ const modelFailures = new Set([
   "policy-terse-turn",
   "failed-turn",
   "rate-limit-turn",
+  "flex-unavailable-turn",
+  "restricted-capacity-turn",
   "server-error",
   "service-unavailable",
   "network-request-error",
