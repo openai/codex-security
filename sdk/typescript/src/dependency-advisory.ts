@@ -108,21 +108,39 @@ type OsvRecord = z.infer<typeof osvRecord>;
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 const cvePattern = /^CVE-\d{4}-\d{4,}$/u;
 
-interface Advisory {
-  id: string;
-  aliases?: string[];
-  url: string;
-  modified?: string;
-  references?: z.infer<typeof advisoryReference>[];
-  source?: { type: string; url: string };
-  type?: string;
-  summary?: string;
-  body?: string;
-  vulnerabilities?: z.infer<typeof githubVulnerability>[];
-  lookupErrors?: z.infer<typeof advisoryLookupError>[];
-  affected: OsvRecord["affected"];
-  vulnerableFunctions?: string[];
-}
+const advisoryFields = {
+  aliases: z.array(z.string()).optional(),
+  url: z.string(),
+  references: z.array(advisoryReference).optional(),
+  source: advisoryReference.optional(),
+  type: z.string().optional(),
+  summary: z.string().optional(),
+  body: z.string().optional(),
+  vulnerabilities: z.array(githubVulnerability).optional(),
+  lookupErrors: z.array(advisoryLookupError).optional(),
+  affected: z.array(
+    affected.extend({
+      ecosystem_specific: z.union([goImports, rustAffects]).optional(),
+    }),
+  ),
+  vulnerableFunctions: z.array(z.string()).optional(),
+};
+
+export const dependencyAdvisoryDetailsSchema = z.object({
+  id: z.string().optional(),
+  ...advisoryFields,
+  overview: z.string().optional(),
+  applicability: z.string().optional(),
+});
+
+// The normalized record emitted by OSV/GitHub lookup, also accepted when
+// replaying a captured-stack investigation without a network lookup.
+const advisoryRecord = z.strictObject({
+  id: z.string().min(1),
+  ...advisoryFields,
+  modified: z.string().optional(),
+});
+type Advisory = z.infer<typeof advisoryRecord>;
 
 export interface DependencyPackage {
   ecosystem: string;
@@ -134,10 +152,24 @@ export interface PackageAdvisory {
   advisories: FrozenDependencyAdvisory[];
 }
 
-export type FrozenDependencyAdvisory = Advisory & { sha256: string };
+export const advisoryTriggerInstructions = [
+  "Describe what an attacker must control, how the affected operation must be used, and which downstream behavior is required for impact. Include only necessary conditions grounded in the vulnerability evidence. Make each condition concise and independently checkable.",
+  "For a given affected operation, combine alternative ways to meet the same requirement into one condition joined by OR. Treat example payloads, optional configurations, and example impacts as illustrations unless the evidence establishes a requirement.",
+] as const;
+
+export const frozenDependencyAdvisorySchema = advisoryRecord
+  .extend({
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  })
+  .refine(({ sha256, ...record }) => freezeAdvisory(record).sha256 === sha256, {
+    message: "Frozen advisory SHA-256 mismatch.",
+  });
+export type FrozenDependencyAdvisory = z.infer<
+  typeof frozenDependencyAdvisorySchema
+>;
 
 /** Hash the exact advisory fields retained for the investigator, including version events. */
-function freezeAdvisory(advisory: Advisory): FrozenDependencyAdvisory {
+function freezeAdvisory(advisory: Advisory) {
   return {
     ...advisory,
     sha256: createHash("sha256").update(canonicalJson(advisory)).digest("hex"),
