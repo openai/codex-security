@@ -145,8 +145,16 @@ export const reportInteractions = String.raw`
       button.setAttribute('aria-pressed', String(selected));
       button.setAttribute('aria-label', selected ? 'Exit focused view' : 'Focus on call path');
     }
-    if (previous && !focused && previous === active)
-      previous.panel.querySelector('[data-focus]')?.focus({preventScroll: true});
+    if (previous && !focused && previous === active) {
+      // Fragment navigation can reset keyboard focus after popstate returns.
+      const url = location.href;
+      const before = document.activeElement;
+      setTimeout(() => {
+        if (active !== previous || focused || location.href !== url) return;
+        if (document.activeElement === before || document.activeElement === document.body)
+          previous.panel.querySelector('[data-focus]')?.focus({ preventScroll: true });
+      }, 0);
+    }
   }
   for (const button of focusButtons) button.addEventListener('click', () => {
     if (focused) history.back();
