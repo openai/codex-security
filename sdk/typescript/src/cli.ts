@@ -17618,38 +17618,39 @@ async function runPatchRiskAssessment(
     context,
     dependencies,
   );
-  const environment: NodeJS.ProcessEnv = {
-    ...(request.environment ?? dependencies.environment),
-    ...Object.fromEntries(
-      Object.entries(context.environment).filter(
-        ([name]) =>
-          environmentEntry(dependencies.environment, name) !== undefined,
-      ),
+  const gitEnvironment = Object.fromEntries(
+    Object.entries(context.environment).filter(
+      ([name]) =>
+        environmentEntry(dependencies.environment, name) !== undefined,
     ),
-  };
+  );
   for (const [name, argument, path] of [
     ["GIT_DIR", "--absolute-git-dir", context.gitDirectory],
     ["GIT_WORK_TREE", "--show-toplevel", context.root],
   ] as const) {
-    if (
-      (await dependencies
-        .runRepositoryCommand(
-          "git",
-          ["rev-parse", argument],
-          request.repository,
-          {
-            directory: bound.directory,
-            environment,
-            trim: false,
-            protectedRoots: patchExecutableRoots(context),
-          },
-        )
-        .then((value) => realpath(value.replace(/\n$/u, "")))
-        .catch(() => undefined)) !== path
+    const selected = await patchGitOutput(
+      request.repository,
+      ["rev-parse", argument],
+      dependencies,
+      {
+        directory: bound.directory,
+        environment: gitEnvironment,
+        protectedRoots: patchExecutableRoots(context),
+      },
     )
-      environment[name] = context.environment[name] ?? path;
+      .then((value) => realpath(value))
+      .catch(() => undefined);
+    if (selected !== path)
+      gitEnvironment[name] = context.environment[name] ?? path;
   }
-  request = { ...request, directory: bound.directory, environment };
+  request = {
+    ...request,
+    directory: bound.directory,
+    environment: {
+      ...(request.environment ?? dependencies.environment),
+      ...gitEnvironment,
+    },
+  };
   dependencies = bound.dependencies;
   stderr.write("\nAssessing the completed patch...\n");
   const head = state.tree;
