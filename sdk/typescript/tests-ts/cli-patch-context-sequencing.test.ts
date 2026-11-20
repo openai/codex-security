@@ -8,12 +8,12 @@ import {
   publicationRepository,
   repositoryGit,
   resultWithFindings,
-  runGitRepositoryCommand,
   runWorkflow,
   savedScan,
   patchDirectories,
   runIssuePatch,
   runSavedPublication,
+  runPublicationCommand,
 } from "./cli-patch-fixtures.js";
 import {
   patchSnapshotEnvironment,
@@ -355,12 +355,7 @@ test("publication keeps mixed valid and missing selected-path errors before bran
   const original = git("rev-parse", "HEAD");
   const index = await readFile(join(directory, ".git", "index"));
   const outcome = await runSavedPublication(directory, {
-    onRepositoryCommand: (command, args, cwd, options) =>
-      command === "git"
-        ? runGitRepositoryCommand(command, args, cwd, options)
-        : args[1] === "list"
-          ? "[]"
-          : "https://github.example.test/example/repository/pull/1",
+    onRepositoryCommand: runPublicationCommand,
     onCodex: async (_args, output) => {
       await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
       output!.stdout.write(

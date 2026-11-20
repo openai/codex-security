@@ -442,11 +442,12 @@ function serializeConfigEntry(key: string, value: string | undefined): string {
   );
 }
 
+function hasErrorCode(error: unknown, ...codes: string[]): boolean {
+  return codes.includes((error as NodeJS.ErrnoException).code ?? "");
+}
+
 const missing = (error: unknown): undefined => {
-  if (
-    ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")
-  )
-    return undefined;
+  if (hasErrorCode(error, "ENOENT", "ENOTDIR")) return undefined;
   throw error;
 };
 
@@ -531,6 +532,20 @@ function accountHomeDirectory(): string | undefined {
   }
 }
 
+export const githubConfigFiles = ["config.yml", "hosts.yml"] as const;
+
+export function githubConfigDirectory(environment: NodeJS.ProcessEnv) {
+  const explicit = environmentEntry(environment, "GH_CONFIG_DIR");
+  if (explicit) return explicit;
+  const xdg = environmentEntry(environment, "XDG_CONFIG_HOME");
+  if (xdg) return join(xdg, "gh");
+  const windows = process.platform === "win32";
+  const appData = windows && environmentEntry(environment, "AppData");
+  if (appData) return join(appData, "GitHub CLI");
+  const home = environmentEntry(environment, windows ? "USERPROFILE" : "HOME");
+  return join(home ?? "", ".config", "gh");
+}
+
 function clientConfigRoots(
   environment: NodeJS.ProcessEnv,
   homes: Set<string | undefined>,
@@ -603,6 +618,9 @@ async function collectCredentialPointers(
     if (process.platform === "win32" && /^[a-z]:$/iu.test(directory))
       paths.add(directory + file);
   };
+  const selectGh = (directory: string) => {
+    for (const file of githubConfigFiles) selectFile(directory, file);
+  };
   const gcloudAdc = "application_default_credentials.json";
   const selectGcloud = (directory: string, prefix = "") => {
     selectFile(directory, join(prefix, gcloudAdc));
@@ -672,8 +690,8 @@ async function collectCredentialPointers(
     );
     protectCodexHome(home, ".codex");
     selectGcloud(home, join(".config", "gcloud"));
+    selectGh(join(home, ".config", "gh"));
     for (const file of [
-      join(".config", "gh", "hosts.yml"),
       join(".docker", "config.json"),
       join(".kube", "config"),
       ".npmrc",
@@ -704,12 +722,12 @@ async function collectCredentialPointers(
     }
   }
   if (environment["XDG_CONFIG_HOME"])
-    selected.add(join(environment["XDG_CONFIG_HOME"], "gh", "hosts.yml"));
+    selectGh(join(environment["XDG_CONFIG_HOME"], "gh"));
   if (process.platform === "win32") {
     const appData = environment["APPDATA"];
     if (appData) {
       terraformHomes.add(appData);
-      selected.add(join(appData, "GitHub CLI", "hosts.yml"));
+      selectGh(join(appData, "GitHub CLI"));
       selectPgDefaults(relativeFile(appData, "postgresql"));
     }
     // google-auth treats an empty APPDATA as a relative directory.
@@ -720,8 +738,7 @@ async function collectCredentialPointers(
       "gcloud",
     );
   }
-  if (environment["GH_CONFIG_DIR"])
-    selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
+  selectGh(githubConfigDirectory(environment));
   for (const root of clientConfigRoots(environment, homes)) {
     selectFile(root, join("glab-cli", "config.yml"));
     selectFile(root, join("pip", pipConfig));
@@ -842,20 +859,21 @@ export async function selectedGitFileReference(
     : undefined;
 }
 
-function hasNoWorktree(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
+function gitFatalDiagnostic(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
   const failure = error as Error & {
     code?: unknown;
     status?: unknown;
     stderr?: unknown;
   };
-  const diagnostic = Buffer.isBuffer(failure.stderr)
-    ? failure.stderr.toString("utf8")
-    : failure.stderr;
-  return (
-    (failure.code === 128 || failure.status === 128) &&
-    typeof diagnostic === "string" &&
-    /fatal: this operation must be run in a work tree\r?\n$/u.test(diagnostic)
+  if (failure.code !== 128 && failure.status !== 128) return undefined;
+  if (Buffer.isBuffer(failure.stderr)) return failure.stderr.toString("utf8");
+  return typeof failure.stderr === "string" ? failure.stderr : undefined;
+}
+
+function hasNoWorktree(error: unknown): boolean {
+  return /fatal: this operation must be run in a work tree\r?\n$/u.test(
+    gitFatalDiagnostic(error) ?? "",
   );
 }
 
@@ -954,10 +972,7 @@ async function directoryLinkEntry(
   const spelling = basename(path);
   const names = await readdir(parent).catch((error: unknown) => {
     // Traversal can be permitted without directory-list access.
-    if (
-      ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")
-    )
-      return undefined;
+    if (hasErrorCode(error, "EACCES", "EPERM")) return undefined;
     throw error;
   });
   // Exact names remain distinct in case-sensitive directories.
@@ -1181,6 +1196,13 @@ export async function capturePatchGitControls(
     )
       .toString("latin1")
       .split("\0");
+  const controlPath = async (checkout: string, ...args: string[]) =>
+    (await runControl(root, checkout, ["rev-parse", ...args])).replace(
+      /\n$/u,
+      "",
+    );
+  const absolutePath = (checkout: string, ...args: string[]) =>
+    controlPath(checkout, "--path-format=absolute", ...args);
   const configPath = (field: string) =>
     controlPathText(Buffer.from(field, "latin1"));
   let root: string;
@@ -1246,15 +1268,8 @@ export async function capturePatchGitControls(
       });
       return true;
     } catch (error) {
-      if (!(error instanceof Error)) throw error;
-      const failure = error as Error & {
-        code?: unknown;
-        status?: unknown;
-        stderr?: unknown;
-      };
-      const diagnostic = Buffer.isBuffer(failure.stderr)
-        ? failure.stderr.toString("utf8")
-        : failure.stderr;
+      const diagnostic = gitFatalDiagnostic(error);
+      if (diagnostic === undefined) throw error;
       const negatives = [
         `fatal: not a gitdir '${gitPath}'`,
         `fatal: gitfile does not point to a valid repository: ${gitPath}`,
@@ -1273,8 +1288,6 @@ export async function capturePatchGitControls(
         negatives.push(`fatal: not a git repository: ${target}`);
       }
       if (
-        (failure.code === 128 || failure.status === 128) &&
-        typeof diagnostic === "string" &&
         negatives.some(
           (negative) =>
             diagnostic.endsWith(`${negative}\n`) ||
@@ -1387,12 +1400,7 @@ export async function capturePatchGitControls(
       control.contents = await readFile(control.canonical);
       unreadableConfigurations.delete(path);
     } catch (error) {
-      if (
-        optional &&
-        ["EACCES", "EPERM"].includes(
-          (error as NodeJS.ErrnoException).code ?? "",
-        )
-      ) {
+      if (optional && hasErrorCode(error, "EACCES", "EPERM")) {
         unreadableConfigurations.add(path);
         return;
       }
@@ -1413,13 +1421,7 @@ export async function capturePatchGitControls(
       } else if (metadata.isFile())
         await rememberConfiguration(path, true, optional);
     } catch (error) {
-      if (
-        optional &&
-        ["EACCES", "EPERM"].includes(
-          (error as NodeJS.ErrnoException).code ?? "",
-        )
-      )
-        return;
+      if (optional && hasErrorCode(error, "EACCES", "EPERM")) return;
       throw error;
     }
   };
@@ -1493,12 +1495,7 @@ export async function capturePatchGitControls(
     } catch (error) {
       // Git cannot read an inaccessible store or a cyclic link. Preserve its
       // normal behavior without creating a mount at an unresolved alias.
-      if (
-        !["EACCES", "EPERM", "ELOOP"].includes(
-          (error as NodeJS.ErrnoException).code ?? "",
-        )
-      )
-        throw error;
+      if (!hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) throw error;
     }
   };
   const relativeDefaultStores: string[] = [];
@@ -1638,12 +1635,7 @@ export async function capturePatchGitControls(
         try {
           hookContents.set(path, await readFile(canonical));
         } catch (error) {
-          if (
-            !["EACCES", "EPERM"].includes(
-              (error as NodeJS.ErrnoException).code ?? "",
-            )
-          )
-            throw error;
+          if (!hasErrorCode(error, "EACCES", "EPERM")) throw error;
           // Execute-only native hooks remain usable, but writable aliases must
           // not change them while the model controls the repository.
           hookContents.set(path, {
@@ -1973,12 +1965,7 @@ export async function capturePatchGitControls(
         await rememberConfiguration(includePath, !optional, optional);
       } catch (error) {
         // Active includes already passed Git's normal --includes read above.
-        if (
-          optional &&
-          ["EACCES", "ELOOP"].includes(
-            (error as NodeJS.ErrnoException).code ?? "",
-          )
-        ) {
+        if (optional && hasErrorCode(error, "EACCES", "ELOOP")) {
           inaccessibleIncludes.add(includePath);
           return;
         }
@@ -2196,14 +2183,7 @@ export async function capturePatchGitControls(
         onSnapshotConfig?.(snapshotConfig);
       };
     if (mode === "resumed-hook") return;
-    const localConfig = (
-      await runControl(root, checkout, [
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "config",
-      ])
-    ).replace(/\n$/u, "");
+    const localConfig = await absolutePath(checkout, "--git-path", "config");
     const captureLocalConfig = async (path: string) => {
       await rememberSelectedConfiguration(path);
       // Absorbed submodules keep these files outside their worktrees. The
@@ -2238,14 +2218,11 @@ export async function capturePatchGitControls(
       if ((failure.code ?? failure.status) !== 1) throw error;
     }
     if (worktreeConfig) {
-      const path = (
-        await runControl(root, checkout, [
-          "rev-parse",
-          "--path-format=absolute",
-          "--git-path",
-          "config.worktree",
-        ])
-      ).replace(/\n$/u, "");
+      const path = await absolutePath(
+        checkout,
+        "--git-path",
+        "config.worktree",
+      );
       await captureLocalConfig(path);
     }
     await captureHooks();
@@ -2344,10 +2321,7 @@ export async function capturePatchGitControls(
   ]) {
     const path = relativeFile(
       selectorDirectory,
-      (await runControl(root, root, ["rev-parse", argument])).replace(
-        /\n$/u,
-        "",
-      ),
+      await controlPath(root, argument),
     );
     await rememberControl(path);
     for (const link of await directoryLinks(path))
@@ -2407,12 +2381,7 @@ export async function capturePatchGitControls(
           const metadata = await stat(canonical).catch(missing);
           if (metadata === undefined || metadata.isDirectory()) continue;
         } catch (error) {
-          if (
-            ["EACCES", "ELOOP"].includes(
-              (error as NodeJS.ErrnoException).code ?? "",
-            )
-          )
-            continue;
+          if (hasErrorCode(error, "EACCES", "ELOOP")) continue;
           throw error;
         }
         throw new Error(
@@ -2468,12 +2437,7 @@ export async function capturePatchGitControls(
           try {
             await readFile(canonical);
           } catch (error) {
-            if (
-              ["EACCES", "EPERM"].includes(
-                (error as NodeJS.ErrnoException).code ?? "",
-              )
-            )
-              continue;
+            if (hasErrorCode(error, "EACCES", "EPERM")) continue;
             throw error;
           }
           throw new Error(
@@ -2575,9 +2539,7 @@ export async function capturePatchGitControls(
         let worktree: string | undefined;
         try {
           worktree = await realControlPath(
-            (
-              await runControl(root, checkout, ["rev-parse", "--show-toplevel"])
-            ).replace(/\n$/u, ""),
+            await controlPath(checkout, "--show-toplevel"),
           );
         } catch (error) {
           if (!hasNoWorktree(error)) throw error;
@@ -2608,11 +2570,7 @@ export async function capturePatchGitControls(
       if (capture) {
         await captureReferences(checkout);
         const [common, storage] = await Promise.all([
-          runControl(root, checkout, [
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-          ]),
+          absolutePath(checkout, "--git-common-dir"),
           // Git LFS reads the selected config with includes enabled.
           runControl(root, checkout, [
             "config",
@@ -2655,9 +2613,7 @@ export async function capturePatchGitControls(
         const absolute =
           isAbsolute(configured) &&
           (process.platform !== "win32" || parse(configured).root.length > 1);
-        const lfs = absolute
-          ? configured
-          : join(common.replace(/\n$/u, ""), configured);
+        const lfs = absolute ? configured : join(common, configured);
         // Git reports a supplied default as command-line configuration. Only an
         // actual nonempty setting can authorize a cache outside this checkout.
         const userSelected =
@@ -2958,11 +2914,7 @@ export async function capturePatchGitControls(
       } catch (error) {
         // Unavailable optional storage gets no extra snapshot permission.
         // Git/LFS reports the failure if a snapshot actually uses it.
-        if (
-          !["EACCES", "EPERM", "EROFS", "ENOTDIR"].includes(
-            (error as NodeJS.ErrnoException).code ?? "",
-          )
-        )
+        if (!hasErrorCode(error, "EACCES", "EPERM", "EROFS", "ENOTDIR"))
           throw error;
       }
     }
@@ -2990,12 +2942,7 @@ export async function capturePatchGitControls(
       } catch (error) {
         // Locate opaque control paths without resolving their entries. The
         // native sandbox must enforce the literal exclusions or reject them.
-        if (
-          !["EACCES", "ELOOP"].includes(
-            (error as NodeJS.ErrnoException).code ?? "",
-          )
-        )
-          throw error;
+        if (!hasErrorCode(error, "EACCES", "ELOOP")) throw error;
         const parent = dirname(ancestor);
         if (parent === ancestor) throw error;
         ancestor = parent;

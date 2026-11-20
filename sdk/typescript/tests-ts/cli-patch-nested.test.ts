@@ -36,6 +36,7 @@ import {
   initializePatchGit,
   runIssuePatch,
   runSavedPublication,
+  runPublicationCommand,
 } from "./cli-patch-fixtures.js";
 
 describe("patch change tracking", () => {
@@ -157,10 +158,7 @@ describe("patch change tracking", () => {
       const { directory, git, remote } = await publicationRepository();
       const nested = join(directory, "nested");
       await mkdir(nested);
-      const nestedGit = repositoryGit(nested);
-      nestedGit("init", "--initial-branch=main");
-      nestedGit("config", "user.name", "Synthetic User");
-      nestedGit("config", "user.email", "synthetic@example.test");
+      const nestedGit = initializePatchGit(nested);
       await writeFile(join(nested, "app.ts"), "original\n");
       nestedGit("add", ".");
       nestedGit("commit", "-m", "Synthetic nested baseline");
@@ -369,19 +367,15 @@ describe("patch change tracking", () => {
     const nested = join(directory, path);
     await mkdir(nested, { recursive: true });
     await mkdir(join(directory, "package"));
-    const nestedGit = repositoryGit(nested);
-    nestedGit("init", "--initial-branch=main");
-    nestedGit("config", "user.name", "Synthetic User");
-    nestedGit("config", "user.email", "synthetic@example.test");
+    const nestedGit = initializePatchGit(nested);
     await writeFile(join(nested, "app.ts"), "before\n");
     nestedGit("add", ".");
     nestedGit("commit", "-m", "Synthetic baseline");
     const parentGit =
-      scope === "recursive" ? repositoryGit(join(directory, "nested")) : git;
+      scope === "recursive"
+        ? initializePatchGit(join(directory, "nested"))
+        : git;
     if (scope === "recursive") {
-      parentGit("init", "--initial-branch=main");
-      parentGit("config", "user.name", "Synthetic User");
-      parentGit("config", "user.email", "synthetic@example.test");
       parentGit("add", "child");
       parentGit("commit", "-m", "Synthetic parent");
     }
@@ -563,18 +557,12 @@ describe("patch change tracking", () => {
       const nested = join(directory, nestedPath);
       await mkdir(nested, { recursive: true });
       await mkdir(join(directory, "package"));
-      const nestedGit = repositoryGit(nested);
-      nestedGit("init", "--initial-branch=main");
-      nestedGit("config", "user.name", "Synthetic User");
-      nestedGit("config", "user.email", "synthetic@example.test");
+      const nestedGit = initializePatchGit(nested);
       await writeFile(join(nested, "app.ts"), "original\n");
       nestedGit("add", ".");
       nestedGit("commit", "-m", "Synthetic nested baseline");
       if (scope === "recursive") {
-        const parentGit = repositoryGit(join(directory, "nested"));
-        parentGit("init", "--initial-branch=main");
-        parentGit("config", "user.name", "Synthetic User");
-        parentGit("config", "user.email", "synthetic@example.test");
+        const parentGit = initializePatchGit(join(directory, "nested"));
         parentGit("add", "child");
         parentGit("commit", "-m", "Synthetic recursive gitlink");
       }
@@ -739,9 +727,7 @@ describe("patch change tracking", () => {
               await rm(nested, { recursive: true });
             if (change === "replace") {
               await mkdir(nested);
-              nestedGit("init", "--initial-branch=main");
-              nestedGit("config", "user.name", "Synthetic User");
-              nestedGit("config", "user.email", "synthetic@example.test");
+              initializePatchGit(nested);
             }
             if (change !== "remove")
               await writeFile(
@@ -1356,13 +1342,8 @@ describe("patch change tracking", () => {
       const root = await fixtures.create("synthetic-sparse-submodule-");
       const nested = join(root, "vendor");
       await mkdir(nested);
-      const git = repositoryGit(root);
-      const inner = repositoryGit(nested);
-      for (const repository of [git, inner]) {
-        repository("init", "--initial-branch=main");
-        repository("config", "user.name", "Synthetic User");
-        repository("config", "user.email", "synthetic@example.test");
-      }
+      const git = initializePatchGit(root);
+      const inner = initializePatchGit(nested);
       await writeFile(join(nested, "app.ts"), "old dependency\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic dependency baseline");
@@ -1375,9 +1356,7 @@ describe("patch change tracking", () => {
       git("sparse-checkout", "set", "--no-cone", "/app.ts", "/package/app.ts");
       await rm(nested, { recursive: true });
       await mkdir(nested);
-      inner("init", "--initial-branch=main");
-      inner("config", "user.name", "Synthetic User");
-      inner("config", "user.email", "synthetic@example.test");
+      initializePatchGit(nested);
       await writeFile(join(nested, "app.ts"), "different history\n");
       inner("add", ".");
       inner("commit", "-m", "Synthetic replacement baseline");
@@ -1443,10 +1422,7 @@ describe("patch change tracking", () => {
       const nested = join(directory, "nested");
       await mkdir(nested, { recursive: true });
       const git = initializePatchGit(root);
-      const inner = repositoryGit(nested);
-      inner("init", "--initial-branch=main");
-      inner("config", "user.name", "Synthetic User");
-      inner("config", "user.email", "synthetic@example.test");
+      const inner = initializePatchGit(nested);
       await writeFile(join(nested, "app.ts"), "unsafe\n");
       if (settings === "alternate-index") {
         await writeFile(
@@ -1672,9 +1648,7 @@ describe("patch change tracking", () => {
           if (operation !== "modify") await rm(nested, { recursive: true });
           if (operation === "replace") {
             await mkdir(nested);
-            inner("init", "--initial-branch=main");
-            inner("config", "user.name", "Synthetic User");
-            inner("config", "user.email", "synthetic@example.test");
+            initializePatchGit(nested);
           }
           if (operation !== "remove")
             await writeFile(join(nested, "app.ts"), "fixed\n");
@@ -1797,12 +1771,7 @@ describe("patch change tracking", () => {
       const outcome = await runSavedPublication(root, {
         result,
         onWorkbench: () => savedScan(result, "scan-1", root),
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: runPublicationCommand,
         onCodex: async (args, output) => {
           await writeFile(join(root, ".gitignore"), "local.env\n");
           completePatches(args, output);
@@ -1835,10 +1804,7 @@ describe("patch change tracking", () => {
       const { directory, git, remote } = await publicationRepository();
       const nested = join(directory, "nested");
       await mkdir(nested);
-      const nestedGit = repositoryGit(nested);
-      nestedGit("init", "--initial-branch=main");
-      nestedGit("config", "user.name", "Synthetic User");
-      nestedGit("config", "user.email", "synthetic@example.test");
+      const nestedGit = initializePatchGit(nested);
       await writeFile(join(nested, "app.ts"), "original\n");
       nestedGit("add", ".");
       nestedGit("commit", "-m", "Synthetic nested baseline");
@@ -1861,12 +1827,7 @@ describe("patch change tracking", () => {
         ],
         {
           currentDirectory: directory,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
+          onRepositoryCommand: runPublicationCommand,
           onCodex: async (_args, output) => {
             if (
               output?.appServer?.prompt.includes(

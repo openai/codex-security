@@ -867,7 +867,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   ];
   const policyCluster = join(operator, "policy cluster");
   const registry = join(operator, "selected registry");
-  const gh = join(operator, "selected gh");
+  const gh = "selected gh";
   const glab = join(operator, "selected glab");
   const pgpass = join(operator, "selected pgpass");
   const pgservice = join(operator, "selected pg service");
@@ -891,7 +891,6 @@ test("patch model and clean filters cannot read selected authentication files", 
       ? join(appdata, "postgresql")
       : join(operator, ".postgresql");
   const ssh = join(operator, ".ssh");
-  await mkdir(gh);
   await mkdir(ssh);
   await mkdir(defaultGh, { recursive: true });
   await mkdir(terraformDir, { recursive: true });
@@ -1005,6 +1004,8 @@ test("patch model and clean filters cannot read selected authentication files", 
     glabDirectories.push(
       join(operator, "Library", "Application Support", "glab-cli"),
     );
+  const ghFiles = (directory: string) =>
+    ["hosts.yml", "config.yml"].map((file) => join(directory, file));
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
@@ -1026,8 +1027,11 @@ test("patch model and clean filters cannot read selected authentication files", 
     ...clusterFiles,
     policyCluster,
     join(registry, "config.json"),
-    join(gh, "hosts.yml"),
-    join(defaultGh, "hosts.yml"),
+    ...ghFiles(defaultGh),
+    ...ghFiles(join(environment.XDG_CONFIG_HOME, "gh")),
+    ...(process.platform === "win32"
+      ? ghFiles(join(appdata, "GitHub CLI"))
+      : []),
     pgpass,
     pgservice,
     pgKey,
@@ -1141,7 +1145,18 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
       );
       const modelRead =
         readFiles() + "\nprocess.stdout.write(JSON.stringify(contents));";
-      expect(await inspectModel(modelRead)).toBe("[]");
+      const selectedGhFiles = ghFiles(join(repo, gh));
+      const probeWrites = `
+fs.writeFileSync(${JSON.stringify(join(repo, "write-control"))}, "writable");
+for (const path of ${JSON.stringify(selectedGhFiles)}) {
+  try { fs.writeFileSync(path, "changed"); }
+  catch (error) { if (!["EACCES", "EPERM", "EROFS", "ENOENT"].includes(error.code)) throw error; }
+}`;
+      expect(await inspectModel(modelRead + probeWrites)).toBe("[]");
+      for (const path of selectedGhFiles)
+        expect(await readFile(path, "utf8")).toBe(
+          contents[protectedPaths.indexOf(path)]!,
+        );
       if (patchSnapshotWindowsConfig().includes('"elevated"'))
         console.info(
           "Windows model denied selected authentication files before snapshot",
@@ -1193,6 +1208,12 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
     },
     async (repository) => {
       const literalTilde = join(repository, "~");
+      const selectedGh = join(repository, gh);
+      await mkdir(selectedGh);
+      for (const path of ghFiles(selectedGh)) {
+        protectedPaths.push(path);
+        contents.push("synthetic selected gh input " + contents.length + "\n");
+      }
       const localGlabDir = join(repository, ".git", "glab-cli");
       glabDirectories.push(localGlabDir);
       protectedPaths.push(join(localGlabDir, "config.yml"));

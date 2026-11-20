@@ -24,6 +24,7 @@ import {
   runIssuePatch,
   runSavedPublication,
   gitWithEnvironment,
+  observeIssuePatch,
 } from "./cli-patch-fixtures.js";
 import { execFileSync } from "node:child_process";
 import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
@@ -131,18 +132,10 @@ for (const mode of [
         "includeif.onbranch:future-branch.path ../src",
       );
     }
-    let launches = 0;
-    let controls: readonly string[] = [];
-    const afterTurn: string[][] = [];
     const replacement = "[synthetic]\n value = now-a-config-file\n";
-    const outcome = await runIssuePatch(root, {
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurn.push([...args]);
-        return runGitRepositoryCommand(command, args, cwd, options);
-      },
-      onCodex: async (_args, output) => {
-        launches++;
-        controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+    const { outcome, launches, afterTurn, controls } = await observeIssuePatch(
+      root,
+      async () => {
         await writeFile(source, "after\n");
         if (
           mode === "becomes config file" ||
@@ -159,10 +152,8 @@ for (const mode of [
         }
         if (mode === "remove directory")
           await rm(directory, { recursive: true });
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+    );
     if (mode === "active directory") {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(launches).toBe(0);
@@ -647,17 +638,8 @@ for (const role of ["hook", "conditional include"] as const) {
       const head = git("rev-parse", "HEAD");
       const index = await readFile(join(root, ".git", "index"));
       const config = await readFile(join(root, ".git", "config"));
-      let launches = 0;
-      let controls: readonly string[] = [];
-      const afterTurn: string[][] = [];
-      const outcome = await runIssuePatch(root, {
-        onRepositoryCommand: (command, args, cwd, options) => {
-          if (launches > 0) afterTurn.push([...args]);
-          return runGitRepositoryCommand(command, args, cwd, options);
-        },
-        onCodex: async (_args, output) => {
-          launches++;
-          controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+      const { outcome, launches, afterTurn, controls } =
+        await observeIssuePatch(root, async () => {
           await unlink(unavailable);
           if (transition === "directory") {
             await mkdir(unavailable);
@@ -667,10 +649,7 @@ for (const role of ["hook", "conditional include"] as const) {
             );
           }
           await writeFile(source, "after\n");
-          output?.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
-      });
+        });
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(launches).toBe(1);
       expect(controls).toContain(join(root, ".git"));

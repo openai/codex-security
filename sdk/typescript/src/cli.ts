@@ -101,6 +101,8 @@ import {
   capturePatchGitAdministrationReferences,
   activePatchPublicationHooks,
   capturePatchGitControls,
+  githubConfigDirectory,
+  githubConfigFiles,
   patchFilterParameters,
   PATCH_LOCAL_GIT_ENVIRONMENT,
   type PatchGitControlMode,
@@ -1934,7 +1936,12 @@ type PatchTransportFile = {
   target: string;
   stamp: string;
   digest?: string;
-  kind: "executable" | "file" | "known-hosts" | "missing-known-hosts";
+  kind:
+    | "github-config"
+    | "executable"
+    | "file"
+    | "known-hosts"
+    | "missing-known-hosts";
 };
 
 interface LibraryDirectory {
@@ -1950,6 +1957,7 @@ interface PatchWriters {
 }
 
 interface PatchTransportAccess extends PatchWriters {
+  verifyGitHubConfig?: () => Promise<string>;
   // A null target represents a known-hosts file that SSH may create.
   readonly invocations: Map<string, string | null>;
   readonly implicitLaunchers: Map<string, string | null>;
@@ -2271,6 +2279,20 @@ async function restrictRepositoryLoader(
   }
 }
 
+function isPatchStartupOverride(name: string): boolean {
+  return (
+    /^(?:PYTHON(?:HOME|PATH|USERBASE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
+      name,
+    ) ||
+    /^(?:NODE_(?:OPTIONS|PATH)|BUN_OPTIONS|PERL(?:5?LIB|5OPT)|GITPERLLIB|RUBY(?:LIB|OPT)|RUBYGEMS_GEMDEPS|GEM_(?:HOME|PATH)|BASH_ENV|ENV|ZDOTDIR|BASH_FUNC_.+%%)$/iu.test(
+      name,
+    ) ||
+    /^(?:PHPRC|PHP_INI_SCAN_DIR|LUA_(?:INIT|C?PATH)(?:_\d+_\d+)?|DOTNET_STARTUP_HOOKS|(?:JAVA_TOOL|JDK_JAVA|_JAVA)_OPTIONS|CLASSPATH)$/iu.test(
+      name,
+    )
+  );
+}
+
 export async function runRepositoryCommand(
   command: Parameters<CliDependencies["runRepositoryCommand"]>[0],
   args: readonly string[],
@@ -2554,6 +2576,9 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
+    // Git, hosting clients and the sandbox launcher all start on the host.
+    for (const name of Object.keys(environment))
+      if (isPatchStartupOverride(name)) delete environment[name];
     await restrictRepositoryLoader(
       environment,
       protectedRoots,
@@ -2622,9 +2647,15 @@ export async function runRepositoryCommand(
       // The config parser needs the selected Git's PATH and OS environment.
       const effective: NodeJS.ProcessEnv = {};
       for (const source of [environment, sandbox.gitEnvironment ?? {}]) {
-        for (const [name, value] of Object.entries(source))
+        for (const [name, value] of Object.entries(source)) {
+          if (
+            source !== environment &&
+            (isPatchStartupOverride(name) || /^(?:LD|DYLD)_/u.test(name))
+          )
+            continue;
           effective[process.platform === "win32" ? name.toUpperCase() : name] =
             value;
+        }
       }
       filterCommandConfig(
         effective,
@@ -4057,10 +4088,16 @@ export async function main(
           },
         };
       }
-      // The local SSH hostname probe also executes the previously selected launcher.
+      if (command === "gh" && patchTransportAccess.verifyGitHubConfig) {
+        options.environment = {
+          ...options.environment,
+          GH_CONFIG_DIR: await patchTransportAccess.verifyGitHubConfig(),
+        };
+      }
+      // The hostname probe invokes the same selected SSH launcher as the transport.
       if (
-        options.patchTransport ||
         command !== "git" ||
+        options.patchTransport ||
         (args[0] === "-c" &&
           args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
           args[2] === "codex-security-ssh-config")
@@ -12383,6 +12420,15 @@ async function patchPublicationDestination(
   }
   if (!found)
     await requireOperatorPatchMirrors(remotes, repository, dependencies);
+  // Capture after trusted provider reads, which can migrate or refresh credentials.
+  // A branch include may select GitHub only after the patch changes branches.
+  if (dependencies.patchTransportAccess)
+    dependencies.patchTransportAccess.verifyGitHubConfig ??=
+      await captureGitHubConfig(
+        dependencies.patchCallerDirectory ?? repository,
+        dependencies.environment,
+      );
+
   return {
     remote: source,
     target,
@@ -12544,7 +12590,12 @@ async function patchScopedConfig(
 }
 
 function patchTransportChanged(kind: PatchTransportFile["kind"]) {
-  const label = kind === "executable" ? "executable" : "file";
+  const label =
+    kind === "github-config"
+      ? "GitHub CLI configuration"
+      : kind === "executable"
+        ? "executable"
+        : "file";
   return new CodexSecurityError(
     `Patch transport ${label} changed before publication. Inspect the selected transport settings and files before resuming.`,
   );
@@ -12573,7 +12624,18 @@ async function patchTransportIdentity(
       throw patchTransportChanged(kind);
     kind = "known-hosts";
   }
-  const target = await realpath(path);
+  const target = await realpath(path).catch((error: NodeJS.ErrnoException) => {
+    if (
+      kind === "github-config" &&
+      ["ENOENT", "ENOTDIR"].includes(error.code ?? "")
+    )
+      return undefined;
+    throw error;
+  });
+  if (target === undefined) {
+    if (selected?.stamp) throw patchTransportChanged(kind);
+    return { target: path, stamp: "", kind };
+  }
   if (selected && target !== selected.target) throw patchTransportChanged(kind);
   const entry = await stat(target, { bigint: true });
   if (options.writers && entry.nlink > 1n && entry.isFile())
@@ -12606,6 +12668,31 @@ async function patchTransportIdentity(
     return { target, stamp, kind, digest };
   } finally {
     await file.close();
+  }
+}
+
+async function captureGitHubConfig(
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+) {
+  try {
+    const directory = resolve(
+      process.platform === "win32" ? cwd : await canonicalConfigPath(cwd),
+      githubConfigDirectory(environment),
+    );
+    const files = new Map<string, PatchTransportFile>();
+    for (const name of githubConfigFiles) {
+      const path = join(directory, name);
+      files.set(path, await patchTransportIdentity(path, "github-config"));
+    }
+    return async () => {
+      for (const [path, file] of files)
+        await patchTransportIdentity(path, file.kind, file);
+      return directory;
+    };
+  } catch (error) {
+    // A GitLab-only publication need not read GitHub credentials.
+    return () => Promise.reject(error);
   }
 }
 
@@ -12823,14 +12910,11 @@ async function inspectPatchGitExecutable(
     ).replace(/\r?\n$/u, "");
   } else {
     if (!selected && bare)
-      execPath = (
-        await dependencies.runRepositoryCommand(
-          "git",
-          ["--exec-path"],
-          repository,
-          { trim: false },
-        )
-      ).replace(/\n$/u, "");
+      execPath = await patchGitOutput(
+        repository,
+        ["--exec-path"],
+        dependencies,
+      );
     path = [execPath, hostPath].filter(Boolean).join(delimiter);
   }
   const inspected = await inspectTrustedExecutable(
@@ -14152,14 +14236,9 @@ async function patchCommandContext(
   dependencies: CliDependencies,
 ): Promise<PatchCommandContext> {
   const gitPath = async (args: string[]) =>
-    (
-      await dependencies.runRepositoryCommand(
-        "git",
-        ["rev-parse", ...args],
-        repository,
-        { trim: false, directory },
-      )
-    ).replace(/\n$/u, "");
+    await patchGitOutput(repository, ["rev-parse", ...args], dependencies, {
+      directory,
+    });
   const gitDirectory = await gitPath(["--git-dir"]);
   const canonicalGitDirectory = await realpath(
     await gitPath(["--absolute-git-dir"]),
@@ -14292,14 +14371,12 @@ async function patchCommandContext(
       return Boolean(path) && !isAbsolute(path!);
     });
   if (configurationPaths.length) {
-    const configurationDirectory = (
-      await dependencies.runRepositoryCommand(
-        "git",
-        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-        repository,
-        { trim: false, directory, environment: { GIT_OBJECT_DIRECTORY: "." } },
-      )
-    ).replace(/\n$/u, "");
+    const configurationDirectory = await patchGitOutput(
+      repository,
+      ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+      dependencies,
+      { directory, environment: { GIT_OBJECT_DIRECTORY: "." } },
+    );
     for (const [name, value] of configurationPaths)
       environment[name] =
         process.platform === "win32" && /^[a-z]:/iu.test(value)
@@ -14321,24 +14398,10 @@ async function patchCommandContext(
   }
 
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
-    let value = environmentEntry(dependencies.environment, name);
-    if (name === "GH_CONFIG_DIR" && !value) {
-      // Preserve gh's fallback selection when publication changes cwd.
-      const xdg = environmentEntry(dependencies.environment, "XDG_CONFIG_HOME");
-      const appData =
-        process.platform === "win32"
-          ? environmentEntry(dependencies.environment, "AppData")
-          : undefined;
-      const home = environmentEntry(
-        dependencies.environment,
-        process.platform === "win32" ? "USERPROFILE" : "HOME",
-      );
-      value = xdg
-        ? join(xdg, "gh")
-        : appData
-          ? join(appData, "GitHub CLI")
-          : join(home ?? "", ".config", "gh");
-    }
+    const value =
+      name === "GH_CONFIG_DIR"
+        ? githubConfigDirectory(dependencies.environment)
+        : environmentEntry(dependencies.environment, name);
     if (value === undefined) continue;
     environment[name] =
       value === ""
@@ -14445,7 +14508,7 @@ async function bindPatchCommandContext(
     directory,
     dependencies: {
       ...dependencies,
-      patchCallerDirectory: directory,
+      patchCallerDirectory: context.callerDirectory,
       // A patch may remove the original component. Keep its captured physical
       // protection root while resolving later config from Git's validated cwd.
       patchTransportContext: {
@@ -14768,14 +14831,11 @@ async function preparePatchPublication(
   const localRefs = local.split("\n").filter(Boolean);
   let existing = localRefs.some(conflicts);
   if (!existing && localRefs.length > 0) {
-    const directory = (
-      await dependencies.runRepositoryCommand(
-        "git",
-        ["rev-parse", "--path-format=absolute", "--git-path", "refs/heads"],
-        repository,
-        { trim: false },
-      )
-    ).replace(/\n$/u, "");
+    const directory = await patchGitOutput(
+      repository,
+      ["rev-parse", "--path-format=absolute", "--git-path", "refs/heads"],
+      dependencies,
+    );
     const selected = canonicalPatchPath(directory, patchPathKey(branch));
     existing = localRefs.some((candidate) => {
       const stored = patchPathKey(candidate.slice("refs/heads/".length));
@@ -15684,12 +15744,13 @@ async function createPatchPullRequest(
 
   const { branch, directory, dirtyFiles, ignoredFiles, tree, root, context } =
     publication;
-  const { dependencies } = await bindPatchCommandContext(
-    context.directory,
-    root,
-    context,
-    callerDependencies,
-  );
+  const { directory: boundDirectory, dependencies } =
+    await bindPatchCommandContext(
+      context.directory,
+      root,
+      context,
+      callerDependencies,
+    );
   const head = patchRisk?.tree ?? (await snapshotPatchTree(root, dependencies));
   const changes = await patchGitRecords(
     root,
@@ -15861,9 +15922,9 @@ async function createPatchPullRequest(
     patchRisk === undefined
       ? introduction
       : `${introduction}\n\n## Patch risk assessment\n\n${patchRisk.summary}`;
-  const stagingDirectory = isOutsidePath(relative(root, bound.directory))
+  const stagingDirectory = isOutsidePath(relative(root, boundDirectory))
     ? root
-    : bound.directory;
+    : boundDirectory;
   // Native commit hooks keep their normal worktree and index. Git's implicit
   // index refresh may inspect a file again, but its filtered blob is already captured.
   let branchFilters: readonly string[] | undefined;
@@ -16500,6 +16561,21 @@ function patchFilePath(root: string, path: string): Buffer {
   return Buffer.from(resolve(patchPathKey(root), path), "latin1");
 }
 
+// Git terminates these values with LF. Spaces and other newlines can belong to a path.
+async function patchGitOutput(
+  repository: string,
+  args: string[],
+  dependencies: CliDependencies,
+  options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
+): Promise<string> {
+  return (
+    await dependencies.runRepositoryCommand("git", args, repository, {
+      ...options,
+      trim: false,
+    })
+  ).replace(/\n$/u, "");
+}
+
 // NUL-delimited Git records contain opaque paths, not UTF-8 display strings.
 async function patchGitRecords(
   repository: string,
@@ -16773,14 +16849,11 @@ async function configuredPatchObjectDirectory(
   return environmentValue(dependencies.environment, "GIT_OBJECT_DIRECTORY") ===
     undefined
     ? undefined
-    : (
-        await dependencies.runRepositoryCommand(
-          "git",
-          ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-          repository,
-          { trim: false },
-        )
-      ).replace(/\n$/u, "");
+    : await patchGitOutput(
+        repository,
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        dependencies,
+      );
 }
 
 const NESTED_PATCH_GIT_ENVIRONMENT = Object.fromEntries(
@@ -16810,14 +16883,12 @@ async function nestedPatchGitDependencies(
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
   // Resolve "." in Git's actual setup directory, including an outside invocation.
-  const directory = (
-    await dependencies.runRepositoryCommand(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-      repository,
-      { trim: false, environment: { GIT_OBJECT_DIRECTORY: "." } },
-    )
-  ).replace(/\n$/u, "");
+  const directory = await patchGitOutput(
+    repository,
+    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    dependencies,
+    { environment: { GIT_OBJECT_DIRECTORY: "." } },
+  );
   const objectDirectory =
     writeObjectsTo ??
     (await configuredPatchObjectDirectory(repository, dependencies));
@@ -16851,14 +16922,12 @@ async function nestedPatchGitDependencies(
       ),
   };
   if (objectDirectory !== undefined) {
-    const commonDirectory = (
-      await nested.runRepositoryCommand(
-        "git",
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        checkout,
-        { trim: false, environment: { GIT_OBJECT_DIRECTORY: objectDirectory } },
-      )
-    ).replace(/\n$/u, "");
+    const commonDirectory = await patchGitOutput(
+      checkout,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      nested,
+      { environment: { GIT_OBJECT_DIRECTORY: objectDirectory } },
+    );
     const localObjects = join(commonDirectory, "objects");
     if (existsSync(localObjects)) {
       // Retain local reads while writing to the caller's configured primary pool.
@@ -17398,14 +17467,11 @@ async function snapshotPatchTree(
     ":(top,glob,exclude)**/.svn",
     ":(top,glob,exclude)**/.svn/**",
   ];
-  const objects = (
-    await dependencies.runRepositoryCommand(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-      repository,
-      { trim: false },
-    )
-  ).replace(/\n$/u, "");
+  const objects = await patchGitOutput(
+    repository,
+    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    dependencies,
+  );
   const snapshotProfiles: PatchSnapshotProfiles = new Map();
   const workingIndex: Parameters<typeof withPatchGitIndex>[0] = (
     args,

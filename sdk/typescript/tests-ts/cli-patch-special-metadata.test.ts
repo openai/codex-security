@@ -13,7 +13,6 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  repositoryGit,
   runWorkflow,
   patchDirectories,
   initializePatchGit,
@@ -73,10 +72,7 @@ for (const name of [
         const git = initializePatchGit(root);
         git("add", ".");
         git("commit", "-m", "Synthetic outer baseline");
-        const nestedGit = repositoryGit(nested);
-        nestedGit("init", "--initial-branch=main");
-        nestedGit("config", "user.name", "Synthetic User");
-        nestedGit("config", "user.email", "synthetic@example.test");
+        const nestedGit = initializePatchGit(nested);
         nestedGit("add", ".");
         nestedGit("commit", "-m", "Synthetic nested baseline");
         const metadata = join(nested, ".git");

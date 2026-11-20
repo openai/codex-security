@@ -22,6 +22,7 @@ import {
   runPublicationCommand,
   savedScan,
   patchDirectories,
+  initializePatchGit,
 } from "./cli-patch-fixtures.js";
 import type { BigIntStats, Stats } from "node:fs";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -370,10 +371,7 @@ test.skipIf(process.platform !== "linux").each([false, true])(
       "src/nested-\ufffd/\n",
     );
     await mkdir(alias);
-    const aliasGit = repositoryGit(alias);
-    aliasGit("init", "--initial-branch=main");
-    aliasGit("config", "user.name", "Synthetic User");
-    aliasGit("config", "user.email", "synthetic@example.test");
+    const aliasGit = initializePatchGit(alias);
     aliasGit("commit", "--allow-empty", "-m", "Synthetic alias");
     const outcome = await runPublication(directory, ["src"], async () => {
       await stage(after);

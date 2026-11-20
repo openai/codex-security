@@ -6,14 +6,20 @@ import {
   rename,
   unlink,
   writeFile,
+  rm,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   repositoryGit,
   runGitRepositoryCommand,
   patchDirectories,
   initializePatchGit,
   runIssuePatch,
+  completePatches,
+  publicationRepository,
+  resultWithFindings,
+  runWorkflow,
+  observeIssuePatch,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -179,25 +185,17 @@ test("patch discovery refuses new reachable administration before snapshot bookk
   let nestedHead: string | undefined;
   let nestedIndex: Buffer | undefined;
   let operator: Awaited<ReturnType<typeof operatorHook>> | undefined;
-  const afterTurn: string[][] = [];
-  let launches = 0;
-  const outcome = await runIssuePatch(root, {
-    onRepositoryCommand: (command, args, cwd, options) => {
-      if (launches > 0) afterTurn.push([...args]);
-      return runGitRepositoryCommand(command, args, cwd, options);
-    },
-    onCodex: async (_args, output) => {
-      launches++;
+  const { outcome, launches, afterTurn } = await observeIssuePatch(
+    root,
+    async () => {
       const inner = await initialize(nested, "input.ts");
       inner("commit", "-m", "Synthetic new administration");
       operator = await operatorHook(nested, "input.ts");
       nestedHead = inner("rev-parse", "HEAD");
       nestedIndex = await readFile(join(nested, ".git", "index"));
       await writeFile(join(root, "app.ts"), "after\n");
-      output?.stdout.write("Synthetic patch complete.\n");
-      return 0;
     },
-  });
+  );
   expect(outcome.exitCode, outcome.stderr).toBe(2);
   expect(launches).toBe(1);
   expect(outcome.stderr).toContain(
@@ -223,3 +221,254 @@ test("patch discovery refuses new reachable administration before snapshot bookk
   expect(await readFile(operator!.hook, "utf8")).toBe(operator!.contents);
   expect(await readFile(operator!.effect).catch(() => null)).toBeNull();
 });
+
+function commitBaseline(directory: string) {
+  const git = initializePatchGit(directory);
+  git("add", ".");
+  git("commit", "-m", "Synthetic baseline");
+  return git;
+}
+
+test.each(
+  [
+    { foreign: false, configuration: "absolute" },
+    { foreign: true, configuration: "absolute" },
+    { foreign: false, configuration: "unset" },
+    { foreign: false, configuration: "relative" },
+  ].flatMap((configuration) =>
+    [false, true].map((gitlink) => ({ ...configuration, gitlink })),
+  ),
+)(
+  "patch discovery binds selected nested administration: %p",
+  async ({ foreign, configuration, gitlink }) => {
+    const root = await fixtures.create("patch-worktree-selected-");
+    const nested = join(root, "source");
+    await mkdir(nested);
+    await writeFile(join(root, "outer.txt"), "before\n");
+    await writeFile(join(nested, "app.ts"), "selected source\n");
+    commitBaseline(root);
+
+    const worktree = foreign
+      ? await fixtures.create("patch-worktree-unselected-")
+      : nested;
+    if (foreign) await writeFile(join(worktree, "app.ts"), "foreign source\n");
+    const git = commitBaseline(worktree);
+    if (configuration !== "unset")
+      git(
+        "config",
+        "core.worktree",
+        configuration === "relative" ? ".." : worktree,
+      );
+    if (foreign) {
+      await writeFile(join(worktree, "app.ts"), "foreign local edit\n");
+      await writeFile(
+        join(nested, ".git"),
+        `gitdir: ${join(worktree, ".git")}\n`,
+      );
+    }
+    const effect = join(worktree, "hook-effect");
+    if (!gitlink && process.platform !== "win32") {
+      const hook = join(worktree, ".git", "hooks", "synthetic-fsmonitor");
+      await writeFile(
+        hook,
+        `#!/bin/sh\nprintf effect > ${JSON.stringify(effect)}\nprintf '\\0'\n`,
+        {
+          mode: 0o755,
+        },
+      );
+      git("config", "core.fsmonitor", hook);
+    }
+    const head = git("rev-parse", "HEAD");
+    const index = await readFile(join(worktree, ".git", "index"));
+    const source = await readFile(join(worktree, "app.ts"));
+    if (gitlink) {
+      const parent = repositoryGit(root);
+      parent("rm", "--cached", "source/app.ts");
+      parent("update-index", "--add", "--cacheinfo", `160000,${head},source`);
+      parent("commit", "-m", "Synthetic selected gitlink");
+    }
+    const selectedIndex = await readFile(join(root, ".git", "index"));
+    await rm(effect, { force: true });
+    const nestedInventory: string[][] = [];
+    let launches = 0;
+    let beforeTurnEffect: string | undefined;
+    const outcome = await runIssuePatch(root, {
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const gitDirectory = args.indexOf("--git-dir");
+        if (
+          args.includes("ls-files") &&
+          gitDirectory >= 0 &&
+          resolve(args[gitDirectory + 1]!) === join(nested, ".git")
+        )
+          nestedInventory.push([...args]);
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+      onCodex: async (_args, output) => {
+        launches++;
+        beforeTurnEffect = await readFile(effect, "utf8").catch(
+          () => undefined,
+        );
+        await writeFile(join(root, "outer.txt"), "after\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+
+    expect(outcome.exitCode, outcome.stderr).toBe(foreign && gitlink ? 2 : 0);
+    expect(launches).toBe(foreign && gitlink ? 0 : 1);
+    if (foreign || !gitlink) expect(nestedInventory).toEqual([]);
+    else expect(nestedInventory.length).toBeGreaterThan(0);
+    expect(beforeTurnEffect).toBeUndefined();
+    expect(
+      await readFile(effect, "utf8").catch(() => undefined),
+    ).toBeUndefined();
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(join(worktree, ".git", "index"))).toEqual(index);
+    expect(await readFile(join(worktree, "app.ts"))).toEqual(source);
+    expect(await readFile(join(root, ".git", "index"))).toEqual(selectedIndex);
+    expect(await readFile(join(root, "outer.txt"), "utf8")).toBe(
+      foreign && gitlink ? "before\n" : "after\n",
+    );
+    if (!foreign && !gitlink && process.platform !== "win32") {
+      git("ls-files", "--cached");
+      expect(await readFile(effect, "utf8")).toBe("effect");
+    }
+  },
+);
+
+test("patch discovery does not execute a workspace fsmonitor rewritten by the model", async () => {
+  const root = await fixtures.create("patch-fsmonitor-selected-");
+  const output = await fixtures.create("patch-fsmonitor-output-");
+  const nested = join(root, "source");
+  const hook = join(nested, "monitor.cjs");
+  const effect = join(output, "hook-effect");
+  const script = (value: string) =>
+    `require("node:fs").writeFileSync(${JSON.stringify(effect)}, ${JSON.stringify(value)});\nprocess.stdout.write("\\0");\n`;
+  await mkdir(nested);
+  await writeFile(join(root, "outer.txt"), "before\n");
+  await writeFile(join(nested, "app.ts"), "selected source\n");
+  await writeFile(hook, script("operator"));
+  commitBaseline(root);
+  const git = commitBaseline(nested);
+  const commandPath = (path: string) =>
+    JSON.stringify(path.replaceAll("\\", "/"));
+  git(
+    "config",
+    "core.fsmonitor",
+    `${commandPath(process.execPath)} ${commandPath(hook)}`,
+  );
+
+  git("ls-files", "--cached");
+  expect(await readFile(effect, "utf8")).toBe("operator");
+  await rm(effect);
+  const head = git("rev-parse", "HEAD");
+  const index = await readFile(join(nested, ".git", "index"));
+  const nestedInventory: string[][] = [];
+  let launches = 0;
+  let beforeTurnEffect: string | undefined;
+  const outcome = await runIssuePatch(root, {
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (args.includes(nested) && args.includes("ls-files"))
+        nestedInventory.push([...args]);
+      return runGitRepositoryCommand(command, args, cwd, options);
+    },
+    onCodex: async (args, streams) => {
+      launches++;
+      expect(
+        args.some((arg) => arg.startsWith("permissions.codex_security_patch=")),
+      ).toBe(false);
+      expect(streams?.appServer?.permissions?.name).toBe(
+        "codex_security_patch",
+      );
+      expect(streams?.appServer?.permissions?.readOnlyPaths).not.toContain(
+        hook,
+      );
+      beforeTurnEffect = await readFile(effect, "utf8").catch(() => undefined);
+      await rm(effect, { force: true });
+      await writeFile(hook, script("model-rewritten"));
+      await writeFile(join(root, "outer.txt"), "after\n");
+      streams?.stdout.write("Synthetic patch complete.\n");
+      return 0;
+    },
+  });
+
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(launches).toBe(1);
+  expect(nestedInventory).toEqual([]);
+  expect(await readFile(effect, "utf8").catch(() => undefined)).toBeUndefined();
+  expect(beforeTurnEffect).toBeUndefined();
+  expect(await readFile(hook, "utf8")).toBe(script("model-rewritten"));
+  expect(await readFile(join(root, "outer.txt"), "utf8")).toBe("after\n");
+  expect(git("rev-parse", "HEAD")).toBe(head);
+  expect(await readFile(join(nested, ".git", "index"))).toEqual(index);
+
+  git("ls-files", "--cached");
+  expect(await readFile(effect, "utf8")).toBe("model-rewritten");
+});
+
+test.each([
+  ["scan", "checkout"],
+  ["patch", "checkout"],
+  ["patch", "inherited"],
+])(
+  "%s publication skips the %s fsmonitor during preflight and commit",
+  async (command, source) => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const support = await fixtures.create("patch-publication-fsmonitor-");
+    const effect = join(support, "callback");
+    const hook = join(directory, "monitor.cjs");
+    const script = (phase: string) =>
+      `require("node:fs").writeFileSync(${JSON.stringify(effect)}, ${JSON.stringify(phase)}); process.stdout.write("\\0");`;
+    await writeFile(hook, script("preflight"));
+    git("add", "monitor.cjs");
+    git("commit", "-m", "Synthetic filesystem monitor");
+    const quoted = (path: string) => JSON.stringify(path.replaceAll("\\", "/"));
+    const monitor = `${quoted(process.execPath)} ${quoted(hook)}`;
+    git("config", "core.fsmonitor", monitor);
+    const environment =
+      source === "inherited"
+        ? {
+            GIT_CONFIG_PARAMETERS: `'core.fsmonitor'='${monitor.replaceAll("'", "'\\''")}'`,
+            GIT_ALLOW_PROTOCOL: "file",
+          }
+        : {};
+    git("status", "--porcelain");
+    expect(await readFile(effect, "utf8")).toBe("preflight");
+    await rm(effect);
+    let beforeTurn: string | undefined;
+    const result = await runWorkflow(
+      command === "patch"
+        ? ["patch", "Synthetic issue", "--create-pr", "--json"]
+        : ["scan", directory, "--patch", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        result: resultWithFindings(["high"]),
+        onCodex: async (args, output) => {
+          beforeTurn = await readFile(effect, "utf8").catch(() => undefined);
+          await rm(effect, { force: true });
+          await writeFile(hook, script("publication"));
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          if (command === "scan") completePatches(args, output);
+          else output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+        onRepositoryCommand: (tool, args, cwd, options) =>
+          tool === "git"
+            ? runGitRepositoryCommand(tool, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              })
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+      },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect([
+      beforeTurn,
+      await readFile(effect, "utf8").catch(() => undefined),
+    ]).toEqual([undefined, undefined]);
+    expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
+  },
+);

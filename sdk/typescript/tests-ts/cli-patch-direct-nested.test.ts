@@ -14,7 +14,6 @@ import {
   patchRiskAssessment,
   publicationRepository,
   readAppliedText,
-  repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
   patchDirectories,
@@ -82,10 +81,7 @@ for (const {
     const { directory, git } = await publicationRepository(fixtures);
     const nested = join(directory, "nested");
     await mkdir(nested);
-    const child = repositoryGit(nested);
-    child("init", "--initial-branch=main");
-    child("config", "user.name", "Synthetic User");
-    child("config", "user.email", "synthetic@example.test");
+    const child = initializePatchGit(nested);
     await writeFile(join(nested, "app.ts"), "original\n");
     child("add", ".");
     child("commit", "-m", "Synthetic child baseline");

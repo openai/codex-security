@@ -361,6 +361,29 @@ export function runIssuePatch(
   );
 }
 
+export async function observeIssuePatch(
+  directory: string,
+  edit: () => Promise<void>,
+) {
+  let launches = 0;
+  const afterTurn: string[][] = [];
+  let controls: readonly string[] = [];
+  const outcome = await runIssuePatch(directory, {
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (launches > 0) afterTurn.push([...args]);
+      return runGitRepositoryCommand(command, args, cwd, options);
+    },
+    onCodex: async (_args, output) => {
+      launches++;
+      controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+      await edit();
+      output?.stdout.write("Synthetic patch complete.\n");
+      return 0;
+    },
+  });
+  return { outcome, launches, controls, afterTurn };
+}
+
 export function runSavedPublication(
   directory: string,
   fixtures: Parameters<typeof runWorkflow>[1],
@@ -440,6 +463,17 @@ export const runLocalHostingTransport: typeof runGitRepositoryCommand = (
   options,
 ) => runGitRepositoryCommand(command, args, cwd, localHostingOptions(options));
 
+export async function addPublicationOrigin(
+  fixtures: ReturnType<typeof createTemporaryDirectories>,
+  git: ReturnType<typeof repositoryGit>,
+  format: readonly string[] = [],
+) {
+  const remote = await fixtures.create("patch-destination-origin-");
+  git("init", ...format, "--bare", remote);
+  git("remote", "add", "origin", remote);
+  return remote;
+}
+
 export async function publicationRepository(
   fixtures: ReturnType<typeof createTemporaryDirectories>,
   objectFormat?: "sha1" | "sha256",
@@ -454,9 +488,7 @@ export async function publicationRepository(
   await writeFile(join(directory, "src/finding-1.ts"), "original\n");
   git("add", ".");
   git("commit", "-m", "Synthetic baseline");
-  const remote = await fixtures.create("patch-destination-origin-");
-  git("init", ...format, "--bare", remote);
-  git("remote", "add", "origin", remote);
+  const remote = await addPublicationOrigin(fixtures, git, format);
   return { directory, git, remote };
 }
 

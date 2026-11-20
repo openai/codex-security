@@ -835,10 +835,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
       } else if (location === "nested-administration") {
         const child = join(repository, "child");
         await mkdir(child);
-        const childGit = repositoryGit(child);
-        childGit("init", "--initial-branch=main");
-        childGit("config", "user.name", "Synthetic User");
-        childGit("config", "user.email", "synthetic@example.test");
+        const childGit = initializePatchGit(child);
         await writeFile(join(child, "app.txt"), "child\n");
         childGit("add", ".");
         childGit("commit", "-m", "Synthetic child");
@@ -1398,10 +1395,7 @@ lines.on("line", (line) => {
             : "nested";
       const nested = join(root, nestedPath);
       await mkdir(nested, { recursive: true });
-      const child = repositoryGit(nested);
-      child("init", "--initial-branch=main");
-      child("config", "user.name", "Synthetic User");
-      child("config", "user.email", "synthetic@example.test");
+      const child = initializePatchGit(nested);
       await writeFile(join(nested, "app.txt"), "baseline\n");
       child("add", ".");
       child("commit", "-m", "Synthetic child baseline");
@@ -1433,10 +1427,7 @@ lines.on("line", (line) => {
       git("add", "data", "outer.txt");
       let topRevision = revision;
       if (mode === "recursive") {
-        const parent = repositoryGit(join(root, "nested"));
-        parent("init", "--initial-branch=main");
-        parent("config", "user.name", "Synthetic User");
-        parent("config", "user.email", "synthetic@example.test");
+        const parent = initializePatchGit(join(root, "nested"));
         parent(
           "update-index",
           "--add",
@@ -1594,10 +1585,7 @@ lines.on("line", (line) => {
         await writeFile(join(root, "outer.txt"), "before\n");
         const child = join(root, "child");
         await mkdir(child);
-        const nested = repositoryGit(child);
-        nested("init", "--initial-branch=main");
-        nested("config", "user.name", "Synthetic User");
-        nested("config", "user.email", "synthetic@example.test");
+        const nested = initializePatchGit(child);
         await writeFile(join(child, "app.txt"), "before\n");
         nested("add", ".");
         nested("commit", "-m", "Synthetic nested baseline");
@@ -1834,10 +1822,7 @@ lines.on("line", (line) => {
       const git = initializePatchGit(root);
       const child = join(root, "nested-\ufffd-é-\\377-tail");
       await mkdir(child);
-      const nested = repositoryGit(child);
-      nested("init", "--initial-branch=main");
-      nested("config", "user.name", "Synthetic User");
-      nested("config", "user.email", "synthetic@example.test");
+      const nested = initializePatchGit(child);
       await writeFile(join(child, "app.txt"), "before\n");
       nested("add", ".");
       nested("commit", "-m", "Synthetic quoted checkout");

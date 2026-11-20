@@ -11,6 +11,7 @@ import {
   savedScan,
   patchDirectories,
   runSavedPublication,
+  initializePatchGit,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -595,10 +596,7 @@ test("supplied-issue publication retains the clean-checkout requirement for an u
   const { directory, git, remote } = await publicationRepository(fixtures);
   const nested = join(directory, "nested");
   await mkdir(nested);
-  const nestedGit = repositoryGit(nested);
-  nestedGit("init", "--initial-branch=main");
-  nestedGit("config", "user.name", "Synthetic User");
-  nestedGit("config", "user.email", "synthetic@example.test");
+  const nestedGit = initializePatchGit(nested);
   nestedGit("config", "commit.gpgsign", "false");
   await writeFile(join(nested, "local.txt"), "Synthetic local content\n");
   nestedGit("add", "local.txt");

@@ -9,6 +9,8 @@ import {
   runWorkflow,
   patchDirectories,
   runSavedPublication,
+  initializePatchGit,
+  runPublicationCommand,
 } from "./cli-patch-fixtures.js";
 
 describe("deinitialized patch submodule availability", () => {
@@ -21,10 +23,7 @@ describe("deinitialized patch submodule availability", () => {
     git("config", "core.hooksPath", hooks);
     const nested = join(directory, "nested");
     await mkdir(nested);
-    const inner = repositoryGit(nested);
-    inner("init", "--initial-branch=main");
-    inner("config", "user.name", "Synthetic User");
-    inner("config", "user.email", "synthetic@example.test");
+    const inner = initializePatchGit(nested);
     inner("config", "core.hooksPath", hooks);
     await writeFile(join(nested, "app.ts"), "original\n");
     inner("add", ".");
@@ -150,12 +149,7 @@ describe("deinitialized patch submodule availability", () => {
       const before = git("rev-parse", "HEAD");
       let commit = "";
       const result = await runSavedPublication(directory, {
-        onRepositoryCommand: (tool, args, cwd, options) =>
-          tool === "git"
-            ? runGitRepositoryCommand(tool, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: runPublicationCommand,
         onCodex: async (_args, output) => {
           await writeFile(
             join(directory, "outside.ts"),
