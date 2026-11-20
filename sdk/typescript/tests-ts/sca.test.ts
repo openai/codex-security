@@ -3502,6 +3502,25 @@ test("source drift during inventory does not create a resumable checkpoint", asy
   expect(f.calls.scanner).toBe(1);
 });
 
+test("continues saved matching after cancellation in the inventory callback", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const controller = new AbortController();
+  await expect(
+    security.scanDependencies({
+      ...options,
+      signal: controller.signal,
+      onInventory: () => controller.abort(),
+    }),
+  ).rejects.toThrow();
+  expect(f.turns).toHaveLength(0);
+  const result = await security.scanDependencies(options);
+  expect(result.status).toBe("completed");
+  expect(f.turns).toHaveLength(1);
+  expect(f.calls.scanner).toBe(1);
+});
+
 test("continues saved matching after authentication becomes available", async () => {
   const fixtureOptions = { runtimeError: true };
   const f = await fixture(fixtureOptions);

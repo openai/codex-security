@@ -1220,7 +1220,7 @@ export class CodexSecurity {
       };
       // Bind triage to the source before inventory, including dirty and ignored files.
       // A snapshot failure must not discard deterministic scanner evidence.
-      const source = await sourceSnapshot().then(
+      let source = await sourceSnapshot().then(
         (snapshot) => snapshot,
         (error: unknown) => ({ error }),
       );
@@ -1278,6 +1278,22 @@ export class CodexSecurity {
       }
       if (result.matches.length === 0) reportProgress?.({ phase: "saving" });
       if (canSave) await saveDependencyScan(result);
+      if (!continuing && result.matches.length > 0 && !("error" in source)) {
+        try {
+          const inventorySource = await sourceSnapshot();
+          if (inventorySource.digest !== source.digest)
+            throw new CodexSecurityError(
+              `Source changed during dependency inventory (original revision ${String(source.revision)}, current revision ${String(inventorySource.revision)}). Rerun the dependency scan.`,
+            );
+          result.assessmentContext = {
+            sourceDigest: source.digest,
+            configurationDigest: null,
+          };
+          await saveDependencyScan(result);
+        } catch (error) {
+          source = { error };
+        }
+      }
       if (onInventory !== undefined)
         notifyObserver(options, "onInventory")(structuredClone(result));
       throwIfAborted(signal, outputDir);
@@ -1329,18 +1345,6 @@ export class CodexSecurity {
               `Source changed during dependency assessment (original revision ${String(source.revision)}, current revision ${String(currentSource.revision)}); earlier assessments describe the original source. Rerun the dependency scan.`,
             );
         };
-        if (!continuing) {
-          const inventorySource = await sourceSnapshot();
-          if (inventorySource.digest !== source.digest)
-            throw new CodexSecurityError(
-              `Source changed during dependency inventory (original revision ${String(source.revision)}, current revision ${String(inventorySource.revision)}). Rerun the dependency scan.`,
-            );
-          result.assessmentContext = {
-            sourceDigest: source.digest,
-            configurationDigest: null,
-          };
-          await saveDependencyScan(result);
-        }
         let auth = options.auth;
         let session: PreparedSession;
         try {
