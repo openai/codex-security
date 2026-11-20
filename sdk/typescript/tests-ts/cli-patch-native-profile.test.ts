@@ -1223,12 +1223,18 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
         ],
       ] as const)
         execFileSync("git", ["config", "--file", config, setting, value]);
-      return captureFilterPermissions(
+      const permissions = await captureFilterPermissions(
         repository,
         environment,
         "auth-file",
         program,
       );
+      // The operator fixture lives outside the app-server's synthetic user
+      // profile. Give both tools read access so the file denies are exercised.
+      return {
+        ...permissions,
+        readOnlyPaths: [...permissions.readOnlyPaths, operator],
+      };
     },
     { set: policySet, paths: [policyCluster] },
   );
