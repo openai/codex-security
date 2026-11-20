@@ -1182,6 +1182,13 @@ async function preparePublicationInput(
   const providerJobVersion = privateJobVersions[options.provider];
   const requestedJobVersion = String(providerJobVersion ?? 2);
   let legacyJobVersion: PrivateJobVersion | undefined;
+  function supportsPrivateProtocol(version = legacyJobVersion) {
+    return (
+      importMedia === SCANNER_IMPORT_MEDIA_TYPE ||
+      legacyUnversionedJob ||
+      version !== undefined
+    );
+  }
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1261,16 +1268,13 @@ async function preparePublicationInput(
       importScope = scope;
       importMedia = media;
       legacyJobVersion =
+        media === "application/json" &&
         response.headers.get(jobVersionHeader) === requestedJobVersion
           ? providerJobVersion
           : undefined;
-      canStartJob = privateProviders?.includes(options.provider) ?? false;
-      if (
-        media === "application/json" &&
-        !legacyUnversionedJob &&
-        !legacyJobVersion
-      )
-        canStartJob = false;
+      canStartJob =
+        supportsPrivateProtocol() &&
+        (privateProviders?.includes(options.provider) ?? false);
     } else if (
       importMedia === SCANNER_IMPORT_MEDIA_TYPE &&
       importResponseMediaType(response) !== importMedia
@@ -1626,11 +1630,7 @@ async function preparePublicationInput(
   if (
     usePrivateImport &&
     !canStartJob &&
-    (!privateSaved ||
-      (importMedia === "application/json" &&
-        !legacyUnversionedJob &&
-        !privateSaved.jobApiVersion &&
-        !legacyJobVersion))
+    (!privateSaved || !supportsPrivateProtocol(privateSaved.jobApiVersion))
   )
     throw new CodexSecurityError(
       "Private findings import is unavailable for this account or provider.",
@@ -2021,13 +2021,10 @@ async function preparePublicationInput(
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const negotiatedLegacyJobVersion =
-            importMedia === "application/json" ? legacyJobVersion : undefined;
           const checkpoint = active
             ? {
                 ...active,
-                jobApiVersion:
-                  active.jobApiVersion ?? negotiatedLegacyJobVersion,
+                jobApiVersion: active.jobApiVersion ?? legacyJobVersion,
               }
             : {
                 ...binding,
@@ -2038,7 +2035,7 @@ async function preparePublicationInput(
                     : undefined,
                 uploadRequestId: randomUUID(),
                 jobRequestId: randomUUID(),
-                jobApiVersion: negotiatedLegacyJobVersion,
+                jobApiVersion: legacyJobVersion,
                 fileId: undefined,
                 jobId: undefined,
                 receipt: undefined,

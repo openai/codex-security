@@ -1592,11 +1592,13 @@ async function privateUploadFixture(
   };
   const uploads: { id: string; bytes: string }[] = [];
   const jobs: unknown[] = [];
+  const paths: string[] = [];
   const fileId = "aifile_" + "a".repeat(32);
   const deps = {
     ...f.deps,
     fetch: async (url: string, init: RequestInit) => {
       const { pathname } = new URL(url);
+      paths.push(pathname);
       if (pathname.endsWith("/finding-imports/context"))
         return privateInboxContext(inbox.version, inbox.formats);
       if (pathname.includes("/finding-imports/file-requests/")) {
@@ -1631,7 +1633,17 @@ async function privateUploadFixture(
     },
   };
   const prepareFile = () => prepareExternalPublication(f.file, settings, deps);
-  return { f, settings, deps, inbox, uploads, jobs, fileId, prepareFile };
+  return {
+    f,
+    settings,
+    deps,
+    inbox,
+    uploads,
+    jobs,
+    fileId,
+    prepareFile,
+    paths,
+  };
 }
 
 const tenableOptions = {
@@ -6831,63 +6843,46 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
   expect(f.posts[2]).toBe(f.posts[1]);
 });
 
-test("an unexpected import response preserves the approved request for retry", async () => {
-  const f = await fixture();
-  let dropMediaType = true;
-  const prepare = () =>
-    prepareExternalPublication(f.file, options, {
-      ...f.deps,
-      async fetch(url, init) {
-        const response = await f.deps.fetch(url, init);
-        if (init.method !== "POST" || !dropMediaType) return response;
-        dropMediaType = false;
-        return new Response(response.body, {
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    });
-  const first = await prepare();
-  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect(retry.preview.requests).toEqual(first.preview.requests);
-  expect((await retry.publish()).verified).toBe(1);
-  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
-  expect(f.receipts.size).toBe(1);
-});
-
-test("an unexpected private job response retries the same uploaded file and job request", async () => {
-  const { f, deps, inbox, uploads, jobs } = await privateUploadFixture(
-    [normalized()],
-    "wiz",
-  );
-  inbox.interruptUpload = false;
-  let dropMediaType = true;
-  const prepare = () =>
-    prepareExternalPublication(f.file, options, {
-      ...deps,
-      async fetch(url, init) {
-        const response = await deps.fetch(url, init);
-        if (
-          !new URL(url).pathname.endsWith("/finding-imports/jobs") ||
-          !dropMediaType
-        )
-          return response;
-        dropMediaType = false;
-        return new Response(response.body, {
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    });
-  const first = await prepare();
-  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
-  const retry = await prepare();
-  expect(retry.preview.resumed).toBe(true);
-  expect((await retry.publish()).privateJob?.status).toBe("completed");
-  expect(uploads).toHaveLength(1);
-  expect(jobs).toEqual([jobs[0], jobs[0]]);
-  expect(f.posts).toHaveLength(0);
-});
+test.each(["personal", "workspace"] as const)(
+  "an unexpected %s response retries the same approved request",
+  async (scope) => {
+    const { f, deps, inbox, uploads, jobs } = await privateUploadFixture(
+      [normalized()],
+      "wiz",
+    );
+    if (scope === "personal") f.state.catalogHeaders = { [scopeHeader]: scope };
+    inbox.interruptUpload = false;
+    let dropMediaType = true;
+    const prepare = () =>
+      prepareExternalPublication(f.file, options, {
+        ...deps,
+        async fetch(url, init) {
+          const response = await deps.fetch(url, init);
+          if (typeof init.body !== "string" || !dropMediaType) return response;
+          dropMediaType = false;
+          return new Response(response.body, {
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      });
+    const first = await prepare();
+    await expect(first.publish()).rejects.toThrow(/representation|media type/i);
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(first.preview.requests);
+    const result = await retry.publish();
+    if (scope === "personal") {
+      expect(result.verified).toBe(1);
+      expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+      expect(f.receipts.size).toBe(1);
+    } else {
+      expect(result.privateJob?.status).toBe("completed");
+      expect(uploads).toHaveLength(1);
+      expect(jobs).toEqual([jobs[0], jobs[0]]);
+      expect(f.posts).toHaveLength(0);
+    }
+  },
+);
 
 test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
   const input = opengrepJson();
@@ -9598,7 +9593,7 @@ test.each(scannerReports)(
     const provider = reader === "opengrep" ? "semgrep" : reader;
     const url =
       reader === "tenable" ? tenableReport.repository_url : exampleRepository;
-    const { f, deps, inbox, uploads, jobs, fileId } =
+    const { f, deps, inbox, uploads, jobs, fileId, paths } =
       await privateUploadFixture(report, provider, url);
     const sourceCheckout = join(f.root, "checkout");
     if (reader === "crowdstrike") {
@@ -9608,7 +9603,6 @@ test.each(scannerReports)(
       await git("git", ["-C", sourceCheckout, "init", "--quiet"]);
       await git("git", ["-C", sourceCheckout, "remote", "add", "origin", url]);
     }
-    const paths: string[] = [];
     const prepare = () =>
       prepareExternalPublication(
         f.file,
@@ -9619,14 +9613,7 @@ test.each(scannerReports)(
             ? { trivyScanRoot: "." }
             : { sourceRepositoryUrl: url }),
         },
-        {
-          ...deps,
-          sourceCheckout,
-          fetch(url, init) {
-            paths.push(new URL(url).pathname);
-            return deps.fetch(url, init);
-          },
-        },
+        { ...deps, sourceCheckout },
       );
 
     f.state.catalogHeaders = { [scopeHeader]: "personal" };
@@ -9741,10 +9728,13 @@ test.each([
 ] as [string, string, Record<string, string>][])(
   "Continuum rejects %s before transferring evidence",
   async (_, mediaType, headers) => {
-    const f = await fixture(readerReports.continuum, exampleRepository);
+    const { f, deps, paths } = await privateUploadFixture(
+      readerReports.continuum,
+      "continuum",
+      exampleRepository,
+    );
     f.state.catalogMediaType = mediaType;
     f.state.catalogHeaders = headers;
-    const paths: string[] = [];
     await expect(
       prepareExternalPublication(
         f.file,
@@ -9753,13 +9743,7 @@ test.each([
           provider: "continuum",
           sourceRepositoryUrl: exampleRepository,
         },
-        {
-          ...f.deps,
-          fetch(url, init) {
-            paths.push(new URL(url).pathname);
-            return f.deps.fetch(url, init);
-          },
-        },
+        deps,
       ),
     ).rejects.toThrow(/Cloud|unavailable|scope|provider|contract|catalog/i);
     expect(paths).toEqual(["/backend-api/aardvark/external/repositories"]);
