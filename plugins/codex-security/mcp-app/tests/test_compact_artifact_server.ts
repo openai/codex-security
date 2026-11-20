@@ -592,8 +592,9 @@ async function testPluginDraftEvidence(bundle: string) {
   for (const mode of ["standard", "diff"] as const) {
     const label = `plugin-draft-evidence-${mode}`;
     const { repoRoot, environment } = await createScanFixture(label);
+    const file = "src/fixture.py";
     const sourceLine = "return request.value";
-    await writeFile(path.join(repoRoot, "src", "fixture.py"), sourceLine);
+    await writeFile(path.join(repoRoot, file), sourceLine);
     const selection: Record<string, unknown> = {
       targetPath: repoRoot,
       scope: ".",
@@ -602,10 +603,7 @@ async function testPluginDraftEvidence(bundle: string) {
     if (mode === "diff") {
       gitText(["init", "-q"], { cwd: repoRoot });
       const baseRevision = commitFixture(repoRoot, "base");
-      await writeFile(
-        path.join(repoRoot, "src", "fixture.py"),
-        `${sourceLine}\n`,
-      );
+      await writeFile(path.join(repoRoot, file), `${sourceLine}\n`);
       selection.diffTarget = {
         kind: "range",
         baseRevision,
@@ -628,10 +626,9 @@ async function testPluginDraftEvidence(bundle: string) {
           owner: `${label}: attach owner`,
         },
       );
-      const { validation, ...sourceEvidence } =
-        completedFindingEvidence("src/fixture.py");
+      const { validation, ...sourceEvidence } = completedFindingEvidence(file);
       const provisional = {
-        ...finding("custom-discovery", "src/fixture.py"),
+        ...finding("custom-discovery", file),
         ...sourceEvidence,
       };
       const draft = {
@@ -651,35 +648,34 @@ async function testPluginDraftEvidence(bundle: string) {
           deferred: [],
         },
       };
+      const record = (updates: Record<string, unknown>) =>
+        call("record_codex_security_scan_draft", { ...draft, ...updates });
       requireSuccessfulTool(
-        await call("record_codex_security_scan_draft", {
-          ...draft,
-          complete: false,
-        }),
+        await record({ complete: false }),
         `${label}: retain incomplete source discovery`,
       );
-      const before = await snapshotScanDraft(scanDir);
-      const checkpointPath = path.join(scanDir, "checkpoint-head.json");
-      const checkpoint = await readFile(checkpointPath, "utf8");
-      const directory = path.join(scanDir, "checkpoints");
-      const checkpoints = await readdir(directory);
+      async function snapshot() {
+        return {
+          draft: await snapshotScanDraft(scanDir),
+          head: await readFile(
+            path.join(scanDir, "checkpoint-head.json"),
+            "utf8",
+          ),
+          checkpoints: await readdir(path.join(scanDir, "checkpoints")),
+        };
+      }
+      const before = await snapshot();
       for (const completion of [{ complete: true }, {}]) {
         requireToolError(
-          await call("record_codex_security_scan_draft", {
-            ...draft,
-            ...completion,
-          }),
+          await record(completion),
           /validation/,
           `${label}: an authored marker cannot defer validation`,
         );
       }
-      assert.deepEqual(await snapshotScanDraft(scanDir), before);
-      assert.equal(await readFile(checkpointPath, "utf8"), checkpoint);
-      assert.deepEqual(await readdir(directory), checkpoints);
+      assert.deepEqual(await snapshot(), before);
 
       requireSuccessfulTool(
-        await call("record_codex_security_scan_draft", {
-          ...draft,
+        await record({
           scope: {},
           findings: [{ ...provisional, validation }],
         }),

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { after, test } from "node:test";
+import { promisify } from "node:util";
+import { fixturePython } from "./support/python.ts";
+import { buildServer, applicationRoot } from "./build-server.ts";
 import type { WorkerTelemetryOptions } from "../src/deep-scan/types.js";
 import { workerUsage } from "./deep_scan_worker_usage_assertions.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
-import { readJson, writeJson } from "./support/json.ts";
 import {
   iterationInputs,
   coordinatorFixture,
@@ -13,207 +17,592 @@ import {
   runCoordinator,
   temporaryDirectories,
 } from "./deep_scan_coordinator_fixture.ts";
+import {
+  createScanArtifactContext,
+  DeepScanCoordinator,
+  readFixtureCoverage,
+  recordCodexSecurityScanDraftViaWorkbench,
+  WorkbenchDeepScanStore,
+} from "./deep_scan_coverage_fixture.ts";
+import { readJson, writeJson } from "./support/json.ts";
+import { startMcpClient } from "./support/mcp-client.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
+import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 
-try {
-  await testResumeRepairsPreviouslyAcceptedEvidence(false);
-  await testResumeRepairsPreviouslyAcceptedEvidence(true);
-  await testResumeRepairsPreviouslyAcceptedEvidence(true, true);
-} finally {
-  await temporaryDirectories.cleanup();
+function createSeedExecutor() {
+  return new FakeExecutor({ discoveryCandidateId: "accepted-finding" });
 }
 
-async function testResumeRepairsPreviouslyAcceptedEvidence(
-  completedIteration: boolean,
-  withLaterBatch = false,
-) {
-  const { fixture, store } = await coordinatorFixture({
-    workers: 1,
-    stopAfterNoNew: 1,
-    maxDiscoveryRuns: 1,
-  });
-  assert.equal(
-    (
-      await runCoordinator(
-        fixture,
-        store,
-        new FakeExecutor({
-          discoveryCandidateId: "accepted-finding",
-        }),
-      )
-    )?.status,
-    "succeeded",
-  );
-  const cause =
-    "The query uses request-controlled text without parameterization.";
-  // The persisted schema admits BOM-only text, which the evidence gate treats as blank.
-  const blank = "\uFEFF";
-  for (const worker of [...store.workers.values()]) {
-    if (!completedIteration && worker.kind === "dedup") {
-      store.workers.delete(worker.id);
-      continue;
-    }
-    const saved = await readJson(worker.resultManifestPath!);
-    for (const finding of saved.findings) {
-      finding.validation = {
-        method: blank,
-        result: "Observed in the saved run.",
-        evidenceRefs: ["query-sink"],
-      };
-      finding.attackPath.dataflow = {
-        source: "request",
-        ...(completedIteration ? { sink: "query" } : {}),
-        evidenceRefs: ["query-sink"],
-      };
-      finding.rootCause.evidenceRefs = [finding.codeEvidence[0].id];
-      if (!completedIteration) finding.rootCause = blank;
-      else if (!withLaterBatch) finding.rootCause.summary = blank;
-      finding.codeEvidence[0].endLine = finding.codeEvidence[0].startLine;
-      if (withLaterBatch && worker.kind === "dedup") {
-        // A pre-upgrade checkpoint can retain multiple source groups from one repair.
-        const source = structuredClone(finding);
-        const ids = ["first", "second"];
-        finding.provenance.sourceFindingIds = ids;
-        finding.provenance.sourceFindings = ids.map((id) => ({
-          id,
-          finding: source,
-        }));
-        finding.provenance.deepScanRepairGroups = ids.map((id, order) => ({
-          order,
-          sources: [id],
-        }));
-      }
-    }
-    await writeJson(worker.resultManifestPath!, saved);
-    if (!completedIteration && worker.kind === "discovery")
-      store.workers.set(worker.id, { ...worker, mergeState: "buffered" });
-  }
-  if (!completedIteration) {
-    store.iterations = [];
-  }
-  const resetForResume = () => {
-    store.run = {
-      ...store.run,
-      excludePaths: ["generated"],
-      status: "running",
-      terminalReason: undefined,
-      manifestPath: undefined,
-      config: { ...store.run.config, maxDiscoveryRuns: withLaterBatch ? 2 : 1 },
-      noNewStreak: completedIteration && !withLaterBatch ? 1 : 0,
-      persistedWorkers: structuredClone([...store.workers.values()]),
-      persistedDedupInputs: store.iterations.flatMap(iterationInputs),
-    };
-  };
-  resetForResume();
-  const acceptedPaths = [...store.workers.values()].map(
-    (worker) => worker.resultManifestPath!,
-  );
-  const acceptedBytes = await Promise.all(
-    acceptedPaths.map((file) => readFile(file, "utf8")),
-  );
-  const evidenceAttempts = new Set<string>();
-  let repairCalls = 0;
-  const executor = Object.assign(new FakeExecutor(), {
-    async repairFindingEvidence(
-      prompt: string,
-      cwd: string,
-      _signal: AbortSignal,
-      _schema: Record<string, unknown>,
-      telemetry?: WorkerTelemetryOptions,
-    ) {
-      assert.ok(telemetry?.attemptId);
-      assert.equal(
-        telemetry.workerUsageDirectory,
-        fixture.run.workerUsageDirectory,
-      );
-      evidenceAttempts.add(telemetry.attemptId);
-      await telemetry.onThreadStarted?.(`evidence-${telemetry.attemptId}`);
-      await telemetry.onUsage?.(workerUsage(1), "evidence-turn");
-      assert.equal(
-        cwd,
-        join(fixture.run.scanDir, "artifacts", "deep_discovery"),
-      );
-      assert.match(prompt, /missing evidence/i);
-      repairCalls++;
-      if (repairCalls === 1) return "{}";
-      const { finding, targetPath, excludePaths } = JSON.parse(
-        prompt.split("\n")[1]!,
-      );
-      assert.equal(targetPath, fixture.run.targetPath);
-      assert.deepEqual(excludePaths, ["generated"]);
-      return JSON.stringify({
-        codeEvidence: [{ ...finding.codeEvidence[0], endLine: undefined }],
-        rootCause: cause,
-        attackPath: { dataflow: "The request reaches the query." },
-        validation: {
-          method: "Static analysis",
-          summary: "The query reaches SQL execution.",
-          evidence: "The query argument is unparameterized.",
-        },
-      });
-    },
-  });
-  const published: ScanDraftInput[] = [];
-  const terminal = await runCoordinator(fixture, store, executor, {
-    run: store.run,
-    retryDelaysMs: [1],
-    clock: immediateClock,
-    onComplete: async (draft) => void published.push(structuredClone(draft)),
-  });
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
-  assert.equal(
-    executor.discoveryCalls,
-    withLaterBatch ? 1 : 0,
-    "repair must honor the discovery cap",
-  );
-  assert.equal(repairCalls, withLaterBatch ? 3 : 2);
-  assert.equal(evidenceAttempts.size, repairCalls);
-  for (const attempt of evidenceAttempts) {
-    const receipt = await readJson(
-      join(fixture.run.workerUsageDirectory!, `${attempt}.json`),
-    );
-    assert.equal(receipt.kind, "evidence");
-    assert.equal(receipt.outcome, "succeeded");
-    assert.equal(receipt.threadId, `evidence-${attempt}`);
-    assert.equal(receipt.turnId, "evidence-turn");
-    assert.deepEqual(receipt.usage, workerUsage(1));
-  }
-  assert.equal(store.run.dispatchedCount, withLaterBatch ? 2 : 1);
-  assert.equal(store.failureMessages.length, 0);
-  assert.equal(published.length, 1);
-  const [repaired] = published[0].findings;
-  assert.deepEqual(repaired.validation, {
-    method: "Static analysis",
-    result: "Observed in the saved run.",
-    evidenceRefs: ["query-sink"],
-  });
-  assert.deepEqual(repaired.attackPath?.dataflow, {
-    source: "request",
-    ...(completedIteration
-      ? { sink: "query" }
-      : { summary: "The request reaches the query." }),
-    evidenceRefs: ["query-sink"],
-  });
-  assert.deepEqual(
-    repaired.rootCause,
-    completedIteration
-      ? { summary: cause, evidenceRefs: ["query-sink"] }
-      : cause,
-  );
-  assert.equal(repaired.codeEvidence?.[0].endLine, 1);
-  assert.equal(
-    store.iterations.at(-1)!.workerIds.length,
-    completedIteration && !withLaterBatch ? 0 : 1,
-  );
-  assert.deepEqual(
-    await Promise.all(acceptedPaths.map((file) => readFile(file, "utf8"))),
-    acceptedBytes,
-  );
+function readAcceptedArtifacts(paths: string[]) {
+  return Promise.all(paths.map((file) => readFile(file, "utf8")));
+}
 
-  resetForResume();
-  const restarted = new FakeExecutor();
-  const next = await runCoordinator(fixture, store, restarted, {
-    run: store.run,
+for (const state of [
+  "buffered discovery",
+  "completed iteration",
+  "later batch",
+]) {
+  test(`the coordinator repairs accepted evidence from a ${state}`, async (t) => {
+    t.after(() => temporaryDirectories.cleanup());
+    const completedIteration = state !== "buffered discovery";
+    const withLaterBatch = state === "later batch";
+    const { fixture, store } = await coordinatorFixture({
+      workers: 1,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 1,
+    });
+    const seed = await runCoordinator(fixture, store, createSeedExecutor());
+    assert.equal(seed?.status, "succeeded");
+    const cause =
+      "The query uses request-controlled text without parameterization.";
+    // The persisted schema admits BOM-only text, which the evidence gate treats as blank.
+    const blank = "\uFEFF";
+    for (const worker of [...store.workers.values()]) {
+      if (!completedIteration && worker.kind === "dedup") {
+        store.workers.delete(worker.id);
+        continue;
+      }
+      const saved = await readJson(worker.resultManifestPath!);
+      for (const finding of saved.findings) {
+        finding.validation = {
+          method: blank,
+          result: "Observed in the saved run.",
+          evidenceRefs: ["query-sink"],
+        };
+        finding.attackPath.dataflow = {
+          source: "request",
+          ...(completedIteration ? { sink: "query" } : {}),
+          evidenceRefs: ["query-sink"],
+        };
+        finding.rootCause.evidenceRefs = [finding.codeEvidence[0].id];
+        if (!completedIteration) finding.rootCause = blank;
+        else if (!withLaterBatch) finding.rootCause.summary = blank;
+        finding.codeEvidence[0].endLine = finding.codeEvidence[0].startLine;
+        if (withLaterBatch && worker.kind === "dedup") {
+          // A pre-upgrade checkpoint can retain multiple source groups from one repair.
+          const source = structuredClone(finding);
+          const ids = ["first", "second"];
+          finding.provenance.sourceFindingIds = ids;
+          finding.provenance.sourceFindings = ids.map((id) => ({
+            id,
+            finding: source,
+          }));
+          finding.provenance.deepScanRepairGroups = ids.map((id, order) => ({
+            order,
+            sources: [id],
+          }));
+        }
+      }
+      await writeJson(worker.resultManifestPath!, saved);
+      if (!completedIteration && worker.kind === "discovery")
+        store.workers.set(worker.id, { ...worker, mergeState: "buffered" });
+    }
+    if (!completedIteration) {
+      store.iterations = [];
+    }
+    const resetForResume = () => {
+      store.run = {
+        ...store.run,
+        excludePaths: ["generated"],
+        status: "running",
+        terminalReason: undefined,
+        manifestPath: undefined,
+        config: {
+          ...store.run.config,
+          maxDiscoveryRuns: withLaterBatch ? 2 : 1,
+        },
+        noNewStreak: completedIteration && !withLaterBatch ? 1 : 0,
+        persistedWorkers: structuredClone([...store.workers.values()]),
+        persistedDedupInputs: store.iterations.flatMap(iterationInputs),
+      };
+    };
+    resetForResume();
+    const acceptedPaths = [...store.workers.values()].map(
+      (worker) => worker.resultManifestPath!,
+    );
+    const acceptedBytes = await readAcceptedArtifacts(acceptedPaths);
+    const evidenceAttempts = new Set<string>();
+    let repairCalls = 0;
+    const executor = Object.assign(new FakeExecutor(), {
+      async repairFindingEvidence(
+        prompt: string,
+        cwd: string,
+        _signal: AbortSignal,
+        _schema: Record<string, unknown>,
+        telemetry?: WorkerTelemetryOptions,
+      ) {
+        assert.ok(telemetry?.attemptId);
+        assert.equal(
+          telemetry.workerUsageDirectory,
+          fixture.run.workerUsageDirectory,
+        );
+        evidenceAttempts.add(telemetry.attemptId);
+        await telemetry.onThreadStarted?.(`evidence-${telemetry.attemptId}`);
+        await telemetry.onUsage?.(workerUsage(1), "evidence-turn");
+        assert.equal(
+          cwd,
+          path.join(fixture.run.scanDir, "artifacts", "deep_discovery"),
+        );
+        assert.match(prompt, /missing evidence/i);
+        repairCalls++;
+        if (repairCalls === 1) return "{}";
+        const { finding, targetPath, excludePaths } = JSON.parse(
+          prompt.split("\n")[1]!,
+        );
+        assert.equal(targetPath, fixture.run.targetPath);
+        assert.deepEqual(excludePaths, ["generated"]);
+        return JSON.stringify({
+          codeEvidence: [{ ...finding.codeEvidence[0], endLine: undefined }],
+          rootCause: cause,
+          attackPath: { dataflow: "The request reaches the query." },
+          validation: {
+            method: "Static analysis",
+            summary: "The query reaches SQL execution.",
+            evidence: "The query argument is unparameterized.",
+          },
+        });
+      },
+    });
+    const published: ScanDraftInput[] = [];
+    const terminal = await runCoordinator(fixture, store, executor, {
+      run: store.run,
+      retryDelaysMs: [1],
+      clock: immediateClock,
+      onComplete: async (draft) => void published.push(structuredClone(draft)),
+    });
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    assert.equal(
+      executor.discoveryCalls,
+      withLaterBatch ? 1 : 0,
+      "repair must honor the discovery cap",
+    );
+    assert.equal(repairCalls, withLaterBatch ? 3 : 2);
+    assert.equal(evidenceAttempts.size, repairCalls);
+    for (const attempt of evidenceAttempts) {
+      const receipt = await readJson(
+        path.join(fixture.run.workerUsageDirectory!, `${attempt}.json`),
+      );
+      assert.equal(receipt.kind, "evidence");
+      assert.equal(receipt.outcome, "succeeded");
+      assert.equal(receipt.threadId, `evidence-${attempt}`);
+      assert.equal(receipt.turnId, "evidence-turn");
+      assert.deepEqual(receipt.usage, workerUsage(1));
+    }
+    assert.equal(store.run.dispatchedCount, withLaterBatch ? 2 : 1);
+    assert.equal(store.failureMessages.length, 0);
+    assert.equal(published.length, 1);
+    const [repaired] = published[0].findings;
+    assert.deepEqual(repaired.validation, {
+      method: "Static analysis",
+      result: "Observed in the saved run.",
+      evidenceRefs: ["query-sink"],
+    });
+    assert.deepEqual(repaired.attackPath?.dataflow, {
+      source: "request",
+      ...(completedIteration
+        ? { sink: "query" }
+        : { summary: "The request reaches the query." }),
+      evidenceRefs: ["query-sink"],
+    });
+    assert.deepEqual(
+      repaired.rootCause,
+      completedIteration
+        ? { summary: cause, evidenceRefs: ["query-sink"] }
+        : cause,
+    );
+    assert.equal(repaired.codeEvidence?.[0].endLine, 1);
+    assert.equal(
+      store.iterations.at(-1)!.workerIds.length,
+      completedIteration && !withLaterBatch ? 0 : 1,
+    );
+    assert.deepEqual(await readAcceptedArtifacts(acceptedPaths), acceptedBytes);
+
+    resetForResume();
+    const restarted = new FakeExecutor();
+    const next = await runCoordinator(fixture, store, restarted, {
+      run: store.run,
+    });
+    assert.equal(next?.status, "succeeded", next?.error);
+    assert.equal(restarted.discoveryCalls, 0);
   });
-  assert.equal(next?.status, "succeeded", next?.error);
-  assert.equal(restarted.discoveryCalls, 0);
+}
+
+const execFileAsync = promisify(execFile);
+const pluginRoot = path.resolve(applicationRoot, "..");
+const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
+const owner = "selected-evidence-owner";
+const { permissionProfile } = readOnlyParentSandboxState(pluginRoot);
+const bundleRoot = await temporaryDirectory("selected-evidence-bundle-");
+after(() => rm(bundleRoot, { recursive: true, force: true }));
+const serverPath = path.join(bundleRoot, "server.cjs");
+await buildServer(serverPath, {
+  define: {
+    __dirname: JSON.stringify(applicationRoot),
+    "import.meta.url": "__filename",
+  },
+  plugins: [
+    {
+      name: "fixture-evidence-repair-executor",
+      setup(build) {
+        build.onLoad({ filter: /deep-scan[/\\]executor\.ts$/ }, () => ({
+          loader: "ts",
+          contents: `
+          import assert from "node:assert/strict";
+          export class CodexSdkWorkerExecutor {
+            async repairFindingEvidence(prompt) {
+              assert.match(prompt, /missing evidence/i);
+              const {finding} = JSON.parse(prompt.split("\\n")[1]);
+              return JSON.stringify({
+                codeEvidence: finding.codeEvidence,
+                rootCause: finding.rootCause.summary,
+                attackPath: finding.attackPath,
+                validation: {method: "Static source inspection", summary: "The query reaches SQL.", evidence: "The query is passed to connection.execute()."},
+              });
+            }
+          }
+        `,
+        }));
+      },
+    },
+  ],
+});
+
+for (const { route, saturated, lateFailure } of [
+  { route: "plugin", saturated: false, lateFailure: false },
+  { route: "cli", saturated: false, lateFailure: false },
+  { route: "headless continuation", saturated: false, lateFailure: false },
+  { route: "plugin", saturated: true, lateFailure: false },
+  { route: "plugin", saturated: true, lateFailure: true },
+] as const) {
+  test(`${route} repairs a selected unsealed aggregate before completion${saturated ? (lateFailure ? " with a late saturation failure" : " with saturation omissions") : ""}`, async (t) => {
+    const root = await temporaryDirectory("selected-evidence-");
+    let client: Awaited<ReturnType<typeof startMcpClient>> | undefined;
+    t.after(async () => {
+      await client?.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const targetPath = path.join(root, "target");
+    await mkdir(targetPath);
+    await writeFile(
+      path.join(targetPath, "fixture.py"),
+      "connection.execute(query)\n",
+    );
+    const env = Object.fromEntries(
+      Object.entries({
+        ...process.env,
+        CODEX_HOME: path.join(root, "home"),
+        CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+        CODEX_SECURITY_SCAN_ROOT: path.join(root, "scans"),
+      }).filter((entry): entry is [string, string] => entry[1] !== undefined),
+    );
+    delete env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    await mkdir(path.join(env.CODEX_HOME, "codex-security"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(env.CODEX_HOME, "codex-security", "config.toml"),
+      saturated
+        ? "[deep_scan]\nworkers = 1\nmax_discovery_runs = 4\nstop_after_no_new = 1\nstop_after_consecutive_errors = 1\n"
+        : "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
+    );
+    const runWorkbench = async (args: string[], input?: string | Buffer) => {
+      const child = execFileAsync(fixturePython, [workbenchPath, ...args], {
+        env,
+        cwd: pluginRoot,
+      });
+      child.child.stdin!.end(input);
+      return JSON.parse((await child).stdout);
+    };
+    const store = new WorkbenchDeepScanStore(runWorkbench);
+    const run = await store.begin({
+      targetPath,
+      threadId: owner,
+      scanRoot: env.CODEX_SECURITY_SCAN_ROOT,
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: owner,
+    });
+    const coordinator = new DeepScanCoordinator({
+      run: claim.run,
+      store,
+      pluginRoot,
+      threadId: owner,
+      executor: createSeedExecutor(),
+      retryDelaysMs: [],
+      onComplete: async (draft, signal, publication) => {
+        const context = await createScanArtifactContext(
+          run.scanId,
+          runWorkbench,
+          { requireRunning: true, pluginRoot },
+        );
+        await recordCodexSecurityScanDraftViaWorkbench(
+          context,
+          draft,
+          runWorkbench,
+          signal,
+          publication,
+        );
+      },
+    });
+    coordinator.start();
+    const terminal = await coordinator.wait(t.signal);
+    assert.equal(
+      terminal.status,
+      "succeeded",
+      terminal.error ?? "seed coordinator failed",
+    );
+    if (saturated) {
+      // The retired scheduler could select a report while a surplus discovery
+      // finished. Seed that historical row after running the current host.
+      await execFileAsync(fixturePython, [
+        "-c",
+        `
+import sqlite3, sys, uuid
+with sqlite3.connect(sys.argv[1]) as db:
+    db.row_factory = sqlite3.Row
+    worker = dict(db.execute("SELECT * FROM deep_scan_workers WHERE scan_id=? AND kind='discovery' LIMIT 1", (sys.argv[2],)).fetchone())
+    failed = sys.argv[3] == "true"
+    worker.update(id=str(uuid.uuid4()), status="failed" if failed else "succeeded", merge_state="none" if failed else "buffered", completion_sequence=None if failed else 3, result_manifest_path=None, error_message="surplus discovery failed" if failed else None)
+    db.execute("INSERT INTO deep_scan_workers (" + ",".join(worker) + ") VALUES (" + ",".join("?" for _ in worker) + ")", tuple(worker.values()))
+    db.execute("UPDATE deep_scan_runs SET discovery_runs_dispatched=3, completion_sequence=?, consecutive_errors=? WHERE scan_id=?", (2 if failed else 3, int(failed), sys.argv[2]))
+`,
+        path.join(env.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+        run.scanId,
+        String(lateFailure),
+      ]);
+    }
+    const accepted = await store.get(run.scanId, owner);
+    assert.ok(accepted.persistedWorkers);
+    const omittedIds = accepted.persistedWorkers
+      .filter((worker) => worker.mergeState === "buffered")
+      .map((worker) => worker.id);
+    assert.equal(accepted.terminalReason, saturated ? "saturated" : "capped");
+    assert.equal(omittedIds.length, saturated && !lateFailure ? 1 : 0);
+    assert.equal(accepted.consecutiveErrors, lateFailure ? 1 : 0);
+    if (lateFailure)
+      assert.equal(
+        accepted.consecutiveErrors,
+        accepted.config.stopAfterConsecutiveErrors,
+      );
+    const manifestPath = path.join(run.scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    const parentFindingsPath = path.join(run.scanDir, "findings.json");
+    const acceptedPaths = accepted.persistedWorkers.flatMap((worker) =>
+      worker.resultManifestPath ? [worker.resultManifestPath] : [],
+    );
+    const legacyReducer =
+      route !== "cli" && !saturated
+        ? accepted.persistedWorkers.find((worker) => worker.kind === "dedup")
+            ?.resultManifestPath
+        : undefined;
+    // Simulate artifacts accepted before the update, without resetting the
+    // persisted terminal status, selected manifest, budget or coordinator lease.
+    for (const file of [...acceptedPaths, parentFindingsPath]) {
+      const draft = await readJson(file);
+      for (const finding of draft.findings) {
+        delete finding.validation;
+        if (
+          legacyReducer &&
+          (file === legacyReducer || file === parentFindingsPath)
+        ) {
+          assert.equal(finding.provenance.sourceFindingIds.length, 1);
+          delete finding.provenance.sourceFindings;
+          if (route === "headless continuation")
+            delete finding.provenance.sourceFindingIds;
+        }
+      }
+      if (file === parentFindingsPath && route === "plugin" && !saturated) {
+        // Older parents derived anchors from titles and scoped coverage by worker.
+        draft.findings[0].identity = { anchor: "unsafe-fixture-query" };
+        const surface = manifest.scan.reviewState.surfaces[0];
+        const { workerId, sourceId } = surface.provenance;
+        surface.id = `${workerId}/${sourceId ?? "0"}`;
+        surface.workerId = workerId;
+        delete surface.provenance;
+        delete manifest.scan.reviewState.reviews;
+        await writeJson(manifestPath, manifest);
+      }
+      await writeJson(file, draft);
+    }
+    const selectedReview = await readFixtureCoverage(
+      run.scanDir,
+      env.CODEX_SECURITY_STATE_DIR,
+    );
+    const originalFindings = (await readJson(parentFindingsPath)).findings;
+    const original = await readAcceptedArtifacts(acceptedPaths);
+    const before = await store.get(run.scanId, owner);
+    assert.equal(before.status, "succeeded");
+    assert.equal(before.manifestPath, manifestPath);
+    assert.equal(before.evidenceRepairRequired, true);
+    await assert.rejects(
+      runWorkbench(["complete-scan", "--scan-id", run.scanId]),
+      /validation/,
+    );
+    await assert.rejects(
+      store.claimCoordinator({
+        scanId: run.scanId,
+        threadId: "unrelated-thread",
+      }),
+      /owning Codex thread/,
+    );
+    assert.equal((await store.get(run.scanId, owner)).status, "succeeded");
+
+    const resumeOwner =
+      route === "headless continuation" ? "continued-owner" : owner;
+    let resume: (
+      selection: { scanId: string } | { targetPath: string },
+    ) => Promise<void>;
+    if (route === "cli") {
+      resume = async () => {
+        const child = execFileAsync(
+          process.execPath,
+          [serverPath, "--deep-scan-engine"],
+          {
+            cwd: applicationRoot,
+            env,
+            signal: t.signal,
+          },
+        );
+        child.child.stdin!.write(
+          JSON.stringify({
+            scanId: run.scanId,
+            threadId: owner,
+            model: "fixture-model",
+            permissionProfile,
+          }) + "\n",
+        );
+        const result = JSON.parse((await child).stdout);
+        assert.equal(result.scanId, run.scanId);
+        assert.equal(result.manifestPath, before.manifestPath);
+      };
+    } else {
+      client = await startMcpClient(
+        {
+          command: process.execPath,
+          args: [serverPath, "--stdio"],
+          cwd: applicationRoot,
+          env,
+          stderr: "ignore",
+        },
+        "selected-evidence-resume",
+      );
+      resume = async (selection) => {
+        const result = await client!.request("tools/call", {
+          name: "start_codex_security_deep_scan",
+          arguments: selection,
+          _meta: {
+            "openai/threadId": resumeOwner,
+            "codex/sandbox-state-meta": { permissionProfile },
+          },
+        });
+        assert.notEqual(result.isError, true, JSON.stringify(result));
+      };
+    }
+    if (route === "plugin" && !saturated) {
+      const source = path.join(targetPath, "fixture.py");
+      const selectedSource = await readFile(source);
+      const selectedManifest = await readFile(manifestPath);
+      await writeFile(source, "connection.close()\n");
+      await assert.rejects(
+        resume({ scanId: run.scanId }),
+        /Scan target contents changed/,
+      );
+      const unchanged = await store.get(run.scanId, owner);
+      assert.equal(unchanged.status, "succeeded");
+      assert.equal(
+        unchanged.coordinatorGeneration,
+        before.coordinatorGeneration,
+      );
+      assert.deepEqual(unchanged.persistedWorkers, before.persistedWorkers);
+      assert.deepEqual(
+        (await readJson(parentFindingsPath)).findings,
+        originalFindings,
+      );
+      assert.deepEqual(await readFile(manifestPath), selectedManifest);
+      await writeFile(source, selectedSource);
+    }
+    await resume(
+      route === "headless continuation"
+        ? { targetPath }
+        : { scanId: run.scanId },
+    );
+    const repaired = await store.get(run.scanId, resumeOwner);
+    assert.equal(repaired.status, "succeeded");
+    assert.equal(repaired.evidenceRepairRequired, undefined);
+    assert.equal(repaired.terminalReason, before.terminalReason);
+    assert.equal(repaired.consecutiveErrors, before.consecutiveErrors);
+    assert.deepEqual(
+      repaired.persistedWorkers
+        ?.filter((worker) => worker.mergeState === "buffered")
+        .map((worker) => worker.id),
+      omittedIds,
+    );
+    assert.deepEqual(
+      await readFixtureCoverage(run.scanDir, env.CODEX_SECURITY_STATE_DIR),
+      selectedReview,
+    );
+    const findingKey = (finding: { ruleId: string; identity: object }) => [
+      finding.ruleId,
+      finding.identity,
+    ];
+    const repairedFindings = (await readJson(parentFindingsPath)).findings;
+    assert.deepEqual(
+      repairedFindings.map(findingKey),
+      originalFindings.map(findingKey),
+    );
+    assert.equal(
+      repaired.coordinatorGeneration,
+      before.coordinatorGeneration! + 1,
+    );
+    assert.equal(repaired.dispatchedCount, before.dispatchedCount);
+    assert.ok(repaired.persistedWorkers);
+    assert.ok(before.persistedWorkers);
+    assert.equal(
+      repaired.persistedWorkers.length,
+      before.persistedWorkers.length + 1,
+    );
+    assert.deepEqual(await readAcceptedArtifacts(acceptedPaths), original);
+    assert.ok(
+      (await readJson(run.scanDir, "findings.json")).findings[0].validation,
+    );
+    await assert.rejects(
+      runWorkbench([
+        "finish-deep-scan",
+        "--scan-id",
+        run.scanId,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        before.manifestPath,
+        "--coordinator-generation",
+        String(before.coordinatorGeneration),
+      ]),
+      /newer generation/,
+    );
+
+    // Once headless delivery is acknowledged, a new target request starts a scan.
+    // Resume the delivered scan by ID to verify that its generation is stable.
+    await resume({ scanId: run.scanId });
+    assert.equal(
+      (await store.get(run.scanId, resumeOwner)).coordinatorGeneration,
+      repaired.coordinatorGeneration,
+    );
+    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    const sealed = await readFile(before.manifestPath, "utf8");
+    const complete = await store.begin({
+      scanId: run.scanId,
+      threadId: resumeOwner,
+      scanRoot: env.CODEX_SECURITY_SCAN_ROOT,
+    });
+    assert.equal(complete.evidenceRepairRequired, undefined);
+    await assert.rejects(
+      store.claimCoordinator({
+        scanId: run.scanId,
+        threadId: resumeOwner,
+      }),
+      /Only a running/,
+    );
+    assert.equal(await readFile(before.manifestPath, "utf8"), sealed);
+  });
 }
