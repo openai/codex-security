@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
-const fs = require("node:fs");
-const path = require("node:path");
-const { CORPUS, FIXTURE_ROOT } = require("./sca-result.js");
+const { CORPUS } = require("./fixtures.js");
 
 function baselineRecords(testCase) {
-  const directory = path.join(FIXTURE_ROOT, testCase.case_id);
   const scanner = {
     case_id: testCase.case_id,
     component: testCase.input.component,
@@ -18,9 +15,7 @@ function baselineRecords(testCase) {
   // These tiny fixtures have a single complete entrypoint. Include inspectable
   // lines without inferring a call graph or a negative reachability claim.
   const source = "src/application.mjs";
-  const lines = fs
-    .readFileSync(path.join(directory, source), "utf8")
-    .split(/\r?\n/);
+  const lines = testCase.files[source].split(/\r?\n/);
   return {
     scanner_only: scanner,
     scanner_with_usage_evidence: {
@@ -31,10 +26,7 @@ function baselineRecords(testCase) {
           ? []
           : [{ path: source, line: index + 1, text }],
       ),
-      application_contract: fs.readFileSync(
-        path.join(directory, "APPLICATION.md"),
-        "utf8",
-      ),
+      application_contract: testCase.files["APPLICATION.md"],
     },
   };
 }

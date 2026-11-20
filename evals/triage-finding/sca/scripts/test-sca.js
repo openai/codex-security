@@ -12,13 +12,13 @@ const { execFileSync } = require("node:child_process");
 const {
   CORPUS,
   EXPECTED,
-  FIXTURE_ROOT,
   parseOutcome,
   normalizePromptfooResult,
   summarize,
   summarizeExport,
   matchRetention,
 } = require("./sca-result.js");
+const { stageCase } = require("./fixtures.js");
 const { generateTests } = require("./generate-tests.js");
 const {
   stageRuntime,
@@ -135,11 +135,12 @@ test("scanner and inspectable-usage baselines preserve all matches without inven
 });
 
 for (const fixture of CORPUS.cases) {
-  test(`${fixture.case_id}: frozen source/advisory digests and schema-valid expected assessment`, () => {
+  test(`${fixture.case_id}: frozen source/advisory digests and schema-valid expected assessment`, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-case-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const directory = stageCase(root, fixture);
     for (const [relative, expected] of Object.entries(fixture.sha256)) {
-      const bytes = fs.readFileSync(
-        path.join(FIXTURE_ROOT, fixture.case_id, relative),
-      );
+      const bytes = fs.readFileSync(path.join(directory, relative));
       assert.equal(
         crypto.createHash("sha256").update(bytes).digest("hex"),
         expected,
@@ -153,10 +154,7 @@ for (const fixture of CORPUS.cases) {
       true,
     );
     const captured = JSON.parse(
-      fs.readFileSync(
-        path.join(FIXTURE_ROOT, fixture.case_id, "osv.json"),
-        "utf8",
-      ),
+      fs.readFileSync(path.join(directory, "osv.json"), "utf8"),
     );
     assert.equal(
       captured.results[0].packages[0].package.name,
@@ -692,10 +690,7 @@ test("isolates case read roots and disables inherited integrations while retaini
     fs.mkdirSync(nativePackageRoot);
     let child;
     for (const testCase of CORPUS.cases.slice(0, 2)) {
-      const target = path.join(runtime, "cases", testCase.case_id);
-      fs.cpSync(path.join(FIXTURE_ROOT, testCase.case_id), target, {
-        recursive: true,
-      });
+      const target = stageCase(path.join(runtime, "cases"), testCase);
       const vars = runtimeVars({ target_repo: target });
       const bindings = {
         "{{target_repo}}": vars.target_repo,
