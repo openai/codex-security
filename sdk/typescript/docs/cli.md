@@ -3127,6 +3127,11 @@ that disables recursion skips these checks. On-demand recursion and
 publication. Publish missing child commits separately, then resume the saved
 parent from a configuration that allows a parent push.
 
+When a Git hook edits the generated commit message, the CLI keeps the accepted
+commit on its local branch and prints its identifier. Inspect the message
+before running the printed `patch --resume-pr BRANCH` command to publish that
+commit. A hook can still veto a commit.
+
 If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
 commit without rerunning Codex, but refuses changed branches or an existing

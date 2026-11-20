@@ -14745,6 +14745,20 @@ async function createPatchPullRequest(
     }
     throw error;
   }
+  // Hooks may edit and validate a message. The approved tree only covers
+  // file contents, so check the actual message Git would send to the remote.
+  const raw = await run(
+    ["--no-replace-objects", "cat-file", "commit", commit],
+    {
+      trim: false,
+      maxBuffer: Infinity,
+    },
+  );
+  const separator = raw.indexOf("\n\n");
+  if (separator < 0 || raw.slice(separator + 2) !== PATCH_PR_TITLE + "\n")
+    throw new CodexSecurityError(
+      `The patch commit was saved locally with an edited message. Review it with 'git --no-replace-objects cat-file commit ${safePatchText(commit)}'. To publish the saved commit, run 'codex-security patch --resume-pr ${safePatchText(branch)}'.`,
+    );
   return publishPatchBranch(
     repository,
     branch,
