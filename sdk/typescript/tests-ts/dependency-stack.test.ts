@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { main } from "../src/cli.js";
+import { main, runCodexSkillCommand } from "../src/cli.js";
+import { parse as parseToml } from "smol-toml";
 import { prepareStackPacket } from "../src/stack-packet.js";
 import { stackPacketWorkItems } from "../src/dependency-stack-packet.js";
 import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
@@ -10,7 +11,7 @@ import {
   executeStackRun,
   readFinalStackReport,
 } from "../src/dependency-stack-run.js";
-import { dependencies } from "./cli-fixtures.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -412,6 +413,73 @@ for (const version of ["1.5.0", "2.1.0"]) {
   });
 }
 
+test("the stack process gets a private Codex home and can write only its workspace", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-process-");
+  const home = join(dir.path, "user");
+  const work = join(dir.path, "work");
+  const target = join(dir.path, "target");
+  await Promise.all([home, work, target].map((path) => mkdir(path)));
+  git(target, "init", "--quiet");
+  await writeFile(
+    join(home, "config.toml"),
+    [
+      'model_provider = "sample"',
+      "[model_providers.sample]",
+      'name = "Sample"',
+      'base_url = "https://example.invalid"',
+      'env_key = "SAMPLE_PROVIDER_TOKEN"',
+      "[mcp_servers.ambient]",
+      'command = "unused"',
+    ].join("\n"),
+  );
+  const stdout = capture(),
+    stderr = capture();
+  const script = `
+    const fs = require("node:fs"), path = require("node:path");
+    const home = process.env.CODEX_HOME, cfg = path.join(home, "config.toml");
+    const result = {
+      home, inherited: fs.existsSync(cfg) && fs.readFileSync(cfg, "utf8").includes("mcp_servers.ambient"),
+      policy: process.argv.find(a => a.startsWith("permissions.dependency_investigation=")),
+    };
+    console.log(JSON.stringify({type:"item.completed",item:{id:"r",type:"agent_message",text:JSON.stringify(result)}}));
+    console.log(JSON.stringify({type:"turn.completed"}));
+  `;
+  const status = await runCodexSkillCommand(
+    ["-e", script, "--"],
+    {
+      command: "exploitability check",
+      auth: "auto",
+      stackTarget: target,
+      directory: work,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    },
+    { command: process.execPath },
+    {
+      PATH: process.env["PATH"],
+      CODEX_HOME: home,
+      SAMPLE_PROVIDER_TOKEN: "test",
+    },
+  );
+  expect(status, stderr.text()).toBe(0);
+  const observed = JSON.parse(stdout.text());
+  expect(observed.home).not.toBe(home);
+  expect(observed.inherited).toBe(false);
+  expect(parseToml(observed.policy)).toMatchObject({
+    permissions: {
+      dependency_investigation: {
+        network: { enabled: false },
+        filesystem: {
+          ":root": "read",
+          [work]: { ".": "write" },
+          [home]: { ".": "deny" },
+          [observed.home]: { ".": "deny" },
+        },
+      },
+    },
+  });
+});
+
 test("the gated check gives one investigator a usable child CLI and publishes its verified report", async () => {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
@@ -422,6 +490,10 @@ test("the gated check gives one investigator a usable child CLI and publishes it
     async onCodex(argv, out, _env, prompt) {
       calls++;
       expect(argv[0]).toBe("exec");
+      expect(argv).toContain("--ignore-user-config");
+      expect(argv).toContain("mcp_servers={}");
+      expect(out?.investigationServers).toEqual({});
+      expect(argv).toContain('model_provider="sample"');
       expect(argv.some((arg) => arg.includes(gate))).toBe(true);
       const { state, command } = JSON.parse(
         prompt!.split("\n").find((line) => line.startsWith('{"command":'))!,
@@ -463,6 +535,13 @@ test("the gated check gives one investigator a usable child CLI and publishes it
       return 0;
     },
   });
+  const configHome = join(dir.path, "user-config");
+  await mkdir(configHome);
+  await writeFile(
+    join(configHome, "config.toml"),
+    'model_provider="sample"\n[model_providers.sample]\nname="Sample"\nbase_url="https://example.invalid"\nwire_api="responses"\n[mcp_servers.ambient]\ncommand="unused"\n',
+  );
+  d.environment["CODEX_HOME"] = configHome;
   d.environment[gate] = "1";
   const io = createCliTest(main);
   const code = await io.runCli(

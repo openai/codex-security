@@ -74,7 +74,23 @@ cs exploitability check npm:lodash --progress-events progress.jsonl
 cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
 ```
 
-Package checks return one `checks` entry per advisory. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. An unapproved or failed investigation exits with a nonzero status. Progress is best effort. `--report-file` publishes the completed JSON atomically to a new file and preserves any existing destination.
+Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed JSON atomically to a new file and preserves any existing destination.
+
+The investigator can delegate source searches while an independent reviewer evaluates proposed uses and the claims they rely on. Investigators share evidence collected during the check. The reviewer selects the citations that support each approved claim. A deciding MCP citation can identify a single JSON value. Its `receiptId` identifies the captured response, `originalPayloadSha256` identifies its contents, and `selection.record` gives the key and index path. A null `selection.textBlock` selects structured content. A numeric value selects a JSON text block by index. Whole-response citations omit `selection`. Open a use in the JSON report to see its component, version, verdict, and deciding evidence. The progress stream includes provisional verdicts that can change during review.
+
+Both a terminal and redirected stderr show investigation stages, scoped source searches, reviewed verdicts and the final verdict counts. When you use `--report-file`, stderr also shows the absolute path to the saved report. With `--json`, stdout contains only the report or blocked outcome.
+
+Use `--progress-events FILE` for live JSON Lines. Each event carries `schemaVersion: 1`, `elapsedMs`, `subject` and `type`. Match `activity_started` and `activity_finished` by `id`. A finished trace includes the checkout-relative `searchedPaths` when the tracer reports them. A `reviewed` event can carry a `previousVerdict` when an assessment changes. The `access_program` event reports the program selected for the investigation turn, or `unconfirmed` when the transport does not expose it. The `report_ready` event includes verdict counts, the limitation count and the saved report path when requested. The final `finished` event records the command outcome.
+
+For repository checks, the coordinator runs at high reasoning effort. Investigator subagents use the effort selected by `--effort` or the project profile unless `agents.default_subagent_reasoning_effort` sets their effort explicitly. Independent claim reviewers run at low effort. Review feedback returns to the same coordinator thread with the original plan, claims and evidence. If the native process exits unexpectedly, the CLI can resume that thread once when its last tool operations have a known outcome.
+
+The host includes every current approved assessment submitted during the investigation. The coordinator’s final `uses` array adds findings that have yet to be submitted and can be empty. To revise a submitted assessment, the coordinator uses its ID and current revision. Assessments for distinct call sites, package copies, or deployments can share a scope and location.
+
+Investigators use `update_codex_security_graph` to share a source note (`note`) or track files in a delegated search (`sourceWork`). A note can identify a newly discovered caller or sink and cite lines from the pinned Git revision. Other investigators can find it with `query_codex_security_graph({note:{search}})` and read the excerpts with `{note:{id}}`. Submitting a claim based on those lines starts independent review.
+
+Before creating an assessment, investigators query the existing uses. They submit new evidence for the same caller, copy and deployment under its existing ID. To withdraw a superseded use, an investigator submits a disposition under that ID with the latest `expectedRevision`, the approved use’s exact `{id, revision, hash}` in `replacesUse`, and evidence for the change. The reviewer receives the prior finding, its proof and the proposed reason. The original stays in effect while its evidence remains current, until a replacement passes review. An approved disposition’s `conclusionClaim` points to its current report entry. The claim payload’s `replacesUse` records the earlier revision in the investigation ledger.
+
+When the investigation finds a caller but cannot establish which dependency operation it reaches, it can submit an unresolved coverage disposition. Its handoff records what the investigator verified and what evidence is still needed. A dismissal identifies the observed candidate and explains the evidence for excluding it. Each approved disposition in `coverage` links to its own reviewed claim revision, deciding source ranges or original receipt rows, and any selected supporting claims. Source tracing can add candidate lines after initial discovery. The host verifies their source against the checked-out Git revision and resolves the owning package before adding them to coverage. Other unassessed callers retain their own coverage gaps.
 
 A repository check can ask MCP servers for facts it cannot learn from the checkout. For example, a lockfile can identify the package selected by a build. A deployment inventory can show whether that build is running. In a project file, list the servers under `exploitability.evidence_sources` and describe when the investigator should use each one. Define the connection once under `codex.mcp_servers`. Configure read-only tools for the systems you want the investigator to query.
 
@@ -90,7 +106,11 @@ codex:
       enabled_tools: [get_deployment]
 ```
 
-Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. You can also set `exploitability.scope.instructions` to specify which callers to investigate. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
+Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. Repository checks default to production services, jobs, workers, and the code they deploy or import. Set `exploitability.scope.instructions` to replace that caller scope. Use `exploitability.scope.exclude_paths` for literal checkout-relative files or directories to omit from broad discovery. A nested `SECURITY.md` boundary or an exact source or build lead can bring a path back into the investigation.
+
+Repository checks also accept independent `exploitability.sources` and `exploitability.sinks` lists in the project file. Each endpoint names a `function` and can include its package, symbol, file, and line. Supply a list to describe all endpoints on that side of the scenario, including an empty list when the side has no endpoints. Omit the list to let the investigator discover endpoints. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
+
+The report's `assumptions` records the caller scope, supplied endpoint lists, and paths excluded from broad discovery. A runtime selector's source `line` requires its `location`. The selector retains additional JSON metadata supplied by the evidence source.
 
 ## Updating the CLI
 
@@ -2910,9 +2930,12 @@ text/files, and Linear inputs. Paths resolve from the invocation directory, even
 when the finding belongs to another repository. The file must be nonempty and
 regular, is read before patching, and cannot combine with `--resume-pr`.
 
-Use `--verification-mode static` to assess a patch from source and diff evidence
-without installing dependencies or running builds, tests, reproducers, or the
-application. Validation instructions become questions for that source review.
+Use `--verification-mode static` to request an assessment from source and diff
+evidence. It instructs Codex not to install dependencies or run builds, tests,
+reproducers, or the application; validation instructions become questions for
+that source review. This mode does not change execution permissions or enforce
+source-only behavior. Use an independently enforced execution restriction if
+commands must be prohibited.
 The default is `standard`, which retains the existing verification checks.
 Static results identify the evidence and state that runtime checks were not
 performed; material proof gaps can still block verification.
