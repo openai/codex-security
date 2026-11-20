@@ -149,6 +149,8 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
       },
     }),
     DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
+    TF_TOKEN_registry_example_test: "synthetic-terraform-token",
+    TF_VAR_workspace: "example",
     SNAPSHOT_USER_SETTING: "preserved",
     HTTP_PROXY: "http://fixture:synthetic@proxy.example.test:8080",
     https_proxy: "https://fixture:synthetic@proxy.example.test",
@@ -167,7 +169,8 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
     `const input = require("node:fs").readFileSync(0, "utf8");
 process.stdout.write(JSON.stringify({
   input, setting: process.env.SNAPSHOT_USER_SETTING, proxy: process.env.ALL_PROXY,
-  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
+  workspace: process.env.TF_VAR_workspace,
+  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "TF_TOKEN_registry_example_test", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
 }));`,
   );
   const add = [
@@ -181,6 +184,7 @@ process.stdout.write(JSON.stringify({
     input: "safe patch\n",
     setting: "preserved",
     proxy: env.ALL_PROXY,
+    workspace: env.TF_VAR_workspace,
   };
   git(...add);
   expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
@@ -188,6 +192,7 @@ process.stdout.write(JSON.stringify({
     credentialKeys: [
       "DOCKER_AUTH_CONFIG",
       "DATABASE_URL",
+      "TF_TOKEN_registry_example_test",
       "HTTP_PROXY",
       "https_proxy",
     ],

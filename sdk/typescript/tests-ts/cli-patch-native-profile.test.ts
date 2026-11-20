@@ -939,11 +939,17 @@ test("patch model and clean filters cannot read selected authentication files", 
   const pgservice = join(operator, "selected pg service");
   const pgKey = join(operator, "selected pg key");
   const pgCert = join(operator, "selected pg cert");
+  const terraformConfig = join(operator, "selected terraform config");
+  const legacyTerraformConfig = join(operator, "legacy terraform config");
   const defaultGh = join(operator, ".config", "gh");
   const cloudConfig = join(operator, "selected gcloud");
   const cloudKey = join(operator, "selected Google credentials.json");
   const cloudDefault = "application_default_credentials.json";
   const appdata = join(operator, "Roaming");
+  const terraformDir =
+    process.platform === "win32"
+      ? join(appdata, "terraform.d")
+      : join(operator, ".terraform.d");
   const pgTlsDir =
     process.platform === "win32"
       ? join(appdata, "postgresql")
@@ -967,6 +973,8 @@ test("patch model and clean filters cannot read selected authentication files", 
     PGSERVICEFILE: pgservice,
     PGSSLKEY: pgKey,
     PGSSLCERT: pgCert,
+    TF_CLI_CONFIG_FILE: terraformConfig,
+    TERRAFORM_CONFIG: legacyTerraformConfig,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
   };
@@ -1045,6 +1053,12 @@ test("patch model and clean filters cannot read selected authentication files", 
     pgservice,
     pgKey,
     pgCert,
+    terraformConfig,
+    legacyTerraformConfig,
+    process.platform === "win32"
+      ? join(appdata, "terraform.rc")
+      : join(operator, ".terraformrc"),
+    join(terraformDir, "credentials.tfrc.json"),
     join(pgTlsDir, "postgresql.key"),
     join(pgTlsDir, "postgresql.crt"),
     join(operator, "pg_service.conf"),
@@ -1077,6 +1091,8 @@ test("patch model and clean filters cannot read selected authentication files", 
 if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
   throw new Error("Cannot read the ordinary sibling");
+if (fs.readFileSync(${JSON.stringify(join(terraformDir, "ordinary.txt"))}, "utf8") !== "Terraform sibling")
+  throw new Error("Cannot read the ordinary Terraform sibling");
 const contents = [];
 for (const path of ${JSON.stringify(protectedPaths)}) {
   try { contents.push(fs.readFileSync(path, "utf8")); }
@@ -1097,6 +1113,8 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         await mkdir(directory, { recursive: true });
       await mkdir(cloudConfig);
       await mkdir(pgTlsDir, { recursive: true });
+      await mkdir(terraformDir, { recursive: true });
+      await writeFile(join(terraformDir, "ordinary.txt"), "Terraform sibling");
       await mkdir(join(operator, ".config", "gcloud"));
       if (process.platform === "win32")
         await mkdir(join(appdata, "gcloud"), { recursive: true });
