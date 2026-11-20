@@ -72,6 +72,7 @@ test("reviewed exports preserve each decision and the frozen advisory", () => {
   };
   const draft = {
     ...input,
+    callerScope: "Assess callers with upload access",
     advisoryDetails: [{ ...advisory, sha256: dependencyClaimHash(advisory) }],
   };
   const [observed, missing] = input.assessments;
@@ -105,6 +106,7 @@ test("reviewed exports preserve each decision and the frozen advisory", () => {
     expect(output).toContain(review.draftDigest);
     for (const decision of review.decisions)
       expect(output).toContain(decision.reason);
+    expect(output).toContain(draft.callerScope);
     expect(output).toContain(advisory.body);
     expect(output).toContain(observed.questionChecks[0]!.checked);
     expect(output).toContain(observed.questionChecks[0]!.missingEvidence);
