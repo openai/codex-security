@@ -147,12 +147,29 @@ const rateLimitSnapshot = z.object({
   secondary: rateLimitWindow.nullish(),
 });
 
-/** A persisted worker session discovered during this run. Contains no model text. */
-export interface ScanWorkerEvent {
-  kind: "observed";
-  /** Scan-local number shared with activity and session observers. */
-  worker: number;
-}
+/**
+ * Worker signals delivered through onWorkerEvent.
+ * `observed` is a persisted session discovered during this run and contains no
+ * model text. `dispatch` and `failed` are runtime spawn_agent boundaries from
+ * the live event stream, distinct from late session observations.
+ */
+export type ScanWorkerEvent =
+  | {
+      kind: "observed";
+      /** Scan-local number shared with activity and session observers. */
+      worker: number;
+    }
+  | {
+      kind: "dispatch";
+      /** Scan-local ordinal for this spawn attempt. */
+      attempt: number;
+    }
+  | {
+      kind: "failed";
+      /** Matches the preceding dispatch event when one was observed. */
+      attempt: number;
+      reason: string;
+    };
 
 export interface ScanSessionEvent {
   threadId: string;

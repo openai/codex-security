@@ -232,6 +232,7 @@ import {
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
 import {
+  createWorkerDispatchMonitor,
   scanProgressUpdatesFromEvent,
   scanPhaseSchema,
   workerStatusFromEvent,
@@ -463,11 +464,16 @@ export interface ScanOptions extends ScanSettings {
   /** Best-effort, model-reported phase dispatch counts. */
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   /**
-   * Reports each persisted worker session once when discovered during this run.
-   * Worker numbers match onActivity/onSessionEvent. Includes saved workers on
-   * resume; observation ends before postScanPrompt. Persistence and polling can
-   * delay delivery. Does not report failed spawns, phase, or planned counts and
-   * cannot gate dispatch; use maxCostUsd or signal for cancellation.
+   * Reports runtime worker dispatch and persisted worker sessions.
+   * `kind: "dispatch"` and `kind: "failed"` come from live spawn_agent tool
+   * calls and carry a scan-local attempt number. They do not infer the worker
+   * phase, planned work, or whether a dispatched attempt ultimately started.
+   * `kind: "observed"` reports each persisted worker session once when
+   * discovered during this run. Worker numbers on observed events match
+   * onActivity/onSessionEvent. Observed sessions include saved workers on
+   * resume; session observation ends before postScanPrompt. Persistence and
+   * polling can delay `observed` events; they do not identify when file review
+   * begins and cannot gate dispatch. Use maxCostUsd or signal for cancellation.
    */
   onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
@@ -3910,6 +3916,7 @@ export class CodexSecurity {
             : (event) => tracker.recordParentItem(event),
         onProgress: reportProgress,
         onWorkerStatus: reportWorkerStatus,
+        onWorkerEvent: options.onWorkerEvent,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,
       });
@@ -6117,6 +6124,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
   onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
@@ -6129,6 +6137,7 @@ export async function runScanEvents(
   let tacStatusReported = false;
   try {
     options.signal.throwIfAborted();
+    const workerDispatch = createWorkerDispatchMonitor();
     const turn = await readCodexTurn({
       thread: options.thread,
       events: options.events,
@@ -6173,6 +6182,10 @@ export async function runScanEvents(
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
           notifyObserver(options, "onWorkerStatus")(workerStatus);
+        }
+        const workerEvent = workerDispatch.observe(event);
+        if (workerEvent !== null) {
+          notifyObserver(options, "onWorkerEvent")(workerEvent);
         }
         if (event.type === "thread.started") {
           const startedThreadId = event["thread_id"];

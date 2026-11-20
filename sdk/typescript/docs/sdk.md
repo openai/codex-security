@@ -392,35 +392,53 @@ reported window. An allowance can arrive before any token measurement. See
 controls, replay, and reporting definitions.
 
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
-persisted worker sessions discovered by the SDK's existing session tracker,
-independently of model-emitted status markers:
+two kinds of signal:
+
+- `{ kind: "dispatch", attempt }` and `{ kind: "failed", attempt, reason }`
+  come from live `spawn_agent` tool calls on the parent event stream,
+  independently of model-emitted status markers. `attempt` is a scan-local
+  ordinal for each distinct tool call. A start item emits `dispatch`
+  immediately; a successful completion also emits it when the corresponding
+  start was not present in the stream. A failure reuses the same attempt number
+  when its start was observed. These events do not infer the work phase,
+  planned worker count, or number of successfully started workers. A completed
+  scan that emitted neither event exposed no `spawn_agent` call on that stream.
+- `{ kind: "observed", worker: number }` reports persisted worker sessions
+  discovered by the SDK's existing session tracker.
 
 ```ts
 await security.run(repository, {
   onWorkerEvent(event) {
-    console.log(`Worker ${event.worker} observed`);
+    if (event.kind === "dispatch") {
+      console.log(`Worker spawn attempt ${event.attempt} dispatched`);
+    } else if (event.kind === "failed") {
+      console.log(
+        `Worker spawn attempt ${event.attempt} failed: ${event.reason}`,
+      );
+    } else {
+      console.log(`Worker ${event.worker} observed`);
+    }
   },
 });
 ```
 
-The callback contains only `{ kind: "observed", worker: number }`. The scan-local
-worker number matches `onActivity` and `onSessionEvent`; no prompts, raw thread
-IDs, or session contents are exposed. Each session is reported once per run,
-including nested workers and scan-associated validation or Deep Scan sessions.
-On resume, already persisted workers can be reported again. Observation ends
-with scan cost tracking, before `postScanPrompt`.
+The scan-local worker number on `observed` events matches `onActivity` and
+`onSessionEvent`; no prompts, raw thread IDs, or session contents are exposed.
+Each session is reported once per run, including nested workers and
+scan-associated validation or Deep Scan sessions. On resume, already persisted
+workers can be reported again. Session observation ends with scan cost
+tracking, before `postScanPrompt`.
 
-This works with the bundled Codex version. Persistence and polling can delay
-notification, and missing notifications do not prove that delegation was skipped.
-An observed session does not establish that a worker just started or that file
-review has begun. The callback does not report failed spawn attempts, phase names,
-or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
-`signal` for cancellation. Observer failures go to `onObserverError` without
-stopping the scan.
+Persistence and polling can delay `observed` notifications, and a missing
+`observed` event does not prove that delegation was skipped. An observed
+session does not establish that a worker just started or that file review has
+begun. Use the `dispatch` and `failed` events for that boundary. Use
+`maxCostUsd` or `signal` for cancellation. Observer failures go to
+`onObserverError` without stopping the scan.
 
 `onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
-text markers. A missing dispatch status does not mean delegation was skipped.
-For retired progress hooks, see [older progress integrations](#older-progress-integrations).
+text markers. A missing `onWorkerStatus` dispatch does not mean delegation was
+skipped. For retired progress hooks, see [older progress integrations](#older-progress-integrations).
 
 `onSessionEvent` receives saved events with thread IDs and worker numbers and can
 contain source code or credentials. Deep scans additionally expose durable
