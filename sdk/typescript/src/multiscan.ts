@@ -28,7 +28,7 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject } from "./config.js";
@@ -67,6 +67,7 @@ import {
 import {
   DiffTarget,
   normalizeTarget,
+  normalizeExcludedPaths,
   gitOutput,
   gitProtectionRoots,
   nullIfMissingPath,
@@ -391,6 +392,7 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
+    new Set(tasks.map((task) => task.id.toLowerCase())),
     options.recoverScan !== undefined,
   );
   const pending: {
@@ -1432,6 +1434,7 @@ function parseReceipt(
   path: string,
   line: string,
   lineNumber: number,
+  campaignIds: ReadonlySet<string>,
 ): MultiscanReceipt {
   let value: unknown;
   const invalid = `${path}:${lineNumber}: Multiscan recovery is required: results line ${lineNumber} is not a valid receipt.`;
@@ -1446,6 +1449,10 @@ function parseReceipt(
   }
   if (!isRecord(value) || typeof value["id"] !== "string")
     throw new Error(`${invalid} ${recovery}`);
+  if (!campaignIds.has(value["id"].toLowerCase()))
+    throw new Error(
+      `${path}:${lineNumber}: Receipt task id is absent from the campaign manifest. ${recovery}`,
+    );
   const attempt = value["attempt"];
   if (
     typeof attempt !== "number" ||
@@ -1497,6 +1504,7 @@ function parseReceipt(
 
 async function readReceipts(
   path: string,
+  campaignIds: ReadonlySet<string>,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
   let contents: Buffer;
@@ -1513,7 +1521,7 @@ async function readReceipts(
   const receipts = new Map<string, MultiscanHistory>();
   for (const [index, line] of lines.entries()) {
     if (!line) continue;
-    const receipt = parseReceipt(path, line, index + 1);
+    const receipt = parseReceipt(path, line, index + 1, campaignIds);
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
     receipts.set(id, {
@@ -1548,8 +1556,11 @@ function campaignScanOptions(
   const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
     .filter(Boolean)
     .join("\n\n");
+  const settings = options.scanOptionsByMode?.[task.mode];
+  const excludePaths = normalizeExcludedPaths(settings?.excludePaths);
   return {
-    ...options.scanOptionsByMode?.[task.mode],
+    ...settings,
+    excludePaths: excludePaths.length ? excludePaths : undefined,
     knowledgeBaseSnapshot,
     ...(task.scope === undefined
       ? {}
@@ -1862,7 +1873,10 @@ async function verifiedCampaignCheckout(
     target.displayName !== basename(matchedRoot) ||
     target.revision !== task.revision ||
     mode !== expectedMode ||
-    scope.excludePaths.length !== 0
+    !isDeepStrictEqual(
+      scope.excludePaths,
+      authority.recipe["excludePaths"] ?? [],
+    )
   )
     return undefined;
   let expectedPaths: readonly unknown[] = ["."];

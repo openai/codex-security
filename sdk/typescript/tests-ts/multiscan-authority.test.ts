@@ -16,7 +16,7 @@ import {
   loadContract,
   loadContractWithScanDirectory,
 } from "../src/contract.js";
-import { normalizeTarget } from "../src/targets.js";
+import { normalizeExcludedPaths, normalizeTarget } from "../src/targets.js";
 import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
 import { runMultiscan } from "../src/multiscan.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
@@ -87,6 +87,7 @@ async function fixture(registerOnly = false) {
   ): Promise<ScanResult> {
     const scanDir = scan.outputDir!;
     const target = await normalizeTarget(checkout, scan.target ?? "repository");
+    const excludePaths = normalizeExcludedPaths(scan.excludePaths);
     const includePaths = target.kind === "repository" ? ["."] : target.paths;
     await mkdir(scanDir, { recursive: true, mode: 0o700 });
     const registered = await workbench(
@@ -100,13 +101,21 @@ async function fixture(registerOnly = false) {
       ],
       {
         recipe: {
+          ...(excludePaths.length ? { excludePaths } : {}),
           repository: checkout,
           mode: scan.mode ?? "standard",
           target,
           config: {},
           maxCostUsd: scan.maxCostUsd,
           ownerSuggestions: scan.ownerSuggestions,
-          scanRequestDigest: scanRequestDigest(config, scan, checkout),
+          scanRequestDigest: scanRequestDigest(
+            config,
+            {
+              ...scan,
+              excludePaths: excludePaths.length ? excludePaths : undefined,
+            },
+            checkout,
+          ),
         },
         userContext: scan.scanPrompt,
       },
@@ -126,7 +135,7 @@ async function fixture(registerOnly = false) {
       displayName: basename(checkout),
       revision: git(checkout, "rev-parse", "HEAD"),
     };
-    manifest.scan.scope = { includePaths, excludePaths: [] };
+    manifest.scan.scope = { includePaths, excludePaths };
     delete manifest.scan.sealedAt;
     delete manifest.scan.artifacts;
     const findings = {
@@ -330,6 +339,16 @@ test.each([false, true])(
     expect(value.runs()).toBe(2);
   },
 );
+
+test("a cleaned checkout preserves normalized campaign exclusions", async () => {
+  const value = await fixture();
+  value.options.scanOptionsByMode = {
+    standard: { excludePaths: ["./vendor/", "vendor"] },
+  };
+  expect(await runMultiscan(value.options)).toMatchObject({ completed: 1 });
+  expect(await runMultiscan(value.options)).toMatchObject({ skipped: 1 });
+  expect(value.runs()).toBe(1);
+});
 
 test("registered campaign reuses equivalent staged knowledge sources", async () => {
   const value = await fixture();
