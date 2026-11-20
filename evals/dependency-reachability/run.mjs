@@ -19,6 +19,7 @@ import {
   git,
   jsonFile,
   mixedFixture,
+  mixedServiceVersions,
   restorePackets,
   reviewedCve,
   sha256,
@@ -290,7 +291,7 @@ try {
         await writeFile(transcript, "", { mode: 0o600 });
         await jsonFile(records, {
           notes: {
-            release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version 5.0.0.`,
+            release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version ${mixedServiceVersions.notes}.`,
             ...(id === "mixed-evidence" && {
               request_record: `An anonymous client sent its own text to POST /preview on service notes at revision ${fixture.sha}, and received the parsed links from its submitted body.`,
             }),

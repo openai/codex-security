@@ -10,6 +10,10 @@ import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
+async function* commandOutput(...events: object[]) {
+  for (const event of events) yield JSON.stringify(event) + "\n";
+}
+
 test("command schema exposes complete and blocked reports as direct output alternatives", async () => {
   const stdout = capture(),
     stderr = capture();
@@ -209,18 +213,16 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
         } else {
           const requests: { method?: string; params?: object }[] = [];
           await readSkillCommandOutput(
-            (async function* () {
-              yield JSON.stringify({
-                id: 2,
-                result: {
-                  thread: { id: "investigator", ephemeral: true },
-                  activePermissionProfile: { id: "dependency_investigation" },
-                  model: "fixture",
-                  modelProvider: "fixture",
-                  sandbox: {},
-                },
-              }) + "\n";
-            })(),
+            commandOutput({
+              id: 2,
+              result: {
+                thread: { id: "investigator", ephemeral: true },
+                activePermissionProfile: { id: "dependency_investigation" },
+                model: "fixture",
+                modelProvider: "fixture",
+                sandbox: {},
+              },
+            }),
             {
               ...output!.appServer!,
               linkedEvidence: undefined,
@@ -311,16 +313,16 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
             wireReceipts.set(dependencyRecordHash(original), original);
           }
           await readSkillCommandOutput(
-            (async function* () {
-              yield JSON.stringify({
+            commandOutput(
+              {
                 type: "turn.completed",
                 usage: {
                   input_tokens: 12,
                   cached_input_tokens: 2,
                   output_tokens: 6,
                 },
-              }) + "\n";
-              yield JSON.stringify({
+              },
+              {
                 type: "item.completed",
                 item: {
                   type: "mcp_tool_call",
@@ -330,8 +332,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
                   arguments: {},
                   result,
                 },
-              }) + "\n";
-            })(),
+              },
+            ),
             undefined,
             output?.onExecEvent,
           );

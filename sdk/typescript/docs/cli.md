@@ -2970,9 +2970,12 @@ text/files, and Linear inputs. Paths resolve from the invocation directory, even
 when the finding belongs to another repository. The file must be nonempty and
 regular, is read before patching, and cannot combine with `--resume-pr`.
 
-Use `--verification-mode static` to assess a patch from source and diff evidence
-without installing dependencies or running builds, tests, reproducers, or the
-application. Validation instructions become questions for that source review.
+Use `--verification-mode static` to request an assessment from source and diff
+evidence. It instructs Codex not to install dependencies or run builds, tests,
+reproducers, or the application; validation instructions become questions for
+that source review. This mode does not change execution permissions or enforce
+source-only behavior. Use an independently enforced execution restriction if
+commands must be prohibited.
 The default is `standard`, which retains the existing verification checks.
 Static results identify the evidence and state that runtime checks were not
 performed; material proof gaps can still block verification.
