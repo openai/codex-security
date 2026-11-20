@@ -118,6 +118,8 @@ A graph resource can establish which frames appeared in a sample. Ruling out a v
 
 Live or supplemented reports can include `effectiveInputDigest`, a hash of the versioned canonical effective source, sink and stack documents, target, and imported receipt IDs. The original `inputDigest` remains stable so existing claim identities continue to resolve.
 
+A stack group with `no_indexed_match` has zero observations from an indexed search whose coverage may be incomplete. The report uses `no_coverage` for the group’s status, `unknown` for its verdict, and lists its work item in `coverage.noCoverage`. Other stack groups are assessed independently.
+
 When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
 
 A missing observation or a gap in the evidence can yield a completed `unknown` assessment. An `unknown` verdict on a matched stack with consistent scope requires one `questionChecks` entry per remaining question. Each entry records the exact question, what the investigator inspected, the supporting claim revisions and the specific missing evidence. Both `record-assessments` and `finalize` apply the same static checks. Only the high-level `exploitability check` adds independent model review. Reports retain the question checks. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
@@ -3098,8 +3100,9 @@ selected by libcurl's `NETRC` environment variable, and files selected by Git's
 URL-specific values. Delegates also have deny rules for the account's `.ssh`
 directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
 `.kube/config`, and `.npmrc`. The rules cover the home-directory defaults
-and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, and
-`NPM_CONFIG_USERCONFIG`. They protect `auth.json`, `.credentials.json`, and
+and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
+`NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. They protect
+`auth.json`, `.credentials.json`, and
 Codex configuration files (including named profiles) in the default Codex home,
 the selected `CODEX_HOME`, and the Codex Security credential home.
 They also cover Google Cloud Application Default

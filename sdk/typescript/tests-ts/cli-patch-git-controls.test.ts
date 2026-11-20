@@ -193,7 +193,8 @@ describe("patch Git administration", () => {
     await mkdir(staged);
     const sources = {
       system: "[fixture]\nvalue = system\xff\n",
-      command: "[include]\npath = branch\n",
+      command: "[include]\npath = empty\npath = branch\n",
+      empty: "",
       "git/config": "[fixture]\nvalue = xdg\n",
       ".gitconfig":
         "[fixture]\nvalue = home\nboolean\nempty =\n" +
@@ -281,6 +282,7 @@ describe("patch Git administration", () => {
       config.files,
       prefix,
     ).entries()) {
+      expect(contents.length).toBeGreaterThan(0);
       expect(contents.includes("synthetic-value")).toBe(false);
       await writeFile(file(index), contents);
     }

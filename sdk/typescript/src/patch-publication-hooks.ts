@@ -12,7 +12,7 @@ export const httpCredentialFile =
   /^http(?:\..*)?\.(?:cookiefile|(?:proxy)?ssl(?:key|cert))$/iu;
 
 export const credentialFileVariable =
-  /^(?:GOOGLE_APPLICATION_CREDENTIALS|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY)|TERRAFORM_CONFIG|TF_CLI_CONFIG_FILE)$/iu;
+  /^(?:GOOGLE_APPLICATION_CREDENTIALS|NPM_CONFIG_(?:USER|GLOBAL)CONFIG|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY)|TERRAFORM_CONFIG|TF_CLI_CONFIG_FILE)$/iu;
 
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
@@ -26,7 +26,7 @@ export function removePatchCredentials(
     if (
       fileVariable.test(name) ||
       /^TF_TOKEN_/iu.test(name) ||
-      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
+      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
         name,
       ) ||
       credentialNames.includes(name.toUpperCase()) ||
