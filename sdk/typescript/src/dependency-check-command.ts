@@ -208,11 +208,16 @@ export function registerDependencyCheck(
                 (context.stderr ?? process.stderr).write(message + "\n"),
             },
             async (emit) => {
+              const project = config
+                ? await readProjectConfig(config, cwd)
+                : undefined;
+              const scope = project?.input.exploitability?.scope;
               if (sources && sinks && stacks) {
                 const { runLocalStackInvestigation } =
                   await import("./dependency-stack-launcher.js");
                 return runLocalStackInvestigation({
                   cve: args.subject.toUpperCase(),
+                  callerScope: scope?.instructions,
                   repository,
                   signal,
                   sourcesPath: resolveConfigPath(cwd, sources),
@@ -223,9 +228,6 @@ export function registerDependencyCheck(
                     context.runAgent({ ...request, ...settings }),
                 });
               }
-              const project = config
-                ? await readProjectConfig(config, cwd)
-                : undefined;
               const { runReviewedDependencyCheck } =
                 await import("./dependency-reviewed-check.js");
               const reviewed = await runReviewedDependencyCheck(
@@ -233,9 +235,8 @@ export function registerDependencyCheck(
                   directory: repository,
                   subject: args.subject,
                   vulnDescription: options.vulnDescription,
-                  scope: project?.input.exploitability?.scope?.instructions,
-                  excludePaths:
-                    project?.input.exploitability?.scope?.exclude_paths,
+                  scope: scope?.instructions,
+                  excludePaths: scope?.exclude_paths,
                   sources: project?.input.exploitability?.sources,
                   sinks: project?.input.exploitability?.sinks,
                   evidenceSources:

@@ -570,7 +570,13 @@ function sectionBody(section: Section, heading: string) {
       "Advisory lookup failed · " + prose(stack.advisoryLookupError),
     stack &&
       "A sampled stack shows which functions ran. It does not measure call counts or establish who controlled the input.",
-    list((check?.assumptions ?? []).map(prose), "Scope"),
+    list(
+      (stack?.callerScope
+        ? [stack.callerScope]
+        : (check?.assumptions ?? [])
+      ).map(prose),
+      "Scope",
+    ),
     decisionIndex(findings),
     ...results.map((result) => result.decision),
     evidence.length > 0 && heading + " Evidence",
