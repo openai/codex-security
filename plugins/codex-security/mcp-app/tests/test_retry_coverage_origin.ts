@@ -51,8 +51,9 @@ test("three actual cumulative worker attempts retain original coverage ownership
   }
 });
 
-test("an accepted retry reconciles each occurrence of a legacy ID-less surface", async (t) => {
+test("an accepted retry reconciles each occurrence of legacy ID-less surfaces and deferrals", async (t) => {
   const f = await workerHistoryFixture(t, 2);
+  const task = { reason: "Synthetic pending review" };
   const single = { label: "Single review", disposition: "no_issue_found" };
   const repeated = { ...single, label: "Repeated review" };
   const named = { ...single, label: "Named review" };
@@ -76,7 +77,7 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
           { ...mixed, id: "known" },
         ],
         explicitExclusions: [],
-        deferred: [],
+        deferred: [task, { ...task, id: "saved" }],
       },
     }),
   );
@@ -91,10 +92,19 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
           { ...mixed, id: "known" },
           { ...mixed, id: "assigned" },
         ],
+        deferred: [task, { ...task, id: "assigned" }, task],
       }),
     ),
   );
   const { coverage } = await f.readAccepted();
+  assert.deepEqual(
+    coverage.deferred.map(
+      (row: { provenance: { attempt: number } }) => row.provenance.attempt,
+    ),
+    [1, 1, 2],
+  );
+  assert.equal(coverage.deferred[0].provenance.sourceId, "saved");
+  assert.equal(coverage.deferred[1].provenance.sourceId, "assigned");
   assert.deepEqual(
     coverage.surfaces.map(
       (row: { label: string; provenance: { attempt: number } }) => [

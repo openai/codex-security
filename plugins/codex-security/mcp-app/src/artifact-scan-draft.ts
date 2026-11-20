@@ -1074,6 +1074,49 @@ async function preserveScanDraft(
   };
 }
 
+// Each occurrence can inherit a matching saved identity once per snapshot.
+// Reserve explicit identities first, including duplicates needed by closure checks.
+function inferSavedIds<T extends JsonObject>(
+  snapshots: T[][],
+  normalize: (rows: T[]) => T[],
+  identity: (row: T) => JsonObject | undefined,
+) {
+  const known: { id: string; content: JsonObject }[] = [];
+  function remember(row: T) {
+    if (typeof row.id !== "string") return;
+    const content = identity(row);
+    if (content) known.push({ id: row.id, content });
+  }
+  for (const rows of snapshots) rows.forEach(remember);
+  for (const rows of snapshots) {
+    const reserved = new Set(rows.map((row) => row.id));
+    for (const row of rows) {
+      // Candidate deferrals own their candidate IDs even before normalization.
+      if (typeof row.candidateId === "string" && !identity(row))
+        reserved.add(row.candidateId);
+    }
+    for (const [index, row] of rows.entries()) {
+      if (typeof row.id === "string") continue;
+      const content = identity(row);
+      if (!content) continue;
+      const matching = known.find(
+        (saved) =>
+          !reserved.has(saved.id) && isDeepStrictEqual(saved.content, content),
+      );
+      if (matching) {
+        rows[index] = { ...row, id: matching.id };
+        reserved.add(matching.id);
+      }
+    }
+    const normalized = normalize(rows);
+    for (const [index, row] of rows.entries()) {
+      if (typeof row.id === "string") continue;
+      rows[index] = normalized[index]!;
+      remember(normalized[index]!);
+    }
+  }
+}
+
 async function mergeSavedDraft(
   input: ScanDraftInput,
   result: ScanDraftInput,
@@ -1086,69 +1129,19 @@ async function mergeSavedDraft(
   const sources = savedSources.map(({ input }) => input);
   // Older checkpoints can omit IDs already assigned in their published output.
   const drafts = [result, ...sources];
-  const savedSurfaces = drafts.flatMap((draft) => draft.reviewState.surfaces);
-  for (const source of drafts) {
-    const reservedSurfaceIds = new Set(
-      source.reviewState.surfaces.flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    const surfaces = source.reviewState.surfaces.map((row) => {
-      if (typeof row.id === "string") return row;
-      const matching = savedSurfaces.find(
-        ({ id, ...content }) =>
-          typeof id === "string" &&
-          !reservedSurfaceIds.has(id) &&
-          isDeepStrictEqual(
-            { ...content, receiptRefs: content.receiptRefs ?? [] },
-            { ...row, receiptRefs: row.receiptRefs ?? [] },
-          ),
-      );
-      if (matching === undefined) return row;
-      const id = matching.id as string;
-      reservedSurfaceIds.add(id);
-      return { ...row, id };
-    });
-    const normalizedSurfaces = normalizeSurfaces(surfaces);
-    // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
-    source.reviewState.surfaces = surfaces.map((row, index) => {
-      if (typeof row.id === "string") return row;
-      const normalized = normalizedSurfaces[index]!;
-      savedSurfaces.push(normalized);
-      return normalized;
-    });
-  }
-  const savedDeferred = sources.flatMap(
-    (source) => source.reviewState.deferred,
+  inferSavedIds(
+    drafts.map((draft) => draft.reviewState.surfaces),
+    normalizeSurfaces,
+    ({ id: _id, ...row }) => ({ ...row, receiptRefs: row.receiptRefs ?? [] }),
   );
-  for (const source of sources) {
-    const reservedIds = new Set(
-      source.reviewState.deferred.flatMap((row) =>
-        typeof row.id === "string" ? [row.id] : [],
-      ),
-    );
-    source.reviewState.deferred = normalizeDeferred(
-      source.reviewState.deferred.map((row) => {
-        if (
-          typeof row.id === "string" ||
-          "candidateId" in row ||
-          "candidate" in row ||
-          "finding" in row
-        )
-          return row;
-        const matching = savedDeferred.find(
-          ({ id, ...content }) =>
-            typeof id === "string" &&
-            !reservedIds.has(id) &&
-            isDeepStrictEqual(content, row),
-        );
-        if (matching === undefined) return row;
-        const id = matching.id as string;
-        reservedIds.add(id);
-        return { ...row, id };
-      }),
-    );
-  }
+  inferSavedIds(
+    drafts.map((draft) => draft.reviewState.deferred),
+    normalizeDeferred,
+    ({ id: _id, ...row }) =>
+      "candidateId" in row || "candidate" in row || "finding" in row
+        ? undefined
+        : row,
+  );
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
   const keepsGenericWork = (row: JsonObject) =>
     ambiguousGenericEntry(row, ambiguousDeferredIds);
@@ -1803,10 +1796,6 @@ export async function reconcileAcceptedWorkerHistory(
   requireFiniteNumbers(input);
   const savedSources = structuredClone(history);
   const initial = structuredClone(input);
-  // Legacy terminal drafts may lack the IDs assigned to their archived occurrences.
-  initial.reviewState.deferred = normalizeDeferred(
-    initial.reviewState.deferred,
-  );
   const workerPrefix = workerReceiptPrefix(context);
   const archivePrefix = `${workerPrefix}attempts/`;
   const currentReceiptRefs = new Set(

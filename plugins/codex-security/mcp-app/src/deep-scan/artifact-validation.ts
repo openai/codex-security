@@ -321,8 +321,8 @@ export function scanCoverage(
             return row ? [comparable(row)] : [];
           },
         );
-        // Prefer explicit IDs over an otherwise identical unnamed surface.
-        if (field === "surfaces")
+        // Prefer explicit IDs over an otherwise identical unnamed occurrence.
+        if (field === "surfaces" || field === "deferred")
           rows.sort(
             (left, right) =>
               Number(right.id !== undefined) - Number(left.id !== undefined),
