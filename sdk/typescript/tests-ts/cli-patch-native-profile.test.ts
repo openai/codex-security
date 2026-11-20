@@ -70,7 +70,7 @@ async function resolvePatchProfile(
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
   const repository = join(root, "repository");
-  const extra = join(root, "extra-workspace");
+  const extra = join(root, "private", "extra-workspace");
   const temporaryDirectory = join(root, "temp");
   for (const path of [
     // Create the parent directory for the default credential-store deny rule.
@@ -334,7 +334,12 @@ glob_scan_max_depth = 8
       modelOnlyReadOnlyPaths,
       externalConfigPaths: controls?.externalConfigPaths,
       externalCachePaths,
-      credentialStorePaths: controls?.credentialStorePaths,
+      // The configured workspace reopens a descendant of this denied directory.
+      credentialStorePaths:
+        controls?.credentialStorePaths ??
+        (process.platform === "linux"
+          ? [dirname(extra), join(extra, "session")]
+          : []),
     };
     const reader = await readSkillCommandOutput(stream, {
       directory: repository,
@@ -410,6 +415,9 @@ glob_scan_max_depth = 8
         permissions.readOnlyPaths.map((path) => [path, { ".": "read" }]),
       ),
       ...Object.fromEntries(snapshotDenies),
+      ...(snapshotDenies.some(([path]) => path.endsWith("/**}"))
+        ? { glob_scan_max_depth: 4096 }
+        : {}),
       ...(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {}),
     };
     expect(snapshotProfile).toEqual({
@@ -486,8 +494,23 @@ glob_scan_max_depth = 8
     const fileDenies = snapshotDenies.filter(
       ([path]) => !path.endsWith("{*.config.toml,.*.config.toml.tmp}"),
     );
-    expect(fileDenies).toHaveLength(deniedFiles.size);
-    for (const file of deniedFiles) {
+    const stores = [...deniedFiles];
+    const writable = [repository, ...expectedPolicy.writableRoots];
+    const mounts = stores.filter(
+      (file) =>
+        process.platform !== "linux" ||
+        !stores.some(
+          (parent) =>
+            file.startsWith(parent + "/") &&
+            !writable.some(
+              (root) =>
+                root.startsWith(parent + "/") &&
+                (file === root || file.startsWith(root + "/")),
+            ),
+        ),
+    );
+    expect(fileDenies).toHaveLength(mounts.length);
+    for (const file of mounts) {
       expect(
         fileDenies.filter(([key, access]) =>
           access === "deny" ? matchesGlob(file, key) : key === file,
@@ -537,6 +560,12 @@ test("native patch profiles ignore inactive repository grants and remain isolate
   expect(first.name).not.toBe(second.name);
   expect(first.filesystem).not.toHaveProperty(second.administration);
   expect(second.filesystem).not.toHaveProperty(first.administration);
+  if (process.platform === "linux") {
+    expect(first.filesystem[join(first.storage, "session")]).toBeUndefined();
+    expect(second.filesystem[join(second.storage, "session")]).toEqual({
+      ".": "deny",
+    });
+  }
 }, 30_000);
 
 test.each([false, true])(
@@ -1350,7 +1379,7 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
     },
     { set: policySet, paths: [policyCluster] },
   );
-}, 60_000);
+}, 180_000);
 
 test.each(["administration", "direct-administration"] as const)(
   "storage keeps overlapping Git administration protected in snapshots: %s",

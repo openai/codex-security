@@ -1499,6 +1499,7 @@ async function patchSandboxWritableRoots(
   if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return undefined;
   const writable = [sandbox.directory, ...Object.keys(workspaces)];
   for (const [path, access] of Object.entries(filesystem)) {
+    if (path === "glob_scan_max_depth") continue;
     if (access === "deny" && isAbsolute(path)) continue;
     if (!isJsonObject(access)) return undefined;
     if (
@@ -1654,13 +1655,28 @@ function windowsMissingStorePattern(path: string): string {
   return join(dirname(escaped), `{${file},[?]}`);
 }
 
-function patchWorkspaceProfile(
+async function patchWorkspaceProfile(
+  directory: string,
+  environment: NodeJS.ProcessEnv,
   workspace: JsonObject,
   readOnlyPaths: readonly string[],
   credentialStorePaths: readonly string[] = [],
   codexProfileHomes: readonly string[] = [],
 ) {
-  return {
+  const filesystem: JsonObject = {
+    ...Object.fromEntries(readOnlyPaths.map((path) => [path, { ".": "read" }])),
+    // Native snapshot profiles carrying provider settings are created
+    // in the managed homes after the initial credential inventory.
+    ...Object.fromEntries(
+      codexProfileHomes.map((home) => [
+        join(escapeCredentialGlob(home), "{*.config.toml,.*.config.toml.tmp}"),
+        "deny",
+      ]),
+    ),
+    ...(workspace["exclude_tmpdir_env_var"] === true ? { ":tmpdir": {} } : {}),
+    ...(workspace["exclude_slash_tmp"] === true ? { ":slash_tmp": {} } : {}),
+  };
+  const profile = {
     extends: ":workspace",
     network: { enabled: workspace["network_access"] === true },
     workspace_roots: Object.fromEntries(
@@ -1669,43 +1685,47 @@ function patchWorkspaceProfile(
         true,
       ]),
     ),
-    filesystem: {
-      ...Object.fromEntries(
-        readOnlyPaths.map((path) => [path, { ".": "read" }]),
-      ),
-      // Native snapshot profiles carrying provider settings are created
-      // in the managed homes after the initial credential inventory.
-      ...Object.fromEntries(
-        codexProfileHomes.map((home) => [
-          join(
-            escapeCredentialGlob(home),
-            "{*.config.toml,.*.config.toml.tmp}",
-          ),
-          "deny",
-        ]),
-      ),
-      ...Object.fromEntries(
-        credentialStorePaths.map((path) => {
-          if (process.platform === "win32" && !existsSync(path))
-            return [windowsMissingStorePattern(path), "deny"];
-          if (process.platform === "linux" && !existsSync(dirname(path))) {
-            // A literal deny under an absent directory makes bubblewrap mount
-            // a missing parent. Expand the exact filename at each tool launch.
-            const name = escapeCredentialGlob(basename(path)).replace(
-              /[a-zA-Z0-9.]/u,
-              "[$&]",
-            );
-            return [join(escapeCredentialGlob(dirname(path)), name), "deny"];
-          }
-          return [path, { ".": "deny" }];
-        }),
-      ),
-      ...(workspace["exclude_tmpdir_env_var"] === true
-        ? { ":tmpdir": {} }
-        : {}),
-      ...(workspace["exclude_slash_tmp"] === true ? { ":slash_tmp": {} } : {}),
-    },
+    filesystem,
   };
+  const stores = new Set(credentialStorePaths);
+  const writable =
+    process.platform === "linux" && stores.size
+      ? await patchSandboxWritableRoots(
+          { profile, directory, environment },
+          directory,
+        )
+      : undefined;
+  const hasDeniedParent = (path: string) => {
+    let current = path;
+    while (writable && !writable.includes(current)) {
+      const parent = dirname(current);
+      if (parent === current) break;
+      if (stores.has(parent)) return true;
+      current = parent;
+    }
+    return false;
+  };
+  for (const path of stores) {
+    // Bubblewrap cannot mount a second deny inside a masked directory.
+    // A writable carveout reopens its subtree and needs its own denies.
+    if (hasDeniedParent(path)) continue;
+    if (process.platform === "win32" && !existsSync(path)) {
+      filesystem[windowsMissingStorePattern(path)] = "deny";
+    } else if (process.platform === "linux" && !existsSync(dirname(path))) {
+      // Bubblewrap cannot mount below a missing parent. Its glob walk finds files,
+      // so match both the future store and any files it contains as a directory.
+      // The impossible [.] filename starts the native glob at the parent.
+      const leaf = escapeCredentialGlob(basename(path));
+      const pattern = join(
+        escapeCredentialGlob(dirname(path)),
+        `{[.],${leaf},${leaf}/**}`,
+      );
+      filesystem[pattern] = "deny";
+      // Bound the native walk by Linux PATH_MAX, which exceeds the component count.
+      filesystem["glob_scan_max_depth"] = 4096;
+    } else filesystem[path] = { ".": "deny" };
+  }
+  return profile;
 }
 
 function currentGitParameters(
@@ -1792,7 +1812,9 @@ async function resumeHookSandbox(
     environment,
     providerKeyVariable: scanProviderEnvKey(config),
     stripAwsCredentials: scanModelProvider(config) === "amazon-bedrock",
-    profile: patchWorkspaceProfile(
+    profile: await patchWorkspaceProfile(
+      directory,
+      environment,
       workspace,
       gitDirectories,
       await readCredentialStorePaths(config),
@@ -3294,6 +3316,7 @@ async function runCodexSkillProcess(
                   ? undefined
                   : {
                       ...output.appServer,
+                      environment,
                       apiKey,
                       modelProvider,
                       onThreadStarted: releaseCredentialHome,
@@ -17556,6 +17579,7 @@ export async function readSkillCommandOutput(
       configuration: JsonObject,
     ) => void;
     readonly directory?: string;
+    readonly environment?: NodeJS.ProcessEnv;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly linkedEvidence?: DependencyResourceEvents;
@@ -17902,7 +17926,9 @@ export async function readSkillCommandOutput(
                   }
                 : {};
             // Extend the effective native workspace policy without resetting its settings.
-            const profile = patchWorkspaceProfile(
+            const profile = await patchWorkspaceProfile(
+              appServer.directory!,
+              appServer.environment ?? process.env,
               workspace,
               appServer.permissions.readOnlyPaths,
               (await appServer.permissions.protectShellCredentialFiles?.(
