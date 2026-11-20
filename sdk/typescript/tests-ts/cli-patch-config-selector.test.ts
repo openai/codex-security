@@ -5,6 +5,7 @@ import {
   readFile,
   rename,
   unlink,
+  symlink,
   writeFile,
   stat,
   appendFile,
@@ -15,7 +16,11 @@ import {
 } from "node:fs/promises";
 import { join, dirname, sep } from "node:path";
 import {
+  fixSavedFinding,
+  publicationRepository,
   runGitRepositoryCommand,
+  runPublicationCommand,
+  runSavedPublication,
   repositoryGit,
   patchDirectories,
   runIssuePatch,
@@ -209,10 +214,63 @@ test.each([
   },
 );
 
+test.each(["selected file", "selector created by hook", "repository config"])(
+  "publication binds the caller's GIT_CONFIG: %s",
+  async (mode) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const marker = "remote.origin.gh-resolved";
+    const expected = "upstream/repository";
+    const hook = mode === "selector created by hook";
+    const selector =
+      mode === "repository config"
+        ? ".git/config"
+        : hook
+          ? "selector"
+          : join(await fixtures.create("patch-hosting-config-"), "selector");
+    git("config", "push.recurseSubmodules", "false");
+    if (hook)
+      await writeFile(
+        join(directory, ".git/hooks/pre-commit"),
+        "#!/bin/sh\nprintf '[remote \"origin\"]\\ngh-resolved = decoy/repository\\n' > selector\n",
+        { mode: 0o755 },
+      );
+    else git("config", "--file", selector, marker, expected);
+    let push: readonly string[] = [];
+    const targets: string[] = [];
+    const environment = { GIT_CONFIG: selector };
+    const outcome = await runSavedPublication(directory, {
+      environment,
+      onRepositoryCommand(command, args, cwd, options) {
+        const env = { ...environment, ...options?.environment };
+        if (command === "git" && args[0] === "push") push = args;
+        if (command === "gh" && args[1] === "create")
+          targets.push(repositoryGit(cwd, env)("config", "--get", marker));
+        return runPublicationCommand(command, args, cwd, {
+          ...options,
+          environment: env,
+        });
+      },
+      onCodex: fixSavedFinding(directory),
+    });
+    if (hook) {
+      expect(git("config", "--file", selector, "--get", marker)).toBe(
+        "decoy/repository",
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("Git configuration changed");
+      expect(push).toEqual([]);
+      expect(targets).toEqual([]);
+    } else {
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(push).toContain("--recurse-submodules=no");
+      expect(targets).toEqual([expected]);
+    }
+  },
+);
+
 test.each(["unset", "missing", "unrelated", "decoy remote"] as const)(
   "publication preflight reads effective Git configuration with selector: %s",
   async (mode) => {
-    const { publicationRepository } = await import("./cli-patch-fixtures.js");
     const { directory, git } = await publicationRepository(fixtures);
     const support = await fixtures.create("patch-publication-selector-");
     const selector = join(support, "selected-config");
@@ -276,7 +334,7 @@ for (const selected of [
   const states: Array<boolean | "directory"> =
     selected.startsWith("disabled") || selected === "empty global"
       ? [true]
-      : selected === "device" || selected.startsWith("lfs ")
+      : selected.startsWith("lfs ")
         ? [false]
         : [false, true];
   if (selected === "global" || selected === "administration global")
@@ -325,7 +383,8 @@ for (const selected of [
           environment["GIT_CONFIG_SYSTEM"] = control;
           if (selected === "system") environment["GIT_CONFIG_NOSYSTEM"] = "0";
         } else if (selected === "device") {
-          environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
+          if (create) await symlink("/dev/null", control);
+          environment["GIT_CONFIG_GLOBAL"] = create ? control : "/dev/null";
         } else if (selected !== "disabled global") {
           environment["GIT_CONFIG_GLOBAL"] =
             selected === "relative global"
@@ -386,6 +445,7 @@ for (const selected of [
             if (create === "directory") {
               await mkdir(control, { recursive: true });
             } else if (create) {
+              if (selected === "device") await unlink(control);
               await mkdir(hooks);
               await writeFile(
                 join(hooks, "post-checkout"),

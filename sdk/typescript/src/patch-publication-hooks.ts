@@ -28,6 +28,9 @@ export function patchCredentialKind(
     /^(?:(?:PIP|UV)_CONFIG_FILE|(?:PIP|SSL|BUNDLE_SSL)_CLIENT_CERT|P?NPM_CONFIG_(?:USER|GLOBAL)CONFIG|REGISTRY_AUTH_FILE|PNPM_CONFIG_NPMRC_AUTH_FILE)$/iu.test(
       name,
     ) ||
+    /^_?RCLONE_(?:.+_(?:KEY|SERVICE_ACCOUNT)_FILE|CLIENT_KEY|RC_(?:KEY|HTPASSWD))$/iu.test(
+      name,
+    ) ||
     /^P?NPM_CONFIG_(?:\/\/.*:)?(?:CERTFILE|KEYFILE)$/isu.test(name) ||
     /^(?:YARN_(?:USER)?CONFIG|CONDARC|PDM_CONFIG_FILE|HATCH_CONFIG|KEYRING_PROPERTY_FILE_PATH|POETRY_CERTIFICATES_.+_CLIENT_CERT)$/iu.test(
       name,
@@ -43,6 +46,9 @@ export function patchCredentialKind(
     );
   if (secret) return secret[1] ? "file" : "value";
   if (
+    /^RCLONE_.+_(?:PASS|PASSWORD2|KEY|KEY_PEM|SAS_URL|BEARER_TOKEN_COMMAND|SSE_CUSTOMER_KEY_BASE64)$/iu.test(
+      name,
+    ) ||
     /^(?:AWS_BEARER_TOKEN_|POETRY_PYPI_TOKEN_|TF_TOKEN_|NuGetPackageSourceCredentials_)/iu.test(
       name,
     ) ||

@@ -1322,6 +1322,19 @@ function gitConfigFile(directory: string, file: string | undefined) {
     : relativeFile(directory, file);
 }
 
+export async function publicationConfigSelector(
+  directory: string,
+  environment: ProcessEnvironment,
+): Promise<string | undefined> {
+  const file = environmentEntry(environment, "GIT_CONFIG");
+  const path = gitConfigFile(directory, file);
+  if (!path || isAbsolute(file!) || process.platform === "win32") return path;
+  // git config interprets its explicit file from the caller, even when
+  // Git enters the worktree. Resolve the parent before that caller can disappear.
+  const parent = dirname(path);
+  return (await canonicalPath(parent)) + path.slice(parent.length);
+}
+
 async function directoryLinkEntry(
   path: string,
   identity: { dev: bigint; ino: bigint },
@@ -1687,7 +1700,7 @@ export async function capturePatchGitControls(
   const configurationFiles = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
-  const inaccessibleIncludes = new Set<string>();
+  const inaccessibleConfigs = new Map<string, string>();
   const unreadableConfigurations = new Set<string>();
   const inaccessibleHooks = new Set<string>();
   const hookContents = new Map<
@@ -1748,17 +1761,18 @@ export async function capturePatchGitControls(
     optional = false,
   ): Promise<void> => {
     try {
-      // Absent and empty regular inputs have no --show-origin records. Devices
-      // such as /dev/null and unavailable optional inputs keep native behavior.
+      // Empty or unavailable inputs have no --show-origin records. Bind their
+      // location too, preserving native access to devices such as /dev/null.
       const metadata = await stat(path).catch(missing);
-      if (metadata === undefined) {
+      if (metadata === undefined || metadata.isDirectory()) {
         await rememberControl(path, false);
         controlPaths.get(path)!.contents = null;
       } else if (metadata.isFile())
         await rememberConfiguration(path, true, optional);
+      else await rememberControl(path, false, false);
     } catch (error) {
-      if (optional && hasErrorCode(error, "EACCES", "EPERM")) return;
-      throw error;
+      if (!optional || !hasErrorCode(error, "EACCES", "EPERM")) throw error;
+      inaccessibleConfigs.set(path, "configuration");
     }
   };
   const expandConfigurationPath = async (
@@ -2265,7 +2279,7 @@ export async function capturePatchGitControls(
       } catch (error) {
         // Active includes already passed Git's normal --includes read above.
         if (optional && hasErrorCode(error, "EACCES", "ELOOP")) {
-          inaccessibleIncludes.add(includePath);
+          inaccessibleConfigs.set(includePath, "conditional include");
           return;
         }
         throw error;
@@ -2328,6 +2342,13 @@ export async function capturePatchGitControls(
         const path = gitConfigFile(base, file);
         if (path) await inspectFile(path, "selector", true);
       }
+    if (file && automaticPublication && checkout === root) {
+      const selector = await publicationConfigSelector(
+        requestedDirectory,
+        environment,
+      );
+      if (selector) await rememberSelectedConfiguration(selector);
+    }
     for (const { scope, origin, key, value } of settings) {
       if (!includeSetting.test(key)) continue;
       const relativeTo = origin.startsWith("file:")
@@ -2666,17 +2687,17 @@ export async function capturePatchGitControls(
             `Git hook became accessible during the patch: ${path}`,
           );
       }
-      for (const path of inaccessibleIncludes) {
+      for (const [path, kind] of inaccessibleConfigs) {
         try {
           const canonical = await canonicalPath(path);
           const metadata = await stat(canonical).catch(missing);
           if (metadata === undefined || metadata.isDirectory()) continue;
         } catch (error) {
-          if (hasErrorCode(error, "EACCES", "ELOOP")) continue;
+          if (hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) continue;
           throw error;
         }
         throw new Error(
-          `Git conditional include became accessible during the patch: ${path}`,
+          `Git ${kind} became accessible during the patch: ${path}`,
         );
       }
       for (const [path, expected] of controlPaths) {
@@ -2860,19 +2881,28 @@ export async function capturePatchGitControls(
       }
       if (capture) {
         await captureReferences(checkout);
+        const selector = environmentEntry(environment, "GIT_CONFIG");
         const [common, storage] = await Promise.all([
           absolutePath(checkout, "--git-common-dir"),
-          // Git LFS reads the selected config with includes enabled.
-          runControl(checkout, [
-            "config",
-            "--includes",
-            "--null",
-            "--show-scope",
-            "--show-origin",
-            "--default=",
-            "--get",
-            "lfs.storage",
-          ]).catch((error: unknown) => {
+          // Git starts LFS filters at the checkout root, even from a component.
+          runControl(
+            checkout,
+            [
+              "config",
+              "--includes",
+              "--null",
+              "--show-scope",
+              "--show-origin",
+              "--default=",
+              "--get",
+              "lfs.storage",
+            ],
+            {
+              environment: {
+                GIT_CONFIG: gitConfigFile(checkout, selector) ?? selector,
+              },
+            },
+          ).catch((error: unknown) => {
             const failure = error as Error & {
               code?: unknown;
               status?: unknown;
@@ -3217,14 +3247,14 @@ export async function capturePatchGitControls(
       } catch (error) {
         // Locate opaque control paths without resolving their entries. The
         // native sandbox must enforce the literal exclusions or reject them.
-        if (!hasErrorCode(error, "EACCES", "ELOOP")) throw error;
+        if (!hasErrorCode(error, "EACCES", "EPERM", "ELOOP")) throw error;
         const parent = dirname(ancestor);
         if (parent === ancestor) throw error;
         ancestor = parent;
       }
     }
   };
-  for (const path of inaccessibleIncludes) {
+  for (const path of inaccessibleConfigs.keys()) {
     const canonical = await snapshotControlLocation(path);
     if ([...snapshotStoragePaths].some((storage) => inside(storage, canonical)))
       snapshotControlPaths.push(canonical);
