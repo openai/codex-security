@@ -164,7 +164,9 @@ export class WorkbenchDeepScanStore {
       );
     let result = await begin({ probeModelFileInputs: true });
     if (typeof result.newScanTarget === "string") {
-      const modelFileInputsJson = JSON.stringify(await currentModelFileInputs());
+      const modelFileInputsJson = JSON.stringify(
+        await currentModelFileInputs(),
+      );
       result = await begin({
         joinOnly: input.projectConfigPath !== undefined,
         modelFileInputsJson,

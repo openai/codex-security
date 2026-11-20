@@ -191,7 +191,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           return typeof path === "string" && path ? [path] : [];
         }),
       ]);
-      return bindCodexExecutable(environment, cwd, signal, this.executableRoots);
+      return bindCodexExecutable(
+        environment,
+        cwd,
+        signal,
+        this.executableRoots,
+      );
     };
     while (true) {
       signal.throwIfAborted();
