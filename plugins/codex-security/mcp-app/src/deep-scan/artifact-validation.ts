@@ -279,6 +279,10 @@ export async function readAcceptedDiscovery(
           : [{ attempt: Number(number), coverage: input.reviewState }];
       }),
       receiptDigests,
+      [
+        draft.result.reviewState,
+        ...current.map(({ input }) => input.reviewState),
+      ],
     ),
   };
 }
@@ -289,6 +293,7 @@ export function scanCoverage(
   scanDir: string,
   archived: { attempt: number; coverage: ScanDraftInput["reviewState"] }[] = [],
   receiptDigests: ReadonlyMap<string, string> = new Map(),
+  currentSources: ScanDraftInput["reviewState"][] = [worker.result.reviewState],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -301,23 +306,25 @@ export function scanCoverage(
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
   const reviews = [provenance];
+  const namedFirst = (left: JsonObject, right: JsonObject) =>
+    Number(right.id !== undefined) - Number(left.id !== undefined);
+  const matchingCoverage = (coverage: ScanDraftInput["reviewState"]) => ({
+    ...coverage,
+    // Consume explicitly named rows before an otherwise identical anonymous row.
+    surfaces: [...coverage.surfaces].sort(namedFirst),
+    deferred: [...coverage.deferred].sort(namedFirst),
+  });
+  const authored = currentSources.map(matchingCoverage);
   const history: typeof archived = [...archived]
     .sort((left, right) => left.attempt - right.attempt)
     .map(({ attempt, coverage }) => ({
       attempt,
-      coverage: {
-        ...coverage,
-        // Match explicit IDs before an otherwise identical unnamed occurrence.
-        surfaces: [...coverage.surfaces].sort(
-          (left, right) =>
-            Number(right.id !== undefined) - Number(left.id !== undefined),
-        ),
-      },
+      coverage: matchingCoverage(coverage),
     }));
   // Each occurrence in one snapshot can account for only one current record.
   const matchedRows = new Map<
     string,
-    Map<(typeof history)[number], Set<number>>
+    Map<ScanDraftInput["reviewState"], Set<number>>
   >();
   const project = <T extends Record<string, unknown>>(
     field: string,
@@ -325,10 +332,9 @@ export function scanCoverage(
   ): T => {
     const matchedHistory = matchedRows.get(field) ?? new Map();
     matchedRows.set(field, matchedHistory);
-    let origin = provenance;
-    for (const saved of history) {
-      const matched = matchedHistory.get(saved) ?? new Set<number>();
-      const rows = (saved.coverage[field] as unknown[] | undefined) ?? [];
+    const match = (coverage: ScanDraftInput["reviewState"]) => {
+      const matched = matchedHistory.get(coverage) ?? new Set<number>();
+      const rows = (coverage[field] as unknown[] | undefined) ?? [];
       const index = rows.findIndex(
         (row, index) =>
           !matched.has(index) &&
@@ -340,11 +346,24 @@ export function scanCoverage(
             receiptDigests,
           ),
       );
-      if (index < 0) continue;
+      if (index < 0) return undefined;
       matched.add(index);
-      matchedHistory.set(saved, matched);
-      if (origin === provenance)
+      matchedHistory.set(coverage, matched);
+      return asRecord(rows[index]) ?? {};
+    };
+    let source: Record<string, unknown> | undefined;
+    for (const coverage of authored) {
+      const row = match(coverage);
+      source ??= row;
+    }
+    let origin = provenance;
+    for (const saved of history) {
+      const row = match(saved.coverage);
+      if (row === undefined) continue;
+      if (origin === provenance) {
         origin = { workerId: worker.id, attempt: saved.attempt };
+        source ??= row;
+      }
     }
     if (!reviews.some((review) => review.attempt === origin.attempt))
       reviews.push(origin);
@@ -358,12 +377,13 @@ export function scanCoverage(
       "scanReceiptRefs",
     ])
       delete projected[key];
+    const sourceId = (source ?? item).id;
     return {
       ...result,
       provenance: {
         ...projected,
         ...origin,
-        ...(item.id === undefined ? {} : { sourceId: item.id }),
+        ...(sourceId === undefined ? {} : { sourceId }),
         ...(item.candidateId === undefined
           ? {}
           : { candidateId: item.candidateId }),

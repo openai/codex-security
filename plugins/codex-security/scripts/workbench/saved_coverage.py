@@ -441,6 +441,8 @@ class SavedCoverageOrigins:
         rows = self.sources[relative][0].get(field, [])
         if not isinstance(rows, list) or not 0 < index <= len(rows):
             return attempt
+        for offset in range(1, len(rows) + 1):
+            self.attempts[relative, field, offset] = attempt
         for path, (coverage, owner) in self.sources.items():
             previous_attempt = self.worker_attempts.get(
                 self.directory(path).as_posix(), (owner, worker["attempt"])
@@ -456,24 +458,22 @@ class SavedCoverageOrigins:
                 key=lambda row: isinstance(row, dict) and "id" in row,
                 reverse=True,
             )
-            matched = False
-            for current in rows[:index]:
+            for offset, current in enumerate(rows, 1):
                 match = next(
                     (
-                        offset
-                        for offset, row in enumerate(unmatched)
+                        previous_index
+                        for previous_index, row in enumerate(unmatched)
                         if self.same_row(field, row, path, current, relative, owner)
                     ),
                     None,
                 )
-                matched = match is not None
                 if match is not None:
                     unmatched.pop(match)
-            if matched:
-                attempt = previous_attempt
-                self.origin_sources[key] = path
-        self.attempts[key] = attempt
-        return attempt
+                    current_key = (relative, field, offset)
+                    if previous_attempt < self.attempts[current_key]:
+                        self.attempts[current_key] = previous_attempt
+                        self.origin_sources[current_key] = path
+        return self.attempts[key]
 
     def retained_closure(self, closure, worker, source, published, reviewed):
         relative = self.paths.get(id(source))

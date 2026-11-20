@@ -9,6 +9,61 @@ import pytest
 from workbench_test_support import interrupt_publication, read_review_state, write_checkpoint
 
 
+def test_changed_coverage_matches_each_snapshot_without_replaying_prefixes(
+    workbench_api, tmp_path, monkeypatch
+):
+    from workbench.saved_coverage import SavedCoverageOrigins
+
+    count = 40
+    worker = {"id": "synthetic-worker", "attempt": 2}
+    worker_root = "artifacts/deep_discovery/workers/synthetic-worker"
+    old_path = f"{worker_root}/attempts/attempt-1/result.json"
+    current_path = f"{worker_root}/output/result.json"
+    snapshots = [
+        {
+            "surfaces": [
+                {
+                    "id": f"surface-{index}",
+                    "label": f"{label} review {index}",
+                    "disposition": "no_issue_found",
+                    "receiptRefs": [],
+                }
+                for index in range(count)
+            ]
+        }
+        for label in ("Old", "Current")
+    ]
+    sources = [
+        (path, {"reviewState": coverage}, worker["id"])
+        for path, coverage in zip((old_path, current_path), snapshots)
+    ]
+    original = copy.deepcopy(sources)
+    origins = SavedCoverageOrigins(
+        sources,
+        set(),
+        {f"{worker_root}/attempts/attempt-1": (worker["id"], 1)},
+        lambda relative, row, owner: row.get("receiptRefs", []),
+        tmp_path,
+    )
+    comparisons = 0
+    same_row = origins.same_row
+
+    def compare(*args):
+        nonlocal comparisons
+        comparisons += 1
+        return same_row(*args)
+
+    monkeypatch.setattr(origins, "same_row", compare)
+    for index in range(count, 0, -1):
+        assert origins.attempt("surfaces", index, worker, snapshots[1]) == 2
+    assert comparisons <= count * count
+    first_pass = comparisons
+    for index in range(1, count + 1):
+        assert origins.attempt("surfaces", index, worker, snapshots[1]) == 2
+    assert comparisons == first_pass
+    assert sources == original
+
+
 def add_discovery_attempt(connection, scan, attempt, *, canonical_output=True):
     result = scan.add_worker(connection)
     worker_id = result.parent.name

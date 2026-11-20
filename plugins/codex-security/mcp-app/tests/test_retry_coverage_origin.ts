@@ -154,6 +154,56 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
   );
 });
 
+for (const field of ["surfaces", "deferred"] as const) {
+  for (const checkpointOnly of [false, true]) {
+    test(`accepted ${field} preserve authored identities, checkpoint only=${checkpointOnly}`, async (t) => {
+      const f = await workerHistoryFixture(t, 2);
+      const anonymous =
+        field === "surfaces"
+          ? { label: "Synthetic review", disposition: "no_issue_found" }
+          : { reason: "Review the synthetic authentication boundary" };
+      const rows = [anonymous, { ...anonymous, id: "authored-review" }];
+      const coverage = {
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      };
+      const result = JSON.stringify(
+        workerDraft([], {
+          complete: true,
+          reviewState: { ...coverage, [field]: checkpointOnly ? [] : rows },
+        }),
+      );
+      await writeFile(f.resultPath, result);
+      const checkpoint = JSON.stringify(
+        workerDraft([], {
+          complete: false,
+          reviewState: { ...coverage, [field]: checkpointOnly ? rows : [] },
+        }),
+      );
+      const directory = path.join(f.output, "checkpoints");
+      await mkdir(directory, { recursive: true });
+      const checkpointPath = path.join(directory, "saved.json");
+      await writeFile(checkpointPath, checkpoint);
+
+      const accepted = await readAcceptedDiscovery(
+        createDeepScanArtifacts(f.scanRoot),
+        f.worker,
+        scanId,
+      );
+      assert.deepEqual(
+        accepted.coverage[field].map(
+          (row: { provenance: { sourceId?: string } }) =>
+            row.provenance.sourceId,
+        ),
+        [undefined, "authored-review"],
+      );
+      assert.equal(await readFile(f.resultPath, "utf8"), result);
+      assert.equal(await readFile(checkpointPath, "utf8"), checkpoint);
+    });
+  }
+}
+
 for (const field of [
   "deferred",
   "explicitExclusions",
