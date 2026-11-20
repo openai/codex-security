@@ -237,7 +237,7 @@ export async function readAcceptedDiscovery(
   );
   const snapshots = [...current, ...archived];
   // Same-thread retries copy checkpoints without creating a new observation.
-  // fs.cp preserves times through Date values, which have millisecond precision.
+  // Match the raw file's copy time separately from a later head selection.
   const history = snapshots.filter(
     (source, index) =>
       source.snapshot === undefined ||
@@ -245,16 +245,21 @@ export async function readAcceptedDiscovery(
         (earlier, earlierIndex) =>
           earlierIndex > index &&
           earlier.attempt !== source.attempt &&
-          Math.round(source.modifiedMs) <= Math.round(earlier.modifiedMs) &&
+          sameCheckpointCopyTime(
+            source.checkpointModifiedMs,
+            earlier.checkpointModifiedMs,
+          ) &&
+          (source.modifiedMs <= earlier.modifiedMs ||
+            sameCheckpointCopyTime(source.modifiedMs, earlier.modifiedMs)) &&
           isDeepStrictEqual(source.snapshot, earlier.snapshot),
       ),
   );
   const receiptDigests = new Map<string, string>();
-  const receiptSources = history.length
-    ? [result, ...history.map(({ input }) => input)]
-    : [];
-  for (const source of receiptSources) {
-    for (const surface of source.reviewState.surfaces) {
+  if (history.length) {
+    const sources = [result, ...history.map(({ input }) => input)];
+    for (const surface of sources.flatMap(
+      ({ reviewState }) => reviewState.surfaces,
+    )) {
       for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
         const ref = posix.normalize(value);
         const shared = recordedScanReceiptRefs(surface).includes(ref);
@@ -276,8 +281,6 @@ export async function readAcceptedDiscovery(
         }
       }
     }
-  }
-  if (history.length) {
     const reconciled = await reconcileAcceptedWorkerHistory(
       context,
       result,
@@ -321,6 +324,31 @@ export async function readAcceptedDiscovery(
       deferredSurfaceTargets,
     ),
   };
+}
+
+function sameCheckpointCopyTime(left?: number, right?: number): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    (left === right ||
+      left === copiedCheckpointTime(right) ||
+      right === copiedCheckpointTime(left))
+  );
+}
+
+function copiedCheckpointTime(modifiedMs: number): number {
+  // fs.cp passes a rounded Date through the platform's utimes conversion.
+  const seconds = Math.round(modifiedMs) / 1000;
+  if (process.platform === "win32") {
+    const epoch = 116_444_736_000_000_000;
+    const ticks = Math.trunc(seconds * 10_000_000 + epoch) - epoch;
+    return (
+      Math.trunc(ticks / 10_000_000) * 1000 + (ticks % 10_000_000) / 10_000
+    );
+  }
+  const whole = Math.trunc(seconds);
+  const nanos = Math.trunc((seconds - whole) * 1_000_000_000);
+  return whole * 1000 + Math.trunc(nanos / 1000) / 1000;
 }
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */

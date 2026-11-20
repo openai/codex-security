@@ -215,6 +215,7 @@ interface SavedScanDraft {
   input: ScanDraftInput;
   surfaceIdentities?: SurfaceNormalization[];
   modifiedMs: number;
+  checkpointModifiedMs?: number;
   snapshot?: JsonObject;
   head?: boolean;
   attempt?: string;
@@ -2629,6 +2630,7 @@ async function readSavedCheckpoints(
         ...surfaceNormalization(input.reviewState.surfaces).values(),
       ],
       snapshot: draft,
+      checkpointModifiedMs: Number(checkpointMetadata.mtimeMs),
       modifiedMs:
         entry.name === checkpointHead
           ? head!.modifiedMs

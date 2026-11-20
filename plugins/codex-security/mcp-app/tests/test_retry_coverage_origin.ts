@@ -73,6 +73,30 @@ test("three actual cumulative worker attempts retain original coverage ownership
   }
 });
 
+test("a direct terminal result matches its first checkpoint by receipt", async (t) => {
+  const f = await workerHistoryFixture(t, 1);
+  const ref = "artifacts/review.txt";
+  await mkdir(path.join(f.output, "artifacts"));
+  await writeFile(path.join(f.output, ref), "Synthetic evidence");
+  const surface = {
+    label: "Review",
+    disposition: "no_issue_found",
+    receiptRefs: [ref],
+  };
+  await f.record(
+    reviewDraft(false, { surfaces: [{ ...surface, id: "saved" }] }),
+  );
+  await writeFile(
+    f.resultPath,
+    JSON.stringify(reviewDraft(true, { surfaces: [surface] })),
+  );
+  const { coverage, result } = await f.readAccepted();
+  assert.equal(coverage.surfaces.length, 1);
+  assert.equal(result.reviewState.surfaces[0].id, "saved");
+  assert.equal(coverage.surfaces[0].provenance.sourceId, undefined);
+  assert.equal(coverage.surfaces[0].provenance.attempt, 1);
+});
+
 test("an accepted retry reconciles each occurrence of legacy ID-less surfaces and deferrals", async (t) => {
   const f = await workerHistoryFixture(t, 2);
   const task = { reason: "Synthetic pending review" };
@@ -1062,6 +1086,62 @@ for (const history of ["removed", "invalid", "none"]) {
     assert.equal(await readFile(f.resultPath, "utf8"), result);
     for (const [file, original] of saved)
       assert.deepEqual(await readFile(file), original);
+  });
+}
+
+for (const admission of ["new", "previously-accepted"] as const) {
+  test(`a later checkpoint selection within one millisecond reopens work: ${admission}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const pending = reviewDraft(false, {
+      deferred: [{ id: "task", reason: "Review the synthetic scope" }],
+    });
+    await f.record(pending);
+    const headPath = path.join(f.output, "checkpoint-head.json");
+    const head = JSON.parse(await readFile(headPath, "utf8"));
+    const checkpoint = path.join(f.output, "checkpoints", head.checkpoint);
+    await utimes(checkpoint, 1.000125, 1.000125);
+    await utimes(headPath, 1.000125, 1.000125);
+    await writeFile(
+      f.resultPath,
+      JSON.stringify(
+        reviewDraft(true, {
+          resolvedDeferred: [{ id: "task", reason: "Review completed" }],
+        }),
+      ),
+    );
+    await utimes(f.resultPath, 1.00025, 1.00025);
+    const archive = path.join(f.workerRoot, "attempts/attempt-01");
+    await f.archive(archive);
+    await f.record(pending);
+    await utimes(checkpoint, 1.000125, 1.000125);
+    await utimes(headPath, 1.000375, 1.000375);
+    await writeFile(f.resultPath, JSON.stringify(reviewDraft(true)));
+    await utimes(f.resultPath, 1.00075, 1.00075);
+    const saved = await Promise.all(
+      [
+        checkpoint,
+        headPath,
+        f.resultPath,
+        path.join(archive, "checkpoints", head.checkpoint),
+        path.join(archive, "checkpoint-head.json"),
+        path.join(archive, "result.json"),
+      ].map(async (file) => [file, await readFile(file)] as const),
+    );
+    const accepted = await readAcceptedDiscovery(
+      f.artifacts,
+      f.worker,
+      scanId,
+      {},
+      admission,
+    );
+    assert.deepEqual(
+      accepted.result.reviewState.deferred.map((row: { id: string }) => row.id),
+      ["task"],
+    );
+    assert.equal(accepted.coverage.deferred.length, 1);
+    assert.deepEqual(accepted.coverage.resolvedDeferred ?? [], []);
+    for (const [file, bytes] of saved)
+      assert.deepEqual(await readFile(file), bytes);
   });
 }
 
