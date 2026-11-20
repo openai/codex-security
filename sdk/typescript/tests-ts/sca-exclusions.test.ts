@@ -1,25 +1,19 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { runOsvScan } from "../src/sca-osv.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const { create: temporaryDirectory, cleanup } =
+  createTemporaryDirectories(true);
+afterEach(cleanup);
 
 async function scan(
   stderr: string,
   allExcluded = false,
   retainedLocal = false,
 ) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "sca-exclusions-")));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectory("sca-exclusions-");
   const repository = join(root, "repository");
   const output = join(root, "output");
   await mkdir(repository);
@@ -152,10 +146,7 @@ test.each([
 ] as const)(
   "Pipenv dev exclusions leave omitted categories unresolved: %s",
   async (_label, origin, customFirst) => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "sca-pipenv-exclusion-")),
-    );
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("sca-pipenv-exclusion-");
     const repository = join(root, "repository");
     await mkdir(repository);
     const dependency = { "synthetic-lib": { version: "==1.2.0", ...origin } };
@@ -239,10 +230,7 @@ for (const [origin, resolution] of [
     test.each([false, true])(
       `pnpm ${origin} ${layout} tarball uses the emitted identity while retained: %p`,
       async (retained) => {
-        const root = await realpath(
-          await mkdtemp(join(tmpdir(), "sca-pnpm-exclusion-")),
-        );
-        temporaryDirectories.push(root);
+        const root = await temporaryDirectory("sca-pnpm-exclusion-");
         const repository = join(root, "repository");
         await mkdir(repository);
         await writeFile(

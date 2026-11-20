@@ -42,17 +42,18 @@ const cargo = (version: string, local = false) =>
   `version=3\n[[package]]\nname="synthetic-crate"\nversion="${version}"\n${local ? "" : 'source="registry+https://github.com/rust-lang/crates.io-index"\n'}`;
 const bundler = (version: string, local = false) =>
   `${local ? "PATH\n  remote: vendor/synthetic-gem" : "GEM\n  remote: https://rubygems.org/"}\n  specs:\n    synthetic-gem (${version})\n`;
-const composer = (version: string, local = false) =>
-  JSON.stringify({
-    packages: [
-      {
-        name: "synthetic/library",
-        version,
-        ...(local ? { dist: { type: "path", url: "./local" } } : {}),
-      },
-    ],
+export function composerLock(
+  version: string,
+  origin: {
+    dist?: Record<string, string>;
+    source?: Record<string, string>;
+  } = {},
+) {
+  return JSON.stringify({
+    packages: [{ name: "synthetic/library", version, ...origin }],
     "packages-dev": [],
   });
+}
 const nuget = (version: string, local = false) =>
   JSON.stringify({
     version: 1,
@@ -104,7 +105,7 @@ export const ecosystemFixtures = {
     "composer.lock",
     "Packagist",
     "synthetic/library",
-    composer,
+    composerLock,
   ),
   nuget: fixture("packages.lock.json", "NuGet", "Synthetic.Library", nuget),
 };
@@ -113,65 +114,44 @@ export function ecosystemAdvisoryId(ecosystem: string): string {
   return `SYNTHETIC-${ecosystem.toUpperCase().replace(/[^A-Z0-9]/gu, "-")}-001`;
 }
 
-export const localOriginFixtures: {
-  format: keyof typeof ecosystemFixtures;
-  content: string;
-  emitted: { name: string; version: string | null }[];
-  omitted?: string[];
-  matches: number;
-}[] = [
-  {
-    format: "uv",
-    content: uv("1.2.0", 'editable="./local"'),
-    emitted: [{ name: "synthetic-py", version: "1.2.0" }],
+function local(
+  format: keyof typeof ecosystemFixtures,
+  content: string,
+  overrides: {
+    emitted?: { name: string; version: string | null }[];
+    omitted?: string[];
+    matches?: number;
+  } = {},
+) {
+  return {
+    format,
+    content,
+    emitted: [{ name: ecosystemFixtures[format].name, version: "1.2.0" }],
     matches: 1,
-  },
-  {
-    format: "poetry",
-    content: poetry("1.2.0", 'source={type="directory",url="./local"}\n'),
-    emitted: [{ name: "synthetic-py", version: "1.2.0" }],
-    matches: 1,
-  },
-  {
-    format: "pipenv",
-    content: pipenv("1.2.0", true),
-    emitted: [{ name: "synthetic-py", version: "1.2.0" }],
-    omitted: ["synthetic-local"],
-    matches: 1,
-  },
-  {
-    format: "go",
-    content: go("1.2.0") + "replace example.test/synthetic-go => ./local\n",
+    ...overrides,
+  };
+}
+
+export const localOriginFixtures = [
+  local("uv", uv("1.2.0", 'editable="./local"')),
+  local("poetry", poetry("1.2.0", 'source={type="directory",url="./local"}\n')),
+  local("pipenv", pipenv("1.2.0", true), { omitted: ["synthetic-local"] }),
+  local("go", go("1.2.0") + "replace example.test/synthetic-go => ./local\n", {
     emitted: [{ name: "./local", version: null }],
     matches: 0,
-  },
-  {
-    format: "cargo",
-    content: cargo("1.2.0", true),
-    emitted: [{ name: "synthetic-crate", version: "1.2.0" }],
-    matches: 1,
-  },
-  {
-    format: "bundler",
-    content: bundler("1.2.0", true),
-    emitted: [{ name: "synthetic-gem", version: "1.2.0" }],
-    matches: 1,
-  },
-  {
-    format: "composer",
-    content: composer("1.2.0", true),
-    emitted: [{ name: "synthetic/library", version: "1.2.0" }],
-    matches: 1,
-  },
-  {
-    format: "nuget",
-    content: nuget("1.2.0", true),
+  }),
+  local("cargo", cargo("1.2.0", true)),
+  local("bundler", bundler("1.2.0", true)),
+  local(
+    "composer",
+    composerLock("1.2.0", { dist: { type: "path", url: "./local" } }),
+  ),
+  local("nuget", nuget("1.2.0", true), {
     emitted: [
       { name: "Synthetic.Library", version: "1.2.0" },
       { name: "Synthetic.Project", version: null },
     ],
-    matches: 1,
-  },
+  }),
 ];
 
 export const unsupportedEcosystemInputs = [

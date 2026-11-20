@@ -17,6 +17,7 @@ import {
   type OsvScanResult,
 } from "../src/sca-osv.js";
 import {
+  composerLock,
   ecosystemAdvisoryId,
   ecosystemFixtures,
   localOriginFixtures,
@@ -29,7 +30,6 @@ if (!executable)
   throw new Error("Pass the path to an installed OSV-Scanner v2.6.0 binary.");
 const root = await realpath(await mkdtemp(join(tmpdir(), "sca-osv-contract-")));
 const database = join(root, "database");
-const archiveDirectory = join(database, "osv-scalibr", "npm");
 const results: {
   case: string;
   exitCode: number | null;
@@ -37,22 +37,60 @@ const results: {
   components: number;
   matches: number;
 }[] = [];
-const syntheticAdvisory = {
-  schema_version: "1.7.0",
-  id: "SYNTHETIC-2026-001",
-  aliases: ["CVE-2099-10001"],
-  modified: "2026-01-01T00:00:00Z",
-  published: "2026-01-01T00:00:00Z",
-  summary: "Synthetic scanner contract fixture; not a real advisory.",
-  affected: [
-    {
-      package: { name: "synthetic-lib", ecosystem: "npm" },
-      ranges: [
-        { type: "SEMVER", events: [{ introduced: "0" }, { fixed: "1.3.0" }] },
-      ],
-    },
-  ],
-};
+function advisory(ecosystem: string, name: string) {
+  const npm = ecosystem === "npm";
+  const date = "2026-01-01T00:00:00Z";
+  return {
+    schema_version: "1.7.0",
+    id: npm ? "SYNTHETIC-2026-001" : ecosystemAdvisoryId(ecosystem),
+    ...(npm && { aliases: ["CVE-2099-10001"] }),
+    modified: date,
+    ...(npm && { published: date }),
+    summary: "Synthetic scanner contract fixture; not a real advisory.",
+    affected: [
+      {
+        package: { name, ecosystem },
+        ranges: [
+          {
+            type: ["npm", "Go", "crates.io"].includes(ecosystem)
+              ? "SEMVER"
+              : "ECOSYSTEM",
+            events: [{ introduced: "0" }, { fixed: "1.3.0" }],
+          },
+        ],
+      },
+    ],
+  };
+}
+async function writeArchive(
+  ecosystem: string,
+  entry?: ReturnType<typeof advisory>,
+) {
+  const directory = join(database, "osv-scalibr", ecosystem);
+  await mkdir(directory, { recursive: true });
+  const files = entry
+    ? { [`${entry.id}.json`]: strToU8(JSON.stringify(entry)) }
+    : {};
+  await writeFile(join(directory, "all.zip"), zipSync(files));
+}
+function assertMessage(lines: readonly string[], text: string) {
+  assert.ok(
+    lines.some((line) => line.includes(text)),
+    `Expected message containing "${text}": ${lines.join("; ")}`,
+  );
+}
+async function runGit(cwd: string, args: string[]) {
+  const result = await runOsvProcess("git", args, {
+    cwd,
+    environment: process.env,
+  });
+  assert.equal(result.exitCode, 0, result.stderr);
+  return result.stdout.trim();
+}
+const ignoreSyntheticPackage =
+  '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n';
+const npmPackages = (packages: unknown, lockfileVersion = 3) =>
+  JSON.stringify({ lockfileVersion, packages });
 const npmLock = (version: number, resolvedVersion = "1.2.0") =>
   JSON.stringify({
     name: "synthetic-app",
@@ -65,9 +103,15 @@ const npmLock = (version: number, resolvedVersion = "1.2.0") =>
 async function scan(
   name: string,
   files: Record<string, string>,
-  missingDatabase = false,
-  changeBeforeMatching?: (repository: string) => Promise<void>,
-  prepareRepository?: (repository: string) => Promise<void>,
+  {
+    missingDatabase,
+    changeBeforeMatching,
+    prepareRepository,
+  }: {
+    missingDatabase?: boolean;
+    changeBeforeMatching?: (repository: string) => Promise<void>;
+    prepareRepository?: (repository: string) => Promise<void>;
+  } = {},
 ) {
   const repository = join(root, name, "repository with spaces");
   const output = join(root, name, "output");
@@ -121,77 +165,51 @@ function assertEcosystemFacts(
     (item) => item.sourcePath === sourcePath && item.name === fixture.name,
   );
   assert.ok(component, `${sourcePath}: expected ${fixture.name} inventory`);
-  assert.deepEqual(
-    {
-      ecosystem: component.ecosystem,
-      name: component.name,
-      version: component.version,
-      sourcePath: component.sourcePath,
-    },
-    { ecosystem: fixture.ecosystem, name: fixture.name, version, sourcePath },
-  );
+  assert.equal(component.ecosystem, fixture.ecosystem);
+  assert.equal(component.version, version);
   const matches = result.matches.filter(
     (match) => match.componentId === component.id,
   );
   assert.equal(matches.length, version === "1.2.0" ? 1 : 0);
   if (version === "1.2.0") {
-    assert.deepEqual(matches[0]!.advisoryIds, [
-      ecosystemAdvisoryId(fixture.ecosystem),
-    ]);
+    const expected = advisory(fixture.ecosystem, fixture.name);
+    assert.deepEqual(matches[0]!.advisoryIds, [expected.id]);
     assert.deepEqual(matches[0]!.fixedVersions, ["1.3.0"]);
-    assert.deepEqual(matches[0]!.sourceAdvisories[0]!["affected"], [
-      {
-        package: { name: fixture.name, ecosystem: fixture.ecosystem },
-        ranges: [
-          {
-            type: ["Go", "crates.io"].includes(fixture.ecosystem)
-              ? "SEMVER"
-              : "ECOSYSTEM",
-            events: [{ introduced: "0" }, { fixed: "1.3.0" }],
-          },
-        ],
-      },
-    ]);
-  }
-}
-try {
-  await mkdir(archiveDirectory, { recursive: true });
-  await writeFile(
-    join(archiveDirectory, "all.zip"),
-    zipSync({
-      "SYNTHETIC-2026-001.json": strToU8(JSON.stringify(syntheticAdvisory)),
-    }),
-  );
-  const ecosystemAdvisories = new Map<string, EcosystemFixture>();
-  for (const fixture of Object.values(ecosystemFixtures))
-    ecosystemAdvisories.set(fixture.ecosystem, fixture);
-  for (const [ecosystem, fixture] of ecosystemAdvisories) {
-    const directory = join(database, "osv-scalibr", ecosystem);
-    await mkdir(directory, { recursive: true });
-    const advisory = {
-      schema_version: "1.7.0",
-      id: ecosystemAdvisoryId(ecosystem),
-      modified: "2026-01-01T00:00:00Z",
-      summary: "Synthetic scanner contract fixture; not a real advisory.",
-      affected: [
-        {
-          package: { name: fixture.name, ecosystem },
-          ranges: [
-            {
-              type: ["Go", "crates.io"].includes(ecosystem)
-                ? "SEMVER"
-                : "ECOSYSTEM",
-              events: [{ introduced: "0" }, { fixed: "1.3.0" }],
-            },
-          ],
-        },
-      ],
-    };
-    await writeFile(
-      join(directory, "all.zip"),
-      zipSync({ [`${advisory.id}.json`]: strToU8(JSON.stringify(advisory)) }),
+    assert.deepEqual(
+      matches[0]!.sourceAdvisories[0]!["affected"],
+      expected.affected,
     );
   }
+}
+async function checkLocalExclusion(
+  name: string,
+  fixture: EcosystemFixture,
+  content: string,
+) {
+  const excluded = await scan(name, {
+    [fixture.path]: content,
+    "osv-scanner.toml": `[[PackageOverrides]]\nname=${JSON.stringify(fixture.name)}\necosystem=${JSON.stringify(fixture.ecosystem)}\nversion="1.2.0"\nignore=true\nreason="Synthetic exclusion contract"\n`,
+  });
+  assert.equal(
+    excluded.status,
+    "completed",
+    `${name}: ${excluded.diagnostics.join("; ")}`,
+  );
+  assert.equal(excluded.coverage.unresolvedPackages, 0);
+  assert.equal(excluded.components.length, 0);
+  assert.equal(excluded.matches.length, 0);
+  assert.ok(
+    (await readFile(excluded.scanner.stderrPath, "utf8")).includes(
+      `Package ${fixture.ecosystem}/${fixture.name}/1.2.0 has been filtered out because:`,
+    ),
+  );
+}
+try {
+  const packages = new Map([["npm", "synthetic-lib"]]);
+  for (const fixture of Object.values(ecosystemFixtures))
+    packages.set(fixture.ecosystem, fixture.name);
+  for (const [ecosystem, name] of packages)
+    await writeArchive(ecosystem, advisory(ecosystem, name));
   for (const version of [2, 3]) {
     const match = await scan(`npm-v${version}`, {
       "package-lock.json": npmLock(version),
@@ -228,21 +246,16 @@ try {
       "ignored/package-lock.json": npmLock(3),
       "ignored/untracked/package-lock.json": npmLock(3),
     },
-    false,
-    undefined,
-    async (repository) => {
-      const options = { cwd: repository, environment: process.env };
-      assert.equal((await runOsvProcess("git", ["init"], options)).exitCode, 0);
-      assert.equal(
-        (
-          await runOsvProcess(
-            "git",
-            ["add", "--force", "--", "ignored/package-lock.json"],
-            options,
-          )
-        ).exitCode,
-        0,
-      );
+    {
+      async prepareRepository(repository) {
+        await runGit(repository, ["init"]);
+        await runGit(repository, [
+          "add",
+          "--force",
+          "--",
+          "ignored/package-lock.json",
+        ]);
+      },
     },
   );
   assert.equal(trackedIgnored.status, "completed");
@@ -261,13 +274,10 @@ try {
       "package-lock.json": npmLock(3, "1.3.0"),
       "vendor/library/package-lock.json": npmLock(3),
     },
-    false,
-    undefined,
-    async (repository) => {
-      const git = async (cwd: string, args: string[]) => {
-        const result = await runOsvProcess(
-          "git",
-          [
+    {
+      async prepareRepository(repository) {
+        const git = (cwd: string, args: string[]) =>
+          runGit(cwd, [
             "-c",
             `core.hooksPath=${join(repository, ".git", "empty-hooks")}`,
             "-c",
@@ -277,31 +287,27 @@ try {
             "-c",
             "user.email=synthetic@example.test",
             ...args,
-          ],
-          { cwd, environment: process.env },
-        );
-        assert.equal(result.exitCode, 0, result.stderr);
-        return result.stdout.trim();
-      };
-      await git(repository, ["init", "--quiet"]);
-      const nested = join(repository, "vendor/library");
-      await git(nested, ["init", "--quiet"]);
-      await git(nested, ["add", "package-lock.json"]);
-      await git(nested, [
-        "commit",
-        "--quiet",
-        "-m",
-        "Synthetic dependency fixture",
-      ]);
-      const revision = await git(nested, ["rev-parse", "HEAD"]);
-      await git(repository, [
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        "160000",
-        revision,
-        "vendor/library",
-      ]);
+          ]);
+        await git(repository, ["init", "--quiet"]);
+        const nested = join(repository, "vendor/library");
+        await git(nested, ["init", "--quiet"]);
+        await git(nested, ["add", "package-lock.json"]);
+        await git(nested, [
+          "commit",
+          "--quiet",
+          "-m",
+          "Synthetic dependency fixture",
+        ]);
+        const revision = await git(nested, ["rev-parse", "HEAD"]);
+        await git(repository, [
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          "160000",
+          revision,
+          "vendor/library",
+        ]);
+      },
     },
   );
   assert.equal(submodule.status, "partial");
@@ -312,11 +318,7 @@ try {
     submodule.coverage.inputs.map((input) => input.path),
     ["package-lock.json"],
   );
-  assert.ok(
-    submodule.diagnostics.some((message) =>
-      message.includes("Git submodule vendor/library"),
-    ),
-  );
+  assertMessage(submodule.diagnostics, "Git submodule vendor/library");
   const clean = await scan("fixed-version", {
     "package-lock.json": npmLock(3, "1.3.0"),
   });
@@ -354,12 +356,9 @@ try {
   assert.equal(malformedNestedConfig.matches.length, 2);
   assert.equal(malformedNestedConfig.coverage.inputs.length, 2);
   assert.equal(malformedNestedConfig.coverage.configFiles.length, 1);
-  assert.ok(
-    malformedNestedConfig.diagnostics.some((line) =>
-      line.includes(
-        "Unable to parse OSV configuration nested/osv-scanner.toml",
-      ),
-    ),
+  assertMessage(
+    malformedNestedConfig.diagnostics,
+    "Unable to parse OSV configuration nested/osv-scanner.toml",
   );
   const shrink = await scan("shrinkwrap", {
     "package-lock.json": npmLock(3),
@@ -401,9 +400,8 @@ try {
         const tarball = await scan(
           `npm-v${version}-${origin}-${scheme}-tarball`,
           {
-            "package-lock.json": JSON.stringify({
-              lockfileVersion: version,
-              packages: {
+            "package-lock.json": npmPackages(
+              {
                 "": {
                   name: "synthetic-app",
                   version: "1.0.0",
@@ -414,7 +412,8 @@ try {
                 },
                 "node_modules/synthetic-lib": { version: "1.2.0", resolved },
               },
-            }),
+              version,
+            ),
           },
         );
         assert.equal(
@@ -431,17 +430,14 @@ try {
     }
   }
   const workspaceLink = await scan("npm-workspace-link", {
-    "package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: {
-        "": { name: "synthetic-app", version: "1.0.0" },
-        "node_modules/synthetic-lib": { version: "1.2.0" },
-        "node_modules/linked-lib": {
-          resolved: "packages/linked-lib",
-          link: true,
-        },
-        "packages/linked-lib": { name: "linked-lib", version: "1.0.0" },
+    "package-lock.json": npmPackages({
+      "": { name: "synthetic-app", version: "1.0.0" },
+      "node_modules/synthetic-lib": { version: "1.2.0" },
+      "node_modules/linked-lib": {
+        resolved: "packages/linked-lib",
+        link: true,
       },
+      "packages/linked-lib": { name: "linked-lib", version: "1.0.0" },
     }),
   });
   assert.equal(workspaceLink.status, "partial");
@@ -497,10 +493,9 @@ snapshots:
       ?.version,
     "file:../local-lib",
   );
-  assert.ok(
-    pnpmLocal.coverage.limitations.some((line) =>
-      line.includes("linked-lib@link:../linked-lib"),
-    ),
+  assertMessage(
+    pnpmLocal.coverage.limitations,
+    "linked-lib@link:../linked-lib",
   );
   for (const [origin, resolution] of [
     ["local", "file:../synthetic-lib.tgz"],
@@ -547,8 +542,7 @@ snapshots:
             }),
             ...(excluded
               ? {
-                  "osv-scanner.toml":
-                    '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+                  "osv-scanner.toml": ignoreSyntheticPackage,
                 }
               : {}),
           },
@@ -568,21 +562,18 @@ snapshots:
     }
   }
   const alias = await scan("npm-alias-scoped-multiple", {
-    "package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: {
-        "": { name: "synthetic-app" },
-        "node_modules/alias-lib": {
-          name: "synthetic-lib",
-          version: "1.2.0",
-          dev: true,
-        },
-        "node_modules/nested/node_modules/synthetic-lib": {
-          version: "1.3.0",
-          optional: true,
-        },
-        "node_modules/@synthetic/scoped": { version: "2.0.0" },
+    "package-lock.json": npmPackages({
+      "": { name: "synthetic-app" },
+      "node_modules/alias-lib": {
+        name: "synthetic-lib",
+        version: "1.2.0",
+        dev: true,
       },
+      "node_modules/nested/node_modules/synthetic-lib": {
+        version: "1.3.0",
+        optional: true,
+      },
+      "node_modules/@synthetic/scoped": { version: "2.0.0" },
     }),
   });
   assert.equal(alias.status, "completed");
@@ -594,10 +585,7 @@ snapshots:
   assert.equal(alias.matches.length, 1);
   const emptyNested = await scan("empty-nested-lockfile", {
     "package-lock.json": npmLock(3),
-    "nested/package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: {},
-    }),
+    "nested/package-lock.json": npmPackages({}),
   });
   assert.equal(emptyNested.status, "completed");
   assert.equal(emptyNested.scanner.exitCode, 1);
@@ -611,22 +599,17 @@ snapshots:
       .find((input) => input.path === "nested/package-lock.json")
       ?.reason?.includes("no packages"),
   );
-  const gitArchive = join(database, "osv-scalibr", "GIT");
-  await mkdir(gitArchive, { recursive: true });
-  await writeFile(join(gitArchive, "all.zip"), zipSync({}));
+  await writeArchive("GIT");
   const unresolved = await scan("local-and-git-references", {
-    "package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: {
-        "": { name: "synthetic-app" },
-        "node_modules/local-lib": { resolved: "../local-lib", link: true },
-        "node_modules/git-lib": {
-          version: "1.0.0",
-          resolved:
-            "git+https://example.test/synthetic/lib.git#" + "a".repeat(40),
-        },
-        "node_modules/synthetic-lib": { version: "1.2.0" },
+    "package-lock.json": npmPackages({
+      "": { name: "synthetic-app" },
+      "node_modules/local-lib": { resolved: "../local-lib", link: true },
+      "node_modules/git-lib": {
+        version: "1.0.0",
+        resolved:
+          "git+https://example.test/synthetic/lib.git#" + "a".repeat(40),
       },
+      "node_modules/synthetic-lib": { version: "1.2.0" },
     }),
   });
   assert.equal(unresolved.status, "partial");
@@ -640,11 +623,7 @@ snapshots:
   assert.equal(excluded.status, "completed");
   assert.equal(excluded.components.length, 0);
   assert.equal(excluded.coverage.configFiles.length, 1);
-  assert.ok(
-    excluded.coverage.limitations.some((line) =>
-      line.includes("suppressed counts"),
-    ),
-  );
+  assertMessage(excluded.coverage.limitations, "suppressed counts");
   const lowercaseExclusions = await scan(
     "case-insensitive-package-exclusions",
     {
@@ -656,17 +635,9 @@ snapshots:
   assert.equal(lowercaseExclusions.status, "completed");
   assert.equal(lowercaseExclusions.scanner.exitCode, 0);
   assert.equal(lowercaseExclusions.components.length, 0);
-  assert.ok(
-    lowercaseExclusions.coverage.limitations.some((line) =>
-      line.includes("suppressed counts"),
-    ),
-  );
+  assertMessage(lowercaseExclusions.coverage.limitations, "suppressed counts");
   for (const [name, configuration, ignored] of [
-    [
-      "exact",
-      '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
-      true,
-    ],
+    ["exact", ignoreSyntheticPackage, true],
     [
       "regex",
       '[[packageoverrides]]\nname="synthetic-.*"\nnameIsRegex=true\nignore=true\n',
@@ -699,51 +670,35 @@ snapshots:
     ],
   ] as const) {
     const localExclusion = await scan(`local-exclusion-${name}`, {
-      "package-lock.json": JSON.stringify({
-        lockfileVersion: 3,
-        packages: {
-          "node_modules/synthetic-lib": {
-            version: "1.2.0",
-            resolved: "file:../local-lib.tgz",
-            dev: true,
-          },
-          "node_modules/synthetic-registry": { version: "2.0.0" },
+      "package-lock.json": npmPackages({
+        "node_modules/synthetic-lib": {
+          version: "1.2.0",
+          resolved: "file:../local-lib.tgz",
+          dev: true,
         },
+        "node_modules/synthetic-registry": { version: "2.0.0" },
       }),
       "osv-scanner.toml": configuration,
     });
     assert.equal(localExclusion.status, ignored ? "completed" : "partial");
     assert.equal(localExclusion.coverage.unresolvedPackages, ignored ? 0 : 1);
   }
+  const localLock = npmPackages({
+    "node_modules/synthetic-lib": {
+      version: "1.2.0",
+      resolved: "file:../local-lib.tgz",
+    },
+  });
   const allLocalExcluded = await scan("all-local-excluded", {
-    "package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: {
-        "node_modules/synthetic-lib": {
-          version: "1.2.0",
-          resolved: "file:../local-lib.tgz",
-        },
-      },
-    }),
-    "osv-scanner.toml":
-      '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+    "package-lock.json": localLock,
+    "osv-scanner.toml": ignoreSyntheticPackage,
   });
   assert.equal(allLocalExcluded.status, "completed");
   assert.equal(allLocalExcluded.coverage.unresolvedPackages, 0);
   assert.equal(allLocalExcluded.components.length, 0);
-  const localLock = JSON.stringify({
-    lockfileVersion: 3,
-    packages: {
-      "node_modules/synthetic-lib": {
-        version: "1.2.0",
-        resolved: "file:../local-lib.tgz",
-      },
-    },
-  });
   const scopedExclusion = await scan("local-exclusion-source-scope", {
     "a/package-lock.json": localLock,
-    "a/osv-scanner.toml":
-      '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
+    "a/osv-scanner.toml": ignoreSyntheticPackage,
     "b/package-lock.json": localLock,
   });
   assert.equal(scopedExclusion.status, "partial");
@@ -764,16 +719,12 @@ snapshots:
   const unavailable = await scan(
     "missing-offline-db",
     { "package-lock.json": npmLock(3) },
-    true,
+    { missingDatabase: true },
   );
   assert.equal(unavailable.status, "partial");
   assert.equal(unavailable.scanner.exitCode, 127);
   assert.equal(unavailable.components.length, 1);
-  assert.ok(
-    unavailable.diagnostics.some((line) =>
-      line.includes("Error during extraction:"),
-    ),
-  );
+  assertMessage(unavailable.diagnostics, "Error during extraction:");
   assert.ok(
     (await readFile(unavailable.scanner.rawOutputPath, "utf8")).includes(
       "synthetic-lib",
@@ -792,50 +743,42 @@ snapshots:
       {
         "package-lock.json": npmLock(3),
       },
-      false,
-      async (repository) => {
-        if (changed === "lockfile")
-          await writeFile(
-            join(repository, "package-lock.json"),
-            npmLock(3, "1.3.0"),
-          );
-        else
-          await writeFile(
-            join(repository, "osv-scanner.toml"),
-            '[[IgnoredVulns]]\nid="SYNTHETIC-2026-001"\nreason="Synthetic drift fixture"\n',
-          );
+      {
+        async changeBeforeMatching(repository) {
+          if (changed === "lockfile")
+            await writeFile(
+              join(repository, "package-lock.json"),
+              npmLock(3, "1.3.0"),
+            );
+          else
+            await writeFile(
+              join(repository, "osv-scanner.toml"),
+              '[[IgnoredVulns]]\nid="SYNTHETIC-2026-001"\nreason="Synthetic drift fixture"\n',
+            );
+        },
       },
     );
     assert.equal(drift.status, "partial");
     assert.equal(drift.scanner.exitCode, 0);
     assert.equal(drift.components.length, 1);
     assert.equal(drift.matches.length, 0);
-    assert.ok(
-      drift.diagnostics.some((line) => line.includes("changed while matching")),
-    );
+    assertMessage(drift.diagnostics, "changed while matching");
   }
   const emptyWithExcluded = await scan("empty-with-excluded-inventory", {
     "package-lock.json": npmLock(3),
-    "osv-scanner.toml":
-      '[[PackageOverrides]]\nname="synthetic-lib"\nignore=true\n',
-    "empty/package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: {},
-    }),
+    "osv-scanner.toml": ignoreSyntheticPackage,
+    "empty/package-lock.json": npmPackages({}),
   });
   assert.equal(emptyWithExcluded.status, "completed");
   assert.equal(emptyWithExcluded.scanner.exitCode, 0);
   assert.equal(emptyWithExcluded.components.length, 0);
   const empty = await scan("no-packages", {
-    "package-lock.json": JSON.stringify({ lockfileVersion: 3, packages: {} }),
+    "package-lock.json": npmPackages({}),
   });
   assert.equal(empty.status, "failed");
   assert.equal(empty.scanner.exitCode, 128);
   const malformed = await scan("malformed-package", {
-    "package-lock.json": JSON.stringify({
-      lockfileVersion: 3,
-      packages: "invalid",
-    }),
+    "package-lock.json": npmPackages("invalid"),
   });
   assert.equal(malformed.status, "failed");
   assert.equal(malformed.scanner.exitCode, 128);
@@ -880,15 +823,10 @@ snapshots:
     assert.equal(result.coverage.status, "partial");
     assert.equal(result.coverage.inputs[0]?.status, "scanned");
     assert.equal(result.scanner.exitCode, 1);
-    assert.ok(
-      result.diagnostics.some((message) =>
-        message.includes("may omit transitive dependencies"),
-      ),
-    );
-    assert.ok(
-      result.coverage.limitations.some((message) =>
-        message.includes("may omit transitive dependencies"),
-      ),
+    assertMessage(result.diagnostics, "may omit transitive dependencies");
+    assertMessage(
+      result.coverage.limitations,
+      "may omit transitive dependencies",
     );
     assertEcosystemFacts(result, fixture, "1.2.0");
   }
@@ -936,40 +874,20 @@ snapshots:
   for (const origin of localOriginFixtures.filter((item) =>
     ["uv", "poetry", "cargo", "bundler", "composer"].includes(item.format),
   )) {
-    const fixture = ecosystemFixtures[origin.format];
-    const excluded = await scan(`ecosystem-${origin.format}-local-excluded`, {
-      [fixture.path]: origin.content,
-      "osv-scanner.toml": `[[PackageOverrides]]\nname=${JSON.stringify(fixture.name)}\necosystem=${JSON.stringify(fixture.ecosystem)}\nversion="1.2.0"\nignore=true\nreason="Synthetic exclusion contract"\n`,
-    });
-    assert.equal(
-      excluded.status,
-      "completed",
-      `${origin.format}: ${excluded.diagnostics.join("; ")}`,
-    );
-    assert.equal(excluded.coverage.unresolvedPackages, 0);
-    assert.equal(excluded.components.length, 0);
-    assert.equal(excluded.matches.length, 0);
-    assert.ok(
-      (await readFile(excluded.scanner.stderrPath, "utf8")).includes(
-        `Package ${fixture.ecosystem}/${fixture.name}/1.2.0 has been filtered out because:`,
-      ),
+    await checkLocalExclusion(
+      `ecosystem-${origin.format}-local-excluded`,
+      ecosystemFixtures[origin.format],
+      origin.content,
     );
   }
   for (const version of ["1.2.0", "9.0.0"]) {
     const sourceOnlyComposer = await scan(`composer-source-only-${version}`, {
-      "composer.lock": JSON.stringify({
-        packages: [
-          {
-            name: ecosystemFixtures.composer.name,
-            version,
-            source: {
-              type: "git",
-              url: "https://example.invalid/synthetic-fork.git",
-              reference: "0123456789012345678901234567890123456789",
-            },
-          },
-        ],
-        "packages-dev": [],
+      "composer.lock": composerLock(version, {
+        source: {
+          type: "git",
+          url: "https://example.invalid/synthetic-fork.git",
+          reference: "0123456789012345678901234567890123456789",
+        },
       }),
     });
     assert.equal(sourceOnlyComposer.status, "partial");
@@ -982,19 +900,12 @@ snapshots:
     );
   }
   const skippedComposer = await scan("ecosystem-composer-short-commit", {
-    "composer.lock": JSON.stringify({
-      packages: [
-        {
-          name: ecosystemFixtures.composer.name,
-          version: "1.2.0",
-          dist: {
-            type: "zip",
-            url: "https://example.invalid/synthetic.zip",
-            reference: "abc1234",
-          },
-        },
-      ],
-      "packages-dev": [],
+    "composer.lock": composerLock("1.2.0", {
+      dist: {
+        type: "zip",
+        url: "https://example.invalid/synthetic.zip",
+        reference: "abc1234",
+      },
     }),
   });
   assert.equal(skippedComposer.status, "partial");
@@ -1002,10 +913,9 @@ snapshots:
   assert.equal(skippedComposer.coverage.inputs[0]?.status, "failed");
   assert.equal(skippedComposer.components.length, 1);
   assert.equal(skippedComposer.matches.length, 0);
-  assert.ok(
-    skippedComposer.diagnostics.some((line) =>
-      line.includes('short commit hash "abc1234" cannot be queried;'),
-    ),
+  assertMessage(
+    skippedComposer.diagnostics,
+    'short commit hash "abc1234" cannot be queried;',
   );
   const resolvedProjectContent = ecosystemFixtures.nuget
     .content("1.2.0")
@@ -1016,22 +926,10 @@ snapshots:
   assert.equal(resolvedProject.status, "partial");
   assert.equal(resolvedProject.coverage.unresolvedPackages, 1);
   assertEcosystemFacts(resolvedProject, ecosystemFixtures.nuget, "1.2.0");
-  const excludedProject = await scan(
+  await checkLocalExclusion(
     "ecosystem-nuget-resolved-project-excluded",
-    {
-      "packages.lock.json": resolvedProjectContent,
-      "osv-scanner.toml":
-        '[[PackageOverrides]]\nname="Synthetic.Library"\necosystem="NuGet"\nversion="1.2.0"\nignore=true\nreason="Synthetic exclusion contract"\n',
-    },
-  );
-  assert.equal(excludedProject.status, "completed");
-  assert.equal(excludedProject.coverage.unresolvedPackages, 0);
-  assert.equal(excludedProject.components.length, 0);
-  assert.equal(excludedProject.matches.length, 0);
-  assert.ok(
-    (await readFile(excludedProject.scanner.stderrPath, "utf8")).includes(
-      "Package NuGet/Synthetic.Library/1.2.0 has been filtered out because:",
-    ),
+    ecosystemFixtures.nuget,
+    resolvedProjectContent,
   );
   for (const input of unsupportedEcosystemInputs) {
     const result = await scan(`ecosystem-unsupported-${input.name}`, {
