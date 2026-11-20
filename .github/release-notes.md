@@ -34,6 +34,7 @@
 - bump promptfoo from 0.124.1 to 0.125.1 in /evals/triage-finding ([#2335](https://github.com/openai/codex-security/pull/2335))
 - clarify static verification is instruction-based ([#2744](https://github.com/openai/codex-security/pull/2744))
 - use singular nouns for one-item match-all counts ([#2751](https://github.com/openai/codex-security/pull/2751))
+- render exploitability reports in Markdown and interactive HTML ([#2762](https://github.com/openai/codex-security/pull/2762))
 
 </details>
 
