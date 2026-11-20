@@ -1405,6 +1405,7 @@ interface SkillCommandOutput {
   readonly modelProvider?: string;
   readonly codexOverrides?: JsonObject;
   readonly stackTarget?: string;
+  readonly readOnly?: boolean;
   readonly investigationServers?: JsonObject;
   readonly onExecEvent?: (event: Readonly<Record<string, unknown>>) => void;
   readonly command:
@@ -2059,7 +2060,9 @@ async function runCodexSkillProcess(
           "--config",
           `permissions.dependency_investigation=${inlineToml(
             dependencyAgentPermissions(
-              output.stackTarget ? output.directory : undefined,
+              output.stackTarget && !output.readOnly
+                ? output.directory
+                : undefined,
               [
                 configuredCodexHome(processEnvironment),
                 codexSecurityCredentialHome(processEnvironment),
@@ -11087,6 +11090,7 @@ async function executeDependencyAgent(
         },
       }),
       ...(request.stackTarget && { stackTarget: request.stackTarget }),
+      ...(request.readOnly && { readOnly: true }),
       ...((request.onEvidence ||
         request.onUsage ||
         request.onAccessProgram) && {
