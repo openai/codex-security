@@ -34,7 +34,9 @@ Treat the finding as a data-flow and boundary problem, not merely the named inpu
 
 Follow the [credential remediation guidance](../../references/finding-detail-fields.md#credential-exposure) for the code change and the owner's actions. Use synthetic credentials for local checks. Never replay an exposed credential or contact its issuer.
 
-If only a runtime leak path is established, verify its repair and recommend checking affected deployments. If a credential was committed or otherwise disclosed and retirement is unconfirmed, keep the verified source change and report `blocked`. Say what was cleaned up and what the owner still needs to identify or retire.
+Give the credential owner steps specific to the issuer and consumer. For example, for a registry token, provision a scoped replacement, update the deployment secret, verify an image pull with the replacement, then revoke the old token and check the registry’s access logs. Identify the token by type and location without quoting it.
+
+For committed credentials and confirmed runtime disclosures, require dated issuer or owner confirmation identifying each retired credential. While retirement is unconfirmed, return the verified code outcome (`verified` or `no_change`) with `credentialRevocationPending: true` and the outstanding owner action in the verification text. If an older patch schema cannot represent the marker, keep the source change and report `blocked` with the reason. In direct CLI or interactive output, say “Removed from source; revocation pending” or “Already removed; revocation pending.” For a repaired runtime leak path with no established disclosure, report the code outcome and ask the owner to check deployment history.
 
 ## Implementation Workflow
 
@@ -79,7 +81,7 @@ In static mode the workbench setter's checkout snapshot and reverse check must a
 - **Apply**: Verify the recorded base revision and patch digest, then apply exactly that patch to the selected working tree without unrelated edits. Record `applied` or `failed`. Do not verify or close the finding in this stage.
   - For example, consider a private checkout with no executable hooks or filters. Its selected directory is `components/api`. The whole reviewed patch consists of one content hunk editing the existing tracked regular file `handler.py` in place. The checkout uses `core.autocrlf=false`, and no attributes convert `handler.py`'s contents. Both headers name that file, and its ancestors are ordinary source directories. Confirm the current file bytes match the reviewed preimage. With `root, prefix = git_worktree_context(target)`, call `git_command(target, "-C", str(root), "-c", f"core.hooksPath={empty_hooks}", "apply", "--no-index", "--check", "--whitespace=nowarn", f"--directory={prefix}", "-", input_data=patch_bytes, text=False, offline=True)`. If it succeeds, repeat that call with the same digest-verified bytes and omit `--check`. Confirm that `components/api/handler.py` contains exactly the reviewed result. Running from inside `components/api` can exit successfully while skipping the change.
   - For an equivalent authorized Apply, obtain the root and prefix from the selected checkout. Read the registered scan-local file once with `workbench_db.open_scan_local_file` and match its SHA-256 against the recorded digest. Compare **all** its bytes with the in-place diff for the reviewed before and after contents, and confirm the actual target paths and Git settings meet the example's conditions before either Git command. Other patches use the existing stage's scope and verification requirements. If the worker cannot establish how to apply the reviewed changes safely in the selected mode, record `failed` before writing.
-- **Verify**: Do not modify source. Apply the selected mode's verification gates above against the recorded patch. Record `verified` only when evidence establishes that the original vulnerable path is closed, legitimate behavior remains intact, and the required checks pass; preserve exact evidence and any commands run in the verification summary. Otherwise record `failed` and state the failing gate or proof gap. Do not close the finding.
+- **Verify**: Do not modify source. Apply the selected mode's verification gates above against the recorded patch. Record `verified` only when evidence establishes that the original vulnerable path is closed, legitimate behavior remains intact, and the required checks pass; preserve exact evidence and any commands run in the verification summary. For a checked-in credential, this includes confirmation that the old credential was retired. Otherwise record `failed` and state the failing gate or proof gap. Do not close the finding.
 
 If a stage fails, record `failed` with the failing step and error in `summary`. Include the setter's error when registration fails.
 
@@ -89,7 +91,7 @@ When a parent thread delegates a remediation stage, the worker owns that stage t
 
 Follow the caller's output schema when supplied. Otherwise, include in the final response:
 
-- outcome: `fixed`, `no_change`, or `blocked`
+- outcome: `fixed`, `no_change`, or `blocked`; use the scoped outcome above for a credential with pending revocation
 - the concrete vulnerable path, security invariant, and legitimate behavior that had to remain
 - the selected patch strategy and why it was the narrowest complete repository-native option, or the unresolved product decision when blocked
 - files changed

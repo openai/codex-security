@@ -23,6 +23,8 @@ Persist requested context changes with `update_codex_security_scan_context`. At 
 
 The inventory includes changed text files regardless of filename, extension, or directory. Tracked changes remain in scope even when ignored; local patches also include non-ignored untracked files. Inspect deleted files at the baseline revision. Assess security relevance from behavior and reachability, including build, deployment, and CI use.
 
+When assembling each checked-in credential finding, put “Validity unchecked” in the saved `summary`. Include at least one complete, verbatim source line in `codeEvidence` that proves the exposure, such as the embedded assignment or a comparison with a literal password. Refer to the credential by type in the summary.
+
 Use `cancel_codex_security_scan` only when the user explicitly cancels. Reserve `fail_codex_security_scan` for a confirmed unrecoverable blocker; preserve durable scans while recovery is possible.
 
 1. Run `$threat-model` once, or use the supplied model. Preserve a supplied schema-valid canonical `threatModel` object unchanged. Otherwise retain the exact supplied text or generated Markdown as `{ "format": "markdown", "content": "<model text>" }`, with `origin: "provided"` or `origin: "generated"`. Model the repository unless the user requests narrower scope, and record the model's actual scope separately from changed-file scope. Immediately save a `complete: false` semantic draft with the model and no findings yet. The host writes `threatmodel.md`; later phases retain the same canonical model.

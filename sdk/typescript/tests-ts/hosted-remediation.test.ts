@@ -203,6 +203,36 @@ test.each([
   });
 });
 
+test.each([true, false])(
+  "hosted patch preserves outstanding credential work (pending: %p)",
+  async (pending) => {
+    const input = await fixture();
+    const result = await runHostedRemediation(input, {
+      executor: {
+        run: async (request) =>
+          receipt(request, {
+            finalResponse: JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: input.finding.id,
+                  status: "verified",
+                  files: ["guard.ts"],
+                  verification:
+                    "The source now uses the configured replacement.",
+                  credentialRevocationPending: pending,
+                },
+              ],
+            }),
+          }),
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(result.patch?.credentialRevocationPending).toBe(
+      pending || undefined,
+    );
+  },
+);
+
 test.each([
   { status: "verified", verification: undefined },
   { status: "no_change", verification: " " },

@@ -70,7 +70,11 @@ function savedScan(
 function completePatches(
   args: readonly string[],
   output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-  status: "verified" | "blocked" = "verified",
+  status: "verified" | "no_change" | "blocked" = "verified",
+  report?: {
+    verification: string;
+    credentialRevocationPending: boolean | undefined;
+  },
 ): Finding[] {
   const prompt = output?.appServer?.prompt ?? args.at(-1)!;
   const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
@@ -80,8 +84,10 @@ function completePatches(
         occurrenceId: finding.occurrenceId,
         status,
         files: status === "verified" ? [finding.locations[0]!.path] : [],
-        ...(status === "verified"
-          ? { verification: "The exploit fails and focused tests pass." }
+        ...(status !== "blocked"
+          ? (report ?? {
+              verification: "The exploit fails and focused tests pass.",
+            })
           : { reason: "The required service is unavailable." }),
       })),
     }),
@@ -2139,6 +2145,65 @@ describe("scan and patch workflow", () => {
     },
   );
 
+  test.each(["verified", "no_change"] as const)(
+    "keeps pending credential retirement blocking CI after a %s code patch",
+    async (status) => {
+      const fixtures = await publicationFixtures(initialPatchFiles);
+      let publishedBody: string | undefined;
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--create-pr",
+          "--fail-on-severity",
+          "high",
+          "--json",
+        ],
+        {
+          ...fixtures,
+          onCodex: async (args, output) => {
+            if (status === "verified")
+              await writeFile(
+                join(fixtures.currentDirectory, "src/finding-1.ts"),
+                "fixed\n",
+              );
+            completePatches(args, output, status, {
+              verification:
+                "The application now reads its password from the configured store.",
+              credentialRevocationPending: true,
+            });
+            return 0;
+          },
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git")
+              return runGitRepositoryCommand(command, args, cwd, options);
+            if (command === "gh" && args[1] === "create") {
+              publishedBody = args.at(-1);
+              return "https://github.com/example/project/pull/1";
+            }
+            return "";
+          },
+        },
+        {
+          configure: (current) => {
+            current.assessPatchRisk = async () => patchRiskAssessment();
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(1);
+      expect(JSON.parse(outcome.stdout).patches).toMatchObject([
+        { status, credentialRevocationPending: true },
+      ]);
+      expect(outcome.stderr).toContain("REVOCATION PENDING");
+      expect(outcome.stderr).toContain("Confirm revocation");
+      if (status === "verified") {
+        expect(publishedBody).toContain("Confirm revocation");
+      } else {
+        expect(publishedBody).toBeUndefined();
+      }
+    },
+  );
+
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
     const reason = "Revoke the exposed token with its issuer.";
     const scan = ["scan", "--patch"];
@@ -2154,7 +2219,7 @@ describe("scan and patch workflow", () => {
         status,
         files,
         ...(status === "blocked"
-          ? { reason }
+          ? { reason, credentialRevocationPending: true }
           : { verification: "Focused checks pass." }),
       };
       const fixtures = await publicationFixtures({
@@ -2188,6 +2253,7 @@ describe("scan and patch workflow", () => {
       if (args === saved)
         expect(response).toMatchObject({ applied: true, files });
       if (status === "blocked") {
+        expect(outcome.stderr).toContain("BLOCKED");
         expect(outcome.stderr).toContain(reason);
         expect(fixtures.git("diff", "--name-only")).toBe(files[0]);
         expect(fixtures.git("branch", "--show-current")).toBe("main");

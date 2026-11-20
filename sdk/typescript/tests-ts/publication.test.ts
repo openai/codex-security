@@ -2,7 +2,10 @@ import { reseal } from "./support/sealed-scan.js";
 import { chmod, mkdir, readFile, realpath, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { prepareScanPublication } from "../src/publication.js";
+import {
+  linearPublicationArguments,
+  prepareScanPublication,
+} from "../src/publication.js";
 import type {
   CoverageDocument,
   FindingsDocument,
@@ -145,6 +148,60 @@ describe("scan publication preparation", () => {
       issue.description.indexOf("**Scan ID:**"),
     );
     expect(issue.description).not.toContain("/blob/deadbeef/");
+  });
+
+  test("publishes original credential diagnostics and issuer retirement guidance", async () => {
+    const scanDirectory = await copyExample();
+    const path = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(path);
+    const finding = findings.findings[0]!;
+    finding.taxonomy = { category: "credential-exposure", cwe: ["CWE-798"] };
+    finding.title = "Example Registry token in release configuration";
+    finding.summary =
+      "The release job reads a token from the checked-in configuration.";
+    finding.remediation =
+      "Revoke the old token in Example Registry, update the release job, and confirm retirement with its owner.";
+    const validation = {
+      summary: "Source review traced the token to the release job.",
+      limitations: ["The token's validity was not checked."],
+    };
+    finding.validation = validation;
+    finding.locations = [{ path: "config/release.env", startLine: 7 }];
+    const code = 'SERVICE_TOKEN="synthetic-example-only"';
+    finding.codeEvidence = [
+      {
+        id: "token-assignment",
+        label: "Release configuration",
+        ...finding.locations[0]!,
+        code,
+        explanation: "The release job reads this assignment.",
+      },
+    ];
+    await writeJson(path, findings);
+    await reseal(scanDirectory);
+    const saved = await readFile(path, "utf8");
+
+    const prepared = await prepareScanPublication(
+      scanDirectory,
+      publicationOptions(scanDirectory),
+    );
+    const payload = linearPublicationArguments(
+      prepared.destination,
+      prepared.issues[0]!,
+    );
+    expect(payload.title).toBe(`[Codex Security][HIGH] ${finding.title}`);
+    for (const detail of [
+      finding.summary,
+      finding.remediation,
+      validation.summary,
+      ...validation.limitations,
+      code,
+      "config/release.env:7",
+      finding.fingerprints.primary,
+    ]) {
+      expect(payload.description).toContain(detail);
+    }
+    expect(await readFile(path, "utf8")).toBe(saved);
   });
 
   test("keeps the reproduction and validation limits ahead of scan metadata", async () => {

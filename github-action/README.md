@@ -422,6 +422,8 @@ are not supported.
 
 The scanner uses applicable `SECURITY.md` guidance from the checked-out revision,
 including policy changes in the PR. Review those changes alongside the code.
+Use the [checked-in credential policy](../sdk/typescript/docs/cli.md#checked-in-credentials)
+to delegate known-format token alerts when another scanner covers them.
 
 ## Scan settings
 
