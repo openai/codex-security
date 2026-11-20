@@ -2308,6 +2308,9 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
+    // The loader runs before the trusted executable, in the patch's writable cwd.
+    for (const name of Object.keys(environment))
+      if (/^(?:LD|DYLD)_/u.test(name)) delete environment[name];
     const credentialNames = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
@@ -12051,7 +12054,7 @@ async function patchPublicationDestination(
   if (candidates.length > 0) {
     const requestUrl = new URL(candidates[0]!.url);
     let lookupError: unknown;
-    for (const pushRemote of remotes.filter(isNetworkPatchRemote)) {
+    for (const pushRemote of remotes) {
       const selected = await githubPatchRepository(
         pushRemote,
         requestUrl,
@@ -12082,6 +12085,8 @@ async function patchPublicationDestination(
     }
     if (!found && lookupError !== undefined) throw lookupError;
   }
+  if (!found)
+    await requireOperatorPatchMirrors(remotes, repository, dependencies);
   return {
     remote: source,
     target,
@@ -14334,12 +14339,6 @@ async function preparePatchPublication(
       dependencies,
     );
     existing = Boolean(destination.existing);
-    if (!existing)
-      await requireOperatorPatchMirrors(
-        destination.remotes,
-        repository,
-        dependencies,
-      );
     preflightUsedHttps = destination.remotes.some((remote) =>
       remote.startsWith("https://"),
     );
@@ -14867,7 +14866,6 @@ async function publishPatchBranch(
     }
 
     if (!url) {
-      await requireOperatorPatchMirrors(remotes, repository, dependencies);
       let head = branch;
       if (!gitlab) {
         const base = new URL(
@@ -14882,7 +14880,7 @@ async function publishPatchBranch(
           ]),
         );
         let headRepository: URL | undefined;
-        for (const pushRemote of remotes.filter(isNetworkPatchRemote)) {
+        for (const pushRemote of remotes) {
           const lookup = await githubPatchRepository(
             pushRemote,
             base,

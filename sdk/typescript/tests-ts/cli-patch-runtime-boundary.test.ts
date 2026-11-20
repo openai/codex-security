@@ -13,6 +13,26 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+test.each(["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"])(
+  "host Git cannot inherit %s from a writable component",
+  async (variable) => {
+    const directory = await fixtures.create("patch-loader-");
+    await expect(
+      runRepositoryCommand(
+        "git",
+        [
+          `--config-env=probe.loader=${variable}`,
+          "config",
+          "--get",
+          "probe.loader",
+        ],
+        directory,
+        { environment: { [variable]: "./selected-library", LC_ALL: "C" } },
+      ),
+    ).rejects.toThrow(`missing environment variable '${variable}'`);
+  },
+);
+
 test("a private-index snapshot reuses only unchanged profiles outside its writable roots", async () => {
   const name =
     "a private-index snapshot reuses only unchanged profiles outside its writable roots";
