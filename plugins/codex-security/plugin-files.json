@@ -94,6 +94,7 @@
     "scripts/workbench/saved_coverage.py",
     "scripts/workbench/saved_outputs.py",
     "scripts/workbench/saved_sources.py",
+    "scripts/workbench/scan_binding.py",
     "scripts/workbench/storage.py",
     "scripts/workbench_cli.py",
     "scripts/workbench_constants.py",

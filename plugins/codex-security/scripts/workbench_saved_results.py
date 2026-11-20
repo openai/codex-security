@@ -39,6 +39,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from workbench import saved_sources
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.retained_records import _ensure_finding_identities
 from workbench.saved_coverage import (
@@ -75,12 +76,6 @@ from workbench.saved_sources import (
 from workbench.saved_sources import (
     _digest as _digest,
 )
-from workbench.saved_sources import (
-    _require_selected_result as _require_selected_result,
-)
-from workbench.saved_sources import (
-    require_selected_publication as require_selected_publication,
-)
 from workbench.storage import saved_deep_workers
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
@@ -88,6 +83,9 @@ from workbench_coverage_receipts import (
 )
 from workbench_source_coverage import retain_unmerged_review_coverage
 from workbench_validation import has_verified_selected_result
+
+_require_selected_result = saved_sources._require_selected_result
+require_selected_publication = saved_sources.require_selected_publication
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
