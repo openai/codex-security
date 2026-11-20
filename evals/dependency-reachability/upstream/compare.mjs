@@ -11,7 +11,11 @@ function sum(values) {
 
 function score(results) {
   const correct = (field) =>
-    results.filter((result) => result.grade?.[field] === true).length;
+    results.some((r) => typeof r.grade?.[field] === "boolean")
+      ? results.filter((r) => r.grade?.[field] === true).length
+      : null;
+  const identity = correct("identityCorrect");
+  const verdict = correct("verdictLabelCorrect");
   const batches = results.map((r) => r.reviewBatches).filter(Number.isFinite);
   const usage = results.map((r) => r.usage).filter(Boolean);
   return {
@@ -19,11 +23,14 @@ function score(results) {
     passed: results.filter((r) => r.status === "passed").length,
     executionErrors: results.filter((r) => r.status === "execution_error")
       .length,
-    verdict: correct("verdictLabelCorrect"),
-    identity: correct("identityCorrect"),
-    identityAndVerdict: results.filter(
-      ({ grade }) => grade?.identityCorrect && grade.verdictLabelCorrect,
-    ).length,
+    verdict,
+    identity,
+    identityAndVerdict:
+      identity === null || verdict === null
+        ? null
+        : results.filter(
+            ({ grade }) => grade?.identityCorrect && grade.verdictLabelCorrect,
+          ).length,
     version: correct("versionCorrect"),
     decidingEvidence: correct("evidenceCorrect"),
     selectedEvidence: correct("selectedEvidenceCorrect"),

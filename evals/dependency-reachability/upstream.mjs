@@ -11,28 +11,22 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
 import { commitFixture, jsonFile, sha256 } from "./fixtures.mjs";
-import { cases, originalCases } from "./upstream/cases.mjs";
+import { sourceReader, verifyClaimCitations } from "./grade.mjs";
+import { cases as pinnedCases, originalCases } from "./upstream/cases.mjs";
 import { compareRuns } from "./upstream/compare.mjs";
 import { gradeSnapshot, validateSnapshot } from "./upstream/grade.mjs";
 
-const suites = ["original", "added", ...new Set(cases.map((c) => c.suite))];
-const usage = `Usage: node upstream.mjs --cache DIR [--suite ${suites.join("|")}] [--case ID ...]
-       (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
-       Repeat --case ID to select several cases.
-       With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled for live runs)
-       Regrading uses the cases and grader from results.json when available. Pass selectors to narrow the run.
-       With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
-       For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
-Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE`;
 const separator = process.argv.indexOf("--", 2);
 const adapter = separator < 0 ? [] : process.argv.slice(separator + 1);
 const { values } = parseArgs({
   args: process.argv.slice(2, separator < 0 ? undefined : separator),
   options: {
     cache: { type: "string" },
+    "case-module": { type: "string" },
     suite: { type: "string" },
     case: { type: "string", multiple: true },
     cli: { type: "string" },
@@ -47,6 +41,31 @@ const { values } = parseArgs({
     help: { type: "boolean", short: "h" },
   },
 });
+const caseModule = values["case-module"] && resolve(values["case-module"]);
+const corpus = caseModule
+  ? await import(pathToFileURL(caseModule).href)
+  : { cases: pinnedCases, prepare, validateSnapshot, gradeSnapshot };
+const { cases } = corpus;
+assert(Array.isArray(cases), "Expected an array of cases");
+for (const hook of ["prepare", "validateSnapshot", "gradeSnapshot"])
+  assert.equal(typeof corpus[hook], "function", `Missing function ${hook}`);
+const idsSeen = new Set();
+for (const scenario of cases) {
+  assert.match(scenario.id, /^[a-z\d_-]+$/iu, "Invalid case directory name");
+  assert(!idsSeen.has(scenario.id), `Duplicate case ID: ${scenario.id}`);
+  idsSeen.add(scenario.id);
+}
+const suites = new Set(caseModule ? [] : ["original", "added"]);
+for (const scenario of cases) suites.add(scenario.suite);
+const usage = `Usage: node upstream.mjs (--cache DIR | --case-module PATH) [--suite ${[...suites].join("|")}] [--case ID ...]
+       (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
+       Repeat --case ID to select several cases.
+       With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled for live runs)
+       Regrading uses the cases and grader from results.json when available. Pass selectors to narrow the run.
+       With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
+       For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
+Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE
+Use --case-module PATH to load cases and their grader from a trusted local JavaScript module.`;
 if (values.help) {
   console.log(usage + "\nCases: " + cases.map((c) => c.id).join(", "));
   process.exit(0);
@@ -70,7 +89,8 @@ if (
   jobs < 1 ||
   (separator >= 0 &&
     (!adapter.length || !values["skill-baseline"] || values.model)) ||
-  !values.cache ||
+  Boolean(values.cache) === Boolean(caseModule) ||
+  (caseModule && values["skill-baseline"]) ||
   !["enabled", "disabled", "both"].includes(grader) ||
   (values.grader && !values.cli && !existing) ||
   (values["isolated-state"] && !values.cli) ||
@@ -95,8 +115,8 @@ const selected = cases.filter((c) => {
   if (values.case && !values.case.includes(c.id)) return false;
   if (savedIds && !savedIds.includes(c.id)) return false;
   if (values["skill-baseline"] && !original.has(c.id)) return false;
-  if (values.suite === "original") return original.has(c.id);
-  if (values.suite === "added") return !original.has(c.id);
+  if (!caseModule && values.suite === "original") return original.has(c.id);
+  if (!caseModule && values.suite === "added") return !original.has(c.id);
   return !values.suite || c.suite === values.suite;
 });
 const ids = selected.map((c) => c.id);
@@ -106,7 +126,7 @@ if (unmatched.length)
   throw Error("Cases unavailable for this selection: " + unmatched.join(", "));
 if (!selected.length) throw Error("No matching cases.\n" + usage);
 const cli = values.cli && (await realpath(resolve(values.cli)));
-const cache = resolve(values.cache);
+const cache = values.cache && resolve(values.cache);
 const out = values.out
   ? resolve(values.out)
   : await mkdtemp(join(tmpdir(), "upstream-results-"));
@@ -247,9 +267,13 @@ async function runCase(task, runSkill) {
   try {
     await mkdir(dest, { mode: 0o700 });
     const savedReport = existing && (await readSavedReport(task, result));
-    const { repo, sha } = prepare(scenario, scratch);
+    const { repo, sha } = await corpus.prepare(
+      scenario,
+      scratch,
+      commitFixture,
+    );
     result.sourceSha = sha;
-    result.evidence = validateSnapshot(scenario, repo, sha);
+    result.evidence = await corpus.validateSnapshot(scenario, repo, sha);
     if (values["prepare-only"]) {
       result.status = "prepared";
     } else if (runSkill) {
@@ -289,7 +313,15 @@ async function runCase(task, runSkill) {
           report.assumptions?.some((s) => s.includes(scenario.callerScope)),
           "report is missing the supplied caller scope",
         );
-      result.grade = gradeSnapshot(report, scenario, repo, sha, task.grader);
+      result.grade = await corpus.gradeSnapshot(
+        report,
+        scenario,
+        repo,
+        sha,
+        task.grader,
+        { sourceReader, verifyClaimCitations },
+      );
+      assert.equal(typeof result.grade.pass, "boolean", "Missing grade.pass");
       if (result.grade.pass) result.status = "passed";
     }
   } catch (error) {

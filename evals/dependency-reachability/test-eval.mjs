@@ -505,6 +505,71 @@ test("the evidence grader checks citations against the stdio server's original r
   );
 });
 
+test("a local case module can regrade both conditions against its own pinned source", async () => {
+  const saved = await mkdtemp(join(root, "saved-"));
+  const caseModule = join(saved, "local cases.mjs");
+  const scenario = {
+    id: "profile",
+    suite: "service",
+    revision: "v1",
+    callerScope: "The upload service",
+    cve: reviewedCve,
+  };
+  await writeFile(
+    caseModule,
+    `
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+export const cases = [${JSON.stringify(scenario)}];
+export async function prepare(scenario, repo, commitFixture) {
+  await writeFile(join(repo, "handler"), scenario.revision);
+  return { repo, sha: commitFixture(repo) };
+}
+export function validateSnapshot() { return { sites: 1 }; }
+export function gradeSnapshot(report, scenario, repo, sha, mode, { sourceReader }) {
+  const { excerpt } = sourceReader(repo, sha)(report.citation);
+  return { pass: excerpt === scenario.revision && report.mode === mode };
+}
+`,
+  );
+  const repo = await mkdtemp(join(root, "source-"));
+  await writeFile(join(repo, "handler"), scenario.revision);
+  const commit = commitFixture(repo);
+  for (const mode of ["enabled", "disabled"]) {
+    const dir = join(saved, mode, scenario.id);
+    await mkdir(dir, { recursive: true });
+    await jsonFile(join(dir, "report.json"), {
+      mode,
+      assumptions: [scenario.callerScope],
+      citation: { commit, path: "handler", startLine: 1, endLine: 1 },
+    });
+  }
+  const out = join(saved, "regraded");
+  const run = spawnSync(
+    process.execPath,
+    [
+      join(import.meta.dirname, "upstream.mjs"),
+      "--case-module",
+      caseModule,
+      "--grade-existing",
+      saved,
+      "--grader",
+      "both",
+      "--jobs",
+      "2",
+      "--out",
+      out,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.ifError(run.error);
+  const summary = JSON.parse(await readFile(join(out, "results.json"), "utf8"));
+  assert.equal(run.status, 0, JSON.stringify(summary.results));
+  assert.deepEqual(summary.selected, [scenario.id]);
+  assert.equal(summary.comparison.enabled.passed, 1);
+  assert.equal(summary.comparison.disabled.passed, 1);
+});
+
 test("regrading a saved subset infers its cases and mode and can select one side", async () => {
   const saved = await mkdtemp(join(root, "paired-"));
   const selected = ["direct-links", "disabled-links", "queued-links"];
