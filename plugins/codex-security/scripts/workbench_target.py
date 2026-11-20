@@ -1468,8 +1468,8 @@ def directory_content_digest(
             if stat.S_ISLNK(mode) or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
             else None
         )
-        raw_path = os.fsencode(relative_path.as_posix())
-        update_digest_field(digest, b"path", raw_path)
+        relative_name = relative_path.as_posix()
+        update_digest_field(digest, b"path", os.fsencode(relative_name))
         update_digest_field(digest, b"mode", str(stat.S_IMODE(mode)).encode())
         if link_target is not None:
             update_digest_field(digest, b"kind", b"symlink")
@@ -1478,13 +1478,11 @@ def directory_content_digest(
             update_digest_field(digest, b"kind", b"directory")
         elif stat.S_ISREG(mode):
             try:
-                source_root = target if capture_file_digests is not None else None
-                file_digest = _update_regular_file_digest(digest, path, source_root=source_root)
-                if (
-                    capture_file_digests is not None
-                    and relative_path.as_posix() in capture_file_digests
-                ):
-                    capture_file_digests[relative_path.as_posix()] = file_digest.hex()
+                if capture_file_digests is not None and relative_name in capture_file_digests:
+                    file_digest = _update_regular_file_digest(digest, path, source_root=target)
+                    capture_file_digests[relative_name] = file_digest.hex()
+                else:
+                    _update_regular_file_digest(digest, path)
             except OSError as exc:
                 raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
         else:

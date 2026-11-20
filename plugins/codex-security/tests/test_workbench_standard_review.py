@@ -129,6 +129,8 @@ def test_reviewed_file_must_belong_to_the_saved_directory_snapshot(tmp_path: Pat
     repo = tmp_path / "repo"
     src = repo / "src"
     src.mkdir(parents=True)
+    if os.name == "posix":
+        (repo / r"notes\old.txt").write_bytes(b"notes")
     (src / ".ignore").write_text("*.temporary\n")
     for name in ("a", "b", "c"):
         (src / name).write_bytes(name.encode())
