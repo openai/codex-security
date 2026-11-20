@@ -333,19 +333,24 @@ function loadRecipeSources(
     throw new CodexSecurityError(invalidPaths);
   };
   target.executableSourcePaths = paths("executableSourcePaths");
+  target.sourceRoots = [
+    ...paths("executableSourceRoots"),
+    ...paths("knowledgeBasePaths"),
+    ...paths("knowledgeBaseProtectedRoots"),
+  ];
   // Older Deep Scan recipes kept document contents without their source paths.
   if (recipe["mode"] === "deep" && recipe["pythonDiscoveryRoots"] === undefined)
     target.excludeCheckoutPython = "discovery";
   // Older recipes recorded some file inputs only in the selected configuration.
   const config = recipe["config"];
   if (isRecord(config)) {
-    target.executableSourcePaths.push(
-      ...scanConfigSourcePaths(
-        config as JsonObject,
-        row.scan_dir ?? undefined,
-        environment,
-      ),
+    const configPaths = scanConfigSourcePaths(
+      config as JsonObject,
+      row.scan_dir ?? undefined,
+      environment,
     );
+    target.executableSourcePaths.push(...configPaths.model);
+    target.sourceRoots.push(...configPaths.nested);
     const profile = config["profile"];
     const profiles = config["profiles"];
     const nativeProfile =
@@ -361,11 +366,6 @@ function loadRecipeSources(
       target.excludeCheckoutPython = true;
   }
   target.pythonDiscoveryRoots = paths("pythonDiscoveryRoots");
-  target.sourceRoots = [
-    ...paths("executableSourceRoots"),
-    ...paths("knowledgeBasePaths"),
-    ...paths("knowledgeBaseProtectedRoots"),
-  ];
 }
 
 async function savedInputRoots(
