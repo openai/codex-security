@@ -11,13 +11,13 @@ test.each(["native", "win32"] as const)(
   async (platform) => {
     const name = `requirements filename casing preserves input coverage (${platform})`;
     if (runTestInSubprocess(import.meta.path, name)) return;
-    const { additionalScaFormat, inspectAdditionalScaInput, scaInputBasename } =
+    const { scaInputFormat, inspectAdditionalScaInput, scaInputBasename } =
       await import("../src/sca-inputs.js");
     // Only the filename predicate observes the simulated platform. Filesystem,
     // Git, path handling, and process execution retain their native behavior.
     if (platform === "win32") {
       mock.module("../src/sca-inputs.js", () => ({
-        additionalScaFormat: (path: string) => {
+        scaInputFormat: (path: string) => {
           const descriptor = Object.getOwnPropertyDescriptor(
             process,
             "platform",
@@ -27,7 +27,7 @@ test.each(["native", "win32"] as const)(
             value: platform,
           });
           try {
-            return additionalScaFormat(path);
+            return scaInputFormat(path);
           } finally {
             Object.defineProperty(process, "platform", descriptor);
           }

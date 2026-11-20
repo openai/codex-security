@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import {
-  additionalScaFormat,
+  scaInputFormat,
   inspectAdditionalScaInput,
   type AdditionalScaFormat,
 } from "../src/sca-inputs.js";
@@ -28,7 +28,7 @@ describe("additional SCA input contracts", () => {
     ["composer.lock", "composer"],
     ["packages.lock.json", "nuget"],
   ] as const)("discovers the pinned extractor input %s", (name, format) => {
-    expect(additionalScaFormat(join("nested", name))).toBe(format);
+    expect(scaInputFormat(join("nested", name))).toBe(format);
   });
 
   test.each([
@@ -41,7 +41,7 @@ describe("additional SCA input contracts", () => {
     "requirements.in",
     "__proto__",
   ])("does not treat %s as a supported resolved input", (name) =>
-    expect(additionalScaFormat(name)).toBeNull(),
+    expect(scaInputFormat(name)).toBeNull(),
   );
 
   test.each(["uv", "poetry"] as const)(

@@ -66,7 +66,7 @@ test.each(["native", "win32"] as const)(
   async (platform) => {
     const name = `dependency filenames preserve format and coverage (${platform})`;
     if (runTestInSubprocess(import.meta.path, name)) return;
-    const { additionalScaFormat, inspectAdditionalScaInput, scaInputBasename } =
+    const { scaInputFormat, inspectAdditionalScaInput, scaInputBasename } =
       await import("../src/sca-inputs.js");
     if (platform === "win32") {
       const onWindows =
@@ -88,7 +88,7 @@ test.each(["native", "win32"] as const)(
         };
       // Only filename comparisons see Windows. Git and filesystem I/O stay native.
       mock.module("../src/sca-inputs.js", () => ({
-        additionalScaFormat: onWindows(additionalScaFormat),
+        scaInputFormat: onWindows(scaInputFormat),
         scaInputBasename: onWindows(scaInputBasename),
         inspectAdditionalScaInput,
       }));
