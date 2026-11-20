@@ -38,6 +38,7 @@
 - assess captured stacks against public advisory conditions ([#2760](https://github.com/openai/codex-security/pull/2760))
 - keep cached scan skills disabled across path aliases ([#2732](https://github.com/openai/codex-security/pull/2732))
 - split legacy roots from linked global finding groups ([#2702](https://github.com/openai/codex-security/pull/2702))
+- accept indexed stack misses ([#2761](https://github.com/openai/codex-security/pull/2761))
 
 </details>
 
