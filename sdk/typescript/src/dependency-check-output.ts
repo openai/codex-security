@@ -55,9 +55,11 @@ export type DependencyProgressSink = (
 const stages: Record<string, string> = {
   osv: "Looking up advisories in OSV",
   advisory_lookup: "Looking up advisories",
+  advisory_analysis: "Identifying trigger conditions from advisories",
   supplied_advisory: "Using the supplied vulnerability description",
   investigate: "Starting source investigation",
   review: "Reviewing evidence",
+  review_follow_up: "Investigating questions raised by review",
 };
 const activities: Record<string, string> = {
   opengrep: "Searching with OpenGrep",
@@ -93,6 +95,8 @@ function progressLine(type: string, fields: Record<string, unknown>) {
       return "Preparing the checkout";
     case "stage":
       return stages[String(fields["stage"])];
+    case "advisory_lookup_failed":
+      return `Public advisory lookup failed: ${fields["error"]}. Continuing with the supplied advisory only`;
     case "advisories_loaded":
       return `Loaded ${fields["count"]} advisory records`;
     case "access_program":
