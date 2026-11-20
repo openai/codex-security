@@ -602,6 +602,13 @@ process.exit(child.status ?? 1);
     },
   );
   return {
+    [Symbol.asyncDispose]: () => client[Symbol.asyncDispose](),
+    scan: (options: Omit<DependencyScanOptions, "repositoryPath"> = {}) =>
+      client.scanDependencies({
+        repositoryPath: repository,
+        outputDir,
+        ...options,
+      }),
     client,
     repository,
     outputDir,
@@ -649,7 +656,7 @@ test.each(["api key", "command"] as const)(
       },
     });
     let preload: string;
-    const f = await fixture({
+    await using f = await fixture({
       turns: ["completed", "completed"],
       gitHubConfig: "explicit",
       mcpConfig: initialConfig,
@@ -672,7 +679,6 @@ test.each(["api key", "command"] as const)(
           requestedPermissionProfile,
         ),
     });
-    await using security = f.client;
     const receipt = join(f.codexHome, "provider-children.jsonl");
     preload = join(f.codexHome, "provider-child.mjs");
     await writeFile(
@@ -697,10 +703,7 @@ for (const event of [
 process.exit(0);
 `,
     );
-    const result = await security.scanDependencies({
-      repositoryPath: f.repository,
-      outputDir: f.outputDir,
-    });
+    const result = await f.scan();
     expect(result.status, JSON.stringify(result.diagnostics)).toBe("completed");
     expect(result.assessments).toHaveLength(2);
     const children = (await readFile(receipt, "utf8"))
@@ -775,7 +778,7 @@ test.each(
     const receipt = join(root, "calls.jsonl");
     const id = "codex_security_dependencies";
     const fallback = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${id}\` to required value \`:read-only\`.`;
-    const f = await fixture({
+    await using f = await fixture({
       codexLauncher: node,
       turns:
         policy === "runtime-fallback"
@@ -808,7 +811,6 @@ test.each(
       }) =>
         createProfileCodex(options, nativeProfile!, requestedPermissionProfile),
     });
-    await using security = f.client;
     await writeFile(
       executable,
       `
@@ -869,10 +871,7 @@ if (args.includes("app-server")) {
         : originalSpawn(...input);
     }) as typeof originalSpawn);
     try {
-      const result = await security.scanDependencies({
-        repositoryPath: f.repository,
-        outputDir: f.outputDir,
-      });
+      const result = await f.scan();
       const calls = (await readFile(receipt, "utf8"))
         .trim()
         .split("\n")
@@ -997,12 +996,8 @@ async function nativeDependencySandboxAvailable(): Promise<boolean> {
       kind === "JavaScript"
         ? createRequire(import.meta.url).resolve("@openai/codex/bin/codex.js")
         : join(import.meta.dir, "../node_modules/.bin/codex");
-    const f = await fixture({ codexLauncher: launcher });
-    await using security = f.client;
-    const result = await security.scanDependencies({
-      repositoryPath: f.repository,
-      outputDir: f.outputDir,
-    });
+    await using f = await fixture({ codexLauncher: launcher });
+    const result = await f.scan();
     expect(result.status).toBe("completed");
     expect(f.captured.codex!.codexPathOverride).toBe(launcher);
     expect(f.captured.codex!.config!["default_permissions"]).toBe(
@@ -1057,7 +1052,7 @@ nativeDependencyTest.each([
 ] as const)(
   "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %p, relative home: %p",
   async (homeVariable, configuredGitHubHome, relativeHome) => {
-    const f = await fixture({
+    await using f = await fixture({
       wrappedCodex: true,
       ambientOutput: true,
       homeVariable,
@@ -1108,11 +1103,7 @@ nativeDependencyTest.each([
       BUNDLE_USER_HOME: dirname(bundlerFiles[1]!),
       BUNDLE_USER_CONFIG: bundlerFiles[2],
     });
-    await using security = f.client;
-    const result = await security.scanDependencies({
-      repositoryPath: f.repository,
-      outputDir: f.outputDir,
-    });
+    const result = await f.scan();
     expect(result.status, result.diagnostics.join("\n")).toBe("completed");
     const options = f.captured.codex!;
     const launcher = f.environment.CODEX_CLI_PATH!;
@@ -1374,10 +1365,9 @@ test.each(["absolute", "relative"] as const)(
 );
 
 test("final cost recovery persists an unchanged estimate without duplicate notifications", async () => {
-  const { client, repository, outputDir } = await fixture({
+  await using f = await fixture({
     turns: ["malformed"],
   });
-  await using security = client;
   const costs: Readonly<ScanCost>[] = [];
   const originalRefresh = ScanCostTracker.prototype.refresh;
   const originalStop = ScanCostTracker.prototype.stop;
@@ -1397,9 +1387,7 @@ test("final cost recovery persists an unchanged estimate without duplicate notif
     },
   );
   try {
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
+    const result = await f.scan({
       onCost: (cost) => {
         costs.push(cost);
       },
@@ -1409,7 +1397,7 @@ test("final cost recovery persists an unchanged estimate without duplicate notif
     expect(expected).toBeGreaterThan(0);
     expect(result.model.costUsd).toBe(expected);
     const saved = JSON.parse(
-      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.model.costUsd).toBe(expected);
     for (let index = 1; index < costs.length; index++)
@@ -1508,13 +1496,9 @@ test.each([
 );
 
 test("dependency triage distinguishes npm's home from a USERPROFILE override on POSIX", async () => {
-  const f = await fixture({ homeVariable: "USERPROFILE" });
+  await using f = await fixture({ homeVariable: "USERPROFILE" });
   Object.assign(f.environment, { npm_config_userconfig: "~/registry.npmrc" });
-  await using security = f.client;
-  await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
-  });
+  await f.scan();
   const options = f.captured.codex!;
   const permissions = parseToml(
     options.configOverrides!.find((value) =>
@@ -1535,7 +1519,7 @@ test("dependency triage distinguishes npm's home from a USERPROFILE override on 
 test("dependency triage disables inherited MCP servers and keeps the linked native launcher", async () => {
   const mcpConfig =
     '[mcp_servers."synthetic.inherited"]\ncommand = "synthetic-inherited"\n';
-  const f = await fixture({
+  await using f = await fixture({
     mcpConfig,
     mcpOverrides: {
       "synthetic.configured": {
@@ -1545,11 +1529,7 @@ test("dependency triage disables inherited MCP servers and keeps the linked nati
     },
     linkedCodex: true,
   });
-  await using security = f.client;
-  const result = await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
-  });
+  const result = await f.scan();
   expect(result.status).toBe("completed");
   const options = f.captured.codex!;
   expect(options.env!["CODEX_HOME"]).toBe(f.codexHome);
@@ -1652,12 +1632,8 @@ process.exit(0);
 });
 
 test("dependency triage preserves scanner evidence when MCP configuration cannot be read", async () => {
-  const f = await fixture({ mcpConfig: "[invalid TOML\n" });
-  await using security = f.client;
-  const result = await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
-  });
+  await using f = await fixture({ mcpConfig: "[invalid TOML\n" });
+  const result = await f.scan();
   expect(result.status).toBe("partial");
   expect(result.matches).toHaveLength(1);
   expect(result.assessments[0]!.status).toBe("failed");
@@ -1683,18 +1659,13 @@ function observeAssessments(outputDir: string) {
 test.each(["setup", "source snapshot", "source drift"] as const)(
   "dependency observers report saved bulk assessment failures after %s",
   async (failure) => {
-    const f = await fixture({
+    await using f = await fixture({
       turns: ["completed", "source_changed", "completed"],
       ...(failure === "setup" ? { runtimeError: true } : {}),
       ...(failure === "source snapshot" ? { snapshotErrorAt: 1 } : {}),
     });
-    await using security = f.client;
     const { progress, persisted, onProgress } = observeAssessments(f.outputDir);
-    const result = await security.scanDependencies({
-      repositoryPath: f.repository,
-      outputDir: f.outputDir,
-      onProgress,
-    });
+    const result = await f.scan({ onProgress });
     const completed = failure === "source drift" ? 1 : 0;
     expect(result.status).toBe("partial");
     expect(progress.slice(-2)).toEqual([
@@ -1718,20 +1689,17 @@ test.each(["setup", "source snapshot", "source drift"] as const)(
 );
 
 test("dependency observers report saved assessments, activity, usage, and total cost", async () => {
-  const f = await fixture({
+  await using f = await fixture({
     turns: ["completed", "malformed", "completed"],
     commandActivity: true,
   });
-  await using security = f.client;
   const { progress, persisted, onProgress } = observeAssessments(f.outputDir);
   const activity: ScanActivity[] = [];
   const costs: Readonly<ScanCost>[] = [];
   const usage: Readonly<ScanTokenUsage>[] = [];
   const directories: string[] = [];
   const errors: unknown[] = [];
-  const result = await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
+  const result = await f.scan({
     onProgress,
     onActivity: (event) => {
       activity.push(event);
@@ -1809,12 +1777,9 @@ test("dependency observers report saved assessments, activity, usage, and total 
 });
 
 test("throwing, rejecting, and pending observers do not interrupt dependency work", async () => {
-  const f = await fixture();
-  await using security = f.client;
+  await using f = await fixture();
   const errors: string[] = [];
-  const result = await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
+  const result = await f.scan({
     onProgress() {
       throw new Error("progress unavailable");
     },
@@ -1840,12 +1805,9 @@ test("throwing, rejecting, and pending observers do not interrupt dependency wor
 });
 
 test("zero-match scans finish progress without starting model observers", async () => {
-  const f = await fixture({ matched: false });
-  await using security = f.client;
+  await using f = await fixture({ matched: false });
   const events: string[] = [];
-  const result = await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
+  const result = await f.scan({
     onProgress: (event) => {
       events.push(event.phase);
     },
@@ -1866,12 +1828,8 @@ test("zero-match scans finish progress without starting model observers", async 
 
 test("large advisory records stay readable without exceeding Codex's input limit", async () => {
   const advisoryDetails = "Synthetic advisory detail. ".repeat(50_000);
-  const f = await fixture({ advisoryDetails });
-  await using security = f.client;
-  const result = await security.scanDependencies({
-    repositoryPath: f.repository,
-    outputDir: f.outputDir,
-  });
+  await using f = await fixture({ advisoryDetails });
+  const result = await f.scan();
   expect(result.status).toBe("completed");
   expect(JSON.stringify(f.captured.evidence).length).toBeGreaterThan(1 << 20);
   expect(Array.from(f.captured.prompt!).length).toBeLessThan(1 << 20);
@@ -1899,20 +1857,17 @@ test.each([
 ] as const)(
   "dependency scan persists and assesses $ecosystem with schema-valid artifacts",
   async (dependencyInput) => {
-    const { client, repository, outputDir, calls, captured } = await fixture({
+    await using f = await fixture({
       dependencyInput,
     });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
+    const { outputDir, captured } = f;
+    const result = await f.scan();
     expect(result.status).toBe("completed");
     expect(result.assessments[0]).toMatchObject({
       status: "completed",
       verdict: "needs_review",
     });
-    expect(calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
+    expect(f.calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
     expect(captured.codex!.config).toMatchObject({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "high",
@@ -1928,7 +1883,7 @@ test.each([
       approvalPolicy: "never",
       networkAccessEnabled: false,
       webSearchMode: "disabled",
-      additionalDirectories: [repository, PLUGIN_ROOT],
+      additionalDirectories: [f.repository, PLUGIN_ROOT],
     });
     expect(captured.prompt).toContain("triage-finding");
     expect(captured.prompt).toContain(
@@ -1976,63 +1931,47 @@ test.each([
 );
 
 test("complete zero-match scan needs no authentication or model", async () => {
-  const { client, repository, outputDir, calls } = await fixture({
+  await using f = await fixture({
     matched: false,
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const result = await f.scan();
   expect(result.status).toBe("completed");
   expect(result.assessments).toEqual([]);
-  expect(calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
+  expect(f.calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
 });
 
 test("completed assessment cannot promote incomplete matching coverage", async () => {
-  const { client, repository, outputDir } = await fixture({
+  await using f = await fixture({
     scannerStatus: "partial",
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const result = await f.scan();
   expect(result.status).toBe("partial");
   expect(result.coverage.status).toBe("partial");
   expect(result.assessments[0]!.status).toBe("completed");
 });
 
 test("failed matching without assessable matches retains its failure status", async () => {
-  const { client, repository, outputDir, calls } = await fixture({
+  await using f = await fixture({
     scannerStatus: "failed",
     matched: false,
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const result = await f.scan();
   expect(result.status).toBe("failed");
   expect(result.coverage.status).toBe("failed");
-  expect(calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
+  expect(f.calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
 });
 
 test.each(["runtime", "model", "malformed", "missing"])(
   "%s failure retains matches and records unavailable assessment",
   async (failure) => {
     const modelError = "synthetic transport failure: token=synthetic-value";
-    const { client, repository, outputDir } = await fixture({
+    await using f = await fixture({
       runtimeError: failure === "runtime",
       error: failure === "model" ? modelError : undefined,
       malformed: failure === "malformed",
       missing: failure === "missing",
     });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
+    const result = await f.scan();
     expect(result.status).toBe("partial");
     expect(result.coverage.status).toBe("complete");
     expect(result.matches).toHaveLength(1);
@@ -2045,7 +1984,7 @@ test.each(["runtime", "model", "malformed", "missing"])(
       expect(result.diagnostics.join("\n")).toContain(modelError);
     }
     expect(
-      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+      JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
   },
 );
@@ -2054,24 +1993,20 @@ test.each(["source", "revision"] as const)(
   "cancellation during %s provenance saves an incomplete result before inventory",
   async (abortAt) => {
     const controller = new AbortController();
-    const { client, repository, outputDir, calls } = await fixture({
+    await using f = await fixture({
       controller,
       abortAt,
     });
-    await using security = client;
-    await expect(
-      security.scanDependencies({
-        repositoryPath: repository,
-        outputDir,
-        signal: controller.signal,
-      }),
-    ).rejects.toMatchObject({ scanDir: outputDir });
+    const { outputDir, calls } = f;
+    await expect(f.scan({ signal: controller.signal })).rejects.toMatchObject({
+      scanDir: outputDir,
+    });
     const saved = JSON.parse(
       await readFile(join(outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.status).toBe("partial");
     expect(saved.coverage.status).toBe("failed");
-    expect(saved.repository.path).toBe(repository);
+    expect(saved.repository.path).toBe(f.repository);
     expect(saved.matches).toEqual([]);
     expect(saved.scanner.invocations).toEqual([]);
     expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain(
@@ -2087,15 +2022,13 @@ test.each(["scanner", "model"] as const)(
   async (abortAt) => {
     const controller = new AbortController();
     const progress: DependencyScanProgress[] = [];
-    const { client, repository, outputDir } = await fixture({
+    await using f = await fixture({
       controller,
       abortAt,
     });
-    await using security = client;
+    const { outputDir } = f;
     try {
-      await security.scanDependencies({
-        repositoryPath: repository,
-        outputDir,
+      await f.scan({
         signal: controller.signal,
         onProgress: (event) => {
           progress.push(event);
@@ -2125,8 +2058,8 @@ test.each(["scanner", "model"] as const)(
 test("cancellation during the final dependency artifact save retains completed assessments", async () => {
   const controller = new AbortController();
   const reason = new Error("synthetic cancellation during final artifact save");
-  const { client, repository, outputDir } = await fixture();
-  await using security = client;
+  await using f = await fixture();
+  const { outputDir } = f;
   const originalRename = filesystem.rename;
   const rename = spyOn(filesystem, "rename").mockImplementation(
     async (source, destination) => {
@@ -2139,16 +2072,10 @@ test("cancellation during the final dependency artifact save retains completed a
     },
   );
   try {
-    const error = await security
-      .scanDependencies({
-        repositoryPath: repository,
-        outputDir,
-        signal: controller.signal,
-      })
-      .then(
-        () => null,
-        (error: unknown) => error,
-      );
+    const error = await f.scan({ signal: controller.signal }).then(
+      () => null,
+      (error: unknown) => error,
+    );
     expect(controller.signal.aborted).toBe(true);
     expect(error).toBeInstanceOf(ScanInterruptedError);
     expect((error as ScanInterruptedError).cause).toBe(reason);
@@ -2168,12 +2095,9 @@ test("cancellation during the final dependency artifact save retains completed a
 });
 
 test("requested cost limit interrupts while retaining completed evidence", async () => {
-  const { client, repository, outputDir } = await fixture();
-  await using security = client;
+  await using f = await fixture();
   await expect(
-    security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
+    f.scan({
       maxCostUsd: 0.000001,
       onCost: async () => {
         throw new Error("cost observer unavailable");
@@ -2182,7 +2106,7 @@ test("requested cost limit interrupts while retaining completed evidence", async
     }),
   ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
   const saved = JSON.parse(
-    await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
   ) as ScaResult;
   expect(saved.matches).toHaveLength(1);
   expect(saved.status).toBe("partial");
@@ -2191,19 +2115,14 @@ test("requested cost limit interrupts while retaining completed evidence", async
 
 test("dependency assessments accept a budget for a managed Vertex model", async () => {
   const model = "openai/gpt-oss-120b-maas";
-  const { client, repository, outputDir } = await fixture({
+  await using f = await fixture({
     model,
     codexOverrides: {
       openai_base_url:
         "https://us-central1-aiplatform.googleapis.com/v1/projects/synthetic/locations/us-central1/endpoints/openapi",
     },
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-    maxCostUsd: 1,
-  });
+  const result = await f.scan({ maxCostUsd: 1 });
   expect(result.status).toBe("completed");
   expect(result.model.costUsd).toBe(
     estimateScanCost(
@@ -2217,7 +2136,7 @@ test("dependency assessments accept a budget for a managed Vertex model", async 
 test("dependency assessments enforce regional Bedrock pricing before the next match", async () => {
   const model = "openai.gpt-5.6-terra";
   const region = "us-gov-west-1";
-  const { client, repository, outputDir, turns } = await fixture({
+  await using f = await fixture({
     model,
     codexOverrides: {
       model_provider: "amazon-bedrock",
@@ -2231,17 +2150,12 @@ test("dependency assessments enforce regional Bedrock pricing before the next ma
     provider: "amazon-bedrock",
     region,
   })!.estimatedUsd;
-  await using security = client;
   await expect(
-    security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-      maxCostUsd: (standard + regional) / 2,
-    }),
+    f.scan({ maxCostUsd: (standard + regional) / 2 }),
   ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
-  expect(turns).toHaveLength(1);
+  expect(f.turns).toHaveLength(1);
   const saved = JSON.parse(
-    await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
   ) as ScaResult;
   expect(saved.model.costUsd).toBe(regional);
   expect(saved.assessments.map(({ status }) => status)).toEqual([
@@ -2251,15 +2165,12 @@ test("dependency assessments enforce regional Bedrock pricing before the next ma
 });
 
 test("a response describing another selected match fails only its own assessment", async () => {
-  const { client, repository, outputDir, turns } = await fixture({
+  await using f = await fixture({
     turns: ["completed", "mismatched_identity", "completed"],
     distinctMatches: true,
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const { turns } = f;
+  const result = await f.scan();
   expect(result.status).toBe("partial");
   expect(result.assessments.map(({ status }) => status)).toEqual([
     "completed",
@@ -2287,21 +2198,18 @@ test("a response describing another selected match fails only its own assessment
     "not_started",
   ]);
   expect(
-    JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8")),
   ).toEqual(result);
 });
 
 test.each(["truncated", "malformed", "duplicate_id"] as const)(
   "a later %s response preserves saved assessments and continues independent matches",
   async (failure) => {
-    const { client, repository, outputDir, turns } = await fixture({
+    await using f = await fixture({
       turns: ["completed", failure, "completed"],
     });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
+    const { outputDir, turns } = f;
+    const result = await f.scan();
     expect(result.status).toBe("partial");
     expect(result.assessments.map((item) => item.status)).toEqual([
       "completed",
@@ -2330,7 +2238,7 @@ test.each(["truncated", "malformed", "duplicate_id"] as const)(
         networkAccessEnabled: false,
         webSearchMode: "disabled",
       });
-      expect(turn.options!.additionalDirectories).toContain(repository);
+      expect(turn.options!.additionalDirectories).toContain(f.repository);
       expect(turn.options!.additionalDirectories).toContain(PLUGIN_ROOT);
     }
     expect(
@@ -2343,16 +2251,12 @@ test.each(["unauthorized", "source_changed", "cancelled"] as const)(
   "a later %s turn preserves an earlier failed assessment and its diagnostic",
   async (failure) => {
     const controller = new AbortController();
-    const { client, repository, outputDir, turns } = await fixture({
+    await using f = await fixture({
       controller,
       turns: ["malformed", failure, "completed"],
     });
-    await using security = client;
-    const operation = security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-      signal: controller.signal,
-    });
+    const { turns } = f;
+    const operation = f.scan({ signal: controller.signal });
     if (failure === "cancelled")
       await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
     else expect((await operation).status).toBe("partial");
@@ -2361,7 +2265,7 @@ test.each(["unauthorized", "source_changed", "cancelled"] as const)(
     expect(prior.status).toBe("failed");
     expect(prior.error).not.toBeNull();
     const saved = JSON.parse(
-      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.assessments[0]).toEqual(prior);
     expect(saved.assessments.slice(1).map((item) => item.status)).toEqual([
@@ -2385,14 +2289,14 @@ test.each(["stable source", "changed source", "user cancellation"] as const)(
       record.call(this, value, threadId);
       if (value && ++receipts === 2) poll = this.refresh(true);
     });
-    const { client, repository, outputDir, turns } = await fixture({
+    await using f = await fixture({
       turns: ["completed", "completed", "completed"],
       beforeSourceSnapshot: async () => {
         if (poll === undefined) return;
         await poll;
         if (scenario === "changed source") {
           await writeFile(
-            join(repository, "usage.txt"),
+            join(f.repository, "usage.txt"),
             "changed during verification",
           );
         } else if (scenario === "user cancellation") {
@@ -2407,10 +2311,7 @@ test.each(["stable source", "changed source", "user cancellation"] as const)(
       output_tokens: 1000,
       reasoning_output_tokens: 0,
     })!.estimatedUsd;
-    await using security = client;
-    const operation = security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
+    const operation = f.scan({
       maxCostUsd: perTurn * 1.5,
       signal: controller.signal,
     });
@@ -2425,9 +2326,9 @@ test.each(["stable source", "changed source", "user cancellation"] as const)(
     }
     expect(usage).toHaveBeenCalled();
     expect(poll).toBeDefined();
-    expect(turns).toHaveLength(2);
+    expect(f.turns).toHaveLength(2);
     const saved = JSON.parse(
-      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.status).toBe("partial");
     expect(saved.model.costUsd).toBeCloseTo(perTurn * 2);
@@ -2477,7 +2378,7 @@ test.each([
         setImmediate(delivered.resolve);
       }
     });
-    const { client, repository, outputDir, turns } = await fixture({
+    await using f = await fixture({
       turns: ["completed", "completed"],
       afterThreadEvent: async (event) => {
         if (event === "turn.completed") terminal = true;
@@ -2493,14 +2394,11 @@ test.each([
           await waitForPoll();
       },
     });
-    await using security = client;
     const perTurn = estimateScanCost("gpt-5.6-sol", {
       input_tokens: 1000,
       output_tokens: 1000,
     })!.estimatedUsd;
-    const operation = security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
+    const operation = f.scan({
       maxCostUsd: perTurn * (scenario === "terminal overage" ? 0.5 : 5),
     });
     if (scenario === "terminal overage") {
@@ -2511,9 +2409,9 @@ test.each([
       await expect(operation).rejects.toMatchObject({ cause: fault });
     }
     expect(polls).toHaveBeenCalled();
-    expect(turns).toHaveLength(1);
+    expect(f.turns).toHaveLength(1);
     const saved: ScaResult = JSON.parse(
-      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     );
     expect(saved.status).toBe("partial");
     expect(saved.assessments.map((assessment) => assessment.status)).toEqual([
@@ -2526,15 +2424,11 @@ test.each([
 test.each(["unauthorized", "forbidden"] as const)(
   "a later %s event stops assessment without retrying the remaining matches",
   async (failure) => {
-    const { client, repository, outputDir, turns } = await fixture({
+    await using f = await fixture({
       turns: ["completed", failure, "completed"],
     });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
-    expect(turns).toHaveLength(2);
+    const result = await f.scan();
+    expect(f.turns).toHaveLength(2);
     expect(result.status).toBe("partial");
     expect(result.assessments.map((item) => item.status)).toEqual([
       "completed",
@@ -2545,7 +2439,7 @@ test.each(["unauthorized", "forbidden"] as const)(
       failure === "unauthorized" ? "401 Unauthorized" : "403 Forbidden",
     );
     expect(
-      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+      JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
   },
 );
@@ -2554,22 +2448,17 @@ test.each(["source_changed", "cancelled"] as const)(
   "a later %s turn stops remaining work and preserves assessments of the original source",
   async (failure) => {
     const controller = new AbortController();
-    const { client, repository, outputDir, turns } = await fixture({
+    await using f = await fixture({
       controller,
       turns: ["completed", failure, "completed"],
     });
-    await using security = client;
-    const operation = security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-      signal: controller.signal,
-    });
+    const operation = f.scan({ signal: controller.signal });
     if (failure === "cancelled")
       await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
     else expect((await operation).status).toBe("partial");
-    expect(turns).toHaveLength(2);
+    expect(f.turns).toHaveLength(2);
     const saved = JSON.parse(
-      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.matches).toHaveLength(3);
     expect(saved.status).toBe("partial");
@@ -2588,11 +2477,11 @@ test.each(["source_changed", "cancelled"] as const)(
 test.each(["unchanged", "changed", "snapshot unavailable"] as const)(
   "final cost collection preserves source integrity: %s",
   async (source) => {
-    const { client, repository, outputDir, codexHome, turns } = await fixture({
+    await using f = await fixture({
       ...(source === "snapshot unavailable" ? { snapshotErrorAt: 3 } : {}),
     });
-    await using security = client;
-    const sessions = join(codexHome, "sessions");
+    const { outputDir } = f;
+    const sessions = join(f.codexHome, "sessions");
     await mkdir(sessions);
     const reading = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -2618,10 +2507,7 @@ test.each(["unchanged", "changed", "snapshot unavailable"] as const)(
       }
       return await originalReaddir(...args);
     }) as typeof filesystem.readdir);
-    const operation = security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
+    const operation = f.scan();
     try {
       await Promise.race([
         reading.promise,
@@ -2635,7 +2521,7 @@ test.each(["unchanged", "changed", "snapshot unavailable"] as const)(
       expect(checkpoint.assessments[0]!.status).toBe("completed");
       if (source === "changed")
         await writeFile(
-          join(repository, "usage.txt"),
+          join(f.repository, "usage.txt"),
           "synthetic source changed during final cost collection",
         );
       release.resolve();
@@ -2648,7 +2534,7 @@ test.each(["unchanged", "changed", "snapshot unavailable"] as const)(
       expect(result.matches).toEqual(checkpoint.matches);
       expect(result.assessments).toEqual(checkpoint.assessments);
       expect(result.model.costUsd).toBeGreaterThan(0);
-      expect(turns).toHaveLength(1);
+      expect(f.turns).toHaveLength(1);
       if (source !== "unchanged")
         expect(result.diagnostics.join("\n")).toContain(
           source === "changed"
@@ -2677,8 +2563,7 @@ test.each([
   async ({ failure, requested }) => {
     const trackingError =
       "synthetic final cost tracking failure: token=synthetic-value";
-    const { client, repository, outputDir } = await fixture();
-    await using security = client;
+    await using f = await fixture();
     const originalStop = ScanCostTracker.prototype.stop;
     const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
       async function (this: ScanCostTracker, usage?: unknown) {
@@ -2688,11 +2573,7 @@ test.each([
       },
     );
     try {
-      const operation = security.scanDependencies({
-        repositoryPath: repository,
-        outputDir,
-        ...(requested ? { maxCostUsd: 1 } : {}),
-      });
+      const operation = f.scan({ ...(requested ? { maxCostUsd: 1 } : {}) });
       if (requested) {
         const error = await operation.then(
           () => null,
@@ -2709,7 +2590,7 @@ test.each([
         expect((await operation).status).toBe("completed");
       }
       const saved = JSON.parse(
-        await readFile(join(outputDir, "sca-result.json"), "utf8"),
+        await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
       ) as ScaResult;
       expect(saved.status).toBe(requested ? "partial" : "completed");
       if (!requested) expect(saved.model.costUsd).toBeNull();
@@ -2724,17 +2605,12 @@ test.each([
 );
 
 test("unknown model with a requested budget cannot silently assess without cost enforcement", async () => {
-  const { client, repository, outputDir, calls } = await fixture({
+  await using f = await fixture({
     model: "unknown-model",
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-    maxCostUsd: 1,
-  });
+  const result = await f.scan({ maxCostUsd: 1 });
   expect(result.status).toBe("partial");
-  expect(calls.model).toBe(0);
+  expect(f.calls.model).toBe(0);
   expect(result.matches).toHaveLength(1);
 });
 
@@ -2754,38 +2630,30 @@ test("SCA preserves output-path protections and argument validation", async () =
 });
 
 test("stable initially dirty source can complete dependency assessment", async () => {
-  const { client, repository, outputDir } = await fixture({
+  await using f = await fixture({
     dirtyRepository: true,
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const result = await f.scan();
   expect(result.repository.dirty).toBe(true);
   expect(result.status).toBe("completed");
   expect(result.assessments[0]!.status).toBe("completed");
 });
 
 test("unrelated Git reference changes retain all dependency assessments", async () => {
-  const { client, repository, outputDir, sourceCalls } = await fixture({
+  await using f = await fixture({
     changeRefs: true,
     workbenchSnapshot: true,
     turns: ["completed", "completed"],
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
-  expect(sourceCalls).toHaveLength(4);
+  const result = await f.scan();
+  expect(f.sourceCalls).toHaveLength(4);
   expect(result.status).toBe("completed");
   expect(result.assessments.map(({ status }) => status)).toEqual([
     "completed",
     "completed",
   ]);
   expect(
-    JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+    JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8")),
   ).toEqual(result);
 });
 
@@ -2796,15 +2664,11 @@ test.each([
 ])(
   "source drift at $changeSourceAt (revision: $changeRevision) rejects stale assessments and retains OSV facts",
   async (change) => {
-    const { client, repository, outputDir } = await fixture({
+    await using f = await fixture({
       ...change,
       dirtyRepository: true,
     });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
+    const result = await f.scan();
     expect(result.repository.dirty).toBe(true);
     expect(result.repository.revision).toBe("synthetic-revision");
     expect(result.status).toBe("partial");
@@ -2816,7 +2680,7 @@ test.each([
     });
     expect(result.diagnostics.join("\n")).toContain("Source changed");
     expect(
-      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+      JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
   },
 );
@@ -2824,14 +2688,11 @@ test.each([
 test.each([1, 2] as const)(
   "source snapshot failure at capture %i preserves OSV evidence without accepting an assessment",
   async (snapshotErrorAt) => {
-    const { client, repository, outputDir, calls } = await fixture({
+    await using f = await fixture({
       snapshotErrorAt,
     });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-    });
+    const { calls } = f;
+    const result = await f.scan();
     expect(result.status).toBe("partial");
     expect(result.matches).toHaveLength(1);
     expect(result.assessments[0]).toMatchObject({
@@ -2844,44 +2705,29 @@ test.each([1, 2] as const)(
     expect(calls.runtime).toBe(snapshotErrorAt === 1 ? 0 : 1);
     expect(calls.model).toBe(snapshotErrorAt === 1 ? 0 : 1);
     expect(
-      JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+      JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
   },
 );
 
 test("zero-match inventory completes even when a source snapshot is unavailable", async () => {
-  const { client, repository, outputDir, calls } = await fixture({
+  await using f = await fixture({
     matched: false,
     snapshotErrorAt: 1,
   });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const result = await f.scan();
   expect(result.status).toBe("completed");
   expect(result.assessments).toEqual([]);
-  expect(calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
+  expect(f.calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
 });
 
 test("dependency source snapshots preserve per-scan process environment, protected root, and cancellation", async () => {
   const python = spyOn(runtime, "resolvePluginPython");
   try {
     const controller = new AbortController();
-    const {
-      client,
-      repository,
-      outputDir,
-      sourceCalls,
-      pythonResolutions,
-      environment,
-    } = await fixture({ workbenchSnapshot: true });
-    await using security = client;
-    const result = await security.scanDependencies({
-      repositoryPath: repository,
-      outputDir,
-      signal: controller.signal,
-    });
+    await using f = await fixture({ workbenchSnapshot: true });
+    const { repository, sourceCalls, pythonResolutions, environment } = f;
+    const result = await f.scan({ signal: controller.signal });
     expect(result.status).toBe("completed");
     expect(sourceCalls).toHaveLength(3);
     expect(pythonResolutions[0]).toMatchObject({
@@ -2911,16 +2757,8 @@ test("dependency source snapshots preserve per-scan process environment, protect
 test.each(["xdg", "explicit"] as const)(
   "dependency triage protects the effective %s GitHub credential directory",
   async (gitHubConfig) => {
-    const f = await fixture({ homeVariable: "HOME", gitHubConfig });
-    await using security = f.client;
-    expect(
-      (
-        await security.scanDependencies({
-          repositoryPath: f.repository,
-          outputDir: f.outputDir,
-        })
-      ).status,
-    ).toBe("completed");
+    await using f = await fixture({ homeVariable: "HOME", gitHubConfig });
+    expect((await f.scan()).status).toBe("completed");
     const options = f.captured.codex!;
     const permissions = parseToml(
       options.configOverrides!.find((value) =>
@@ -2946,16 +2784,12 @@ test.each(["xdg", "explicit"] as const)(
 test.skipIf(process.platform !== "win32")(
   "dependency triage protects Windows AppData GitHub stores alongside explicit configuration",
   async () => {
-    const f = await fixture({
+    await using f = await fixture({
       homeVariable: "USERPROFILE",
       gitHubConfig: "appdata",
     });
     f.environment.GH_CONFIG_DIR = join(dirname(f.repository), "explicit-gh");
-    await using security = f.client;
-    await security.scanDependencies({
-      repositoryPath: f.repository,
-      outputDir: f.outputDir,
-    });
+    await f.scan();
     const permissions = parseToml(
       f.captured.codex!.configOverrides!.find((value) =>
         value.startsWith("permissions.codex_security_dependencies="),
@@ -2981,12 +2815,10 @@ test.skipIf(process.platform !== "win32")(
 test.each(["completed", "malformed", "truncated"] as const)(
   "dependency triage retains originating threads after a later %s assessment",
   async (middle) => {
-    const f = await fixture({ turns: ["completed", middle, "completed"] });
-    await using security = f.client;
-    const result = await security.scanDependencies({
-      repositoryPath: f.repository,
-      outputDir: f.outputDir,
+    await using f = await fixture({
+      turns: ["completed", middle, "completed"],
     });
+    const result = await f.scan();
     expect(result.assessments.map((assessment) => assessment.threadId)).toEqual(
       ["sca-thread", "sca-thread-2", "sca-thread-3"],
     );

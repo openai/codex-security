@@ -1,16 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as filesystem from "node:fs/promises";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -27,19 +18,14 @@ import {
 import type { DependencyScanProgress, ScaInput } from "../src/index.js";
 import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const execFile = promisify(execFileCallback);
-const temporaryDirectories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const { create: temporaryDirectory, cleanup } =
+  createTemporaryDirectories(true);
+afterEach(cleanup);
 async function setup() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "sca-osv-")));
-  temporaryDirectories.push(root);
+  const root = await temporaryDirectory("sca-osv-");
   const repository = join(root, "repository with spaces");
   const output = join(root, "output");
   await Promise.all([mkdir(repository), mkdir(output)]);
@@ -98,6 +84,16 @@ function rawOutput(source: string, vulnerabilities: unknown[] = []) {
     ],
   };
 }
+function scannerReturning(result: unknown, exitCode = 0) {
+  return {
+    executable: process.execPath,
+    runProcess: async (_executable: string, argv: readonly string[]) =>
+      argv[0] === "--version"
+        ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+        : { stdout: JSON.stringify(result), stderr: "", exitCode },
+  };
+}
+
 async function scanFixture(
   out: OsvProcessResult,
   files: Record<string, string> = {},
@@ -240,45 +236,43 @@ test.each(["missing", "version", "invocation"] as const)(
   },
 );
 
+function git(cwd: string, ...args: string[]) {
+  return execFile("git", [
+    "-c",
+    "core.hooksPath=" + join(cwd, ".git", "empty-hooks"),
+    "-c",
+    "commit.gpgSign=false",
+    "-c",
+    "user.name=Synthetic",
+    "-c",
+    "user.email=synthetic@example.test",
+    "-C",
+    cwd,
+    ...args,
+  ]);
+}
+
 async function initializedSubmodule(
   repository: string,
   path = "vendor/library",
 ) {
-  const git = async (cwd: string, args: string[]) =>
-    execFile("git", [
-      "-c",
-      `core.hooksPath=${join(repository, ".git", "empty-hooks")}`,
-      "-c",
-      "commit.gpgSign=false",
-      "-c",
-      "user.name=Synthetic",
-      "-c",
-      "user.email=synthetic@example.test",
-      "-C",
-      cwd,
-      ...args,
-    ]);
-  await git(repository, ["init", "--quiet"]);
+  await git(repository, "init", "--quiet");
   const nested = join(repository, path);
   await mkdir(nested, { recursive: true });
-  await git(nested, ["init", "--quiet"]);
+  await git(nested, "init", "--quiet");
   await writeFile(join(nested, "package-lock.json"), npmLock());
-  await git(nested, ["add", "package-lock.json"]);
-  await git(nested, [
-    "commit",
-    "--quiet",
-    "-m",
-    "Synthetic dependency fixture",
-  ]);
-  const revision = (await git(nested, ["rev-parse", "HEAD"])).stdout.trim();
-  await git(repository, [
+  await git(nested, "add", "package-lock.json");
+  await git(nested, "commit", "--quiet", "-m", "Synthetic dependency fixture");
+  const revision = (await git(nested, "rev-parse", "HEAD")).stdout.trim();
+  await git(
+    repository,
     "update-index",
     "--add",
     "--cacheinfo",
     "160000",
     revision,
     path,
-  ]);
+  );
   return nested;
 }
 
@@ -314,17 +308,7 @@ describe("SCA input selection", () => {
       if (unreadable) await filesystem.chmod(rawDirectory, 0);
       const result = await runOsvScan(
         { repositoryPath: selected, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_executable, argv) =>
-            argv[0] === "--version"
-              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
-              : {
-                  stdout: JSON.stringify(rawOutput("package-lock.json")),
-                  stderr: "",
-                  exitCode: 0,
-                },
-        },
+        scannerReturning(rawOutput("package-lock.json")),
       ).finally(async () => {
         if (unreadable) await filesystem.chmod(rawDirectory, 0o700);
       });
@@ -358,20 +342,6 @@ describe("SCA input selection", () => {
     "retains incomplete Git coverage for byte-path %s boundaries",
     async (kind) => {
       const { root, repository } = await setup();
-      const git = (cwd: string, ...args: string[]) =>
-        execFile("git", [
-          "-c",
-          "core.hooksPath=",
-          "-c",
-          "commit.gpgSign=false",
-          "-c",
-          "user.name=Synthetic",
-          "-c",
-          "user.email=synthetic@example.test",
-          "-C",
-          cwd,
-          ...args,
-        ]);
       await git(repository, "init", "--quiet");
       await writeFile(join(repository, "package-lock.json"), npmLock());
       const directoryBytes = Buffer.concat([
@@ -527,20 +497,6 @@ describe("SCA input selection", () => {
 
   test("retains absent sparse-checkout lockfiles without counting ordinary deletions or unselected paths", async () => {
     const { repository, output } = await setup();
-    const git = (...args: string[]) =>
-      execFile("git", [
-        "-c",
-        "core.hooksPath=",
-        "-c",
-        "commit.gpgSign=false",
-        "-c",
-        "user.name=Synthetic",
-        "-c",
-        "user.email=synthetic@example.test",
-        "-C",
-        repository,
-        ...args,
-      ]);
     for (const directory of ["included", "omitted"]) {
       await mkdir(join(repository, directory));
       await writeFile(
@@ -548,12 +504,18 @@ describe("SCA input selection", () => {
         npmLock(),
       );
     }
-    await git("init", "--quiet");
-    await git("add", ".");
-    await git("commit", "--quiet", "-m", "Synthetic sparse inventory");
-    await git("sparse-checkout", "init", "--cone");
-    await git("sparse-checkout", "set", "included");
-    expect((await git("status", "--porcelain")).stdout).toBe("");
+    await git(repository, "init", "--quiet");
+    await git(repository, "add", ".");
+    await git(
+      repository,
+      "commit",
+      "--quiet",
+      "-m",
+      "Synthetic sparse inventory",
+    );
+    await git(repository, "sparse-checkout", "init", "--cone");
+    await git(repository, "sparse-checkout", "set", "included");
+    expect((await git(repository, "status", "--porcelain")).stdout).toBe("");
     const discovered = await discoverScaInputs(repository);
     expect(
       discovered.inputs.map(({ path, status }) => ({ path, status })),
@@ -567,17 +529,7 @@ describe("SCA input selection", () => {
     ).toMatchObject([{ path: "package-lock.json", status: "scanned" }]);
     const result = await runOsvScan(
       { repositoryPath: repository, outputDir: output },
-      {
-        executable: process.execPath,
-        runProcess: async (_executable, argv) => ({
-          stdout:
-            argv[0] === "--version"
-              ? "2.6.0"
-              : JSON.stringify(rawOutput("included/package-lock.json")),
-          stderr: "",
-          exitCode: 0,
-        }),
-      },
+      scannerReturning(rawOutput("included/package-lock.json")),
     );
     expect(result.status).toBe("partial");
     expect(result.coverage.status).toBe("partial");
@@ -844,17 +796,7 @@ describe("SCA input selection", () => {
       if (!initialized) await rm(nested, { recursive: true });
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_executable, argv) =>
-            argv[0] === "--version"
-              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
-              : {
-                  stdout: JSON.stringify(rawOutput("package-lock.json")),
-                  stderr: "",
-                  exitCode: 0,
-                },
-        },
+        scannerReturning(rawOutput("package-lock.json")),
       );
       expect(result.status).toBe("partial");
       expect(result.coverage.status).toBe("partial");
@@ -889,17 +831,7 @@ describe("SCA input selection", () => {
       }
       const result = await runOsvScan(
         { repositoryPath: selected, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_executable, argv) =>
-            argv[0] === "--version"
-              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
-              : {
-                  stdout: JSON.stringify(rawOutput("package-lock.json")),
-                  stderr: "",
-                  exitCode: 0,
-                },
-        },
+        scannerReturning(rawOutput("package-lock.json")),
       );
       expect(result.status).toBe("partial");
       expect(result.coverage.status).toBe("partial");
@@ -933,42 +865,29 @@ describe("SCA input selection", () => {
       const nested = join(repository, "container", "nested-checkout");
       await mkdir(join(repository, "ordinary", "deep"), { recursive: true });
       await mkdir(join(repository, "container"));
-      const git = (cwd: string, args: string[]) =>
-        execFile("git", [
-          "-c",
-          `core.hooksPath=${join(root, "empty-hooks")}`,
-          "-c",
-          "commit.gpgSign=false",
-          "-c",
-          "user.name=Synthetic",
-          "-c",
-          "user.email=synthetic@example.test",
-          "-C",
-          cwd,
-          ...args,
-        ]);
       let nestedRepository = true;
       if (kind === "worktree") {
         const owner = join(root, "worktree-owner");
         await mkdir(owner);
-        await git(owner, ["init", "--quiet"]);
+        await git(owner, "init", "--quiet");
         await writeFile(join(owner, "README"), "Synthetic worktree fixture\n");
-        await git(owner, ["add", "README"]);
-        await git(owner, ["commit", "--quiet", "-m", "Synthetic fixture"]);
-        await git(owner, [
+        await git(owner, "add", "README");
+        await git(owner, "commit", "--quiet", "-m", "Synthetic fixture");
+        await git(
+          owner,
           "worktree",
           "add",
           "--quiet",
           "--detach",
           nested,
           "HEAD",
-        ]);
+        );
       } else {
         await mkdir(nested);
         if (kind === "invalid-marker")
           await writeFile(join(nested, ".git"), "invalid gitfile\n");
         else {
-          await git(nested, ["init", "--quiet"]);
+          await git(nested, "init", "--quiet");
           if (kind === "case-variant") {
             await filesystem.rename(
               join(nested, ".git"),
@@ -978,10 +897,11 @@ describe("SCA input selection", () => {
               join(nested, "git-metadata"),
               join(nested, ".GIT"),
             );
-            nestedRepository = await git(nested, [
+            nestedRepository = await git(
+              nested,
               "rev-parse",
               "--is-inside-work-tree",
-            ]).then(
+            ).then(
               ({ stdout }) => stdout.trim() === "true",
               () => false,
             );
@@ -1071,17 +991,7 @@ describe("SCA input selection", () => {
     await execFile("git", ["-C", repository, "add", "packages"]);
     const result = await runOsvScan(
       { repositoryPath: selected, outputDir: output },
-      {
-        executable: process.execPath,
-        runProcess: async (_executable, argv) =>
-          argv[0] === "--version"
-            ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
-            : {
-                stdout: JSON.stringify(rawOutput("package-lock.json")),
-                stderr: "",
-                exitCode: 0,
-              },
-      },
+      scannerReturning(rawOutput("package-lock.json")),
     );
     expect(result.status).toBe("completed");
     expect(result.coverage.inputs.map((item) => item.path)).toEqual([
@@ -1976,14 +1886,7 @@ packages:
       raw.results[0]!.packages[0]!.package.ecosystem = ecosystem;
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_exe, argv) => ({
-            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
-            stderr: "",
-            exitCode: argv[0] === "--version" || !matched ? 0 : 1,
-          }),
-        },
+        scannerReturning(raw, matched ? 1 : 0),
       );
       expect(result.status).toBe("partial");
       expect(result.coverage.unresolvedPackages).toBe(1);
@@ -2029,14 +1932,7 @@ packages:
       raw.results[0]!.packages[0]!.package.ecosystem = "PyPI";
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_exe, argv) => ({
-            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
-            stderr: "",
-            exitCode: 0,
-          }),
-        },
+        scannerReturning(raw),
       );
       expect(result.status).toBe("completed");
       expect(result.coverage.status).toBe("complete");
@@ -2063,14 +1959,7 @@ packages:
       raw.results[0]!.packages[0]!.package.ecosystem = "RubyGems";
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_exe, argv) => ({
-            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
-            stderr: "",
-            exitCode: argv[0] === "--version" || !matched ? 0 : 1,
-          }),
-        },
+        scannerReturning(raw, matched ? 1 : 0),
       );
       expect(result.status).toBe("completed");
       expect(result.coverage.status).toBe("complete");
@@ -2101,14 +1990,7 @@ packages:
       raw.results[0]!.packages[0]!.package.ecosystem = "Packagist";
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_exe, argv) => ({
-            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
-            stderr: "",
-            exitCode: argv[0] === "--version" || !matched ? 0 : 1,
-          }),
-        },
+        scannerReturning(raw, matched ? 1 : 0),
       );
       expect(result.status).toBe("partial");
       expect(result.coverage.unresolvedPackages).toBe(1);
@@ -2168,17 +2050,7 @@ packages:
         );
         const result = await runOsvScan(
           { repositoryPath: repository, outputDir: output },
-          {
-            executable: process.execPath,
-            runProcess: async (_exe, argv) => ({
-              stdout:
-                argv[0] === "--version"
-                  ? "2.6.0"
-                  : JSON.stringify(rawOutput(path, [])),
-              stderr: "",
-              exitCode: 0,
-            }),
-          },
+          scannerReturning(rawOutput(path, [])),
         );
         expect(result.status, resolved).toBe(
           publicRegistry ? "completed" : "partial",
@@ -2365,17 +2237,7 @@ packages:
       );
       const result = await runOsvScan(
         { repositoryPath: repository, outputDir: output },
-        {
-          executable: process.execPath,
-          runProcess: async (_exe, argv) => ({
-            stdout:
-              argv[0] === "--version"
-                ? "2.6.0"
-                : JSON.stringify(rawOutput("pnpm-lock.yaml", [advisory("A")])),
-            stderr: "",
-            exitCode: argv[0] === "--version" ? 0 : 1,
-          }),
-        },
+        scannerReturning(rawOutput("pnpm-lock.yaml", [advisory("A")]), 1),
       );
       const direct = layout !== "registry";
       expect(result.status).toBe(direct ? "partial" : "completed");
