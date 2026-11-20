@@ -7,7 +7,7 @@ import {
   materialRemediations,
   materialRemediationTests,
   publishCoverageFixture,
-} from "./deep_scan_coverage_fixture.mjs";
+} from "./deep_scan_publication_fixture.mjs";
 import { readJson } from "./support/json.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 

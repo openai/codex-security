@@ -5,29 +5,39 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { workbenchArgs } from "../src/workbench-arguments.ts";
+import { readJson } from "./support/json.ts";
+import { fixturePython } from "./support/python.ts";
 import { importModule } from "./import-module.ts";
 
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const exec = promisify(execFile);
-const runtime = await importModule({
-  bundle: true,
+const {
+  DeepScanCoordinator,
+  createDeepScanArtifacts,
+  validateDiscoveryArtifacts,
+  WorkbenchDeepScanStore,
+  parseDeepScan,
+  createScanArtifactContext,
+  recordCodexSecurityScanDraftViaWorkbench,
+  mergeBatch,
+  saveScanDraftCheckpoint,
+} = await importModule({
   stdin: {
     contents: [
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createDeepScanArtifacts } from "./src/deep-scan/artifacts.ts";',
       'export { validateDiscoveryArtifacts } from "./src/deep-scan/artifact-validation.ts";',
-      'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
+      'export { parseDeepScan, WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";',
       'export { mergeBatch } from "./src/deep-scan/iteration.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
-  format: "esm",
-  platform: "node",
   loader: { ".md": "text" },
-  write: false,
 });
+
 export async function publishCoverageFixture(
   root,
   completeness,
@@ -38,16 +48,6 @@ export async function publishCoverageFixture(
     materialFindings = false,
   } = {},
 ) {
-  const {
-    DeepScanCoordinator,
-    createDeepScanArtifacts,
-    validateDiscoveryArtifacts,
-    WorkbenchDeepScanStore,
-    createScanArtifactContext,
-    recordCodexSecurityScanDraftViaWorkbench,
-    mergeBatch,
-    saveScanDraftCheckpoint,
-  } = runtime;
   const targetPath = path.join(root, "target");
   const codexHome = path.join(root, "codex-home");
   const scanRoot = path.join(root, "scans");
@@ -71,7 +71,7 @@ export async function publishCoverageFixture(
       path.join(pluginRoot, "scripts", "workbench_db.py"),
       ...args,
     ];
-    const execution = exec(process.env.PYTHON || "python3", pythonArgs, {
+    const execution = exec(fixturePython, pythonArgs, {
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
@@ -83,25 +83,16 @@ export async function publishCoverageFixture(
     return JSON.parse(stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
-  let run = await store.begin({ targetPath, scope: ".", threadId, scanRoot });
-  assert.equal(
-    run.workflowVersion,
-    "deep-security-scan/v1",
-    "the prior reader starts the legacy workflow",
-  );
-  // Seed an existing v1 run for legacy direct publication and in-memory coverage recovery.
-  await exec(process.env.PYTHON || "python3", [
-    "-c",
-    [
-      "import sqlite3, sys",
-      "with sqlite3.connect(sys.argv[1]) as db:",
-      "    db.execute(\"UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?\", (sys.argv[2],))",
-    ].join("\n"),
-    path.join(root, "state", "workbench.sqlite3"),
-    run.scanId,
-  ]);
-  run = await store.get(run.scanId, threadId);
+  const args = workbenchArgs("begin-deep-scan", {
+    targetPath,
+    scope: ".",
+    threadId,
+    scanRoot,
+    workflowVersion: "deep-scan-mcp/v1",
+  });
+  let run = parseDeepScan(await runWorkbench(args));
   assert.equal(run.workflowVersion, "deep-scan-mcp/v1");
+  const artifacts = createDeepScanArtifacts(run.scanDir);
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
@@ -223,9 +214,7 @@ export async function publishCoverageFixture(
         { root: artifactDir, repoRoot: targetPath, layout: "worker" },
         JSON.parse(bytes),
       );
-      const head = JSON.parse(
-        await readFile(path.join(artifactDir, "checkpoint-head.json"), "utf8"),
-      );
+      const head = await readJson(artifactDir, "checkpoint-head.json");
       const acceptedPath = path.join(
         artifactDir,
         "checkpoints",
@@ -241,10 +230,7 @@ export async function publishCoverageFixture(
     const seeded = continueAfterResume ? statuses.slice(0, -1) : statuses;
     for (const index of seeded.keys()) {
       const workerRoot = path.join(
-        run.scanDir,
-        "artifacts",
-        "deep_discovery",
-        "workers",
+        artifacts.workersRoot,
         `discovery-${String(index + 1).padStart(4, "0")}`,
       );
       const artifactDir = path.join(workerRoot, "output");
@@ -270,15 +256,7 @@ export async function publishCoverageFixture(
     const aggregate = { scanId: run.scanId, findings: [] };
     let noNewStreak = 0;
 
-    const label = "dedup-0001";
-    const artifactDir = path.join(
-      run.scanDir,
-      "artifacts",
-      "deep_discovery",
-      "dedup",
-      label,
-      "output",
-    );
+    const artifactDir = path.join(artifacts.dedupRoot, "dedup-0001", "output");
     await mkdir(artifactDir, { recursive: true });
     const id = randomUUID();
     const state = await store.get(run.scanId, threadId);
@@ -289,7 +267,7 @@ export async function publishCoverageFixture(
         );
         const resultPath = stored.acceptedResultPath ?? worker.resultPath;
         const result = await validateDiscoveryArtifacts(
-          createDeepScanArtifacts(run.scanDir),
+          artifacts,
           resultPath,
           run.scanId,
           {
@@ -338,19 +316,15 @@ export async function publishCoverageFixture(
       await request.onThreadStarted?.(thread);
       if (request.kind === "discovery") {
         discoveryCalls++;
-        const index =
-          Number(
-            path
-              .basename(path.dirname(request.artifactContext.root))
-              .split("-")
-              .at(-1),
-          ) - 1;
+        const artifactDir = request.artifactContext.root;
+        const worker = path.basename(path.dirname(artifactDir));
+        const index = Number(worker.split("-").at(-1)) - 1;
         if (index === 0 && !request.resumeThreadId)
           return {
             threadId: thread,
             finalResponse: "Continue the unfinished audit.",
           };
-        await writeDiscovery(request.artifactContext.root, index);
+        await writeDiscovery(artifactDir, index);
       }
       return { threadId: thread, finalResponse: "Audit finished." };
     },
@@ -393,7 +367,7 @@ export async function publishCoverageFixture(
         (claim) => claim.previousWorkerId === worker.id,
       )?.previousResultPath ??
       worker.resultManifestPath;
-    const result = JSON.parse(await readFile(resultPath, "utf8"));
+    const result = await readJson(resultPath);
     assert.equal(
       Object.hasOwn(result, "sourceCoverage"),
       false,
