@@ -356,8 +356,18 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         new Set(["pctPosHOffset", "pctPosVOffset", "pctWidth", "pctHeight"]),
       ],
     ]);
-    const declarations = new Map<string, (Set<string> | undefined)[]>();
-    const layout: boolean[] = [];
+    const wordNamespaces = new Set([
+      "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+      "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    ]);
+    const declarations = new Map<string, string[]>();
+    const namespace = (name: string) => {
+      const colon = name.indexOf(":");
+      const key = colon < 0 ? "xmlns" : "xmlns:" + name.slice(0, colon);
+      return declarations.get(key)?.at(-1) ?? "";
+    };
+    const elements: { wordName?: string; layout: boolean; hidden?: boolean }[] =
+      [];
     let documentElement = false;
     let ignoredDepth = 0;
     let instructionText = false;
@@ -368,10 +378,14 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     const wordAttribute = (
       attributes: Record<string, string>,
       localName: string,
+      wordOnly = false,
     ) =>
       decodeXml(
         Object.entries(attributes).find(
-          ([key]) => key.split(":").at(-1) === localName,
+          ([key]) =>
+            key.split(":").at(-1) === localName &&
+            (!wordOnly ||
+              (key.includes(":") && wordNamespaces.has(namespace(key)))),
         )?.[1] ?? "",
       );
     const append = (value: string) => {
@@ -391,23 +405,28 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     parser.on("attribute", ({ name, value }) => {
       if (name !== "xmlns" && !name.startsWith("xmlns:")) return;
       const bindings = declarations.get(name) ?? [];
-      bindings.push(drawingLayout.get(decodeXml(value)));
+      bindings.push(decodeXml(value));
       declarations.set(name, bindings);
     });
     parser.on("opentag", ({ name, attributes }) => {
-      const colon = name.indexOf(":");
-      const declaration = colon < 0 ? "xmlns" : "xmlns:" + name.slice(0, colon);
       const localName = name.split(":").at(-1)!;
-      layout.push(
-        declarations.get(declaration)?.at(-1)?.has(localName) ?? false,
-      );
+      const uri = namespace(name);
+      const wordName = wordNamespaces.has(uri) ? localName : undefined;
+      const parent = elements.at(-1);
+      elements.push({
+        wordName,
+        hidden: parent?.hidden,
+        layout: drawingLayout.get(uri)?.has(localName) ?? false,
+      });
       if (
         ignoredDepth > 0 ||
         localName === "del" ||
         localName === "delText" ||
         localName === "delInstrText" ||
         localName === "moveFrom" ||
-        (localName === "sdtContent" && placeholders.at(-1))
+        (localName === "sdtContent" && placeholders.at(-1)) ||
+        // Field markers still delimit visible instructions and results across runs.
+        (parent?.hidden && wordName !== "fldChar")
       ) {
         ignoredDepth++;
         return;
@@ -416,6 +435,15 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       else if (localName === "showingPlcHdr" && placeholders.length)
         placeholders[placeholders.length - 1] = !["0", "false", "off"].includes(
           wordAttribute(attributes, "val"),
+        );
+      const run = elements.at(-3);
+      if (
+        wordName === "vanish" &&
+        parent?.wordName === "rPr" &&
+        run?.wordName === "r"
+      )
+        run.hidden = !["0", "false", "off"].includes(
+          wordAttribute(attributes, "val", true),
         );
       if (localName === "txbxContent") {
         // Text boxes have their own field boundaries.
@@ -437,7 +465,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, attributes, isSelfClosing }) => {
-      layout.pop();
+      elements.pop();
       for (const key of Object.keys(attributes)) {
         const bindings = declarations.get(key);
         if (!bindings) continue;
@@ -462,7 +490,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     });
     // Word stores drawing positions and relative sizes as character data.
     const appendCharacters = (value: string) => {
-      if (!layout.at(-1)) append(value);
+      const element = elements.at(-1);
+      if (!element?.layout && !element?.hidden) append(value);
     };
     parser.on("text", (value) => appendCharacters(decodeXml(value)));
     parser.on("cdata", (value) =>
