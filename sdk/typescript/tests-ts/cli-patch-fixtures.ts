@@ -53,6 +53,19 @@ export function resultWithFindings(severities: readonly SeverityLevel[]) {
   return result;
 }
 
+export const patchRiskSkill = "$codex-security:assess-patch-risk";
+
+export function savedPatchFixture(
+  directory: string,
+  result = resultWithFindings(["high"]),
+) {
+  return {
+    currentDirectory: directory,
+    result,
+    onWorkbench: () => savedScan(result, "scan-1", directory),
+  };
+}
+
 export function savedScan(
   result: ReturnType<typeof resultWithFindings>,
   scanId = "scan-1",
