@@ -97,10 +97,10 @@
     "types": "node scripts/generate-plugin-defaults.mjs --check && pnpm run generate:models:check && pnpm run generate:external-import-models:check && pnpm --dir ../../plugins/codex-security/mcp-app run typecheck && tsc --noEmit"
   },
   "dependencies": {
-    "@inquirer/checkbox": "5.2.8",
-    "@inquirer/confirm": "6.3.5",
-    "@inquirer/input": "5.1.9",
-    "@inquirer/search": "4.3.6",
+    "@inquirer/checkbox": "5.3.0",
+    "@inquirer/confirm": "6.4.0",
+    "@inquirer/input": "5.2.0",
+    "@inquirer/search": "4.4.0",
     "@linear/sdk": "102.0.0",
     "@octokit/core": "7.0.8",
     "@openai/codex": "0.171.0",
