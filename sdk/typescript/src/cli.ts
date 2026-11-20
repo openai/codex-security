@@ -2336,7 +2336,7 @@ async function restrictRepositoryLoader(
 function isPatchStartupOverride(name: string): boolean {
   return (
     /^OPENSSL_(?:CONF(?:_INCLUDE)?|MODULES|ENGINES)$/iu.test(name) ||
-    /^(?:PYTHON(?:HOME|PATH|USERBASE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
+    /^(?:PYTHON(?:HOME|PATH|USERBASE|NOUSERSITE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
       name,
     ) ||
     /^(?:NODE_(?:OPTIONS|PATH)|BUN_OPTIONS|PERL(?:5?LIB|5OPT)|GITPERLLIB|RUBY(?:LIB|OPT)|RUBYGEMS_GEMDEPS|GEM_(?:HOME|PATH)|BASH_ENV|ENV|ZDOTDIR|BASH_FUNC_.+%%)$/iu.test(
@@ -2646,6 +2646,7 @@ export async function runRepositoryCommand(
     // Git, hosting clients and the sandbox launcher all start on the host.
     for (const name of Object.keys(environment))
       if (isPatchStartupOverride(name)) delete environment[name];
+    environment["PYTHONNOUSERSITE"] = "1";
     await restrictRepositoryLoader(
       environment,
       protectedRoots,
@@ -12768,13 +12769,15 @@ async function githubSocketIdentity(socket: string, directory: string) {
   // Linux abstract sockets have no pathname to replace.
   if (!socket || (process.platform === "linux" && /^[@\0]/u.test(socket)))
     return;
-  // Preserve Unix path components so '..' follows symlink resolution as in net.Dial.
   const path =
     process.platform === "win32"
       ? resolve(directory, socket)
-      : isAbsolute(socket)
-        ? socket
-        : directory + sep + socket;
+      : resolveGitControlPath(directory, socket);
+  if (process.platform !== "win32") {
+    // A link through /proc/self/cwd can select a different socket inside gh.
+    const host = await trustedHostPathResolver("/", ["/proc", "/dev/fd"]);
+    if (!host(path)) throw patchTransportChanged("gh");
+  }
   return (
     (await realpath(path)) +
     ":" +

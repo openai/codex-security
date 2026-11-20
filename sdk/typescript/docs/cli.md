@@ -3087,7 +3087,9 @@ configuration that Git delegates inherit.
 
 Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 `PYTHONHOME`, `NODE_OPTIONS`, and `BASH_ENV` before launching Git, hosting
-clients, and the sandbox runner on the host.
+clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
+to disable Python’s default user site-packages directory. If your wrapper uses
+`python -E` to ignore environment settings, add `-s` to skip that directory.
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
 `OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
 OpenSSL configuration and module directories. Configure required cryptographic
@@ -3311,6 +3313,10 @@ the repository selected by `gh`. For an enterprise endpoint on a custom HTTPS
 port, use the account configured for that endpoint or select the base explicitly
 with `GH_REPO=HOST:PORT/OWNER/REPO`. The `origin` push destination identifies
 the repository that supplies the head branch.
+
+If you configure GitHub CLI's `http_unix_socket` with a filesystem path, use a
+path that reaches the same socket from every publication directory. On Unix,
+keep the path and its symlinks outside `/proc` and `/dev/fd`.
 
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
