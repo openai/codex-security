@@ -1467,3 +1467,144 @@ def test_recovery_keeps_established_named_lineage(
         row["provenance"].get("sourceId"): row["provenance"]["attempt"] for row in rows
     } == expected
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("changed", [False, True])
+def test_recovery_retains_accepted_exclusion_occurrences(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, count, changed
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    row = {"pattern": "vendor/**", "reason": "Reviewed separately"}
+    prior = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "explicitExclusions": [row] * count,
+        },
+    }
+    archive = result.parent.parent / "attempts/attempt-1/result.json"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(json.dumps(prior))
+    current = copy.deepcopy(prior)
+    if changed:
+        current["reviewState"]["explicitExclusions"] = [
+            {**row, "reason": "Changed review boundary"}
+        ]
+    result.write_text(json.dumps(current))
+    originals = {path: path.read_bytes() for path in (archive, result)}
+    published = [{**row, "provenance": {"workerId": worker_id, "attempt": 2}} for _ in range(count)]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "explicitExclusions": published,
+            "reviews": [{"workerId": worker_id, "attempt": 2, "completeness": "partial"}],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    expected = published + (
+        [
+            {
+                **row,
+                "reason": "Changed review boundary",
+                "provenance": {"workerId": worker_id, "attempt": 2},
+            }
+        ]
+        if changed
+        else []
+    )
+    rows = coverage["explicitExclusions"]
+    assert rows[:count] == published
+    assert [{key: value for key, value in row.items() if key != "id"} for row in rows] == expected
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "observation", ["selected", "unselected", "twice", "reselected", "registered-result"]
+)
+def test_recovery_preserves_copied_checkpoint_observation_order(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, observation
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    attempt = 3 if observation == "twice" else 2
+    worker_id, result = add_discovery_attempt(workbench_db, scan, attempt)
+    task = {"id": "task", "reason": "Complete the synthetic review"}
+    closure = {"id": "task", "reason": "Synthetic review completed"}
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {**scan.coverage, "surfaces": [], "deferred": []},
+    }
+    pending = copy.deepcopy(draft)
+    pending["complete"] = False
+    pending["reviewState"]["deferred"] = [task]
+    originals = {}
+    for number in range(1, attempt):
+        archive = result.parent.parent / f"attempts/attempt-{number:02}"
+        checkpoint = write_checkpoint(archive / "checkpoints", pending, mtime_ns=1_000_000_000)
+        head = select_checkpoint(archive, checkpoint, mtime_ns=2_000_000_000)
+        prior = copy.deepcopy(draft)
+        if number == 1:
+            prior["reviewState"]["resolvedDeferred"] = [closure]
+        prior_result = archive / "result.json"
+        prior_result.write_text(json.dumps(prior))
+        os.utime(prior_result, ns=(3_000_000_000 + number, 3_000_000_000 + number))
+        originals.update({path: path.read_bytes() for path in (checkpoint, head, prior_result)})
+    checkpoint = write_checkpoint(result.parent / "checkpoints", pending, mtime_ns=1_000_249_999)
+    if observation != "unselected":
+        selected_at = 6_000_000_000 if observation == "reselected" else 2_000_249_999
+        head = select_checkpoint(result.parent, checkpoint, mtime_ns=selected_at)
+        originals[head] = head.read_bytes()
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(5_000_000_000, 5_000_000_000))
+    originals.update({path: path.read_bytes() for path in (checkpoint, result)})
+    if observation == "registered-result":
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+                (str(checkpoint), worker_id),
+            )
+    published_closure = {**closure, "id": f"{worker_id}-attempt-1-resolved-task"}
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **draft["reviewState"],
+            "resolvedDeferred": [published_closure],
+            "reviews": [
+                {"workerId": worker_id, "attempt": number} for number in range(1, attempt + 1)
+            ],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    remaining = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
+    if observation in {"reselected", "registered-result"}:
+        assert len(remaining) == 1
+        assert remaining[0]["reason"] == task["reason"]
+        assert not coverage.get("resolvedDeferred")
+    else:
+        assert remaining == []
+        assert coverage["resolvedDeferred"] == [published_closure]
+    assert all(path.read_bytes() == data for path, data in originals.items())

@@ -274,6 +274,37 @@ def _is_source_order_snapshot(relative: str) -> bool:
     )
 
 
+def _retain_checkpoint_observation_order(
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    source_digests: dict[str, str],
+    source_order: dict[str, tuple[int, int]],
+    selected_observations: dict[str, tuple[int, int]],
+    current_results: set[str],
+) -> None:
+    """Keep retry copies at their original observation, not their new directory's attempt."""
+    # fs.cp preserves times through millisecond-precision Date values.
+    checkpoint_observations: dict[tuple[str, str], list[tuple[str, tuple[int, int]]]] = {}
+    for relative, _, owner in sorted(sources, key=lambda source: source_order[source[0]]):
+        if (
+            owner is None
+            or relative in current_results
+            or Path(relative).parent.name != "checkpoints"
+        ):
+            continue
+        order = source_order[relative]
+        previous = checkpoint_observations.setdefault((owner, source_digests[relative]), [])
+        for prior, original_order in reversed(previous):
+            if (
+                original_order[0] < order[0]
+                and (order[1] + 500_000) // 1_000_000 <= (original_order[1] + 500_000) // 1_000_000
+            ):
+                source_order[relative] = source_order[prior]
+                if relative in selected_observations:
+                    selected_observations[relative] = source_order[prior]
+                break
+        previous.append((relative, order))
+
+
 def _frozen_source_times(
     scan_dir: Path,
     scan_id: str,

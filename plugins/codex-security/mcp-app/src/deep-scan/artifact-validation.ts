@@ -227,7 +227,20 @@ export async function readAcceptedDiscovery(
   const current = (await readAcceptedWorkerCheckpoints(context, result)).filter(
     usableCheckpoint,
   );
-  const history = [...current, ...archived];
+  const snapshots = [...current, ...archived];
+  // Same-thread retries copy checkpoints without creating a new observation.
+  // fs.cp preserves times through Date values, which have millisecond precision.
+  const history = snapshots.filter(
+    (source, index) =>
+      source.snapshot === undefined ||
+      !snapshots.some(
+        (earlier, earlierIndex) =>
+          earlierIndex > index &&
+          earlier.attempt !== source.attempt &&
+          Math.round(source.modifiedMs) <= Math.round(earlier.modifiedMs) &&
+          isDeepStrictEqual(source.snapshot, earlier.snapshot),
+      ),
+  );
   const receiptDigests = new Map<string, string>();
   const receiptSources = history.length
     ? [result, ...history.map(({ input }) => input)]
@@ -262,6 +275,7 @@ export async function readAcceptedDiscovery(
       result,
       history,
       receiptDigests,
+      admission === "previously-accepted",
     );
     if (admission === "new") validateWorkerReport(result);
     validateRetainedCoverage(result.reviewState);

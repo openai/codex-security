@@ -214,6 +214,7 @@ export interface DeepScanPublication {
 interface SavedScanDraft {
   input: ScanDraftInput;
   modifiedMs: number;
+  snapshot?: JsonObject;
   head?: boolean;
   attempt?: string;
   result?: boolean;
@@ -1244,6 +1245,7 @@ export async function reconcileAcceptedWorkerHistory(
   input: ScanDraftInput,
   history: SavedScanDraft[],
   receiptDigests: ReadonlyMap<string, string>,
+  previouslyAccepted = false,
 ): Promise<ScanDraftInput> {
   requireFiniteNumbers(input);
   const savedSources = structuredClone(history);
@@ -1299,6 +1301,7 @@ export async function reconcileAcceptedWorkerHistory(
         `${workerPrefix}output`,
         receiptDigests,
       ),
+    previouslyAccepted,
   );
   // Projection assigns distinct parent IDs; retain the worker's authored IDs.
   const result = reconciliation.complete({ preserveSurfaceIds: true });
@@ -1532,6 +1535,7 @@ function prepareScanDraftReconciliation(
       { ...left, receiptRefs: left.receiptRefs ?? [] },
       { ...right, receiptRefs: right.receiptRefs ?? [] },
     ),
+  previouslyAccepted = false,
 ) {
   // Older checkpoints can omit IDs already assigned in their published output.
   const drafts = [result, ...sources];
@@ -1760,6 +1764,7 @@ function prepareScanDraftReconciliation(
     resolvedCandidateIds,
     ambiguousDeferredIds,
     retainedFinal?.input,
+    previouslyAccepted,
   );
   for (const surface of reopenedSurfaces) resolvedSurfaces.add(surface);
   return {
@@ -2132,6 +2137,7 @@ function reconcileResolvedDeferred(
   resolvedCandidateIds: Set<string>,
   ambiguousIds: Set<string>,
   retainedFinal?: ScanDraftInput,
+  previouslyAccepted = false,
 ): { closedDeferredIds: Set<string>; resolvedSurfaces: Set<JsonObject> } {
   const activeDeferred = result.reviewState.deferred;
   // Legacy aliases cannot identify which independent task was completed.
@@ -2237,7 +2243,9 @@ function reconcileResolvedDeferred(
         `scan draft: reviewState.resolvedDeferred cannot close candidate ${id}; record its finding or disposition.`,
       );
     }
+    // Accepted results remain valid when optional history is unavailable.
     if (
+      !previouslyAccepted &&
       !closureSources.has(id) &&
       !historical.some((row) => row.id === id || row.candidateId === id)
     )

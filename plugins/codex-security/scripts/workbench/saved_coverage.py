@@ -596,7 +596,12 @@ class SavedCoverageOrigins:
 
     def retained_record(self, field, item, index, worker, source, published, reviewed):
         relative = self.paths.get(id(source))
-        if relative is None or field not in {"surfaces", "deferred", "openQuestions"}:
+        if relative is None or field not in {
+            "surfaces",
+            "deferred",
+            "openQuestions",
+            "explicitExclusions",
+        }:
             return None
 
         def comparable(value, projected=False, inferred_identity=False):

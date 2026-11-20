@@ -79,6 +79,7 @@ from workbench.saved_sources import (
     _parent_publication_ancestors,
     _read_saved_parent_result,
     _read_saved_result,
+    _retain_checkpoint_observation_order,
     _unselected_root_order,
     _worker_outputs,
 )
@@ -492,6 +493,10 @@ def merge_saved_results(
     selected_observations.update(authoritative_observations)
     source_order.update(selected_observations)
     source_order.update(registered_result_orders)
+
+    _retain_checkpoint_observation_order(
+        sources, source_digests, source_order, selected_observations, current_results
+    )
 
     # Keep frozen source digests over the original data, before discarding markers
     # that never passed through the worker draft writer.

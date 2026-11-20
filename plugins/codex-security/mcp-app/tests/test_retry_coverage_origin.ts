@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -942,4 +950,161 @@ for (const [field, change] of [
       originals,
     );
   });
+}
+
+for (const history of ["removed", "invalid", "none"]) {
+  test(`accepted closure survives unavailable optional history: ${history}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const state = { surfaces: [], explicitExclusions: [], deferred: [] };
+    if (history !== "none") {
+      await recordCodexSecurityWorkerScanDraft(
+        f.workerContext,
+        workerDraft([], { complete: false, reviewState: state }),
+      );
+    }
+    await recordCodexSecurityWorkerScanDraft(
+      f.workerContext,
+      workerDraft([], {
+        complete: false,
+        reviewState: {
+          ...state,
+          deferred: [{ id: "task", reason: "Review the synthetic scope" }],
+        },
+      }),
+    );
+    const head = JSON.parse(
+      await readFile(path.join(f.output, "checkpoint-head.json"), "utf8"),
+    );
+    const pending = path.join(f.output, "checkpoints", head.checkpoint);
+    if (history === "invalid") await writeFile(pending, "invalid checkpoint");
+    else await rm(pending);
+    const result = JSON.stringify(
+      workerDraft([], {
+        complete: true,
+        reviewState: {
+          ...state,
+          resolvedDeferred: [{ id: "task", reason: "Review completed" }],
+        },
+      }),
+    );
+    await writeFile(f.resultPath, result);
+    const saved = await Promise.all(
+      (await readdir(path.join(f.output, "checkpoints"))).map(async (name) => {
+        const file = path.join(f.output, "checkpoints", name);
+        return [file, await readFile(file)] as const;
+      }),
+    );
+    const accepted = await readAcceptedDiscovery(
+      createDeepScanArtifacts(f.scanRoot),
+      f.worker,
+      scanId,
+      {},
+      "previously-accepted",
+    );
+    assert.deepEqual(accepted.coverage.deferred, []);
+    assert.deepEqual(
+      accepted.result.reviewState.resolvedDeferred.map(
+        (row: { id: string }) => row.id,
+      ),
+      ["task"],
+    );
+    if (history !== "none") {
+      await assert.rejects(
+        readAcceptedDiscovery(
+          createDeepScanArtifacts(f.scanRoot),
+          f.worker,
+          scanId,
+        ),
+        /names no saved generic deferral/,
+      );
+    }
+    assert.equal(await readFile(f.resultPath, "utf8"), result);
+    for (const [file, original] of saved)
+      assert.deepEqual(await readFile(file), original);
+  });
+}
+
+for (const copies of [1, 2]) {
+  for (const observation of [
+    "copied-selected",
+    "copied-unselected",
+    "reselected",
+  ]) {
+    test(`retry keeps checkpoint chronology: ${observation}, copies=${copies}`, async (t) => {
+      const f = await workerHistoryFixture(t, copies + 1);
+      const state = { surfaces: [], explicitExclusions: [], deferred: [] };
+      await recordCodexSecurityWorkerScanDraft(
+        f.workerContext,
+        workerDraft([], {
+          complete: false,
+          reviewState: {
+            ...state,
+            deferred: [{ id: "task", reason: "Review the synthetic scope" }],
+          },
+        }),
+      );
+      const headPath = path.join(f.output, "checkpoint-head.json");
+      const head = JSON.parse(await readFile(headPath, "utf8"));
+      const checkpoint = path.join(f.output, "checkpoints", head.checkpoint);
+      await utimes(checkpoint, 1.00025, 1.00025);
+      await utimes(headPath, 2.00025, 2.00025);
+      const closed = JSON.stringify(
+        workerDraft([], {
+          complete: true,
+          reviewState: {
+            ...state,
+            resolvedDeferred: [{ id: "task", reason: "Review completed" }],
+          },
+        }),
+      );
+      await writeFile(f.resultPath, closed);
+      await utimes(f.resultPath, 3, 3);
+      const archive = path.join(f.workerRoot, "attempts/attempt-01");
+      await mkdir(path.dirname(archive), { recursive: true });
+      await cp(f.output, archive, {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+      const result = JSON.stringify(
+        workerDraft([], { complete: true, reviewState: state }),
+      );
+      await writeFile(f.resultPath, result);
+      await utimes(f.resultPath, 4, 4);
+      if (copies === 2) {
+        await cp(f.output, path.join(f.workerRoot, "attempts/attempt-02"), {
+          recursive: true,
+          preserveTimestamps: true,
+        });
+        await writeFile(f.resultPath, result);
+        await utimes(f.resultPath, 4.5, 4.5);
+      }
+      if (observation === "copied-unselected") await rm(headPath);
+      if (observation === "reselected") await utimes(headPath, 5, 5);
+      const checkpointBytes = await readFile(checkpoint);
+      const { coverage, result: acceptedResult } = await readAcceptedDiscovery(
+        createDeepScanArtifacts(f.scanRoot),
+        f.worker,
+        scanId,
+      );
+      const pending = observation === "reselected";
+      assert.equal(coverage.deferred.length, pending ? 1 : 0);
+      assert.equal((coverage.resolvedDeferred ?? []).length, pending ? 0 : 1);
+      assert.equal(
+        (pending
+          ? acceptedResult.reviewState.deferred
+          : acceptedResult.reviewState.resolvedDeferred)[0].id,
+        "task",
+      );
+      assert.equal(await readFile(f.resultPath, "utf8"), result);
+      assert.equal(
+        await readFile(path.join(archive, "result.json"), "utf8"),
+        closed,
+      );
+      assert.deepEqual(await readFile(checkpoint), checkpointBytes);
+      assert.deepEqual(
+        await readFile(path.join(archive, "checkpoints", head.checkpoint)),
+        checkpointBytes,
+      );
+    });
+  }
 }
