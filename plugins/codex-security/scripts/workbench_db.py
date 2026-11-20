@@ -1146,6 +1146,70 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
         return scan_context(connection, scan_id)
 
 
+def complete_budget_exhausted_scan(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    """Stop a budget-exhausted Deep Scan."""
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
+    if cost_json is None:
+        raise SystemExit("Budget-exhausted scan completion requires the measured scan cost.")
+    with scan_completion_lock(scan_id):
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["mode"] != "deep" or scan["recipe_json"] is None:
+            raise SystemExit("Only a running CLI Deep Scan can complete after its cost limit.")
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        if not isinstance(recipe, dict) or recipe.get("mode") != "deep":
+            raise SystemExit("Budget-exhausted scan completion requires a Deep Scan launch recipe.")
+        cost = json.loads(cost_json)
+        measured = cost.get("cost", cost)
+        limit = recipe.get("maxCostUsd")
+        if (
+            not isinstance(limit, (int, float))
+            or isinstance(limit, bool)
+            or not isinstance(measured, dict)
+            or measured.get("estimatedUsd", 0) <= limit
+        ):
+            raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
+        run = connection.execute(
+            "SELECT status, terminal_reason, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        if (
+            run is None
+            or run["status"] != "succeeded"
+            or run["terminal_reason"] not in {"saturated", "capped"}
+            or not run["manifest_path"]
+        ):
+            raise SystemExit(
+                "Budget-exhausted scan completion requires successfully completed Deep Scan "
+                "discovery."
+            )
+        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        if saved_results.budget_stop_receipt(_WORKBENCH_DB_CONTEXT, scan_id).exists():
+            return complete_scan_locked(connection, scan_id, None, cost_json)
+        candidates = (
+            []
+            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+            else budget_exhausted_candidates(scan, scan_dir)
+        )
+        warning = optional_text(args.message)
+        if warning is None:
+            warning = (
+                f"Deep Scan reached its cost limit after an estimated "
+                f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
+            )
+        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        warnings = json.loads(scan["completion_warnings_json"])
+        if warning not in warnings:
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                (json.dumps([*warnings, warning]), scan_id),
+            )
+            connection.commit()
+        return complete_scan_locked(connection, scan_id, None, cost_json, cost_stop=warning)
+
+
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
     artifacts = deep_scan.canonical_discovery_artifacts(scan)
     ledger = Path(artifacts["candidateLedgerPath"])
@@ -1216,6 +1280,12 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
                 "Canonical Deep Scan candidate must include a location in its in-scope inventory."
             )
     return candidates
+
+
+def budget_exhausted_draft(
+    scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
+) -> None:
+    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
 
 
 def complete_scan_locked(
@@ -1358,21 +1428,18 @@ def complete_scan_locked(
                     (len(prepared.coverage["surfaces"]), scan_id),
                 )
         wrote = True
+        before_seal = None
+        if cost_stop is not None and intent is None:
+            before_seal = partial(
+                saved_results.record_budget_stop,
+                _WORKBENCH_DB_CONTEXT,
+                scan_id,
+                published_manifest_digest(scan_dir, current_manifest),
+                cost_json,
+                cost_stop,
+            )
         manifest, findings, _ = _write_prepared_scan_finalization(
-            prepared,
-            projection_warnings=warnings,
-            before_cost_stop_seal=(
-                partial(
-                    saved_results.record_budget_stop,
-                    _WORKBENCH_DB_CONTEXT,
-                    scan_id,
-                    published_manifest_digest(scan_dir, current_manifest),
-                    cost_json,
-                    cost_stop,
-                )
-                if cost_stop is not None and intent is None
-                else None
-            ),
+            prepared, projection_warnings=warnings, before_cost_stop_seal=before_seal
         )
     except ContractError as exc:
         # Only a coordinator-selected parent is fenced for output-write replay.
@@ -3362,9 +3429,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
             "list-findings": list_findings,
-            "complete-budget-exhausted-scan": partial(
-                saved_results.complete_budget_exhausted_scan, _WORKBENCH_DB_CONTEXT
-            ),
+            "complete-budget-exhausted-scan": complete_budget_exhausted_scan,
             "set-finding-triage": set_finding_triage,
             "request-finding-remediation": request_finding_remediation,
             "request-finding-remediation-action": request_finding_remediation_action,
