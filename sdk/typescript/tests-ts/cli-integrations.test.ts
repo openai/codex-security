@@ -147,9 +147,11 @@ describe("integration command dispatch", () => {
     );
     const { home, project, run } = await isolatedCli(temp.path, {
       COMPLETE: "bash",
+      CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
     });
     for (const [args, flag] of [
       [["cs", "skill", "ls", "--de"], "--depth"],
+      [["cs", "exploitability", "check", "--format", "ht"], "html"],
       [["codex-security", "mcp", "add", "--ag"], "--agent"],
       [["cs", "skills", "list", "--format", "ya"], "yaml"],
     ] as const) {

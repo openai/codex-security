@@ -405,7 +405,20 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   });
 });
 
-test("a coordinator reports its selected access program and preserves redirected JSON output", async () => {
+const outputFlags = {
+  json: ["--json"],
+  md: ["--format", "md"],
+  html: ["--format", "html"],
+  tokens: ["--format", "md", "--token-count"],
+  summary: [],
+  filter: ["--filter-output", "vulnDescription"],
+};
+test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
+  "a coordinator reports its selected access program and writes the requested %s output",
+  checkCoordinatorOutput,
+);
+
+async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
   await using repo = await scopedTemporaryDirectory("dependency-progress-");
   execFileSync("git", ["init", "-q"], { cwd: repo.path });
   await writeFile(
@@ -426,9 +439,14 @@ test("a coordinator reports its selected access program and preserves redirected
     ],
     { cwd: repo.path },
   );
-  const stdout = capture(false),
+  const stdout = capture(format === "summary"),
     stderr = capture(false);
   const eventsPath = join(repo.path, "events.jsonl");
+  // The suffix alone must not turn a canonical JSON report into HTML.
+  const requestedPath = join(
+    repo.path,
+    format === "summary" ? "report.html" : "report.json",
+  );
   const status = await main(
     [
       "exploitability",
@@ -438,7 +456,8 @@ test("a coordinator reports its selected access program and preserves redirected
       "Supplied condition",
       "--progress-events",
       eventsPath,
-      "--json",
+      ...(format === "html" ? [] : ["--report-file", requestedPath]),
+      ...outputFlags[format],
     ],
     stdout.stream,
     stderr.stream,
@@ -487,7 +506,42 @@ test("a coordinator reports its selected access program and preserves redirected
     }),
   );
   expect(status, stdout.text()).toBe(0);
-  expect(JSON.parse(stdout.text()).checks).toHaveLength(1);
+  const reportPath =
+    format === "html"
+      ? stdout.text().trimEnd().split("\n").at(-1)!
+      : requestedPath;
+  if (format === "html") {
+    expect(reportPath.startsWith(repo.path)).toBe(true);
+    expect(reportPath).toMatch(/exploitability_report_\d{8}T\d{9}Z\.html$/u);
+  } else expect(stderr.text()).toContain("Report saved · " + reportPath);
+  const contents = await readFile(reportPath, "utf8");
+  if (format === "html") {
+    expect(contents).toStartWith("<!doctype html>");
+    expect(contents).toContain("No applicable package was found.");
+  } else expect(JSON.parse(contents).checks).toHaveLength(1);
+  const output = stdout.text().trim();
+  switch (format) {
+    case "json":
+      expect(JSON.parse(output)).toEqual(JSON.parse(contents));
+      break;
+    case "summary":
+    case "html":
+      expect(output).not.toContain("<!doctype html>");
+      expect(output).toContain("0 reviewed uses");
+      expect(output).toContain("No applicable package was found.");
+      break;
+    case "md":
+      expect(output).toContain("# ");
+      expect(output).toContain("No applicable package was found.");
+      expect(output).not.toContain("[object Object]");
+      break;
+    case "filter":
+      expect(output).toBe("Supplied condition");
+      break;
+    case "tokens":
+      expect(Number(output)).toBeGreaterThan(0);
+      break;
+  }
   expect(stderr.text()).toContain("Turn access program · standard");
   const events = (await readFile(eventsPath, "utf8"))
     .trim()
@@ -496,4 +550,4 @@ test("a coordinator reports its selected access program and preserves redirected
   expect(events.filter((e) => e.type === "access_program")).toMatchObject([
     { program: "standard", subject: "sample" },
   ]);
-});
+}
