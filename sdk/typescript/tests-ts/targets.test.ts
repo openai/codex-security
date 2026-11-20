@@ -523,6 +523,8 @@ describe("scan target normalization", () => {
     const shallow = join(root, "shallow");
     await writeFile(shallow, `${revision}\n`);
     const repositoryOverrides = {
+      ...(process.platform === "linux" && { GCONV_PATH: repo }),
+      ...(process.platform !== "win32" && { LD_LIBRARY_PATH: repo }),
       GIT_DIR: join(root, "missing-git-dir"),
       GIT_WORK_TREE: join(root, "missing-work-tree"),
       GIT_INDEX_FILE: join(root, "missing-index"),

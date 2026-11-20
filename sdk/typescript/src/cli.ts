@@ -492,6 +492,8 @@ import {
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
 import {
+  gitDiscoveryLoader,
+  isGitLoaderOverride,
   inspectTrustedExecutable,
   resolveTrustedExecutable,
   trustedHostPathResolver,
@@ -2000,11 +2002,13 @@ type PatchTransportFile = {
     | "missing-known-hosts";
 };
 
+type LibraryCheck = "trusted" | "blocked" | "unusable";
+
 interface PatchWriters {
   readonly writable: Set<string>;
   external?: boolean;
   unknownWriters?: boolean;
-  libraryDirectories?: Map<string, Set<string> | null>;
+  libraryDirectories?: Map<string, Promise<LibraryCheck>>;
 }
 
 interface PatchTransportAccess extends PatchWriters {
@@ -2205,27 +2209,27 @@ function patchFileStamp(entry: { dev: bigint; ino: bigint; ctimeNs: bigint }) {
   return [entry.dev, entry.ino, entry.ctimeNs].join(":");
 }
 
-async function trustedLibraryDirectory(
+async function inspectLibraryDirectory(
   directory: string,
   resolvePath: (path: string) => string | null,
   roots: readonly string[],
-): Promise<boolean> {
+): Promise<LibraryCheck> {
   const selected = resolvePath(directory);
-  if (!selected || !selected.isWellFormed()) return false;
+  if (!selected || !selected.isWellFormed()) return "blocked";
   const directories = new Set([selected]);
   try {
     // Library lookup can descend into hardware-specific directories and frameworks.
     for (const parent of directories) {
       if (roots.some((root) => !isOutsidePath(relative(parent, root))))
-        return false;
+        return "blocked";
       for (const bytes of await readdir(parent, { encoding: "buffer" })) {
-        if (!isUtf8(bytes)) return false;
+        if (!isUtf8(bytes)) return "unusable";
         const name = bytes.toString();
         let path = join(parent, name);
         let entry = lstatSync(path, { bigint: true });
         if (entry.isSymbolicLink()) {
           const target = resolvePath(path);
-          if (!target || !target.isWellFormed()) return false;
+          if (!target || !target.isWellFormed()) return "blocked";
           path = target;
           const resolved = lstatSync(path, {
             bigint: true,
@@ -2238,24 +2242,21 @@ async function trustedLibraryDirectory(
         if (!entry.isFile()) continue;
         // A patch writer can create a hard link even after our last check
         // and modify the inode before the host loader opens it.
-        if (await mutableThroughLink(path, entry)) return false;
+        if (await mutableThroughLink(path, entry)) return "unusable";
       }
     }
-    return true;
+    return "trusted";
   } catch {
-    return false;
+    return "unusable";
   }
 }
 
 async function restrictRepositoryLoader(
   environment: NodeJS.ProcessEnv,
   protectedRoots: readonly string[],
-  sandbox: PatchSnapshotSandbox | undefined,
-  options: Parameters<CliDependencies["runRepositoryCommand"]>[3],
+  writers: PatchWriters = { writable: new Set() },
+  sandbox?: PatchSnapshotSandbox,
 ) {
-  const writers: PatchWriters = options?.loaderAccess ?? {
-    writable: new Set(),
-  };
   let roots: string[] | undefined;
   let resolvePath: ((path: string) => string | null) | undefined;
   const search =
@@ -2263,7 +2264,7 @@ async function restrictRepositoryLoader(
   if (sandbox && Object.keys(environment).some((name) => search.test(name)))
     await addPatchWriters(sandbox, writers);
   for (const name of Object.keys(environment)) {
-    if (!/^(?:LD|DYLD)_/u.test(name)) continue;
+    if (!isGitLoaderOverride(name)) continue;
     const value = environment[name];
     delete environment[name];
     if (
@@ -2275,11 +2276,13 @@ async function restrictRepositoryLoader(
     )
       continue;
     roots ??= [
-      ...writers.writable,
-      ...(await Promise.all(
-        protectedRoots.map((root) => canonicalConfigPath(root)),
-      )),
-    ];
+      ...new Set([
+        ...writers.writable,
+        ...(await Promise.all(
+          protectedRoots.map((root) => canonicalConfigPath(root)),
+        )),
+      ]),
+    ].sort();
     // Process-relative links such as /proc/self/cwd change at exec.
     resolvePath ??= await trustedHostPathResolver("/", [
       ...roots,
@@ -2293,17 +2296,16 @@ async function restrictRepositoryLoader(
       // The ELF loader expands tokens such as $ORIGIN for each child.
       if (!isAbsolute(path)) continue;
       if (elf && /\n|\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(path)) continue;
-      const verified = checked.get(path);
-      if (verified === null) continue;
-      if (!verified || !roots.every((root) => verified.has(root))) {
-        if (!(await trustedLibraryDirectory(path, resolvePath, roots))) {
-          checked.set(path, null);
-          continue;
-        }
-        if (checked.get(path) === null) continue;
-        checked.set(path, new Set(roots));
+      const key = JSON.stringify([path, roots]);
+      let check = checked.get(path) ?? checked.get(key);
+      if (!check) {
+        check = inspectLibraryDirectory(path, resolvePath, roots);
+        checked.set(key, check);
       }
-      allowed.push(path);
+      const result = await check;
+      // A mutable or unreadable installation is unusable under every root set.
+      if (result === "unusable") checked.set(path, check);
+      if (result === "trusted") allowed.push(path);
     }
     if (allowed.length) environment[name] = allowed.join(":");
   }
@@ -2311,7 +2313,6 @@ async function restrictRepositoryLoader(
 
 function isPatchStartupOverride(name: string): boolean {
   return (
-    (process.platform === "linux" && name === "GCONV_PATH") ||
     /^OPENSSL_(?:CONF(?:_INCLUDE)?|MODULES|ENGINES)$/iu.test(name) ||
     /^(?:TCL_LIBRARY|TK_LIBRARY|TCLLIBPATH|TCL\d+[._]\d+_TM_PATH)$/iu.test(
       name,
@@ -2319,6 +2320,9 @@ function isPatchStartupOverride(name: string): boolean {
     /^(?:PYTHON(?:HOME|PATH|USERBASE|NOUSERSITE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
       name,
     ) ||
+    // Bundler settings select Gemfiles and gem stores. BUNDLER_ORIG_* can
+    // also restore interpreter overrides in a wrapper's children.
+    /^BUNDLER?_/iu.test(name) ||
     /^(?:NODE_(?:OPTIONS|PATH)|BUN_OPTIONS|PERL(?:5?LIB|5OPT)|GITPERLLIB|RUBY(?:LIB|OPT)|RUBYGEMS_GEMDEPS|GEM_(?:HOME|PATH)|BASH_ENV|ENV|ZDOTDIR|BASH_FUNC_.+%%)$/iu.test(
       name,
     ) ||
@@ -2641,8 +2645,8 @@ export async function runRepositoryCommand(
     await restrictRepositoryLoader(
       environment,
       protectedRoots,
+      options?.loaderAccess,
       sandbox,
-      options,
     );
     const credentialNames = [
       "OPENAI_API_KEY",
@@ -2709,7 +2713,7 @@ export async function runRepositoryCommand(
         for (const [name, value] of Object.entries(source)) {
           if (
             source !== environment &&
-            (isPatchStartupOverride(name) || /^(?:LD|DYLD)_/u.test(name))
+            (isPatchStartupOverride(name) || isGitLoaderOverride(name))
           )
             continue;
           effective[process.platform === "win32" ? name.toUpperCase() : name] =
@@ -10673,7 +10677,14 @@ export async function main(
         literalArgs,
       ))
     ) {
-      await cli.serve(frameworkArgv, serveOptions);
+      const serve = () => cli.serve(frameworkArgv, serveOptions);
+      if (command === "patch" || command === "scan")
+        await gitDiscoveryLoader.run(
+          (environment, roots) =>
+            restrictRepositoryLoader(environment, roots, loaderWriters),
+          serve,
+        );
+      else await serve();
     }
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);

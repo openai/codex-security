@@ -3094,6 +3094,11 @@ Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
 to disable Python’s default user site-packages directory. If your wrapper uses
 `python -E` to ignore environment settings, add `-s` to skip that directory.
+They clear `BUNDLE_*` and `BUNDLER_*` so Ruby wrappers start outside the
+caller's bundle. Configure required Bundler settings in the trusted wrapper
+and set `BUNDLE_GEMFILE` to its absolute Gemfile path before loading
+`bundler/setup`. Bundler otherwise searches the working directory and its
+parents for a Gemfile, and hosting clients run in the checkout.
 They point `ZDOTDIR` at the system null device so Zsh wrappers skip user startup
 files such as `~/.zshenv`. Put required settings in the trusted wrapper.
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
@@ -3102,7 +3107,10 @@ OpenSSL configuration and module directories. Configure required cryptographic
 policies in those defaults.
 For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
 versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
-On Linux they clear `GCONV_PATH` so glibc uses its default conversion modules.
+On Unix, Git target discovery and patch commands clear native loader overrides
+(`LD_*` and `DYLD_*`). The `scan` and `patch` commands preserve verified
+[library search directories](#create-or-resume-a-draft-pull-request).
+On Linux they also clear `GCONV_PATH` so glibc uses its default conversion modules.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.
@@ -3140,8 +3148,9 @@ and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `PIP_CONFIG_FILE`, `PIP_CLIENT_CERT`, and pip configuration in standard user and
 system locations, `VIRTUAL_ENV`, or `CONDA_PREFIX`. Git delegates also strip
 `MYSQL_PWD`, `PGPASSWORD`, `DATABASE_URL` and environment values containing
-URLs with embedded passwords or HTTP and FTP user credentials. For credential file
-selectors such as `GIT_SSL_KEY`, `REGISTRY_AUTH_FILE`, and
+URLs with embedded passwords. They treat a username alone as a credential for
+HTTP(S), FTP(S), Redis, and NATS transports (including TLS and WebSockets).
+For credential file selectors such as `GIT_SSL_KEY`, `REGISTRY_AUTH_FILE`, and
 `AWS_WEB_IDENTITY_TOKEN_FILE`, delegates lose the selector and filesystem
 access to the selected file. The rules protect
 `auth.json`, `.credentials.json`, and

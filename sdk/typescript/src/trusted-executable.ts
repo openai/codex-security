@@ -133,8 +133,20 @@ function searchPath(
   );
 }
 
-interface HostLookup {
-  hostDirectory: string;
+type HostLookup = { hostDirectory: string } | { gitDiscovery: true };
+
+// Target discovery in a patch shares its host commands' library checks and
+// accumulated write grants. Other SDK discovery clears native loader overrides.
+export const gitDiscoveryLoader = new AsyncLocalStorage<
+  (environment: NodeJS.ProcessEnv, roots: readonly string[]) => Promise<void>
+>();
+
+// glibc can load a module while Git translates even a rev-parse diagnostic.
+export function isGitLoaderOverride(name: string): boolean {
+  return (
+    (process.platform === "linux" && name === "GCONV_PATH") ||
+    /^(?:LD|DYLD)_/u.test(name)
+  );
 }
 
 export async function resolveTrustedExecutable(
@@ -356,6 +368,13 @@ export async function inspectTrustedExecutable(
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {
     if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
+  }
+  if (lookup && "gitDiscovery" in lookup && process.platform !== "win32") {
+    const restrict = gitDiscoveryLoader.getStore();
+    if (restrict) await restrict(sanitizedEnvironment, roots);
+    else
+      for (const name of Object.keys(sanitizedEnvironment))
+        if (isGitLoaderOverride(name)) delete sanitizedEnvironment[name];
   }
   const filteredPath =
     (windows ? undefined : view?.path) ??

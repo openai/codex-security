@@ -102,11 +102,11 @@ export function removePatchCredentials(
   }
 }
 
-// HTTP and FTP can carry a token as the username. For other URI schemes,
-// preserve username-only account selectors such as ssh://git@host.
+// Some protocols accept a token alone as userinfo. For others such as SSH,
+// keep the username that selects the account unless a password is present.
 export function withoutUrlCredentials(value: string): string {
   return value.replace(
-    /((?:https?|ftps?):\/{1,3}|:\/\/)([^/?#\s]+@)/gi,
+    /(\b(?:https?|ftps?):\/{1,3}|\b(?:rediss?|nats|tls|wss?):\/\/|:\/\/)([^/?#\s]+@)/gi,
     (authority, prefix, userinfo) =>
       prefix !== "://" || userinfo.includes(":") ? prefix : authority,
   );

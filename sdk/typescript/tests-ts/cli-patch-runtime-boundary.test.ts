@@ -92,10 +92,14 @@ test.skipIf(process.platform === "win32")(
     }
     for (const name of names) {
       const value = paths.join(name === "LD_LIBRARY_PATH" ? ";" : ":");
-      const actual = await inspectLoader(checkout, name, value, {
-        protectedRoots: [join(grant, "library")],
-      });
-      expect(actual).toBe([first, last].join(":"));
+      const loaderAccess = { writable: new Set<string>() };
+      const inspect = (...extra: string[]) =>
+        inspectLoader(checkout, name, value, {
+          loaderAccess,
+          protectedRoots: [join(grant, "library"), ...extra],
+        });
+      expect(await inspect(first)).toBe(last);
+      expect(await inspect()).toBe([first, last].join(":"));
     }
   },
 );

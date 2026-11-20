@@ -998,6 +998,7 @@ export async function trustedGitCommand(
         ? [protectedRoots]
         : protectedRoots),
     ],
+    { gitDiscovery: true },
   );
   if (!command) throw new Error("Git is not available on a trusted PATH.");
   return command;
