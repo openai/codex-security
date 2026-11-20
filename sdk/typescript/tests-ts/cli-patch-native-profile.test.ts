@@ -954,9 +954,11 @@ test("patch model and clean filters cannot read selected authentication files", 
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
-    join(operator, ".codex", "auth.json"),
-    join(operator, "auth.json"),
-    join(operator, "codex-home", "auth.json"),
+    ...[".codex", ".", "codex-home"].flatMap((home) =>
+      ["auth.json", ".credentials.json", "config.toml"].map((file) =>
+        join(operator, home, file),
+      ),
+    ),
     join(operator, "_netrc"),
     scopedProxyKey,
     proxyCert,
