@@ -1326,16 +1326,20 @@ def test_git_metadata_ignores_signature_output_in_commit_subject(tmp_path: Path)
     assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == "Signed subject"
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("encoding", ["cp932", "cp949"])
-def test_git_output_decodes_repository_paths_as_utf8(
+def test_git_worktree_discovers_unicode_paths_under_legacy_encodings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str
 ) -> None:
     target = tmp_path / "Jos\u00e9-\u65e5\u672c\u8a9e-\ud55c\uad6d\uc5b4"
     initialize_git_repository(target)
     set_default_subprocess_encoding(monkeypatch, encoding)
 
-    output = WORKBENCH_TARGET["git_output"](target, "rev-parse", "--show-toplevel")
-    assert Path(output) == target
+    nested = target / "répertoire"
+    nested.mkdir()
+    context = WORKBENCH_TARGET["git_worktree_context"]
+    assert context(target) == (target.resolve(), ".")
+    assert context(nested) == (target.resolve(), nested.name)
 
 
 @pytest.mark.parametrize("suffix", ["", " ", "\t", "\r", "\n"])
