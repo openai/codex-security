@@ -749,6 +749,7 @@ export async function executeStackRun(
             : [],
           target: manifest.target,
           cve: manifest.cve,
+          ...(manifest.callerScope && { callerScope: manifest.callerScope }),
           advisory: manifest.advisory,
           ...(manifest.triggerAnalysis && {
             triggerAnalysis: manifest.triggerAnalysis,
