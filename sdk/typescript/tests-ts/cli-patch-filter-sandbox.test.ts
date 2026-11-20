@@ -28,17 +28,23 @@ import {
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+const authHeader = "Authorization: Bearer synthetic-fixture";
+
 test.each([
-  ["filter", "Authorization: Bearer synthetic-fixture", true],
-  ["filter", "X-Routing-Tag: synthetic", false],
-  ["no delegate", "Authorization: Bearer synthetic-fixture", false],
-  ["disabled filter", "Authorization: Bearer synthetic-fixture", false],
-  ["unused pre-push", "Authorization: Bearer synthetic-fixture", false],
-  ["configured index hook", "Authorization: Bearer synthetic-fixture", true],
-  ["resume hook", "Authorization: Bearer synthetic-fixture", true],
+  ["filter", "http.extraHeader", authHeader, true],
+  ["filter", "http.extraHeader", "X-Routing-Tag: synthetic", false],
+  ["filter", "imap.pass", "synthetic", true],
+  ["filter", "imap.pass", "", false],
+  ["filter", "sendemail.work.smtpPass", "synthetic", true],
+  ["resume hook", "gitcvs.pserver.dbPass", "synthetic", true],
+  ["no delegate", "http.extraHeader", authHeader, false],
+  ["disabled filter", "http.extraHeader", authHeader, false],
+  ["unused pre-push", "http.extraHeader", authHeader, false],
+  ["configured index hook", "http.extraHeader", authHeader, true],
+  ["resume hook", "http.extraHeader", authHeader, true],
 ] as const)(
-  "external Git configuration with %s and %s",
-  async (delegate, header, blocked) => {
+  "external Git configuration with %s and %s=%s",
+  async (delegate, setting, value, blocked) => {
     const { directory, git } = await publicationRepository(fixtures);
     const host = await fixtures.create("patch-filter-host-config-");
     const config = join(host, "gitconfig");
@@ -54,7 +60,7 @@ test.each([
       resume ? "includeIf.onbranch:unused.path" : "include.path",
       "transport-config",
     );
-    git("config", "--file", included, "http.extraHeader", header);
+    git("config", "--file", included, setting, value);
     git("config", "--file", included, "credential.helper", "");
     git("config", "--file", included, "core.sshCommand", "ssh");
     if (delegate.endsWith("filter")) {

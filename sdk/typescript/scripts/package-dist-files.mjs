@@ -5,9 +5,12 @@ const distModules = [
   "dependency-stack-claims",
   "dependency-stack-cli",
   "dependency-stack-evidence",
+  "dependency-stack-graph-observations",
   "dependency-stack-launcher",
+  "dependency-stack-live",
   "dependency-stack-packet",
   "dependency-stack-run",
+  "dependency-stack-runtime-receipts",
   "dependency-stack-use",
   "stack-packet",
 

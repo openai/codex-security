@@ -35,7 +35,7 @@ test("snapshot filters receive safe command config from both Git encodings", asy
   const env = {
     ...process.env,
     CODEX_HOME: await fixtures.create("snapshot-config-home-"),
-    GIT_CONFIG_COUNT: "4",
+    GIT_CONFIG_COUNT: "5",
     GIT_CONFIG_KEY_0: "demo.value",
     GIT_CONFIG_VALUE_0: "first",
     GIT_CONFIG_KEY_1: "http.extraHeader",
@@ -44,9 +44,13 @@ test("snapshot filters receive safe command config from both Git encodings", asy
     GIT_CONFIG_VALUE_2: "https://proxy.example.test/?route=a@b",
     GIT_CONFIG_KEY_3: "http.proxySSLKey",
     GIT_CONFIG_VALUE_3: "proxy-" + credentials,
+    GIT_CONFIG_KEY_4: "imap.pass",
+    GIT_CONFIG_VALUE_4: credentials,
     GIT_CONFIG_VALUE_9: credentials,
   };
   const parameters = [
+    "'sendemail.smtpPass'='" + credentials + "'",
+    "'gitcvs.dbPass'='" + credentials + "'",
     "'demo.value'='second with spaces'",
     "'demo.a=b.flag'=",
     "'demo.empty'=''",

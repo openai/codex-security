@@ -490,6 +490,9 @@ glob_scan_max_depth = 8
     }
     const stores = new Set([
       ...(permissions.credentialStorePaths ?? []),
+      ...(process.platform === "win32"
+        ? (permissions.externalConfigPaths ?? [])
+        : []),
       ...(shellPolicy?.paths ?? []),
     ]);
     const fileDenies = storeDenies.filter(

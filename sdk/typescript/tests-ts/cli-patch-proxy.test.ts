@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { link, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import {
   publicationRepository,
   runGitRepositoryCommand,
@@ -96,6 +96,66 @@ test("HTTPS preflight rejects a checkout-relative Git exec directory without a p
     { localHosting: false },
   );
   expect(result.stderr).toContain("outside patch-writable directories");
+});
+
+test("hook-free publication binds the native HTTPS helper before the patch turn", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const tools = await fixtures.create("patch-https-helper-");
+  const helper = join(tools, "git-remote-https");
+  const alias = join(directory, "launcher");
+  const marker = join(tools, "invoked");
+  // Answer the remote-helper protocol with an empty ref list for ls-remote.
+  await writeFile(
+    helper,
+    `#!/bin/sh
+while read -r command; do
+  case "$command" in
+    capabilities) printf 'fetch\\npush\\n\\n' ;;
+    list) echo preflight > "$PATCH_HELPER_LOG"; echo ;;
+    *) exit ;;
+  esac
+done
+`,
+    { mode: 0o700 },
+  );
+  await link(helper, alias);
+  git("add", "launcher");
+  git("commit", "-m", "Add synthetic launcher");
+  const host = "127.0.0.1:1";
+  git("remote", "set-url", "origin", `https://${host}/team/repository.git`);
+  const environment = {
+    GIT_CONFIG_GLOBAL: join(tools, "gitconfig"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_EXEC_PATH: relative(directory, tools),
+    GITLAB_HOST: host,
+    PATCH_HELPER_LOG: marker,
+  };
+  const outcome = await runWorkflow(
+    ["patch", "Synthetic issue", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      onRepositoryCommand: (tool, args, cwd, options) =>
+        tool === "git"
+          ? runGitRepositoryCommand(tool, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            })
+          : "",
+      onCodex: async (_args, output) => {
+        await writeFile(
+          alias,
+          '#!/bin/sh\necho replacement > "$PATCH_HELPER_LOG"\nexit 1\n',
+        );
+        output?.stdout.write("Fixed and verified.");
+        return 0;
+      },
+    },
+    { localHosting: false },
+  );
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  expect(outcome.stderr).toContain("transport executable changed");
+  expect(await readFile(marker, "utf8")).toBe("preflight\n");
 });
 
 test("one native push uses the configured proxy for each destination", () =>
