@@ -1,4 +1,4 @@
-<!-- release-version: 0.10.2 -->
+<!-- release-version: 0.11.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -47,6 +47,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+<!-- Replace each candidate with the affected users and the action they need to take. -->
+
+- support incremental exploitability investigations ([#2745](https://github.com/openai/codex-security/pull/2745))
 
 <!-- release-section: upgrades:end -->
