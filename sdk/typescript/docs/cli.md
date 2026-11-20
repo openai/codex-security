@@ -3061,7 +3061,9 @@ operator. The patch model’s filesystem profile denies access to those files.
 When a snapshot filter or publication hook can run, keep inline Git credentials
 out of external configuration files, including conditional includes. A patch
 stops before running a delegate with an authorization header, credential-bearing
-URL or proxy, or inline helper password available in those files.
+URL or proxy, or inline password available in those files. Password settings
+include `imap.pass`, `sendemail.smtpPass`, and `gitcvs.dbPass`, including
+identity-specific SMTP and access-method-specific CVS settings.
 
 HTTPS publication runs named Git credential helpers and executable wrappers
 outside the checkout. Operator settings can also select `!gh auth git-credential`
