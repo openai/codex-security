@@ -125,7 +125,9 @@ test.each([
     const inventory = calls.filter(
       ({ args }) => args.includes("config") && !args.includes("--git-path"),
     );
-    const origins = inventory.filter(({ args }) => args.includes("--list"));
+    const origins = inventory.filter(
+      ({ args }) => args.includes("--list") && !args.includes("--file"),
+    );
     expect(origins.length).toBeGreaterThan(0);
     for (const { args } of origins) {
       expect(args).toContain("--includes");

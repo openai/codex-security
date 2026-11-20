@@ -147,11 +147,14 @@ export function patchDependencies(
         args.at(-2) === "rev-parse" &&
         args.at(-1) === "--absolute-git-dir" &&
         commandOptions?.encoding === "base64";
-      if (
-        (output !== undefined && !missingStagedGitDirectory) ||
-        command !== "git" ||
-        !args.includes("rev-parse") ||
-        !args.some((argument) =>
+      if (command !== "git" || output) return output;
+      const inspectSearchPath = args[1]?.startsWith(
+        "alias.codex-security-transport-path-",
+      );
+      const resolveGitPath =
+        (output === undefined || missingStagedGitDirectory) &&
+        args.includes("rev-parse") &&
+        args.some((argument) =>
           [
             "--show-toplevel",
             "--absolute-git-dir",
@@ -160,9 +163,8 @@ export function patchDependencies(
             "--git-path",
             "--resolve-git-dir",
           ].includes(argument),
-        )
-      )
-        return output;
+        );
+      if (!inspectSearchPath && !resolveGitPath) return output;
       return runGitRepositoryCommand(command, args, repository, commandOptions);
     },
   });

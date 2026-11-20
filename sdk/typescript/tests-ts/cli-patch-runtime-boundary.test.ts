@@ -33,6 +33,50 @@ test.each(["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"])(
   },
 );
 
+test.skipIf(process.platform === "win32")(
+  "host Git preserves external library directories in search order",
+  async () => {
+    const checkout = await fixtures.create("loader-checkout-");
+    const tools = await fixtures.create("loader-tools-");
+    const first = join(tools, "first");
+    const last = join(tools, "last");
+    const viaFile = join(tools, "via-file");
+    const viaDirectory = join(tools, "via-directory");
+    const grant = join(tools, "grant");
+    for (const path of [first, last, viaFile, grant]) await mkdir(path);
+    await symlink(checkout, viaDirectory);
+    await symlink(join(checkout, "library"), join(viaFile, "library"));
+    const paths = [first, "", "./lib", checkout, viaDirectory, viaFile, grant];
+    if (process.platform === "linux") {
+      const root = join(tools, "optimized");
+      const tier = join(root, "glibc-hwcaps", "x86-64-v3");
+      await mkdir(tier, { recursive: true });
+      await symlink(join(checkout, "library"), join(tier, "library"));
+      paths.push(root);
+    }
+    paths.push(last);
+    const names = ["LD_LIBRARY_PATH"];
+    // macOS system programs also clear DYLD_* at execution.
+    if (process.platform !== "darwin") {
+      names.push("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH");
+    }
+    for (const name of names) {
+      const value = paths.join(name === "LD_LIBRARY_PATH" ? ";" : ":");
+      const binding = `--config-env=probe.loader=${name}`;
+      const actual = await runRepositoryCommand(
+        "git",
+        [binding, "config", "--get", "probe.loader"],
+        checkout,
+        {
+          environment: { [name]: value },
+          protectedRoots: [join(grant, "library")],
+        },
+      );
+      expect(actual).toBe([first, last].join(":"));
+    }
+  },
+);
+
 test("a private-index snapshot reuses only unchanged profiles outside its writable roots", async () => {
   const name =
     "a private-index snapshot reuses only unchanged profiles outside its writable roots";

@@ -1937,13 +1937,18 @@ type PatchTransportFile = {
   kind: "executable" | "file" | "known-hosts" | "missing-known-hosts";
 };
 
-interface PatchTransportAccess {
+interface TransportWriters {
   readonly writable: Set<string>;
+  unknownWriters?: boolean;
+}
+
+interface PatchTransportAccess extends TransportWriters {
+  libraryDirectories?: Map<string, RepositoryLibraryDirectory>;
   // A null target represents a known-hosts file that SSH may create.
   readonly invocations: Map<string, string | null>;
+  readonly implicitLaunchers: Map<string, string | null>;
   readonly afterHook: Set<string>;
   external: boolean;
-  unknownWriters?: boolean;
 }
 
 interface CliDependencies {
@@ -2028,6 +2033,7 @@ interface CliDependencies {
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
       snapshotProfiles?: PatchSnapshotProfiles;
+      loaderAccess?: PatchTransportAccess;
       patchTransport?: { mirrors: boolean; pushing: boolean };
       publicationHooks?: PatchPublicationHooks;
       hookSandbox?: PatchSnapshotSandbox;
@@ -2120,6 +2126,130 @@ child.on("exit", (code, signal) => {
   else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);
 });
 `;
+
+interface RepositoryLibraryDirectory {
+  readonly target: string;
+  readonly checked: Map<string, boolean>;
+  readonly linked: Map<string, PatchTransportFile>;
+}
+
+// The loader searches leaf names in the directory and, on glibc, in its
+// hardware capability tiers. Check aliases there without walking the install.
+async function checkLibraryLinks(
+  directory: RepositoryLibraryDirectory,
+  trustedPath: (path: string) => string | null,
+) {
+  const locations = [directory.target];
+  if (process.platform === "linux") {
+    const caps = join(directory.target, "glibc-hwcaps");
+    if (!trustedPath(caps)) return false;
+    if (existsSync(caps)) {
+      for (const tier of await readdir(caps)) {
+        const path = join(caps, tier);
+        if (!trustedPath(path)) return false;
+        if ((await stat(path)).isDirectory()) locations.push(path);
+      }
+    }
+  }
+  for (const location of locations) {
+    for (const item of await readdir(location, { withFileTypes: true })) {
+      const path = join(location, item.name);
+      if (item.isSymbolicLink() && !trustedPath(path)) return false;
+      if (!item.isSymbolicLink() && !item.isFile()) continue;
+      const file = await stat(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      });
+      if (file?.isFile() && file.nlink > 1 && !directory.linked.has(path)) {
+        const identity = await patchTransportIdentity(path, "executable");
+        directory.linked.set(path, identity);
+      }
+    }
+  }
+  return true;
+}
+
+async function restrictRepositoryLoader(
+  environment: NodeJS.ProcessEnv,
+  protectedRoots: readonly string[],
+  sandbox: PatchSnapshotSandbox | undefined,
+  access: PatchTransportAccess | undefined,
+  hooks: boolean,
+) {
+  const searches = new Map<string, string>();
+  const searchName = /^(?:LD|DYLD(?:_FALLBACK|_VERSIONED)?)_LIBRARY_PATH$/u;
+  for (const [name, value] of Object.entries(environment)) {
+    if (!/^(?:LD|DYLD)_/u.test(name)) continue;
+    delete environment[name];
+    if (value && searchName.test(name)) searches.set(name, value);
+  }
+  if (!searches.size || access?.external || access?.unknownWriters) return;
+  const grants = sandbox
+    ? await patchSandboxWritableRoots(sandbox, sandbox.directory)
+    : [];
+  if (!grants) return;
+  const writable = new Set([
+    ...(access?.writable ?? []),
+    ...grants,
+    ...(sandbox?.snapshotStoragePaths ?? []),
+  ]);
+  for (const root of protectedRoots) {
+    const physical = await canonicalConfigPath(root).catch(() => undefined);
+    if (physical === undefined) return;
+    writable.add(physical);
+  }
+  const roots = [...writable];
+  const resolveHostPath = await trustedHostPathResolver(process.cwd(), roots);
+  const trustedPath = (path: string) => {
+    const target = resolveHostPath(path);
+    // A grant can select a single library within an external directory.
+    if (!target || roots.some((root) => !isOutsidePath(relative(target, root))))
+      return null;
+    return target;
+  };
+  const directories =
+    access?.libraryDirectories ?? new Map<string, RepositoryLibraryDirectory>();
+  if (access) access.libraryDirectories = directories;
+  const mayWrite = hooks || sandbox !== undefined;
+  const scope = JSON.stringify([roots, mayWrite]);
+  for (const [name, value] of searches) {
+    const elf = name === "LD_LIBRARY_PATH";
+    const accepted: string[] = [];
+    for (const entry of value.split(elf ? /[:;]/u : /:/u)) {
+      // Empty/relative entries and ELF loader tokens depend on the child.
+      if (!isAbsolute(entry)) continue;
+      if (elf && /\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(entry)) continue;
+      const target = trustedPath(entry);
+      if (!target) continue;
+      let directory = directories.get(entry);
+      if (!directory) {
+        directory = { target, checked: new Map(), linked: new Map() };
+        directories.set(entry, directory);
+      }
+      if (directory.target !== target) continue;
+      const checked = directory.checked.get(scope);
+      if (checked === false) continue;
+      try {
+        if (!checked && !(await checkLibraryLinks(directory, trustedPath))) {
+          directory.checked.set(scope, false);
+          continue;
+        }
+        // A hook or filter may write before a later child loads a library.
+        // Check link accounting once and recheck identities across patch turns.
+        if (mayWrite || access?.writable.size) {
+          const guard = mayWrite && !checked ? { writers: { writable } } : {};
+          for (const [path, selected] of directory.linked)
+            await patchTransportIdentity(path, "executable", selected, guard);
+        }
+        directory.checked.set(scope, true);
+        accepted.push(entry);
+      } catch {
+        directory.checked.set(scope, false);
+      }
+    }
+    if (accepted.length) environment[name] = accepted.join(":");
+  }
+}
 
 export async function runRepositoryCommand(
   command: Parameters<CliDependencies["runRepositoryCommand"]>[0],
@@ -2404,9 +2534,13 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
-    // The loader runs before the trusted executable, in the patch's writable cwd.
-    for (const name of Object.keys(environment))
-      if (/^(?:LD|DYLD)_/u.test(name)) delete environment[name];
+    await restrictRepositoryLoader(
+      environment,
+      protectedRoots,
+      sandbox,
+      options?.loaderAccess,
+      hooks !== undefined,
+    );
     const credentialNames = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
@@ -3721,6 +3855,7 @@ export async function main(
   const patchTransportAccess: PatchTransportAccess = {
     writable: new Set(),
     invocations: new Map(),
+    implicitLaunchers: new Map(),
     afterHook: new Set(),
     external: false,
   };
@@ -3758,7 +3893,11 @@ export async function main(
               const previous = patchPreparationSignal;
               patchPreparationSignal = signal;
               try {
-                if (appServer.permissions && patchSandbox && publicationHooks)
+                if (
+                  appServer.permissions &&
+                  patchSandbox &&
+                  (publicationHooks || patchTransportAccess.libraryDirectories)
+                )
                   await addPatchTransportWriters(
                     patchTransportAccess,
                     patchSandbox,
@@ -3777,6 +3916,7 @@ export async function main(
       options = {
         ...options,
         signal: options?.signal ?? patchPreparationSignal,
+        loaderAccess: patchTransportAccess,
       };
       options.signal?.throwIfAborted();
       if (command === "git") {
@@ -12376,18 +12516,19 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+function patchTransportChanged(kind: PatchTransportFile["kind"]) {
+  const label = kind === "executable" ? "executable" : "file";
+  return new CodexSecurityError(
+    `Patch transport ${label} changed before publication. Inspect the selected transport settings and files before resuming.`,
+  );
+}
+
 async function patchTransportIdentity(
   path: string,
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
-  options: { updatedHostKeys?: boolean; writers?: PatchTransportAccess } = {},
+  options: { updatedHostKeys?: boolean; writers?: TransportWriters } = {},
 ): Promise<PatchTransportFile> {
-  const changed = () =>
-    new CodexSecurityError(
-      "Patch transport " +
-        (kind === "executable" ? "executable" : "file") +
-        " changed before publication. Inspect the selected transport settings and files before resuming.",
-    );
   if (kind === "missing-known-hosts") {
     const parent = dirname(path);
     const directory = await lstat(parent, { bigint: true });
@@ -12397,21 +12538,22 @@ async function patchTransportIdentity(
       (await realpath(parent)) !== parent ||
       (selected && selected.stamp !== stamp)
     )
-      throw changed();
+      throw patchTransportChanged(kind);
     const leaf = await gitPublicationPathMetadata(path);
     if (!leaf) return { kind, target: path, stamp };
     // Only a successful SSH transport can populate the previously absent file.
-    if (!options.updatedHostKeys || !leaf.isFile()) throw changed();
+    if (!options.updatedHostKeys || !leaf.isFile())
+      throw patchTransportChanged(kind);
     kind = "known-hosts";
   }
   const target = await realpath(path);
-  if (selected && target !== selected.target) throw changed();
+  if (selected && target !== selected.target) throw patchTransportChanged(kind);
   const entry = await stat(target, { bigint: true });
   if (options.writers && entry.nlink > 1n && entry.isFile())
     await requireProtectedTransportLinks(target, entry, options.writers);
   const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
   if (selected && !options.updatedHostKeys && selected.stamp !== stamp)
-    throw changed();
+    throw patchTransportChanged(kind);
   if (
     kind === "executable" ||
     (target === "/dev/null" && entry.isCharacterDevice())
@@ -12433,7 +12575,7 @@ async function patchTransportIdentity(
       !options.updatedHostKeys &&
       selected.digest !== digest
     )
-      throw changed();
+      throw patchTransportChanged(kind);
     return { target, stamp, kind, digest };
   } finally {
     await file.close();
@@ -12459,7 +12601,7 @@ async function bindPatchTransportFile(
 async function requireProtectedTransportLinks(
   target: string,
   file: { uid: bigint; mode: bigint; dev: bigint; ino: bigint; nlink: bigint },
-  writers: PatchTransportAccess,
+  writers: TransportWriters,
 ) {
   // Git installations commonly hard-link their subcommands. An inode owned
   // by another user and unwritable from this account stays safe through every
@@ -12554,7 +12696,7 @@ async function addPatchTransportWriters(
 
 function requireStablePatchTransportTarget(
   path: string,
-  access?: PatchTransportAccess,
+  access?: TransportWriters,
 ) {
   if (access?.unknownWriters)
     throw new CodexSecurityError(
@@ -12659,13 +12801,21 @@ async function inspectPatchGitExecutable(
     ...inspected,
     configuredExecPath,
   };
+  const access = dependencies.patchTransportAccess;
   if (implicit) {
+    // A retargeted search directory can select a new launcher while the file
+    // bound during ls-remote remains intact.
+    const launcher = result.gitTransport?.launcher ?? null;
+    const previous = access?.implicitLaunchers.get(command);
+    if (previous !== undefined && previous !== launcher)
+      throw patchTransportChanged("executable");
+    access?.implicitLaunchers.set(command, launcher);
     // Git searches for its child by name. An absolute replacement command
     // cannot pin that lookup: a hook can replace an intermediate link or
     // install an earlier candidate in any writable search directory.
     const resolveHostPath = await trustedHostPathResolver(transportDirectory, [
       ...protectedRoots,
-      ...(dependencies.patchTransportAccess?.writable ?? []),
+      ...(access?.writable ?? []),
     ]);
     const windows = process.platform === "win32";
     const names = windows ? [command + ".exe", command] : [command];
@@ -12680,8 +12830,7 @@ async function inspectPatchGitExecutable(
         // chmod through a writable hard link.
         if ((await stat(physical).catch(() => undefined))?.isFile()) {
           await bindPatchTransportFile(physical, "executable", dependencies);
-          if (afterHook)
-            dependencies.patchTransportAccess?.afterHook.add(physical);
+          if (afterHook) access?.afterHook.add(physical);
         }
       }
     }
@@ -12689,13 +12838,10 @@ async function inspectPatchGitExecutable(
   if (!result.executable || !result.gitTransport) return result;
   const { launcher, target } = result.gitTransport;
   await bindPatchTransportFile(launcher, "executable", dependencies);
-  if (afterHook) dependencies.patchTransportAccess?.afterHook.add(launcher);
+  if (afterHook) access?.afterHook.add(launcher);
   const selectedFile = dependencies.patchTransportFiles?.get(launcher);
   if (selectedFile && selectedFile.target !== target)
-    throw new CodexSecurityError(
-      "Patch transport executable changed before publication. Inspect the selected transport settings and files before resuming.",
-    );
-  const access = dependencies.patchTransportAccess;
+    throw patchTransportChanged("executable");
   requireStablePatchTransportTarget(target, access);
   if (
     launcher !== target &&
