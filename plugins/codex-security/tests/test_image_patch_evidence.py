@@ -111,6 +111,24 @@ def test_other_package_namespace_cannot_supply_fix():
     assert run(items)["scanner_evidence"] == "inconclusive"
 
 
+@pytest.mark.parametrize(
+    ("qualifiers", "outcome"),
+    [
+        ("?arch=x86_64&distro=alpine-3.18", "reported_fix_present"),
+        ("?distro=alpine-3.19", "inconclusive"),
+        ("", "inconclusive"),
+    ],
+)
+def test_apk_fixed_version_applies_to_its_distribution(qualifiers, outcome):
+    items = reports()
+    items[0]["artifacts"][0]["purl"] += "?distro=alpine-3.18"
+    package = items[2]["artifacts"][0]
+    package["purl"] += qualifiers
+    assert run(items)["scanner_evidence"] == outcome
+    items[3]["matches"] = [{**items[1]["matches"][0], "artifact": package}]
+    assert run(items)["scanner_evidence"] == "still_reported"
+
+
 def test_related_advisory_selects_native_match():
     items = reports()
     match = items[1]["matches"][0]

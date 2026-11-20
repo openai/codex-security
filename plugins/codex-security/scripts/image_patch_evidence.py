@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 
 def required_text(value, field):
@@ -31,6 +32,11 @@ def package_identity(artifact):
     if not version_separator or not name.startswith("pkg:"):
         raise ValueError("Expected a versioned package URL")
     return name
+
+
+def apk_distro(artifact):
+    query = urlsplit(artifact["purl"]).query
+    return parse_qs(query).get("distro", [None])[0]
 
 
 def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=None):
@@ -63,15 +69,18 @@ def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=Non
         for m in scan.get("ignoredMatches", [])
         if selected(m) and package_identity(m["artifact"]) == identity_key
     ]
-    versions = sorted(
-        {
-            required_text(a["version"], "installed version")
-            for a in sbom["artifacts"]
-            if a["name"] == package
-            and a["type"] == package_type
-            and package_identity(a) == identity_key
-        }
-    )
+    installed = [
+        a
+        for a in sbom["artifacts"]
+        if a["name"] == package
+        and a["type"] == package_type
+        and package_identity(a) == identity_key
+    ]
+    versions = sorted({required_text(a["version"], "installed version") for a in installed})
+    distros = set()
+    if package_type == "apk":
+        distros.update(apk_distro(a) for a in installed)
+        distros.update(apk_distro(match["artifact"]) for match in active)
     summary = {
         "manifest_digest": identity[0],
         "platform": identity[1],
@@ -82,7 +91,7 @@ def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=Non
         "total_matches": len(matches),
         "distinct_advisories": len({m["vulnerability"]["id"] for m in matches}),
     }
-    return summary, active
+    return summary, active, distros
 
 
 def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package, package_type):
@@ -106,8 +115,10 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
     ):
         raise ValueError("Incomparable Grype databases")
 
-    before, active = image_snapshot(before_sbom, before_scan, advisory, package, package_type)
-    after, _ = image_snapshot(
+    before, active, before_distros = image_snapshot(
+        before_sbom, before_scan, advisory, package, package_type
+    )
+    after, _, after_distros = image_snapshot(
         after_sbom, after_scan, advisory, package, package_type, before["package_identity"]
     )
     if before["platform"] != after["platform"]:
@@ -128,6 +139,7 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
         outcome = "still_reported"
     elif (
         after["installed_versions"]
+        and len(before_distros | after_distros) <= 1
         and set(after["installed_versions"]) <= fixes
         and before["installed_versions"] != after["installed_versions"]
         and before["manifest_digest"] != after["manifest_digest"]
