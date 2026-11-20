@@ -21,8 +21,11 @@ import {
   dependencyTriagePrompt,
   dependencyTriageEvidence,
 } from "./sca-triage.js";
-import type { ScaAssessment, ScaMatch, ScaResult } from "./sca-types.js";
-import type { DependencyScanProgress } from "./sca-progress.js";
+import type { ScaAssessment, ScaResult } from "./sca-types.js";
+import {
+  assessmentProgress,
+  type DependencyScanProgress,
+} from "./sca-progress.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import {
   explicitlyCanceled,
@@ -346,6 +349,7 @@ import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
+  normalizeExcludedPaths,
   nullIfMissingFile,
   gitMarkerRoot,
   repositoryRevision,
@@ -763,6 +767,7 @@ export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   maxTimeMinutes?: number;
   repository: string;
   target: NormalizedTarget;
+  excludePaths?: string[];
   mode: ScanMode;
   knowledgeBasePaths?: string[];
   outputDir: string | null;
@@ -1083,8 +1088,8 @@ export class CodexSecurity {
   async #scanDependencies(
     options: DependencyScanOptions,
   ): Promise<DependencyScanResult> {
-    const { onProgress: _onProgress, onInventory, ...scanOptions } = options;
-    const reportProgress = notifyObserver(options, "onProgress");
+    const { onProgress, onInventory, ...scanOptions } = options;
+    const reportProgress = onProgress && notifyObserver(options, "onProgress");
     const onActivity = notifyObserver(options, "onActivity");
     const onCost = notifyObserver(options, "onCost");
     const budgetController = new AbortController();
@@ -1100,7 +1105,7 @@ export class CodexSecurity {
     let continuing = false;
     try {
       throwIfAborted(signal);
-      reportProgress({ phase: "preparing" });
+      reportProgress?.({ phase: "preparing" });
       const inputs = await this.#prepareLocalInputs(
         options.repositoryPath,
         scanOptions,
@@ -1271,7 +1276,7 @@ export class CodexSecurity {
           );
         }
       }
-      if (result.matches.length === 0) reportProgress({ phase: "saving" });
+      if (result.matches.length === 0) reportProgress?.({ phase: "saving" });
       if (canSave) await saveDependencyScan(result);
       if (onInventory !== undefined)
         notifyObserver(options, "onInventory")(structuredClone(result));
@@ -1308,43 +1313,14 @@ export class CodexSecurity {
         canSave = true;
         recordPreviousAttempt(result, cost === null);
         result.status = "completed";
-        reportProgress({ phase: "saving" });
+        reportProgress?.({ phase: "saving" });
         await saveDependencyScan(result);
         throwIfAborted(signal, outputDir);
         return result;
       }
-      const reportAssessment = (match: ScaMatch | null): void => {
-        const component = result!.components.find(
-          (item) => item.id === match?.componentId,
-        );
-        reportProgress({
-          phase: "assessing",
-          assessmentsTotal: result!.matches.length,
-          assessmentsCompleted: result!.assessments.filter(
-            (item) => item.status === "completed",
-          ).length,
-          assessmentsFailed: result!.assessments.filter(
-            (item) => item.status === "failed",
-          ).length,
-          assessmentsInconclusive: result!.assessments.filter(
-            (item) =>
-              item.status === "completed" && item.verdict === "needs_review",
-          ).length,
-          current:
-            match === null
-              ? null
-              : {
-                  matchId: match.id,
-                  componentId: match.componentId,
-                  packageName: component?.name ?? null,
-                  packageVersion: component?.version ?? null,
-                  advisoryIds: [...match.advisoryIds],
-                },
-        });
-      };
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
-        reportProgress({ phase: "preparing_assessment" });
+        reportProgress?.({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
         const verifyAssessmentSource = async () => {
           const currentSource = await sourceSnapshot();
@@ -1645,7 +1621,7 @@ export class CodexSecurity {
             );
             if (result.assessments[index]!.status === "completed") continue;
             throwIfAborted(signal, outputDir);
-            reportAssessment(match);
+            reportProgress?.(assessmentProgress(result, match));
             let thread = threads.get(match.componentId);
             const reusedThread = thread !== undefined;
             if (thread === undefined) {
@@ -1751,7 +1727,7 @@ export class CodexSecurity {
             result.assessments[index] = assessment;
             await saveDependencyScan(result);
             finishCheckpoint();
-            reportAssessment(null);
+            reportProgress?.(assessmentProgress(result, null));
             const snapshot = await tracker.refresh().catch((error: unknown) => {
               reportTrackingError(error);
               if (options.maxCostUsd !== undefined) throw error;
@@ -1791,11 +1767,11 @@ export class CodexSecurity {
         }
         await saveDependencyScan(result);
         throwIfAborted(signal, outputDir);
-        reportAssessment(null);
-        reportProgress({ phase: "saving" });
+        reportProgress?.(assessmentProgress(result, null));
+        reportProgress?.({ phase: "saving" });
         return result;
       }
-      reportProgress({ phase: "saving" });
+      reportProgress?.({ phase: "saving" });
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       return result;
@@ -1812,7 +1788,7 @@ export class CodexSecurity {
             "Dependency scan interrupted; completed scanner facts are retained.",
           );
         } else result.diagnostics.push(errorMessage(error));
-        reportProgress({ phase: "saving" });
+        reportProgress?.({ phase: "saving" });
         await saveDependencyScan(result);
       }
       throwIfAborted(signal, outputDir);
@@ -2600,6 +2576,9 @@ export class CodexSecurity {
     return {
       repository: inputs.repository,
       target: inputs.target,
+      ...(inputs.excludePaths?.length
+        ? { excludePaths: inputs.excludePaths }
+        : {}),
       mode: inputs.mode,
       ...inputs.deepScanConfiguration?.settings,
       ...(inputs.deepScanConfiguration === undefined
@@ -3163,7 +3142,7 @@ export class CodexSecurity {
         deepScanConfiguration,
         prompts,
       } = inputs;
-      options = { ...options, ...prompts };
+      options = { ...options, ...prompts, excludePaths: inputs.excludePaths };
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -3454,6 +3433,7 @@ export class CodexSecurity {
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
+        excludePaths: options.excludePaths,
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model, pricingContext);
@@ -3797,7 +3777,9 @@ export class CodexSecurity {
           typeof resumeThreadId !== "string" ||
           !resumeThreadId ||
           JSON.stringify(savedRecipe["target"]) !==
-            JSON.stringify(recipe["target"])
+            JSON.stringify(recipe["target"]) ||
+          JSON.stringify(savedRecipe["excludePaths"] ?? []) !==
+            JSON.stringify(recipe["excludePaths"] ?? [])
         ) {
           throw new CodexSecurityError(
             "The workbench returned mismatched scan resume context.",
@@ -4261,6 +4243,8 @@ export class CodexSecurity {
         scopeFileCount === null
           ? basePrompt
           : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
+      if (options.excludePaths?.length)
+        prompt += `\nExclude these literal repository-relative paths and all their descendants from review: ${jsonForPrompt(options.excludePaths)}. Exclusions take precedence over requested paths. Pass the same exclusions to every reviewer and worker. You may read excluded files as supporting context, but the affected operation must be in scope. Do not report findings located only in excluded paths. Inventory helpers apply the host-supplied exclusions automatically.`;
       if (
         standard &&
         modelProvider !== "amazon-bedrock" &&
@@ -4341,6 +4325,9 @@ export class CodexSecurity {
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
         CODEX_SECURITY_TARGET_KIND: targetKind,
+        CODEX_SECURITY_EXCLUDE_PATHS: JSON.stringify(
+          options.excludePaths ?? [],
+        ),
         ...(targetRevision === null
           ? {}
           : { CODEX_SECURITY_TARGET_REVISION: targetRevision }),
@@ -6323,7 +6310,11 @@ export class CodexSecurity {
       ...(options.signal ? [options.signal] : []),
     ]);
     const local = await this.#prepareLocalInputs(repository, options, signal);
-    options = { ...options, ...local.prompts };
+    options = {
+      ...options,
+      ...local.prompts,
+      excludePaths: local.excludePaths,
+    };
     const temporaryRoot = await realpath(tmpdir());
     requireOutputOutsideRepository(
       local.protectedRoot,
@@ -6523,6 +6514,7 @@ export class CodexSecurity {
           target: local.target,
           mode: local.mode,
           pluginVersion: plugin.version,
+          excludePaths: options.excludePaths,
         },
         signal,
         true,
@@ -6625,6 +6617,7 @@ export class CodexSecurity {
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);
     const normalized = await normalizeTarget(repo, requestedTarget, signal);
+    const excludePaths = normalizeExcludedPaths(options.excludePaths);
     throwIfAborted(signal);
     const mode = options.mode ?? DEFAULT_SCAN_MODE;
     validateMode(normalized, mode);
@@ -6667,6 +6660,7 @@ export class CodexSecurity {
     return {
       repository: repo,
       target: normalized,
+      ...(excludePaths.length ? { excludePaths } : {}),
       mode,
       outputDir: requestedOutput,
       protectedRoot,
@@ -7489,6 +7483,9 @@ function scanRecipe({
   deepScan?: Required<DeepScanOptions>;
 }): JsonObject {
   const optionalSettings = {
+    excludePaths: options.excludePaths?.length
+      ? options.excludePaths
+      : undefined,
     ownerSuggestions: options.ownerSuggestions,
     auth: options.auth,
     cyberAccessProgram: options.cyberAccessProgram,

@@ -54,6 +54,32 @@ function option(helpText: string, flag: string): string {
 }
 
 describe("CLI help", () => {
+  test.each([undefined, "", "0", "true", "1"])(
+    "registers the experimental dependency command only for the exact opt-in (%j)",
+    async (value) => {
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: value },
+      });
+      const root = createCliTest(main);
+      expect(await root.runCli(["--help"], deps)).toBe(0);
+      expect(/^  exploitability\s/mu.test(root.stdout.text())).toBe(
+        value === "1",
+      );
+
+      const group = createCliTest(main);
+      const status = await group.runCli(["exploitability", "--help"], deps);
+      if (value === "1") {
+        expect(status).toBe(0);
+        expect(group.stdout.text()).toContain(
+          "Usage: codex-security exploitability",
+        );
+      } else {
+        expect(status).toBe(2);
+        expect(group.stderr.text()).toContain("Unknown command exploitability");
+      }
+    },
+  );
+
   test.each(["scan", "patch", "verify-fix"])(
     "%s advertises hosted mode without entering the protocol",
     async (command) => {

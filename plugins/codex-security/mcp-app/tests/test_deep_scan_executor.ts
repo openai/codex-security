@@ -6,7 +6,6 @@ import {
   parseDeepScan,
   temporaryDirectories,
   fakeCodexFixture,
-  bundledCodexSdkEnvironment,
   workerRequest,
   assertReadOnlyWorkerPolicy,
   workerPermissionProfileOverride,
@@ -50,7 +49,6 @@ import {
   mkdir,
   readFile,
   realpath,
-  stat,
   symlink,
   utimes,
   writeFile,
@@ -904,9 +902,9 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       else process.env.CODEX_CLI_PATH = configured;
       const hasBundledTools = expectedExecutable === codexPath;
       if (hasBundledTools) {
-        process.env.PATH = bundledCodexSdkEnvironment(resolveCodexPath(), {
-          PATH: process.env.PATH,
-        }).PATH;
+        process.env.PATH = [bundledTools, process.env.PATH].join(
+          path.delimiter,
+        );
       }
       await writeFile(
         promptPath,
@@ -3113,6 +3111,7 @@ async function testLargeScopeTransport() {
             const filePaths = includePaths.filter(
               (_, index) => index % 2 === 0,
             );
+            const excludePaths = [`scan-${index}/examples`];
             const run = parseDeepScan({
               deepScan: {
                 scanId,
@@ -3121,6 +3120,7 @@ async function testLargeScopeTransport() {
                 scope: ".",
                 includePaths,
                 filePaths,
+                excludePaths,
                 scanDir: workerRoot,
                 config: {
                   workers: 1,
@@ -3141,6 +3141,7 @@ async function testLargeScopeTransport() {
                 scope: run.scope,
                 includePaths: run.includePaths,
                 filePaths: run.filePaths,
+                excludePaths: run.excludePaths,
               },
             });
             await executor.run(
@@ -3155,6 +3156,11 @@ async function testLargeScopeTransport() {
             const invocation = await readJson(output, "invocation.json");
             assert.deepEqual(invocation.scopeInput.paths, includePaths);
             assert.deepEqual(invocation.scopeInput.filePaths, filePaths);
+            assert.deepEqual(invocation.scopeInput.excludePaths, excludePaths);
+            assert.deepEqual(
+              JSON.parse(invocation.scanExclusions),
+              excludePaths,
+            );
             assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
             await assert.rejects(readFile(invocation.scopeInput.file), {
               code: "ENOENT",
