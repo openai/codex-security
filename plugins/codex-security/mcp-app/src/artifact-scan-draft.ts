@@ -885,8 +885,9 @@ async function preserveScanDraft(
       ? history.find((source) => source.input.complete !== false)
       : undefined;
   const retainedIndex = retainedFinal ? history.indexOf(retainedFinal) : -1;
+  const deepParent = context.layout === "scan" && context.mode === "deep";
   let savedSources = history;
-  if (retainedFinal && context.layout === "scan" && context.mode === "deep") {
+  if (retainedFinal && deepParent) {
     // The canonical files can be newer than their head when publication spans a clock tick.
     const terminalCheckpoint =
       retainedFinal.name ??
@@ -1053,7 +1054,8 @@ async function preserveScanDraft(
       .filter(
         (source, index) =>
           source.input.complete === false &&
-          (index < retainedIndex ||
+          (deepParent ||
+            index < retainedIndex ||
             (source.attempt === retainedFinal.attempt &&
               source.modifiedMs === retainedFinal.modifiedMs)),
       )
@@ -1224,14 +1226,17 @@ async function preserveScanDraft(
   // Reconcile the observations each batch would publish. Keep untouched rows
   // raw so reconciliation can restore their previously published identities.
   if (context.layout === "scan" && context.mode !== "deep") {
+    const published = Map.groupBy(
+      previous?.findings ?? [],
+      findingRuleAndTitle,
+    );
     for (const draft of [result, ...sources]) {
       const raw = draft.findings;
       if (raw.length > 1 && raw.some((row) => row.identity === undefined))
         draft.findings = coalesceCandidateObservations(
           raw,
-          assignFindingIdentities(raw, context.mode),
-          raw,
-          previousState.input?.findings,
+          context.mode,
+          published,
         );
     }
   }
@@ -2217,13 +2222,18 @@ async function readSavedCheckpoints(
         "scan checkpoint: current checkpoint belongs to a different scan.",
       );
     }
+    const publication = isObject(draft.publication) ? draft.publication : {};
     checkpoints.push({
       input,
       snapshot: draft,
-      ...(isObject(draft.publication) &&
-      typeof draft.publication.previousCheckpoint === "string"
-        ? { previousCheckpoint: draft.publication.previousCheckpoint }
-        : {}),
+      // The same projected checkpoint can be published again from a different input.
+      previousCheckpoint:
+        typeof publication.previousCheckpoint === "string" &&
+        (publication.previousCheckpoint !== checkpointHead ||
+          head?.inputCheckpoint === undefined ||
+          publication.previousInputCheckpoint === head.inputCheckpoint)
+          ? publication.previousCheckpoint
+          : undefined,
       modifiedMs:
         entry.name === checkpointHead
           ? head!.modifiedMs
@@ -3399,45 +3409,90 @@ function observationContent(finding: JsonObject): JsonObject {
   };
 }
 
+function findingRuleAndTitle(finding: DraftFinding): string {
+  return JSON.stringify([finding.ruleId, finding.title]);
+}
+
+// Restore unambiguous ownership before grouping. Identity assignment still
+// distinguishes authored identities from identities inferred during replay.
+function restorePublishedOwner(
+  row: DraftFinding,
+  published: DraftFinding[],
+): DraftFinding[] {
+  const observation = withoutPreviousFindings(row);
+  const matches = published.filter(
+    (prior) =>
+      prior.identity !== undefined &&
+      (row.identity === undefined
+        ? containsSavedValue(prior, observation)
+        : sameSavedRevision(prior, row)),
+  );
+  if (matches.length === 1) {
+    const prior = matches[0]!;
+    const candidate = findingCandidateId(row);
+    const priorCandidate = findingIdentityCandidate(prior);
+    if (candidate && priorCandidate && priorCandidate !== candidate) return [];
+    if (!candidate && priorCandidate)
+      row.provenance.candidateId = priorCandidate;
+    const worker = prior.provenance.workerId;
+    if (!row.provenance.workerId && typeof worker === "string" && worker)
+      row.provenance.workerId = worker;
+  }
+  return matches;
+}
+
 function coalesceCandidateObservations(
   raw: DraftFinding[],
-  identified: DraftFinding[],
-  unchanged = identified,
-  published: DraftFinding[] = [],
+  mode?: string,
+  published?: Map<string, DraftFinding[]>,
 ): DraftFinding[] {
   type Observation = { owner?: string; candidate?: string; indexes: number[] };
-  const scopes = new Map<string, Observation[]>();
-  for (const [index, finding] of raw.entries()) {
-    const extensions = finding.extensions as JsonObject | undefined;
-    const qualified = ["candidateId", "reportId", "ledgerRowId"].some(
-      (key) =>
-        typeof extensions?.[key] === "string" &&
-        Boolean(extensions[key].trim()),
-    );
-    const provenance = finding.provenance as JsonObject;
-    const candidate = findingCandidateId(finding);
-    const owner =
-      typeof provenance.workerId === "string" && provenance.workerId
-        ? provenance.workerId
-        : undefined;
-    const scope = JSON.stringify([
+  const scopes = Map.groupBy(raw.keys(), (index) => {
+    const finding = raw[index]!;
+    return JSON.stringify([
       finding.ruleId,
       finding.title,
       findingLocationKeys(finding),
     ]);
-    const observations = scopes.get(scope) ?? [];
-    let observation = observations.find(
-      (item) => item.owner === owner && item.candidate === candidate,
-    );
-    if (!observation) {
-      observation = { owner, candidate, indexes: [] };
-      observations.push(observation);
-      scopes.set(scope, observations);
+  });
+  const groups: Observation[][] = [];
+  const publishedMatches = new Map<number, DraftFinding[]>();
+  for (const indexes of scopes.values()) {
+    if (indexes.length < 2) continue;
+    const priors = published?.get(findingRuleAndTitle(raw[indexes[0]!]!));
+    const observations: Observation[] = [];
+    groups.push(observations);
+    for (const index of indexes) {
+      const finding = raw[index]!;
+      const extensions = finding.extensions as JsonObject | undefined;
+      const qualified = ["candidateId", "reportId", "ledgerRowId"].some(
+        (key) =>
+          typeof extensions?.[key] === "string" &&
+          Boolean(extensions[key].trim()),
+      );
+      if (priors && !qualified)
+        publishedMatches.set(index, restorePublishedOwner(finding, priors));
+      const provenance = finding.provenance as JsonObject;
+      const candidate = findingCandidateId(finding);
+      const owner =
+        typeof provenance.workerId === "string" && provenance.workerId
+          ? provenance.workerId
+          : undefined;
+      let observation = observations.find(
+        (item) => item.owner === owner && item.candidate === candidate,
+      );
+      if (!observation) {
+        observation = { owner, candidate, indexes: [] };
+        observations.push(observation);
+      }
+      if (!qualified) observation.indexes.push(index);
     }
-    if (!qualified) observation.indexes.push(index);
   }
-  const result: (DraftFinding | undefined)[] = [...unchanged];
-  for (const observations of scopes.values()) {
+  const identified = assignFindingIdentities(raw, mode);
+  const result: (DraftFinding | undefined)[] = [
+    ...(published ? raw : identified),
+  ];
+  for (const observations of groups) {
     for (const item of observations) {
       if (!item.indexes.length || (item.candidate && item.owner)) continue;
       const matches = observations.filter(
@@ -3526,15 +3581,16 @@ function coalesceCandidateObservations(
       );
       // A saved singleton can acquire siblings during a retry. Its published
       // identity still belongs to the same raw observation in this batch.
-      if (!explicit.length) {
-        const matches = published.filter((prior) => {
+      if (!explicit.length && publishedMatches.size) {
+        const priors = new Set(
+          selected.flatMap((index) => publishedMatches.get(index) ?? []),
+        );
+        const matches = [...priors].filter((prior) => {
           const priorCandidate = findingCandidateId(prior);
           const priorOwner = prior.provenance.workerId;
           return (
-            prior.identity !== undefined &&
             (!candidate || !priorCandidate || priorCandidate === candidate) &&
-            (!owner || !priorOwner || priorOwner === owner) &&
-            selected.some((index) => containsSavedFinding(prior, raw[index]!))
+            (!owner || !priorOwner || priorOwner === owner)
           );
         });
         if (
@@ -3655,10 +3711,9 @@ function buildFindings(
   findings: DraftFinding[],
   mode?: string,
 ): DraftFinding[] {
-  const projected = assignFindingIdentities(findings, mode);
   return mode === "deep"
-    ? projected
-    : coalesceCandidateObservations(findings, projected);
+    ? assignFindingIdentities(findings, mode)
+    : coalesceCandidateObservations(findings, mode);
 }
 
 function buildCoverage(
