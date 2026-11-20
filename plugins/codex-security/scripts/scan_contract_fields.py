@@ -8,25 +8,40 @@ from typing import Any
 class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
 
+    def __init__(
+        self, message: str, *, reason: str = "validation_failed", location: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.location = location
+
+
+def _required_field_error(value: Any, location: str, expected: str) -> ContractError:
+    return ContractError(
+        f"{location}: expected {expected}",
+        reason="missing_required_field" if value is None else "invalid_required_field",
+        location=location,
+    )
+
 
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
     value = payload.get(key)
     if not isinstance(value, dict):
-        raise ContractError(f"{context}.{key}: expected an object")
+        raise _required_field_error(value, f"{context}.{key}", "an object")
     return value
 
 
 def _require_list(payload: dict[str, Any], key: str, context: str) -> list[Any]:
     value = payload.get(key)
     if not isinstance(value, list):
-        raise ContractError(f"{context}.{key}: expected an array")
+        raise _required_field_error(value, f"{context}.{key}", "an array")
     return value
 
 
 def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise ContractError(f"{context}.{key}: expected a non-empty string")
+        raise _required_field_error(value, f"{context}.{key}", "a non-empty string")
     return value
 
 

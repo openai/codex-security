@@ -611,7 +611,9 @@ def _open_scan_local_file_with_path(
             # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
             if exc.errno in {2, 3}:
                 raise MissingScanLocalFileError(
-                    f"{context}: expected a file inside the scan directory"
+                    f"{context}: expected a file inside the scan directory",
+                    reason="missing_artifact",
+                    location=relative_path,
                 ) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
@@ -630,7 +632,9 @@ def _open_scan_local_file_with_path(
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 raise MissingScanLocalFileError(
-                    f"{context}: expected a file inside the scan directory"
+                    f"{context}: expected a file inside the scan directory",
+                    reason="missing_artifact",
+                    location=relative_path,
                 ) from exc
             if exc.errno == errno.ELOOP:
                 try:
@@ -731,7 +735,9 @@ def _read_scan_local_json_with_metadata(
         try:
             payload = _loads_json(raw.decode("utf-8-sig"))
         except (UnicodeDecodeError, ValueError) as exc:
-            raise ContractError(f"{context}: invalid JSON: {exc}") from exc
+            raise ContractError(
+                f"{context}: invalid JSON: {exc}", reason="invalid_json", location=relative_path
+            ) from exc
         if not isinstance(payload, dict):
             raise ContractError(f"{context}: expected a JSON object")
         _require_safe_json_value(payload, context, validate_strings=False)
@@ -1980,7 +1986,9 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
         if required_path not in artifact_paths:
             raise ContractError(
-                f"manifest.scan.artifacts: missing required artifact: {required_path}"
+                f"manifest.scan.artifacts: missing required artifact: {required_path}",
+                reason="missing_artifact_record",
+                location=required_path,
             )
     _require_safe_json_value(manifest, "scan-manifest.json")
 
@@ -2182,7 +2190,11 @@ def _validate_schema_node(
                     _validate_schema_node(value, then_schema, context, root_schema)
         for key in schema.get("required", []):
             if key not in value:
-                raise ContractError(f"{context}.{key}: missing required schema property")
+                raise ContractError(
+                    f"{context}.{key}: missing required schema property",
+                    reason="missing_required_field",
+                    location=f"{context}.{key}",
+                )
         if "minProperties" in schema and len(value) < schema["minProperties"]:
             raise ContractError(f"{context}: object has too few properties")
         properties = schema.get("properties", {})
@@ -2706,7 +2718,11 @@ def _validate_existing_seal(
             else _sha256_scan_local_file(scan_dir, path, context)
         )
         if actual_sha256 != expected_sha256:
-            raise ContractError(f"{context}: sealed artifact changed or is missing")
+            raise ContractError(
+                f"{context}: sealed artifact changed or is missing",
+                reason="artifact_digest_mismatch",
+                location=path,
+            )
 
 
 def _read_scan_artifacts(
@@ -3184,23 +3200,35 @@ def _prepare_scan_finalization(
     validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
-    if finding_scope is not None:
+    requested_exclusions = (
+        completion_binding.get("scope", {}).get("excludePaths", [])
+        if completion_binding is not None
+        else []
+    )
+    if finding_scope is not None or requested_exclusions:
         # Accepted worker/reducer files remain immutable; only the new parent
         # projection is scoped, after the existing validation of every finding.
         scoped_findings = []
         excluded_findings = []
         for finding in findings["findings"]:
             in_scope = any(
-                PurePosixPath(location["path"]) == PurePosixPath(path)
-                if is_file
-                else path_within_scope(location["path"], path)
+                not any(path_within_scope(location["path"], path) for path in requested_exclusions)
+                and (
+                    finding_scope is None
+                    or any(
+                        PurePosixPath(location["path"]) == PurePosixPath(path)
+                        if is_file
+                        else path_within_scope(location["path"], path)
+                        for path, is_file in finding_scope
+                    )
+                )
                 for location in finding["locations"]
-                for path, is_file in finding_scope
             )
             (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
+            label = "Deep scan" if finding_scope is not None else "scan"
             raise ContractError(
-                "The sealed Deep scan contains findings outside its requested paths; "
+                f"The sealed {label} contains findings outside its requested scope; "
                 "start a new scan to produce scoped results."
             )
         if not was_sealed:

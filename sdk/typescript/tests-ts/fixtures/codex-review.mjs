@@ -111,6 +111,14 @@ const turnFailures = {
     message: "Provider stream disconnected",
     codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
   },
+  "overloaded-turn": {
+    message: "Selected model is at capacity.",
+    codexErrorInfo: "serverOverloaded",
+  },
+  "internal-error-turn": {
+    message: "Internal server error",
+    codexErrorInfo: "internalServerError",
+  },
   "unauthorized-turn": {
     message: "Authentication required",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } },

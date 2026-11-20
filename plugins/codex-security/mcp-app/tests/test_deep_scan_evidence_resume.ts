@@ -86,6 +86,7 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
   const resetForResume = () => {
     store.run = {
       ...store.run,
+      excludePaths: ["generated"],
       status: "running",
       terminalReason: undefined,
       manifestPath: undefined,
@@ -127,8 +128,11 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       assert.match(prompt, /missing evidence/i);
       repairCalls++;
       if (repairCalls === 1) return "{}";
-      const { finding, targetPath } = JSON.parse(prompt.split("\n")[1]!);
+      const { finding, targetPath, excludePaths } = JSON.parse(
+        prompt.split("\n")[1]!,
+      );
       assert.equal(targetPath, fixture.run.targetPath);
+      assert.deepEqual(excludePaths, ["generated"]);
       return JSON.stringify({
         codeEvidence: [{ ...finding.codeEvidence[0], endLine: undefined }],
         rootCause: finding.rootCause.summary,

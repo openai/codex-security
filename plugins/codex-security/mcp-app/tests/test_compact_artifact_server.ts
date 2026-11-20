@@ -1,5 +1,5 @@
 import { fixturePython } from "./support/python.ts";
-import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
+import { readJson, snapshotScanDraft } from "./support/json.ts";
 import {
   completedFindingEvidence,
   workerDraft,

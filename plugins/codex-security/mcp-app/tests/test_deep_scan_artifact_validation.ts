@@ -1,4 +1,4 @@
-import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
+import { writeJsonLine as writeResult } from "./support/json.ts";
 import {
   completedFinding as finding,
   scanId,
@@ -1446,13 +1446,6 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
       );
     }
   }
-}
-
-function reduction<Finding extends Record<string, unknown>>(
-  findings: Finding[],
-  extra = {},
-) {
-  return { scanId, findings, ...extra };
 }
 
 function workerReceiptRef(
