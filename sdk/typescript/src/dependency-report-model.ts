@@ -17,7 +17,7 @@ export { citationKey };
 type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
 import {
   readDependencyCheckOutput,
-  type reviewedDependencyCheckSchema,
+  reviewedDependencyCheckSchema,
   type DependencyCoverageDisposition,
   type DependencyFindingDetails,
   type DependencyReviewReference,
@@ -500,6 +500,19 @@ export function matchTraceFrame(
       return { index: item.evidence.indexOf(cite), cite };
   }
   return { gap: "No matching reviewed citation for this step." };
+}
+
+export function sectionAdvisories({ check, stack }: Section) {
+  // Use the same display projection (including the first body paragraph) without
+  // altering the frozen advisory records used in the input and review digests.
+  const details =
+    check?.advisoryDetails ??
+    (stack?.advisoryDetails &&
+      reviewedDependencyCheckSchema.shape.advisoryDetails.parse(
+        stack.advisoryDetails,
+      )) ??
+    [];
+  return { details, urls: check?.advisories ?? details.map((a) => a.url) };
 }
 
 export function advisoryFunctions(details: Advisory[]) {
