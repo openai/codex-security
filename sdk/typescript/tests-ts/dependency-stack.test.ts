@@ -8,6 +8,7 @@ import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
 import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
 import { analyzeStackAdvisory } from "../src/dependency-stack-advisory.js";
 import { prepareStackPacket } from "../src/stack-packet.js";
+import { sqliteDatabaseOpener } from "../src/runtime.js";
 import {
   prepareStackCheckPacket,
   readStackPacket,
@@ -152,6 +153,7 @@ async function sample(
 async function startProof(
   root: string,
   files: Awaited<ReturnType<typeof sample>>,
+  legacyCapture = false,
 ) {
   const inputs = join(root, "packet"),
     state = join(root, "attempt.sqlite");
@@ -163,15 +165,26 @@ async function startProof(
     toolRevision: "test",
   });
   await executeStackRun("init", { state, repo: files.repo, inputs });
+  if (legacyCapture) {
+    // Packet-backed attempts created before run next supplied captures had no
+    // protocol record; their claim receipts identify the read-stacks command.
+    const db = sqliteDatabaseOpener()(state);
+    try {
+      db.exec(
+        "DELETE FROM records WHERE kind = 'stack-protocol' AND id = 'capture-origin'",
+      );
+    } finally {
+      db.close();
+    }
+  }
   const call = (command: string, input?: unknown) =>
     executeStackRun(command, { state, input });
-  const { workItem, receiptId } = (await call("next")) as {
-    workItem: { id: string };
+  const { workItem, receiptId, rootFirstRawIndices } = (await call("next")) as {
+    workItem: { id: string; observation: { bindings?: unknown[] } };
     receiptId: string;
+    rootFirstRawIndices: number[];
   };
-  const capture = (await call("read-stacks", { workItemId: workItem.id })) as {
-    observation: { bindings?: unknown[] };
-  };
+  const capture = { ...workItem, receiptId, rootFirstRawIndices };
   const write = {
     operationId: "proof",
     claims: [
@@ -227,6 +240,43 @@ async function startProof(
   };
   return { inputs, state, call, capture, claims, write, row };
 }
+
+test("an unchanged finalized packet with a legacy read-stacks receipt retains its report bytes", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-legacy-final-");
+  const files = await sample(dir.path, true);
+  const { state, call, claims, row } = await startProof(dir.path, files, true);
+  const queried = (await call("query-claims", { ids: ["caller"] })) as {
+    claims: { evidence: { receipts: { origin: { tool: string } }[] } }[];
+  };
+  expect(queried.claims[0]!.evidence.receipts[0]!.origin.tool).toBe(
+    "read-stacks",
+  );
+  await call("record-assessments", { items: [row] });
+  const original = await call("finalize");
+  expect(original).toMatchObject({ claims });
+  expect(original).not.toHaveProperty("effectiveInputDigest");
+  const originalBytes = JSON.stringify(original);
+  const savedBytes = () => {
+    const db = sqliteDatabaseOpener()(state);
+    try {
+      const statement = db.prepare(
+        "SELECT value FROM records WHERE kind = 'report' AND id = 'final'",
+      );
+      try {
+        const [row] = statement.all() as { value: string }[];
+        return row!.value;
+      } finally {
+        statement.finalize?.();
+      }
+    } finally {
+      db.close();
+    }
+  };
+  const saved = savedBytes();
+  expect(JSON.stringify(await readFinalStackReport(state))).toBe(originalBytes);
+  expect(JSON.stringify(await call("finalize"))).toBe(originalBytes);
+  expect(savedBytes()).toBe(saved);
+});
 
 test("trigger analysis checks quotations and addresses each supplied sink", async () => {
   const quote = "The decoder must accept a caller-supplied length.";
@@ -742,10 +792,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
         const previous = previousDraft?.assessments[i];
         const { workItem, receiptId, openQuestions, advisoryDetails } =
           await child("next");
-        if (previous) {
-          expect(workItem.id).toBe(previous.workItemId);
-          await child("read-stacks", { workItemId: workItem.id });
-        }
+        if (previous) expect(workItem.id).toBe(previous.workItemId);
         expect(openQuestions).toContain(condition);
         expect(openQuestions).toContain(trigger);
         expect(advisoryDetails[0].body).toBe(trigger);
