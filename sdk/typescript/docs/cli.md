@@ -3254,6 +3254,15 @@ system configurations. For dynamic expansions, complex globs, Windows includes
 or custom installation paths, select a self-contained configuration outside
 patch-writable directories with `-F /absolute/path`.
 
+SSH can run `Match exec` during hostname lookup and `ProxyCommand`,
+`KnownHostsCommand`, or `LocalCommand` during the connection. Publication
+checks these commands in every host block of the selected configuration and
+its includes, along with the `SHELL` used to execute them. Use
+literal executable and script paths outside the patch's writable directories,
+or executable names on the protected search path. On Windows use drive-qualified
+paths with forward slashes. Proxy arguments can use `%h`, `%n`, `%p`, and `%r`.
+Put shell expressions in a trusted external wrapper.
+
 For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
 publication also rechecks the selected executable before starting Git.
 A pre-push hook can run before Git launches another process for packing

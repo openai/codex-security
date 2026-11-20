@@ -1967,7 +1967,7 @@ type PatchTransportFile = {
   digest?: string;
   kind:
     | PatchHostingProvider
-    | "ssh-config"
+    | "ssh-input"
     | "executable"
     | "file"
     | "known-hosts"
@@ -12646,7 +12646,7 @@ async function patchTransportIdentity(
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
   options: {
-    sshIncludes?: string[];
+    sshConfig?: { includes: string[]; commands: string[] };
     updatedHostKeys?: boolean;
     writers?: PatchWriters;
   } = {},
@@ -12670,7 +12670,7 @@ async function patchTransportIdentity(
   }
   const target = await realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (
-      (kind === "gh" || kind === "glab" || kind === "ssh-config") &&
+      (kind === "gh" || kind === "glab" || kind === "ssh-input") &&
       !selected?.stamp &&
       ["ENOENT", "ENOTDIR"].includes(error.code ?? "")
     )
@@ -12699,9 +12699,10 @@ async function patchTransportIdentity(
         "Patch publication requires regular files for SSH transport operands.",
       );
     let digest: string;
-    if (options.sshIncludes) {
+    if (options.sshConfig) {
       const bytes = await file.readFile();
-      options.sshIncludes.push(...sshConfigIncludes(bytes.toString("utf8")));
+      const { includes, commands } = options.sshConfig;
+      sshConfigReferences(bytes.toString("utf8"), includes, commands);
       digest = createHash("sha256").update(bytes).digest("hex");
     } else {
       digest = await hashPatchFile(file.createReadStream({ autoClose: false }));
@@ -13483,8 +13484,8 @@ function literalTransportWords(command: string) {
   // Keep adjacent quoted and unquoted parts in the same word, as in
   // --file='/path with spaces'. Refuse substitutions and shell operators.
   const literal =
-    /[a-zA-Z0-9_./:@%+,=~-]+|'[^'\r\n]*'|"(?:[^"$\x60\\\r\n]|\\[^\r\n])*"|\\[^\r\n]/gy;
-  const text = command.trim();
+    /[a-zA-Z0-9_./:@%+,=~-]+|\[(?:%[hn]|[a-fA-F\d:]+)\]:(?:%p|\d+)|'[^'\r\n]*'|"(?:[^"$\x60\\\r\n]|\\[^\r\n])*"|\\[^\r\n]/gy;
+  const text = command.replace(/^[ \t]+|[ \t]+$/gu, "");
   const words: string[] = [];
   for (let offset = 0; offset < text.length;) {
     let word = "";
@@ -13553,29 +13554,100 @@ function unsupportedSshInclude() {
   );
 }
 
-function sshConfigIncludes(contents: string): string[] {
-  const paths: string[] = [];
+function unsupportedSshCommand() {
+  return new CodexSecurityError(
+    "Cannot bind the SSH configuration command for patch publication. Use a static executable and script outside every patch-writable directory.",
+  );
+}
+
+function sshMatchCommands(line: string, commands: string[]) {
+  // Match uses OpenSSH's argv_split before passing an exec operand to the shell.
+  const words: string[] = [];
+  let quote = "";
+  let word: string | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]!;
+    if (!quote && (char === " " || char === "\t")) {
+      if (word !== undefined) words.push(word);
+      word = undefined;
+      continue;
+    }
+    if (char === "#" && word === undefined) break;
+    word ??= "";
+    const next = line[i + 1];
+    if (
+      char === "\\" &&
+      (next === "'" ||
+        next === '"' ||
+        next === "\\" ||
+        (!quote && next === " "))
+    )
+      word += line[++i];
+    else if (!quote && (char === "'" || char === '"')) quote = char;
+    else if (char === quote) quote = "";
+    else word += char;
+  }
+  if (quote) throw unsupportedSshCommand();
+  if (word !== undefined) words.push(word);
+  for (let i = 0; i < words.length; i++) {
+    const criterion = words[i]!.replace(/^!/u, "");
+    if (/^(?:all|canonical|final)$/iu.test(criterion)) continue;
+    const equals = criterion.indexOf("=");
+    const arg = equals < 0 ? words[++i] : criterion.slice(equals + 1);
+    // Older Match readers split '=' inside tokens and after whitespace.
+    if (/^exec(?:=|$)/iu.test(criterion)) {
+      if (!arg || arg.startsWith("=")) throw unsupportedSshCommand();
+      commands.push(arg);
+    } else if (arg && /=!?exec(?:[ \t=]|$)/iu.test(arg))
+      throw unsupportedSshCommand();
+  }
+}
+
+function sshConfigReferences(
+  contents: string,
+  includes: string[],
+  commands: string[],
+): void {
   for (const raw of contents.split("\n")) {
     const line = raw.split("\0", 1)[0]!.replace(/[ \t\r\f]+$/u, "");
     // OpenSSH's keyword reader accepts double quotes and an optional '='.
     // Detect unusual spellings too, then require unambiguous static syntax.
-    if (!/^[\s=]*include/iu.test(line.replaceAll('"', ""))) continue;
+    const keyword =
+      /^[\s=]*(include|match|proxycommand|localcommand|knownhostscommand)/iu
+        .exec(line.replaceAll('"', ""))?.[1]
+        ?.toLowerCase();
+    if (!keyword) continue;
     const directive =
-      /^[ \t\r]*include(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
-    if (!directive || process.platform === "win32")
-      throw unsupportedSshInclude();
-    let args = directive[1]!;
+      /^[ \t\r]*([a-z]+)(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
+    if (!directive || directive[1]!.toLowerCase() !== keyword)
+      throw keyword === "include"
+        ? unsupportedSshInclude()
+        : unsupportedSshCommand();
+    let args = directive[2]!;
+    if (keyword !== "include") {
+      if (keyword === "match") sshMatchCommands(args, commands);
+      else {
+        // OpenSSH passes the rest of a command directive verbatim.
+        const command = args.replace(/^[ \t\r=]+/u, "");
+        // KnownHostsCommand uses argv_split directly, whose backslash
+        // escapes differ from the shell used by ProxyCommand and LocalCommand.
+        if (keyword === "knownhostscommand" && command.includes("\\"))
+          throw unsupportedSshCommand();
+        if (command.toLowerCase() !== "none") commands.push(command);
+      }
+      continue;
+    }
+    if (process.platform === "win32") throw unsupportedSshInclude();
     while (args) {
       const word = /^(?:"([^"]+)"|([^'"\t ]+))(?:[ \t]+|$)/u.exec(args);
       if (!word) throw unsupportedSshInclude();
       const path = (word[1] ?? word[2])!;
       if (/['%$\\?[\]{}=\r\f#\ufffd]/u.test(path))
         throw unsupportedSshInclude();
-      paths.push(path);
+      includes.push(path);
       args = args.slice(word[0].length);
     }
   }
-  return paths;
 }
 
 async function bindSshConfiguration(
@@ -13583,6 +13655,7 @@ async function bindSshConfiguration(
   directory: string,
   roots: readonly string[],
   dependencies: CliDependencies,
+  invocation: { cwd: string; launchers: Set<string> },
   system?: string,
 ) {
   const access = dependencies.patchTransportAccess;
@@ -13590,12 +13663,48 @@ async function bindSshConfiguration(
     ...roots,
     ...(access?.writable ?? []),
   ]);
-  const trust = (path: string) => {
+  const trust = (path: string, unsupported = unsupportedSshInclude) => {
     const physical = host(path);
-    if (!physical) throw unsupportedSshInclude();
+    if (!physical) throw unsupported();
     requireStablePatchTransportTarget(physical, access);
     access?.invocations.set(path, physical);
     return physical;
+  };
+  const bindCommand = async (command: string) => {
+    const words = literalTransportWords(command);
+    if (!words?.[0] || (process.platform === "win32" && command.includes("\\")))
+      throw unsupportedSshCommand();
+    for (const [index, word] of words.entries()) {
+      if (index === 0 && /^[a-z\d_.+-]+$/iu.test(word)) {
+        invocation.launchers.add(word);
+        continue;
+      }
+      // Host, port and user substitutions are common proxy arguments.
+      // A command or file path must have a stable spelling before ssh expands it.
+      if (process.platform === "win32" && /^[a-z]:(?!\/)/iu.test(word))
+        throw unsupportedSshCommand();
+      if (index && /^(?:[a-z\d_.:@+,=\[\]-]|%[hnpr])+$/iu.test(word)) continue;
+      const absolute =
+        process.platform === "win32"
+          ? /^[a-z]:\//iu.test(word)
+          : isAbsolute(word);
+      if (
+        (!absolute && !/^[a-z\d_.+][a-z\d_.+-]*\//iu.test(word)) ||
+        /[%$\x60;|&<>\[\]\r\n\ufffd]/u.test(word)
+      )
+        throw unsupportedSshCommand();
+      const path = absolute ? word : invocation.cwd + word;
+      const physical = trust(path, unsupportedSshCommand);
+      // A command in an inactive Host block may be absent.
+      const exists = existsSync(physical);
+      if (!exists && /\s/u.test(word)) throw unsupportedSshCommand();
+      await bindPatchTransportFile(
+        path,
+        !index && exists ? "executable" : "ssh-input",
+        dependencies,
+      );
+      access?.afterHook.add(path);
+    }
   };
   const visited = new Set<string>();
   const expand = (pattern: string) => {
@@ -13660,17 +13769,19 @@ async function bindSshConfiguration(
     if (depth > 16) throw unsupportedSshInclude();
     trust(path);
     const includes: string[] = [];
+    const commands: string[] = [];
     const files = dependencies.patchTransportFiles;
     const config = await patchTransportIdentity(
       path,
-      "ssh-config",
+      "ssh-input",
       files?.get(path),
       {
-        sshIncludes: includes,
+        sshConfig: { includes, commands },
       },
     );
     files?.set(path, config);
     access?.afterHook.add(path);
+    for (const command of commands) await bindCommand(command);
     for (const include of includes)
       for (const pattern of expand(include))
         for (const child of await select(pattern))
@@ -13769,6 +13880,8 @@ async function pinPublicationCommand(
   const original = basename(program)
     .toLowerCase()
     .replace(/\.exe$/u, "");
+  const volume = parse(executable).root;
+  const sshInvocation = { cwd: volume, launchers: new Set<string>() };
   if (
     kind === "credential" &&
     original === "git" &&
@@ -13828,6 +13941,7 @@ async function pinPublicationCommand(
             directory,
             protectedRoots,
             dependencies,
+            sshInvocation,
           );
       } else if (option === "-o") {
         const pathSetting = /^(IdentityFile|UserKnownHostsFile)=(.+)$/iu.exec(
@@ -13869,6 +13983,7 @@ async function pinPublicationCommand(
           directory,
           protectedRoots,
           dependencies,
+          sshInvocation,
           system,
         );
   } else if (
@@ -13889,25 +14004,30 @@ async function pinPublicationCommand(
   }
   // A trusted wrapper can launch further commands. Only its process leaves
   // the checkout; Git keeps its normal repository cwd.
-  const volume = parse(executable).root;
   const cwd =
     process.platform === "win32" ? volume.replaceAll("\\", "/") : volume;
 
-  // OpenSSH can invoke its own prompt independently of Git's HTTPS prompt.
-  let sshAskPass: string | undefined;
+  const sshEnvironment: NodeJS.ProcessEnv = {};
   if (kind === "ssh") {
-    sshAskPass = environmentEntry(dependencies.environment, "SSH_ASKPASS");
-    if (sshAskPass) {
+    for (const name of ["SSH_ASKPASS", "SHELL"]) {
+      const value = environmentEntry(dependencies.environment, name);
+      if (!value) {
+        sshEnvironment[name] = value;
+        continue;
+      }
+      // OpenSSH searches PATH for its prompt. It executes SHELL directly
+      // from the neutral cwd for Match exec and ProxyCommand.
+      const launcher =
+        name === "SHELL" && barePatchExecutable(value) ? "./" + value : value;
       const helper = await inspectPatchGitExecutable(
-        sshAskPass,
+        launcher,
         repository,
         dependencies,
         protectedRoots,
-        // Relative PATH entries were normalized before the launcher's cd.
-        barePatchExecutable(sshAskPass) ? directory : cwd,
+        barePatchExecutable(launcher) ? directory : cwd,
         { afterHook: true },
       );
-      sshAskPass = helper.executable ?? "";
+      sshEnvironment[name] = helper.executable ?? "";
     }
   }
 
@@ -13929,15 +14049,28 @@ async function pinPublicationCommand(
         .filter((entry) => entry && resolveHostPath(entry))
         .join(delimiter);
       // Git for Windows converts the native PATH for its POSIX shell.
-      return {
+      const pinned = {
         PATH: path || (process.platform === "win32" ? "" : "/dev/null"),
-        ...(sshAskPass !== undefined && { SSH_ASKPASS: sshAskPass }),
+        ...sshEnvironment,
         ...(configuredExecPath !== undefined && {
           GIT_EXEC_PATH:
             (configuredExecPath && resolveHostPath(configuredExecPath)) ||
             undefined,
         }),
       };
+      for (const launcher of sshInvocation.launchers)
+        await inspectPatchGitExecutable(
+          launcher,
+          repository,
+          {
+            ...dependencies,
+            environment: { ...dependencies.environment, ...pinned },
+          },
+          protectedRoots,
+          directory,
+          { implicit: true, afterHook: true },
+        );
+      return pinned;
     },
     ...(["ssh", "plink", "tortoiseplink"].includes(original)
       ? { automaticVariant: original }
