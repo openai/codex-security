@@ -68,6 +68,20 @@ test.skipIf(process.platform === "win32")(
     await mkdir(tier, { recursive: true });
     await symlink(join(checkout, "library"), join(tier, "library"));
     const aliases = [viaDirectory, viaFile, shared, optimized];
+    if (process.platform === "linux") {
+      const bytes = Buffer.concat([
+        Buffer.from(tools + "/"),
+        Buffer.from([255]),
+      ]);
+      const selected = join(tools, "selected-bytes");
+      await mkdir(bytes);
+      await symlink(bytes, selected);
+      await symlink(join(checkout, "library"), join(selected, "library"));
+      // The resolver represents byte FF as a lone surrogate. Give its string
+      // spelling a separate, harmless directory for a lossy filesystem lookup.
+      await mkdir(join(tools, "\udcff"), { recursive: true });
+      aliases.push(selected);
+    }
     const paths = [first, "", "./lib", checkout, ...aliases, grant, last];
     const names = ["LD_LIBRARY_PATH"];
     // macOS system programs also clear DYLD_* at execution.

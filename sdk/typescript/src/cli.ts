@@ -2134,7 +2134,7 @@ async function trustedLibraryDirectory(
   roots: readonly string[],
 ): Promise<boolean> {
   const selected = resolvePath(directory);
-  if (!selected) return false;
+  if (!selected || !selected.isWellFormed()) return false;
   const writers = { writable: new Set(roots) };
   const directories = new Set([selected]);
   try {
