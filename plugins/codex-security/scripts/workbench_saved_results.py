@@ -741,7 +741,7 @@ def preserve_scan_results_locked(
             recovery_source_digests is None
             and frozen_source_digests == {}
             and isinstance(existing_scan, dict)
-            and existing_scan.get("sealedAt") is not None
+            and manifest_is_sealed(existing_scan)
             and "preservedSources" not in existing_scan
         )
     )

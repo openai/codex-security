@@ -24,7 +24,6 @@
         "warnings": { "$ref": "#/$defs/stringList" },
         "startedAt": { "type": "string", "format": "date-time" },
         "completedAt": { "type": "string", "format": "date-time" },
-        "sealedAt": { "type": "string", "format": "date-time" },
         "target": {
           "type": "object",
           "properties": {
@@ -181,7 +180,6 @@
         "status",
         "startedAt",
         "completedAt",
-        "sealedAt",
         "target",
         "scope",
         "findingsRef",

@@ -193,7 +193,7 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
     )
     manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "completed"
-    assert "sealedAt" in manifest["scan"]
+    assert "artifacts" in manifest["scan"]
     assert_retained_finding(scan)
 
 
@@ -247,7 +247,7 @@ def test_coordinator_deadline_preserves_only_usable_worker_checkpoints(
         assert "completeness" not in coverage
         assert any(row.get("id", "").endswith("/review") for row in coverage["deferred"])
         manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
-        assert "sealedAt" not in manifest["scan"]
+        assert "artifacts" not in manifest["scan"]
     else:
         assert not findings.exists()
     warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
@@ -380,7 +380,9 @@ def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication
     assert recovered["mode"] == "scoped_path"
     assert recovered["inventoryStrategy"] == "scoped_path"
     assert recovered["includePaths"] == ["app.py"]
-    assert "sealedAt" not in json.loads((scan.directory / "scan-manifest.json").read_text())["scan"]
+    assert (
+        "artifacts" not in json.loads((scan.directory / "scan-manifest.json").read_text())["scan"]
+    )
 
     completed = run_workbench(
         scan.state,
@@ -395,7 +397,7 @@ def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication
         assert_retained_finding(scan)
     manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "completed"
-    assert "sealedAt" in manifest["scan"]
+    assert "artifacts" in manifest["scan"]
     assert all(path.read_bytes() == contents for path, contents in worker_sources.items())
 
 

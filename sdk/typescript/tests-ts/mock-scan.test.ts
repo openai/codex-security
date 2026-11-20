@@ -130,7 +130,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
     expect(first.findings.findings).toHaveLength(12);
     expect(first.review).not.toHaveProperty("status");
     expect(first.manifest.scan.status).toBe("completed");
-    expect(first.manifest.scan.sealedAt).toBeTruthy();
+    expect(first.manifest.scan.artifacts.length).toBeGreaterThan(0);
     expect(first.turnResult["mock"]).toBe(true);
     expect(first.threadId).toBe("");
     expect(first.cost?.estimatedUsd).toBe(0);

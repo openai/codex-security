@@ -1217,7 +1217,6 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
         target: { allowedKinds: string[] };
       };
       doc.scan.target = { kind: contract.target.allowedKinds[0] };
-      delete doc.scan.sealedAt;
       delete doc.scan.artifacts;
     } else {
       doc.scanId = f.scanId;
@@ -1536,7 +1535,7 @@ test.each([
       });
     } else {
       expect(result.manifest.scan.id).toBe(f.scanId);
-      expect(result.manifest.scan.sealedAt).toBeString();
+      expect(result.manifest.scan.artifacts.length).toBeGreaterThan(0);
       expect(result.cost.inputTokens).toBe(10000);
       expect(result.cost.outputTokens).toBe(2000);
     }
@@ -2212,7 +2211,6 @@ test.each([false, true])(
     await finishDiscovery(f);
     const manifestPath = join(f.scanDir, "scan-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    delete manifest.scan.sealedAt;
     manifest.scan.producer.version = f.recipe.pluginVersion;
     if (empty) manifest.scan.artifacts = [];
     else delete manifest.scan.artifacts;

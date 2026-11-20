@@ -8,9 +8,15 @@ import path from "node:path";
 import type { TestContext } from "node:test";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type { ArtifactContext } from "../src/artifact-io.js";
-import { importModule, importSource } from "./import-module.ts";
+import {
+  bundledMcpServerUrl,
+  importModule,
+  importSource,
+} from "./import-module.ts";
+
 export const draftApi = await importSource("../src/artifact-scan-draft.ts", {
   absWorkingDir: import.meta.dirname,
+  define: { "import.meta.url": JSON.stringify(bundledMcpServerUrl) },
 });
 
 const {

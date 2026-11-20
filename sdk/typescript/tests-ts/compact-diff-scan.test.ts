@@ -787,7 +787,6 @@ describe("compact diff scan", () => {
       const terminalScan = terminalManifest["scan"] as JsonObject;
       terminalScan["threatModel"] = { summary: markdownModel };
       terminalScan["reviewState"] = reviewState;
-      delete terminalScan["sealedAt"];
       delete terminalScan["artifacts"];
       for (const [name, document] of [
         ["scan-manifest.json", terminalManifest],
@@ -811,11 +810,11 @@ describe("compact diff scan", () => {
       expect(validated.status, validated.stderr).toBe(0);
       const terminalResult = JSON.parse(
         readFileSync(join(terminalDir, "scan-manifest.json"), "utf8"),
-      ) as { scan: { threatModel: unknown; sealedAt: string } };
+      ) as { scan: { threatModel: unknown; artifacts: unknown[] } };
       expect(terminalResult.scan.threatModel).toEqual({
         summary: markdownModel,
       });
-      expect(terminalResult.scan.sealedAt).toBeDefined();
+      expect(terminalResult.scan.artifacts.length).toBeGreaterThan(0);
       const terminalReport = readFileSync(
         join(terminalDir, "report.md"),
         "utf8",

@@ -303,7 +303,7 @@ for (const scenario of cases) {
     const manifest = JSON.parse(
       await readFile(join(standardRoot, "scan-manifest.json"), "utf8"),
     );
-    expect(manifest.scan.sealedAt).toBeUndefined();
+    expect(manifest.scan.artifacts).toBeUndefined();
     await expect(readFile(join(standardRoot, "report.md"))).rejects.toThrow();
   });
 }

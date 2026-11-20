@@ -345,7 +345,6 @@ describe("CLI", () => {
           document.scan.id = scanId;
           document.scan.target.kind = "directory_snapshot";
           document.scan.threatModel = { format: "markdown", content };
-          delete document.scan.sealedAt;
           delete document.scan.artifacts;
         } else {
           document.scanId = scanId;

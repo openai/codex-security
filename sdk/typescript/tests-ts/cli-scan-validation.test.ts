@@ -308,7 +308,6 @@ test("cached empty scan validation rechecks an unchanged, edited, and committed 
           manifest.scan.target.revision = registration!.targetRevision;
           manifest.scan.target.displayName = "repository";
           delete manifest.scan.target.snapshotDigest;
-          delete manifest.scan.sealedAt;
           delete manifest.scan.artifacts;
           await writeFile(
             join(scanDir, "scan-manifest.json"),

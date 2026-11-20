@@ -242,7 +242,7 @@ for (const deferLast of [false, true]) {
     const { scan } = await readJson(scanDir, "scan-manifest.json");
     assert.equal(scan.id, report.scanId);
     assert.equal(scan.status, "completed");
-    assert.ok(scan.sealedAt);
+    assert.ok(scan.artifacts.length);
     const terminal = await readCheckpoint(scanDir);
     assert.notEqual(terminal.complete, false);
     assert.deepEqual(terminal.reviewState.deferred, deferred);

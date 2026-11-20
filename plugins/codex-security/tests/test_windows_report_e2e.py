@@ -63,7 +63,7 @@ def test_workbench_completion_and_exports_use_windows_file_backend(tmp_path: Pat
     assert "Unsafe archive extraction" in (scan_dir / "report.md").read_text()
     assert not (scan_dir / "report.html").exists()
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-    assert manifest["scan"]["sealedAt"]
+    assert manifest["scan"]["artifacts"]
     sarif = json.loads((scan_dir / "exports" / "results.sarif").read_text())
     assert len(sarif["runs"][0]["results"]) == 1
     assert exported["export"] == {

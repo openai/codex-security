@@ -194,7 +194,6 @@ const scanManifest = z.looseObject({
       warnings: textList.optional(),
       startedAt: timestamp,
       completedAt: timestamp,
-      sealedAt: timestamp,
       target,
       scope: z.looseObject({
         includePaths: strings,

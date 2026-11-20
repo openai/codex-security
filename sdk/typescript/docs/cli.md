@@ -994,6 +994,10 @@ with reviewed surfaces, explicit exclusions and deferred work. A saved source
 inventory identifies inputs. Neither that inventory nor session logs establish
 which files the scan reviewed in full.
 
+The manifest records when the scan finished in `scan.completedAt`. A completed
+bundle has a terminal outcome and an artifact index with verified file hashes.
+Older manifests may also contain `sealedAt`. Readers ignore that obsolete field.
+
 For a local plugin scan, ask Codex to open the saved scan and explain its scope,
 exclusions, deferred work, and follow-up questions. CLI history can also locate
 that scan when it uses the same Codex home and state directory on the machine

@@ -14,7 +14,6 @@ export interface ScanManifest {
     warnings?: string[];
     startedAt: string;
     completedAt: string;
-    sealedAt: string;
     target: {
       kind: "git_revision" | "git_worktree" | "git_diff" | "directory_snapshot";
       targetId: string;

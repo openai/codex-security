@@ -553,9 +553,9 @@ async function validateSeal(
   signal?: AbortSignal,
 ): Promise<void> {
   const scan = manifest.scan;
-  if (scan.sealedAt !== scan.completedAt) {
+  if (scan.status === "completed" && scan["complete"] === false) {
     throw new ContractValidationError(
-      "Manifest sealedAt must match completedAt.",
+      "Cannot validate an incomplete scan as completed.",
     );
   }
 

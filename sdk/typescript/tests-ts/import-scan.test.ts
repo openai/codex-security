@@ -327,7 +327,7 @@ test.each(["csv", "json"] as const)(
       result.findings.findings[1]!.locations,
     );
     expect(result.manifest.scan.status).toBe("completed");
-    expect(result.manifest.scan.sealedAt).toBeTruthy();
+    expect(result.manifest.scan.artifacts.length).toBeGreaterThan(0);
     expect(result.manifest.scan.target.kind).toBe("directory_snapshot");
     expect(result.manifest.scan.scope.runtimeStatus).toBe("imported");
     expect(result.review).not.toHaveProperty("status");

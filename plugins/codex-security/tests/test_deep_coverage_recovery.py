@@ -892,7 +892,16 @@ def test_parent_only_task_links_to_surface_with_retained_finding_history(tmp_pat
     manifest = tmp_path / "scan-manifest.json"
     parent_manifest = json.loads((template / "scan-manifest.json").read_text())
     parent_manifest["scan"].update(
-        complete=True, sealedAt="2026-01-01T00:00:00Z", status="interrupted"
+        complete=True,
+        status="interrupted",
+        artifacts=[
+            {
+                "path": name,
+                "mediaType": "application/json",
+                "sha256": hashlib.sha256((tmp_path / name).read_bytes()).hexdigest(),
+            }
+            for name in ("findings.json", "coverage.json")
+        ],
     )
     manifest.write_text(json.dumps(parent_manifest))
     result = recover(tmp_path, [source])
@@ -1164,7 +1173,6 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     assert any("duplicate artifact path" in warning for warning in warnings)
     scan = {
         "completedAt": "synthetic-time",
-        "sealedAt": "synthetic-time",
         "artifacts": [
             {"path": ref, "sha256": hashlib.sha256((tmp_path / ref).read_bytes()).hexdigest()}
             for refs in receipts.values()
@@ -1274,7 +1282,7 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
     assert (root / "report.md").is_file()
     manifest = json.loads((root / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "interrupted"
-    assert isinstance(manifest["scan"]["sealedAt"], str)
+    assert manifest["scan"]["artifacts"]
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
@@ -1330,7 +1338,6 @@ def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical
     assert any("Replaced invalid saved coverage receipt" in warning for warning in warnings)
     scan = {
         "completedAt": "synthetic-time",
-        "sealedAt": "synthetic-time",
         "artifacts": [
             {"path": ref, "sha256": hashlib.sha256((tmp_path / ref).read_bytes()).hexdigest()}
             for ref in retained
