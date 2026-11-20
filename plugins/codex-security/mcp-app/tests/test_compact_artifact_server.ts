@@ -383,7 +383,26 @@ async function testResumedFindingsFeed(
   }
   const client = await startClient(bundle, environment);
   const call = toolCaller(client, "findings-feed");
-  let observer: Client | undefined;
+  async function replay(scanId: string, status: string, cursor = 0) {
+    const observer = await startClient(bundle, environment);
+    try {
+      const read = findingUpdateReader(toolCaller(observer, null), scanId, 1);
+      const updates = [];
+      for (;;) {
+        const page = await read(cursor);
+        assert.equal(page.status, status);
+        assert.equal(page.updates.length, 1);
+        assert.ok(page.nextCursor > cursor);
+        updates.push(...page.updates);
+        cursor = page.nextCursor;
+        if (!page.hasMore) break;
+      }
+      assert.deepEqual((await read(cursor)).updates, []);
+      return { updates, cursor };
+    } finally {
+      await observer.close();
+    }
+  }
   try {
     const { workspace } = requireSuccessfulTool<WorkspaceResult>(
       await call("start_codex_security_prompt_only_scan", {
@@ -414,16 +433,7 @@ async function testResumedFindingsFeed(
       complete: false,
     };
     await save(checkpoint);
-    observer = await startClient(bundle, environment);
-    const read = findingUpdateReader(toolCaller(observer, null), scanId, 1);
-    const first = await read();
-    const second = await read(first.nextCursor);
-    await observer.close();
-    observer = undefined;
-    assert.equal(first.status, "running");
-    assert.equal(first.hasMore, true);
-    assert.equal(second.hasMore, false);
-    const initial = [...first.updates, ...second.updates];
+    const { updates: initial, cursor } = await replay(scanId, "running");
     assert.deepEqual(
       initial.map((update) => update.kind),
       ["reviewed", "reviewed"],
@@ -455,17 +465,7 @@ async function testResumedFindingsFeed(
     requireSuccessfulTool(
       await call("complete_codex_security_scan", { scanId }),
     );
-    observer = await startClient(bundle, environment);
-    const resume = findingUpdateReader(toolCaller(observer, null), scanId, 1);
-    let page = await resume(second.nextCursor);
-    assert.equal(page.status, "complete");
-    const changes = [...page.updates];
-    while (page.hasMore) {
-      const next = await resume(page.nextCursor);
-      assert.ok(next.nextCursor > page.nextCursor);
-      changes.push(...next.updates);
-      page = next;
-    }
+    const { updates: changes } = await replay(scanId, "complete", cursor);
     const keptChanges = changes.filter((update) => update.findingId === keptId);
     assert.deepEqual(
       keptChanges.map(({ kind, severity }) => [kind, severity]),
@@ -489,7 +489,6 @@ async function testResumedFindingsFeed(
       [keptId],
     );
   } finally {
-    await observer?.close();
     await client.close();
   }
 }
@@ -837,10 +836,6 @@ async function testSemanticScanDraftCompletion(
       title: "Untrusted query text reaches SQL execution",
       summary:
         "The execution helper passes a query argument directly to its SQL sink.",
-      validation: {
-        method: "Static source review",
-        summary: "Checked the query at the SQL execution call.",
-      },
       severity: { level: "high" },
       confidence: {
         level: "high",
@@ -1097,14 +1092,6 @@ async function testSemanticScanDraftCompletion(
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
-    const read = findingUpdateReader(call, scanId);
-    const live = await read();
-    assert.equal(live.status, "running");
-    assert.equal(live.hasMore, false);
-    assert.equal(live.updates.length, 1);
-    assert.equal(live.updates[0].kind, "reviewed");
-    assert.equal(live.updates[0].title, finding.title);
-    assert.deepEqual((await read(live.nextCursor)).updates, []);
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
@@ -1190,10 +1177,6 @@ async function testSemanticScanDraftCompletion(
     );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
-    const sealed = await read(live.nextCursor);
-    assert.equal(sealed.status, "complete");
-    assert.equal(sealed.updates[0].kind, "finalized");
-    assert.equal(sealed.updates[0].findingId, live.updates[0].findingId);
 
     const results = requireSuccessfulTool<CompletedResult>(
       await call("get_codex_security_completed_scan", {

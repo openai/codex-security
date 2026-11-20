@@ -80,7 +80,7 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
-from workbench_finding_index import index_findings, legacy_finding_matches
+from workbench_finding_index import index_findings
 from workbench_finding_updates import list_finding_updates, record_final_finding_updates
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
@@ -2993,6 +2993,19 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
+
+
+def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
+    if not isinstance(finding, dict):
+        return False
+    return (
+        finding.get("findingId") == row["finding_id"]
+        and finding.get("title") == row["title"]
+        and finding.get("summary") == row["summary"]
+        and finding.get("remediation") == row["remediation"]
+        and finding["severity"]["level"] == row["severity"]
+        and finding["confidence"]["level"] == row["confidence"]
+    )
 
 
 def finding_result(

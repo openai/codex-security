@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from itertools import count, islice
 from pathlib import Path
 from typing import Any
@@ -59,45 +60,44 @@ def preview(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def record_finding_updates(
-    connection: sqlite3.Connection,
-    scan: sqlite3.Row,
-    manifest: dict[str, Any],
-    findings: dict[str, Any],
-    *,
-    final: bool,
-) -> None:
-    """Append semantic changes under the caller's serialized publication transaction."""
-    if not _supports_feed(scan):
+def _supports_publication(scan, manifest):
+    validation_mode = manifest["scan"].get("scope", {}).get("validationMode")
+    return _supports_feed(scan) and validation_mode != "custom_pending"
+
+
+def record_checkpoint_updates(connection, scan, manifest, findings, scope, *, worker_batch=False):
+    """Journal an accepted draft or cumulative Deep batch under its publication lock."""
+    if not _supports_publication(scan, manifest):
         return
-    scan_data = manifest["scan"]
-    if scan_data.get("scope", {}).get("validationMode") == "custom_pending":
+    if json.loads(scan["recipe_json"] or "{}").get("validationMode") == "custom":
         return
-    if not final and json.loads(scan["recipe_json"] or "{}").get("validationMode") == "custom":
-        return
-    if final:
-        # Completion already verified and indexed these identities.
-        findings_by_id = ((finding["findingId"], finding) for finding in findings["findings"])
-    else:
-        findings_by_id = (
-            (finding_id, finding)
-            for _, finding, finding_id, _, _ in _derived_finding_identity_rows(manifest, findings)
-        )
-    # Deep batches and final results replace the full set. Other checkpoints
-    # withdraw only the candidates explicitly rejected by this review.
+    exclusions = requested_exclude_paths(scan)
+    visible = findings["findings"]
+    if worker_batch or scope is not None or exclusions:
+        visible = [f for f in visible if finding_within_scope(f, scope, exclusions)]
+    if worker_batch:
+        # The terminal publisher allocates identities after filtering the union.
+        _ensure_finding_identities(visible, deep=True)
+    identities = _derived_finding_identity_rows(manifest, {**findings, "findings": visible})
+    findings_by_id = ((finding_id, finding) for _, finding, finding_id, _, _ in identities)
+    # Deep batches replace the full set. Other checkpoints withdraw only explicit rejections.
     rejected = None
-    if not final and scan["mode"] != "deep":
+    if scan["mode"] != "deep":
         rejected = {
             surface["candidateId"]
-            for surface in scan_data.get("reviewState", {}).get("surfaces", [])
+            for surface in manifest["scan"].get("reviewState", {}).get("surfaces", [])
             if surface.get("disposition") in {"rejected", "not_applicable"}
             and surface.get("candidateId")
         }
+    _append_changes(connection, scan["id"], findings_by_id, final=False, rejected=rejected)
+
+
+def _append_changes(connection, scan_id, findings_by_id, *, final, rejected=None):
     connection.executemany(
         """INSERT INTO scan_finding_updates
            (scan_id,cursor,finding_id,candidate_id,kind,preview_json,fields_json,changed_json)
            VALUES (:scan_id,:cursor,:finding_id,:candidate_id,:kind,:preview_json,:fields_json,:changed_json)""",
-        _finding_changes(connection, scan["id"], findings_by_id, final=final, rejected=rejected),
+        _finding_changes(connection, scan_id, findings_by_id, final=final, rejected=rejected),
     )
 
 
@@ -177,17 +177,31 @@ def _assessment_hashes(finding: dict[str, Any]) -> dict[str, str]:
     return hashes
 
 
-def record_final_finding_updates(connection, scan, manifest, findings, warnings):
-    """Keep an auxiliary write failure from rolling back a valid scan and its index."""
-    connection.execute("SAVEPOINT final_finding_updates")
+@contextmanager
+def _journal_write(connection, warnings=None):
+    """Keep a failed journal append from rolling back the publication it describes."""
+    connection.execute("SAVEPOINT finding_updates")
     try:
-        record_finding_updates(connection, scan, manifest, findings, final=True)
-    except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+        yield
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         if not connection.in_transaction:
             raise
-        connection.execute("ROLLBACK TO final_finding_updates")
-        warnings.append(f"{_FINAL_FEED_WARNING} {exc}")
-    connection.execute("RELEASE final_finding_updates")
+        connection.execute("ROLLBACK TO finding_updates")
+        if warnings is None:
+            print(f"Could not record Deep Scan finding updates: {exc}", file=sys.stderr)
+        else:
+            warnings.append(f"{_FINAL_FEED_WARNING} {exc}")
+    finally:
+        if connection.in_transaction:
+            connection.execute("RELEASE finding_updates")
+
+
+def record_final_finding_updates(connection, scan, manifest, findings, warnings):
+    with _journal_write(connection, warnings):
+        if _supports_publication(scan, manifest):
+            # Completion already verified and indexed these identities.
+            identified = ((finding["findingId"], finding) for finding in findings["findings"])
+            _append_changes(connection, scan["id"], identified, final=True)
 
 
 def record_deep_iteration_updates(connection, scan, run, result_path, requested_finding_scope):
@@ -195,8 +209,7 @@ def record_deep_iteration_updates(connection, scan, run, result_path, requested_
     root = Path(scan["scan_dir"])
     if run["manifest_path"] == str(root / "scan-manifest.json"):
         return
-    connection.execute("SAVEPOINT deep_iteration_updates")
-    try:
+    with _journal_write(connection):
         selected = _latest_iteration(
             connection.execute(
                 "SELECT * FROM deep_scan_workers WHERE scan_id = ? AND kind = 'dedup'",
@@ -210,11 +223,6 @@ def record_deep_iteration_updates(connection, scan, run, result_path, requested_
         )
         if draft.get("complete") is False:
             return
-        scope = requested_finding_scope(scan)
-        exclusions = requested_exclude_paths(scan)
-        findings = [f for f in draft["findings"] if finding_within_scope(f, scope, exclusions)]
-        # The terminal publisher allocates identities after filtering the union.
-        _ensure_finding_identities(findings, deep=True)
         manifest = {
             "scan": {
                 "id": scan["id"],
@@ -222,21 +230,9 @@ def record_deep_iteration_updates(connection, scan, run, result_path, requested_
                 "scope": draft.get("scope", {}),
             }
         }
-        record_finding_updates(
-            connection,
-            scan,
-            manifest,
-            {"scanId": scan["id"], "findings": findings},
-            final=False,
+        record_checkpoint_updates(
+            connection, scan, manifest, draft, requested_finding_scope(scan), worker_batch=True
         )
-    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        if not connection.in_transaction:
-            raise
-        connection.execute("ROLLBACK TO deep_iteration_updates")
-        print(f"Could not record Deep Scan finding updates: {exc}", file=sys.stderr)
-    finally:
-        if connection.in_transaction:
-            connection.execute("RELEASE deep_iteration_updates")
 
 
 def list_finding_updates(

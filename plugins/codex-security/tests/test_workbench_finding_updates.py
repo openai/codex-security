@@ -1,17 +1,68 @@
-"""Standard scans expose only accepted reviewed checkpoints and reconcile them at completion."""
+"""Local scans expose only accepted reviewed checkpoints and reconcile them at completion."""
 
 import copy
 import json
 import sqlite3
 import uuid
+from functools import partial
+from pathlib import Path
 
 import pytest
+from test_workbench_completion_binding import _start_diff_scan_with_draft
 from workbench_test_support import (
     empty_target_scan,
     read_draft_documents,
     scan_command,
     write_completed_contract,
 )
+
+
+def publish_draft(state, scan_id, directory, documents, *extra, **kwargs):
+    staged = directory / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    return scan_command(
+        state, "write-scan-draft", scan_id, "--draft-path", str(staged), *extra, **kwargs
+    )
+
+
+def finding_updates(state, scan_id, after=None, *, limit=None, **kwargs):
+    args = [] if after is None else ["--after-cursor", str(after)]
+    if limit is not None:
+        args.extend(["--limit", str(limit)])
+    return scan_command(state, "list-finding-updates", scan_id, *args, **kwargs)
+
+
+@pytest.mark.parametrize("kind", ["commit", "range", "working_tree"])
+def test_diff_finding_feed_matches_the_sealed_snapshot(tmp_path: Path, kind: str) -> None:
+    state, _, scan = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, directory = scan["scanId"], Path(scan["scanDir"])
+    docs = read_draft_documents(directory)
+    docs["manifest"]["scan"]["complete"] = False
+    publish = partial(publish_draft, state, scan_id, directory, docs)
+    read = partial(finding_updates, state, scan_id)
+
+    publish()
+    page = read(0)
+    assert page["status"] == "running"
+    [reviewed] = page["updates"]
+    assert reviewed["kind"] == "reviewed" and reviewed["locations"][0]["file"] == "README.md"
+    docs["findings"]["findings"][0]["severity"]["level"] = "medium"
+    docs["manifest"]["scan"]["complete"] = True
+    publish()
+    revised = read(page["nextCursor"])
+    [updated] = revised["updates"]
+    assert updated["kind"] == "updated" and updated["changedFields"] == ["severity"]
+    scan_command(state, "complete-scan", scan_id)
+    terminal = read(revised["nextCursor"])
+    [final] = terminal["updates"]
+    [sealed] = json.loads((directory / "findings.json").read_text())["findings"]
+    assert terminal["status"] == "complete" and final["kind"] == "finalized"
+    assert final["severity"] == sealed["severity"]["level"] == "medium"
+    assert (
+        final["findingId"] == updated["findingId"] == reviewed["findingId"] == sealed["findingId"]
+    )
+    assert read(terminal["nextCursor"])["updates"] == []
 
 
 def test_live_finding_update_replay(tmp_path):
@@ -28,17 +79,8 @@ def test_live_finding_update_replay(tmp_path):
     retired["identity"]["instance"] = "second"
     retired["provenance"]["candidateId"] = "candidate-b"
     findings["findings"].append(retired)
-    (scan_dir / "drafts").mkdir(exist_ok=True)
-    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
-
-    def publish(*extra, **kwargs):
-        staged.write_text(json.dumps(documents))
-        return scan_command(
-            state, "write-scan-draft", scan_id, "--draft-path", str(staged), *extra, **kwargs
-        )
-
-    def feed(*args):
-        return scan_command(state, "list-finding-updates", scan_id, *args)
+    publish = partial(publish_draft, state, scan_id, scan_dir, documents)
+    feed = partial(finding_updates, state, scan_id)
 
     documents["manifest"]["scan"]["scope"]["validationMode"] = "custom_pending"
     publish()
@@ -49,13 +91,13 @@ def test_live_finding_update_replay(tmp_path):
     assert feed()["updates"] == []
     publish()
     publish()
-    first = feed("--limit", "1")
+    first = feed(limit=1)
     assert first["status"] == "running"
     assert first["hasMore"] and first["nextCursor"] == 1
     first_id = first["updates"][0]["findingId"]
     assert first["updates"][0]["kind"] == "reviewed"
     assert first["updates"][0]["locations"] == [{"file": "src/extract.py", "line": 41}]
-    second = feed("--after-cursor", "1")
+    second = feed(1)
     assert not second["hasMore"] and second["updates"][0]["kind"] == "reviewed"
     second_id = second["updates"][0]["findingId"]
     assert second_id != first_id
@@ -74,31 +116,31 @@ def test_live_finding_update_replay(tmp_path):
         }
     )
     publish()
-    rejected_event = feed("--after-cursor", "2")["updates"]
+    rejected_event = feed(2)["updates"]
     assert [(u["kind"], u["findingId"]) for u in rejected_event] == [("withdrawn", second_id)]
     surfaces.pop()
     findings["findings"] = [retired]
     publish()
-    assert [u["kind"] for u in feed("--after-cursor", "3")["updates"]] == ["reviewed"]
+    assert [u["kind"] for u in feed(3)["updates"]] == ["reviewed"]
     findings["findings"] = []
     publish()
-    assert feed("--after-cursor", "4")["updates"] == []
+    assert feed(4)["updates"] == []
     finding["remediation"] = "Changed remediation"
     findings["findings"] = [finding]
     publish()
-    changed = feed("--after-cursor", "4")["updates"]
+    changed = feed(4)["updates"]
     assert len(changed) == 1 and changed[0]["changedFields"] == ["remediation"]
     assert changed[0]["kind"] == "updated" and changed[0]["findingId"] == first_id
 
     finding["provenance"]["candidateId"] = "new-source-reference"
     publish()
-    provenance = feed("--after-cursor", "5")["updates"]
+    provenance = feed(5)["updates"]
     assert [(u["kind"], u["changedFields"]) for u in provenance] == [("updated", ["provenance"])]
 
     documents["manifest"]["scan"]["complete"] = True
     publish()
     scan_command(state, "complete-scan", scan_id)
-    terminal = feed("--after-cursor", "6")
+    terminal = feed(6)
     assert terminal["status"] == "complete"
     assert [(u["kind"], u["findingId"]) for u in terminal["updates"]][-2:] == [
         ("finalized", first_id),
@@ -106,18 +148,18 @@ def test_live_finding_update_replay(tmp_path):
     ]
     sealed = json.loads((scan_dir / "findings.json").read_text())
     assert [f["findingId"] for f in sealed["findings"]] == [first_id]
-    assert feed("--after-cursor", str(terminal["nextCursor"]))["updates"] == []
+    assert feed(terminal["nextCursor"])["updates"] == []
 
 
 def test_direct_files_and_historical_index_are_replayed(tmp_path):
     state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    assert not scan_command(state, "list-finding-updates", scan_id)["updates"]
+    assert not finding_updates(state, scan_id)["updates"]
     with sqlite3.connect(state / "workbench.sqlite3") as db:
         db.execute("""CREATE TRIGGER fail_feed_append BEFORE INSERT ON scan_finding_updates
                       BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END""")
     scan_command(state, "complete-scan", scan_id)
-    page = scan_command(state, "list-finding-updates", scan_id)
+    page = finding_updates(state, scan_id)
     [final] = page["updates"]
     assert final["kind"] == "finalized"
 
@@ -133,18 +175,16 @@ def test_direct_files_and_historical_index_are_replayed(tmp_path):
         db.execute(
             "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
         )
-    old = scan_command(state, "list-finding-updates", scan_id)
+    old = finding_updates(state, scan_id)
     assert old["updates"] == [{**final, "validation": ""}]
-    assert not scan_command(state, "list-finding-updates", scan_id, "--after-cursor", "1")[
-        "updates"
-    ]
+    assert not finding_updates(state, scan_id, 1)["updates"]
 
     # Scans completed before migration 8 have valid seals without a pinned digest.
     with sqlite3.connect(state / "workbench.sqlite3") as db:
         db.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
-    assert scan_command(state, "list-finding-updates", scan_id) == old
+    assert finding_updates(state, scan_id) == old
     (scan_dir / "findings.json").write_text("{}")
-    assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
+    assert finding_updates(state, scan_id)["updates"] == []
 
 
 def test_completed_custom_pending_source_discovery_cannot_replay_as_reviewed(tmp_path):
@@ -155,12 +195,12 @@ def test_completed_custom_pending_source_discovery_cannot_replay_as_reviewed(tmp
     manifest["scan"]["scope"]["validationMode"] = "custom_pending"
     manifest_path.write_text(json.dumps(manifest))
     scan_command(state, "complete-scan", scan_id)
-    page = scan_command(state, "list-finding-updates", scan_id)
+    page = finding_updates(state, scan_id)
     assert page["status"] == "complete"
     assert page["updates"] == []
     with sqlite3.connect(state / "workbench.sqlite3") as db:
         db.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
-    assert scan_command(state, "list-finding-updates", scan_id) == page
+    assert finding_updates(state, scan_id) == page
 
 
 def test_feed_append_failure_preserves_completion_and_replays_its_terminal_changes(tmp_path):
@@ -171,11 +211,8 @@ def test_feed_append_failure_preserves_completion_and_replays_its_terminal_chang
     removed = copy.deepcopy(findings[0])
     removed["identity"]["instance"] = "removed"
     findings.append(removed)
-    (scan_dir / "drafts").mkdir(exist_ok=True)
-    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
-    staged.write_text(json.dumps(documents))
-    scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(staged))
-    before = scan_command(state, "list-finding-updates", scan_id)
+    publish_draft(state, scan_id, scan_dir, documents)
+    before = finding_updates(state, scan_id)
     kept_id, removed_id = [entry["findingId"] for entry in before["updates"]]
     # A direct-file final handoff revises a finding and drops its sibling.
     # Reject the *second* journal insert to exercise rollback of the first.
@@ -205,11 +242,7 @@ def test_feed_append_failure_preserves_completion_and_replays_its_terminal_chang
     cursor = before["nextCursor"]
     replay = []
 
-    def read_page(after):
-        return scan_command(
-            state, "list-finding-updates", scan_id, "--after-cursor", str(after), "--limit", "1"
-        )
-
+    read_page = partial(finding_updates, state, scan_id, limit=1)
     for _ in range(3):
         page = read_page(cursor)
         assert page["status"] == "complete" and page == read_page(cursor)
@@ -222,12 +255,7 @@ def test_feed_append_failure_preserves_completion_and_replays_its_terminal_chang
         ("withdrawn", removed_id),
     ]
     assert "severity" in replay[0]["changedFields"] and replay[1]["severity"] == "low"
-    assert (
-        scan_command(state, "list-finding-updates", scan_id, "--after-cursor", str(cursor))[
-            "updates"
-        ]
-        == []
-    )
+    assert finding_updates(state, scan_id, cursor)["updates"] == []
 
 
 @pytest.fixture
@@ -246,7 +274,7 @@ def test_finding_updates_move_original_journal_receipt(tmp_path):
         db.execute(
             "UPDATE schema_migrations SET version = 73, applied_at = 'preview-time' WHERE version = 87"
         )
-    assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
+    assert finding_updates(state, scan_id)["updates"] == []
     with sqlite3.connect(database) as db:
         assert db.execute(
             "SELECT version, applied_at FROM schema_migrations WHERE name = ?",
@@ -262,7 +290,7 @@ def test_finding_updates_reject_conflicting_migration_without_changes(scan_befor
         db.execute("INSERT INTO schema_migrations VALUES (87, ?, 'preview-time')", (name,))
         before = list(db.iterdump())
 
-    failure = scan_command(state, "list-finding-updates", scan_id, check=False)
+    failure = finding_updates(state, scan_id, check=False)
     assert failure["returncode"] != 0
     assert "Unsupported workbench migration 87" in failure["stderr"]
     assert name in failure["stderr"]
@@ -286,7 +314,7 @@ def test_finding_updates_upgrade_without_a_journal_receipt(
             )
 
     for _ in range(2):
-        assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
+        assert finding_updates(state, scan_id)["updates"] == []
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT name FROM schema_migrations WHERE version = 87").fetchone() == (
             "Standard scan reviewed finding updates",
