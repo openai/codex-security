@@ -1004,6 +1004,9 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(gh, "hosts.yml"),
     join(defaultGh, "hosts.yml"),
     join(ssh, "id_rsa"),
+    join(operator, ".docker", "config.json"),
+    join(operator, ".kube", "config"),
+    join(operator, ".npmrc"),
     npm,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
@@ -1030,6 +1033,8 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       // An operator may have no AWS profile directory when the first model tool runs.
       expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
       await mkdir(awsDirectory);
+      await mkdir(join(operator, ".docker"));
+      await mkdir(join(operator, ".kube"));
       await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
       for (let i = existing.length; i < protectedPaths.length; i++)

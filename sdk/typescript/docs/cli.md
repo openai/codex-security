@@ -2972,9 +2972,10 @@ and a drive letter for an explicit store on Windows. The same rules cover
 selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
 URL-specific values. Delegates also have deny rules for the account's `.ssh`
-directory and the GitHub CLI's file-backed logins in `hosts.yml`, including
-the directory selected by `GH_CONFIG_DIR`. The host transport retains access
-to these files.
+directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
+`.kube/config`, and `.npmrc`. The rules cover the home-directory defaults
+and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, and
+`NPM_CONFIG_USERCONFIG`. The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can

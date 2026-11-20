@@ -492,6 +492,15 @@ function kubeConfigFiles(value: string): string[] {
   return files;
 }
 
+function accountHomeDirectory(): string | undefined {
+  try {
+    return userInfo().homedir;
+  } catch {
+    // An effective UID need not have an entry in the password database.
+    return undefined;
+  }
+}
+
 function credentialPointerFiles(
   inherited: Readonly<Record<string, unknown>>,
   settings?: Readonly<Record<string, unknown>>,
@@ -503,25 +512,41 @@ function credentialPointerFiles(
     for (const [name, value] of Object.entries(source))
       if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
-  // gh stores file-backed logins in hosts.yml. A delegate can unset an
-  // override to consult the default directory, or read the file directly.
-  const home =
-    environment[process.platform === "win32" ? "USERPROFILE" : "HOME"] ||
-    homedir();
-  selected.add(join(home, ".config", "gh", "hosts.yml"));
+  // A delegate can unset a client override or read the default file directly.
+  // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
+  const homes = new Set([
+    environment["HOME"],
+    awsAccountHome(environment),
+    accountHomeDirectory(),
+  ]);
+  if (
+    process.platform === "win32" &&
+    environment["HOMEDRIVE"] &&
+    environment["HOMEPATH"]
+  )
+    homes.add(environment["HOMEDRIVE"] + environment["HOMEPATH"]);
+  for (const home of homes) {
+    if (home === undefined) continue;
+    for (const file of [
+      join(".config", "gh", "hosts.yml"),
+      join(".docker", "config.json"),
+      join(".kube", "config"),
+      ".npmrc",
+    ]) {
+      selected.add(relativeFile(home, file));
+      selected.add(join(home, file));
+    }
+    for (const { defaultPath, path } of awsProfileFiles(home, environment)) {
+      selected.add(defaultPath);
+      if (path) selected.add(path);
+    }
+  }
   if (environment["XDG_CONFIG_HOME"])
     selected.add(join(environment["XDG_CONFIG_HOME"], "gh", "hosts.yml"));
   if (process.platform === "win32" && environment["APPDATA"])
     selected.add(join(environment["APPDATA"], "GitHub CLI", "hosts.yml"));
   if (environment["GH_CONFIG_DIR"])
     selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
-  for (const { defaultPath, path } of awsProfileFiles(
-    awsAccountHome(environment),
-    environment,
-  )) {
-    selected.add(defaultPath);
-    if (path) selected.add(path);
-  }
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
     switch (name.toUpperCase()) {
@@ -1246,12 +1271,7 @@ export async function capturePatchGitControls(
     if (xdg) await protectStore(relativeFile(root, xdg));
     // Git for Windows can initialize HOME from the drive and home path.
     // libcurl otherwise falls back to USERPROFILE or the Unix account home.
-    let accountHome: string | undefined;
-    try {
-      accountHome = userInfo().homedir;
-    } catch {
-      // An effective UID need not have an entry in the password database.
-    }
+    const accountHome = accountHomeDirectory();
     const profile = process.platform === "win32" ? userProfile : undefined;
     const home = (await expandConfigurationPath("~")) || profile || accountHome;
     if (home) {
