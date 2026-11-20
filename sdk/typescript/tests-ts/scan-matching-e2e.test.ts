@@ -18,11 +18,7 @@ import {
   type ScanMatchingBatch,
 } from "../src/scan-comparison.js";
 import { dependencies } from "./cli-fixtures.js";
-import {
-  readCompletedFindingsFixture,
-  copyCompletedScanFixture,
-  PLUGIN_ROOT,
-} from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { fail } from "./support/errors.js";
@@ -93,7 +89,7 @@ test("matches sealed scan history end to end without merging related findings", 
         }),
       ]);
       const scanId = String(registered["scanId"]);
-      await copyCompletedScanFixture(scanDir);
+      await copyScanForResealing(scanDir);
       const manifest = await readJson<ScanManifest>(
         join(scanDir, "scan-manifest.json"),
       );
@@ -103,7 +99,9 @@ test("matches sealed scan history end to end without merging related findings", 
       delete draftScan.sealedAt;
       delete draftScan.artifacts;
       await writeJson(join(scanDir, "scan-manifest.json"), manifest);
-      const document = await readCompletedFindingsFixture();
+      const document = await readJson<FindingsDocument>(
+        join(scanDir, "findings.json"),
+      );
       const example = document.findings[0]!;
       document.scanId = scanId;
       document.findings = names.map((name) => ({

@@ -86,6 +86,12 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     assert checkpoint.read_bytes() == original_checkpoint
 
 
+def finish_deadline(scan):
+    scan.finish(terminal_reason="capped")
+    assert scan.complete()["progress"]["status"] == "complete"
+    return json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+
+
 @pytest.mark.parametrize("missing_field", ["remediation", "codeEvidence", "validation"])
 def test_discarded_worker_finding_leaves_its_review_pending(
     workbench_db, deadline_scan, missing_field
@@ -175,8 +181,7 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
     )
     original = checkpoint.read_bytes()
 
-    scan.finish(terminal_reason="capped")
-    assert scan.complete()["progress"]["status"] == "complete"
+    findings = finish_deadline(scan)
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert sorted(
@@ -188,7 +193,6 @@ def test_discarded_worker_evidence_preserves_other_surface_dispositions(
         ("Incomplete finding", "needs_follow_up"),
         ("Independent review", "no_issue_found"),
     ]
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert {row["title"] for row in findings} == {scan.findings[0]["title"], retained["title"]}
     task = next(row for row in coverage["deferred"] if row.get("workerId") == worker_id)
     pending = next(row for row in coverage["surfaces"] if row["disposition"] == "needs_follow_up")
@@ -218,8 +222,7 @@ def test_unlinked_sparse_checkpoint_leaves_earlier_worker_surface_reported(
     )
     original = [path.read_bytes() for path in (earlier, later)]
 
-    scan.finish(terminal_reason="capped")
-    assert scan.complete()["progress"]["status"] == "complete"
+    finish_deadline(scan)
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert (
         next(row for row in coverage["surfaces"] if row.get("workerId") == worker_id)["disposition"]
@@ -273,13 +276,12 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
     )
     original = checkpoint.read_bytes()
 
-    scan.finish(terminal_reason="capped")
-    assert scan.complete()["progress"]["status"] == "complete"
+    findings = finish_deadline(scan)
 
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert coverage["resolvedDeferred"] == [closure]
     assert accepted in coverage["surfaces"]
-    (retained,) = json.loads((scan.scan_dir / "findings.json").read_bytes())["findings"]
+    (retained,) = findings
     assert retained["identity"] == selected[0]["identity"]
     assert retained["provenance"]["workerId"] == accepted_owner
     assert retained["validation"] == selected[0]["validation"]
@@ -294,14 +296,14 @@ def test_deferred_worker_candidate_cannot_reopen_another_owners_task(
 
 
 def write_worker_revisions(scan, output, earlier, latest):
+    directory = output / "checkpoints"
     previous = write_checkpoint(
-        output / "checkpoints", saved_draft(scan.scan_id, findings=[earlier])
+        directory, saved_draft(scan.scan_id, findings=[earlier]), mtime_ns=100
     )
-    current = write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id, findings=[latest]))
-    os.utime(previous, ns=(100, 100))
-    os.utime(current, ns=(200, 200))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": current.name}))
+    current = write_checkpoint(
+        directory, saved_draft(scan.scan_id, findings=[latest]), mtime_ns=200
+    )
+    head = select_checkpoint(output, current)
     return {path: path.read_bytes() for path in (previous, current, head)}
 
 
@@ -317,10 +319,7 @@ def test_complete_worker_revision_keeps_its_sparse_checkpoint_identity(workbench
     earlier.pop("validation")
     originals = write_worker_revisions(scan, output, earlier, latest)
 
-    scan.finish(terminal_reason="capped")
-    assert scan.complete()["progress"]["status"] == "complete"
-
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    findings = finish_deadline(scan)
     (finding,) = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
     assert finding["identity"] == earlier["identity"]
     assert finding["summary"] == latest["summary"]
@@ -365,10 +364,7 @@ def test_deadline_reuses_omitted_proof_only_for_unchanged_worker_findings(
     latest.update(revision)
     originals = write_worker_revisions(scan, output, earlier, latest)
 
-    scan.finish(terminal_reason="capped")
-    assert scan.complete()["progress"]["status"] == "complete"
-
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    findings = finish_deadline(scan)
     retained = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
     coverage = read_review_state(workbench_db, scan.scan_dir)
     deferred = [row for row in coverage["deferred"] if row.get("workerId") == worker_id]
@@ -401,10 +397,7 @@ def test_deadline_uses_the_last_authored_validation(deadline_scan, renewed):
     latest["provenance"]["previousFindings"] = history
     originals = write_worker_revisions(scan, output, earlier, latest)
 
-    scan.finish(terminal_reason="capped")
-    assert scan.complete()["progress"]["status"] == "complete"
-
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    findings = finish_deadline(scan)
     retained = [row for row in findings if row["ruleId"] == earlier["ruleId"]]
     assert [row["validation"]["summary"] for row in retained] == (
         ["Later validation."] if renewed else []

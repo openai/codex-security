@@ -15,7 +15,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
-from finalize_scan_contract import _validate_finding_evidence, manifest_is_sealed
+from finalize_scan_contract import manifest_is_sealed
+from scan_contract_fields import finding_evidence_error
 from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench.saved_sources import selected_iteration_result_path
 from workbench.storage import (
@@ -337,12 +338,7 @@ def selected_evidence_repair_required(scan: sqlite3.Row, run: sqlite3.Row) -> bo
 
 
 def findings_need_evidence_repair(findings: list[dict[str, Any]]) -> bool:
-    try:
-        for index, finding in enumerate(findings):
-            _validate_finding_evidence(finding, index)
-    except saved_results.ContractError:
-        return True
-    return False
+    return any(finding_evidence_error(finding) for finding in findings)
 
 
 def require_selected_repair_target(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:

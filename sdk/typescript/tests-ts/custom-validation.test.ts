@@ -38,11 +38,7 @@ import {
   type ScanProgress,
 } from "../src/index.js";
 import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
-import {
-  readCompletedFindingsFixture,
-  copyCompletedScanFixture,
-  PLUGIN_ROOT,
-} from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
@@ -62,7 +58,7 @@ async function save(path: string, value: unknown) {
 }
 
 async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
-  await copyCompletedScanFixture(scanDir);
+  await copyScanForResealing(scanDir);
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
   );
@@ -71,7 +67,7 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
   scan.target.kind = diff ? "git_diff" : "directory_snapshot";
   scan.scope.validationMode = "custom_pending";
   await save(join(scanDir, "scan-manifest.json"), { ...manifest, scan });
-  const findings = await readCompletedFindingsFixture();
+  const findings = await json<FindingsDocument>(join(scanDir, "findings.json"));
   const original = findings.findings[0]!;
   findings.scanId = scanId;
   findings.findings = Array.from({ length: count }, (_, index) => ({

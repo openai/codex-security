@@ -15,7 +15,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { completedFinding } from "./scan-draft-fixture.ts";
+import { completedFindingEvidence } from "./scan-draft-fixture.ts";
 import {
   draftFixture,
   fixture,
@@ -1183,9 +1183,7 @@ for (const layout of ["standard", "diff"] as const) {
     });
     const second = { ...structuredClone(first), title: "Second review" };
     await f.writeFindings([first, second]);
-    const { codeEvidence, rootCause, attackPath, validation } =
-      completedFinding("review", first.locations[0]!.path);
-    const evidence = { codeEvidence, rootCause, attackPath, validation };
+    const evidence = completedFindingEvidence(first.locations[0]!.path);
     await f.writeFindings(
       [
         { ...first, ...evidence, summary: "Revised evidence." },

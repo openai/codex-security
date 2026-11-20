@@ -41,6 +41,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from scan_contract_fields import finding_evidence_error
 from workbench.retained_coverage import _projected_candidate_id
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.retained_records import (
@@ -472,11 +473,8 @@ def _restore_omitted_worker_evidence(finding: dict[str, Any], worker_id: str) ->
     # Recovery can append a normalized copy of an older observation after the
     # worker's ordered revisions. Prefer the last authored proof or invalidation.
     previous = next((row for row in reversed(matches) if "findingId" not in row), matches[-1])
-    try:
-        _validate_finding_evidence(previous)
-    except ContractError:
-        return
-    finding.update({field: previous[field] for field in missing})
+    if finding_evidence_error(previous) is None:
+        finding.update({field: previous[field] for field in missing})
 
 
 def _defer_incomplete_deadline_findings(
@@ -506,9 +504,7 @@ def _defer_incomplete_deadline_findings(
             if source is not None and prior and prior.get("provenance") == provenance:
                 rechecked[task_id] = prior
             _restore_omitted_worker_evidence(finding, worker_id)
-            try:
-                _validate_finding_evidence(finding)
-            except ContractError as exc:
+            if exc := finding_evidence_error(finding):
                 reason = (
                     f"Skipped malformed finding {finding['findingId']} ({finding['title']}): {exc}."
                 )
@@ -1275,11 +1271,7 @@ def _repair_selected_finding_evidence(
 
     for key, finding in saved.items():
         repair = repairs.get(key)
-        if finding is None or repair is None:
-            continue
-        try:
-            _validate_finding_evidence(finding)
-        except ContractError:
+        if finding is not None and repair is not None and finding_evidence_error(finding):
             finding.update({field: repair[field] for field in evidence if field in repair})
     return {row["findingId"] for key, row in selected_keys if "findingId" in row and key in repairs}
 

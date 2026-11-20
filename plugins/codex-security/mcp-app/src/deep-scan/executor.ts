@@ -99,6 +99,10 @@ interface CodexSdkWorkerRuntimeSettings {
   cyberAccessProgram?: CyberAccessProgram;
 }
 
+type ReportWorkerArgs = Parameters<
+  NonNullable<CodexWorkerExecutor["compareFindings"]>
+>;
+
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
   // Each live coordinator keeps the executable selected for its first worker.
@@ -119,34 +123,21 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     return { threadId, turnId, usage, ...(diagnostics && { diagnostics }) };
   }
 
-  async compareFindings(
-    prompt: string,
-    workingDirectory: string,
-    signal: AbortSignal,
-    schema: Record<string, unknown>,
-    telemetry?: WorkerTelemetryOptions,
-  ): Promise<string> {
-    const turn = await this.runTurn({
-      ...telemetry,
-      kind: "compare",
-      prompt,
-      workingDirectory,
-      signal,
-      schema,
-    });
-    return turn.finalResponse;
+  compareFindings(...args: ReportWorkerArgs) {
+    return this.runReport("compare", ...args);
   }
 
-  async repairFindingEvidence(
-    prompt: string,
-    workingDirectory: string,
-    signal: AbortSignal,
-    schema: Record<string, unknown>,
-    telemetry?: WorkerTelemetryOptions,
-  ): Promise<string> {
+  repairFindingEvidence(...args: ReportWorkerArgs) {
+    return this.runReport("evidence", ...args);
+  }
+
+  private async runReport(
+    kind: "compare" | "evidence",
+    ...[prompt, workingDirectory, signal, schema, telemetry]: ReportWorkerArgs
+  ) {
     const turn = await this.runTurn({
       ...telemetry,
-      kind: "evidence",
+      kind,
       prompt,
       workingDirectory,
       signal,

@@ -74,3 +74,12 @@ def _validate_finding_evidence(
         raise ContractError(
             f"{context}.validation: include observed evidence or evidenceRefs to the source proof"
         )
+
+
+def finding_evidence_error(finding: dict[str, Any]) -> ContractError | None:
+    """Inspect an accepted finding before deciding whether to repair or defer it."""
+    try:
+        _validate_finding_evidence(finding)
+    except ContractError as error:
+        return error
+    return None

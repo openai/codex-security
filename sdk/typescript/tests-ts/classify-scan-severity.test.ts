@@ -31,11 +31,7 @@ import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import {
-  copyCompletedScanFixture,
-  PLUGIN_ROOT,
-  readCompletedFindingsFixture,
-} from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -48,12 +44,14 @@ afterEach(cleanup);
 async function fixture(scanId?: string, savedRoot?: string) {
   const root = savedRoot ?? (await temporaryDirectory());
   const scanDirectory = join(root, "scan");
-  await copyCompletedScanFixture(scanDirectory);
+  await copyScanForResealing(scanDirectory);
   if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
   const manifest = JSON.parse(
     await readFile(join(scanDirectory, "scan-manifest.json"), "utf8"),
   ) as ScanManifest;
-  const document = await readCompletedFindingsFixture();
+  const document = JSON.parse(
+    await readFile(join(scanDirectory, "findings.json"), "utf8"),
+  ) as FindingsDocument;
   const other = structuredClone(document.findings[0]!);
   other.identity.instance = "second-instance";
   setFindingIdentity(manifest.scan, other);
