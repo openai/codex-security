@@ -71,6 +71,7 @@ import {
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
 import {
+  cliOutputFormats,
   completeCli,
   completionShell,
   serveIntegration,
@@ -8398,6 +8399,8 @@ export async function main(
       await import("./dependency-stack-cli.js");
     cli.command(
       createExploitabilityCli({
+        hasOutputFilter: () => frameworkFlags.filters.length > 0,
+        htmlReportRequested: () => frameworkFlags.htmlReport,
         currentDirectory: dependencies.currentDirectory,
         environment: dependencies.environment,
         stderr: errorOutput,
@@ -8608,7 +8611,7 @@ export async function main(
       }
     }
     if (
-      frameworkFlags.rawStructuredOutput &&
+      frameworkFlags.rawOutput &&
       !(command === "scans" && subcommand === "logs")
     ) {
       // Saved logs include the framework's CTA after streamed events. Other
@@ -8695,7 +8698,14 @@ export async function main(
     }
     return frameworkFlags.tokenError;
   }
-  const frameworkFlags = parseFrameworkArguments(argv);
+  // The report-file option marks the exploitability operations that publish a
+  // completed report (check and run finalize).
+  const dependencyReport =
+    command === "exploitability" &&
+    !!selected &&
+    "options" in selected &&
+    !!selected.options?.shape["reportFile"];
+  const frameworkFlags = parseFrameworkArguments(argv, dependencyReport);
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
   const policyFullOutput =
@@ -8973,7 +8983,11 @@ export async function main(
         )}\n`;
       }
     }
-    const help = formatCliHelp(frameworkOutput, output.columns);
+    const help = formatCliHelp(
+      frameworkOutput,
+      output.columns,
+      dependencyReport,
+    );
     let response = renderedOutput ?? help ?? frameworkOutput;
     // Incur writes menus and completion scripts directly as plain text.
     if (
@@ -9410,7 +9424,10 @@ function normalizeImportArguments(
   return { args };
 }
 
-function parseFrameworkArguments(argv: readonly string[]) {
+function parseFrameworkArguments(
+  argv: readonly string[],
+  dependencyReport: boolean,
+) {
   const args: string[] = [];
   const formats: string[] = [];
   const filters: (string | undefined)[] = [];
@@ -9476,19 +9493,35 @@ function parseFrameworkArguments(argv: readonly string[]) {
       continue;
     }
     args.push(flag);
-    if (operand !== undefined) args.push(operand);
+    if (operand !== undefined) {
+      // The handler writes HTML to disk. Incur carries its plain-text summary.
+      const html =
+        dependencyReport && flag === "--format" && operand === "html";
+      args.push(html ? "toon" : operand);
+    }
     if (flag === "--format" && operand) formats.push(operand);
   }
-  // Invalid format operands still go to Incur. Preserve a valid request for
-  // JSON diagnostics if parsing a later operand fails.
-  const format = formats.findLast((value) =>
-    ["json", "jsonl", "toon", "yaml", "md"].includes(value),
-  );
+  const htmlReport = dependencyReport && formats.includes("html");
+  if (htmlReport && formats.some((value) => value !== "html"))
+    argumentError ??=
+      "--format html conflicts with other output formats, including --json.";
+  if (htmlReport && filters.length)
+    argumentError ??=
+      "--filter-output requires a structured result. Use --json with --filter-output.";
+  // Preserve a valid request for JSON diagnostics if a later operand fails.
+  const choices = cliOutputFormats(dependencyReport);
+  if (dependencyReport) {
+    const invalid = formats.find((name) => !choices.includes(name));
+    if (invalid)
+      argumentError ??= `Invalid format: ${diagnosticValue(invalid)}. Expected one of: ${choices.join(", ")}`;
+  }
+  const format = formats.findLast((value) => choices.includes(value));
   const jsonFormat = isJsonFormat(format) ? format : undefined;
   if (!jsonFormat) args.push(...tokenArguments);
   return {
     args,
     formats,
+    htmlReport,
     jsonFormat,
     fullOutput,
     argumentError,
@@ -9496,8 +9529,9 @@ function parseFrameworkArguments(argv: readonly string[]) {
     tokenArguments,
     tokenView,
     tokenError,
-    rawStructuredOutput:
-      !fullOutput && (jsonFormat !== undefined || format === "yaml"),
+    rawOutput:
+      !fullOutput &&
+      (dependencyReport || jsonFormat !== undefined || format === "yaml"),
   };
 }
 

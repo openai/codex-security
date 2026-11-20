@@ -12,12 +12,20 @@ import {
 } from "./dependency-check-output.js";
 import type { DependencyCliContext } from "./dependency-stack-cli.js";
 import { stackInvestigationReportSchema } from "./dependency-stack-assessment.js";
-import type { runLocalStackInvestigation } from "./dependency-stack-launcher.js";
+import { formatSecurityPolicyText } from "./security-policy.js";
+import { prepareDependencyReport } from "./dependency-report-model.js";
+import { summarizeDependencyReport } from "./dependency-report-summary.js";
+import { renderPreparedDependencyReportMarkdown } from "./dependency-report-markdown.js";
 import { CodexSecurityError } from "./errors.js";
 import { readProjectConfig } from "./project-config.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 
 const text = z.string().trim().min(1);
+export const reportFileOption = text
+  .optional()
+  .describe(
+    "Save the completed JSON report to a new file. With --format html, save HTML here instead (default: exploitability_report_<timestamp>.html in the current directory).",
+  );
 const blocked = z
   .object({
     status: z.literal("blocked"),
@@ -40,36 +48,47 @@ const blockedPackage = dependencyPackageCheckOutputSchema
   })
   .passthrough();
 
-type Result =
-  | z.output<typeof dependencyCheckOutputSchema>
-  | Awaited<ReturnType<typeof runLocalStackInvestigation>>;
-function summarize(report: Result): string {
-  if ("verdict" in report)
-    return [
-      `${report.cve} · ${report.verdict}`,
-      ...report.assessments.map(
-        (a) => `  ${a.workItemId}: ${a.verdict} — ${a.reason}`,
-      ),
-    ].join("\n");
-  const checks = "checks" in report ? report.checks : [report];
-  if (!checks.length && "package" in report)
-    return `${report.package.ecosystem}:${report.package.name}: no published advisories found.`;
-  return checks
-    .map((check) => {
-      const title =
-        "cve" in check
-          ? check.cve
-          : (check.advisoryId ?? "Caller-supplied description");
-      return [
-        title,
-        ...check.uses.map(
-          (u) =>
-            `  ${u.location} · ${u.component}@${u.version ?? "unknown"} · ${u.verdict}: ${u.reason}`,
-        ),
-        ...check.limitations.map((s) => `  Gap: ${s}`),
-      ].join("\n");
-    })
-    .join("\n\n");
+/** HTML is a file, never a document dumped to stdout. All other formats keep
+ * --report-file independent of the terminal and preserve the canonical JSON. */
+export function dependencyReportDestination(
+  cwd: string,
+  requested: string | undefined,
+  context: DependencyCliContext,
+) {
+  const html = context.htmlReportRequested?.();
+  const path =
+    requested ??
+    (html
+      ? `exploitability_report_${new Date().toISOString().replace(/[-:.]/gu, "")}.html`
+      : undefined);
+  return {
+    reportFile: path && resolveConfigPath(cwd, path),
+    reportFormat: html ? ("html" as const) : ("json" as const),
+  };
+}
+
+export function presentDependencyResult<T>(
+  result: T,
+  context: DependencyCliContext,
+  format: string,
+  options: { summary?: boolean; savedPath?: string } = {},
+): T | string {
+  if (context.htmlReportRequested?.()) {
+    const summary = summarizeDependencyReport(prepareDependencyReport(result));
+    // A blocked investigation has no completed artifact to link.
+    return options.savedPath
+      ? summary + "\n\n" + formatSecurityPolicyText(options.savedPath)
+      : summary;
+  }
+  if (context.hasOutputFilter?.()) return result;
+  if (format === "md")
+    return formatSecurityPolicyText(
+      renderPreparedDependencyReportMarkdown(prepareDependencyReport(result)),
+      true,
+    ).trimEnd();
+  if (options.summary && format === "toon")
+    return summarizeDependencyReport(prepareDependencyReport(result));
+  return result;
 }
 
 export function registerDependencyCheck(
@@ -79,6 +98,7 @@ export function registerDependencyCheck(
   group.command("check", {
     description:
       "Investigate a CVE or package in this checkout, optionally using a supplied stack capture.",
+    hint: "Read the summary on stdout, use --format md for the full text or --json for the structured result. --format html saves a browser view and prints its path.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
@@ -114,9 +134,7 @@ export function registerDependencyCheck(
       progressEvents: text
         .optional()
         .describe("Stream investigation progress to a new JSON Lines file."),
-      reportFile: text
-        .optional()
-        .describe("Save the completed JSON report to a new file."),
+      reportFile: reportFileOption,
     }),
     output: z.union([
       ...dependencyCheckOutputSchema.options,
@@ -169,15 +187,18 @@ export function registerDependencyCheck(
             codex: options.codex,
             config,
           };
+          const destination = dependencyReportDestination(
+            cwd,
+            options.reportFile,
+            context,
+          );
           const result = await withDependencyCheckOutput(
             {
               subject: args.subject,
               checkout: repository,
               display: (line) => context.stderr.write(line + "\n"),
               signal,
-              reportFile:
-                options.reportFile &&
-                resolveConfigPath(cwd, options.reportFile),
+              ...destination,
               progressEvents:
                 options.progressEvents &&
                 resolveConfigPath(cwd, options.progressEvents),
@@ -234,16 +255,17 @@ export function registerDependencyCheck(
               return dependencyCheckOutputSchema.parse(reviewed);
             },
           );
-          return !formatExplicit && format === "toon"
-            ? summarize(result)
-            : result;
+          return presentDependencyResult(result, context, format, {
+            summary: !formatExplicit,
+            savedPath: destination.reportFile,
+          });
         })
         .catch((error: unknown) => {
           if (error instanceof DependencyInvestigationBlockedError) {
             context.setExitCode(2);
-            return !formatExplicit && format === "toon"
-              ? error.message
-              : error.outcome;
+            return presentDependencyResult(error.outcome, context, format, {
+              summary: !formatExplicit,
+            });
           }
           throw error;
         });

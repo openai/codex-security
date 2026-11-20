@@ -36,6 +36,9 @@ const { assertTarListingSizes, regularTarListingLines } = (await import(
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
 )) as { packageDistFiles: readonly string[] };
+const { MAX_EXPANDED_ASSET_BYTES } = (await import(
+  new URL("../scripts/package-public-content.mjs", import.meta.url).href
+)) as { MAX_EXPANDED_ASSET_BYTES: number };
 // Avoid Bun 1.3.14's stale Windows spawnSync timeout.
 // https://github.com/oven-sh/bun/issues/33932
 const execFileAsync = promisify(execFile);
@@ -513,8 +516,9 @@ describe("npm package tar listings", () => {
     }
   });
 
-  const expandedBytes = 32 * 1024 * 1024;
-  const paddedTar = { trailingZeroBytes: expandedBytes - packageTar().length };
+  const paddedTar = {
+    trailingZeroBytes: MAX_EXPANDED_ASSET_BYTES - packageTar().length,
+  };
   test.each([
     { name: "default", tar: paddedTar },
     { name: "level-0", tar: paddedTar, gzip: { level: 0 } },
@@ -546,7 +550,7 @@ describe("npm package tar listings", () => {
         if (name === "default")
           expect(contents.length).toBeLessThan(1024 * 1024);
         if (name === "level-0")
-          expect(contents.length).toBeGreaterThan(expandedBytes);
+          expect(contents.length).toBeGreaterThan(MAX_EXPANDED_ASSET_BYTES);
         const archivePath = join(root, `${name}.tgz`);
         writeFileSync(archivePath, contents);
         const contractPath = join(root, "plugin contract.json");
