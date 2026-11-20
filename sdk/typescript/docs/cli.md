@@ -77,7 +77,47 @@ jq -e --slurpfile r report.json '
 
 Pass `--sinks sinks-replay.json` and choose a new report filename. The CLI validates the supplied records and quotes, skips the public lookup and trigger extraction, and reruns the caller investigation and independent review. Treat a supplied snapshot as evidence from its producer. The hashes verify its contents against the saved hashes. Supplying only `advisoryDetails` skips the lookup and runs trigger extraction on those records.
 
-An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt. `run tools --state <database>` lists operation schemas. Use `next` and `read-stacks` to select evidence, `record-evidence` and `record-claims` to save it, and `query-claims` to retrieve its exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file. These lower-level operations run offline. A direct `run finalize` returns an immutable report with `review: null`.
+An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt from a prepared packet. For an interactive investigation, omit `--inputs` and initialize the checkout and state before collecting runtime evidence; optionally pass advisory or endpoint information as JSON with `--json-stdin`. `run tools --state <database>` lists operation schemas.
+
+Use `next` to select the outstanding work item and read its complete captured frames, original frame indices, bindings and capture receipt. `record-evidence` saves pinned source ranges or an original runtime result or resource; `record-observations` registers additional runtime queries and their work items as evidence becomes available. Use `record-claims` to save supported facts and `query-claims` to retrieve their exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file. These lower-level operations run offline. A direct `run finalize` returns an immutable report with `review: null`.
+
+For example, start a run before its advisory or runtime information is complete:
+
+```sh
+export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
+cs exploitability run init --repo "$TARGET" --state "$STATE"
+cs exploitability run init --repo "$TARGET" --state "$STATE" --json-stdin < advisory.json
+cs exploitability run record-evidence --state "$STATE" --json-stdin < runtime.json
+cs exploitability run record-observations --state "$STATE" --json-stdin < observations.json
+cs exploitability run next --state "$STATE"
+```
+
+`advisory.json` supplies the CVE, advisory and source/sink endpoints as they become known. A runtime evidence import names the operation and contains the original JSON result, or a path and SHA-256 for its original JSON bytes:
+
+```json
+{
+  "kind": "runtime",
+  "server": "example-runtime",
+  "tool": "profile.lookup",
+  "arguments": { "service": "example" },
+  "scope": { "service": "example" },
+  "resource": { "path": "/path/to/result.json", "sha256": "<original SHA-256>" }
+}
+```
+
+An original stack result can be a query in the shape from `schemas/dependency-stack-inputs-v1.schema.json`, or an object containing a `queries` array. A `codex-security-graph-evidence/v1` result can also be normalized when its metadata supplies the query identity, scope, window and sink selectors; root-first frames are reversed and their original index references are remapped. Use the returned `receiptId` to register the query results; the host derives the queries and work items from the recorded original:
+
+```json
+{ "receiptId": "<returned receipt ID>" }
+```
+
+If `queries` is also supplied to `record-observations`, it must exactly match the queries represented by the original receipt, including scope, status, frames and indices. Observed stacks and successful zero-match results require a receipt; a `no_coverage` query may be registered without one. A successful zero-match result also needs complete query coverage. Runtime imports preserve caller-supplied operation provenance and the original payload; they do not independently attest that a provider executed the named operation. Cite the original receipt when an assessment depends on its result.
+
+For graph evidence, a zero-match result requires metadata status `empty_matches`, `coverage.result_complete: true`, and `limits.truncated: false`. Missing telemetry or incomplete coverage becomes `no_coverage` instead.
+
+A graph resource can establish which frames appeared in a sample. Ruling out a vulnerability because a fixed package version ran requires the capture producer to tie that version to the matched frame. An image inventory alone establishes which packages the image contains. When the producer supplies a canonical stack query with frame-to-package bindings, the finalized claim includes the original import for review.
+
+Live or supplemented reports can include `effectiveInputDigest`, a hash of the versioned canonical effective source, sink and stack documents, target, and imported receipt IDs. The original `inputDigest` remains stable so existing claim identities continue to resolve.
 
 When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
 
