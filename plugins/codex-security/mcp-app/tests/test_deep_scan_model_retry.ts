@@ -3,6 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { readJson } from "./support/json.ts";
+import { executor } from "./support/deep-scan-executor-module.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.ts";
 import {
   coordinatorFixture,
@@ -16,6 +18,56 @@ import {
 } from "./deep_scan_coordinator_fixture.ts";
 
 after(temporaryDirectories.cleanup);
+
+test("model input receipts include native user settings inherited by MCP workers", async () => {
+  const { fixture } = await coordinatorFixture({
+    workers: 1,
+    maxDiscoveryRuns: 1,
+  });
+  const home = fixture.run.targetPath;
+  const config = join(home, "config.toml");
+  const snapshot = join(home, "snapshot.toml");
+  const instructions = join(home, "instructions.md");
+  await mkdir(home, { recursive: true });
+  await writeFile(snapshot, "");
+  await writeFile(instructions, "Instructions from the file");
+  const saved = [
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+  ].map((key) => [key, process.env[key]] as const);
+  try {
+    process.env.CODEX_HOME = home;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    for (const configPath of [undefined, snapshot]) {
+      restoreEnv("CODEX_SECURITY_CONFIG_PATH", configPath);
+      const model = 'model_instructions_file = "instructions.md"\n';
+      await writeFile(config, model);
+      const modelFileInputs = await executor.currentModelFileInputs();
+      const validate = () =>
+        new executor.CodexSdkWorkerExecutor({
+          modelFileInputs,
+        }).validateModelFileInputs(new AbortController().signal);
+      await writeFile(
+        config,
+        model + 'developer_instructions = "Added after registration"\n',
+      );
+      await assert.rejects(validate(), /developer_instructions changed/);
+      await writeFile(config, model);
+      await validate();
+      assert.equal(modelFileInputs.model_instructions_file.path, instructions);
+    }
+    await writeFile(snapshot, 'developer_instructions = "Override"');
+    const explicit = await executor.currentModelFileInputs();
+    await writeFile(config, 'developer_instructions = "Home"');
+    assert.deepEqual(
+      (await executor.currentModelFileInputs()).developer_instructions,
+      explicit.developer_instructions,
+    );
+  } finally {
+    for (const [key, value] of saved) restoreEnv(key, value);
+  }
+});
 
 test("a changed model file stops discovery retries and preserves interrupted sibling work", async () => {
   const { fixture, store } = await coordinatorFixture({
