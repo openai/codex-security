@@ -165,7 +165,8 @@ describe("skill authentication at the subprocess boundary", () => {
       expect(result.status, result.stderr).toBe(status);
       if (status === 1) {
         expect(result.stderr).toContain("codex-security login");
-        if (detail !== null) expect(result.stderr.split(detail)).toHaveLength(2);
+        if (detail !== null)
+          expect(result.stderr.split(detail)).toHaveLength(2);
       }
     },
   );
