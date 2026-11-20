@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { gitText } from "./shell.js";
 import { readJson, readJsonLines, writeJson } from "./json.js";
 import { reseal as resealArtifacts } from "./sealed-scan.js";
 import { setFindingIdentity, sha256 } from "./finding-identity.js";
+import { execFileSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import {
@@ -115,7 +115,7 @@ export async function registeredCampaignResult(
   config: MultiscanOptions["config"],
   repository: string,
   scan: NonNullable<Parameters<SecurityClient["run"]>[1]>,
-  outcome: "findings" | "empty" | "interrupted",
+  outcome: "findings" | "sealed" | "interrupted",
 ): Promise<ScanResult> {
   const checkout = await realpath(repository);
   const scanDir = scan.outputDir!;
@@ -174,7 +174,7 @@ export async function registeredCampaignResult(
       : scan.mode === "deep"
         ? "deep_repository"
         : "repository";
-  if (outcome === "empty") findings.findings = [];
+  if (outcome === "sealed") findings.findings = [];
   for (const finding of findings.findings) {
     setFindingIdentity(manifest.scan, finding);
     for (const location of finding.locations)
@@ -210,6 +210,37 @@ export async function registeredCampaignResult(
         scanId,
       ],
       { env: environment },
+    );
+  }
+  if (outcome === "sealed") {
+    execFileSync(
+      python,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts/finalize_scan_contract.py"),
+        "--scan-dir",
+        scanDir,
+      ],
+      { env: environment, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const sealed = await readJson<ScanResult["manifest"]>(manifestPath);
+    sealed.scan.artifacts.push({
+      path: "report.md",
+      mediaType: "text/markdown",
+      sha256: sha256(await readFile(join(scanDir, "report.md"))),
+    });
+    await writeFile(
+      manifestPath,
+      execFileSync(
+        python,
+        [
+          "-I",
+          "-c",
+          "import json,sys; sys.stdout.buffer.write((json.dumps(json.load(sys.stdin), indent=2, sort_keys=True) + '\\n').encode('utf-8'))",
+        ],
+        { input: JSON.stringify(sealed), env: environment },
+      ),
     );
   }
   await workbench(["complete-scan", "--scan-id", scanId]);

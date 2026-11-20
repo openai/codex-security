@@ -1171,8 +1171,9 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.assertEqual(output.read_bytes(), protected_contents)
 
     def test_export_entrypoint_rejects_orphaned_or_conflicting_flags(self) -> None:
-        self.write_scan()
-        before = self.scan_file_bytes(*CANONICAL_FILES)
+        self.write_sealed_scan()
+        (self.scan_dir / "report.md").write_bytes(b"Retained report\n")
+        before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
         for arguments, error in (
             (
                 ("--export-output", "exports/findings.csv"),
@@ -1186,6 +1187,9 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                 ("--sarif-only", "--export-format", "sarif"),
                 "--sarif-only cannot be combined with --export-format",
             ),
+            (("--report-only", "--export-artifact", "threat-model"), "--report-only cannot"),
+            (("--report-only", "--describe-threat-model"), "--report-only cannot"),
+            (("--report-only", "--write-threat-model"), "--report-only cannot"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_finalizer(*arguments)
@@ -1892,6 +1896,74 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assert_finalization_fails("invalid JSON.*non-finite JSON number.*NaN")
         with self.assertRaisesRegex(FINALIZER.ContractError, "cannot encode canonical JSON"):
             FINALIZER._json_bytes({"score": float("nan")})
+
+    def test_report_projection_distinguishes_sealed_entries_from_hard_links(self) -> None:
+        report = self.scan_dir / "report.md"
+        report.write_bytes(b"Saved report.\n")
+        (self.scan_dir / "artifacts").mkdir(exist_ok=True)
+        # Open the same inode under each spelling to exercise case-sensitive
+        # and case-insensitive directory layouts on every platform.
+        descriptor = mock.Mock(side_effect=lambda *_: os.open(report, os.O_RDONLY))
+        for artifact, entries, linked_parent, expected in (
+            ("./report.md", [], False, "preserve"),
+            ("REPORT.md", ["REPORT.md"], False, "preserve"),
+            ("REPORT.md", ["report.md"], False, "preserve"),
+            ("findings.json", ["report.md", "findings.json"], False, "write"),
+            ("REPORT.md", ["REPORT.md", "report.md"], False, "write"),
+            ("findings.json", ["Report.md", "findings.json"], False, "write"),
+            ("artifacts/report.md", ["report.md"], False, "write"),
+            ("artifacts/report.md", ["report.md"], True, "ambiguous"),
+            ("REPORT.md", [], False, "ambiguous"),
+        ):
+            manifest = {"scan": {"artifacts": [{"path": artifact}]}}
+            descriptor.reset_mock()
+            with (
+                self.subTest(artifact=artifact, entries=entries, linked_parent=linked_parent),
+                mock.patch.object(os, "listdir", return_value=entries),
+                mock.patch.object(os, "close", wraps=os.close) as close,
+                mock.patch.object(FINALIZER, "open_scan_local_file_descriptor", descriptor),
+                mock.patch.object(
+                    FINALIZER,
+                    "_require_scan_directory",
+                    (lambda _: self.scan_dir) if linked_parent else Path,
+                ),
+                mock.patch.object(
+                    FINALIZER, "_read_sealed_scan", return_value=(manifest, {}, {}, b"")
+                ),
+                mock.patch.object(FINALIZER, "_generate_report_projection") as project,
+                mock.patch.object(FINALIZER, "write_scan_local_bytes") as write,
+            ):
+                if expected == "ambiguous":
+                    with self.assertRaisesRegex(FINALIZER.ContractError, "ambiguous sealed"):
+                        FINALIZER.write_report_projection(self.scan_dir)
+                else:
+                    FINALIZER.write_report_projection(self.scan_dir)
+                self.assertEqual(descriptor.call_count, close.call_count)
+                if expected == "write":
+                    project.assert_called_once_with(manifest, {}, {})
+                    write.assert_called_once_with(self.scan_dir, "report.md", project.return_value)
+                else:
+                    project.assert_not_called()
+                    write.assert_not_called()
+
+    def test_report_only_recreates_a_missing_report_with_additive_fingerprints(self) -> None:
+        manifest, findings, _ = self.write_sealed_scan()
+        report = self.scan_dir / "report.md"
+        expected = report.read_bytes()
+        report.unlink()
+        findings["findings"][0]["fingerprints"]["future"] = "preserved"
+        FINALIZER._validate_derived_finding_identities(manifest, findings)
+        self.assertEqual(findings["findings"][0]["fingerprints"]["future"], "preserved")
+        sarif = self.scan_dir / "exports" / "results.sarif"
+        sarif.parent.mkdir(exist_ok=True)
+        sarif.write_bytes(b"existing export")
+        before = self.scan_file_bytes(*CANONICAL_FILES, "exports/results.sarif")
+
+        schemas = EXAMPLE_DIR.parents[1] / "schemas"
+        result = self.run_finalizer("--report-only", "--schema-dir", str(schemas))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(report.read_bytes(), expected)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES, "exports/results.sarif"), before)
 
     def test_sealed_rerun_regenerates_reports_without_mutating_canonical_artifacts(self) -> None:
         self.write_sealed_scan()

@@ -4,25 +4,33 @@ import { createRequire } from "node:module";
 import {
   chmod,
   cp,
+  link,
   lstat,
   mkdir,
   readFile,
   realpath,
   rename,
+  rm,
   symlink,
   type FileHandle,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
 import {
+  hasSealedReport,
   loadContractWithScanDirectory,
   readScanFile,
   sameCheckedFileDevice,
   validatedFileDigests,
 } from "../src/contract.js";
-import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
+import type {
+  NormalizedTarget,
+  ScanExpectation,
+  ScanManifest,
+} from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
@@ -76,6 +84,83 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
+  test("recognizes only the authenticated report directory entry", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "recognizes only the authenticated report directory entry",
+      )
+    )
+      return;
+    const scanDirectory = await realpath(await temporaryDirectory());
+    const alias = join(scanDirectory, "REPORT.md");
+    const report = join(scanDirectory, "report.md");
+    const manifest = (...paths: string[]) =>
+      ({
+        scan: { artifacts: paths.map((path) => ({ path })) },
+      }) as ScanManifest;
+    await writeFile(alias, "Sealed report.");
+    expect(await hasSealedReport(scanDirectory, manifest("./report.md"))).toBe(
+      true,
+    );
+    expect(
+      await hasSealedReport(scanDirectory, manifest("findings.json")),
+    ).toBe(false);
+    const caseSensitive = await lstat(report).then(
+      () => false,
+      () => true,
+    );
+    if (caseSensitive) {
+      expect(await hasSealedReport(scanDirectory, manifest("REPORT.md"))).toBe(
+        false,
+      );
+      await link(alias, report);
+      expect(await hasSealedReport(scanDirectory, manifest("REPORT.md"))).toBe(
+        false,
+      );
+    }
+    // Simulate one case-insensitive directory entry while comparing real file identities.
+    const original = { ...fsPromises };
+    let onList: (() => void) | undefined;
+    mock.module("node:fs/promises", () => ({
+      ...original,
+      readdir: async (...args: Parameters<typeof original.readdir>) => {
+        if (args[0] !== scanDirectory) return original.readdir(...args);
+        onList?.();
+        return ["REPORT.md"];
+      },
+    }));
+    try {
+      expect(await hasSealedReport(scanDirectory, manifest("REPORT.md"))).toBe(
+        true,
+      );
+      if (caseSensitive) {
+        await rm(report);
+        await writeFile(report, "Different file.");
+        expect(
+          await hasSealedReport(scanDirectory, manifest("REPORT.md")),
+        ).toBe(false);
+      }
+      for (const throwDuringList of [false, true]) {
+        const controller = new AbortController();
+        const reason = new Error("Report inspection cancelled.");
+        onList = () => {
+          controller.abort(reason);
+          if (throwDuringList) throw reason;
+        };
+        await expect(
+          hasSealedReport(
+            scanDirectory,
+            manifest("REPORT.md"),
+            controller.signal,
+          ),
+        ).rejects.toBe(reason);
+      }
+    } finally {
+      mock.module("node:fs/promises", () => original);
+    }
+  });
+
   test("re-finalizing an imported bundle preserves its sealed projections", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");

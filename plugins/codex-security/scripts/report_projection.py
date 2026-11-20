@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import chain
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -28,6 +30,7 @@ DISPOSITION_LABELS = {
     "not_applicable": "Not applicable",
     "needs_follow_up": "Needs follow-up",
 }
+REPORT_NAME_RE = re.compile(r"report\.md", re.IGNORECASE | re.ASCII)
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
 ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
@@ -44,6 +47,89 @@ def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
     if model.get("format") == "markdown" and isinstance(content, str) and content.strip():
         return content
     return None
+
+
+def is_sealed_report(
+    scan_dir: Path,
+    artifact_paths: set[str],
+    open_file: Callable[[Path, str, str], int],
+    check_directory: Callable[[Path], Path],
+) -> bool:
+    """Identify a sealed report without mistaking a separate hard link for its name."""
+    if "report.md" in artifact_paths:
+        return True
+    try:
+        output_metadata = (scan_dir / "report.md").stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ReportProjectionError("report.md: unable to inspect report output") from exc
+
+    def is_same_file(path: str, context: str) -> bool:
+        descriptor = open_file(scan_dir, path, context)
+        try:
+            return os.path.samestat(output_metadata, os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+
+    aliases = {path for path in artifact_paths if is_same_file(path, f"sealed artifact {path}")}
+    if not aliases:
+        return False
+    try:
+        entries = set(os.listdir(scan_dir))
+        report_names = [name for name in entries if REPORT_NAME_RE.fullmatch(name)]
+        report_entry = "report.md" if "report.md" in entries else None
+        if len(report_names) == 1:
+            name = report_names[0]
+            if report_entry is not None or is_same_file(name, "report directory entry"):
+                report_entry = name
+                if any(REPORT_NAME_RE.fullmatch(alias) for alias in aliases):
+                    return True
+        root = scan_dir.stat(follow_symlinks=False)
+        for alias in aliases:
+            artifact = PurePosixPath(alias)
+            parent = check_directory(scan_dir.joinpath(*artifact.parts[:-1]))
+            if not os.path.samestat(root, parent.stat(follow_symlinks=False)):
+                continue
+            if (
+                report_entry is None
+                or artifact.name not in entries
+                or artifact.name == report_entry
+            ):
+                raise ReportProjectionError(
+                    "report.md: cannot safely replace an ambiguous sealed artifact alias"
+                )
+    except OSError as exc:
+        raise ReportProjectionError("report.md: unable to inspect sealed artifact aliases") from exc
+    return False
+
+
+def csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and (
+        value.startswith(("'", "\t", "\r", "\n"))
+        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
+    ):
+        return f"'{value}"
+    return value
+
+
+def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
+    return (
+        "occurrence_id",
+        "finding_id",
+        *(("candidate_id",) if deep_scan else ()),
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "status",
+        "close_reason",
+        "note",
+        "remediation",
+        "path",
+        "start_line",
+        "end_line",
+    )
 
 
 def _escape_markdown(value: str) -> str:
