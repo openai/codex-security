@@ -1,5 +1,6 @@
 const distModules = [
   "api",
+  "dependency-stack-advisory",
   "dependency-stack-assessment",
   "dependency-stack-claims",
   "dependency-stack-cli",
@@ -37,6 +38,7 @@ const distModules = [
   "codeowners",
   "dependency-advisory-version",
   "dependency-caller-scope",
+  "dependency-investigation-correction",
   "dependency-investigation-session",
   "dependency-linked-resources",
   "dependency-report-audit",

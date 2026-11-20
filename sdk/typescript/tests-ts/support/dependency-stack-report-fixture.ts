@@ -24,6 +24,14 @@ export function stackReport() {
     reason: "The decoder ran. Its effective mode is unknown.",
     supportingClaims: [ref],
     remainingQuestions: ["Which decoder mode ran?"],
+    questionChecks: [
+      {
+        question: "Which decoder mode ran?",
+        checked: "Inspected the decoder configuration.",
+        missingEvidence: "The effective runtime flag.",
+        claims: [ref],
+      },
+    ],
     frameIndices: [0, 4],
     use: {
       location: "decode at the upload handler",
@@ -88,7 +96,7 @@ export function stackReport() {
   };
   return {
     schemaVersion: "codex-security.pipeline-stacks.report/v1",
-    reviewPolicy: "single_agent",
+    review: null,
     cve: "CVE-2099-10001",
     runId: "run-a",
     attemptId: "attempt-a",

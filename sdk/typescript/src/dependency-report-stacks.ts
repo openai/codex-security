@@ -37,6 +37,7 @@ function projectClaim({
 type Claim = ReturnType<typeof projectClaim>;
 export type StackAssessment =
   StackInvestigationReport["assessments"][number] & {
+    reviewReason: string | undefined;
     claims: Claim[];
     missingClaims: DependencyClaimReference[];
   };
@@ -82,6 +83,9 @@ export function readStackReport(value: unknown): StackReport | undefined {
       throw new Error("Duplicate stack claim reference: " + record.id);
     records.set(id, projectClaim(record));
   }
+  const reasons = new Map(
+    report.review?.decisions.map((d) => [d.workItemId, d.reason]),
+  );
   const paths = assessments.map((item): StackAssessment => {
     const pending = [...item.supportingClaims];
     const seen = new Set<string>();
@@ -97,7 +101,12 @@ export function readStackReport(value: unknown): StackReport | undefined {
         for (const dependency of record.dependencies) pending.push(dependency);
       } else missingClaims.push(ref);
     }
-    return { ...item, claims, missingClaims };
+    return {
+      ...item,
+      reviewReason: reasons.get(item.workItemId),
+      claims,
+      missingClaims,
+    };
   });
   return { ...report, assessments: paths };
 }
