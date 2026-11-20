@@ -2772,7 +2772,10 @@ async function windowsOutputBinding(path?: string) {
     path ?? (await windowsBindingPath()),
   ) as {
     createPrivateWindowsDirectory(path: Buffer, checkOutput: boolean): number;
-    createWindowsHookMessageStage(path: Buffer): { close(): void };
+    createWindowsHookMessageStage(path: Buffer): {
+      coordinator: string;
+      close(): void;
+    };
     validateWindowsOutputPath(
       path: Buffer,
       writableLeaf?: boolean,
@@ -2788,7 +2791,12 @@ export async function createWindowsHookMessageStage(path: string) {
   const stage = native.createWindowsHookMessageStage(
     Buffer.from(win32.toNamespacedPath(path), "utf16le"),
   );
-  return { binding, close: () => stage.close() };
+  return {
+    binding,
+    coordinator: stage.coordinator,
+    directory: join(path, "message"),
+    close: () => stage.close(),
+  };
 }
 
 export async function requireWindowsOutputPath(

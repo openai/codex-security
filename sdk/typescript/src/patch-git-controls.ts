@@ -14,7 +14,6 @@ import {
   symlink,
 } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { setTimeout as delay } from "node:timers/promises";
 import {
   basename,
   delimiter,
@@ -210,7 +209,7 @@ export interface PatchGitControls {
   readonly externalConfigPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
-  readonly snapshotConfigPaths: readonly string[];
+  readonly snapshotConfig?: PatchSnapshotConfig;
   readonly hostRefreshFilters: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
@@ -381,43 +380,38 @@ export async function activePatchPublicationHooks(
   };
 }
 
-// Windows provisions read ACLs in the background. Ask Git to read the same
-// files explicitly before a snapshot can silently ignore an inaccessible config.
-export async function ensureWindowsSnapshotConfigReadable(
-  paths: readonly string[],
-  probe: (
-    args: string[],
-    input: string,
-    refreshReadGrants: boolean,
-  ) => Promise<unknown>,
-  signal?: AbortSignal,
-): Promise<void> {
-  const input =
-    paths.map((path) => path.replaceAll("\\", "/")).join("\n") + "\n";
-  const deadline = Date.now() + 30_000;
-  let refreshReadGrants = false;
-  for (;;) {
-    signal?.throwIfAborted();
-    try {
-      await probe(
-        ["hash-object", "--no-filters", "--stdin-paths"],
-        input,
-        refreshReadGrants,
-      );
-      return;
-    } catch (error) {
-      const stderr = (error as { stderr?: string } | null)?.stderr;
-      if (
-        typeof stderr !== "string" ||
-        !/permission denied|access is denied/iu.test(stderr) ||
-        Date.now() >= deadline
-      )
-        throw error;
-      // A fresh sandbox launch can schedule an ACL refresh skipped by a busy helper.
-      refreshReadGrants = true;
-      await delay(250, undefined, { signal });
-    }
-  }
+export interface PatchSnapshotConfig {
+  root: string;
+  // The Windows Git runner stages each base64 config at its decimal index.
+  files: string[];
+  global?: number;
+  system?: number;
+  commands: Record<string, number>;
+}
+
+const includeSetting = /^include(?:if\..*)?\.path$/u;
+
+function parseConfigEntry(entry: string) {
+  const split = entry.indexOf("\n");
+  return split < 0
+    ? { key: entry, value: undefined }
+    : { key: entry.slice(0, split), value: entry.slice(split + 1) };
+}
+
+// Invert Git's NUL-delimited config output, retaining valueless keys and
+// arbitrary bytes. Subsection names may themselves contain dots and quotes.
+function serializeConfigEntry(key: string, value: string | undefined): string {
+  const quote = (text: string) => '"' + text.replace(/["\\]/gu, "\\$&") + '"';
+  const first = key.indexOf(".");
+  const last = key.lastIndexOf(".");
+  const section = key.slice(0, first);
+  const subsection =
+    first === last ? "" : " " + quote(key.slice(first + 1, last));
+  const assignment =
+    value === undefined ? "" : " = " + quote(value).replaceAll("\n", "\\n");
+  return (
+    "[" + section + subsection + "]\n" + key.slice(last + 1) + assignment + "\n"
+  );
 }
 
 const missing = (error: unknown): undefined => {
@@ -1019,6 +1013,7 @@ export async function capturePatchGitControls(
   netrc: string | null = process.env["NETRC"] ?? null,
   pointerEnvironment: Readonly<Record<string, unknown>> = process.env,
   shellSettings?: Readonly<Record<string, unknown>>,
+  onSnapshotConfig?: (config: PatchSnapshotConfig) => void,
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -1211,7 +1206,9 @@ export async function capturePatchGitControls(
     }
   >();
   const snapshotStoragePaths = new Set<string>();
-  const snapshotConfigPaths = new Set<string>();
+  let snapshotConfig: PatchSnapshotConfig | undefined;
+  let projectSnapshotConfig: (() => Promise<void>) | undefined;
+  const credentialFileIds = new Set<string>();
   const configurationFiles = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
@@ -1348,7 +1345,7 @@ export async function capturePatchGitControls(
   };
   const protectStore = async (path: string, includeDirectory = false) => {
     try {
-      const metadata = await stat(path).catch(missing);
+      const metadata = await stat(path, { bigint: true }).catch(missing);
       if (metadata && !metadata.isFile() && !metadata.isDirectory()) {
         // Git can read credentials from a FIFO. Do not open it during capture
         // or assume that a regular-file sandbox rule isolates its producer.
@@ -1356,6 +1353,8 @@ export async function capturePatchGitControls(
         return;
       }
       if (metadata?.isFile() || includeDirectory) hostMayReadStore = true;
+      if (metadata?.isFile() && metadata.nlink > 1n)
+        credentialFileIds.add(metadata.dev + ":" + metadata.ino);
       // Mounting a deny at a symlink itself fails on Linux. Git's file store
       // follows the link when locking and replacing its backing file.
       if (!metadata || metadata.isFile() || includeDirectory)
@@ -1409,6 +1408,7 @@ export async function capturePatchGitControls(
         );
   }
   const globalConfigurationPaths: string[] = [];
+  let systemConfigurationPath: string | undefined;
   if (configuration.global !== undefined) {
     if (configuration.global !== "")
       globalConfigurationPaths.push(configuration.global);
@@ -1440,8 +1440,7 @@ export async function capturePatchGitControls(
               { environment: configurationEnvironment },
             )
           ).trim();
-    if (disabled === "false")
-      globalConfigurationPaths.push(configuration.system);
+    if (disabled === "false") systemConfigurationPath = configuration.system;
   }
   const insideSelectedRoots = (path: string): boolean =>
     inside(root, path) ||
@@ -1618,6 +1617,31 @@ export async function capturePatchGitControls(
     }
   };
   const captureReferences = async (checkout: string): Promise<void> => {
+    const projectConfig =
+      checkout === root &&
+      mode !== "external" &&
+      (process.platform === "win32" || !!onSnapshotConfig);
+    const expandedIncludes = new Map<string, string>();
+    const parsedFiles = new Map<Buffer, string[] | undefined>();
+    const readConfig = async (contents: Buffer) => {
+      if (parsedFiles.has(contents)) return parsedFiles.get(contents);
+      let entries: string[] | undefined;
+      try {
+        // Parse captured bytes without activating dormant includes or their errors.
+        entries = await runConfigFields(
+          checkout,
+          ["config", "--file", "-", "--no-includes", "--null", "--list"],
+          contents,
+        );
+      } catch (error) {
+        if (!(
+          error instanceof Error && error.message.includes("bad config line")
+        ))
+          throw error;
+      }
+      if (projectConfig) parsedFiles.set(contents, entries);
+      return entries;
+    };
     await protectPointerFiles(checkout, inheritedPointerFiles);
     if (mode !== "external" && netrc) {
       hostMayReadStore = true;
@@ -1640,13 +1664,12 @@ export async function capturePatchGitControls(
       value: string;
     }[] = [];
     for (let index = 0; index + 2 < records.length; index += 3) {
-      const entry = records[index + 2]!;
-      const split = entry.indexOf("\n");
+      const { key, value = "" } = parseConfigEntry(records[index + 2]!);
       settings.push({
         scope: records[index]!,
         origin: records[index + 1]!,
-        key: split < 0 ? entry : entry.slice(0, split),
-        value: split < 0 ? "" : entry.slice(split + 1),
+        key,
+        value,
       });
     }
     const activeConfigurations = new Set<string>();
@@ -1753,6 +1776,7 @@ export async function capturePatchGitControls(
         throw error;
       }
       const includePath = relativeFile(relativeTo, path);
+      if (projectConfig) expandedIncludes.set(value, path);
       try {
         if (
           !insideSelectedRoots(await canonicalPath(includePath)) &&
@@ -1785,23 +1809,10 @@ export async function capturePatchGitControls(
       const identity = `${control.canonical}\0${await canonicalPath(origin)}`;
       if (inspectedIncludes.has(identity)) return;
       inspectedIncludes.add(identity);
-      let entries: string[];
-      try {
-        // Parse captured bytes without activating dormant includes or their errors.
-        entries = await runConfigFields(
-          checkout,
-          ["config", "--file", "-", "--no-includes", "--null", "--list"],
-          control.contents,
-        );
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("bad config line"))
-          return;
-        throw error;
-      }
+      const entries = await readConfig(control.contents);
+      if (!entries) return;
       for (const entry of entries) {
-        const separator = entry.indexOf("\n");
-        const key = entry.slice(0, separator);
-        const value = entry.slice(separator + 1);
+        const { key, value = "" } = parseConfigEntry(entry);
         if (automaticPublication && snapshotFilter(key)) {
           // Leaving a branch can remove an empty override and activate a
           // nonempty command that was present earlier in Git's config order.
@@ -1831,7 +1842,7 @@ export async function capturePatchGitControls(
         }
         if (key === "core.hookspath" && mode !== "resumed-hook")
           await captureHooks(configPath(value));
-        else if (/^(include|includeif\..*)\.path$/u.test(key))
+        else if (includeSetting.test(key))
           await captureInclude(
             origin,
             value,
@@ -1841,7 +1852,7 @@ export async function capturePatchGitControls(
       }
     };
     for (const { scope, origin, key, value } of settings) {
-      if (!/^(include|includeif\..*)\.path$/u.test(key)) continue;
+      if (!includeSetting.test(key)) continue;
       const relativeTo = origin.startsWith("file:")
         ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
         : checkout;
@@ -1852,7 +1863,7 @@ export async function capturePatchGitControls(
         await userSelectedConfig(scope, origin, checkout),
       );
     }
-    if (mode === "resumed-hook") return;
+    if (mode === "resumed-hook" && !projectConfig) return;
     for (const path of activeConfigurations) await rememberConfiguration(path);
     if (
       automaticPublication &&
@@ -1865,16 +1876,138 @@ export async function capturePatchGitControls(
         if (!key.endsWith(".smudge")) checkoutCleanFilter = true;
       }
     }
-    for (const path of globalConfigurationPaths) {
-      const selected = relativeFile(checkout, path);
-      await rememberSelectedConfiguration(selected, true);
-      activeConfigurations.add(selected);
-    }
-    for (const path of activeConfigurations) {
-      const control = controlPaths.get(path);
-      if (control && Buffer.isBuffer(control.contents))
-        snapshotConfigPaths.add(control.canonical);
-    }
+    const globals = globalConfigurationPaths.map((path) =>
+      relativeFile(checkout, path),
+    );
+    // The first system record belongs to the top-level file, including
+    // when its first setting is itself an include.
+    const systemOrigin = settings.find(
+      ({ scope }) => scope === "system",
+    )?.origin;
+    const system =
+      systemConfigurationPath ??
+      (systemOrigin?.startsWith("file:")
+        ? configPath(systemOrigin.slice(5))
+        : undefined);
+    const systems = system ? [relativeFile(checkout, system)] : [];
+    for (const path of [...globals, ...systems])
+      await rememberSelectedConfiguration(path, true);
+    if (projectConfig)
+      projectSnapshotConfig = async () => {
+        // Windows shares its read-deny ACL across commands. Give snapshot Git
+        // its own system/global files, leaving the originals denied. Keep the
+        // include graph so Git evaluates conditions in each branch and repo.
+        const files: string[] = [];
+        const numbers = new Map<string, number>();
+        const paths = new Map(
+          [...controlPaths].map(([path, control]) => [
+            normalize(path),
+            control,
+          ]),
+        );
+        const pathBytes = (path: string) =>
+          Buffer.from(path.split(sep).join("/")).toString("latin1");
+        const numberFor = async (path: string): Promise<number | undefined> => {
+          const control = paths.get(normalize(path));
+          if (
+            !control ||
+            !Buffer.isBuffer(control.contents) ||
+            insideSelectedRoots(control.canonical) ||
+            [...credentialStorePaths].some((store) =>
+              inside(store, control.canonical),
+            ) ||
+            (control.identity &&
+              credentialFileIds.has(
+                control.identity.dev + ":" + control.identity.ino,
+              ))
+          )
+            return;
+          const id =
+            control.canonical + "\0" + (await canonicalPath(dirname(path)));
+          if (numbers.has(id)) return numbers.get(id);
+          const entries = await readConfig(control.contents);
+          if (!entries) return;
+          const number = files.push("") - 1;
+          numbers.set(id, number);
+          let text = "";
+          for (const record of entries) {
+            if (!record) continue;
+            let { key, value } = parseConfigEntry(record);
+            if (hasInlineGitAuthentication(key, value ?? "")) continue;
+            if (includeSetting.test(key)) {
+              // Git resolves ./ conditions against the real file's directory,
+              // treating the directory prefix literally. Relative include
+              // destinations use the path through which Git opened that file.
+              key = key.replace(
+                /^(includeif\.(?:gitdir|worktree)(?:\/i)?:)\.[\\/]/u,
+                (_match, prefix: string) =>
+                  prefix +
+                  pathBytes(dirname(control.canonical))
+                    .replace(/[[*?]/gu, "\\$&")
+                    .replace(/\/?$/u, "/"),
+              );
+              const expanded = value && expandedIncludes.get(value);
+              if (expanded) {
+                const target = relativeFile(dirname(path), expanded);
+                const child = await numberFor(target);
+                value = child === undefined ? pathBytes(target) : String(child);
+              }
+            }
+            text += serializeConfigEntry(key, value);
+          }
+          files[number] = text;
+          return number;
+        };
+        const scope = async (roots: string[]) => {
+          let projected: number | undefined;
+          const parts: string[] = [];
+          for (const path of roots) {
+            if (!Buffer.isBuffer(paths.get(normalize(path))?.contents))
+              continue;
+            const id = await numberFor(path);
+            if (id === undefined)
+              parts.push(serializeConfigEntry("include.path", pathBytes(path)));
+            else {
+              projected = id;
+              parts.push(files[id]!);
+            }
+          }
+          // Combine projected XDG and home files at their original include depth.
+          return projected !== undefined && parts.length > 1
+            ? files.push(parts.join("")) - 1
+            : projected;
+        };
+        const global = await scope(globals);
+        const system = await scope(systems);
+        const commands: Record<string, number> = Object.create(null);
+        for (const { scope, origin, key, value } of settings) {
+          if (
+            scope !== "command" ||
+            origin.startsWith("file:") ||
+            !includeSetting.test(key)
+          )
+            continue;
+          const path = expandedIncludes.get(value);
+          if (path && isAbsolute(path)) {
+            const number = await numberFor(path);
+            if (number !== undefined) commands[configPath(value)] = number;
+          }
+        }
+        if (!snapshotConfig && !files.length) return;
+        // The launch context retains this object as shell policy can supply
+        // additional credential paths before the native permissions resolve.
+        snapshotConfig ??= { root, files: [], commands };
+        Object.assign(snapshotConfig, {
+          files: files.map((text) =>
+            Buffer.from(text, "latin1").toString("base64"),
+          ),
+          global,
+          system,
+          commands,
+        });
+        onSnapshotConfig?.(snapshotConfig);
+      };
+    if (mode === "resumed-hook") return;
     const localConfig = (
       await runControl(root, checkout, [
         "rev-parse",
@@ -1948,6 +2081,7 @@ export async function capturePatchGitControls(
     for (const path of selectedDirectories) await remember(path);
     await captureReferences(root);
     checkDelegateCredentials(true);
+    await projectSnapshotConfig?.();
     return undefined;
   }
   const gitDirectory = selectedDirectories[0]!;
@@ -2643,6 +2777,7 @@ export async function capturePatchGitControls(
     }
   };
   await discover(true);
+  await projectSnapshotConfig?.();
   const snapshotControlPaths: string[] = [];
   for (const [path, control] of controlPaths) {
     if (!control.readOnly) continue;
@@ -2772,6 +2907,7 @@ export async function capturePatchGitControls(
       const previouslyUnisolated = unisolatedCredentialHelper;
       for (const checkout of filterCheckouts)
         await protectPointerFiles(checkout, newFiles);
+      if (newFiles.size) await projectSnapshotConfig?.();
       if (
         !previouslyUnisolated &&
         unisolatedCredentialHelper &&
@@ -2785,7 +2921,7 @@ export async function capturePatchGitControls(
     ),
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
-    snapshotConfigPaths: [...snapshotConfigPaths],
+    snapshotConfig,
     hostRefreshFilters:
       mode === "sandbox" && automaticPublication ? protectedFilterKeys() : [],
     async hostFilterSettings(switchingBranch) {

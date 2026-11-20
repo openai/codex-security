@@ -23,10 +23,11 @@ use windows_sys::Win32::{
             ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             SDDL_REVISION_1,
         },
-        GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        GetTokenInformation, TokenLogonSid, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        SECURITY_MAX_SID_SIZE, TOKEN_GROUPS, TOKEN_USER,
     },
     Storage::FileSystem::*,
-    System::{SystemServices::SE_TOKEN_USER, Threading::GetCurrentProcess},
+    System::Threading::GetCurrentProcess,
 };
 
 fn invalid(message: &str) -> napi::Error {
@@ -658,24 +659,42 @@ pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
 }
 
 pub(crate) fn current_user_sid() -> Result<String, u32> {
+    token_sid(false)
+}
+
+fn token_sid(logon: bool) -> Result<String, u32> {
     // GetCurrentProcessToken() is the SDK's query-only pseudo-handle.
     const CURRENT_PROCESS_TOKEN: HANDLE = -4isize as HANDLE;
-    let mut user = SE_TOKEN_USER::default();
+    // TokenLogonSid returns one group. The buffer also fits TOKEN_USER.
+    #[repr(C)]
+    struct SidBuffer {
+        group: TOKEN_GROUPS,
+        sid: [u8; SECURITY_MAX_SID_SIZE as usize],
+    }
+    let mut buffer = MaybeUninit::<SidBuffer>::uninit();
     let mut length = 0;
     let error = status(unsafe {
         GetTokenInformation(
             CURRENT_PROCESS_TOKEN,
-            TokenUser,
-            (&raw mut user).cast(),
-            size_of::<SE_TOKEN_USER>() as u32,
+            if logon { TokenLogonSid } else { TokenUser },
+            buffer.as_mut_ptr().cast(),
+            size_of::<SidBuffer>() as u32,
             &mut length,
         )
     });
     if error != 0 {
         return Err(error);
     }
-    // GetTokenInformation filled the inline user SID in this buffer.
-    unsafe { sid_string(user.Anonymous1.User.Sid) }
+    // Both structures refer to a SID in the trailing storage.
+    if logon {
+        let groups = unsafe { &(*buffer.as_ptr()).group };
+        if groups.GroupCount != 1 {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        unsafe { sid_string(groups.Groups[0].Sid) }
+    } else {
+        unsafe { sid_string((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) }
+    }
 }
 
 /// The SID must remain valid until Windows has copied its string representation.
@@ -715,20 +734,46 @@ pub fn create_private_windows_directory(
                 None,
             )
         } else {
-            let attributes = SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: descriptor,
-                ..Default::default()
-            };
-            let error = status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) });
-            if error == 0 {
-                Ok(())
-            } else {
-                Err(error)
-            }
+            create_directory(&path, descriptor)
         }
     })
     .map_or_else(|error| error, |()| 0))
+}
+
+fn create_directory(path: &[u16], descriptor: PSECURITY_DESCRIPTOR) -> Result<(), u32> {
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        ..Default::default()
+    };
+    let error = status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) });
+    if error == 0 {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+/// Elevated sandbox launches share a user, but each has its own logon SID.
+#[napi]
+pub fn create_windows_git_config_directory(
+    path: Buffer,
+    coordinator: String,
+) -> napi::Result<bool> {
+    let path = wide_path(path)?;
+    let error = |code| napi::Error::from(io::Error::from_raw_os_error(code as i32));
+    // Same-account adapters consume Git configuration at its original path.
+    if current_user_sid().map_err(error)? == coordinator {
+        return Ok(false);
+    }
+    let sid = token_sid(true).map_err(error)?;
+    // OWNER RIGHTS suppresses the shared account's implicit WRITE_DAC, including
+    // on the config files that inherit these permissions. The host cleans up
+    // its pinned stage even when the sandbox process is interrupted.
+    let descriptor = format!("D:P(A;OICI;FA;;;{coordinator})(A;OICI;FA;;;{sid})(A;OICI;RC;;;OW)");
+    with_security_descriptor(&descriptor, |security| create_directory(&path, security))
+        .map_err(error)?;
+    Ok(true)
 }
 
 pub(crate) fn with_private_directory_security<T>(
@@ -737,6 +782,13 @@ pub(crate) fn with_private_directory_security<T>(
 ) -> Result<T, u32> {
     // Match the credential-home policy: current user, SYSTEM and administrators.
     let descriptor = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})");
+    with_security_descriptor(&descriptor, create)
+}
+
+fn with_security_descriptor<T>(
+    descriptor: &str,
+    create: impl FnOnce(PSECURITY_DESCRIPTOR) -> Result<T, u32>,
+) -> Result<T, u32> {
     let descriptor = descriptor.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let mut security = null_mut();
     let error = status(unsafe {
