@@ -59,6 +59,7 @@ import {
   type ScanAuthentication,
   ScanCostLimitExceededError,
   type DeepScanProgress,
+  type FindingUpdate,
   type ScanOptions,
   type ScanProgress,
   type ScanSessionEvent,
@@ -1698,6 +1699,7 @@ describe("CodexSecurity orchestration", () => {
         mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
       const onWarning = mock();
       const reads: number[] = [];
+      const combinedReads: string[][] = [];
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         prepareRuntime: async () => {
@@ -1706,6 +1708,8 @@ describe("CodexSecurity orchestration", () => {
           return runtime;
         },
         runWorkbench: async (_options, args, input) => {
+          if (args[0] === "get-scan" && args.includes("--after-cursor"))
+            combinedReads.push([...args]);
           if (args[0] !== "list-finding-updates")
             return mockWorkbench(args, input);
           const cursor = Number(args[args.indexOf("--after-cursor") + 1]);
@@ -1745,11 +1749,163 @@ describe("CodexSecurity orchestration", () => {
         }),
       ).rejects.toThrow("Synthetic scan ended");
       expect([...new Set(reads)]).toEqual(supported ? [0, 1] : []);
+      expect(combinedReads).toEqual([]);
       expect(onFindingUpdate).toHaveBeenCalledTimes(supported ? 1 : 0);
       if (version === "unreadable")
         expect(onWarning).toHaveBeenCalledWith(
           expect.stringContaining("Could not read live finding updates"),
         );
+    },
+  );
+
+  test.each([
+    "both",
+    "deep",
+    "progress only",
+    "legacy",
+    "feed error",
+    "malformed feed",
+    "malformed progress",
+  ] as const)(
+    "reads local progress and finding updates (%s)",
+    async (scenario) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const runtime = preparedRuntime(codexHome);
+      if (scenario === "legacy") {
+        const pluginRoot = await copyCredentialTestPlugin(root);
+        await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+          recursive: true,
+        });
+        const manifestPath = join(pluginRoot, ".codex-plugin/plugin.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        delete manifest.codexSecurity.progressFindingUpdates;
+        await writeFile(manifestPath, JSON.stringify(manifest));
+        runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
+      }
+      const progress = mock<NonNullable<ScanOptions["onProgress"]>>();
+      const deepProgress = mock<NonNullable<ScanOptions["onDeepProgress"]>>();
+      const finding = mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
+      const warning = mock();
+      const reads: string[] = [];
+      let sealed = false;
+      const terminalKind = scenario === "deep" ? "withdrawn" : "finalized";
+      const feedError =
+        scenario === "feed error" || scenario === "malformed feed";
+      const page = (cursor: number, kind: FindingUpdate["kind"]) => ({
+        scanId: "scan_example_001",
+        nextCursor: cursor,
+        hasMore: kind === "reviewed",
+        updates: [
+          {
+            cursor,
+            kind,
+            findingId: "finding-1",
+            title: "Observation",
+            severity: "low",
+            summary: "",
+            validation: "",
+            locations: [],
+          },
+        ],
+      });
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => runtime,
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+          const index = args.indexOf("--after-cursor");
+          const cursor = index < 0 ? undefined : Number(args[index + 1]);
+          if (args[0] === "get-scan" && args.includes("--progress-only")) {
+            reads.push(
+              cursor === undefined ? "progress" : `combined ${cursor}`,
+            );
+            const scan = {
+              progress: {
+                phase: "discovery",
+                independentReviews: { completed: 3, active: 2, maximum: 40 },
+                coverage: {
+                  filesTotal: 4,
+                  closedRows: scenario === "malformed progress" ? -1 : 2,
+                  worklistRows: 3,
+                },
+              },
+            };
+            if (cursor === undefined) return { scan };
+            if (scenario === "feed error")
+              return { scan, findingUpdatesError: "fixture feed unavailable" };
+            return {
+              scan,
+              findingUpdates:
+                scenario === "malformed feed" ? {} : page(1, "reviewed"),
+            };
+          }
+          if (args[0] === "list-finding-updates") {
+            reads.push(`${sealed ? "terminal" : "feed"} ${cursor}`);
+            return sealed
+              ? page((cursor ?? 0) + 1, terminalKind)
+              : cursor === 0
+                ? page(1, "reviewed")
+                : page(2, "updated");
+          }
+          if (args[0] === "complete-scan" || args[0] === "fail-scan")
+            sealed = true;
+          return mockWorkbench(args, input);
+        },
+        createCodex:
+          scenario === "deep"
+            ? codexFactory(async () => {
+                throw new Error("Synthetic Deep scan failed");
+              })
+            : completedCodex(root),
+      });
+      const run = client.run(repository, {
+        ...(scenario === "deep"
+          ? { mode: "deep", onDeepProgress: deepProgress }
+          : { onProgress: progress }),
+        onFindingUpdate: scenario === "progress only" ? undefined : finding,
+        onWarning: warning,
+      });
+      if (scenario === "deep")
+        await expect(run).rejects.toThrow("Synthetic Deep scan failed");
+      else await run;
+      const updates = finding.mock.calls.map(([update]) => [
+        update.cursor,
+        update.kind,
+        update.findingId,
+      ]);
+      const reviewProgress = progress.mock.calls.some(
+        ([update]) => update.reviewItems?.completed === 2,
+      );
+      if (scenario === "deep") {
+        expect(deepProgress.mock.calls).toEqual([
+          [{ completed: 3, active: 2, maximum: 40 }],
+        ]);
+      } else expect(reviewProgress).toBe(scenario !== "malformed progress");
+      if (scenario === "progress only") {
+        expect(reads).toEqual(["progress"]);
+        expect(updates).toEqual([]);
+      } else if (feedError) {
+        expect(reads).toEqual(["combined 0", "terminal 0"]);
+        expect(updates).toEqual([[1, "finalized", "finding-1"]]);
+        expect(warning).toHaveBeenCalledWith(
+          expect.stringContaining("finding updates"),
+        );
+      } else {
+        if (scenario === "legacy") {
+          expect(reads.slice(0, -1).sort()).toEqual([
+            "feed 0",
+            "feed 1",
+            "progress",
+          ]);
+          expect(reads.at(-1)).toBe("terminal 2");
+        } else {
+          expect(reads).toEqual(["combined 0", "feed 1", "terminal 2"]);
+        }
+        expect(updates).toEqual([
+          [1, "reviewed", "finding-1"],
+          [2, "updated", "finding-1"],
+          [3, terminalKind, "finding-1"],
+        ]);
+      }
     },
   );
 

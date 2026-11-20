@@ -4,6 +4,8 @@ import copy
 import json
 import sqlite3
 import uuid
+from argparse import Namespace
+from contextlib import closing
 from functools import partial
 from pathlib import Path
 
@@ -99,6 +101,11 @@ def test_live_finding_update_replay(tmp_path):
     assert first["updates"][0]["locations"] == [{"file": "src/extract.py", "line": 41}]
     second = feed(1)
     assert not second["hasMore"] and second["updates"][0]["kind"] == "reviewed"
+    progress = scan_command(state, "get-scan", scan_id, "--progress-only")
+    assert scan_command(state, "get-scan", scan_id, "--progress-only", "--after-cursor", "1") == {
+        **progress,
+        "findingUpdates": second,
+    }
     second_id = second["updates"][0]["findingId"]
     assert second_id != first_id
 
@@ -142,6 +149,9 @@ def test_live_finding_update_replay(tmp_path):
     scan_command(state, "complete-scan", scan_id)
     terminal = feed(6)
     assert terminal["status"] == "complete"
+    poll = scan_command(state, "get-scan", scan_id, "--progress-only", "--after-cursor", "6")
+    assert poll["findingUpdates"] == terminal
+    assert poll["scan"]["progress"]["status"] == "complete"
     assert [(u["kind"], u["findingId"]) for u in terminal["updates"]][-2:] == [
         ("finalized", first_id),
         ("withdrawn", second_id),
@@ -149,6 +159,48 @@ def test_live_finding_update_replay(tmp_path):
     sealed = json.loads((scan_dir / "findings.json").read_text())
     assert [f["findingId"] for f in sealed["findings"]] == [first_id]
     assert feed(terminal["nextCursor"])["updates"] == []
+
+
+def test_combined_poll_preserves_snapshot_and_reports_feed_errors(
+    tmp_path, workbench_api, monkeypatch
+):
+    state, _, scan_id, _ = empty_target_scan(tmp_path)
+    database = state / "workbench.sqlite3"
+    read = workbench_api["get_scan"]
+    progress_module = workbench_api["progress"]
+    original = progress_module.scan_progress_result
+    args = Namespace(scan_id=scan_id, progress_only=True, after_cursor=0)
+    with closing(sqlite3.connect(database)) as reader, closing(sqlite3.connect(database)) as writer:
+        reader.row_factory = sqlite3.Row
+        reader.execute("PRAGMA query_only = ON")
+        assert reader.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+        # Commit a reviewed update after the progress SELECT and before the feed SELECT.
+        def publish_after_progress(connection, scan):
+            result = original(connection, scan)
+            with writer:
+                writer.execute(
+                    "INSERT INTO scan_finding_updates"
+                    "(scan_id, cursor, finding_id, kind, preview_json, fields_json) "
+                    "VALUES (?, 1, 'fixture', 'reviewed', '{}', '{}')",
+                    (scan_id,),
+                )
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(progress_module, "scan_progress_result", publish_after_progress)
+            assert read(reader, args)["findingUpdates"]["updates"] == []
+        poll = read(reader, args)
+        assert [entry["findingId"] for entry in poll["findingUpdates"]["updates"]] == ["fixture"]
+        with writer:
+            writer.execute(
+                "UPDATE scan_finding_updates SET preview_json = 'bad json' WHERE scan_id = ?",
+                (scan_id,),
+            )
+        damaged = read(reader, args)
+        assert damaged["scan"] == poll["scan"]
+        assert "findingUpdates" not in damaged and damaged["findingUpdatesError"]
+        assert not reader.in_transaction
 
 
 def test_direct_files_and_historical_index_are_replayed(tmp_path):
