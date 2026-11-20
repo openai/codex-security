@@ -119,11 +119,8 @@ export async function smokeStackRun({
     target.sha,
   );
   assert.equal(command("tools").commands.length, 10);
-  const { workItem } = command("next");
-  assert.deepEqual(
-    command("read-stacks", { workItemId: workItem.id }).rootFirstRawIndices,
-    [],
-  );
+  const { workItem, rootFirstRawIndices } = command("next");
+  assert.deepEqual(rootFirstRawIndices, []);
   const evidence = [{ path: "app.js", startLine: 1, endLine: 1 }];
   assert.ok(
     command("record-evidence", {
@@ -154,10 +151,29 @@ export async function smokeStackRun({
     ],
   });
   assert.equal(verdict, "unknown");
-  assert.equal(command("summarize-coverage").assessed, 1);
+  const { receiptId } = command("record-evidence", {
+    kind: "runtime",
+    server: "example",
+    tool: "sample",
+    result: { ...documents.stacks.queries[0], id: "follow-up" },
+  });
+  const { workItemIds } = command("record-observations", { receiptId });
+  const followUp = command("next").workItem;
+  assert.deepEqual(workItemIds, [followUp.id]);
+  command("record-assessments", {
+    items: [
+      {
+        workItemId: followUp.id,
+        verdict: "unknown",
+        reason: "The follow-up found no matches.",
+        remainingQuestions: ["Which caller ran?"],
+      },
+    ],
+  });
+  assert.equal(command("summarize-coverage").assessed, 2);
   assert.equal(command("finalize").verdict, "unknown");
   assert.match(
     invoke("summarize-coverage", ["--format", "yaml"]),
-    /assessed: 1/u,
+    /assessed: 2/u,
   );
 }
