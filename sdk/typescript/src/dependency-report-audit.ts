@@ -694,6 +694,7 @@ export function sectionAudit(section: Section) {
     const c = stack.coverage;
     limits = sampleLimits(stack, findings);
     scope = facts([
+      ["Caller scope", stack.callerScope],
       ["Review", stack.review ? "Independently reviewed" : "Finalized offline"],
       ["Reviewed draft digest", stack.review?.draftDigest],
       [
