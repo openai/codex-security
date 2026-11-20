@@ -1648,15 +1648,6 @@ async function managedCodexHomes(environment: NodeJS.ProcessEnv) {
   ];
 }
 
-function windowsMissingStorePattern(path: string): string {
-  const escaped = escapeCredentialGlob(path);
-  const file = basename(escaped);
-  // A missing literal can become a directory during native Windows ACL setup.
-  // Braces alone do not select a native glob. The other alternative is a literal
-  // question mark, which cannot name a Windows file.
-  return join(dirname(escaped), `{${file},[?]}`);
-}
-
 async function patchWorkspaceProfile(
   directory: string,
   environment: NodeJS.ProcessEnv,
@@ -1707,29 +1698,41 @@ async function patchWorkspaceProfile(
     }
     return false;
   };
+  const windows = process.platform === "win32";
+  const missing = new Map<string, string[]>();
   for (const path of stores) {
     // Bubblewrap cannot mount a second deny inside a masked directory.
     // A writable carveout reopens its subtree and needs its own denies.
     if (hasDeniedParent(path)) continue;
-    if (process.platform === "win32" && !existsSync(path)) {
-      filesystem[windowsMissingStorePattern(path)] = "deny";
-    } else if (
-      (process.platform === "linux" || process.platform === "darwin") &&
-      !existsSync(dirname(path))
-    ) {
-      // Bubblewrap cannot mount below a missing parent. Seatbelt can compile
-      // the same subtree pattern without resolving every absent literal root.
-      // The impossible [.] filename starts the native glob at the parent.
-      const leaf = escapeCredentialGlob(basename(path));
-      const pattern = join(
-        escapeCredentialGlob(dirname(path)),
-        `{[.],${leaf},${leaf}/**}`,
-      );
-      filesystem[pattern] = "deny";
-      // Bound the native walk by Linux PATH_MAX, which exceeds the component count.
-      filesystem["glob_scan_max_depth"] = 4096;
-    } else filesystem[path] = { ".": "deny" };
+    const needsGlob = windows
+      ? !existsSync(path)
+      : (process.platform === "linux" || process.platform === "darwin") &&
+        !existsSync(dirname(path));
+    if (!needsGlob) {
+      filesystem[path] = { ".": "deny" };
+      continue;
+    }
+    // Keep the immediate scan root, including when it later becomes a directory link.
+    const escaped = escapeCredentialGlob(path);
+    const parent = dirname(escaped);
+    const names = missing.get(parent) ?? [];
+    names.push(basename(escaped));
+    missing.set(parent, names);
   }
+  for (const [parent, names] of missing) {
+    // Windows ACL setup materializes absent literal paths. Bubblewrap cannot
+    // mount below a missing parent and its glob walk matches regular files,
+    // so include descendants as well. Seatbelt compiles the same subtree rule.
+    // An impossible filename ensures the native parser treats this as a glob.
+    const leaves = names.join(",");
+    const group = windows ? `{${leaves},[?]}` : `{[.],${leaves}}`;
+    // Seatbelt emits an ancestor rule per separator. Share one descendant
+    // suffix across the sibling names to keep those rules linear in size.
+    const pattern = windows ? group : `{${group},${group}/**}`;
+    filesystem[join(parent, pattern)] = "deny";
+  }
+  // Linux PATH_MAX exceeds the possible component count for either POSIX backend.
+  if (missing.size && !windows) filesystem["glob_scan_max_depth"] = 4096;
   return profile;
 }
 
