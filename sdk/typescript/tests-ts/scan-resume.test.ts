@@ -1946,6 +1946,19 @@ test
   },
 );
 
+function telemetryOverrides(certificate: string): JsonObject {
+  return {
+    otel: {
+      trace_exporter: {
+        "otlp-grpc": {
+          endpoint: "https://example.test",
+          tls: { "ca-certificate": certificate },
+        },
+      },
+    },
+  };
+}
+
 test.skipIf(process.platform === "win32").each([
   ["scanPromptFile", "before sealing"],
   ["scanPromptFile", "after sealing"],
@@ -1959,18 +1972,7 @@ test.skipIf(process.platform === "win32").each([
     const f = await interruptedScan("deep", false, {
       registrationFiles:
         file === "telemetry certificate"
-          ? {
-              codexOverrides: {
-                otel: {
-                  trace_exporter: {
-                    "otlp-grpc": {
-                      endpoint: "https://example.test",
-                      tls: { "ca-certificate": source },
-                    },
-                  },
-                },
-              },
-            }
+          ? { codexOverrides: telemetryOverrides(source) }
           : { [file]: source },
     });
     if (stage !== "before sealing") await sealWithOriginalPlugin(f);
@@ -2022,14 +2024,21 @@ async function trustedRecoveryPython(python: string): Promise<string> {
 }
 
 test.skipIf(process.platform === "win32")(
-  "sealed SDK recovery skips the original campaign checkout and finds Python beside a standalone prompt",
+  "sealed SDK recovery skips the original campaign checkout and finds Python beside a standalone prompt and certificate",
   async () => {
     const { checkout, bin, python } = await modelInputCheckout();
     const trusted = await trustedRecoveryPython(pythonOnPath()!);
     const scanPromptFile = join(dirname(dirname(trusted)), "instructions.md");
+    const certificate = join(dirname(scanPromptFile), "ca.pem");
     await writeFile(scanPromptFile, "Review input handling.");
+    await writeFile(certificate, "synthetic fixture");
     const f = await withProtectedExecutableRoots([checkout], () =>
-      interruptedScan("deep", false, { registrationFiles: { scanPromptFile } }),
+      interruptedScan("deep", false, {
+        registrationFiles: {
+          scanPromptFile,
+          codexOverrides: telemetryOverrides(certificate),
+        },
+      }),
     );
     await sealWithOriginalPlugin(f);
     await rm(join(checkout, ".git"), { recursive: true });

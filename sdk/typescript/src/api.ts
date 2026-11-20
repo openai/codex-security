@@ -389,6 +389,11 @@ function scanPythonProtection(
   environment: ProcessEnvironment,
 ) {
   if (!inputs) return {};
+  const paths = scanConfigSourcePaths(
+    config,
+    inputs.outputDir ?? undefined,
+    environment,
+  );
   return {
     protectedRoot: [
       ...new Set([
@@ -396,11 +401,8 @@ function scanPythonProtection(
         ...inputs.documentPaths,
         ...inputs.executableSourcePaths,
         ...(inputs.previous?.inputRoots ?? []),
-        ...scanConfigSourcePaths(
-          config,
-          inputs.outputDir ?? undefined,
-          environment,
-        ),
+        ...paths.model,
+        ...paths.nested,
       ]),
     ],
     discoveryProtectedRoots: inputs.previous?.pythonDiscoveryRoots,
@@ -3309,25 +3311,32 @@ export class CodexSecurity {
         deepScan: deepScanConfiguration?.settings,
       });
       if (mode === "deep") {
-        const sources = [
-          ...inputs.executableSourcePaths,
-          ...scanConfigSourcePaths(
-            workerRuntimeConfig,
-            scanDir,
-            workerProviderEnvironment,
-          ),
-        ];
+        const configPaths = scanConfigSourcePaths(
+          workerRuntimeConfig,
+          scanDir,
+          workerProviderEnvironment,
+        );
         const resolvedSources = await Promise.all(
           modelFilePaths.map((path) => realpath(path)),
         );
         const executableSources = [
-          ...new Set([...sources, ...resolvedSources]),
+          ...new Set([
+            ...inputs.executableSourcePaths,
+            ...configPaths.model,
+            ...resolvedSources,
+          ]),
         ];
         const sourceRoots = await Promise.all(
-          executableSources.map((path) => gitProtectionRoots(path, signal)),
+          [...executableSources, ...configPaths.nested].map((path) =>
+            gitProtectionRoots(path, signal),
+          ),
         );
         recipe["executableSourceRoots"] = [
-          ...new Set([...inputs.pythonRoots.protected, ...sourceRoots.flat()]),
+          ...new Set([
+            ...inputs.pythonRoots.protected,
+            ...configPaths.nested,
+            ...sourceRoots.flat(),
+          ]),
         ];
         recipe["pythonDiscoveryRoots"] = inputs.pythonRoots.discovery;
         recipe["sealedPricing"] = {

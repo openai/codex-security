@@ -61,16 +61,19 @@ export function scanConfigSourcePaths(
   config: JsonObject,
   scanDir: string | undefined,
   environment: ProcessEnvironment,
-): string[] {
+): { model: string[]; nested: string[] } {
   const selected = resolveCodexProfile(config);
-  const paths = MODEL_FILE_SETTINGS.map((key) => selected[key]);
-  for (const [object, key] of nestedConfigPathEntries(selected))
-    paths.push(object[key]);
-  return paths.flatMap((path) => {
+  function resolvePath(path: unknown) {
     if (typeof path !== "string" || !path) return [];
     if (!scanDir && !isAbsolute(expandHome(path, environment))) return [];
     return [resolveInputPath(path, scanDir, environment)];
-  });
+  }
+  return {
+    model: MODEL_FILE_SETTINGS.flatMap((key) => resolvePath(selected[key])),
+    nested: [...nestedConfigPathEntries(selected)].flatMap(([object, key]) =>
+      resolvePath(object[key]),
+    ),
+  };
 }
 
 export async function executableSourceRoots(
