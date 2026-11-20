@@ -639,6 +639,7 @@ async function credentialPointerFiles(
       join(".docker", "config.json"),
       join(".kube", "config"),
       ".npmrc",
+      ".pypirc",
     ])
       selectFile(home, file);
     for (const { defaultPath, path } of awsProfileFiles(home, environment)) {

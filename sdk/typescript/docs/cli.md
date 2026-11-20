@@ -3096,7 +3096,7 @@ selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
 URL-specific values. Delegates also have deny rules for the account's `.ssh`
 directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
-`.kube/config`, and `.npmrc`. The rules cover the home-directory defaults
+`.kube/config`, `.npmrc`, and `.pypirc`. The rules cover home-directory defaults
 and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. They protect
 `auth.json`, `.credentials.json`, and
