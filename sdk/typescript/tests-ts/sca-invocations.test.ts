@@ -1,24 +1,12 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { runOsvScan, type OsvScanResult } from "../src/sca-osv.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
-  );
-});
+const { create: temporaryDirectory, cleanup } =
+  createTemporaryDirectories(true);
+afterEach(cleanup);
 const lockfile = (local = false) =>
   JSON.stringify({
     lockfileVersion: 3,
@@ -30,10 +18,7 @@ const lockfile = (local = false) =>
     },
   });
 async function setup(paths: string[], local = false) {
-  const root = await realpath(
-    await mkdtemp(join(tmpdir(), "sca-invocations-")),
-  );
-  directories.push(root);
+  const root = await temporaryDirectory("sca-invocations-");
   const repository = join(root, "repository, with commas");
   const output = join(root, "output");
   for (const path of paths) {
