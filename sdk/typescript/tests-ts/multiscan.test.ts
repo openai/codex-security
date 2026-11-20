@@ -1860,12 +1860,35 @@ function commitFixture(repo: string, message: string) {
   );
 }
 
-function savedCampaign(
+async function completedCampaign(
   paths: CampaignPaths,
   overrides: Partial<MultiscanOptions> = {},
+  scan: SecurityClient["run"] = completeRun,
 ) {
-  const runs = mock(completeRun);
-  return { runs, campaign: options(paths, client(runs), overrides) };
+  const runs = mock(scan);
+  const request = options(paths, client(runs), overrides);
+  const run = () => runMultiscan(request);
+  const initial = await run();
+  expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+  const { resultsPath } = initial;
+  const ledger = await readFile(resultsPath);
+  async function expectUnchanged() {
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect(await readFile(resultsPath)).toEqual(ledger);
+  }
+  return {
+    run,
+    runs,
+    resultsPath,
+    async expectReused() {
+      expect(await run()).toMatchObject({ completed: 1, skipped: 1 });
+      await expectUnchanged();
+    },
+    async expectRejected(expected?: string | typeof Error) {
+      await expect(run()).rejects.toThrow(expected);
+      await expectUnchanged();
+    },
+  };
 }
 
 function cloneRetained(
@@ -1883,9 +1906,15 @@ async function cloneWithoutScope(paths: CampaignPaths, source: CampaignSource) {
   return checkout;
 }
 
-function interruptCampaign(paths: CampaignPaths) {
+function interruptCampaign(
+  paths: CampaignPaths,
+  overrides: Partial<MultiscanOptions> = {},
+) {
   return runMultiscan(
-    options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    options(paths, client(rejecting("Interrupted")), {
+      ...overrides,
+      maxAttempts: 1,
+    }),
   );
 }
 
@@ -1894,36 +1923,16 @@ async function completedRetry(
   overrides: Partial<MultiscanOptions> = {},
   run: SecurityClient["run"] = completeRun,
 ) {
-  await runMultiscan(
-    options(paths, client(rejecting("Interrupted")), {
-      ...overrides,
-      maxAttempts: 1,
-    }),
+  await interruptCampaign(paths, overrides);
+  return completedCampaign(
+    paths,
+    { ...overrides, recoverScan: async () => undefined },
+    run,
   );
-  const runs = mock(run);
-  const campaign = options(paths, client(runs), {
-    ...overrides,
-    recoverScan: async () => undefined,
-  });
-  const initial = await expectScanned(campaign);
-  return { campaign, runs, initial };
 }
 
 function recoveryCheckout(paths: CampaignPaths) {
   return join(paths.output, "recovery-checkouts", "repo", "attempt-2");
-}
-
-async function expectScanned(campaign: MultiscanOptions) {
-  const summary = await runMultiscan(campaign);
-  expect(summary).toMatchObject({ completed: 1, skipped: 0 });
-  return summary;
-}
-
-async function expectReused(campaign: MultiscanOptions) {
-  expect(await runMultiscan(campaign)).toMatchObject({
-    completed: 1,
-    skipped: 1,
-  });
 }
 
 async function pinRecoveryTask(
@@ -1936,6 +1945,7 @@ async function pinRecoveryTask(
   commitFixture(source.path, message);
   const revision = git(source.path, "rev-parse", "HEAD");
   await writeRecoveryTask(paths, source, scope, revision);
+  return revision;
 }
 
 test("qualified campaign reuses a completed recovery checkout", async () => {
@@ -1944,12 +1954,10 @@ test("qualified campaign reuses a completed recovery checkout", async () => {
   const originalCheckout = join(paths.output, "checkouts", "repo");
   git(paths.root, "clone", "--quiet", source.path, originalCheckout);
   const originalIdentity = await lstat(originalCheckout);
-  const { runs, campaign } = savedCampaign(paths, {
+  const campaign = await completedCampaign(paths, {
     recoverScan: async () => undefined,
   });
-  await expectScanned(campaign);
-  await expectReused(campaign);
-  expect(runs).toHaveBeenCalledTimes(1);
+  await campaign.expectReused();
   const retainedIdentity = await lstat(originalCheckout);
   expect([retainedIdentity.dev, retainedIdentity.ino]).toEqual([
     originalIdentity.dev,
@@ -1960,14 +1968,15 @@ test("qualified campaign reuses a completed recovery checkout", async () => {
 for (const target of [["src"], ["src", "src/app.ts"]]) {
   test(`qualified campaign retains configured scopes ${target.join(",")}`, async () => {
     const { paths } = await repositoryFixture("configured-source", "repo");
-    const runs = mock(completedConfiguredPaths);
-    const campaign = options(paths, client(runs), {
-      scanOptionsByMode: { standard: { target } },
-    });
-    await runMultiscan(campaign);
-    expect(runs.mock.calls[0]![1]!.target).toEqual(target);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    const campaign = await completedCampaign(
+      paths,
+      {
+        scanOptionsByMode: { standard: { target } },
+      },
+      completedConfiguredPaths,
+    );
+    expect(campaign.runs.mock.calls[0]![1]!.target).toEqual(target);
+    await campaign.expectReused();
   });
 }
 
@@ -2163,19 +2172,16 @@ test("qualified campaign replays warnings only from accepted saved attempts", as
 
 test("failed repair preserves the retained checkout and completed receipt", async () => {
   const { paths, source } = await scopedRepository("unavailable-scoped-source");
-  const runs = mock(completeRun);
-  const campaign = options(paths, client(runs), { maxAttempts: 1 });
-  const initial = await runMultiscan(campaign);
-  const ledger = await readFile(initial.resultsPath, "utf8");
+  const campaign = await completedCampaign(paths, {
+    maxAttempts: 1,
+  });
   const checkout = join(paths.output, "checkouts", "repo");
   await mkdir(checkout);
   const marker = join(checkout, "notes.txt");
   await writeFile(marker, "Retained edits.");
   await rename(source.path, join(paths.root, "temporarily-unavailable-source"));
-  await expect(runMultiscan(campaign)).rejects.toThrow();
-  expect(await readFile(initial.resultsPath, "utf8")).toBe(ledger);
+  await campaign.expectRejected();
   expect(await readFile(marker, "utf8")).toBe("Retained edits.");
-  expect(runs).toHaveBeenCalledTimes(1);
 });
 
 for (const spelling of [
@@ -2200,19 +2206,18 @@ for (const spelling of [
         await symlink(paths.output, alias, "dir");
         requested = join(alias, "checkouts", "repo", "src");
       }
-      const runs = mock(
+      const campaign = await completedCampaign(
+        paths,
+        {
+          scanOptionsByMode: { standard: { target: [requested] } },
+        },
         async (checkout: string, settings: ScanSettings = {}) => {
           const result = await completedConfiguredPaths(checkout, settings);
           expect(result.manifest.scan.scope.includePaths).toEqual(["src"]);
           return result;
         },
       );
-      const campaign = options(paths, client(runs), {
-        scanOptionsByMode: { standard: { target: [requested] } },
-      });
-      await expectScanned(campaign);
-      await expectReused(campaign);
-      expect(runs).toHaveBeenCalledTimes(1);
+      await campaign.expectReused();
     },
   );
 }
@@ -2229,15 +2234,10 @@ test("qualified campaign recovers its report from an unrelated Python invocation
   )
     return;
   const { paths } = await repositoryFixture("python-invocation-source", "repo");
-  const runs = mock(completeRun);
-  const campaign = options(paths, client(runs), {
+  const campaign = await completedCampaign(paths, {
     config: { pythonPath: PYTHON },
   });
-  const initial = await runMultiscan(campaign);
-  const ledger = await readFile(initial.resultsPath, "utf8");
-  await expectReused(campaign);
-  expect(await readFile(initial.resultsPath, "utf8")).toBe(ledger);
-  expect(runs).toHaveBeenCalledTimes(1);
+  await campaign.expectReused();
 });
 
 testPosix(
@@ -2250,10 +2250,8 @@ testPosix(
     commitFixture(source.path, "add checkout-relative scope alias");
     const revision = git(source.path, "rev-parse", "HEAD");
     await writeRecoveryTask(paths, source, "alias", revision);
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    const campaign = await completedCampaign(paths);
+    await campaign.expectReused();
   },
 );
 
@@ -2265,10 +2263,9 @@ testPosix(
       "repo",
     );
     await interruptCampaign(paths);
-    const { runs, campaign } = savedCampaign(paths, {
+    const campaign = await completedCampaign(paths, {
       recoverScan: async () => undefined,
     });
-    await expectScanned(campaign);
     const taskRoot = join(paths.output, "recovery-checkouts", "repo");
     // Recreate the owned checkout retained by interruption after receipt publication.
     git(
@@ -2283,9 +2280,8 @@ testPosix(
     await symlink(retained, taskRoot, "dir");
     const marker = join(retained, "attempt-2", "retained.txt");
     await writeFile(marker, "retained recovery checkout\n");
-    await expectReused(campaign);
+    await campaign.expectReused();
     expect(await readFile(marker, "utf8")).toBe("retained recovery checkout\n");
-    expect(runs).toHaveBeenCalledTimes(1);
   },
 );
 
@@ -2322,9 +2318,10 @@ for (const section of ["rootCause", "validation", "attackPath"] as const) {
   for (const catalog of catalogs) {
     test(`reuses legacy ${section} references with ${catalog} evidence catalog`, async () => {
       const { paths } = await repositoryFixture("legacy-reference", "repo");
-      const { runs, campaign } = savedCampaign(paths);
-      const first = await expectScanned(campaign);
-      const dir = (await results(first.resultsPath))[0]!["outputDir"] as string;
+      const campaign = await completedCampaign(paths);
+      const dir = (await results(campaign.resultsPath))[0]![
+        "outputDir"
+      ] as string;
       const path = join(dir, "findings.json");
       const saved = JSON.parse(
         await readFile(path, "utf8"),
@@ -2361,8 +2358,7 @@ for (const section of ["rootCause", "validation", "attackPath"] as const) {
       expect(loaded[section]).toEqual(finding[section]);
       expect(loaded.code_evidence).toEqual(finding.code_evidence);
       const bytes = await readFile(path);
-      await expectReused(campaign);
-      expect(runs).toHaveBeenCalledTimes(1);
+      await campaign.expectReused();
       expect(await readFile(path)).toEqual(bytes);
     });
   }
@@ -2389,10 +2385,8 @@ for (const spelling of [
       commitFixture(source.path, "add supported scope link");
       const revision = git(source.path, "rev-parse", "HEAD");
       await writeRecoveryTask(paths, source, "alias", revision);
-      const { runs, campaign } = savedCampaign(paths);
-      await expectScanned(campaign);
-      await expectReused(campaign);
-      expect(runs).toHaveBeenCalledTimes(1);
+      const campaign = await completedCampaign(paths);
+      await campaign.expectReused();
     },
   );
 }
@@ -2401,12 +2395,10 @@ test("original coordinates reuse an existing pinned scope checkout without refet
   const { paths, source } = await scopedRepository(
     "retained-coordinate-source",
   );
-  const { runs, campaign } = savedCampaign(paths);
-  await expectScanned(campaign);
+  const campaign = await completedCampaign(paths);
   cloneRetained(paths, source);
   await rename(source.path, join(paths.root, "temporarily-unavailable-source"));
-  await expectReused(campaign);
-  expect(runs).toHaveBeenCalledTimes(1);
+  await campaign.expectReused();
 });
 
 (process.platform === "win32" ? test : test.skip)(
@@ -2419,10 +2411,8 @@ test("original coordinates reuse an existing pinned scope checkout without refet
       mode: 0o700,
     });
     await writeRecoveryTask(paths, source, "src");
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    const campaign = await completedCampaign(paths);
+    await campaign.expectReused();
   },
 );
 
@@ -2440,12 +2430,10 @@ test("original coordinates reuse an existing pinned scope checkout without refet
     });
     await writeRecoveryTask(paths, source, "src");
     await interruptCampaign(paths);
-    const { runs, campaign } = savedCampaign(paths, {
+    const campaign = await completedCampaign(paths, {
       recoverScan: async () => undefined,
     });
-    await expectScanned(campaign);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    await campaign.expectReused();
   },
 );
 
@@ -2455,14 +2443,9 @@ for (const recovery of [false, true]) {
       const { paths, source } = await scopedRepository(
         "partial-checkout-source",
       );
-      if (recovery) await interruptCampaign(paths);
-      const runs = mock(completeRun);
-      const campaign = options(
-        paths,
-        client(runs),
-        recovery ? { recoverScan: async () => undefined } : {},
-      );
-      await expectScanned(campaign);
+      const campaign = recovery
+        ? await completedRetry(paths)
+        : await completedCampaign(paths);
       const checkout = recovery
         ? recoveryCheckout(paths)
         : join(paths.output, "checkouts", "repo");
@@ -2474,8 +2457,7 @@ for (const recovery of [false, true]) {
       }
       const retained = join(checkout, "retained.txt");
       await writeFile(retained, "Preserved interrupted checkout data.\n");
-      await expectReused(campaign);
-      expect(runs).toHaveBeenCalledTimes(1);
+      await campaign.expectReused();
       if (recovery)
         expect(await readFile(retained, "utf8")).toBe(
           "Preserved interrupted checkout data.\n",
@@ -2501,7 +2483,7 @@ testPosix.each(["source", "campaign"] as const)(
     );
     expect((await lstat(interpreter)).isFile()).toBe(true);
     await writeRecoveryTask(paths, source);
-    const runs = mock(async (checkout: string, settings: ScanSettings = {}) => {
+    const run = async (checkout: string, settings: ScanSettings = {}) => {
       const selected = await runtime.resolvePluginPythonCommand({
         configuredPath: interpreter,
         protectedRoot: checkout,
@@ -2509,29 +2491,25 @@ testPosix.each(["source", "campaign"] as const)(
       });
       expect(selected.executable).toBe(interpreter);
       return completedScan(settings.outputDir!, "complete", checkout);
-    });
-    const campaign = options(paths, client(runs), {
-      config: { pythonPath: interpreter },
-    });
+    };
+    const overrides = { config: { pythonPath: interpreter } };
     if (location === "source") {
-      const result = await runMultiscan(campaign);
+      const result = await runMultiscan(options(paths, client(run), overrides));
       expect(result).toMatchObject({ completed: 0, failed: 1 });
       expect((await results(result.resultsPath))[0]?.["error"]).toContain(
         "configured plugin Python interpreter is unavailable",
       );
       return;
     }
-    await expectScanned(campaign);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    const campaign = await completedCampaign(paths, overrides, run);
+    await campaign.expectReused();
   },
 );
 
 for (const binding of ["gitfile", "worktree", "common", "objects"] as const) {
   test(`retained Git bindings keep ${binding} writes inside the campaign checkout`, async () => {
     const { paths, source } = await scopedRepository("retained-binding-source");
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     const outside = await repository(paths.root, "other-owned-repository");
     await writeFile(
       join(outside.path, "retained-marker.txt"),
@@ -2569,12 +2547,11 @@ for (const binding of ["gitfile", "worktree", "common", "objects"] as const) {
         "junction",
       );
     }
-    await expect(runMultiscan(campaign)).rejects.toThrow();
+    await campaign.expectRejected();
     expect(git(outside.path, "rev-parse", "HEAD")).toBe(originalHead);
     expect(
       await readFile(join(outside.path, "retained-marker.txt"), "utf8"),
     ).toBe(originalFiles);
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 
@@ -2588,7 +2565,7 @@ for (const complete of [true, false]) {
       const outside = join(paths.root, "other-recovery-parent");
       const retained = join(outside, "retained-attempt");
       await mkdir(outside);
-      const { campaign, runs, initial } = await completedRetry(
+      const campaign = await completedRetry(
         paths,
         {},
         async (checkout, settings = {}) => {
@@ -2598,7 +2575,6 @@ for (const complete of [true, false]) {
           return result;
         },
       );
-      const ledger = await readFile(initial.resultsPath);
       if (!complete) {
         await rm(
           join(
@@ -2617,14 +2593,12 @@ for (const complete of [true, false]) {
         parent,
         process.platform === "win32" ? "junction" : "dir",
       );
-      await expect(runMultiscan(campaign)).rejects.toThrow("symbolic links");
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      await campaign.expectRejected("symbolic links");
       expect(await readdir(outside)).toEqual(["retained-attempt"]);
       expect(git(retained, "rev-parse", "HEAD")).toBe(source.revision);
       expect(await readFile(join(retained, "local.txt"), "utf8")).toBe(
         "retained data\n",
       );
-      expect(runs).toHaveBeenCalledTimes(1);
     },
   );
 }
@@ -2632,8 +2606,7 @@ for (const complete of [true, false]) {
 for (const entry of ["config", "FETCH_HEAD", "logs/HEAD", "logs"] as const) {
   test(`recovery refuses a linked Git ${entry} before external bytes change`, async () => {
     const { paths, source } = await scopedRepository("metadata-source");
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     const checkout = await cloneWithoutScope(paths, source);
     const outside = await repository(paths.root, "other-metadata-repository");
     git(outside.path, "config", "core.filemode", "false");
@@ -2645,17 +2618,15 @@ for (const entry of ["config", "FETCH_HEAD", "logs/HEAD", "logs"] as const) {
     const local = join(checkout, ".git", entry);
     await rm(local, { recursive: true, force: true });
     await symlink(target, local, entry === "logs" ? "junction" : undefined);
-    await expect(runMultiscan(campaign)).rejects.toThrow();
+    await campaign.expectRejected();
     expect(await readFile(sentinel)).toEqual(bytes);
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 
 for (const partial of [false, true, "refs", "blob", "tree", "umask"] as const) {
   test(`metadata recovery restores an interrupted repository with removed metadata=${partial}`, async () => {
     const { paths, source } = await scopedRepository("partial-metadata-source");
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     const checkout = join(paths.output, "checkouts", "repo");
     const previousUmask = process.umask();
     if (partial === "umask") process.umask(0o002);
@@ -2686,7 +2657,7 @@ for (const partial of [false, true, "refs", "blob", "tree", "umask"] as const) {
         join(checkout, "retained.txt"),
         "Preserve interrupted data.\n",
       );
-      await expectReused(campaign);
+      await campaign.expectReused();
       expect(
         await realpath(git(checkout, "rev-parse", "--show-toplevel")),
       ).toBe(await realpath(checkout));
@@ -2694,7 +2665,6 @@ for (const partial of [false, true, "refs", "blob", "tree", "umask"] as const) {
       expect(git(checkout, "show", ":src/app.ts")).toBe(
         git(source.path, "show", "HEAD:src/app.ts"),
       );
-      expect(runs).toHaveBeenCalledTimes(1);
     } finally {
       process.umask(previousUmask);
     }
@@ -2714,11 +2684,8 @@ for (const modified of [
       join(source.path, "README.md"),
       "Original tracked notes.\n",
     );
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Tracked notes");
-    source.revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src");
-    const { runs, campaign } = await completedRetry(paths);
+    await pinRecoveryTask(paths, source, "Tracked notes", "src");
+    const campaign = await completedRetry(paths);
     const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     const expectedApp = await readFile(join(checkout, "src", "app.ts"));
     await rm(join(checkout, "src"), { recursive: true });
@@ -2734,7 +2701,7 @@ for (const modified of [
       join(checkout, "retained.txt"),
       "Preserve untracked recovery data.\n",
     );
-    await expectReused(campaign);
+    await campaign.expectReused();
     if (modified === "deleted" || modified === "deleted-missing-index")
       await expect(lstat(join(checkout, "README.md"))).rejects.toMatchObject({
         code: "ENOENT",
@@ -2747,7 +2714,6 @@ for (const modified of [
     expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
       expectedApp,
     );
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 
@@ -2758,11 +2724,13 @@ test.each(["missing HEAD", "skip-worktree"])(
     const source = await repository(paths.root, "retained-index-source");
     await writeFile(join(source.path, "deleted.txt"), "Tracked file");
     await writeFile(join(source.path, "edited.txt"), "Original content");
-    git(source.path, "add", ".");
-    commitFixture(source.path, "Tracked files outside the scope");
-    source.revision = git(source.path, "rev-parse", "HEAD");
-    await writeRecoveryTask(paths, source, "src");
-    const { runs, campaign } = await completedRetry(paths);
+    source.revision = await pinRecoveryTask(
+      paths,
+      source,
+      "Tracked files outside the scope",
+      "src",
+    );
+    const campaign = await completedRetry(paths);
     const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     git(checkout, "rm", "deleted.txt");
     await writeFile(join(checkout, "edited.txt"), "Staged edit");
@@ -2776,7 +2744,7 @@ test.each(["missing HEAD", "skip-worktree"])(
     const expected = await readFile(app);
     await rm(join(checkout, "src"), { recursive: true });
 
-    await expectReused(campaign);
+    await campaign.expectReused();
 
     expect(await readFile(index)).toEqual(saved);
     expect(git(checkout, "rev-parse", "HEAD")).toBe(source.revision);
@@ -2787,7 +2755,6 @@ test.each(["missing HEAD", "skip-worktree"])(
     expect(await readFile(join(checkout, "edited.txt"), "utf8")).toBe(
       "Staged edit",
     );
-    expect(runs).toHaveBeenCalledTimes(1);
   },
 );
 
@@ -2809,11 +2776,13 @@ for (const nested of [false, true, "chain"] as const) {
       if (nested === "chain")
         await symlink("src", join(source.path, "middle"), "dir");
       await symlink("src", join(source.path, "unrelated-alias"), "dir");
-      git(source.path, "add", ".");
-      commitFixture(source.path, "Tracked notes");
-      source.revision = git(source.path, "rev-parse", "HEAD");
-      await writeRecoveryTask(paths, source, nested ? "alias/app.ts" : "alias");
-      const { runs, campaign } = await completedRetry(paths);
+      await pinRecoveryTask(
+        paths,
+        source,
+        "Tracked notes",
+        nested ? "alias/app.ts" : "alias",
+      );
+      const campaign = await completedRetry(paths);
       const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       await rm(join(checkout, "alias"));
       if (nested === "chain") await rm(join(checkout, "middle"));
@@ -2823,7 +2792,7 @@ for (const nested of [false, true, "chain"] as const) {
         join(checkout, "retained.txt"),
         "Preserve untracked recovery data.\n",
       );
-      await expectReused(campaign);
+      await campaign.expectReused();
       await expect(lstat(join(checkout, "README.md"))).rejects.toMatchObject({
         code: "ENOENT",
       });
@@ -2839,7 +2808,6 @@ for (const nested of [false, true, "chain"] as const) {
       await expect(
         lstat(join(checkout, "unrelated-alias")),
       ).rejects.toMatchObject({ code: "ENOENT" });
-      expect(runs).toHaveBeenCalledTimes(1);
     },
   );
 }
@@ -2859,12 +2827,9 @@ test("followup recovery restores deleted paths above the default subprocess buff
   commitFixture(source.path, "Add realistic long tracked paths");
   const revision = git(source.path, "rev-parse", "HEAD");
   await writeRecoveryTask(paths, source, "src", revision);
-  const { runs, campaign } = savedCampaign(paths);
-  await expectScanned(campaign);
+  const campaign = await completedCampaign(paths);
   await cloneWithoutScope(paths, source);
-  await expectReused(campaign);
-
-  expect(runs).toHaveBeenCalledTimes(1);
+  await campaign.expectReused();
 });
 
 for (const entry of ["index", "shallow"] as const) {
@@ -2877,8 +2842,7 @@ for (const entry of ["index", "shallow"] as const) {
       "export const pinned = true;\n",
     );
     await pinRecoveryTask(paths, source, "Advance pinned state", "src");
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     const checkout = join(paths.output, "checkouts", "repo");
     const outside = join(paths.root, "other-index-checkout");
     git(paths.root, "clone", "--quiet", source.path, outside);
@@ -2892,22 +2856,17 @@ for (const entry of ["index", "shallow"] as const) {
     await rm(join(checkout, "src"), { recursive: true });
     await rm(join(checkout, ".git", entry), { force: true });
     await symlink(destination, join(checkout, ".git", entry));
-    await expect(runMultiscan(campaign)).rejects.toThrow();
+    await campaign.expectRejected();
     expect(await readFile(destination)).toEqual(bytes);
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 
 test("final native recovery restores a locally pinned commit with an unavailable source", async () => {
   const { paths, source } = await scopedRepository("local-pinned-source");
-  const { runs, campaign } = savedCampaign(paths);
-  const initial = await runMultiscan(campaign);
-  const before = await readFile(initial.resultsPath);
+  const campaign = await completedCampaign(paths);
   await cloneWithoutScope(paths, source);
   await rename(source.path, join(paths.root, "moved-pinned-source"));
-  await expectReused(campaign);
-  expect(runs).toHaveBeenCalledTimes(1);
-  expect(await readFile(initial.resultsPath)).toEqual(before);
+  await campaign.expectReused();
 });
 
 (process.platform === "darwin" ? test.skip : testPosix)(
@@ -2922,12 +2881,10 @@ test("final native recovery restores a locally pinned commit with an unavailable
       Buffer.concat([Buffer.from(join(root, "src") + sep), suffix]);
     await writeFile(bytePath(source.path), "Synthetic bytes.\n");
     await pinRecoveryTask(paths, source, "Byte-valued tracked path", "src");
-    const { runs, campaign } = savedCampaign(paths);
-    await runMultiscan(campaign);
+    const campaign = await completedCampaign(paths);
     await cloneWithoutScope(paths, source);
 
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    await campaign.expectReused();
   },
 );
 
@@ -2940,21 +2897,22 @@ testPosix(
     await symlink(python, join(source.path, "python-alias"));
     await pinRecoveryTask(paths, source, "Tracked interpreter alias", "src");
     const alias = join(paths.output, "checkouts", "repo", "python-alias");
-    const runs = mock(async (checkout: string, settings: ScanSettings = {}) => {
-      const selected = await runtime.resolvePluginPythonCommand({
-        configuredPath: alias,
-        protectedRoot: checkout,
-        environment: runtime.pluginHelperEnvironment(process.env),
-      });
-      expect(selected.executable).toBe(python);
-      return completedScan(settings.outputDir!, "complete", checkout);
-    });
-    const campaign = options(paths, client(runs), {
-      config: { pythonPath: alias },
-    });
-    await expectScanned(campaign);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    const campaign = await completedCampaign(
+      paths,
+      {
+        config: { pythonPath: alias },
+      },
+      async (checkout: string, settings: ScanSettings = {}) => {
+        const selected = await runtime.resolvePluginPythonCommand({
+          configuredPath: alias,
+          protectedRoot: checkout,
+          environment: runtime.pluginHelperEnvironment(process.env),
+        });
+        expect(selected.executable).toBe(python);
+        return completedScan(settings.outputDir!, "complete", checkout);
+      },
+    );
+    await campaign.expectReused();
   },
 );
 
@@ -2962,17 +2920,15 @@ test.each(["FETCH_HEAD", "logs/HEAD"])(
   "recovery refuses a hardlinked %s before external bytes change",
   async (entry) => {
     const { paths, source } = await scopedRepository("hardlinked-fetch-source");
-    const { runs, campaign } = savedCampaign(paths);
-    await runMultiscan(campaign);
+    const campaign = await completedCampaign(paths);
     const outside = join(paths.root, "external-fetch-head");
     await writeFile(outside, "Preserve synthetic metadata.\n");
     const before = await readFile(outside);
     const checkout = await cloneWithoutScope(paths, source);
     await rm(join(checkout, ".git", entry), { force: true });
     await link(outside, join(checkout, ".git", entry));
-    await expect(runMultiscan(campaign)).rejects.toThrow();
+    await campaign.expectRejected();
     expect(await readFile(outside)).toEqual(before);
-    expect(runs).toHaveBeenCalledTimes(1);
   },
 );
 
@@ -2987,8 +2943,7 @@ test("final native recovery refuses a linked pack directory before fetching miss
       `export const object${i} = ${i};\n`,
     );
   await pinRecoveryTask(paths, source, "Pinned packed objects", "src");
-  const { runs, campaign } = savedCampaign(paths);
-  await runMultiscan(campaign);
+  const campaign = await completedCampaign(paths);
   const outside = join(paths.root, "external-packs");
   await mkdir(outside);
   const checkout = join(paths.output, "checkouts", "repo");
@@ -2999,9 +2954,8 @@ test("final native recovery refuses a linked pack directory before fetching miss
     force: true,
   });
   await symlink(outside, join(checkout, ".git", "objects", "pack"), "junction");
-  await expect(runMultiscan(campaign)).rejects.toThrow();
+  await campaign.expectRejected();
   expect(await readdir(outside)).toEqual([]);
-  expect(runs).toHaveBeenCalledTimes(1);
 });
 
 for (const selection of [
@@ -3057,7 +3011,12 @@ for (const selection of [
           PYTHON: selection === "padded" ? alias + " " : alias,
         }),
       };
-      const runs = mock(
+      const campaign = await completedCampaign(
+        paths,
+        {
+          environment,
+          config: inherited ? {} : { pythonPath: alias },
+        },
         async (checkout: string, settings: ScanSettings = {}) => {
           const selected = await runtime.resolvePluginPythonCommand({
             configuredPath: inherited ? undefined : alias,
@@ -3068,15 +3027,6 @@ for (const selection of [
           return completedScan(settings.outputDir!, "complete", checkout);
         },
       );
-      const campaign = options(paths, client(runs), {
-        environment,
-        config: inherited ? {} : { pythonPath: alias },
-      });
-      const initialSummary = await runMultiscan(campaign);
-      expect(initialSummary).toMatchObject({
-        completed: 1,
-        skipped: 0,
-      });
       if (selection === "chain") {
         const checkout = cloneRetained(paths, source);
         await rm(join(checkout, "middle"));
@@ -3090,8 +3040,7 @@ for (const selection of [
         await rm(alias);
         await writeFile(alias + " ", "Ordinary file.\n", { mode: 0o600 });
       }
-      await expectReused(campaign);
-      expect(runs).toHaveBeenCalledTimes(1);
+      await campaign.expectReused();
     },
   );
 }
@@ -3117,8 +3066,7 @@ for (const [entry, removeHead] of [
     const revision = git(source.path, "rev-parse", "HEAD");
     const object = git(source.path, "rev-parse", "HEAD:src/later.ts");
     await writeRecoveryTask(paths, source, "src", revision);
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     const checkout = join(paths.output, "checkouts", "repo");
     await rename(interrupted, checkout);
     await rm(join(checkout, "src"), { recursive: true });
@@ -3131,15 +3079,10 @@ for (const [entry, removeHead] of [
     await rm(destination, { recursive: true, force: true });
     await symlink(outside, destination, "junction");
     if (removeHead) await rm(join(checkout, ".git", "HEAD"));
-    let failed = false;
-    try {
-      await runMultiscan(campaign);
-    } catch {
-      failed = true;
-    }
+    if (entry === "refs" || entry === "loose-object")
+      await campaign.expectRejected();
+    else await campaign.expectReused();
     expect(await readdir(outside)).toEqual([]);
-    expect(failed).toBe(entry === "refs" || entry === "loose-object");
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 
@@ -3151,8 +3094,8 @@ test("retained scope recovery rejects mismatched artifacts without resurrecting 
     "Synthetic retained notes.\n",
   );
   await pinRecoveryTask(paths, source, "Tracked notes", "src");
-  const { runs, campaign, initial: first } = await completedRetry(paths);
-  const receipt = (await results(first.resultsPath)).find(
+  const campaign = await completedRetry(paths);
+  const receipt = (await results(campaign.resultsPath)).find(
     (entry) => entry["status"] === "completed",
   );
   const outputDir = receipt!["outputDir"] as string;
@@ -3168,11 +3111,11 @@ test("retained scope recovery rejects mismatched artifacts without resurrecting 
   const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
   await rm(join(checkout, "src"), { recursive: true });
   await rm(join(checkout, "README.md"));
-  await expectScanned(campaign);
+  expect(await campaign.run()).toMatchObject({ completed: 1, skipped: 0 });
   await expect(lstat(join(checkout, "README.md"))).rejects.toMatchObject({
     code: "ENOENT",
   });
-  expect(runs).toHaveBeenCalledTimes(2);
+  expect(campaign.runs).toHaveBeenCalledTimes(2);
 });
 
 async function completedConfiguredPaths(
@@ -3214,17 +3157,16 @@ for (const selection of ["root", "parent alias"] as const) {
       selection === "root"
         ? [".", "src/app.ts"]
         : [join(parentAlias, "checkouts", "repo", "src", "app.ts")];
-    const runs = mock(completedConfiguredPaths);
-    const campaign = options(paths, client(runs), {
-      scanOptionsByMode: { standard: { target } },
-    });
-    const initial = await expectScanned(campaign);
-    const ledger = await readFile(initial.resultsPath);
+    const campaign = await completedCampaign(
+      paths,
+      {
+        scanOptionsByMode: { standard: { target } },
+      },
+      completedConfiguredPaths,
+    );
     const checkout = cloneRetained(paths, source);
     await rm(join(checkout, "src", "app.ts"));
-    await expectReused(campaign);
-    expect(await readFile(initial.resultsPath)).toEqual(ledger);
-    expect(runs).toHaveBeenCalledTimes(1);
+    await campaign.expectReused();
   });
 }
 for (const missingAncestor of [false, true]) {
@@ -3237,9 +3179,7 @@ for (const missingAncestor of [false, true]) {
       "Current pinned content.\n",
     );
     await pinRecoveryTask(paths, source, "Current pinned snapshot", "src");
-    const { runs, campaign } = savedCampaign(paths);
-    const initial = await expectScanned(campaign);
-    const ledger = await readFile(initial.resultsPath);
+    const campaign = await completedCampaign(paths);
     const checkout = await cloneWithoutScope(paths, source);
     if (missingAncestor)
       await rm(
@@ -3252,9 +3192,7 @@ for (const missingAncestor of [false, true]) {
         ),
       );
     await rename(source.path, join(paths.root, "unavailable-source"));
-    await expectReused(campaign);
-    expect(await readFile(initial.resultsPath)).toEqual(ledger);
-    expect(runs).toHaveBeenCalledTimes(1);
+    await campaign.expectReused();
   });
 }
 test("final snapshot recovery skips a sealed report's unavailable interpreter ancestor", async () => {
@@ -3262,37 +3200,36 @@ test("final snapshot recovery skips a sealed report's unavailable interpreter an
   const parent = join(paths.root, "python-parent");
   await mkdir(parent);
   const interpreter = join(parent, "bin", "python");
-  const runs = mock(async (checkout: string, settings: ScanSettings = {}) => {
-    const result = await completedScan(
-      settings.outputDir!,
-      "complete",
-      checkout,
-    );
-    result.manifest.scan.artifacts.push({
-      path: "report.md",
-      sha256: "0".repeat(64),
-      mediaType: "text/markdown",
-    });
-    await writeFile(
-      join(settings.outputDir!, "scan-manifest.json"),
-      JSON.stringify(result.manifest),
-    );
-    await reseal(settings.outputDir!);
-    expect(
-      await contract.hasSealedReport(settings.outputDir!, result.manifest),
-    ).toBe(true);
-    return result;
-  });
-  const campaign = options(paths, client(runs), {
-    config: { pythonPath: interpreter },
-  });
-  const initial = await expectScanned(campaign);
-  const ledger = await readFile(initial.resultsPath);
+  const campaign = await completedCampaign(
+    paths,
+    {
+      config: { pythonPath: interpreter },
+    },
+    async (checkout: string, settings: ScanSettings = {}) => {
+      const result = await completedScan(
+        settings.outputDir!,
+        "complete",
+        checkout,
+      );
+      result.manifest.scan.artifacts.push({
+        path: "report.md",
+        sha256: "0".repeat(64),
+        mediaType: "text/markdown",
+      });
+      await writeFile(
+        join(settings.outputDir!, "scan-manifest.json"),
+        JSON.stringify(result.manifest),
+      );
+      await reseal(settings.outputDir!);
+      expect(
+        await contract.hasSealedReport(settings.outputDir!, result.manifest),
+      ).toBe(true);
+      return result;
+    },
+  );
   await rm(parent, { recursive: true });
   await writeFile(parent, "Ancestor is now an ordinary file.\n");
-  await expectReused(campaign);
-  expect(await readFile(initial.resultsPath)).toEqual(ledger);
-  expect(runs).toHaveBeenCalledTimes(1);
+  await campaign.expectReused();
 });
 
 for (const linked of [false, true]) {
@@ -3314,9 +3251,7 @@ for (const linked of [false, true]) {
       "Pinned later source.\n",
     );
     await pinRecoveryTask(paths, source, "Pinned later revision", "src");
-    const { runs, campaign } = savedCampaign(paths);
-    const initial = await expectScanned(campaign);
-    const ledger = await readFile(initial.resultsPath);
+    const campaign = await completedCampaign(paths);
     const checkout = join(paths.output, "checkouts", "repo");
     await rename(interrupted, checkout);
     await rm(join(checkout, "src"), { recursive: true });
@@ -3346,12 +3281,10 @@ for (const linked of [false, true]) {
         await symlink(destinations[i]!, target, "junction");
       }
     }
-    await expectReused(campaign);
+    await campaign.expectReused();
     if (linked)
       for (const destination of destinations)
         expect(await readdir(destination)).toEqual([]);
-    expect(await readFile(initial.resultsPath)).toEqual(ledger);
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 
@@ -3379,18 +3312,14 @@ for (const mode of ["many scopes", "early restore exit"] as const) {
         paths.input,
         `id,repository,revision${mode === "many scopes" ? "" : ",scope"}\nrepo,${source.path},${revision}${mode === "many scopes" ? "" : ",src"}\n`,
       );
-      const runs = mock(
-        mode === "many scopes" ? completedConfiguredPaths : completeRun,
-      );
-      const campaign = options(
-        paths,
-        client(runs),
+      const campaign =
         mode === "many scopes"
-          ? { scanOptionsByMode: { standard: { target: names } } }
-          : {},
-      );
-      const initial = await expectScanned(campaign);
-      const ledger = await readFile(initial.resultsPath);
+          ? await completedCampaign(
+              paths,
+              { scanOptionsByMode: { standard: { target: names } } },
+              completedConfiguredPaths,
+            )
+          : await completedCampaign(paths);
       await cloneWithoutScope(paths, source);
       const previousPath = process.env["PATH"];
       const tools = join(paths.root, "synthetic-tools");
@@ -3413,9 +3342,7 @@ for (const mode of ["many scopes", "early restore exit"] as const) {
           const output = reuse();
           expect(output).toContain("Child failure returned to SDK host 73");
           expect(output).toContain("SDK host remained alive");
-        } else await expectReused(campaign);
-        expect(await readFile(initial.resultsPath)).toEqual(ledger);
-        expect(runs).toHaveBeenCalledTimes(1);
+        } else await campaign.expectReused();
       } finally {
         if (previousPath === undefined) delete process.env["PATH"];
         else process.env["PATH"] = previousPath;
@@ -3433,7 +3360,7 @@ for (const staged of [false, true]) {
       "Synthetic retained readme.\n",
     );
     await pinRecoveryTask(paths, source, "Selected fixture readme");
-    const { runs, campaign, initial } = await completedRetry(
+    const campaign = await completedRetry(
       paths,
       {
         scanOptionsByMode: {
@@ -3442,7 +3369,6 @@ for (const staged of [false, true]) {
       },
       completedConfiguredPaths,
     );
-    const ledger = await readFile(initial.resultsPath);
     const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     const expectedApp = await readFile(join(checkout, "src", "app.ts"));
     const unrelated = join(checkout, "unrelated.txt");
@@ -3480,7 +3406,7 @@ for (const staged of [false, true]) {
       "Preserve staged replacement content.\n",
     );
     const stagedBefore = git(checkout, "diff", "--cached", "--name-only");
-    await expectReused(campaign);
+    await campaign.expectReused();
     expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
       expectedApp,
     );
@@ -3497,8 +3423,6 @@ for (const staged of [false, true]) {
         lstat(join(checkout, "src", "only-at-retained-head.ts")),
       ).rejects.toMatchObject({ code: "ENOENT" });
     }
-    expect(await readFile(initial.resultsPath)).toEqual(ledger);
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 for (const linked of [false, true]) {
@@ -3521,8 +3445,7 @@ for (const linked of [false, true]) {
       paths.input,
       `id,repository,revision,scope\nrepo,${bundle},${revision},src\n`,
     );
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     const checkout = await cloneWithoutScope(paths, source);
     await rm(
       join(checkout, ".git", "objects", blob.slice(0, 2), blob.slice(2)),
@@ -3538,9 +3461,8 @@ for (const linked of [false, true]) {
         "junction",
       );
     }
-    await expectReused(campaign);
+    await campaign.expectReused();
     expect(await readdir(outside)).toEqual([]);
-    expect(runs).toHaveBeenCalledTimes(1);
   });
 }
 (process.platform === "win32" ? test : test.skip)(
@@ -3549,11 +3471,9 @@ for (const linked of [false, true]) {
     const paths = await fixture();
     const source = await repository(paths.root, "case-scope-source");
     await writeRecoveryTask(paths, source, "SRC");
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const campaign = await completedCampaign(paths);
     await cloneWithoutScope(paths, source);
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    await campaign.expectReused();
   },
 );
 (process.platform === "win32" ? test : test.skip)(
@@ -3574,23 +3494,23 @@ for (const linked of [false, true]) {
     );
     await mkdir(outsideParent, { mode: 0o700 });
     git(paths.root, "clone", "--quiet", source.path, outsideCheckout);
-    const runs = mock(async (_checkout: string, settings: ScanSettings = {}) =>
-      completedScan(settings.outputDir!, "complete", outsideCheckout),
+    const campaign = await completedCampaign(
+      paths,
+      {
+        recoverScan: async () => undefined,
+        config,
+      },
+      async (_checkout: string, settings: ScanSettings = {}) =>
+        completedScan(settings.outputDir!, "complete", outsideCheckout),
     );
-    const campaign = options(paths, client(runs), {
-      recoverScan: async () => undefined,
-      config,
-    });
-    await expectScanned(campaign);
     await rename(outsideCheckout, join(outsideParent, "retained-attempt"));
     const lexicalParent = join(paths.output, "recovery-checkouts", "repo");
     await rm(lexicalParent, { recursive: true, force: true });
     await symlink(outsideParent, lexicalParent, "junction");
-    await expect(runMultiscan(campaign)).rejects.toThrow();
+    await campaign.expectRejected();
     await expect(lstat(outsideCheckout)).rejects.toMatchObject({
       code: "ENOENT",
     });
-    expect(runs).toHaveBeenCalledTimes(1);
   },
 );
 
@@ -3672,8 +3592,8 @@ for (const nested of [false, true]) {
       (caseInsensitive ? "ALIAS" : "alias") + (nested ? "/APP.TS" : "");
     const scope = !caseInsensitive && nested ? "alias/app.ts" : requested;
     await writeRecoveryTask(paths, source, scope, revision);
-    const { runs, campaign, initial } = await completedRetry(paths);
-    expect((await results(initial.resultsPath)).at(-1)).toMatchObject({
+    const campaign = await completedRetry(paths);
+    expect((await results(campaign.resultsPath)).at(-1)).toMatchObject({
       status: "completed",
       attempt: 2,
     });
@@ -3695,8 +3615,7 @@ for (const nested of [false, true]) {
       join(checkout, "retained.txt"),
       "Keep unrelated recovery bytes.\n",
     );
-    await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    await campaign.expectReused();
     expect(await readFile(aliasFile)).toEqual(originalBytes);
     expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
       "Keep unrelated recovery bytes.\n",
@@ -3741,26 +3660,27 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
       config: { pythonPath: alias },
     }),
   );
-  const runs = mock(async (root: string, settings: ScanSettings = {}) => {
-    expect(root).toBe(checkout);
-    const selected = await runtime.resolvePluginPythonCommand({
-      configuredPath: alias,
-      protectedRoot: root,
-      environment: runtime.pluginHelperEnvironment(process.env),
-    });
-    expect(await realpath(selected.executable)).toBe(await realpath(PYTHON));
-    return completedScan(settings.outputDir!, "complete", root);
-  });
-  const campaign = options(paths, client(runs), {
-    config: { pythonPath: alias },
-    recoverScan: async () => undefined,
-  });
-  const initial = await runMultiscan(campaign);
-  expect(await results(initial.resultsPath)).toEqual(
+  const campaign = await completedCampaign(
+    paths,
+    {
+      config: { pythonPath: alias },
+      recoverScan: async () => undefined,
+    },
+    async (root: string, settings: ScanSettings = {}) => {
+      expect(root).toBe(checkout);
+      const selected = await runtime.resolvePluginPythonCommand({
+        configuredPath: alias,
+        protectedRoot: root,
+        environment: runtime.pluginHelperEnvironment(process.env),
+      });
+      expect(await realpath(selected.executable)).toBe(await realpath(PYTHON));
+      return completedScan(settings.outputDir!, "complete", root);
+    },
+  );
+  expect(await results(campaign.resultsPath)).toEqual(
     expect.arrayContaining([expect.objectContaining({ status: "completed" })]),
   );
-  expect(initial).toMatchObject({ completed: 1, skipped: 0 });
-  const receipt = (await results(initial.resultsPath)).find(
+  const receipt = (await results(campaign.resultsPath)).find(
     (row) => row["status"] === "completed",
   )!;
   expect(receipt["attempt"]).toBe(2);
@@ -3783,11 +3703,10 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
 
   if (process.platform !== "win32") await rm(join(checkout, "jump"));
   await rm(join(checkout, interpreterPath));
-  await expectReused(campaign);
+  await campaign.expectReused();
   expect(await realpath(join(checkout, interpreterPath))).toBe(
     await realpath(PYTHON),
   );
-  expect(runs).toHaveBeenCalledTimes(1);
   expect(await readFile(marker, "utf8")).toBe("Keep this retained checkout.\n");
   const retainedMarker = await lstat(marker);
   expect([retainedMarker.dev, retainedMarker.ino]).toEqual([
@@ -3811,9 +3730,8 @@ for (const tracked of [false, true]) {
       }
       const revision = git(source.path, "rev-parse", "HEAD");
       await writeRecoveryTask(paths, source, "src", revision);
-      const { runs, campaign, initial } = await completedRetry(paths);
+      const campaign = await completedRetry(paths);
 
-      const ledger = await readFile(initial.resultsPath);
       const checkout = recoveryCheckout(paths);
       await rm(checkout, { recursive: true, force: true });
       git(paths.root, "clone", "--quiet", source.path, checkout);
@@ -3830,20 +3748,10 @@ for (const tracked of [false, true]) {
         { recursive: true },
       );
       if (!allMetadata) await rm(source.path, { recursive: true });
-      let failure: unknown;
-      let summary: unknown;
-      try {
-        summary = await runMultiscan(campaign);
-      } catch (error) {
-        failure = error;
-      }
+      await campaign.expectReused();
       expect(await readFile(join(checkout, "notes.log"), "utf8")).toBe(
         retained,
       );
-      expect(runs).toHaveBeenCalledTimes(1);
-      expect(failure).toBeUndefined();
-      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
       expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
         expectedApp,
       );
@@ -3865,12 +3773,11 @@ for (const missingCode of ["native", "ENOENT"]) {
         "repo",
       );
       const selected = { standard: { target: ["src/app.ts"] } };
-      const { runs, campaign, initial } = await completedRetry(
+      const campaign = await completedRetry(
         paths,
         { scanOptionsByMode: selected },
         completedConfiguredPaths,
       );
-      const ledger = await readFile(initial.resultsPath);
       const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       const expectedApp = await readFile(join(checkout, "src", "app.ts"));
       await rm(join(checkout, "src"), { recursive: true });
@@ -3897,9 +3804,9 @@ for (const missingCode of ["native", "ENOENT"]) {
               }
             }) as typeof filesystem.lstat)
           : undefined;
-      let outcome: unknown;
       try {
-        outcome = await runMultiscan(campaign).catch((error: unknown) => error);
+        if (obstructed) await campaign.expectRejected(Error);
+        else await campaign.expectReused();
       } finally {
         inspect?.mockRestore();
       }
@@ -3907,15 +3814,11 @@ for (const missingCode of ["native", "ENOENT"]) {
         expect(await readFile(join(checkout, "src"), "utf8")).toBe(
           "Preserve retained ancestor contents.\n",
         );
-        expect(outcome).toBeInstanceOf(Error);
       } else {
-        expect(outcome).toMatchObject({ completed: 1, skipped: 1 });
         expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
           expectedApp,
         );
       }
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
-      expect(runs).toHaveBeenCalledTimes(1);
     });
   }
 }
@@ -3981,12 +3884,12 @@ for (const { parentThroughLink, missing, configured = false } of [
           scanOptionsByMode: { standard: { target: [target] } },
         }),
       };
-      const { runs, initial } = await completedRetry(
+      const campaign = await completedRetry(
         paths,
         overrides,
         configured ? completedConfiguredPaths : undefined,
       );
-      const ledger = await readFile(initial.resultsPath);
+      const ledger = await readFile(campaign.resultsPath);
       const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       if (!configured && missing !== "jump") await rm(join(checkout, "alias"));
       if (repeated) await rm(join(checkout, "nested", "deep", "self"));
@@ -4033,14 +3936,14 @@ for (const { parentThroughLink, missing, configured = false } of [
       expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
         "Preserve retained recovery data.\n",
       );
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      expect(await readFile(campaign.resultsPath)).toEqual(ledger);
       if (missing === "nested")
         expect(
           await lstat(join(checkout, "nested", "deep", "keep.ts")).catch(
             () => undefined,
           ),
         ).toBeUndefined();
-      expect(runs).toHaveBeenCalledTimes(1);
+      expect(campaign.runs).toHaveBeenCalledTimes(1);
     },
   );
 }
@@ -4063,12 +3966,11 @@ for (const linked of [false, true]) {
       source.revision = git(source.path, "rev-parse", "HEAD");
       await writeRecoveryTask(paths, source);
       const selected = { standard: { target: ["src", "src/app.ts"] } };
-      const { runs, campaign, initial } = await completedRetry(
+      const campaign = await completedRetry(
         paths,
         { scanOptionsByMode: selected },
         completedConfiguredPaths,
       );
-      const ledger = await readFile(initial.resultsPath);
       const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
       await rm(join(checkout, "src", "app.ts"));
       await rm(join(checkout, "src", "nested", "inside", "keep.ts"));
@@ -4083,7 +3985,7 @@ for (const linked of [false, true]) {
         );
         await symlink("../retained-directory", nested, "dir");
       }
-      await expectReused(campaign);
+      await campaign.expectReused();
       expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
         await readFile(join(source.path, "src", "app.ts")),
       );
@@ -4102,8 +4004,6 @@ for (const linked of [false, true]) {
           ),
         );
       }
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
-      expect(runs).toHaveBeenCalledTimes(1);
     },
   );
 }
@@ -4146,12 +4046,9 @@ for (const imported of [false, true]) {
       const previousPath = process.env["PATH"];
       process.env["PATH"] = `${tools}${delimiter}${previousPath ?? ""}`;
       try {
-        const { runs, campaign } = savedCampaign(paths, {
+        const campaign = await completedCampaign(paths, {
           recoverScan: async () => undefined,
         });
-        const initial = await runMultiscan(campaign);
-        expect(initial).toMatchObject({ completed: 1, skipped: 0 });
-        const ledger = await readFile(initial.resultsPath);
         execFileSync(original!.executable, [
           "clone",
           "--quiet",
@@ -4160,7 +4057,7 @@ for (const imported of [false, true]) {
         ]);
         await rm(marker, { force: true });
         await rm(join(checkout, "src"), { recursive: true });
-        await expectReused(campaign);
+        await campaign.expectReused();
         const invoked = await readFile(marker, "utf8").catch(
           (error: NodeJS.ErrnoException) => {
             if (error.code === "ENOENT") return "";
@@ -4168,8 +4065,6 @@ for (const imported of [false, true]) {
           },
         );
         expect(invoked.length > 0).toBe(!imported);
-        expect(runs).toHaveBeenCalledTimes(1);
-        expect(await readFile(initial.resultsPath)).toEqual(ledger);
         expect(
           await readFile(join(checkout, "src", "app.ts"), "utf8"),
         ).toContain("selected-git-source");
@@ -4207,19 +4102,18 @@ for (const ignoreCase of [false, true]) {
     commitFixture(source.path, "Synthetic case-distinct path");
     const revision = git(source.path, "rev-parse", "HEAD");
     await writeRecoveryTask(paths, source, "SRC", revision);
-    const { runs, campaign, initial } = await completedRetry(paths);
+    const campaign = await completedRetry(paths);
 
-    expect(await results(initial.resultsPath)).toEqual(
+    expect(await results(campaign.resultsPath)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ status: "completed", resolvedScope: "SRC" }),
       ]),
     );
-    const ledger = await readFile(initial.resultsPath);
     const checkout = cloneRetained(paths, source, recoveryCheckout(paths));
     git(checkout, "config", "core.ignorecase", String(ignoreCase));
     await rm(join(checkout, "src"), { recursive: true, force: true });
     await rm(join(checkout, "SRC"), { recursive: true, force: true });
-    await expectReused(campaign);
+    await campaign.expectReused();
     expect(await readFile(join(checkout, "SRC", "app.ts"), "utf8")).toContain(
       "case-sensitive-source",
     );
@@ -4231,8 +4125,6 @@ for (const ignoreCase of [false, true]) {
           throw error;
         }),
     ).toBe(ignoreCase);
-    expect(runs).toHaveBeenCalledTimes(1);
-    expect(await readFile(initial.resultsPath)).toEqual(ledger);
   });
 }
 

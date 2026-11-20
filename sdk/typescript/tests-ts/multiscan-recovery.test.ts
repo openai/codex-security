@@ -3032,20 +3032,18 @@ describe("multiscan", () => {
     ).toBe(false);
   });
 
-  test("skips sealed report recovery and preserves earned receipts on recovery failure", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "report-recovery");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nreport-recovery,${source.path},${source.revision}\n`,
-    );
-    let attempts = 0;
-    const security = client(async (_repository, scanOptions = {}) => {
-      attempts += 1;
-      return await completedScan(scanOptions.outputDir!);
-    });
-    const first = await runMultiscan(options(paths, security));
+  async function reportRecoveryFixture() {
+    const { paths } = await repositoryFixture("report-recovery");
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs));
+    const first = await runMultiscan(campaign);
     const ledger = await readFile(first.resultsPath, "utf8");
+    return { paths, runs, campaign, first, ledger };
+  }
+
+  test("skips sealed report recovery and preserves earned receipts on recovery failure", async () => {
+    const { paths, runs, campaign, first, ledger } =
+      await reportRecoveryFixture();
     const resolvePython = spyOn(
       runtime,
       "resolvePluginPythonCommand",
@@ -3057,17 +3055,19 @@ describe("multiscan", () => {
         true,
       );
       try {
-        await expect(
-          runMultiscan(options(paths, security)),
-        ).resolves.toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+        await expect(runMultiscan(campaign)).resolves.toMatchObject({
+          completed: 1,
+          failed: 0,
+          skipped: 1,
+        });
         expect(reportSealed).toHaveBeenCalledTimes(1);
         expect(resolvePython).not.toHaveBeenCalled();
-        expect(attempts).toBe(1);
+        expect(runs).toHaveBeenCalledTimes(1);
         expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
       } finally {
         reportSealed.mockRestore();
       }
-      await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+      await expect(runMultiscan(campaign)).rejects.toThrow(
         "Multiscan report recovery is required: Python unavailable: sk-proj-SYNTHETIC_REPORT_RECOVERY_123",
       );
       expect(resolvePython).toHaveBeenCalledWith(
@@ -3079,7 +3079,7 @@ describe("multiscan", () => {
           }),
         }),
       );
-      expect(attempts).toBe(1);
+      expect(runs).toHaveBeenCalledTimes(1);
       expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
     } finally {
       resolvePython.mockRestore();
@@ -3087,19 +3087,7 @@ describe("multiscan", () => {
   });
 
   test("preserves cancellation during report recovery", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "cancel-report-recovery");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nreport-recovery,${source.path},${source.revision}\n`,
-    );
-    let attempts = 0;
-    const security = client(async (_repository, scanOptions = {}) => {
-      attempts += 1;
-      return await completedScan(scanOptions.outputDir!);
-    });
-    const first = await runMultiscan(options(paths, security));
-    const ledger = await readFile(first.resultsPath, "utf8");
+    const { runs, campaign, first, ledger } = await reportRecoveryFixture();
     const controller = new AbortController();
     const reason = new Error("Report recovery cancelled.");
     const resolvePython = spyOn(
@@ -3111,9 +3099,9 @@ describe("multiscan", () => {
     });
     try {
       await expect(
-        runMultiscan(options(paths, security, { signal: controller.signal })),
+        runMultiscan({ ...campaign, signal: controller.signal }),
       ).rejects.toBe(reason);
-      expect(attempts).toBe(1);
+      expect(runs).toHaveBeenCalledTimes(1);
       expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
     } finally {
       resolvePython.mockRestore();
