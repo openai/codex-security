@@ -751,12 +751,12 @@
   },
   "multiscan-recovery.test.ts": {
     "linux": 20.1,
-    "darwin": 27.1,
+    "darwin": 234.7,
     "win32": 93.6
   },
   "multiscan.test.ts": {
     "linux": 13.1,
-    "darwin": 24.1,
+    "darwin": 449.2,
     "win32": 56.2
   },
   "native-artifact-cache.test.ts": {
