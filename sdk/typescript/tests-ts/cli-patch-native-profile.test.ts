@@ -1571,7 +1571,7 @@ for (const location of ["inside", "outside", "selected"] as const) {
           );
         },
       );
-    }, 30_000);
+    });
   }
 }
 
