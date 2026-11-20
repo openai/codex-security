@@ -36,6 +36,7 @@ const distModules = [
   "patch-byte-path",
   "patch-git-controls",
   "patch-publication-hooks",
+  "patch-ssh-config",
   "cli-signals",
   "cli-token-view",
   "classify-severity",
