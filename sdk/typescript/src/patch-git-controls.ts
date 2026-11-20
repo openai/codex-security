@@ -569,6 +569,10 @@ function credentialPointerFiles(
   const selectPgDefaults = (home: string) => {
     selectFile(home, process.platform === "win32" ? "pgpass.conf" : ".pgpass");
     selectFile(home, ".pg_service.conf");
+    const client =
+      process.platform === "win32" ? home : relativeFile(home, ".postgresql");
+    selectFile(client, "postgresql.key");
+    selectFile(client, "postgresql.crt");
   };
   // A delegate can unset a client override or read the default file directly.
   // On Windows kubeconfig discovery also checks HOME and HOMEDRIVE/HOMEPATH.
@@ -642,6 +646,8 @@ function credentialPointerFiles(
       case "GOOGLE_APPLICATION_CREDENTIALS":
       case "PGPASSFILE":
       case "PGSERVICEFILE":
+      case "PGSSLKEY":
+      case "PGSSLCERT":
         selected.add(value);
         selected.add(normalize(value));
         break;

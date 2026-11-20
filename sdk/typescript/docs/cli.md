@@ -2983,6 +2983,8 @@ the standard `glab-cli` configuration directories and Git administration.
 PostgreSQL password and service file protection covers `PGPASSFILE`,
 `PGSERVICEFILE`, the standard per-user files and `pg_service.conf` in
 the directory selected by `PGSYSCONFDIR`.
+TLS client identity protection covers `PGSSLKEY`, `PGSSLCERT`, and the
+standard per-user `postgresql.key` and `postgresql.crt` files.
 The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
