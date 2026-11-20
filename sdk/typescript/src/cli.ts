@@ -1937,13 +1937,14 @@ type PatchTransportFile = {
   kind: "executable" | "file" | "known-hosts" | "missing-known-hosts";
 };
 
-interface TransportWriters {
+interface PatchWriters {
   readonly writable: Set<string>;
+  external?: boolean;
   unknownWriters?: boolean;
+  libraryDirectories?: Map<string, Set<string> | null>;
 }
 
-interface PatchTransportAccess extends TransportWriters {
-  libraryDirectories?: Map<string, RepositoryLibraryDirectory>;
+interface PatchTransportAccess extends PatchWriters {
   // A null target represents a known-hosts file that SSH may create.
   readonly invocations: Map<string, string | null>;
   readonly implicitLaunchers: Map<string, string | null>;
@@ -2033,7 +2034,7 @@ interface CliDependencies {
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
       snapshotProfiles?: PatchSnapshotProfiles;
-      loaderAccess?: PatchTransportAccess;
+      loaderAccess?: PatchWriters;
       patchTransport?: { mirrors: boolean; pushing: boolean };
       publicationHooks?: PatchPublicationHooks;
       hookSandbox?: PatchSnapshotSandbox;
@@ -2127,127 +2128,105 @@ child.on("exit", (code, signal) => {
 });
 `;
 
-interface RepositoryLibraryDirectory {
-  readonly target: string;
-  readonly checked: Map<string, boolean>;
-  readonly linked: Map<string, PatchTransportFile>;
-}
-
-// The loader searches leaf names in the directory and, on glibc, in its
-// hardware capability tiers. Check aliases there without walking the install.
-async function checkLibraryLinks(
-  directory: RepositoryLibraryDirectory,
-  trustedPath: (path: string) => string | null,
-) {
-  const locations = [directory.target];
-  if (process.platform === "linux") {
-    const caps = join(directory.target, "glibc-hwcaps");
-    if (!trustedPath(caps)) return false;
-    if (existsSync(caps)) {
-      for (const tier of await readdir(caps)) {
-        const path = join(caps, tier);
-        if (!trustedPath(path)) return false;
-        if ((await stat(path)).isDirectory()) locations.push(path);
+async function trustedLibraryDirectory(
+  directory: string,
+  resolvePath: (path: string) => string | null,
+  roots: readonly string[],
+): Promise<boolean> {
+  const selected = resolvePath(directory);
+  if (!selected) return false;
+  const writers = { writable: new Set(roots) };
+  const directories = new Set([selected]);
+  try {
+    // Library lookup can descend into hardware-specific directories and frameworks.
+    for (const parent of directories) {
+      if (roots.some((root) => !isOutsidePath(relative(parent, root))))
+        return false;
+      for (const bytes of await readdir(parent, { encoding: "buffer" })) {
+        if (!isUtf8(bytes)) return false;
+        const name = bytes.toString();
+        let path = join(parent, name);
+        let entry = lstatSync(path, { bigint: true });
+        if (entry.isSymbolicLink()) {
+          const target = resolvePath(path);
+          if (!target || !target.isWellFormed()) return false;
+          path = target;
+          const resolved = lstatSync(path, {
+            bigint: true,
+            throwIfNoEntry: false,
+          });
+          if (!resolved) continue;
+          entry = resolved;
+        }
+        if (entry.isDirectory()) directories.add(path);
+        if (entry.isFile() && entry.nlink > 1n)
+          await requireProtectedTransportLinks(path, entry, writers);
       }
     }
+    return true;
+  } catch {
+    return false;
   }
-  for (const location of locations) {
-    for (const item of await readdir(location, { withFileTypes: true })) {
-      const path = join(location, item.name);
-      if (item.isSymbolicLink() && !trustedPath(path)) return false;
-      if (!item.isSymbolicLink() && !item.isFile()) continue;
-      const file = await stat(path).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return undefined;
-      });
-      if (file?.isFile() && file.nlink > 1 && !directory.linked.has(path)) {
-        const identity = await patchTransportIdentity(path, "executable");
-        directory.linked.set(path, identity);
-      }
-    }
-  }
-  return true;
 }
 
 async function restrictRepositoryLoader(
   environment: NodeJS.ProcessEnv,
   protectedRoots: readonly string[],
   sandbox: PatchSnapshotSandbox | undefined,
-  access: PatchTransportAccess | undefined,
-  hooks: boolean,
+  writers: PatchWriters = { writable: new Set() },
 ) {
-  const searches = new Map<string, string>();
-  const searchName = /^(?:LD|DYLD(?:_FALLBACK|_VERSIONED)?)_LIBRARY_PATH$/u;
-  for (const [name, value] of Object.entries(environment)) {
+  let roots: string[] | undefined;
+  let resolvePath: ((path: string) => string | null) | undefined;
+  const search =
+    /^(?:LD_LIBRARY_PATH|DYLD_(?:FALLBACK_|VERSIONED_)?(?:LIBRARY|FRAMEWORK)_PATH)$/u;
+  if (sandbox && Object.keys(environment).some((name) => search.test(name)))
+    await addPatchWriters(sandbox, writers);
+  for (const name of Object.keys(environment)) {
     if (!/^(?:LD|DYLD)_/u.test(name)) continue;
+    const value = environment[name];
     delete environment[name];
-    if (value && searchName.test(name)) searches.set(name, value);
-  }
-  if (!searches.size || access?.external || access?.unknownWriters) return;
-  const grants = sandbox
-    ? await patchSandboxWritableRoots(sandbox, sandbox.directory)
-    : [];
-  if (!grants) return;
-  const writable = new Set([
-    ...(access?.writable ?? []),
-    ...grants,
-    ...(sandbox?.snapshotStoragePaths ?? []),
-  ]);
-  for (const root of protectedRoots) {
-    const physical = await canonicalConfigPath(root).catch(() => undefined);
-    if (physical === undefined) return;
-    writable.add(physical);
-  }
-  const roots = [...writable];
-  const resolveHostPath = await trustedHostPathResolver(process.cwd(), roots);
-  const trustedPath = (path: string) => {
-    const target = resolveHostPath(path);
-    // A grant can select a single library within an external directory.
-    if (!target || roots.some((root) => !isOutsidePath(relative(target, root))))
-      return null;
-    return target;
-  };
-  const directories =
-    access?.libraryDirectories ?? new Map<string, RepositoryLibraryDirectory>();
-  if (access) access.libraryDirectories = directories;
-  const mayWrite = hooks || sandbox !== undefined;
-  const scope = JSON.stringify([roots, mayWrite]);
-  for (const [name, value] of searches) {
+    if (
+      !value ||
+      !search.test(name) ||
+      process.platform === "win32" ||
+      writers.external ||
+      writers.unknownWriters
+    )
+      continue;
+    roots ??= [
+      ...writers.writable,
+      ...(await Promise.all(
+        protectedRoots.map((root) => canonicalConfigPath(root)),
+      )),
+    ];
+    // Process-relative links such as /proc/self/cwd change at exec.
+    resolvePath ??= await trustedHostPathResolver("/", [
+      ...roots,
+      "/proc",
+      "/dev/fd",
+    ]);
+    // Recheck new grants. Remember a writable alias even if the model
+    // removes its link after modifying a library.
+    const checked = (writers.libraryDirectories ??= new Map());
     const elf = name === "LD_LIBRARY_PATH";
-    const accepted: string[] = [];
-    for (const entry of value.split(elf ? /[:;]/u : /:/u)) {
-      // Empty/relative entries and ELF loader tokens depend on the child.
-      if (!isAbsolute(entry)) continue;
-      if (elf && /\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(entry)) continue;
-      const target = trustedPath(entry);
-      if (!target) continue;
-      let directory = directories.get(entry);
-      if (!directory) {
-        directory = { target, checked: new Map(), linked: new Map() };
-        directories.set(entry, directory);
-      }
-      if (directory.target !== target) continue;
-      const checked = directory.checked.get(scope);
-      if (checked === false) continue;
-      try {
-        if (!checked && !(await checkLibraryLinks(directory, trustedPath))) {
-          directory.checked.set(scope, false);
+    const allowed: string[] = [];
+    for (const path of value.split(elf ? /[:;]/u : ":")) {
+      // The ELF loader expands tokens such as $ORIGIN for each child.
+      if (!isAbsolute(path)) continue;
+      if (elf && /\n|\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(path)) continue;
+      const previous = checked.get(path);
+      if (previous === null) continue;
+      if (!previous || !roots.every((root) => previous.has(root))) {
+        if (!(await trustedLibraryDirectory(path, resolvePath, roots))) {
+          checked.set(path, null);
           continue;
         }
-        // A hook or filter may write before a later child loads a library.
-        // Check link accounting once and recheck identities across patch turns.
-        if (mayWrite || access?.writable.size) {
-          const guard = mayWrite && !checked ? { writers: { writable } } : {};
-          for (const [path, selected] of directory.linked)
-            await patchTransportIdentity(path, "executable", selected, guard);
-        }
-        directory.checked.set(scope, true);
-        accepted.push(entry);
-      } catch {
-        directory.checked.set(scope, false);
+        if (checked.get(path) === null) continue;
+        checked.set(path, new Set([...(previous ?? []), ...roots]));
       }
+      allowed.push(path);
     }
-    if (accepted.length) environment[name] = accepted.join(":");
+    if (allowed.length) environment[name] = allowed.join(":");
   }
 }
 
@@ -2539,7 +2518,6 @@ export async function runRepositoryCommand(
       protectedRoots,
       sandbox,
       options?.loaderAccess,
-      hooks !== undefined,
     );
     const credentialNames = [
       "OPENAI_API_KEY",
@@ -3852,6 +3830,7 @@ export async function main(
   const parentDependencies = dependencies;
   const patchTransportFiles = new Map<string, PatchTransportFile>();
   let publicationHooks: PatchPublicationHooks | undefined;
+  const loaderWriters: PatchWriters = { writable: new Set() };
   const patchTransportAccess: PatchTransportAccess = {
     writable: new Set(),
     invocations: new Map(),
@@ -3870,7 +3849,10 @@ export async function main(
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
         const appServer = output.appServer;
-        if (appServer.externalSandbox) patchTransportAccess.external = true;
+        if (appServer.externalSandbox) {
+          loaderWriters.external = true;
+          patchTransportAccess.external = true;
+        }
         if (appServer.permissions)
           unavailableFilters = appServer.permissions.unavailableFilters ?? [];
         if (appServer.publicationHooks)
@@ -3893,14 +3875,11 @@ export async function main(
               const previous = patchPreparationSignal;
               patchPreparationSignal = signal;
               try {
-                if (
-                  appServer.permissions &&
-                  patchSandbox &&
-                  (publicationHooks || patchTransportAccess.libraryDirectories)
-                )
-                  await addPatchTransportWriters(
-                    patchTransportAccess,
+                if (appServer.permissions && patchSandbox)
+                  await addPatchWriters(
                     patchSandbox,
+                    loaderWriters,
+                    publicationHooks ? patchTransportAccess : undefined,
                   );
                 await appServer.onBeforeTurn?.(signal);
               } finally {
@@ -3916,7 +3895,7 @@ export async function main(
       options = {
         ...options,
         signal: options?.signal ?? patchPreparationSignal,
-        loaderAccess: patchTransportAccess,
+        loaderAccess: loaderWriters,
       };
       options.signal?.throwIfAborted();
       if (command === "git") {
@@ -9220,9 +9199,10 @@ export async function main(
                     controller.signal,
                   );
                   patchSandbox = { ...patchSandbox, snapshotConfig };
-                  await addPatchTransportWriters(
-                    patchTransportAccess,
+                  await addPatchWriters(
                     patchSandbox,
+                    loaderWriters,
+                    patchTransportAccess,
                   );
                 } finally {
                   removeSignals();
@@ -12527,7 +12507,7 @@ async function patchTransportIdentity(
   path: string,
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
-  options: { updatedHostKeys?: boolean; writers?: TransportWriters } = {},
+  options: { updatedHostKeys?: boolean; writers?: PatchWriters } = {},
 ): Promise<PatchTransportFile> {
   if (kind === "missing-known-hosts") {
     const parent = dirname(path);
@@ -12601,7 +12581,7 @@ async function bindPatchTransportFile(
 async function requireProtectedTransportLinks(
   target: string,
   file: { uid: bigint; mode: bigint; dev: bigint; ino: bigint; nlink: bigint },
-  writers: TransportWriters,
+  writers: PatchWriters,
 ) {
   // Git installations commonly hard-link their subcommands. An inode owned
   // by another user and unwritable from this account stays safe through every
@@ -12660,12 +12640,15 @@ function writablePatchTransportError(path: string) {
   );
 }
 
-async function addPatchTransportWriters(
-  access: PatchTransportAccess,
+async function addPatchWriters(
   sandbox: PatchSnapshotSandbox,
+  loader: PatchWriters,
+  access?: PatchTransportAccess,
 ) {
   const roots = await patchSandboxWritableRoots(sandbox, sandbox.directory);
   if (!roots) {
+    loader.unknownWriters = true;
+    if (!access) return;
     access.unknownWriters = true;
     if (access.invocations.size)
       throw new CodexSecurityError(
@@ -12675,7 +12658,8 @@ async function addPatchTransportWriters(
   }
   // Snapshot filters and publication hooks can also write the selected storage.
   roots.push(...(sandbox.snapshotStoragePaths ?? []));
-  if (roots.every((root) => access.writable.has(root))) return;
+  for (const root of roots) loader.writable.add(root);
+  if (!access || roots.every((root) => access.writable.has(root))) return;
   for (const root of roots) access.writable.add(root);
   // A later remediation turn or delegated hook can receive different write grants.
   if (access.invocations.size) {
@@ -12696,7 +12680,7 @@ async function addPatchTransportWriters(
 
 function requireStablePatchTransportTarget(
   path: string,
-  access?: TransportWriters,
+  access?: PatchWriters,
 ) {
   if (access?.unknownWriters)
     throw new CodexSecurityError(

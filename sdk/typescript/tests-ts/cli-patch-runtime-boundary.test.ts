@@ -1,6 +1,13 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  readFile,
+  readdir,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -13,22 +20,27 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+function inspectLoader(
+  checkout: string,
+  name: string,
+  value: string,
+  protectedRoots: string[] = [],
+) {
+  const binding = `--config-env=probe.loader=${name}`;
+  return runRepositoryCommand(
+    "git",
+    [binding, "config", "--get", "probe.loader"],
+    checkout,
+    { environment: { [name]: value, LC_ALL: "C" }, protectedRoots },
+  );
+}
+
 test.each(["LD_PRELOAD", "DYLD_INSERT_LIBRARIES"])(
   "host Git cannot inherit %s from a writable component",
   async (variable) => {
     const directory = await fixtures.create("patch-loader-");
     await expect(
-      runRepositoryCommand(
-        "git",
-        [
-          `--config-env=probe.loader=${variable}`,
-          "config",
-          "--get",
-          "probe.loader",
-        ],
-        directory,
-        { environment: { [variable]: "./selected-library", LC_ALL: "C" } },
-      ),
+      inspectLoader(directory, variable, "./selected-library"),
     ).rejects.toThrow(`missing environment variable '${variable}'`);
   },
 );
@@ -41,20 +53,22 @@ test.skipIf(process.platform === "win32")(
     const first = join(tools, "first");
     const last = join(tools, "last");
     const viaFile = join(tools, "via-file");
+    const shared = join(tools, "shared");
     const viaDirectory = join(tools, "via-directory");
     const grant = join(tools, "grant");
-    for (const path of [first, last, viaFile, grant]) await mkdir(path);
+    for (const path of [first, last, viaFile, grant, shared]) await mkdir(path);
+    await writeFile(join(first, "library.1"), "trusted");
+    await symlink("library.1", join(first, "library"));
+    await writeFile(join(checkout, "library"), "writable");
+    await link(join(checkout, "library"), join(shared, "library"));
     await symlink(checkout, viaDirectory);
     await symlink(join(checkout, "library"), join(viaFile, "library"));
-    const paths = [first, "", "./lib", checkout, viaDirectory, viaFile, grant];
-    if (process.platform === "linux") {
-      const root = join(tools, "optimized");
-      const tier = join(root, "glibc-hwcaps", "x86-64-v3");
-      await mkdir(tier, { recursive: true });
-      await symlink(join(checkout, "library"), join(tier, "library"));
-      paths.push(root);
-    }
-    paths.push(last);
+    const optimized = join(tools, "optimized");
+    const tier = join(optimized, "glibc-hwcaps", "x86-64-v3");
+    await mkdir(tier, { recursive: true });
+    await symlink(join(checkout, "library"), join(tier, "library"));
+    const aliases = [viaDirectory, viaFile, shared, optimized];
+    const paths = [first, "", "./lib", checkout, ...aliases, grant, last];
     const names = ["LD_LIBRARY_PATH"];
     // macOS system programs also clear DYLD_* at execution.
     if (process.platform !== "darwin") {
@@ -62,16 +76,9 @@ test.skipIf(process.platform === "win32")(
     }
     for (const name of names) {
       const value = paths.join(name === "LD_LIBRARY_PATH" ? ";" : ":");
-      const binding = `--config-env=probe.loader=${name}`;
-      const actual = await runRepositoryCommand(
-        "git",
-        [binding, "config", "--get", "probe.loader"],
-        checkout,
-        {
-          environment: { [name]: value },
-          protectedRoots: [join(grant, "library")],
-        },
-      );
+      const actual = await inspectLoader(checkout, name, value, [
+        join(grant, "library"),
+      ]);
       expect(actual).toBe([first, last].join(":"));
     }
   },
