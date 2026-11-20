@@ -24,7 +24,7 @@ import {
 
 const fixtures = patchDirectories();
 
-test("later patch grants remove writable directories from SSH's command search path", async () => {
+test("later patch grants exclude writable directories from host and SSH command lookup", async () => {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-ssh-search-");
   const writable = await fixtures.create("patch-ssh-later-grant-");
@@ -59,6 +59,7 @@ test("later patch grants remove writable directories from SSH's command search p
   let turns = 0;
   let preflightPath: string | undefined;
   let pushPath: string | undefined;
+  let protectedRoots: readonly string[] = [];
   const outcome = await runSavedPublication(
     directory,
     {
@@ -95,8 +96,10 @@ test("later patch grants remove writable directories from SSH's command search p
           preflightPath = options?.environment?.["PATH"];
           return "";
         }
-        if (options?.patchTransport && args.includes("push"))
+        if (options?.patchTransport && args.includes("push")) {
           pushPath = options.environment?.["PATH"];
+          protectedRoots = options.protectedRoots ?? [];
+        }
         return runGitRepositoryCommand(tool, args, cwd, {
           ...options,
           environment: { ...environment, ...options?.environment },
@@ -111,6 +114,18 @@ test("later patch grants remove writable directories from SSH's command search p
   expect(pushPath!.split(delimiter)).not.toContain(writable);
   expect(outcome.exitCode, outcome.stderr).toBe(2);
   await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  const name = process.platform === "win32" ? "gh.exe" : "gh";
+  const alias = join(writable, "bin");
+  await symlink(external, alias, "junction");
+  await writeFile(join(external, name), "", { mode: 0o755 });
+  await writeFile(join(writable, name), "", { mode: 0o755 });
+  const PATH = [writable, alias].join(delimiter);
+  await expect(
+    runRepositoryCommand("gh", ["--version"], directory, {
+      protectedRoots,
+      sandbox: { directory, environment: { PATH }, profile: {} },
+    }),
+  ).rejects.toThrow("gh is not available on a trusted PATH");
 });
 
 test.each([

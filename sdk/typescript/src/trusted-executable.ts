@@ -133,15 +133,21 @@ function searchPath(
   );
 }
 
+interface HostLookup {
+  hostDirectory: string;
+}
+
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  lookup?: HostLookup,
 ): Promise<TrustedExecutable | null> {
   const inspected = await inspectTrustedExecutable(
     candidate,
     environment,
     protectedRoot,
+    lookup,
   );
   return inspected.executable === null
     ? null
@@ -152,8 +158,10 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
-  options?: { gitTransportDirectory: string },
+  lookup?: { gitTransportDirectory: string } | HostLookup,
 ): Promise<InspectedExecutable> {
+  const options =
+    lookup && "gitTransportDirectory" in lookup ? lookup : undefined;
   const selectedRoots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
       canonicalRoot,
@@ -166,6 +174,12 @@ export async function inspectTrustedExecutable(
       )
     : selectedRoots;
   const roots = campaign ? [...campaign.roots, ...extra] : selectedRoots;
+  // Native mode checks the supplied filenames and their interpreters without
+  // enumerating PATH directories or projecting a temporary tool directory.
+  const host: ToolPathView | undefined =
+    lookup && "hostDirectory" in lookup
+      ? (await campaignPathHelper())("", lookup.hostDirectory, roots, "native")
+      : undefined;
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
   const fromLauncherDirectory = (value: string) => {
@@ -195,6 +209,12 @@ export async function inspectTrustedExecutable(
     const launcherEntry = fromLauncherDirectory(entry);
     const canonical = await realpath(launcherEntry).catch(() => null);
     if (canonical === null || isProtected(canonical)) continue;
+    if (host && launcherEntry !== canonical) {
+      const path = isAbsolute(launcherEntry)
+        ? launcherEntry
+        : `${process.cwd()}${sep}${launcherEntry}`;
+      if (!host.allows(path)) continue;
+    }
     // A directory containing the separator can be on PATH through a safe alias.
     // Keep that absolute spelling so joining the entries cannot split its name.
     const directory = canonical.includes(delimiter)
@@ -247,10 +267,14 @@ export async function inspectTrustedExecutable(
         : [".exe", ".com", ".bat", ".cmd", ""];
   const primary = suffixes.map((suffix) => candidate + suffix);
   // The Windows MCP launcher and inventory look up Node and ripgrep on this PATH.
-  const names =
-    campaign && windows && candidate === "git"
-      ? [...primary, "node.exe", "rg.exe", "rg.com"]
-      : primary;
+  const names = [...primary];
+  if (campaign && windows && candidate === "git")
+    names.push("node.exe", "rg.exe", "rg.com");
+  // Hosting clients look up Git again in the environment they inherit.
+  const hostsGit = host && (candidate === "gh" || candidate === "glab");
+  if (hostsGit) names.push(...suffixes.map((suffix) => "git" + suffix));
+  // These PATHs are reused from another cwd, where a dangling link can resolve.
+  const inherited = view ?? (hostsGit ? host : undefined);
   const candidates = (pathLike ? [null] : entries).flatMap((entry) => {
     // PATH lookup traverses links before "..". join() would collapse it first.
     const directory = entry ?? "";
@@ -270,7 +294,8 @@ export async function inspectTrustedExecutable(
   let executable: string | null = null;
   let gitTransport: InspectedExecutable["gitTransport"];
   for (const current of candidates) {
-    const crossesSource = view !== undefined && !view.allows(current.path);
+    const crossesSource =
+      inherited !== undefined && !inherited.allows(current.path);
     if (!pathLike && crossesSource) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
@@ -279,6 +304,7 @@ export async function inspectTrustedExecutable(
     if (canonical === null) continue;
     if (
       isProtected(canonical) ||
+      (host && !inherited && !host.allows(current.path)) ||
       (pathLike && view && crossesSource && !view.allows(canonical))
     ) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
@@ -336,7 +362,7 @@ export async function inspectTrustedExecutable(
     entries.filter((entry) => !unsafeEntries.has(entry)).join(delimiter);
   // An empty POSIX PATH searches the current directory.
   sanitizedEnvironment["PATH"] =
-    campaign && process.platform !== "win32" && !filteredPath
+    (campaign || host) && process.platform !== "win32" && !filteredPath
       ? "/dev/null"
       : filteredPath;
   return {

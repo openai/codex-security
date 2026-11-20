@@ -353,14 +353,25 @@ describe("trusted executable resolution", () => {
       await symlink(version, alias);
       entry = alias + "/..";
     }
+    const environment = { PATH: [entry, safe].join(delimiter), KEEP: "ok" };
     const result = await inspectTrustedExecutable(
       "git",
-      { PATH: [entry, safe].join(delimiter), KEEP: "ok" },
+      environment,
       repository,
     );
     expect(result).toEqual({
       executable: null,
       environment: { KEEP: "ok", PATH: safe },
+    });
+    if (!windows)
+      await writeFile(join(safe, "gh"), "#!./tools/git\n", { mode: 0o700 });
+    expect(
+      await inspectTrustedExecutable("gh", environment, repository, {
+        hostDirectory: repository,
+      }),
+    ).toEqual({
+      executable: null,
+      environment: { KEEP: "ok", PATH: windows ? safe : "/dev/null" },
     });
     if (!windows) {
       await writeFile(join(safe, executable), "#!/bin/sh\nexit 0\n", {

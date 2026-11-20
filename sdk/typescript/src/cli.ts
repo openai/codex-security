@@ -2382,12 +2382,19 @@ export async function runRepositoryCommand(
         );
     }
   }
-  const protectedRoots = [repository, ...(options?.protectedRoots ?? [])];
-  const executable = await resolveTrustedExecutable(
-    command,
-    sandbox?.environment ?? process.env,
-    protectedRoots,
-  );
+  const protectedRoots = [
+    repository,
+    ...(options?.protectedRoots ?? []),
+    ...processRelativePaths,
+  ];
+  const resolveTool = (name: string) =>
+    resolveTrustedExecutable(
+      name,
+      sandbox?.environment ?? process.env,
+      protectedRoots,
+      { hostDirectory: options?.directory ?? repository },
+    );
+  const executable = await resolveTool(command);
   if (executable === null) {
     throw new CodexSecurityError(
       `${command} is not available on a trusted PATH.`,
@@ -2397,11 +2404,7 @@ export async function runRepositoryCommand(
   // Node preserves inherited handles and reports errors after stdin closes.
   const bridgeRuntime =
     sandbox !== undefined && process.versions["bun"]
-      ? await resolveTrustedExecutable(
-          "node",
-          sandbox.environment,
-          protectedRoots,
-        )
+      ? await resolveTool("node")
       : undefined;
   if (bridgeRuntime === null) {
     throw new CodexSecurityError("Node.js is not available on a trusted PATH.");
@@ -4035,6 +4038,10 @@ export async function main(
     async runRepositoryCommand(command, args, repository, options) {
       options = {
         ...options,
+        protectedRoots: [
+          ...(options?.protectedRoots ?? []),
+          ...patchTransportAccess.writable,
+        ],
         signal: options?.signal ?? patchPreparationSignal,
         loaderAccess: loaderWriters,
       };
@@ -9745,7 +9752,10 @@ export async function main(
                       {
                         trim: false,
                         directory: repository,
-                        protectedRoots: [repository],
+                        protectedRoots: [
+                          repository,
+                          ...patchTransportAccess.writable,
+                        ],
                         environment: dependencies.environment,
                       },
                     )
