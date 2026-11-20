@@ -6,22 +6,27 @@ import {
   dependencyClaimReferenceSchema,
   type DependencyClaimRecord,
   type DependencyClaimReference,
-} from "./dependency-claims.js";
+} from "./dependency-stack-claims.js";
 import {
   aggregateDependencyVerdict,
   dependencyUseSchema,
-  validateDependencyUse,
-  type DependencyExcerpt,
-} from "./dependency-reachability.js";
+} from "./dependency-stack-use.js";
 import {
   sampledStacksSchema,
+  stackManifestSchema,
   stackPacketWorkItems,
   stackSinkMatches,
   type StackPacket,
   type StackWorkItem,
 } from "./dependency-stack-packet.js";
+import { effectiveStackSinks } from "./dependency-stack-advisory.js";
+import { comparePythonReleases } from "./dependency-advisory-version.js";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
-import { inventoryReceiptSelectionSchema } from "./dependency-inventory.js";
+import {
+  inventoryReceiptSelectionSchema,
+  stackJsonValue,
+  type DependencyExcerpt,
+} from "./dependency-stack-evidence.js";
 import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
 
@@ -40,6 +45,21 @@ const stackUse = z.strictObject({
   evidence: useFields.evidence,
   proof: useFields.proof,
 });
+const questionCheck = z.strictObject({
+  question: text.describe("Exact deciding question from remainingQuestions."),
+  checked: text.describe(
+    "Where you checked and what the evidence established.",
+  ),
+  missingEvidence: text.describe(
+    "The specific missing artifact or fact needed to answer the question.",
+  ),
+  claims: z
+    .array(dependencyClaimReferenceSchema)
+    .min(1)
+    .describe(
+      "Recorded claims citing the source or capture inspected for this check.",
+    ),
+});
 const itemInput = z.strictObject({
   workItemId: text,
   verdict,
@@ -51,6 +71,12 @@ const itemInput = z.strictObject({
       "For an exploitable verdict, select the supporting claim whose cited evidence establishes attacker control of the deciding input on this path.",
     ),
   remainingQuestions: z.array(text).default([]),
+  questionChecks: z
+    .array(questionCheck)
+    .optional()
+    .describe(
+      "For each unresolved deciding question on an observed path, record the attempted check and cite the supporting claim revisions.",
+    ),
   frameIndices: z
     .array(z.number().int().nonnegative())
     .optional()
@@ -87,8 +113,8 @@ const sourceCitation = z.strictObject({
   contentSha256: digest,
 });
 const reportedClaim = dependencyClaimReferenceSchema.extend({
-  scope: z.json(),
-  payload: z.json(),
+  scope: stackJsonValue,
+  payload: stackJsonValue,
   dependencies: z.array(dependencyClaimReferenceSchema),
   sources: z.array(sourceCitation),
   receipts: z.array(
@@ -96,11 +122,11 @@ const reportedClaim = dependencyClaimReferenceSchema.extend({
       receiptId: text,
       originalPayloadSha256: digest,
       server: text,
-      origin: z.json(),
+      origin: stackJsonValue,
       selection: inventoryReceiptSelectionSchema
         .omit({ receiptId: true })
         .optional(),
-      result: z.json(),
+      result: stackJsonValue,
     }),
   ),
 });
@@ -136,10 +162,17 @@ const observationCitation = z.strictObject({
   ),
   bindings: captured.bindings.unwrap(),
 });
+export const stackReviewDecisionSchema = z.strictObject({
+  workItemId: text,
+  reason: text,
+  followUp: text.nullable(),
+});
 export const stackInvestigationReportSchema = z.strictObject({
   schemaVersion: z.literal("codex-security.pipeline-stacks.report/v1"),
-  reviewPolicy: z.literal("single_agent"),
   cve: text,
+  advisoryDetails: stackManifestSchema.shape.advisoryDetails,
+  advisoryLookupError: stackManifestSchema.shape.advisoryLookupError,
+  triggerAnalysis: stackManifestSchema.shape.triggerAnalysis,
   runId: text,
   attemptId: text,
   inputDigest: digest,
@@ -161,6 +194,14 @@ export const stackInvestigationReportSchema = z.strictObject({
   claims: z.array(reportedClaim),
   coverage: coverageSchema,
   remainingQuestions: z.array(text),
+  review: z
+    .strictObject({
+      draftDigest: digest,
+      decisions: z.array(
+        stackReviewDecisionSchema.extend({ followUp: z.null() }),
+      ),
+    })
+    .nullable(),
 });
 export type StackInvestigationReport = z.output<
   typeof stackInvestigationReportSchema
@@ -238,8 +279,6 @@ function pythonReleaseMatches(
   version: string,
   specifier: string,
 ): boolean | undefined {
-  if (!/^\d+(?:\.\d+)*$/u.test(version)) return;
-  const release = version.split(".").map(BigInt);
   let unknown = false;
   for (const term of specifier.split(",")) {
     const match = /^\s*(<=|>=|==|!=|<|>)\s*(\d+(?:\.\d+)*)\s*$/u.exec(term);
@@ -247,16 +286,8 @@ function pythonReleaseMatches(
       unknown = true;
       continue;
     }
-    const bound = match[2]!.split(".").map(BigInt);
-    let order = 0;
-    for (let i = 0; i < Math.max(bound.length, release.length); i++) {
-      const a = release[i] ?? 0n;
-      const b = bound[i] ?? 0n;
-      if (a !== b) {
-        order = a < b ? -1 : 1;
-        break;
-      }
-    }
+    const order = comparePythonReleases(version, match[2]!);
+    if (order === undefined) return;
     const result = {
       "<": order < 0,
       ">": order > 0,
@@ -332,18 +363,13 @@ function assessProof(
         );
     }
   }
-  if (row.verdict === "unknown") return;
+  if (row.verdict === "unknown")
+    return verifyQuestionChecks(row, work, records);
   if (!observation) fail("A decided stack assessment needs an observed sink.");
   if (!records.length)
     fail("A decided assessment needs at least one exact supporting claim.");
   const mapped = stackSinkMatches(observation);
-  const sinks = packet.sinks.sinks.filter((sink) =>
-    mapped.some(
-      ({ sinkId, rawIndex }) =>
-        sinkId === sink.id && observation.frames[rawIndex],
-    ),
-  );
-  if (!sinks.length)
+  if (!mapped.length)
     fail(
       "A decided assessment needs an observation mapped to a supplied sink.",
     );
@@ -381,30 +407,37 @@ function assessProof(
       }),
     );
   };
-  const matches = (s: StackSink) =>
-    bindings.flatMap((b, i) =>
-      b.package === s.package ? [{ binding: b, index: i }] : [],
+  const bindingEvidence = bindings.map((binding, index) => ({
+    binding,
+    cited: hasBindingEvidence(index),
+  }));
+  // Packet decoding checks each catalog ID and its original sampled frame.
+  const sinks = effectiveStackSinks(packet);
+  const matches = mapped.map(({ sinkId, rawIndex }) => {
+    const sink = sinks.find((s) => s.id === sinkId)!;
+    const copies = bindingEvidence.filter(
+      ({ binding }) =>
+        binding.package === sink.package &&
+        binding.frameIndices?.includes(rawIndex),
     );
-  if (
-    row.verdict === "ruled_out" &&
-    sinks.every((sink) => {
-      const bound = matches(sink);
-      return (
-        bound.length > 0 &&
-        bound.every(
-          ({ binding, index }) =>
-            hasBindingEvidence(index) &&
-            affectedVersion(sink, binding.version) === false,
-        )
+    const fixed =
+      copies.length > 0 &&
+      copies.every(
+        ({ binding, cited }) =>
+          cited && affectedVersion(sink, binding.version) === false,
       );
-    })
-  ) {
+    return { sink, rawIndex, copies, fixed };
+  });
+  if (row.verdict === "ruled_out" && matches.every(({ fixed }) => fixed)) {
+    const use = row.use;
     if (
-      row.use &&
-      !bindings.some(
-        (b) =>
-          b.package === row.use!.component &&
-          (row.use!.version === null || b.version === row.use!.version),
+      use &&
+      !matches.some(
+        ({ sink, copies }) =>
+          sink.package === use.component &&
+          (!use.proof?.sink || sink.function === use.proof.sink.function) &&
+          (use.version === null ||
+            copies.some(({ binding }) => binding.version === use.version)),
       )
     )
       fail(
@@ -413,75 +446,118 @@ function assessProof(
     return;
   }
 
-  const selected = sinks.find(
-    (s) =>
-      s.package === row.use?.component &&
-      s.function === row.use.proof?.sink?.function,
+  const use = row.use;
+  const selectedFrames = matches.filter(
+    ({ sink }) =>
+      sink.package === use?.component &&
+      sink.function === use?.proof?.sink?.function,
   );
-  if (!row.use || !selected)
+  if (!use || !selectedFrames.length)
     fail("Supply an evidence-backed use and proof for the mapped sink.");
-  const sourceBindings = bindings.filter(
-    (binding, index) =>
-      binding.sourceSha !== undefined && hasBindingEvidence(index),
-  );
-  const sourceMatchesBuild =
-    sourceBindings.length > 0 &&
-    sourceBindings.every((binding) => binding.sourceSha === sha);
-  const conditions = row.use.proof!.conditions;
+  const sourceMatchesBuild = ({
+    sink,
+    rawIndex,
+    copies,
+  }: (typeof matches)[number]) => {
+    const sources = bindingEvidence.flatMap(({ binding, cited }) =>
+      cited &&
+      binding.sourceSha !== undefined &&
+      (!binding.frameIndices?.length || binding.frameIndices.includes(rawIndex))
+        ? [binding]
+        : [],
+    );
+    // A source-based exclusion can use an observation-wide build binding to
+    // verify the caller even when the dependency copy has no frame attribution.
+    const builds =
+      row.verdict === "ruled_out" && !copies.length
+        ? bindingEvidence.filter(
+            ({ binding }) =>
+              binding.package === sink.package && !binding.frameIndices?.length,
+          )
+        : copies;
+    if (!builds.length)
+      return (
+        work.scope.image_digest !== undefined &&
+        sources.length > 0 &&
+        sources.every(
+          (s) =>
+            s.imageDigest === work.scope.image_digest && s.sourceSha === sha,
+        )
+      );
+    return builds.every(({ binding, cited }) => {
+      if (!cited) return false;
+      // A separate source record must describe the same immutable artifact.
+      const sameBuild = sources.filter(
+        (s) =>
+          s === binding ||
+          (binding.imageDigest !== undefined &&
+            s.imageDigest === binding.imageDigest),
+      );
+      return (
+        sameBuild.length > 0 && sameBuild.every((s) => s.sourceSha === sha)
+      );
+    });
+  };
+  const conditions = use.proof!.conditions;
   if (new Set(conditions.map((c) => c.label)).size !== conditions.length)
     fail("Each advisory condition must have one disposition.");
-  const disproved = selected.preconditions.some((p) =>
-    conditions.some((c) => c.label === p && c.status === "ruled_out"),
-  );
+  const disproved = (sink: StackSink) =>
+    sink.preconditions.some((p) =>
+      conditions.some((c) => c.label === p && c.status === "ruled_out"),
+    );
   if (row.verdict === "ruled_out") {
-    if (sinks.length === 1 && disproved) {
-      if (!sourceMatchesBuild)
+    if (matches.length === 1 && disproved(matches[0]!.sink)) {
+      if (!sourceMatchesBuild(matches[0]!))
         fail(
           "A guard in the target source needs a cited build-to-source binding for this running workload.",
         );
       return;
     }
     fail(
-      "An exclusion requires a cited fixed-version binding or a disproved advisory condition.",
+      "An exclusion requires a cited fixed-version binding for every matched sink frame or a disproved advisory condition.",
     );
   }
-  if (disproved)
+  const applicable = selectedFrames.filter(({ sink }) => !disproved(sink));
+  if (!applicable.length)
     fail("A required advisory condition was ruled out for this path.");
-  const bound = matches(selected);
-  if (
-    bound.length &&
-    bound.every(
-      ({ binding, index }) =>
-        hasBindingEvidence(index) &&
-        affectedVersion(selected, binding.version) === false,
-    )
-  )
+  const possible = applicable.filter(({ fixed }) => !fixed);
+  if (!possible.length)
     fail("The observed dependency version falls outside the affected ranges.");
+  const version = use.version;
   if (row.verdict === "potentially_exploitable") {
+    if (
+      version !== null &&
+      possible.every(({ sink }) => affectedVersion(sink, version) === false)
+    )
+      fail(
+        "The reported dependency version falls outside the affected ranges.",
+      );
     if (!row.remainingQuestions.length)
       fail(
         "Name the remaining conditions for a potentially exploitable assessment.",
       );
     return;
   }
-  if (!sourceMatchesBuild)
+  const affectedFrames = possible.filter(
+    ({ sink, copies }) =>
+      version !== null &&
+      affectedVersion(sink, version) === true &&
+      copies.length > 0 &&
+      copies.every(
+        ({ binding, cited }) => cited && binding.version === version,
+      ),
+  );
+  if (!affectedFrames.length)
+    fail(
+      "An exploitable assessment needs a cited affected running dependency binding for the matched sink frame.",
+    );
+  const confirmed = affectedFrames.filter(sourceMatchesBuild);
+  if (!confirmed.length)
     fail(
       "An exploitable use needs a cited build-to-source binding for the running workload.",
     );
-  if (
-    bound.some(({ binding }) => binding.version !== row.use!.version) ||
-    !bound.some(
-      ({ binding, index }) =>
-        hasBindingEvidence(index) &&
-        binding.version === row.use!.version &&
-        affectedVersion(selected, binding.version) === true,
-    )
-  )
-    fail(
-      "An exploitable assessment needs a cited running dependency binding for this observation.",
-    );
   const control = row.attackerControlClaim;
-  const accessCitations = row.use.evidence.filter((range) =>
+  const accessCitations = use.evidence.filter((range) =>
     range.supports.includes("access"),
   );
   if (
@@ -498,8 +574,10 @@ function assessProof(
       "An exploitable assessment needs a supporting claim with source evidence for attacker control of the deciding input.",
     );
   if (
-    !selected.preconditions.every((p) =>
-      conditions.some((c) => c.label === p && c.status === "met"),
+    !confirmed.some(({ sink }) =>
+      sink.preconditions.every((p) =>
+        conditions.some((c) => c.label === p && c.status === "met"),
+      ),
     )
   )
     fail(
@@ -526,14 +604,51 @@ function bindCapturedEvidence(row: StackAssessment, work: StackWorkItem) {
   };
 }
 
+function verifyQuestionChecks(
+  row: StackAssessment,
+  work: StackWorkItem,
+  records: readonly DependencyClaimRecord[],
+) {
+  if (
+    !work.observation ||
+    work.scopeConflicts.length ||
+    stackSinkMatches(work.observation).length === 0
+  )
+    return;
+  const remaining = new Set(row.remainingQuestions);
+  const byId = new Map(records.map((record) => [record.id, record]));
+  for (const check of row.questionChecks ?? []) {
+    if (!remaining.delete(check.question))
+      fail(
+        `Question check is duplicated or does not match a remaining question: ${check.question}`,
+      );
+    for (const ref of check.claims) {
+      const record = byId.get(ref.id);
+      if (
+        !record ||
+        record.revision !== ref.revision ||
+        record.hash !== ref.hash ||
+        (!record.excerpts.length && !record.receipts.length)
+      )
+        fail(
+          `Question check must cite a supporting claim with verified source or capture evidence: ${check.question}`,
+        );
+    }
+  }
+  if (remaining.size)
+    fail(
+      `Before recording unknown, investigate and cite an attempted check for each deciding question: ${[...remaining].join("; ")}`,
+    );
+}
+
 export async function prepareStackAssessment(
   input: unknown,
   work: StackWorkItem,
   packet: StackPacket,
   claims: StackClaimReader,
-  repository: string,
   signal?: AbortSignal,
 ): Promise<StackAssessment> {
+  signal?.throwIfAborted();
   const row = bindCapturedEvidence(itemInput.parse(input), work);
   if (row.workItemId !== work.id)
     fail("Assessment work item does not match the selected observation.");
@@ -546,13 +661,26 @@ export async function prepareStackAssessment(
       commit: r.commit ?? packet.manifest.target.sha,
     }));
     assessProof(row, work, packet, records);
-    const use = await validateDependencyUse(row.use, repository, signal);
-    if (use.verdict !== row.verdict)
-      fail(
-        `The supplied evidence supports only a ${use.verdict} verdict. ${use.reason}`,
-      );
-    row.use.reason = use.reason;
-    row.use.deployment = use.deployment;
+    dependencyUseSchema.parse(row.use);
+    const facts = new Set(row.use.evidence.flatMap((range) => range.supports));
+    if (row.use.deployment === "confirmed" && !facts.has("running"))
+      row.use.deployment = "unknown";
+    if (
+      row.verdict === "exploitable" ||
+      row.verdict === "potentially_exploitable"
+    ) {
+      if (!facts.has("affected_copy") || !facts.has("affected_use"))
+        fail(
+          "The supplied evidence must establish the affected copy and applicable use in code.",
+        );
+      if (
+        row.verdict === "exploitable" &&
+        (row.use.deployment !== "confirmed" || !facts.has("access"))
+      )
+        fail(
+          "The supplied evidence must establish the running revision and caller access.",
+        );
+    }
   } else assessProof(row, work, packet, records);
   return row;
 }
@@ -633,13 +761,22 @@ export function finalizeStackReport(
     packet.manifest;
   return stackInvestigationReportSchema.parse({
     schemaVersion: "codex-security.pipeline-stacks.report/v1",
-    reviewPolicy: "single_agent",
+    review: null,
     runId,
     attemptId,
     inputDigest,
     toolRevision,
     target,
     cve,
+    ...(packet.manifest.advisoryDetails && {
+      advisoryDetails: packet.manifest.advisoryDetails,
+    }),
+    ...(packet.manifest.advisoryLookupError && {
+      advisoryLookupError: packet.manifest.advisoryLookupError,
+    }),
+    ...(packet.manifest.triggerAnalysis && {
+      triggerAnalysis: packet.manifest.triggerAnalysis,
+    }),
     verdict: aggregateDependencyVerdict(paths, {
       unresolved: !!(
         coverage.truncated.length ||

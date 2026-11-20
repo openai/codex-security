@@ -9,7 +9,6 @@ import { writePublicationFindings } from "./support/sealed-scan.js";
 import { parseJsonLines, jsonLines } from "./support/json.js";
 import { nodeCommand } from "./support/shell.js";
 import { Database } from "bun:sqlite";
-import { execFileSync } from "node:child_process";
 import {
   appendFile,
   chmod,
@@ -1093,10 +1092,15 @@ describe("database-backed Linear publication integration", () => {
           publisherPid = await readProcessId(publisherPidFile);
         }
         expect(publisherPid).toBeGreaterThan(1);
-        const groups = execFileSync(
-          "ps",
-          ["-o", "pgid=", "-p", `${process.pid},${publisherPid}`],
-          { encoding: "utf8" },
+        const groups = execNodePython(
+          completed.python,
+          [
+            "-c",
+            "import os, sys\nfor pid in sys.argv[1:]:\n    print(os.getpgid(int(pid)))",
+            String(process.pid),
+            String(publisherPid),
+          ],
+          completed.environment,
         )
           .trim()
           .split(/\s+/u);

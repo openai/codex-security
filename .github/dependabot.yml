@@ -68,6 +68,11 @@ updates:
       default-days: 7
       exclude:
         - "openai/*"
+    groups:
+      install-action:
+        group-by: dependency-name
+        patterns:
+          - taiki-e/install-action
     commit-message:
       prefix: ci
 

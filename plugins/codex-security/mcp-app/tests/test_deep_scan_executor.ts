@@ -6,7 +6,6 @@ import {
   parseDeepScan,
   temporaryDirectories,
   fakeCodexFixture,
-  bundledCodexSdkEnvironment,
   workerRequest,
   assertReadOnlyWorkerPolicy,
   workerPermissionProfileOverride,
@@ -20,7 +19,6 @@ import {
   workerGitEnvironment,
   workerRuntimeEnvironment,
   workerScanEnvironment,
-  externalImports,
   expectedGitEnvironment,
   restoreEnv,
 } from "./support/fake-codex-source.ts";
@@ -51,7 +49,6 @@ import {
   mkdir,
   readFile,
   realpath,
-  stat,
   symlink,
   utimes,
   writeFile,
@@ -96,9 +93,9 @@ try {
     );
     await check(t, testWorkerTerminalEvents);
     await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    await check(t, testAbortPropagation);
     if (process.platform !== "win32") {
       await check(t, testStreamTerminationWithoutTerminalEventFails);
-      await check(t, testAbortPropagation);
     }
   });
 
@@ -905,9 +902,9 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       else process.env.CODEX_CLI_PATH = configured;
       const hasBundledTools = expectedExecutable === codexPath;
       if (hasBundledTools) {
-        process.env.PATH = bundledCodexSdkEnvironment(resolveCodexPath(), {
-          PATH: process.env.PATH,
-        }).PATH;
+        process.env.PATH = [bundledTools, process.env.PATH].join(
+          path.delimiter,
+        );
       }
       await writeFile(
         promptPath,
@@ -1447,8 +1444,10 @@ async function testWorkerRuntimeSettings() {
   ];
   const saved = [
     "PYTHON",
+    "PYTHONIOENCODING",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH",
     "HOME",
     "NODE_OPTIONS",
     "NODE_DEBUG",
@@ -1457,15 +1456,17 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    "GIT_DIFF_OPTS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
     "CODEX_CLI_PATH",
-    "CODEX_MCP_NODE_PATH",
+    "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "SYNTHETIC_GATEWAY_KEY",
@@ -1500,13 +1501,21 @@ async function testWorkerRuntimeSettings() {
         { account: null, requiresOpenaiAuth: false },
         process.platform === "win32" && configuration === "",
       );
-      const python = path.join(fixture.root, "selected venv", "bin", "python");
+      const browserNode = path.join(fixture.root, "browser node");
+      process.env.CODEX_BROWSER_USE_NODE_PATH = browserNode;
+      const systemPython = process.platform === "win32" ? "python" : "python3";
+      const python =
+        configuration === "" && process.platform !== "win32"
+          ? systemPython
+          : path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
         fixture.root,
         "helper venv",
         "bin",
         "python",
       );
+      const workerPython = (index: number) =>
+        index === 0 ? systemPython : `${helperPython}-${index} `;
       process.env.PYTHON = python;
       const gitEnvironment = workerGitEnvironment(fixture.root);
       await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
@@ -1641,16 +1650,27 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const nestedReceipts = index === 0;
           const workerUsageDirectory = path.join(
-            fixture.root,
-            `state-${index}`,
-            "codex-home",
+            nestedReceipts ? codexHome : `${codexHome}-sibling`,
             "worker-usage",
             `scan-${index}`,
           );
+          const receiptRoot = path.parse(workerUsageDirectory).root;
+          const pluginReadRoot =
+            index === 0
+              ? path.join(fixture.root, `plugin-${index}`)
+              : undefined;
+          const sourceReadRoot = path.join(
+            fixture.root,
+            `private source [${index}]`,
+          );
           const parentSandbox = {
+            pluginReadRoot,
+            sourceReadRoot,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
+              ...(nestedReceipts ? [] : [workerUsageDirectory]),
             ],
             literalFilesystemDenies: [
               ...trustedParentSandboxWithDenials.literalFilesystemDenies,
@@ -1701,6 +1721,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           };
           return {
             nativePaths,
+            pythonIoEncoding: index % 2 === 0 ? "utf-16-le" : "utf-8-sig",
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
             knowledgeDocuments: {
               "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
@@ -1716,10 +1737,27 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
+                [sourceReadRoot]: { ".": "read" },
+                ...(pluginReadRoot === undefined
+                  ? {}
+                  : { [pluginReadRoot]: { ".": "read" } }),
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
-                [workerUsageDirectory]: { ".": "deny" },
-                [literalDeniedPath]: { ".": "deny" },
+                ...(!nestedReceipts || process.platform !== "linux"
+                  ? { [workerUsageDirectory]: { ".": "deny" } }
+                  : {}),
+                ...(nestedReceipts
+                  ? {}
+                  : {
+                      [receiptRoot]: {
+                        ...(receiptRoot === "/"
+                          ? deniedWorkerPermissionProfile.filesystem["/"]
+                          : {}),
+                        [workerUsageDirectory.slice(receiptRoot.length)]:
+                          "deny",
+                      },
+                    }),
+                [literalDeniedPath]: "deny",
               },
             },
             provider,
@@ -1729,6 +1767,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ? undefined
                 : {
                     ...workerScanEnvironment(fixture.root, index),
+                    CODEX_BROWSER_USE_NODE_PATH: path.join(
+                      fixture.root,
+                      `scan browser node ${index}`,
+                    ),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     [headerKey]: ` synthetic-canonical-header-${index}\t`,
@@ -2013,6 +2055,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
 
+      const scanGitEnvironments = settings.map((_, index) => {
+        const tools = path.join(fixture.root, `operator tools ${index}`);
+        return {
+          ...gitEnvironment,
+          PATH: [tools, gitEnvironment.PATH].join(path.delimiter),
+          CODEX_SECURITY_GIT: path.join(tools, "git"),
+        };
+      });
+
       await Promise.all(
         settings.map(async (_, index) => {
           const directory = path.join(
@@ -2048,7 +2099,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ? ["api", `background jobs ${index}`]
                   : undefined,
               filePaths: index % 2 === 0 ? [`background jobs ${index}`] : [],
-              pythonCommand: `${helperPython}-${index} `,
+              pythonCommand: workerPython(index),
             },
           }),
       );
@@ -2067,11 +2118,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         await Promise.all(
           executors.map((executor, index) => {
             // Snapshot each scan environment independently.
-            restoreEnv(
-              "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
-              externalImports[index].inherited,
-            );
+            Object.assign(process.env, scanGitEnvironments[index]);
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+            process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH = path.dirname(
+              nodePaths[index],
+            );
             Object.assign(process.env, temporaryEnvironments[index]);
             process.env.CODEX_SECURITY_STATE_DIR = path.join(
               fixture.root,
@@ -2092,6 +2143,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ]) {
               process.env[name] = path.join(fixture.root, `libraries-${index}`);
             }
+            process.env.PYTHONIOENCODING =
+              workerConfigurations[index].pythonIoEncoding;
             restoreEnv(
               "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
               workerConfigurations[index].workerConfigPath,
@@ -2149,7 +2202,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
-            path.join(fixture.root, "ambient-plugin"),
+            workerConfigurations[index].parentSandbox.pluginReadRoot ??
+              path.join(fixture.root, "ambient-plugin"),
+          );
+          assert.equal(
+            workerLaunch.environment!._CODEX_SECURITY_SDK_NODE_SEARCH_PATH,
+            path.dirname(nodePaths[index]),
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -2192,15 +2250,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           const invocation = await readJson(workerLaunch.markerPath);
           assertFlagPair(invocation.argv, "--cd", workerDirectories[index]);
-          assert.equal(
-            invocation.runtimeEnvironment
-              .CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-            externalImports[index].override ?? externalImports[index].inherited,
-          );
-          assert.equal(
-            process.env.CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS,
-            externalImports.at(-1)!.inherited,
-          );
           if (
             process.platform === "win32" &&
             configuration === "" &&
@@ -2223,6 +2272,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment![name],
             );
           }
+          assert.equal(
+            invocation.runtimeEnvironment.PYTHONIOENCODING,
+            workerConfigurations[index].pythonIoEncoding,
+          );
           assert.equal(
             invocation.knowledgePath,
             workerConfigurations[index].knowledgePath,
@@ -2270,6 +2323,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               nodePaths[index],
           );
           assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
+          assert.equal(
+            invocation.runtimeEnvironment.CODEX_BROWSER_USE_NODE_PATH,
+            selectedProvider.environment?.CODEX_BROWSER_USE_NODE_PATH ??
+              browserNode,
+          );
           assert.equal(invocation.providerHeader, providerHeaders[index]);
 
           assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
@@ -2463,13 +2521,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.deepEqual(
             invocation.gitEnvironment,
             expectedGitEnvironment(
-              gitEnvironment,
+              scanGitEnvironments[index],
               nodePaths[index],
               selectedProvider.environment,
             ),
           );
           for (const [name, value] of Object.entries({
-            ...gitEnvironment,
+            ...scanGitEnvironments.at(-1),
             CODEX_MCP_NODE_PATH: nodePaths.at(-1),
           })) {
             assert.equal(process.env[name], value);
@@ -2480,7 +2538,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             "mcp_servers.cs_artifacts.command": process.execPath,
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
               undefined,
-            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
+              workerPython(index),
             "mcp_servers.cs_artifacts.args.0": path.join(
               fixture.root,
               `plugin-${index}`,
@@ -2578,7 +2637,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.deepEqual(
             preflight.gitEnvironment,
             expectedGitEnvironment(
-              gitEnvironment,
+              scanGitEnvironments[index],
               nodePaths[index],
               selectedProvider.environment,
             ),
@@ -3039,6 +3098,7 @@ async function testLargeScopeTransport() {
             const filePaths = includePaths.filter(
               (_, index) => index % 2 === 0,
             );
+            const excludePaths = [`scan-${index}/examples`];
             const run = parseDeepScan({
               deepScan: {
                 scanId,
@@ -3047,6 +3107,7 @@ async function testLargeScopeTransport() {
                 scope: ".",
                 includePaths,
                 filePaths,
+                excludePaths,
                 scanDir: workerRoot,
                 config: {
                   workers: 1,
@@ -3067,6 +3128,7 @@ async function testLargeScopeTransport() {
                 scope: run.scope,
                 includePaths: run.includePaths,
                 filePaths: run.filePaths,
+                excludePaths: run.excludePaths,
               },
             });
             await executor.run(
@@ -3081,6 +3143,11 @@ async function testLargeScopeTransport() {
             const invocation = await readJson(output, "invocation.json");
             assert.deepEqual(invocation.scopeInput.paths, includePaths);
             assert.deepEqual(invocation.scopeInput.filePaths, filePaths);
+            assert.deepEqual(invocation.scopeInput.excludePaths, excludePaths);
+            assert.deepEqual(
+              JSON.parse(invocation.scanExclusions),
+              excludePaths,
+            );
             assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
             await assert.rejects(readFile(invocation.scopeInput.file), {
               code: "ENOENT",

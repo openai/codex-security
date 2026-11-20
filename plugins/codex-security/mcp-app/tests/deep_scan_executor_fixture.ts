@@ -1,46 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { CodexSdkWorkerExecutor as Executor } from "../src/deep-scan/executor.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { assertConfigOverrides } from "./assertions.ts";
-import { importModule, importSource } from "./import-module.ts";
+import { executor } from "./support/deep-scan-executor-module.ts";
 import { createFakeCodexFixture } from "./support/fake-codex-fixture.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
-
-const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
-export const {
-  bundledCodexSdkEnvironment,
-}: {
-  bundledCodexSdkEnvironment(
-    command: string,
-    environment: Record<string, string>,
-  ): Record<string, string>;
-} =
-  process.platform === "win32"
-    ? {}
-    : await importSource(
-        path.join(
-          import.meta.dirname,
-          "../../../../sdk/typescript/src/codex-sdk-environment.ts",
-        ),
-      );
-
-const executor = await importModule({
-  define: {
-    "import.meta.url": JSON.stringify(executorSource.href),
-  },
-  stdin: {
-    // Expose the environment snapshot only for tests.
-    contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendItemDiagnostic };
-export { parseDeepScan } from "./response.js";`,
-    loader: "ts",
-    resolveDir: path.dirname(fileURLToPath(executorSource)),
-    sourcefile: fileURLToPath(executorSource),
-  },
-});
 
 export const {
   resolveCodexPath,
@@ -48,6 +12,7 @@ export const {
   appendItemDiagnostic,
   parseDeepScan,
 } = executor;
+
 export const CodexSdkWorkerExecutor: typeof Executor =
   executor.CodexSdkWorkerExecutor;
 

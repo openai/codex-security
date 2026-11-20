@@ -6,8 +6,8 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink, rm, stat } from
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureRunnerPath, checkPython, checkSandbox, ensureSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, SandboxUnavailableError, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.js';
-import { runProcess } from '../src/process.js';
+import { captureRunnerPath, checkPython, checkSandbox, ensureSandbox, cleanupRuntime, resolveTool, runtimeEnvironment, SandboxUnavailableError, scanCredentials, setupRuntime, writeRuntimeLauncher } from '../src/runtime.ts';
+import { runProcess } from '../src/process.ts';
 
 test('tool discovery preserves the selected PATH launcher spelling', async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-tools-')));

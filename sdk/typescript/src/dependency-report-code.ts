@@ -119,23 +119,66 @@ const escapes: Record<string, string> = {
 const escapeHtml = (text: string) =>
   text.replace(/[&<>"'\r]/gu, (character) => escapes[character]!);
 
+/** Match an explicitly reported expression once, in the original text before escaping. */
+function argumentRange(line: string | undefined, expression: string) {
+  if (!line || !expression) return;
+  const start = line.indexOf(expression);
+  if (start < 0 || start !== line.lastIndexOf(expression)) return;
+  const end = start + expression.length;
+  const word = /[$\p{ID_Continue}]/u;
+  if (word.test(line[start - 1] ?? "") && word.test(expression[0]!)) return;
+  if (word.test(line[end] ?? "") && word.test(expression.at(-1)!)) return;
+  return { start, end };
+}
+
 export function renderDependencyCode(
   text: string,
   path: string,
   firstLine: number,
   highlightedLines?: ReadonlySet<number>,
+  argument?: { line: number; expression: string },
+  follow = false,
+  relatedLines?: ReadonlySet<number>,
 ): string {
   const extension = /\.[a-z\d]+$/iu.exec(path)?.[0].toLowerCase() ?? "";
   const syntax = grammars.find(({ extensions }) => extensions.has(extension));
   const lines = [""];
+  const argumentLine = argument && argument.line - firstLine;
+  const range =
+    argument && argumentLine !== undefined
+      ? argumentRange(text.split("\n")[argumentLine], argument.expression)
+      : undefined;
+  let column = 0;
   function append(value: string, token?: Token) {
     for (const [index, part] of value.split("\n").entries()) {
-      if (index) lines.push("");
+      if (index) {
+        lines.push("");
+        column = 0;
+      }
       if (!part) continue;
-      const escaped = escapeHtml(part);
-      lines[lines.length - 1] += token
-        ? `<span class="tok-${token}">${escaped}</span>`
-        : escaped;
+      const row = lines.length - 1;
+      const styled = (s: string) =>
+        s && token
+          ? `<span class="tok-${token}">${escapeHtml(s)}</span>`
+          : escapeHtml(s);
+      if (
+        range &&
+        row === argumentLine &&
+        column < range.end &&
+        column + part.length > range.start
+      ) {
+        const from = Math.max(range.start - column, 0);
+        const to = Math.min(range.end - column, part.length);
+        lines[row] += styled(part.slice(0, from));
+        if (column + from === range.start)
+          lines[row] += '<mark class="trace-argument">';
+        lines[row] += styled(part.slice(from, to));
+        if (column + to === range.end) lines[row] += "</mark>";
+        lines[row] += styled(part.slice(to));
+      } else {
+        lines[row] += styled(part);
+      }
+      column += part.length;
     }
   }
 
@@ -168,7 +211,7 @@ export function renderDependencyCode(
   const rows = lines
     .map((line, index) => {
       const number = firstLine + index;
-      return `<span class="code-row" data-line="${number}"${highlightedLines?.has(number) ? " data-highlighted" : ""}><span class="code-number" aria-hidden="true">${number}</span><span class="code-text">${line}</span></span>`;
+      return `<span class="code-row" data-line="${number}"${highlightedLines?.has(number) ? " data-highlighted" : relatedLines?.has(number) ? ' data-related title="Another step in this path"' : ""}><span class="code-number" aria-hidden="true">${number}</span><span class="code-text">${line}</span>${follow && highlightedLines?.has(number) ? '<button type="button" data-follow data-js hidden aria-label="Next recorded frame" title="Next recorded frame">→</button>' : ""}</span>`;
     })
     .join("");
   return `<pre class="code-listing"><code>${rows}</code></pre>`;

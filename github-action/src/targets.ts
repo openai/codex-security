@@ -1,8 +1,8 @@
 import { lstat, realpath } from 'node:fs/promises';
 import { resolve, relative, sep, isAbsolute } from 'node:path';
-import { runProcess, safeLogLines, type ProcessResult } from './process.js';
-import type { Inputs } from './inputs.js';
-import { parseGitRemote } from '../../sdk/typescript/src/git-remote.js';
+import { runProcess, safeLogLines, type ProcessResult } from './process.ts';
+import type { Inputs } from './inputs.ts';
+import { parseGitRemote } from '../../sdk/typescript/src/git-remote.ts';
 
 export interface EventContext {
   eventName: string;

@@ -1,9 +1,6 @@
 import { cp, mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  Codex,
-  type Usage,
-} from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
+import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import * as auth from "../../sdk/typescript/dist/auth.js";
 import {
   createIsolatedHome,
@@ -40,25 +37,8 @@ interface ModelState {
     schema: unknown,
   ): Promise<{
     answer: unknown;
-    usage: Usage | null;
+    usage: unknown;
   }>;
-}
-
-export function modelSettings(
-  home: string,
-  codexPath: string,
-  environment = process.env,
-) {
-  const settings = routingSettings(home, codexPath, environment);
-  // These native CLI authentication fields are non-inheritable by model tools.
-  for (const name of [
-    "OPENAI_FEDERATION_RULE_ID",
-    "OPENAI_IDENTITY_TOKEN_FILE",
-    "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
-  ]) {
-    if (environment[name] !== undefined) settings.env[name] = environment[name];
-  }
-  return settings;
 }
 
 export async function withModel(
@@ -73,7 +53,7 @@ export async function withModel(
     ambientHome,
     async ({ root, home, signal }) => {
       const codexPath = await realpath(resolveCodexCommand({}).command);
-      const settings = modelSettings(home, codexPath);
+      const settings = routingSettings(home, codexPath);
       const { runtime, path, instructions } = await stageSkill(root);
       await execute({
         root,

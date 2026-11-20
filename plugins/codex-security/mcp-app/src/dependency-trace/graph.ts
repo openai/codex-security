@@ -319,6 +319,7 @@ export class EvidenceGraph {
     observations: readonly TraceObservation[],
     receiptId: string,
     recordPrefix: readonly (string | number)[] = ["observations"],
+    textBlock: number | null = 0,
   ): ObservationSummary {
     let retained = 0;
     let alreadyRecorded = 0;
@@ -326,7 +327,7 @@ export class EvidenceGraph {
     for (const [index, observation] of observations.entries()) {
       const selection: CatalogReceiptSelection = {
         receiptId,
-        textBlock: 0,
+        textBlock,
         record: [...recordPrefix, index],
       };
       const id =
@@ -751,20 +752,6 @@ export class EvidenceGraph {
     return hasDirectory(path, this.coveredDirectories)
       ? "checked"
       : question.status;
-  }
-
-  isServicePending(path: string) {
-    return this.lookupState(path) === "pending";
-  }
-
-  pendingServicePaths() {
-    return [...this.questions.keys()].filter((path) =>
-      this.isServicePending(path),
-    );
-  }
-
-  serviceProject(path: string) {
-    return this.questions.get(path)?.project;
   }
 
   serviceResolution() {

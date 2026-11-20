@@ -4,7 +4,7 @@ These internal bindings supply OS operations that Node does not expose. The `res
 
 ## Package inputs
 
-For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](../../../.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
+For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](https://github.com/openai/codex-security/blob/main/.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
 
 ```sh
 gh run download RUN_ID --name native-universal-COMMIT --dir plugins/codex-security/native/prebuilt
@@ -32,12 +32,11 @@ node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/c
 
 The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `unixEnvironment` reads one named environment value as raw bytes, preserving the distinction between empty and unset values. This keeps configured filesystem locations such as `CODEX_HOME` intact when Node would replace undecodable bytes.
 
-Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
+With the pinned Rust toolchain installed, build and verify the Unix binding from the repository root:
 
 ```sh
-pnpm --dir sdk/typescript install --frozen-lockfile
-pnpm --dir sdk/typescript run build:ci
-node plugins/codex-security/native/build.mjs
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/native/proof.mjs
 (cd plugins/codex-security/native && cargo fmt --check && cargo clippy --locked -- -D warnings)
 ```

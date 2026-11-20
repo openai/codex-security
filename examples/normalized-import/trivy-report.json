@@ -1,0 +1,33 @@
+{
+  "SchemaVersion": 2,
+  "Trivy": { "Version": "0.76.1" },
+  "ReportID": "00000000-0000-7000-8000-000000000001",
+  "CreatedAt": "2026-01-01T00:00:00Z",
+  "ArtifactType": "repository",
+  "ArtifactName": "https://github.com/example/project",
+  "Metadata": {
+    "RepoURL": "https://github.com/example/project",
+    "Branch": "main",
+    "Commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "Results": [
+    {
+      "Target": "package-lock.json",
+      "Class": "lang-pkgs",
+      "Type": "npm",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2099-0001",
+          "PkgName": "@example/parser",
+          "PkgID": "@example/parser@1.0.0",
+          "InstalledVersion": "1.0.0",
+          "FixedVersion": "1.0.1",
+          "Title": "Example parser accepts an invalid length",
+          "Description": "A crafted length can cause excessive allocation.",
+          "Severity": "HIGH",
+          "PrimaryURL": "https://advisories.example.invalid/CVE-2099-0001"
+        }
+      ]
+    }
+  ]
+}

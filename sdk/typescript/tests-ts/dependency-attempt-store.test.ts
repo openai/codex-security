@@ -1,171 +1,164 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
+import { promisify } from "node:util";
 import {
-  createDependencyClaims,
-  type DependencyClaimReference,
-  type PreparedDependencyClaim,
-} from "../src/dependency-claims.js";
+  DependencyAttemptStore,
+  dependencyRecordHash,
+  type StoredClaim,
+} from "../src/dependency-attempt-store.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
-const context = { cve: "CVE-2024-1000", attempt: "local" };
-const excerpt = {
-  path: "version.txt",
-  startLine: 1,
-  endLine: 1,
-  text: "1.0\n",
-};
-const draft = (
-  id: string,
-  dependencies: DependencyClaimReference[] = [],
-): PreparedDependencyClaim => ({
-  id,
-  scope: "fixture",
-  payload: "uses 1.0",
-  dependencies,
-  excerpts: [excerpt],
-  receipts: [],
-});
-
-test("independent commands can reopen exact recorded claims without acquiring review approval", async () => {
-  await using dir = await scopedTemporaryDirectory("claim-state-");
-  const path = join(dir.path, "run.sqlite");
-  const setup = new DependencyAttemptStore(path);
-  const claims = createDependencyClaims(
-    context,
-    undefined,
-    setup,
-    "single_agent",
-  );
-  const original = claims.reference(claims.propose(draft("version")).record);
-  const child = claims.reference(
-    claims.propose(draft("use", [original])).record,
-  );
-  setup.close();
-
-  const processResult = spawnSync(
-    process.execPath,
-    [
-      "-e",
-      `
-    const { DependencyAttemptStore } = await import(${JSON.stringify(new URL("../src/dependency-attempt-store.ts", import.meta.url).href)});
-    const { createDependencyClaims } = await import(${JSON.stringify(new URL("../src/dependency-claims.ts", import.meta.url).href)});
-    const db = new DependencyAttemptStore(${JSON.stringify(path)}, { create: false });
-    const claims = createDependencyClaims(${JSON.stringify(context)}, undefined, db, "single_agent");
-    const ref = claims.currentReference("use");
-    console.log(JSON.stringify({ ref, record: claims.get(ref), isUsable: claims.isUsable(ref), isApproved: claims.isApproved(ref) }));
-    db.close();
-  `,
-    ],
-    { encoding: "utf8" },
-  );
-  expect(processResult.status, processResult.stderr).toBe(0);
-  expect(JSON.parse(processResult.stdout)).toMatchObject({
-    ref: child,
-    record: {
-      state: "recorded",
-      dependencies: [original],
-      excerpts: [excerpt],
-    },
-    isUsable: true,
-    isApproved: false,
-  });
-
-  const db = new DependencyAttemptStore(path, { create: false });
+test("an attempt reopens with its original evidence and atomically replays a write", async () => {
+  await using directory = await scopedTemporaryDirectory("dependency-attempt-");
+  const file = join(directory.path, "attempt.sqlite");
+  const identity = {
+    runId: "sample",
+    attemptId: "first",
+    inputDigest: "fixture",
+  };
+  const input = { version: "1.0.0", path: "package.json" };
+  const store = new DependencyAttemptStore(file);
   try {
+    store.bindIdentity(identity);
     expect(() =>
-      createDependencyClaims(context, undefined, db, "reviewed"),
-    ).toThrow(/policy/);
-    expect(() =>
-      createDependencyClaims(
-        { cve: "CVE-2024-1001" },
-        undefined,
-        db,
-        "single_agent",
-      ),
-    ).toThrow(/context/);
-    const reopened = createDependencyClaims(
-      context,
-      undefined,
-      db,
-      "single_agent",
-    );
-    const newer = reopened.reference(
-      reopened.propose({ ...draft("version"), payload: "updated" }, 1).record,
-    );
-    expect(reopened.isUsable(newer)).toBe(true);
-    expect(reopened.get(original)?.state).toBe("stale");
-    expect(reopened.isUsable(child)).toBe(false);
-    expect(reopened.get(child)?.state).toBe("stale");
-    expect(reopened.lease(newer)).toBeUndefined();
-  } finally {
-    db.close();
-  }
-});
-
-test("a failing batch rolls back claims, transitive invalidation and receipts together", () => {
-  const db = new DependencyAttemptStore(":memory:");
-  try {
-    const claims = createDependencyClaims(
-      context,
-      undefined,
-      db,
-      "single_agent",
-    );
-    const base = claims.reference(claims.propose(draft("base")).record);
-    const dependent = claims.reference(
-      claims.propose(draft("dependent", [base])).record,
-    );
-    expect(() =>
-      db.transaction(() => {
-        claims.propose({ ...draft("base"), payload: "changed" }, 1);
-        db.set("receipts", "batch", { applied: true });
-        claims.propose(draft("absent"), 3);
+      store.mutate("save", "record", input, () => {
+        store.set("evidence", "package", input);
+        store.recordClaim("version", input);
+        throw new Error("interrupted");
       }),
-    ).toThrow(/expected revision/);
-    expect(claims.currentReference("base")).toEqual(base);
-    expect(claims.isUsable(dependent)).toBe(true);
-    expect(db.get("receipts", "batch")).toBeUndefined();
+    ).toThrow("interrupted");
+    expect(store.get("evidence", "package")).toBeUndefined();
+    expect(store.claim("version")).toBeUndefined();
+    store.mutate("save", "record", input, () => {
+      store.set("evidence", "package", input);
+      return store.recordClaim("version", input, 0);
+    });
   } finally {
-    db.close();
+    store.close();
   }
-});
-
-test("opening unrelated SQLite data fails without modifying it", async () => {
-  await using dir = await scopedTemporaryDirectory("unrelated-state-");
-  const path = join(dir.path, "work.sqlite");
-  const other = new Database(path);
-  other.exec(
-    "CREATE TABLE unrelated (value TEXT); INSERT INTO unrelated VALUES ('data')",
-  );
-  other.close();
-  const original = readFileSync(path);
-  expect(() => new DependencyAttemptStore(path)).toThrow(/unrecognized/i);
-  expect(readFileSync(path)).toEqual(original);
-});
-
-test("only the handle owning a live review can complete it", async () => {
-  await using dir = await scopedTemporaryDirectory("review-lease-");
-  const path = join(dir.path, "run.sqlite");
-  const first = new DependencyAttemptStore(path);
-  const second = new DependencyAttemptStore(path, { create: false });
+  const reopened = new DependencyAttemptStore(file, { create: false });
   try {
-    const owner = createDependencyClaims(context, undefined, first);
-    const other = createDependencyClaims(context, undefined, second);
-    const ref = owner.reference(owner.propose(draft("use")).record);
-    const decision = { accepted: true, reason: "Verified", evidenceKeys: [] };
-    expect(owner.lease(ref)).toBeDefined();
-    expect(other.lease(ref)).toBeUndefined();
-    expect(other.complete(ref, decision)).toBe(false);
-    first.close();
-    expect(other.lease(ref)).toBeDefined();
-    expect(other.complete(ref, decision)).toBe(true);
-    expect(other.isApproved(ref)).toBe(true);
+    reopened.bindIdentity({
+      inputDigest: "fixture",
+      runId: "sample",
+      attemptId: "first",
+    });
+    expect(() =>
+      reopened.bindIdentity({ ...identity, inputDigest: "different" }),
+    ).toThrow(/different investigation/);
+    const unexpectedWrite = (): StoredClaim<typeof input> => {
+      throw new Error("repeated write");
+    };
+    const previous = reopened.mutate(
+      "save",
+      "record",
+      { path: input.path, version: input.version },
+      unexpectedWrite,
+    );
+    expect(previous).toEqual({
+      id: "version",
+      revision: 1,
+      hash: dependencyRecordHash(input),
+      value: input,
+    });
+    expect(reopened.get("evidence", "package")).toEqual(input);
+    expect(() =>
+      reopened.mutate("save", "another-command", input, unexpectedWrite),
+    ).toThrow(/different request/);
+    expect(() =>
+      reopened.mutate("save", "record", {}, unexpectedWrite),
+    ).toThrow(/different request/);
   } finally {
-    first.close();
-    second.close();
+    reopened.close();
   }
+});
+
+test("asynchronous database callbacks cannot commit a mutation receipt", async () => {
+  const store = new DependencyAttemptStore(":memory:");
+  try {
+    const deferredWrite = async () => {
+      await Promise.resolve();
+      store.set("evidence", "deferred", "written outside the transaction");
+      throw new Error("deferred failure");
+    };
+    // @ts-expect-error JavaScript callers can supply an async function.
+    expect(() => store.mutate("save", "record", {}, deferredWrite)).toThrow(
+      /synchronous/,
+    );
+    // @ts-expect-error Read snapshots also expire when the callback returns.
+    expect(() => store.read(deferredWrite)).toThrow(/synchronous/);
+    const returnsPromise = () => {
+      store.set("evidence", "initial", "written before returning a promise");
+      return Promise.reject(new Error("rejected write"));
+    };
+    // @ts-expect-error An ordinary function returning a promise is asynchronous too.
+    expect(() => store.transaction(returnsPromise)).toThrow(/synchronous/);
+    await Promise.resolve();
+    expect(store.keys("evidence")).toEqual([]);
+    expect(store.operation("save", "record", {})).toBeUndefined();
+    expect(store.mutate("save", "record", {}, () => "retried")).toBe("retried");
+  } finally {
+    store.close();
+  }
+});
+
+test("two processes replacing the same claim revision leave one winner and preserve history", async () => {
+  await using directory = await scopedTemporaryDirectory("claim-revision-");
+  const path = join(directory.path, "attempt.sqlite");
+  const store = new DependencyAttemptStore(path);
+  try {
+    const first = store.recordClaim("version", { version: "initial" });
+    expect(store.recordClaim("version", first.value)).toEqual(first);
+    expect(() =>
+      store.recordClaim("version", { version: "different" }),
+    ).toThrow(/expected revision/);
+    const module = new URL(
+      "../src/dependency-attempt-store.ts",
+      import.meta.url,
+    ).href;
+    const contender = `
+      const { DependencyAttemptStore } = await import(${JSON.stringify(module)});
+      const [file, version] = process.argv.slice(1);
+      const store = new DependencyAttemptStore(file, {create: false});
+      try {
+        console.log(JSON.stringify(store.recordClaim("version", {version}, 1)));
+      } catch (error) {
+        if (!String(error).includes("expected revision")) throw error;
+        console.log("null");
+      } finally {
+        store.close();
+      }
+    `;
+    const outcomes = await Promise.all(
+      ["left", "right"].map(async (version) =>
+        JSON.parse(
+          (
+            await promisify(execFile)(process.execPath, [
+              "-e",
+              contender,
+              path,
+              version,
+            ])
+          ).stdout,
+        ),
+      ),
+    );
+    const winners = outcomes.filter(Boolean);
+    expect(winners).toHaveLength(1);
+    expect(store.claim("version", 1)).toEqual(first);
+    expect(store.claim("version")?.revision).toBe(2);
+    expect(store.claims()).toEqual(winners);
+  } finally {
+    store.close();
+  }
+});
+
+test("refuses to initialize over an unrelated file", async () => {
+  await using directory = await scopedTemporaryDirectory("unrelated-state-");
+  const file = join(directory.path, "existing.data");
+  await writeFile(file, "a different file");
+  expect(() => new DependencyAttemptStore(file)).toThrow();
+  expect(await readFile(file, "utf8")).toBe("a different file");
 });

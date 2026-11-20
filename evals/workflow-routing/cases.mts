@@ -21,6 +21,18 @@ export const cases = [
     skill: "triage-finding",
   },
   {
+    id: "acquire-scanner-evidence",
+    request:
+      "Fetch the two existing Guardian findings I selected on main and preview importing them into this checkout.",
+    skill: "publish-findings",
+  },
+  {
+    id: "publish-stored-evidence",
+    request:
+      "Publish the high-severity scanner findings from yesterday’s local import to the connected Cloud repository.",
+    skill: "publish-findings",
+  },
+  {
     id: "dependency-alert",
     request:
       "Grype flagged a vulnerable package in this repo. What pulls it in, and can we upgrade it?",

@@ -29,7 +29,7 @@ test("three independent reviews vote by normalized severity, with deterministic 
           reviewTrigger: `Missing fact ${index + 1}`,
         }));
         let calls = 0;
-        const result = await reviewSeverity(async () => answers[calls++]!);
+        const result = await reviewSeverity(async () => answers[calls++]!, 3);
         const expected =
           first === second || first === third
             ? first

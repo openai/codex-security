@@ -4,6 +4,8 @@ const dependencyTrace = process.argv[2] === "--dependency-trace";
 
 async function createServer() {
   if (dependencyTrace) {
+    if (process.env.CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY !== "1")
+      throw new Error("Dependency tracing is disabled.");
     if (process.argv.length !== 4) {
       throw new Error(
         "--dependency-trace requires an absolute checkout directory.",

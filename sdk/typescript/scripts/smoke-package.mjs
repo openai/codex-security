@@ -18,6 +18,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 import { resolveNpm } from "./package-smoke-npm.mjs";
+import { smokeStackRun } from "./smoke-stack-run.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
 const {
   commandTimeoutMs: PACKAGE_SMOKE_TIMEOUT_MS,
@@ -79,6 +81,7 @@ function run(
     cwd,
     env,
     capture = false,
+    input,
     windowsVerbatimArguments = false,
     timeout = PACKAGE_SMOKE_TIMEOUT_MS,
   } = {},
@@ -86,6 +89,7 @@ function run(
   const result = spawnSync(command, args, {
     cwd,
     env,
+    input,
     encoding: "utf8",
     stdio: capture ? "pipe" : "inherit",
     timeout,
@@ -297,27 +301,7 @@ assert.equal(
   `Packed npm tarball is not a regular file: ${archive}.`,
 );
 
-const publicPluginManifest = ".codex-plugin/plugin.json";
-assert.ok(
-  Array.isArray(pluginContract.externalOwnedExact) &&
-    pluginContract.externalOwnedExact.includes(publicPluginManifest),
-  "Plugin contract must include its public manifest.",
-);
-assert.ok(
-  Array.isArray(pluginContract.shippedExact) &&
-    pluginContract.shippedExact.every((path) => typeof path === "string"),
-  "Plugin contract must declare its shipped files.",
-);
-
-const expectedPluginFiles = [
-  publicPluginManifest,
-  ...pluginContract.shippedExact.filter((path) => !path.startsWith("sdk/")),
-].sort();
-assert.equal(
-  new Set(expectedPluginFiles).size,
-  expectedPluginFiles.length,
-  "Plugin contract must not contain duplicate installed paths.",
-);
+const expectedPluginFiles = pluginContractFiles(pluginContract).sort();
 
 const consumer = await mkdtemp(join(tmpdir(), "codex-security-package-"));
 try {
@@ -336,6 +320,7 @@ try {
     [
       ...npm.args,
       "install",
+      "--engine-strict",
       "--prefer-online",
       "--include=optional",
       "--ignore-scripts",
@@ -833,12 +818,19 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  let credentialLockState = join(consumer, "credential-lock-state");
+  if (process.platform === "win32" && !process.versions.bun) {
+    // Exercise a long SQLite guard while the canonical home fits the ACL tools' path limit.
+    const state = join(await realpath(consumer), "credential-lock-state");
+    const padding = Math.max(0, 240 - join(state, "codex-home").length - 1);
+    credentialLockState = join(state, "x".repeat(padding));
+  }
   run(
     process.execPath,
     [
       join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
       pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
-      join(consumer, "credential-lock-state"),
+      credentialLockState,
     ],
     { cwd: consumer },
   );
@@ -893,7 +885,22 @@ try {
     ],
     { cwd: consumer },
   );
+  await smokeStackRun({ installedRoot, launcher, consumer, run });
   await smokeNestedDeepScanWorker(installedRoot, consumer);
+
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    run(
+      process.execPath,
+      [
+        join(packageRoot, "scripts", "fixtures", "package-review-items.mjs"),
+        installedRoot,
+      ],
+      {
+        cwd: consumer,
+        env: { ...process.env, CODEX_MCP_NODE_PATH: process.execPath },
+      },
+    );
+  }
 
   run(
     process.execPath,

@@ -1,5 +1,4 @@
 import { writeFile } from "node:fs/promises";
-import { format } from "prettier";
 import { z } from "zod";
 import { stackInvestigationReportSchema } from "../dist/dependency-stack-assessment.js";
 import { stackPacketJsonSchema } from "../dist/dependency-stack-packet.js";
@@ -14,6 +13,6 @@ const schemas = {
 for (const [filename, schema] of Object.entries(schemas)) {
   await writeFile(
     new URL("../schemas/" + filename, import.meta.url),
-    await format(JSON.stringify(schema), { parser: "json" }),
+    JSON.stringify(schema, null, 2) + "\n",
   );
 }

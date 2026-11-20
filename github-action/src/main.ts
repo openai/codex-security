@@ -1,12 +1,12 @@
 import * as core from '@actions/core';
 import { readFile, realpath } from 'node:fs/promises';
-import { parseInputs, scanArguments, type Inputs } from './inputs.js';
-import { resolveTarget, type EventContext, type Target } from './targets.js';
-import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, scanCredentials, API_KEY_ENVIRONMENT_VARIABLES, type Runtime } from './runtime.js';
-import { runProcess, safeLogLines } from './process.js';
-import { analyzeResults, type ScanResults, type Severity } from './results.js';
-import { collectReports, uploadReports } from './artifacts.js';
-import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.js';
+import { parseInputs, scanArguments, type Inputs } from './inputs.ts';
+import { resolveTarget, type EventContext, type Target } from './targets.ts';
+import { SUPPORTED_CLI_VERSION, setupRuntime, cleanupRuntime, runtimeEnvironment, scanCredentials, API_KEY_ENVIRONMENT_VARIABLES, type Runtime } from './runtime.ts';
+import { runProcess, safeLogLines } from './process.ts';
+import { analyzeResults, type ScanResults, type Severity } from './results.ts';
+import { collectReports, uploadReports } from './artifacts.ts';
+import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.ts';
 
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 
@@ -66,7 +66,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
   core.setOutput('report-status', 'failed');
   core.setOutput('sarif-upload-ready', 'false');
   try {
-    inputs = parseInputs(name => core.getInput(name), process.env.GITHUB_WORKSPACE ?? '');
+    inputs = parseInputs(name => core.getInput(name, {trimWhitespace: false}), process.env.GITHUB_WORKSPACE ?? '');
     const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context();
     target = await resolveTarget(inputs, event);

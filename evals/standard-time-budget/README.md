@@ -71,10 +71,12 @@ console.log(dir);
 JS
 ```
 
-Start a fresh read-only Codex session in the printed directory. Supply the **Shared Worker
-Instructions** and **Focused Investigator Prompt** blocks from the revision of
-[`core-scan.md`](../../plugins/codex-security/references/core-scan.md) under test,
-then give the investigator this single packet:
+Start a fresh read-only Codex session in the printed directory. Supply the
+[focused investigator brief](../../plugins/codex-security/references/focused-investigator.md)
+from the revision under test. For earlier revisions that embed the brief in
+[`core-scan.md`](../../plugins/codex-security/references/core-scan.md), supply its
+**Shared Worker Instructions** and **Focused Investigator Prompt** blocks.
+Give the investigator this single packet:
 
 > Review `src/statements.py`, using `README.md` and `src/app.py` for context. Can a download request escape the resolved statement directory by path traversal?
 

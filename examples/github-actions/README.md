@@ -52,7 +52,7 @@ older ones. Uncomment the schedule for weekly full scans after setup works.
 Scans consume Bedrock inference usage.
 
 The workflow uses standard mode with high reasoning effort. See
-[scan options](../../sdk/typescript/README.md#scan-options-and-output) and
+[scan options](../../sdk/typescript/docs/cli.md#scan-options-and-output) and
 [Bedrock configuration](../../docs/bedrock.md#select-aws-credentials-and-a-model) for details.
 
 To upgrade, change `CODEX_SECURITY_VERSION` to a reviewed CLI release and keep

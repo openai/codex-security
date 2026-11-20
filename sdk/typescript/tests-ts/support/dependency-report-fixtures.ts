@@ -1,8 +1,12 @@
 import type {
-  DependencyCoverageDisposition,
   DependencyReviewReference,
-  ReviewedDependencyUse,
-} from "../../src/dependency-reachability.js";
+  Finding,
+} from "../../src/dependency-report-model.js";
+type DependencyCoverageDisposition = Extract<
+  Finding,
+  { kind: "coverage" }
+>["item"];
+type ReviewedDependencyUse = Extract<Finding, { kind: "use" }>["item"];
 
 export const sourceRef = (
   path = "src/handler.ts",
@@ -102,6 +106,62 @@ export function report(
     limitations: [],
     assumptions: [],
     searches: [],
+  };
+}
+// Attach each excerpt via the same claim and source references as saved reports.
+export function withExcerpts(
+  input: ReturnType<typeof report>,
+  ...excerpts: string[][]
+) {
+  const items = [...input.uses, ...input.coverage];
+  const sources: Record<
+    string,
+    {
+      path: string;
+      startLine: number;
+      endLine: number;
+      commit?: string;
+      excerpt: string;
+    }
+  > = {};
+  const claims = excerpts.map((texts, i) => {
+    const item = items[i]!;
+    const ref = { id: `evidence-${i}`, revision: 1, hash: "b".repeat(64) };
+    const sourceIds = texts.map((excerpt, j) => {
+      const id = `cite-${i}-${j}`;
+      const cite = item.evidence[j];
+      if (!cite) throw new Error("Fixture excerpt without a citation");
+      sources[id] = { ...cite, excerpt };
+      return id;
+    });
+    return {
+      ...ref,
+      state: "approved",
+      contextHash: "a".repeat(64),
+      payload: { fact: "Source range reviewed." },
+      scope: { location: item.location ?? null },
+      dependencies: [],
+      decision: { accepted: true, reason: "Source verified", evidenceKeys: [] },
+      evidence: { sourceIds, receiptIds: [] },
+    };
+  });
+  const bind = <
+    T extends ReviewedDependencyUse | DependencyCoverageDisposition,
+  >(
+    item: T,
+    i: number,
+  ) => {
+    const claim = claims[i];
+    if (!claim) return item;
+    const { id, revision, hash } = claim;
+    return { ...item, supportingClaims: [{ id, revision, hash }] };
+  };
+  return {
+    ...input,
+    uses: input.uses.map(bind),
+    coverage: input.coverage.map((c, i) => bind(c, input.uses.length + i)),
+    claims,
+    claimEvidence: { sources, receipts: {} },
   };
 }
 export function broadReport() {

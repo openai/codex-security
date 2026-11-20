@@ -8,8 +8,9 @@ import {
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
+import { REPORTABLE_SEVERITIES } from "./scan-settings.js";
 import {
-  trackReaderSelection,
+  appendFinding,
   record,
   relativePath,
   requiredText,
@@ -201,8 +202,19 @@ const matchedVulnerability = z.object({
   package: z.object({ name: nonblank, ecosystem: nonblank }),
   vulnerable_version_range: nonblank,
   first_patched_version: z.object({ identifier: nonblank }).nullable(),
-  severity: z.enum(["critical", "high", "medium", "low"]),
+  severity: z.enum(REPORTABLE_SEVERITIES),
 });
+
+// Python distribution identity ignores case and treats runs of -, _ and . alike.
+function packageNameKey(ecosystem: string, name: unknown): unknown {
+  if (
+    ecosystem === "pip" &&
+    typeof name === "string" &&
+    /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/u.test(name)
+  )
+    return name.toLowerCase().replace(/[-_.]+/gu, "-");
+  return name;
+}
 
 function evidence(alert: Record<string, unknown>, url: string) {
   const dependency = record(alert["dependency"], "Dependabot dependency");
@@ -216,12 +228,16 @@ function evidence(alert: Record<string, unknown>, url: string) {
     first_patched_version: patch,
     severity,
   } = matchedVulnerability.parse(alert["security_vulnerability"]);
+  const nameKey = packageNameKey(ecosystem, name);
+  const matchesPackage = (pkg: Record<string, unknown>) =>
+    pkg["ecosystem"] === ecosystem &&
+    packageNameKey(ecosystem, pkg["name"]) === nameKey;
   if ("package" in dependency) {
     const observed = record(
       dependency["package"],
       "Dependabot dependency package",
     );
-    if (observed["name"] !== name || observed["ecosystem"] !== ecosystem)
+    if (!matchesPackage(observed))
       throw new Error(
         "Dependabot dependency and matched vulnerability packages disagree.",
       );
@@ -249,8 +265,7 @@ function evidence(alert: Record<string, unknown>, url: string) {
       (entry) =>
         isRecord(entry) &&
         isRecord(entry["package"]) &&
-        entry["package"]["name"] === name &&
-        entry["package"]["ecosystem"] === ecosystem &&
+        matchesPackage(entry["package"]) &&
         entry["vulnerable_version_range"] === range,
     )
   )
@@ -319,7 +334,6 @@ export function normalizeGitHubDependabotAlerts(
     findings: [],
     excluded: [],
   };
-  const selection = trackReaderSelection(result);
   const ids = new Set<string>();
   let sourceRepository: string | undefined;
   for (const [index, alert] of alerts.entries()) {
@@ -335,7 +349,7 @@ export function normalizeGitHubDependabotAlerts(
       );
     ids.add(sourceId);
     const inputEvidence = evidence(alert, url);
-    selection.append(index + 1, sourceId, () => {
+    appendFinding(result, index + 1, sourceId, () => {
       if (target === "cloud" && Buffer.byteLength(sourceId) > 512)
         throw new Error(
           "Source finding ID exceeds the Cloud limit of 512 UTF-8 bytes.",
@@ -343,5 +357,5 @@ export function normalizeGitHubDependabotAlerts(
       return validateExternalEvidence(inputEvidence, target);
     });
   }
-  return selection.finish();
+  return result;
 }

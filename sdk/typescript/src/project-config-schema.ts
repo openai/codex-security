@@ -1,8 +1,5 @@
 import { z } from "zod";
-import {
-  dependencyEndpointInputSchema,
-  dependencyScopeSchema,
-} from "./dependency-endpoints.js";
+import { dependencyBoundarySchema } from "./dependency-caller-scope.js";
 import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
@@ -49,6 +46,9 @@ export const ProjectConfigInputSchema = z.strictObject({
       scope: ProjectScopeSchema.optional().describe(
         "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
       ),
+      exclude_paths: ScanSettingsSchema.shape.excludePaths.describe(
+        "Literal files or directories relative to the selected repository. Exclusions take precedence over inclusions.",
+      ),
       knowledge_base: ScanSettingsSchema.shape.knowledgeBasePaths.describe(
         "Context files or directories, relative to this file. An empty list selects no additional context.",
       ),
@@ -74,6 +74,27 @@ export const ProjectConfigInputSchema = z.strictObject({
         ),
     })
     .optional(),
+  exploitability: z
+    .strictObject({
+      ...dependencyBoundarySchema.shape,
+      evidence_sources: z
+        .array(
+          z.strictObject({
+            server: nonempty.describe("Server name in codex.mcp_servers."),
+            instructions: z
+              .string()
+              .regex(/\S/u)
+              .describe(
+                "When to use this server and what evidence its tools can provide.",
+              ),
+          }),
+        )
+        .optional()
+        .describe(
+          "MCP servers the investigator can query during a reviewed dependency check.",
+        ),
+    })
+    .optional(),
   codex: z
     .object({
       model: nonempty.optional(),
@@ -83,37 +104,8 @@ export const ProjectConfigInputSchema = z.strictObject({
     .catchall(z.json())
     .optional()
     .describe(
-      "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply. mcp_servers.<name>.instructions supplies string guidance for exploitability checks and is removed before passing server configuration to Codex.",
+      "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply.",
     ),
-  exploitability: z
-    .strictObject({
-      sources: z
-        .array(dependencyEndpointInputSchema)
-        .optional()
-        .describe(
-          "Complete supplied source boundary. An empty array supplies a boundary with no members. Omit to discover sources.",
-        ),
-      sinks: z
-        .array(dependencyEndpointInputSchema)
-        .optional()
-        .describe(
-          "Complete supplied sink boundary. An empty array supplies a boundary with no members. Omit to discover sinks.",
-        ),
-      scope: dependencyScopeSchema.optional(),
-      service_catalog_mcps: z
-        .array(nonempty)
-        .optional()
-        .describe(
-          "Read-only service catalog servers selected from codex.mcp_servers for service identities, running revisions and access observations in exploitability checks. Defaults to none.",
-        ),
-      runtime_mcps: z
-        .array(nonempty)
-        .optional()
-        .describe(
-          "Read-only runtime evidence servers selected from codex.mcp_servers. These servers are available to the investigator and runtime lookups without serving as source-to-service catalogs. Defaults to none.",
-        ),
-    })
-    .optional(),
   limits: z
     .strictObject({
       max_cost_usd_per_scan: ScanSettingsSchema.shape.maxCostUsd.describe(

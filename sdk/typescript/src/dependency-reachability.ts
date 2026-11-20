@@ -1,48 +1,19 @@
-import {
-  dependencyClaimReferenceSchema,
-  dependencyApprovedClaimSchema,
-  dependencyClaimEvidenceSchema,
-} from "./dependency-claims.js";
-import { realpath } from "node:fs/promises";
-import { join, relative } from "node:path";
 import { z } from "zod";
-import { portableRelativePath } from "./contract-values.js";
-import { dependencyAdvisoryDetailsSchema } from "./dependency-advisory.js";
+import { dependencyClaimReferenceSchema } from "./dependency-stack-claims.js";
 import {
-  assertDependencyUseProofCitations,
-  dependencyUseProofSchema,
-} from "./dependency-report-proof.js";
-import {
-  createDependencySourceIdentityReader,
   dependencyGitCommitSchema,
-  readDependencyGitSource,
-  type DependencySourceIdentity,
-  type DependencySourceIdentityReader,
+  dependencyTargetSchema,
 } from "./dependency-source-identity.js";
-import { CodexSecurityError } from "./errors.js";
-import { readRegularInputFileBytes } from "./prompt-files.js";
-import { relativePathIsOutside } from "./targets.js";
+import {
+  dependencyUseSchema,
+  dependencyUseProofSchema,
+} from "./dependency-stack-use.js";
+import { stackJsonValue } from "./dependency-stack-evidence.js";
 
-const verdict = z.enum([
-  "exploitable",
-  "potentially_exploitable",
-  "ruled_out",
-  "unknown",
-]);
+const identity = z.string().trim().min(1);
 const inventoryFact = z.enum(["affected_copy", "running", "access"]);
-const fact = z.enum([...inventoryFact.options, "affected_use"]);
-const evidence = z.strictObject({
-  path: z.string().min(1).describe("Repository-relative source path."),
-  commit: dependencyGitCommitSchema.optional(),
-  startLine: z.number().int().positive(),
-  endLine: z.number().int().positive(),
-  supports: z
-    .array(fact)
-    .prefault([])
-    .describe(
-      "Facts these lines establish for this use. affected_copy identifies the affected build, including local patches; affected_use shows the operation and its advisory prerequisites in this code. running requires an observation of this deployed revision. access requires observed evidence that the relevant caller can reach that deployment under the advisory's conditions. A desired deployment or route alone cannot establish either runtime fact. Use [] for other citations.",
-    ),
-});
+// The first independently reviewed reports included only the server, quoted record and facts.
+// Some saved reports additionally identified the receipt here. Keep those records readable.
 const observation = z.strictObject({
   server: z
     .string()
@@ -56,6 +27,11 @@ const observation = z.strictObject({
     .describe(
       "Specific returned record, record identifier, or lookup result. For an empty result, identify the lookup and its scope. Identify the unit, revision, environment and observation time when supplied.",
     ),
+  tool: z.string().optional(),
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/u)
+    .optional(),
   supports: z
     .array(inventoryFact)
     .describe(
@@ -289,8 +265,54 @@ const inspection = z
       });
   });
 
+const site = dependencyUseProofSchema.shape.sink
+  .unwrap()
+  .shape.callSite.extend({
+    commit: dependencyGitCommitSchema.optional(),
+  });
+const argument = z
+  .string()
+  .trim()
+  .min(1)
+  .describe(
+    "Exact single-line expression carrying the input at the cited site. Omit when ambiguous.",
+  );
+const label = z.string().trim().min(1);
+export const dependencyTraceSchema = z
+  .array(
+    z.discriminatedUnion("kind", [
+      z.strictObject({
+        kind: z.enum(["source", "handoff"]),
+        label,
+        site,
+        argument: argument.optional(),
+      }),
+      z.strictObject({ kind: z.literal("gap"), label }),
+    ]),
+  )
+  .refine(
+    (frames) =>
+      frames.every((frame, index) => index === 0 || frame.kind !== "source"),
+    "The source, if known, starts the trace.",
+  );
+
+export const repositoryUseProofSchema = dependencyUseProofSchema.extend({
+  sink: dependencyUseProofSchema.shape.sink
+    .unwrap()
+    .extend({
+      callSite: site,
+      argument: argument.optional(),
+    })
+    .optional(),
+});
+
 /** Optional, independently reviewed context. Older saved reports omit it. */
 export const dependencyFindingDetailsShape = {
+  trace: dependencyTraceSchema
+    .optional()
+    .describe(
+      "Ordered, cited input flow up to the sink or unresolved handoff. Mark missing links as gaps.",
+    ),
   services: z.array(serviceAssociation).optional(),
   openConditions: z.array(openCondition).optional(),
   inspections: z.array(inspection).optional(),
@@ -302,85 +324,13 @@ export const dependencyCoverageHandoffSchema = z.strictObject({
   verified: findingText,
   missing: findingText,
 });
-export type DependencyFindingDetails = {
-  services?: z.infer<typeof serviceAssociation>[];
-  openConditions?: z.infer<typeof openCondition>[];
-  inspections?: z.infer<typeof inspection>[];
-  inputSource?: z.infer<typeof inputSource>;
-  runtimeContext?: z.infer<typeof runtimeContext>;
-  tags?: z.infer<typeof findingTag>[];
-};
 export { dependencyPlaceSchema };
-export const dependencyUseSchema = z
-  .strictObject({
-    location: z
-      .string()
-      .min(1)
-      .describe("Consumer, service or build that uses this dependency."),
-    component: z
-      .string()
-      .min(1)
-      .describe("Name of the dependency covered by the advisory."),
-    version: z
-      .string()
-      .nullable()
-      .describe(
-        "Version selected for this use by a bound import, package, build, artifact or runtime record, including a package revision when verified. A matching runtime record can establish the loaded dependency's upstream version even when package revision and patch are unknown. A bound configured selection does not require a live observation. Keep an unbound version declaration in reason and use null here. Explain packaging and patches in reason.",
-      ),
-    verdict: verdict.describe(
-      "potentially_exploitable requires proof of the affected copy and source evidence of its applicable use. exploitable also requires confirmation of the running revision and relevant caller access. Use unknown if a deciding fact about the copy or use is missing.",
-    ),
-    deployment: z
-      .enum(["confirmed", "configured", "unknown"])
-      .describe(
-        "Confirmed requires evidence that this use is running. Build or deployment configuration alone is configured.",
-      ),
-    reason: z.string().min(1),
-    evidence: z
-      .array(evidence)
-      .min(1)
-      .describe(
-        "Cite the lines that tie the dependency to this use and support its version, deployment and verdict. Keep supporting build and package citations with the use they establish.",
-      ),
-    observations: z
-      .array(observation)
-      .prefault([])
-      .describe(
-        "Inventory observations for this use, including lookup results that establish no deciding fact. Use [] when no observations were obtained.",
-      ),
-    ...dependencyFindingDetailsShape,
-    proof: dependencyUseProofSchema
-      .optional()
-      .describe(
-        "The actual sink and advisory conditions for this use, checked against its own evidence. State each condition as met, unknown, or ruled_out with an explanation; do not infer statuses from the overall verdict. Every sink or condition reference must fall within this use's cited source ranges.",
-      ),
-    place: dependencyPlaceSchema
-      .optional()
-      .describe(
-        "The reviewed scope of this use. Separate distinct service, job, build, artifact and library caller claims. Null fields represent facts the evidence does not establish. Keep verified exclusions scoped to the proven call, build or deployment.",
-      ),
-  })
-  .superRefine((use, context) => {
-    if (!use.proof) return;
-    try {
-      assertDependencyUseProofCitations(use.proof, use.evidence);
-    } catch (error) {
-      context.addIssue({
-        code: "custom",
-        path: ["proof"],
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
 
-export const dependencyAssessmentSchema = z.strictObject({
-  status: verdict.describe(
-    "Overall checkout verdict. Use unknown when the evidence is insufficient to decide.",
-  ),
-  uses: z
-    .array(dependencyUseSchema)
-    .describe("One assessment per distinct use of the affected dependency."),
-  limitations: z.array(z.string()),
+const reportUseSchema = dependencyUseSchema.safeExtend({
+  proof: repositoryUseProofSchema.optional(),
+  observations: z.array(observation).prefault([]),
+  place: dependencyPlaceSchema.optional(),
+  ...dependencyFindingDetailsShape,
 });
 
 export const dependencyTestScopeClassification = z.literal(
@@ -394,7 +344,7 @@ export const dependencyCoverageDispositionSchema = z.strictObject({
   handoff: dependencyCoverageHandoffSchema.optional(),
   ...dependencyFindingDetailsShape,
   evidence: dependencyUseSchema.shape.evidence,
-  observations: dependencyUseSchema.shape.observations,
+  observations: reportUseSchema.shape.observations,
   decidingEvidence: z.array(reviewReference).optional(),
   conclusionClaim: dependencyClaimReferenceSchema.optional(),
   supportingClaims: z.array(dependencyClaimReferenceSchema).optional(),
@@ -410,213 +360,32 @@ export const dependencyCoverageDispositionSchema = z.strictObject({
     .optional(),
 });
 
-export type DependencyCoverageDisposition = z.infer<
-  typeof dependencyCoverageDispositionSchema
->;
-export type DependencyAssessment = z.infer<
-  typeof dependencyAssessmentSchema
-> & {
-  /** Reviewed decisions about checked code that is not an assessed use. */
-  coverage?: DependencyCoverageDisposition[];
-};
-export type DependencyUse = z.infer<typeof dependencyUseSchema>;
-export type DependencyVerdict = DependencyUse["verdict"];
+export const dependencyApprovedClaimSchema =
+  dependencyClaimReferenceSchema.extend({
+    state: z.literal("approved"),
+    contextHash: identity,
+    payload: stackJsonValue,
+    scope: stackJsonValue,
+    dependencies: z.array(dependencyClaimReferenceSchema),
+    application: z
+      .strictObject({ assessmentId: identity, fingerprint: identity })
+      .optional(),
+    decision: z.strictObject({
+      accepted: z.literal(true),
+      reason: identity,
+      evidenceKeys: z.array(identity),
+      citedVersion: z.string().nullable().optional(),
+    }),
+    evidence: z.strictObject({
+      sourceIds: z.array(identity),
+      receiptIds: z.array(identity),
+    }),
+  });
 
-export interface DependencyAssessmentCoverage {
-  /** Actual unresolved candidate/evidence gaps, not a descriptive scope note. */
-  unresolved?: boolean;
-}
-
-/** Derive the report verdict from validated uses and explicit remaining gaps. */
-export function aggregateDependencyVerdict(
-  uses: readonly Pick<DependencyUse, "verdict">[],
-  coverage: DependencyAssessmentCoverage = {},
-): DependencyVerdict {
-  if (uses.some((use) => use.verdict === "exploitable")) return "exploitable";
-  if (uses.some((use) => use.verdict === "potentially_exploitable"))
-    return "potentially_exploitable";
-  if (
-    coverage.unresolved ||
-    uses.length === 0 ||
-    uses.some((use) => use.verdict === "unknown")
-  )
-    return "unknown";
-  return "ruled_out";
-}
-
-export interface DependencyExcerpt {
-  path: string;
-  commit?: string;
-  startLine: number;
-  endLine: number;
-  text: string;
-  sourceIdentity?: DependencySourceIdentity;
-}
-
-export async function readDependencyEvidence(
-  evidence: readonly DependencyUse["evidence"][number][],
-  repository: string,
-  signal?: AbortSignal,
-  onExcerpt?: (excerpt: DependencyExcerpt) => void,
-  readSourceIdentity = createDependencySourceIdentityReader(repository),
-  onShortSourceNote?: (
-    path: string,
-    startLine: number,
-    requestedEnd: number,
-    endLine: number,
-  ) => void,
-): Promise<void> {
-  // A working file and an immutable blob at the same path are distinct.
-  const citations = Map.groupBy(evidence, ({ path, commit }) =>
-    JSON.stringify([path, commit]),
-  );
-  for (const ranges of citations.values()) {
-    signal?.throwIfAborted();
-    const { path, commit } = ranges[0]!;
-    let bytes: Buffer;
-    let sourceIdentity: DependencySourceIdentity | undefined;
-    if (commit) {
-      const captured = await readDependencyGitSource(
-        repository,
-        commit,
-        path,
-        signal,
-      );
-      bytes = captured.bytes;
-      sourceIdentity = captured.identity;
-    } else {
-      const file = await realpath(
-        join(repository, portableRelativePath(path, "Evidence path")),
-      );
-      if (relativePathIsOutside(relative(repository, file)))
-        throw new CodexSecurityError(
-          "Evidence path leaves the checkout: " + path,
-        );
-      bytes = await readRegularInputFileBytes(file, repository);
-      if (onExcerpt)
-        sourceIdentity = await readSourceIdentity(file, bytes, signal);
-    }
-    const source = bytes.toString("utf8");
-    // A trailing newline terminates the last line; it does not add a line.
-    const lines = source ? source.replace(/\n$/u, "").split("\n") : [];
-    for (const { startLine, endLine: requestedEnd } of ranges) {
-      const endLine = onShortSourceNote
-        ? Math.min(requestedEnd, lines.length)
-        : requestedEnd;
-      if (startLine > endLine || endLine > lines.length) {
-        throw new CodexSecurityError(
-          `Invalid evidence range ${path}:${startLine}-${requestedEnd} (file has ${lines.length} lines).`,
-        );
-      }
-      if (endLine !== requestedEnd)
-        onShortSourceNote?.(path, startLine, requestedEnd, endLine);
-      onExcerpt?.({
-        path,
-        ...(commit && { commit }),
-        startLine,
-        endLine,
-        text: lines.slice(startLine - 1, endLine).join("\n"),
-        sourceIdentity,
-      });
-    }
-  }
-}
-
-export async function validateDependencyAssessment(
-  value: unknown,
-  repository: string,
-  signal?: AbortSignal,
-  observedInventoryServers: readonly string[] = [],
-  onExcerpt?: (excerpt: DependencyExcerpt) => void,
-  coverage?: DependencyAssessmentCoverage,
-  readSourceIdentity?: DependencySourceIdentityReader,
-): Promise<DependencyAssessment> {
-  const assessment = dependencyAssessmentSchema.parse(value);
-  await readDependencyEvidence(
-    assessment.uses.flatMap((use) => use.evidence),
-    repository,
-    signal,
-    onExcerpt,
-    readSourceIdentity,
-  );
-  for (const use of assessment.uses) {
-    for (const { server } of use.observations) {
-      if (!observedInventoryServers.includes(server)) {
-        throw new CodexSecurityError(
-          `Inventory server did not return a successful result in this check: ${server}`,
-        );
-      }
-    }
-    const facts = new Set(
-      [...use.evidence, ...use.observations].flatMap(
-        (source) => source.supports,
-      ),
-    );
-    const missingRunning =
-      use.deployment === "confirmed" && !facts.has("running");
-    if (missingRunning) {
-      use.deployment = "unknown";
-    }
-    if (
-      use.verdict !== "exploitable" &&
-      use.verdict !== "potentially_exploitable"
-    ) {
-      if (missingRunning) {
-        const gap =
-          "Missing required evidence that this use is running in this deployment.";
-        if (!use.reason.endsWith(gap)) use.reason += ` ${gap}`;
-      }
-      continue;
-    }
-    const missing: string[] = [];
-    if (!facts.has("affected_copy"))
-      missing.push("the affected dependency copy");
-    if (!facts.has("affected_use")) missing.push("the applicable use in code");
-    if (missing.length) {
-      use.verdict = "unknown";
-    } else {
-      if (use.deployment !== "confirmed" || !facts.has("running"))
-        missing.push("the affected revision running in this deployment");
-      if (!facts.has("access"))
-        missing.push("access to this deployment by the relevant caller");
-      if (missing.length) use.verdict = "potentially_exploitable";
-    }
-    if (missing.length) {
-      const gap = `Missing required evidence for ${missing.join(" and ")}.`;
-      if (!use.reason.endsWith(gap)) use.reason += ` ${gap}`;
-    }
-  }
-  signal?.throwIfAborted();
-
-  // Without an independent coverage decision, reconciling individual uses
-  // cannot turn an inconclusive report into a checkout-wide exclusion.
-  assessment.status = aggregateDependencyVerdict(
-    assessment.uses,
-    coverage ?? { unresolved: assessment.status !== "ruled_out" },
-  );
-  return assessment;
-}
-
-/** Validate one item's citations and proof flags without invoking a reviewer. */
-export async function validateDependencyUse(
-  value: unknown,
-  repository: string,
-  signal?: AbortSignal,
-  observedInventoryServers: readonly string[] = [],
-  onExcerpt?: (excerpt: DependencyExcerpt) => void,
-  readSourceIdentity?: DependencySourceIdentityReader,
-): Promise<DependencyUse> {
-  const assessment = await validateDependencyAssessment(
-    { status: "unknown", uses: [value], limitations: [] },
-    repository,
-    signal,
-    observedInventoryServers,
-    onExcerpt,
-    undefined,
-    readSourceIdentity,
-  );
-  return assessment.uses[0]!;
-}
+export const dependencyClaimEvidenceSchema = z.strictObject({
+  sources: z.record(identity, stackJsonValue),
+  receipts: z.record(identity, stackJsonValue),
+});
 
 const tokens = z.number().int().nonnegative();
 const dependencySearchSchema = z.strictObject({
@@ -639,7 +408,7 @@ const dependencySearchSchema = z.strictObject({
 });
 export type DependencySearch = z.infer<typeof dependencySearchSchema>;
 
-export const reviewedDependencyUseSchema = dependencyUseSchema.safeExtend({
+export const reviewedDependencyUseSchema = reportUseSchema.safeExtend({
   place: dependencyPlaceSchema,
   decidingEvidence: z.array(reviewReference),
   conclusionClaim: dependencyClaimReferenceSchema.optional(),
@@ -647,10 +416,11 @@ export const reviewedDependencyUseSchema = dependencyUseSchema.safeExtend({
 });
 export type ReviewedDependencyUse = z.infer<typeof reviewedDependencyUseSchema>;
 
-export const dependencyReachabilityReportSchema = dependencyAssessmentSchema
-  .omit({ status: true })
+export const dependencyReachabilityReportSchema = z
+  .strictObject({ limitations: z.array(z.string()) })
   .extend({
     schemaVersion: z.literal(2),
+    target: dependencyTargetSchema.optional(),
     uses: z.array(reviewedDependencyUseSchema),
     claims: z.array(dependencyApprovedClaimSchema).optional(),
     claimEvidence: dependencyClaimEvidenceSchema.optional(),
@@ -659,7 +429,13 @@ export const dependencyReachabilityReportSchema = dependencyAssessmentSchema
     coverage: z.array(dependencyCoverageDispositionSchema).optional(),
     cve: z.string(),
     advisories: z.array(z.string()),
-    advisoryDetails: z.array(dependencyAdvisoryDetailsSchema).optional(),
+    advisoryDetails: z
+      .array(
+        z
+          .object({ url: z.string(), affected: z.array(z.json()) })
+          .passthrough(),
+      )
+      .optional(),
     usage: z
       .object({
         input_tokens: tokens,
@@ -677,6 +453,7 @@ export const reviewedDependencyCheckSchema =
 // The CVE form keeps its original result. A package can have zero or more
 // independent issues, so each reviewed verdict belongs to a particular check.
 export const dependencyPackageCheckOutputSchema = z.object({
+  target: dependencyTargetSchema.optional(),
   package: z.object({ ecosystem: z.string(), name: z.string() }),
   vulnDescription: z.string().optional(),
   checks: z.array(
@@ -689,61 +466,3 @@ export const dependencyCheckOutputSchema = z.union([
   dependencyReachabilityReportSchema,
   dependencyPackageCheckOutputSchema,
 ]);
-
-// Saved v1 reports are readable without publishing their checkout-wide verdict.
-const legacyCheck = reviewedDependencyCheckSchema
-  .omit({ schemaVersion: true, assumptions: true, searches: true })
-  .extend({ status: verdict, uses: z.array(dependencyUseSchema) });
-const legacyReport = z.union([
-  legacyCheck.extend({ cve: z.string() }),
-  z.object({
-    package: z.object({ ecosystem: z.string(), name: z.string() }),
-    vulnDescription: z.string().optional(),
-    checks: z.array(legacyCheck.extend({ advisoryId: z.string().nullable() })),
-  }),
-]);
-
-export function withReviewedPlace(
-  use: DependencyUse,
-  decidingEvidence: DependencyReviewReference[],
-): ReviewedDependencyUse {
-  return {
-    ...use,
-    place: use.place ?? {
-      kind: "unknown",
-      environment: null,
-      revision: null,
-      artifact: null,
-      observationWindow: null,
-      deploymentBasis:
-        use.deployment === "confirmed" ? "observed" : use.deployment,
-      deploymentDetail: null,
-      dependencySelection: null,
-      patch: null,
-      unresolvedQuestions: use.verdict === "unknown" ? [use.reason] : [],
-    },
-    decidingEvidence,
-  };
-}
-
-export function readDependencyCheckOutput(
-  value: unknown,
-): z.infer<typeof dependencyCheckOutputSchema> {
-  const current = dependencyCheckOutputSchema.safeParse(value);
-  if (current.success) return current.data;
-  const saved = legacyReport.safeParse(value);
-  if (!saved.success) throw current.error;
-  function convert<T extends z.infer<typeof legacyCheck>>(check: T) {
-    const { status: _status, uses, ...rest } = check;
-    return {
-      ...rest,
-      schemaVersion: 2 as const,
-      uses: uses.map((use) => withReviewedPlace(use, [])),
-      assumptions: [],
-      searches: [],
-    };
-  }
-  return "cve" in saved.data
-    ? convert(saved.data)
-    : { ...saved.data, checks: saved.data.checks.map(convert) };
-}

@@ -3,23 +3,42 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
-  dependencyEndpointInputSchema,
-  dependencyRuntimeScopeSchema,
-  dependencyRuntimeSelectorSchema,
-} from "./dependency-endpoints.js";
-import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
+  frozenDependencyAdvisorySchema,
+  lookupDependencyAdvisory,
+  type FrozenDependencyAdvisory,
+} from "./dependency-advisory.js";
+import type { DependencyProgressSink } from "./dependency-check-output.js";
+import { errorMessage } from "./errors.js";
+import {
+  stackTriggerAnalysisSchema,
+  validateStackTriggerAnalysis,
+} from "./dependency-stack-advisory.js";
+import { stackJsonValue } from "./dependency-stack-evidence.js";
+import {
+  dependencyGitCommitSchema,
+  dependencyTargetSchema as target,
+} from "./dependency-source-identity.js";
 import { readRegularInputFileBytes } from "./prompt-files.js";
 import { canonicalJson } from "./record.js";
 import { repositoryRevision } from "./targets.js";
+import { compareTimestamps } from "./timestamps.js";
 
 const text = z.string().min(1);
+const timestamp = z.string().regex(z.regexes.datetime({ offset: true }));
+const runtimeWindowSchema = z
+  .strictObject({ start: timestamp, end: timestamp })
+  .refine(
+    ({ start, end }) => compareTimestamps(start, end) < 0,
+    "Runtime scope start must precede end.",
+  );
+
 const cveId = z.string().regex(/^CVE-\d{4}-\d{4,}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
-const target = z.strictObject({
-  repository: text,
-  sha: dependencyGitCommitSchema,
-});
-const endpoint = dependencyEndpointInputSchema.extend({ id: text });
+// Producers may attach further JSON metadata. The investigator addresses each
+// endpoint by its stable ID and uses its named function to validate the sink.
+const endpoint = z
+  .object({ id: text, function: text })
+  .catchall(stackJsonValue);
 const advisory = z.strictObject({
   url: text,
   summary: text,
@@ -37,10 +56,18 @@ export const stackSourcesSchema = z.strictObject({
   provenance: provenance.optional(),
 });
 
+// Optional replay fields. The catalog's advisory, version ranges and selectors
+// remain intact regardless of what the public lookup or trigger review finds.
+const frozenFields = {
+  advisoryDetails: z.array(frozenDependencyAdvisorySchema).min(1).optional(),
+  triggerAnalysis: stackTriggerAnalysisSchema.optional(),
+};
+
 export const stackSinksSchema = z.strictObject({
   format: z.literal("codex-security.stack-sinks/v1"),
   cve: cveId,
   advisory,
+  ...frozenFields,
   sinks: z
     .array(
       endpoint.extend({
@@ -63,11 +90,6 @@ const workload = z.strictObject({
   image_tag: text.nullish(),
   image_tags: z.array(text).optional(),
   image_digest: text.optional(),
-});
-
-const selector = dependencyRuntimeSelectorSchema.extend({
-  file_suffix: text.optional(),
-  function_name_pattern: text.optional(),
 });
 
 const frame = z.strictObject({
@@ -129,6 +151,12 @@ const observation = z
           package: text,
           version: text,
           provenance: text,
+          frameIndices: z
+            .array(z.int().nonnegative())
+            .optional()
+            .describe(
+              "Original zero-based frames executed by this package copy, as established by the capture producer. Omit or leave empty when only the workload or build is known.",
+            ),
           imageDigest: text.optional(),
           sourceSha: dependencyGitCommitSchema.optional(),
           evidence: z.array(sourceRange).optional(),
@@ -137,6 +165,16 @@ const observation = z
       .optional(),
   })
   .superRefine((value, ctx) => {
+    for (const [i, binding] of (value.bindings ?? []).entries()) {
+      for (const [j, rawIndex] of (binding.frameIndices ?? []).entries()) {
+        if (rawIndex >= value.frames.length)
+          ctx.addIssue({
+            code: "custom",
+            path: ["bindings", i, "frameIndices", j],
+            message: "Package binding index is outside the captured frames.",
+          });
+      }
+    }
     if (value.sinkIndex === null && value.sinkIds?.length) {
       ctx.addIssue({
         code: "custom",
@@ -206,11 +244,11 @@ export const sampledStacksSchema = z.strictObject({
         id: text,
         provenance: provenance.optional(),
         scope: workload.extend({
-          window: dependencyRuntimeScopeSchema.shape.window,
+          window: runtimeWindowSchema,
         }),
         selectors: z.strictObject({
-          sources: z.array(selector),
-          sinks: z.array(selector).min(1),
+          sources: z.array(stackJsonValue),
+          sinks: z.array(stackJsonValue).min(1),
         }),
         groups: z
           .array(
@@ -242,6 +280,8 @@ const manifestContent = z.strictObject({
   format: z.literal("codex-security.stack-manifest/v1"),
   cve: cveId,
   advisory,
+  ...frozenFields,
+  advisoryLookupError: text.optional(),
   target,
   toolRevision: text,
   files: z.strictObject({ sources: file, sinks: file, stacks: file }),
@@ -299,16 +339,26 @@ export function stackSinkMatches(observation: StackObservation) {
 }
 
 function scopeConflicts(
-  query: Workload,
+  query: CaptureScope,
   group?: Workload,
-  observation?: Workload,
+  captured?: StackObservation | null,
 ): string[] {
   const layers = [
     { name: "query", scope: query },
     { name: "group", scope: group },
-    { name: "observation", scope: observation },
+    { name: "observation", scope: captured?.scope },
   ];
   const conflicts: string[] = [];
+  const observedAt = captured?.observedAt;
+  if (
+    observedAt &&
+    (compareTimestamps(observedAt, query.window.start) < 0 ||
+      compareTimestamps(observedAt, query.window.end) > 0)
+  ) {
+    conflicts.push(
+      `observedAt: ${observedAt} falls outside the query window ${query.window.start} to ${query.window.end}.`,
+    );
+  }
   for (const field of [
     "environment",
     "cluster",
@@ -367,11 +417,7 @@ export function stackPacketWorkItems(packet: StackPacket): StackWorkItem[] {
         queryScope: query.scope,
         ...(group.scope && { groupScope: group.scope }),
         scope: { ...query.scope, ...group.scope, ...observation?.scope },
-        scopeConflicts: scopeConflicts(
-          query.scope,
-          group.scope,
-          observation?.scope,
-        ),
+        scopeConflicts: scopeConflicts(query.scope, group.scope, observation),
         status: group.status,
         truncated: group.truncated,
         observation,
@@ -419,6 +465,14 @@ function parseJson(bytes: Buffer, name: string): unknown {
   }
 }
 
+/** These packet schemas validate the wire input without defaults or coercion.
+ * Keep the decoded document so opaque metadata retains every original JSON key. */
+function readDocument<T>(schema: z.ZodType<T>, bytes: Buffer, name: string): T {
+  const original = parseJson(bytes, name);
+  schema.parse(original);
+  return original as T;
+}
+
 function hash(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -433,13 +487,13 @@ async function decodeFiles(
   repository: string,
   signal?: AbortSignal,
 ) {
-  const sources = stackSourcesSchema.parse(
-    parseJson(bytes.sources, "sources.json"),
+  const sources = readDocument(
+    stackSourcesSchema,
+    bytes.sources,
+    "sources.json",
   );
-  const sinks = stackSinksSchema.parse(parseJson(bytes.sinks, "sinks.json"));
-  const stacks = sampledStacksSchema.parse(
-    parseJson(bytes.stacks, "stacks.json"),
-  );
+  const sinks = readDocument(stackSinksSchema, bytes.sinks, "sinks.json");
+  const stacks = readDocument(sampledStacksSchema, bytes.stacks, "stacks.json");
   if (sinks.cve !== cve)
     throw new Error(
       `The supplied sinks describe ${sinks.cve}, expected ${cve}.`,
@@ -469,19 +523,111 @@ async function decodeFiles(
   return { sources, sinks, stacks };
 }
 
+type AdvisorySnapshot = Pick<
+  StackManifest,
+  "advisoryDetails" | "advisoryLookupError" | "triggerAnalysis"
+>;
+
+function validateSnapshot(
+  sinks: StackPacket["sinks"],
+  snapshot: AdvisorySnapshot,
+) {
+  const { advisoryDetails, triggerAnalysis, advisoryLookupError } = snapshot;
+  if (advisoryDetails) {
+    if (advisoryLookupError)
+      throw new Error("Cannot supply advisory records and a failed lookup.");
+    uniqueIds(advisoryDetails, "advisory");
+    for (const record of advisoryDetails)
+      if (record.id !== sinks.cve && !record.aliases?.includes(sinks.cve))
+        throw new Error(
+          `Advisory ${record.id} does not identify ${sinks.cve}.`,
+        );
+  }
+  if (triggerAnalysis) {
+    if (!advisoryDetails)
+      throw new Error("Trigger analysis requires the frozen advisory records.");
+    validateStackTriggerAnalysis(
+      { cve: sinks.cve, sinks: sinks.sinks, advisoryDetails },
+      triggerAnalysis,
+    );
+  }
+}
+
+interface StackAdvisoryHost {
+  analyze(
+    sinks: StackPacket["sinks"],
+    advisoryDetails: FrozenDependencyAdvisory[],
+  ): Promise<NonNullable<StackManifest["triggerAnalysis"]>>;
+  emit?: DependencyProgressSink;
+  lookupCve?: typeof lookupDependencyAdvisory;
+}
+
+async function resolveSnapshot(
+  sinks: StackPacket["sinks"],
+  host: StackAdvisoryHost,
+  signal?: AbortSignal,
+): Promise<AdvisorySnapshot> {
+  const { cve, triggerAnalysis } = sinks;
+  let { advisoryDetails } = sinks;
+  if (!advisoryDetails) {
+    host.emit?.("advisory", cve, { stage: "osv" });
+    try {
+      // Only the CVE identifier leaves the host. Never follow a catalog URL,
+      // or include source code, workload metadata or sampled frames in lookup.
+      const issue = await (host.lookupCve ?? lookupDependencyAdvisory)(
+        cve,
+        signal,
+      );
+      advisoryDetails = issue.advisories;
+    } catch (error) {
+      signal?.throwIfAborted();
+      const advisoryLookupError = errorMessage(error);
+      host.emit?.("advisory_lookup_failed", cve, {
+        error: advisoryLookupError,
+      });
+      return { advisoryLookupError };
+    }
+  }
+  signal?.throwIfAborted();
+  host.emit?.("advisories_loaded", cve, { count: advisoryDetails.length });
+  return {
+    advisoryDetails,
+    triggerAnalysis:
+      triggerAnalysis ?? (await host.analyze(sinks, advisoryDetails)),
+  };
+}
+
 function manifestFields(
   packet: Omit<StackPacket, "manifest">,
   toolRevision: string,
   files: StackManifest["files"],
+  snapshot: AdvisorySnapshot,
 ) {
-  return manifestContent.parse({
+  validateSnapshot(packet.sinks, snapshot);
+  const fields = manifestContent.parse({
     format: "codex-security.stack-manifest/v1",
     cve: packet.sinks.cve,
     advisory: packet.sinks.advisory,
+    ...(snapshot.advisoryDetails && {
+      advisoryDetails: snapshot.advisoryDetails,
+    }),
+    ...(snapshot.advisoryLookupError && {
+      advisoryLookupError: snapshot.advisoryLookupError,
+    }),
+    ...(snapshot.triggerAnalysis && {
+      triggerAnalysis: snapshot.triggerAnalysis,
+    }),
     target: packet.stacks.target,
     toolRevision,
     files,
   });
+  for (const field of ["advisoryDetails", "triggerAnalysis"] as const)
+    if (
+      packet.sinks[field] &&
+      canonicalJson(fields[field]) !== canonicalJson(packet.sinks[field])
+    )
+      throw new Error(`Frozen ${field} does not match the supplied sinks.`);
+  return fields;
 }
 
 export async function prepareStackPacket(options: {
@@ -496,6 +642,15 @@ export async function prepareStackPacket(options: {
   attemptId?: string;
   signal?: AbortSignal;
 }): Promise<StackPacket> {
+  // The public packet API and run init must remain usable without any model
+  // or network access. Only high-level checks opt in to fresh resolution.
+  return prepareStackCheckPacket(options);
+}
+
+export async function prepareStackCheckPacket(
+  options: Parameters<typeof prepareStackPacket>[0],
+  host?: StackAdvisoryHost,
+): Promise<StackPacket> {
   const bytes = await loadFiles(
     {
       sources: options.sourcesPath,
@@ -510,11 +665,29 @@ export async function prepareStackPacket(options: {
     options.repository,
     options.signal,
   );
-  const fields = manifestFields(documents, options.toolRevision, {
+  options.signal?.throwIfAborted();
+  const files = {
     sources: fileIdentity(bytes.sources),
     sinks: fileIdentity(bytes.sinks),
     stacks: fileIdentity(bytes.stacks),
-  });
+  };
+  // Verify that the supplied snapshot survives manifest parsing before any
+  // lookup or analysis. Reopening the packet performs the same comparison.
+  let fields = manifestFields(
+    documents,
+    options.toolRevision,
+    files,
+    documents.sinks,
+  );
+  if (host) {
+    const snapshot = await resolveSnapshot(
+      documents.sinks,
+      host,
+      options.signal,
+    );
+    options.signal?.throwIfAborted();
+    fields = manifestFields(documents, options.toolRevision, files, snapshot);
+  }
   const manifest = stackManifestSchema.parse({
     ...fields,
     inputDigest: hash(canonicalJson(fields)),
@@ -574,6 +747,7 @@ export async function readStackPacket(
     documents,
     manifest.toolRevision,
     manifest.files,
+    manifest,
   );
   if (
     manifest.inputDigest !== hash(canonicalJson(fields)) ||

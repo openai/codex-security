@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
+import { effectiveStackSinks } from "./dependency-stack-advisory.js";
 import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   createDependencyClaims,
@@ -8,18 +9,18 @@ import {
   dependencyClaimQuerySchema,
   dependencyClaimQueueSchema,
   type PreparedDependencyClaim,
-} from "./dependency-claims.js";
+} from "./dependency-stack-claims.js";
 import {
   inventoryJsonField,
   type BoundDependencyInventoryReceipt,
   type DependencyInventoryReceiptSelection,
-} from "./dependency-inventory.js";
-import { readDependencyClaimExcerpts } from "./dependency-report-submission.js";
+} from "./dependency-stack-evidence.js";
+import { readDependencyClaimExcerpts } from "./dependency-stack-evidence.js";
 import {
   dependencySourceNoteSchema,
   prepareDependencySourceNote,
   saveDependencySourceNote,
-} from "./dependency-source-notes.js";
+} from "./dependency-stack-evidence.js";
 import {
   assertStackAssessmentClaims,
   finalizeStackReport,
@@ -128,6 +129,7 @@ interface RunLocation {
   repo: string;
   fingerprint: string;
   manifest: StackPacket["manifest"];
+  hostReview?: true;
 }
 
 type WorkItem = ReturnType<typeof stackPacketWorkItems>[number];
@@ -146,6 +148,7 @@ async function initialize(
   inputs?: string,
   repo?: string,
   signal?: AbortSignal,
+  hostReview?: boolean,
 ) {
   if (!inputs || !repo)
     throw new CodexSecurityError("run init requires --inputs and --repo.");
@@ -156,17 +159,14 @@ async function initialize(
   const store = new DependencyAttemptStore(state);
   try {
     return store.transaction(() => {
+      store.bindIdentity(manifest);
       const existing = store.get<RunLocation>("manifest", "active");
-      if (existing && existing.fingerprint !== fingerprint) {
-        throw new CodexSecurityError(
-          "State belongs to a different packet, target, run or attempt.",
-        );
-      }
       store.set("manifest", "active", {
         inputs: inputPath,
         repo: repoPath,
         fingerprint,
         manifest,
+        ...((hostReview || existing?.hostReview) && { hostReview: true }),
       });
       return manifest;
     });
@@ -175,46 +175,62 @@ async function initialize(
   }
 }
 
-interface OperationReceipt {
-  digest: string;
-  result: unknown;
-}
-
 function mutation(store: DependencyAttemptStore, name: string, input: unknown) {
   if (!isRecord(input))
     throw new CodexSecurityError("Pass a JSON object on stdin.");
   const { operationId, ...body } = input;
-  const digest = dependencyClaimHash({ name, body });
-  const key =
+  const round = store.get<number>("review", "round") ?? 0;
+  const operation =
     operationId === undefined
-      ? "input:" + digest
+      ? "input:" + dependencyClaimHash({ name, body })
       : "id:" + id.parse(operationId);
-  function receipt() {
-    const previous = store.get<OperationReceipt>("operation", key);
-    if (previous && previous.digest !== digest) {
-      throw new CodexSecurityError(
-        "The operation ID was already used with different arguments.",
-      );
-    }
-    return previous;
-  }
+  const key = round ? `review:${round}:${operation}` : operation;
   return {
     body,
-    receipt,
-    commit(write: () => unknown) {
-      return store.transaction(() => {
-        const previous = receipt();
-        if (previous) return previous.result;
+    receipt: () => store.operation<unknown>(key, name, body),
+    commit: (write: () => unknown) =>
+      store.mutate(key, name, body, () => {
+        if ((store.get<number>("review", "round") ?? 0) !== round)
+          throw new CodexSecurityError(
+            "Independent review reopened the investigation. Run next again.",
+          );
         if (store.get("report", "final"))
           throw new CodexSecurityError(
             "This investigation has been finalized.",
           );
-        const result = write();
-        store.set("operation", key, { digest, result });
-        return result;
-      });
-    },
+        return write();
+      }),
   };
+}
+
+/** Reopen a private draft while keeping the other assessments and the evidence ledger. */
+export function reviseLocalStackReport(
+  state: string,
+  draft: StackInvestigationReport,
+  workItemIds: readonly string[],
+): void {
+  const store = new DependencyAttemptStore(state, { create: false });
+  try {
+    store.transaction(() => {
+      const saved = store.get("report", "final");
+      if (
+        !runLocation(store).hostReview ||
+        !saved ||
+        dependencyClaimHash(saved) !== dependencyClaimHash(draft)
+      )
+        throw new CodexSecurityError(
+          "The report is not the current local review draft.",
+        );
+      const round = store.get<number>("review", "round") ?? 0;
+      store.set("review-draft", String(round), saved);
+      for (const workItemId of workItemIds)
+        store.delete("stack-assessment", workItemId);
+      store.delete("report", "final");
+      store.set("review", "round", round + 1);
+    });
+  } finally {
+    store.close();
+  }
 }
 
 function captureId(packet: StackPacket, item: WorkItem) {
@@ -293,9 +309,6 @@ async function prepareClaims(
       repository,
       signal,
     );
-    for (const excerpt of excerpts) {
-      if (excerpt.sourceIdentity) excerpt.sourceIdentity.repositoryRoot = null;
-    }
     const receipts = [
       ...(row.receiptIds ?? []).map((ref) =>
         selectReceipt(packet, receiptsById, ref),
@@ -346,9 +359,7 @@ function openClaims(store: DependencyAttemptStore, { manifest }: StackPacket) {
       cve: manifest.cve,
       target: manifest.target,
     },
-    undefined,
     store,
-    "single_agent",
   );
 }
 
@@ -376,7 +387,6 @@ async function verifyFinal(
       byId.get(assessment.workItemId)!,
       packet,
       claims,
-      repository,
       signal,
     );
   }
@@ -457,7 +467,11 @@ async function verifyFinal(
 
 export async function readFinalStackReport(
   state: string,
-  expected?: { packet: StackPacket; repository: string; signal?: AbortSignal },
+  expected?: {
+    packet: StackPacket;
+    repository: string;
+    signal?: AbortSignal;
+  },
 ): Promise<StackInvestigationReport> {
   const store = new DependencyAttemptStore(state, { create: false });
   try {
@@ -490,11 +504,18 @@ export async function executeStackRun(
     repo?: string;
     input?: unknown;
     signal?: AbortSignal;
+    hostReview?: boolean;
   },
 ): Promise<unknown> {
   const { state, signal } = options;
   if (command === "init")
-    return initialize(state, options.inputs, options.repo, signal);
+    return initialize(
+      state,
+      options.inputs,
+      options.repo,
+      signal,
+      options.hostReview,
+    );
   const store = new DependencyAttemptStore(state, { create: false });
   try {
     const location = runLocation(store);
@@ -521,6 +542,7 @@ export async function executeStackRun(
             coverage: summarizeStackCoverage(packet, assessments()),
           };
         const observation = item.observation;
+        const sinks = effectiveStackSinks(packet);
         return {
           workItem: {
             ...item,
@@ -539,11 +561,18 @@ export async function executeStackRun(
           target: manifest.target,
           cve: manifest.cve,
           advisory: manifest.advisory,
+          ...(manifest.triggerAnalysis && {
+            triggerAnalysis: manifest.triggerAnalysis,
+          }),
+          ...(manifest.advisoryDetails && {
+            advisoryDetails: manifest.advisoryDetails,
+          }),
+          ...(manifest.advisoryLookupError && {
+            advisoryLookupError: manifest.advisoryLookupError,
+          }),
           sources: packet.sources.sources,
-          sinks: packet.sinks.sinks,
-          openQuestions: packet.sinks.sinks.flatMap(
-            (sink) => sink.preconditions,
-          ),
+          sinks,
+          openQuestions: sinks.flatMap((sink) => sink.preconditions),
         };
       }
       case "read-stacks": {
@@ -633,7 +662,6 @@ export async function executeStackRun(
           item,
           packet,
           claims,
-          location.repo,
           signal,
         );
         return op.commit(() => {

@@ -6,7 +6,7 @@ import {
   catalogTool,
   type CatalogService,
 } from "./cases.mts";
-import { gradeMapping } from "./grade.mts";
+import { gradeMapping, graphReplies } from "./grade.mts";
 
 const shared = cases.find((c) => c.id === "shared-project")!;
 const empty = cases.find((c) => c.id === "runnable-package")!;
@@ -118,4 +118,26 @@ test("requires an unresolved identity when no service catalog is configured", ()
     [query([{ from: file, relation: "no_service_found" }], false)],
   ])
     assert.equal(gradeMapping(unavailable, incorrect).pass, false);
+});
+
+test("reads only the host graph's tool output from the reviewed report", () => {
+  const result = query(shared.expected.applications.map(edge));
+  const call = {
+    server: "dependency_investigation",
+    tool: "query_codex_security_graph",
+    result: { structuredContent: result },
+  };
+  const report = {
+    checks: [
+      {
+        claimEvidence: {
+          receipts: {
+            host: call,
+            external: { ...call, server: "mapping_catalog" },
+          },
+        },
+      },
+    ],
+  };
+  assert.deepEqual(graphReplies(report), [result]);
 });

@@ -15,8 +15,6 @@ export const DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID =
   "codex_security_deep_scan_worker";
 
 export interface DeepScanPermissionProfilePreflightOptions {
-  /** Selected MCP servers for the standalone dependency check. */
-  readonly allowedMcpServers?: readonly string[];
   /** The exact Codex executable that will run the worker turn. */
   readonly codexPath: string;
   /** The worker cwd used for app-server startup and cwd-scoped config RPCs. */
@@ -281,13 +279,8 @@ export async function preflightDeepScanWorkerPermissionProfile(
   return withPreflightClient(options, async (client) => {
     const configResponse = await client.request("config/read", {
       cwd: options.cwd,
-      includeLayers: options.allowedMcpServers !== undefined,
+      includeLayers: false,
     });
-    if (options.allowedMcpServers !== undefined)
-      verifyStandaloneMcpLayers(
-        configResponse.layers,
-        options.allowedMcpServers,
-      );
     const catalog = await client.readPermissionProfileCatalog(options.cwd);
     const matchingEntries = catalog.filter(
       (entry) => entry.id === DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
@@ -324,35 +317,6 @@ export async function preflightDeepScanWorkerPermissionProfile(
         account.requiresOpenaiAuth === true && account.account === null,
     };
   });
-}
-
-function verifyStandaloneMcpLayers(
-  layers: unknown,
-  allowed: readonly string[],
-): void {
-  if (!Array.isArray(layers))
-    throw new Error(
-      "Codex did not return configuration layers for the dependency check.",
-    );
-  for (const entry of layers) {
-    const layer = record(entry);
-    const source = record(layer?.name)?.type;
-    if (typeof source !== "string" || !record(layer?.config))
-      throw new Error(
-        "Codex returned an invalid configuration layer for the dependency check.",
-      );
-    if (layer?.disabledReason != null) continue;
-    const servers = record(record(layer?.config)?.mcp_servers) ?? {};
-    for (const [name, settings] of Object.entries(servers)) {
-      const selected = allowed.includes(name);
-      if (source === "sessionFlags" && selected) continue;
-      // Even a disabled lower-layer entry can merge extra env or args into a selected server.
-      if (!selected && record(settings)?.enabled === false) continue;
-      throw new Error(
-        `Dependency check cannot isolate MCP server ${JSON.stringify(name)} from the ${source} configuration layer.`,
-      );
-    }
-  }
 }
 
 async function withPreflightClient<T>(

@@ -133,3 +133,38 @@ export function gradeMapping(c: MappingCase, snapshots: readonly unknown[]) {
   }
   return { pass: errors.length === 0, errors, applications };
 }
+
+// Only host-captured graph replies establish the identity and scope of an
+// application. The investigator's generated reasoning is not a graph record.
+export function graphReplies(report: unknown): unknown[] {
+  if (
+    !isRecord(report) ||
+    !Array.isArray(report.checks) ||
+    report.checks.length !== 1
+  )
+    return [];
+  const check = report.checks[0];
+  if (
+    !isRecord(check) ||
+    !isRecord(check.claimEvidence) ||
+    !isRecord(check.claimEvidence.receipts)
+  )
+    return [];
+  const replies = [];
+  for (const row of Object.values(check.claimEvidence.receipts)) {
+    if (
+      !isRecord(row) ||
+      row.server !== "dependency_investigation" ||
+      ![
+        "query_codex_security_graph",
+        "trace_codex_security_code",
+        "resolve_codex_security_services",
+      ].includes(String(row.tool)) ||
+      !isRecord(row.result)
+    )
+      continue;
+    const data = row.result.structuredContent ?? row.result;
+    if (isRecord(data)) replies.push(data);
+  }
+  return replies;
+}

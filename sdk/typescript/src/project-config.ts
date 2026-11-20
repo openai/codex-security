@@ -1,5 +1,8 @@
-import { readFile } from "node:fs/promises";
+import { isUtf8 } from "node:buffer";
+import { existsSync, statSync } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -16,16 +19,14 @@ import {
 } from "./config.js";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
-import { validateDependencyEndpointConfiguration } from "./dependency-endpoints.js";
-import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
+import type { AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
   projectConfigJsonSchema,
   type ProjectConfigInput,
   type ProjectScope,
 } from "./project-config-schema.js";
-import { expandHome } from "./runtime.js";
-import { isRecord } from "./record.js";
+import { expandHomeForLookup, resolveInputPath } from "./runtime.js";
 import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
@@ -47,81 +48,10 @@ export interface ProjectConfigSource {
   input: ProjectConfigInput;
 }
 
-export function exploitabilityMcpConfiguration(
-  input: ProjectConfigInput | undefined,
-): {
-  servers: JsonObject;
-  catalogServers: JsonObject;
-  instructions: Record<string, string>;
-} {
-  const catalogNames = new Set(input?.exploitability?.service_catalog_mcps);
-  const names = new Set([
-    ...catalogNames,
-    ...(input?.exploitability?.runtime_mcps ?? []),
-  ]);
-  const servers = input?.codex?.["mcp_servers"];
-  const selected = new Map<string, JsonObject>();
-  const instructions = new Map<string, string>();
-  for (const name of names) {
-    if (name.replace(/[-.:@/]/gu, "_") === "codex_security_dependency")
-      throw new ConfigurationError(
-        `Reserved dependency trace server name: ${name}`,
-      );
-    const server =
-      isRecord(servers) && Object.hasOwn(servers, name)
-        ? servers[name]
-        : undefined;
-    if (!isRecord(server))
-      throw new ConfigurationError(
-        `MCP server ${JSON.stringify(name)} selected by exploitability.${catalogNames.has(name) ? "service_catalog_mcps" : "runtime_mcps"} must be defined in codex.mcp_servers.`,
-      );
-    const tools = server["enabled_tools"];
-    if (
-      server["enabled"] !== false &&
-      !(Array.isArray(tools) && tools.length === 0)
-    ) {
-      const guidance = server["instructions"];
-      if (guidance !== undefined && typeof guidance !== "string")
-        throw new ConfigurationError(
-          `codex.mcp_servers.${name}.instructions must be a string.`,
-        );
-      if (guidance !== undefined) instructions.set(name, guidance);
-      selected.set(name, nativeMcpServer(server));
-    }
-  }
-  return {
-    servers: Object.fromEntries(selected),
-    catalogServers: Object.fromEntries(
-      [...selected].filter(([name]) => catalogNames.has(name)),
-    ),
-    instructions: Object.fromEntries(instructions),
-  };
-}
-
-function nativeMcpServer(server: JsonObject): JsonObject {
-  return Object.fromEntries(
-    Object.entries(server).filter(([key]) => key !== "instructions"),
-  );
-}
-
-function nativeMcpConfiguration(config: JsonObject): JsonObject {
-  const servers = config["mcp_servers"];
-  if (!isRecord(servers)) return config;
-  return {
-    ...config,
-    mcp_servers: Object.fromEntries(
-      Object.entries(servers).map(([name, server]) => [
-        name,
-        isRecord(server) ? nativeMcpServer(server) : server,
-      ]),
-    ),
-  };
-}
-
 export interface ResolvedProjectConfig {
+  exploitability?: ProjectConfigInput["exploitability"];
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
-  exploitability?: ProjectConfigInput["exploitability"];
   sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
 }
@@ -134,6 +64,7 @@ const PROJECT_SETTING_KEYS = {
   cyberAccessProgram: "scan.cyber_access_program",
   ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
+  excludePaths: "scan.exclude_paths",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
   validationPromptFile: "scan.validation_file",
@@ -206,10 +137,24 @@ export async function readProjectConfig(
   file: string,
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
-  const path = resolve(directory, expandHome(file));
+  const selected = expandHomeForLookup(file);
+  const requested = isAbsolute(selected)
+    ? selected
+    : `${directory || "."}${sep}${selected}`;
+  const traversesParent = sep === "/" && requested.split("/").includes("..");
+  let path = traversesParent ? requested : resolve(directory, selected);
   const extension = projectConfigExtension(path);
   let text: string;
   try {
+    // Resolve the parent through the filesystem while retaining the selected filename.
+    if (traversesParent) {
+      const parent = await realpath(dirname(path), { encoding: "buffer" });
+      if (!isUtf8(parent))
+        throw new Error(
+          "The resolved configuration directory is not a valid UTF-8 path.",
+        );
+      path = resolve(parent.toString(), basename(path));
+    }
     text = await readFile(path, "utf8");
   } catch (error) {
     throw new ConfigurationError(
@@ -265,11 +210,14 @@ export function projectConfigStarter(
     : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
         relativeSchema.split(sep).join("/"),
       ).replace(/[#?]/gu, encodeURIComponent)}`;
+  const hasSchema = existsSync(schemaPath);
   if (projectConfigExtension(path) === ".json")
-    return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
+    return `${JSON.stringify(hasSchema ? { $schema: schema } : {}, null, 2)}\n`;
   return [
     "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
-    `$schema: ${schema}`,
+    ...(hasSchema
+      ? [`$schema: ${schema}`]
+      : ["# Replace the empty mapping below when enabling settings.", "{}"]),
     "",
     "# Uncomment the settings you want to override. Defaults remain unpinned.",
     `# auth: ${DEFAULT_SCAN_AUTH}`,
@@ -277,6 +225,7 @@ export function projectConfigStarter(
     `#   mode: ${DEFAULT_SCAN_MODE}`,
     "#   scope:",
     "#     paths: [src] # Relative to each selected repository.",
+    "#   exclude_paths: [examples] # Relative to each selected repository.",
     "#   knowledge_base: [] # Paths relative to this file.",
     "#   instructions_file: instructions.md",
     "#   validation_file: validation.md # Standard mode only.",
@@ -316,14 +265,33 @@ function requireProjectConfig(
       `Invalid project configuration${path === undefined ? "" : ` at ${path}`}: ${issues}`,
     );
   }
+}
+
+function outputPath(
+  value: string | undefined,
+  directory: string,
+): AbsolutePath | undefined {
+  if (value === undefined) return;
+  const requested = resolveInputPath(value, directory);
+  const parts = requested.split(sep);
+  const parent = parts.lastIndexOf("..");
+  if (parent < 0) return requested;
+  const prefix = parts.slice(0, parent + 1).join(sep);
   try {
-    validateDependencyEndpointConfiguration(value.exploitability);
-  } catch (error) {
-    throw new ConfigurationError(
-      `Invalid exploitability configuration${path === undefined ? "" : ` at ${path}`}: ${errorMessage(error)}`,
-      { cause: error },
-    );
+    // Keep a redirected traversal intact for output validation.
+    const selected = statSync(prefix, { bigint: true, throwIfNoEntry: false });
+    if (selected !== undefined) {
+      const lexical = statSync(resolve(prefix), {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      if (selected.dev !== lexical?.dev || selected.ino !== lexical.ino)
+        return requested;
+    }
+  } catch {
+    return requested;
   }
+  return resolve(requested) as AbsolutePath;
 }
 
 export function resolveScanSettings(
@@ -351,11 +319,9 @@ export function resolveScanSettings(
   };
   const projectDirectory = project?.directory ?? directory;
   const filePath = (value: string | undefined): AbsolutePath | undefined =>
-    value === undefined
-      ? undefined
-      : resolveConfigPath(projectDirectory, value);
+    value === undefined ? undefined : resolveInputPath(value, projectDirectory);
   const cliPath = (value: string | undefined): AbsolutePath | undefined =>
-    value === undefined ? undefined : resolveConfigPath(directory, value);
+    value === undefined ? undefined : resolveInputPath(value, directory);
 
   const mode =
     choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
@@ -393,8 +359,9 @@ export function resolveScanSettings(
     }
   }
 
-  const codexOverrides = nativeMcpConfiguration(
-    mergeCodexOverrides(file?.codex ?? {}, overrides.codexOverrides ?? {}),
+  const codexOverrides = mergeCodexOverrides(
+    file?.codex ?? {},
+    overrides.codexOverrides ?? {},
   );
   const nativeSourceTree = (
     value: JsonObject,
@@ -423,13 +390,11 @@ export function resolveScanSettings(
     }
   };
   // Match the value merge: defaults beneath the combined project/CLI overrides.
-  const nativeSources = nativeMcpConfiguration(
+  const nativeSources = mergeCodexOverrides(
+    nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
     mergeCodexOverrides(
-      nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
-      mergeCodexOverrides(
-        nativeSourceTree(file?.codex ?? {}, "project"),
-        nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
-      ),
+      nativeSourceTree(file?.codex ?? {}, "project"),
+      nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
     ),
   );
   // Literal dotted keys can share a flattened name; retain layer precedence.
@@ -440,10 +405,10 @@ export function resolveScanSettings(
     choose(
       "scan.knowledge_base",
       file?.scan?.knowledge_base?.map((value) =>
-        resolveConfigPath(projectDirectory, value),
+        resolveInputPath(value, projectDirectory),
       ),
       overrides.knowledgeBasePaths?.map((value) =>
-        resolveConfigPath(directory, value),
+        resolveInputPath(value, directory),
       ),
     ) ?? [];
   const settings: ResolvedScanSettings = {
@@ -457,6 +422,11 @@ export function resolveScanSettings(
     mode,
     maxTimeMinutes,
     target,
+    excludePaths: choose(
+      "scan.exclude_paths",
+      file?.scan?.exclude_paths,
+      overrides.excludePaths,
+    ),
     ownerSuggestions: choose(
       "scan.owner_suggestions",
       file?.scan?.owner_suggestions,
@@ -476,8 +446,8 @@ export function resolveScanSettings(
     postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(
       "output.directory",
-      filePath(file?.output?.directory),
-      cliPath(overrides.outputDir),
+      outputPath(file?.output?.directory, projectDirectory),
+      outputPath(overrides.outputDir, directory),
     ),
     failureSeverity: choose(
       "policy.fail_on_severity",
@@ -495,10 +465,10 @@ export function resolveScanSettings(
   return {
     config: { codexOverrides },
     options: settings,
+    sources: resolvedSources,
     ...(file?.exploitability === undefined
       ? {}
       : { exploitability: structuredClone(file.exploitability) }),
-    sources: resolvedSources,
     ...(project?.path === undefined
       ? {}
       : { projectConfig: { path: project.path, sources: resolvedSources } }),

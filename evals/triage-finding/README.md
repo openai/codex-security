@@ -15,6 +15,13 @@ pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir evals/triage-finding run setup
 ```
 
+The eval lockfile omits unused provider SDKs, document and image readers, and packages for SQL and natural-language assertions. To enable one for a new case, check how Promptfoo declares the package.
+
+- For an excluded optional dependency such as `sharp`, remove its matching exclusion from `ignoredOptionalDependencies` in `pnpm-workspace.yaml`.
+- For an optional peer dependency such as `playwright`, add a pinned version to `dependencies` in this eval workspace’s `package.json`.
+
+After either change, run `pnpm install` in this directory to update the lockfile.
+
 ## Check the harness
 
 From the repository root, run the same deterministic checks as CI. They use fixtures to exercise intake assertions, calibration, SastBench, and the Promptfoo provider without model calls.
@@ -139,7 +146,7 @@ Generated local state is ignored:
 
 The common runner builds the staged helper for validation, evaluation, and replay, then removes its temporary runtime after Promptfoo exits. Separate YAML files under `providers/` retain the native Codex provider IDs and each suite's settings. The suite's `$ref` entries expand these settings into saved evaluation snapshots, so later edits to the provider files do not change an existing run's retry, resume, or replay settings. The runner uses Node's `--import` to preload the runtime adapter into the Promptfoo child process, so it can bind the staged runtime during evaluation, retry, resume, and viewer replay without a Promptfoo patch. Native provider loading preserves authentication precedence.
 
-The adapter depends on bundled Codex classes and internal methods in the pinned Promptfoo provider. The provider tests cover those methods, executable selection, authentication, and per-case settings. Replay does not restore grading metadata, so grading hooks remain disabled.
+Promptfoo 0.125.1's Codex SDK loader accepts `^0.156.1`. The adapter supplies the eval workspace's SDK directly to the native provider so the evals exercise the same version as the scanner. It also supplies the SDK entry point that Promptfoo uses to verify a custom Codex CLI version before starting a turn. When upgrading Promptfoo, check its loader's supported range and remove the explicit SDK binding once it supports the scanner's pin. The provider tests exercise the internal methods used by the adapter, executable selection, authentication, and per-case settings. Replay does not restore grading metadata, so grading hooks remain disabled.
 
 Saved runs whose provider ID is `file://.../triage-provider.mts` need to be rerun with the current configuration before retry, resume, or replay. Their saved results remain intact. Native Codex provider IDs are unchanged.
 

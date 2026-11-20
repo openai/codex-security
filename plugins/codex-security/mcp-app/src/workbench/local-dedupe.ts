@@ -302,15 +302,9 @@ function validVector(
     numbers.push(number);
   }
   if (maximum === 0) return false;
+  // This estimate only selects the exact check below, with a twofold margin.
   let sum = 0;
-  let correction = 0;
-  for (const number of numbers) {
-    const scaled = number / maximum;
-    const term = scaled * scaled - correction;
-    const next = sum + term;
-    correction = next - sum - term;
-    sum = next;
-  }
+  for (const number of numbers) sum += (number / maximum) ** 2;
   if (maximum * Math.sqrt(sum) < Number.MAX_VALUE / 2) return true;
   // Near overflow, a rounded sqrt/product can reject a norm that rounds to
   // MAX_VALUE. Compare exact squares in units of 2^-2148 with the overflow midpoint.

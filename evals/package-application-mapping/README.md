@@ -1,28 +1,18 @@
 # Package-to-application mapping
 
-This eval gives Codex a package name and the service-resolution section of the
-dependency skill. The agent uses the production graph tools in a read-only
-checkout. The catalog resolver gets a synthetic read-only MCP. The grader
-checks the final graph for catalog service names, IDs, and record citations.
+These five cases run the installed dependency investigator on synthetic Git checkouts. Each one supplies the same package and vulnerability description. The CLI receives the caller scope and, when available, a read-only service-catalog MCP. The catalog records, grading oracle and result directory live outside the checkout. The grader reads host-recorded graph queries from the reviewed report and verifies the catalog IDs, tool citations, consumer path and graph revision.
 
-| Case                      | Expected graph result                                                                                              |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `external-launcher`       | The catalog identity for the consumer selected by the launch command. CI and a similarly named project are decoys. |
-| `shared-project`          | Two separately scoped apps that launch the same consumer with different settings.                                  |
-| `runnable-package`        | A cited empty catalog result for a package with a start script and no service record.                              |
-| `shared-library-consumer` | The app that reaches the package through a shared workspace library.                                               |
-| `catalog-unavailable`     | Source evidence with no named service or catalog result, even when the checkout contains service declarations.     |
+| Case                      | What must be established                                                                                    |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `external-launcher`       | Find the launcher for the consumer in use, ignoring a similarly named project and a CI job.                 |
+| `shared-project`          | Find both applications that launch the same project and keep each catalog identity and configuration scope. |
+| `runnable-package`        | Cite the catalog's empty result for a runnable package.                                                     |
+| `shared-library-consumer` | Follow a workspace library to the application that launches its consumer.                                   |
+| `catalog-unavailable`     | Keep service identity unresolved even when the repository contains local catalog declarations.              |
 
-From the repository root, with SDK dependencies installed and Codex signed in,
-run the cases in parallel.
+Run from the repository root, with a built or installed CLI, model credentials and OpenGrep available. `--cli` takes the JavaScript entry point. Omit `--case` to run all five cases concurrently. `--out` takes a new directory. Each completed case retains its full report. Execution failures retain the command's diagnostic output.
 
 ```sh
-pnpm --dir sdk/typescript run build:plugin
-pnpm --dir sdk/typescript run build:evals
-node --experimental-strip-types evals/package-application-mapping/run.mts
+node --experimental-strip-types evals/package-application-mapping/run.mjs --cli "$CLI" --model "$MODEL" --out "$OUT"
+node --experimental-strip-types --test evals/package-application-mapping/test_grade.mts
 ```
-
-Use `--case ID` for one case or `--model MODEL` and `--effort EFFORT` to select
-the model and reasoning effort. Each run writes graph snapshots, the grade,
-wall time, and investigator and catalog token usage under `reports/`. Run the grader tests offline with
-`node --experimental-strip-types --test evals/package-application-mapping/test_grade.mts`.

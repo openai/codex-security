@@ -2,8 +2,7 @@
 
 Use a YAML or JSON file to reuse a scan scope, cost limit, or findings threshold.
 Select the file with `-c FILE` (or `--config FILE`) on `scan`, `bulk-scan`,
-`scan-components`, `info`, or `exploitability check`. The command selects the
-repository; the configuration file does not.
+`scan-components`, or `info`. The repository is a separate command argument.
 
 **Choose a file you trust.** Native Codex settings in the file can start MCP
 servers and select where model requests go. In CI, keep the configuration in an
@@ -21,6 +20,7 @@ For a repository with a `src` directory, save these settings in the file:
 scan:
   scope:
     paths: [src]
+  exclude_paths: [src/examples]
 policy:
   fail_on_severity: high
 ```
@@ -29,6 +29,13 @@ To supply additional context, add `knowledge_base: [SECURITY.md, docs/architectu
 under `scan` only if both files exist relative to the configuration file.
 Use the paths to your own documents or leave the list out.
 
+To exclude files or directories you do not want scanned, set
+`scan.exclude_paths: [examples/]`. Omit `scope` to scan the rest of the repository.
+Exclusions are literal paths relative to each scanned repository and take precedence
+over inclusions. The agent can still read excluded files as context for in-scope
+code, but findings located only in excluded paths are filtered from the results.
+Repeat `--exclude-path PATH` on `scan` to replace the configured list for one run.
+
 ```sh
 # Inspect the settings and where each one came from.
 codex-security info -c codex-security.yaml --json
@@ -36,6 +43,8 @@ codex-security info -c codex-security.yaml --json
 # Check the target, paths, and settings locally.
 codex-security scan . -c codex-security.yaml --dry-run --json
 ```
+
+The init command prints a preview command using the file it created. On Windows the displayed command uses PowerShell syntax. It includes an editor schema hint when the package is installed in the project. With a global installation the starter contains an empty mapping, which you can replace with your settings. The CLI always validates the file with its bundled schema.
 
 Check that the preview shows your intended repository and scope. To start the
 scan with those settings, keep the same file selection:
@@ -81,149 +90,6 @@ the schema in this checkout. For a copy at your project root with
 `./node_modules/@openai/codex-security/schemas/project-config.schema.json`.
 You can also omit the hint. The CLI validates the file using its bundled schema.
 
-## Inventory lookups for dependency checks
-
-An `exploitability check` assesses [production callers by default](../sdk/typescript/docs/cli.md#check-a-dependency-for-vulnerabilities).
-The command applies that scope automatically and uses checkout evidence with no
-inventory servers configured. Optionally set `exploitability.service_catalog_mcps` to select native Codex MCP servers for
-service identity, running revision and caller access lookups. The list accepts
-several servers, and the same server can supply both identity and runtime
-observations. Select a server that looks up known runtime artifacts or native
-resources, but has no source-to-service catalog, in `exploitability.runtime_mcps`.
-This keeps its tools and receipts available without sending it catalog requests.
-A server listed in both settings is connected once and participates in both roles.
-
-Optionally set `exploitability.scope.exclude_paths` to omit literal
-checkout-relative files or directories from broad structural discovery:
-
-```yaml
-exploitability:
-  scope:
-    exclude_paths: [examples/standalone-jobs]
-```
-
-This setting adds explicit exclusions to discovery. The default production
-scope also skips conventional example, test and documentation paths. A
-supplied `exploitability.scope.instructions` guides the check in place of
-those defaults. An instruction can name a production workload, such as
-"Check whether this advisory applies to the example API in production."
-The investigator uses available read-only providers to resolve the target
-and select runtime lookups. The command retains already discovered
-candidates and records matched omissions in the search audit. A different nested `SECURITY.md`
-policy keeps that path in the search. Exact file traces or receipt-backed
-caller leads can reopen a file for follow-up. An omission records search
-scope. Runtime and vulnerability conclusions require their own evidence.
-
-```yaml
-exploitability:
-  service_catalog_mcps: [inventory]
-  runtime_mcps: [artifacts]
-codex:
-  mcp_servers:
-    inventory:
-      url: https://inventory.example/mcp
-      enabled_tools:
-        [find_service, get_running_revision, get_access_observations]
-      bearer_token_env_var: INVENTORY_READ_TOKEN
-    artifacts:
-      url: https://artifacts.example/mcp
-      enabled_tools: [get_image_provenance]
-```
-
-Pass the file to `codex-security exploitability check CVE-2023-4863 --config FILE`.
-After a trace, the CLI looks up queued paths in the selected catalogs. A matching
-record supplies the service name and identity in the graph. For each resolved
-service, the CLI runs available read-only lookups for the running build and
-caller access and retains their original results for review. Automatic lookups
-use tools marked read-only or explicitly selected in `enabled_tools`. The
-investigator can follow up when a tool needs additional scope. With no servers
-selected, the CLI uses checkout evidence.
-If a selected server also exposes mutating tools, set its native
-`enabled_tools` allowlist to the read-only lookup tools as in the `inventory`
-example. Use credentials scoped to reading
-inventory and reference their environment variables. Literal credential values
-in MCP server settings would be passed to the Codex process on its command line.
-The resolver reads each catalog tool's schema and response directly, so the
-project file needs no field mappings.
-
-To guide inventory calls, add an optional `instructions` string to the existing
-server entry in your JSON or YAML file:
-
-```json
-{
-  "exploitability": { "service_catalog_mcps": ["inventory"] },
-  "codex": {
-    "mcp_servers": {
-      "inventory": {
-        "url": "https://inventory.example/mcp",
-        "enabled_tools": ["find_service", "get_running_revision"],
-        "instructions": "For get_running_revision, set include_partial to true and preserve coverage metadata."
-      }
-    }
-  }
-}
-```
-
-Codex Security supplies this guidance to the dependency investigator, service
-catalog resolver and automatic runtime lookup planner for that selected,
-enabled server. The planner validates its final arguments against the tool's
-input schema. Use the argument names and values supported by your server;
-`include_partial` above is an example. Returned records still need to establish
-each claimed fact, and partial coverage remains partial.
-
-This `instructions` field is a Codex Security extension for exploitability
-checks, not a native Codex MCP setting. The wrapper removes it before passing
-server configuration to Codex, including ordinary scans and Deep Scan workers.
-It does not alter the server or its initialization instructions. Omit it to
-preserve existing behavior.
-
-A service identity or desired configuration alone does not establish a running
-revision or caller access. An inventory can establish the running revision
-without saying who can access it. If the source establishes an affected use
-but either runtime fact is missing, the check reports
-`potentially_exploitable`. With inventory servers selected, the report must show
-what the check tried for that use and which runtime facts remain open. A scoped
-lookup that returns no result or fails can support that explanation. If a
-deciding source-level fact is missing, the use
-remains `unknown`. Public access requires evidence about the live route to that
-same service.
-
-Codex ignores user configuration for this command. If an active machine-wide
-configuration would attach another MCP server or change a selected server,
-the check exits before starting the assessment and identifies the conflict.
-
-Selected profiling providers can keep full results outside model context by
-returning a `graph_evidence` object in their tool result:
-
-```json
-{
-  "graph_evidence": {
-    "format": "codex-security-graph-evidence/v1",
-    "uri": "evidence://profiles/collection-id",
-    "sha256": "<SHA-256 of the exact UTF-8 resource text>"
-  }
-}
-```
-
-The same MCP server must expose that URI as one JSON text resource. Its body
-uses `format: "codex-security-graph-evidence/v1"`, `frame_order: "root_first"`,
-and `observations`. Each observation has `id`, `kind: "sampled_stack"`, a JSON
-`scope`, and ordered `frames` containing `kind`, `name`, and optional `scope`.
-Use frame scopes to distinguish workload/build identities; retain additional
-native frame fields in the resource. Keep collection coverage and query
-provenance in `metadata`. A sampled stack establishes sampled execution only.
-
-The host reads and hash-checks the resource, retains the original receipt,
-and ingests it into the existing source evidence graph. The model receives
-the collection summary and bounded graph queries. It does not receive the full
-resource. `query_codex_security_graph` supports node-name searches and witness
-filters; exact frame and witness-scope selections bind the deciding evidence
-to review. Whole resource receipts and oversized review projections are
-rejected with instructions to select narrower graph evidence. Refreshing the
-producing tool receipt invalidates its older resource proof for current claims.
-Resource import failures and graph retention limits remain explicit gaps.
-No additional CLI flag or server configuration field is required.
-
 ## Desktop and conversational Deep Scans
 
 Deep Scan setup accepts an explicitly selected `.yaml`, `.yml`, or `.json` project
@@ -245,6 +111,9 @@ what will run, ask for the effective worker count, subagents per worker, stop
 conditions, review cap, and discovery time limit. The plugin returns each value
 and its source in `setup.deepScanConfig` from `inspect_codex_security_setup`.
 Both setup and `start_codex_security_deep_scan` accept `projectConfigPath`.
+For a file under your home directory, `~/security/scan.yaml` and
+`~\security\scan.yaml` both select the same file. On POSIX, use the `~/`
+spelling when the filename itself contains a backslash.
 
 Explicit project settings override per-user `[deep_scan]` settings, which override
 built-in defaults. The per-user file remains
@@ -285,6 +154,7 @@ load the same config also use that setting. The usual config file is
 | `scan.max_time_minutes`        | Advisory Standard investigation allowance; enforced Deep discovery limit, in minutes | Unset in Standard; 5760 in Deep    |
 | `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Unset; preserve Codex defaults     |
 | `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`           | Whole repository                   |
+| `scan.exclude_paths`           | Literal repository-relative files or directories to exclude                          | Empty list                         |
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |
 | `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
@@ -295,7 +165,7 @@ load the same config also use that setting. The usual config file is
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
+See [owner suggestions](../sdk/typescript/docs/cli.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
@@ -316,6 +186,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.scope.paths`                        | `target: ["src"]`                     | `--path`                                             |
 | `scan.scope.diff`                         | `target: DiffTarget.refs(...)`        | `--diff`, `--head`                                   |
 | `scan.scope.working_tree`                 | `target: DiffTarget.workingTree(...)` | `--working-tree`, `--base`                           |
+| `scan.exclude_paths`                      | `excludePaths`                        | `--exclude-path`                                     |
 | `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
 | `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
 | `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
@@ -325,8 +196,8 @@ The resolver maps file keys to the existing SDK options:
 | `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`                                |
 | `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                                              |
 | `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`                               |
-| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`                                   |
-| `scan.max_time_minutes`                   | `maxTimeMinutes`                      | `--max-time`                                         |
+| `scan.deep.max_time_hours`                | `maxTimeHours`                        | Legacy `--max-time-hours` (hours)                    |
+| `scan.max_time_minutes`                   | `maxTimeMinutes`                      | `--max-time` (minutes, preferred)                    |
 | `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                                         |
 | `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`                                 |
 | `output.directory`                        | `outputDir`                           | `--output-dir`                                       |
@@ -369,7 +240,9 @@ the file loader also returns
 `projectConfig` path and source metadata. The optional directory argument defaults
 to the current directory. It locates a selected file or anchors an in-memory
 object's context, prompt, and output paths. Files anchor those paths to their own
-directory. Neither helper reads prompt contents or prepares a runtime.
+directory. On POSIX, `link/../scan.yaml` selects the file in the parent of
+the directory that `link` points to. Neither helper reads prompt contents or
+prepares a runtime.
 Resolved context, prompt, and output paths have the SDK's `AbsolutePath` type;
 scope paths remain relative to the selected repository.
 
@@ -401,6 +274,7 @@ hints; parsing does not insert them. Lists are replaced, not concatenated.
 | ------------------------------------------------------- | ------------------------------ |
 | Repository positional argument                          | Invocation directory           |
 | File `scan.scope.paths`                                 | Selected repository            |
+| File `scan.exclude_paths`                               | Selected repository            |
 | File context, instruction, validation, and output paths | Configuration file's directory |
 | CLI context, prompt, and output paths                   | Invocation directory           |
 | Native values under `codex`                             | Existing native Codex rules    |
@@ -472,7 +346,8 @@ aliases there are errors, while equivalent durations are accepted.
 `max_cost_usd_per_scan` has the same meaning as `--max-cost`: an estimated limit for one
 scan attempt. In-flight work may exceed it. It is not a total budget for a batch or
 follow-up actions. `fail_on_severity` changes the exit status without filtering the
-retained findings.
+retained findings. A bounded scan cannot run `--patch` or `--validate`. Select a
+finding from the saved scan to patch or validate separately.
 
 ## Batch and component scans
 
@@ -487,6 +362,12 @@ Both commands use the same config precedence, path anchoring, native settings,
 context, prompts, per-attempt cost and investigation limits, and severity policy
 as `scan`. The investigation allowance applies independently to each scan, not
 planning, result matching, or total campaign time.
+
+Use `--max-total-cost USD` for a whole invocation. It divides the estimate among
+explicit components or pending repository attempts, including retries. A tighter
+configured per-scan limit still applies. The total limit skips model-based matching
+and owner suggestions, including when `scan.owner_suggestions` is enabled. See the [component scan](../sdk/typescript/docs/cli.md#scan-project-components)
+and [bulk scan](../sdk/typescript/docs/cli.md#bulk-scans) guides for planning and recovery behavior.
 
 A bulk CSV row's mode and scope override the file's defaults for that repository.
 Bulk checkouts are clean, shallow snapshots, so bulk scans accept repository or
@@ -548,6 +429,17 @@ values, insert defaults, or discard unknown wrapper keys. Completion inside
 `codex` covers common model/provider fields; other native JSON settings retain
 existing checks. CLI `scan --schema --json` and result artifact schemas remain
 separate contracts.
+
+### Deep Scan sandbox qualification
+
+The CLI dry run and SDK `preflight()` are configuration checks, not sandbox
+qualification. They do not start a Deep Scan worker or execute a command under
+its generated permissions, so they cannot establish that the worker enforces
+filesystem, credential-store, or network restrictions. The documented CLI and
+SDK preflight surfaces do not export that generated policy or run a synthetic
+command under it. Do not use either preflight result as evidence of worker
+isolation. See the [security policy](../SECURITY.md) for the limits of read-only
+worker execution and inherited tools.
 
 ## Saved reruns
 

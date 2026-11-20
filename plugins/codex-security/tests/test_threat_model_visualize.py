@@ -351,7 +351,7 @@ class ControlValidation(unittest.TestCase):
             ],
         ]
         for path, value, message in cases:
-            with self.subTest(path=path, value=message if len(path) == 1 else value):
+            with self.subTest(path=path, value=message if len(path) == 1 else repr(value)):
                 model = copy.deepcopy(self.model)
                 target = model
                 for key in path[:-1]:

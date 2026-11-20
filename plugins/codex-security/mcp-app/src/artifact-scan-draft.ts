@@ -1,4 +1,5 @@
 import type { JsonObject } from "./types.js";
+import { normalizedScanRelativePath } from "./contract-values.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
@@ -7,7 +8,7 @@ import {
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, isAbsolute, join, posix, sep } from "node:path";
+import { basename, dirname, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
@@ -134,6 +135,69 @@ export interface ScanDraftResult {
   warnings?: string[];
 }
 
+/** Keep the receipt compact while making saved work discoverable on resume. */
+export function scanDraftToolResponse(
+  { reviewState, ...receipt }: ScanDraftResult,
+  input: ScanDraftInput,
+) {
+  const assigned = (
+    rows: { id?: string }[],
+    normalized: { id?: string }[],
+    saved: { id: string }[],
+  ) => {
+    const savedIds = new Set(saved.map(({ id }) => id));
+    return normalized.flatMap(({ id }, index) =>
+      id !== undefined && id !== rows[index]!.id && savedIds.has(id)
+        ? [{ index, id }]
+        : [],
+    );
+  };
+  const omitted = <Row extends { id?: string }>(
+    saved: Row[],
+    submitted: Row[],
+  ) => {
+    if (!saved.length) return [];
+    const submittedById = new Map(submitted.map((row) => [row.id, row]));
+    return saved.filter(
+      (row) => !isDeepStrictEqual(submittedById.get(row.id), row),
+    );
+  };
+  const { surfaces, deferred } = input.reviewState;
+  const normalizedSurfaces = normalizeSurfaces(surfaces);
+  const savedSurfaces =
+    reviewState.surfaces as (DraftCoverage["surfaces"][number] & {
+      id: string;
+    })[];
+  const assignedSurfaces = assigned(
+    surfaces,
+    normalizedSurfaces,
+    savedSurfaces,
+  );
+  const retainedSurfaces = omitted(
+    savedSurfaces.filter((row) => row.disposition === "needs_follow_up"),
+    normalizedSurfaces,
+  );
+  const savedDeferred =
+    reviewState.deferred as (DraftCoverage["deferred"][number] & {
+      id: string;
+    })[];
+  const normalizedDeferred = normalizeDeferred(deferred);
+  const assignedDeferred = assigned(
+    deferred,
+    normalizedDeferred,
+    savedDeferred,
+  );
+  const retainedDeferred = omitted(savedDeferred, normalizedDeferred);
+  return {
+    ...receipt,
+    deferredCount: savedDeferred.length,
+    ...(retainedSurfaces.length ? { retainedSurfaces } : {}),
+    ...(retainedDeferred.length ? { retainedDeferred } : {}),
+    ...(assignedSurfaces.length ? { assignedSurfaces } : {}),
+    ...(assignedDeferred.length ? { assignedDeferred } : {}),
+  };
+}
+
 export interface CompletedScanResult {
   scanId: string;
   manifest: JsonObject;
@@ -202,11 +266,12 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     const target = buildTarget(context, contract, trustedTarget);
     const scope = buildScope(context, trustedScope, reconciled.scope);
     const scopedFindings =
-      context.mode === "deep"
+      context.mode === "deep" || (scope.excludePaths as string[]).length > 0
         ? findingsWithinScope(
             reconciled.findings,
             scope.includePaths as string[],
             trustedScope.filePaths as string[] | undefined,
+            scope.excludePaths as string[],
           )
         : reconciled.findings;
     // Coordinator publication also carries retained historical payloads.
@@ -273,6 +338,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         "--checkpoint-path",
         checkpointPath,
       ];
+      if (context.modelThreadId !== undefined) {
+        arguments_.push(`--model-thread-id=${context.modelThreadId}`);
+      }
       if (expectedDigest !== undefined) {
         arguments_.push("--expected-draft-digest", expectedDigest);
       }
@@ -370,6 +438,7 @@ export async function recordCodexSecurityWorkerScanDraft(
         parsed.findings,
         includePaths,
         context.filePaths,
+        context.excludePaths,
       ),
     };
     const preserved = await preserveScanDraft(context, scoped);
@@ -379,6 +448,7 @@ export async function recordCodexSecurityWorkerScanDraft(
       scoped.findings,
       includePaths,
       context.filePaths,
+      context.excludePaths,
     );
     const destination = await artifactDestination(
       context,
@@ -427,11 +497,15 @@ export function findingsWithinScope<Finding extends JsonObject>(
   findings: Finding[],
   includePaths: readonly string[],
   filePaths: readonly string[] = [],
+  excludePaths: readonly string[] = [],
 ): Finding[] {
   const scopes = includePaths.map((scope) =>
     posix.normalize(scope).replace(/\/$/u, ""),
   );
-  if (scopes.includes(".")) return findings;
+  const exclusions = excludePaths.map((scope) =>
+    posix.normalize(scope).replace(/\/$/u, ""),
+  );
+  if (scopes.includes(".") && exclusions.length === 0) return findings;
   const files = new Set(
     filePaths.map((path) => posix.normalize(path).replace(/\/$/u, "")),
   );
@@ -442,10 +516,20 @@ export function findingsWithinScope<Finding extends JsonObject>(
   return findings.filter((finding) =>
     (finding.locations as JsonObject[]).some((location) => {
       const path = posix.normalize(location.path as string);
-      return targets.some(
-        (scope) =>
-          path === scope.path ||
-          (!scope.isFile && path.startsWith(`${scope.path}/`)),
+      if (
+        exclusions.some(
+          (scope) =>
+            scope === "." || path === scope || path.startsWith(`${scope}/`),
+        )
+      )
+        return false;
+      return (
+        scopes.includes(".") ||
+        targets.some(
+          (scope) =>
+            path === scope.path ||
+            (!scope.isFile && path.startsWith(`${scope.path}/`)),
+        )
       );
     }),
   );
@@ -515,7 +599,7 @@ export async function hasScanDraftCheckpoint(
   const { handoffClaimToken: _claim, ...snapshot } = input;
   if (saved?.contents === JSON.stringify(snapshot, null, 2) + "\n") return true;
   const includePaths = context.includePaths ?? [context.scope || "."];
-  if (includePaths.includes(".")) return false;
+  if (includePaths.includes(".") && !context.excludePaths?.length) return false;
   // Older writers checkpointed inherited findings before applying the bound scope.
   // Compare the entire projected payload, including every receipt ownership field.
   for (const { snapshot: recorded } of await readSavedCheckpoints(
@@ -531,6 +615,7 @@ export async function hasScanDraftCheckpoint(
             checkpoint.findings as JsonObject[],
             includePaths,
             context.filePaths,
+            context.excludePaths,
           ),
         },
         snapshot,
@@ -1343,6 +1428,7 @@ async function preserveScanDraft(
       result.findings,
       context.includePaths ?? [context.scope || "."],
       context.filePaths,
+      context.excludePaths,
     );
   }
   const receiptLocation = (ref: string) => {
@@ -2815,31 +2901,6 @@ export async function getCodexSecurityCompletedScan(
   };
 }
 
-function safeRelativePath(value: string, context: string): string {
-  const parts = value.split("/");
-  if (
-    value.length === 0 ||
-    Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
-    value.startsWith("/") ||
-    /^[A-Za-z]:/.test(value) ||
-    parts.includes("..") ||
-    value.includes("\\") ||
-    /[\u0000-\u001f]/u.test(value)
-  ) {
-    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
-  }
-  const normalized = posix.normalize(value).replace(/\/+$/, "");
-  if (
-    normalized === "." ||
-    normalized.startsWith("../") ||
-    isAbsolute(normalized)
-  ) {
-    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
-  }
-  return normalized;
-}
-
 /** Admit file-authored drafts through the current contract after removing host fields. */
 export function parseCanonicalScanDraft(input: {
   scanId?: string;
@@ -2880,10 +2941,10 @@ function parseCanonicalCheckpoint(
       for (const [locationIndex, location] of (
         (finding[field] as JsonObject[] | undefined) ?? []
       ).entries()) {
-        safeRelativePath(
-          location.path as string,
-          `findings[${index}].${field}[${locationIndex}].path`,
-        );
+        if (normalizedScanRelativePath(location.path as string) === undefined)
+          throw new Error(
+            `findings[${index}].${field}[${locationIndex}].path: expected a safe scan-relative POSIX path.`,
+          );
       }
     }
   }

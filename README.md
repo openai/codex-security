@@ -13,13 +13,11 @@ Use its security workflows in Codex, or automate them with the
 
 - Scan repositories, selected paths, or Git changes. Deep scans repeat Standard scans and return their deduplicated findings.
 - Validate candidate findings, generate patches, and verify existing fixes.
-- Check a CVE, a package's published advisories, or a newly reported vulnerability
-  against the current checkout with [`cs exploitability check`](sdk/typescript/docs/cli.md#check-a-dependency-for-vulnerabilities).
 - Draft `SECURITY.md` policies and save threat models for later review.
 - Browse saved scans and findings, identify duplicates, assess severity against
   your own rubric, and suggest owners from source and Git history.
-- Import Semgrep, Snyk, and Wiz findings locally or publish them to Codex Security Cloud. [All scanner import guides](docs/scanner-imports/README.md).
-- Export SARIF, JSON, or CSV, and publish findings to Linear or a findings service.
+- Preview third-party scanner findings, save them locally, or publish supported reports to Codex Security Cloud. [Scanner import guides](docs/scanner-imports/README.md).
+- Track findings in Linear, Jira, or GitHub, publish completed scans, or export SARIF, JSON, and CSV. [Integration workflows](docs/plugin-connectors.md).
 - Automate scans across repositories or project components, including in CI and
   containers.
 
@@ -65,7 +63,7 @@ reports an `EEXIST` conflict, use `npx @openai/codex-security` in place of
 `cs` for both login and scanning.
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
-For a headless machine, see [device or SSH login](sdk/typescript/README.md#authentication).
+For a headless machine, see [device or SSH login](sdk/typescript/docs/cli.md#authentication).
 
 ### Scan options
 
@@ -74,6 +72,9 @@ Choose a scope and scan mode:
 ```bash
 # Scan selected paths.
 cs scan . --path src --path tests
+
+# Exclude a directory from the scan.
+cs scan . --exclude-path examples/
 
 # Scan committed changes from a base revision to HEAD.
 cs scan . --diff origin/main
@@ -126,8 +127,12 @@ try {
 }
 ```
 
-The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
+The [SDK guide](sdk/typescript/docs/sdk.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
+
+Linked Git worktrees share scan history and saved findings when they use the same
+Codex Security state directory. Keep `CODEX_SECURITY_STATE_DIR` stable to retain
+that shared history and sign-in scope. See the [scan history guide](sdk/typescript/docs/cli.md#scan-history-and-reruns).
 
 ## Read existing Cloud findings
 
@@ -136,7 +141,7 @@ When Codex Security Cloud is available to your account, the Security plugin's
 verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
 optional connection; local scans work without it.
 
-See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+See [Cloud connection setup and CLI reads](sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
 for authentication requirements and a read-only example.
 
 ## Generate SECURITY.md
@@ -232,3 +237,10 @@ for examples.
 - [Examples](examples/README.md)
 
 To report a vulnerability privately, follow the [security policy](SECURITY.md).
+
+## Citation
+
+Use **Cite this repository** on GitHub to copy an APA or BibTeX citation, or
+download [CITATION.cff](CITATION.cff). Match the citation’s version to
+`codex-security --version` and use the publication date from that version’s
+`npm-vX.Y.Z` entry in [GitHub Releases](https://github.com/openai/codex-security/releases).

@@ -1,8 +1,4 @@
-import {
-  nativeRules,
-  sourceEvidence,
-  sourceStep,
-} from "./support/native-trace-rules.ts";
+import { nativeRules } from "./support/native-trace-rules.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";

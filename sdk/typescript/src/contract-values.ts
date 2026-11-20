@@ -21,36 +21,41 @@ export function hasRequiredFindingText(value: string): boolean {
   return !/^[\p{White_Space}\u001c-\u001f]*$/u.test(value);
 }
 
-export function safeRelativePath(
+/** Return canonical spelling for a valid scan-relative POSIX path. */
+export function normalizedScanRelativePath(
   value: string,
-  context: string,
   allowDot = false,
-): string {
-  const parts = value.split("/");
+): string | undefined {
   if (
     value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
-    (!allowDot && value === ".") ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
-    parts.includes("..") ||
+    value.split("/").includes("..") ||
     value.includes("\\") ||
     /[\u0000-\u001f]/u.test(value)
-  ) {
-    throw new SealedContractError(
-      `${context}: expected a safe scan-relative POSIX path.`,
-    );
-  }
+  )
+    return;
   const normalized = posix.normalize(value).replace(/\/+$/, "");
   if (
     (!allowDot && normalized === ".") ||
     normalized.startsWith("../") ||
     isAbsolute(normalized)
-  ) {
+  )
+    return;
+  return normalized;
+}
+
+export function safeRelativePath(
+  value: string,
+  context: string,
+  allowDot = false,
+): string {
+  const normalized = normalizedScanRelativePath(value, allowDot);
+  if (normalized === undefined)
     throw new SealedContractError(
       `${context}: expected a safe scan-relative POSIX path.`,
     );
-  }
   return normalized;
 }
 

@@ -1,11 +1,13 @@
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
+
+const pythonExecutable = useTestPython();
 
 const temporaryDirectories = createTemporaryDirectoriesSync(true);
 

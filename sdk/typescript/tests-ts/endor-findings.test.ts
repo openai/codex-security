@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   normalizeEndorFindings,
   normalizeEndorSarif,
+  requiresStructuredEndorReport,
 } from "../src/endor-findings.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 
@@ -32,6 +33,89 @@ test("Endor JSON preserves the complete source, UUID, severity, aliases and repo
     installed_version: "1.0.0",
     fixed_versions: [],
   });
+});
+
+test.each([
+  { oversizedPackage: false, oversizedAliases: false },
+  { oversizedPackage: false, oversizedAliases: true },
+  { oversizedPackage: true, oversizedAliases: false },
+  { oversizedPackage: true, oversizedAliases: true },
+])(
+  "Endor retains the source and projects the package and malware IDs that fit %p",
+  ({ oversizedPackage, oversizedAliases }) => {
+    const base = endorFinding();
+    const { target_dependency_name: _, ...spec } = base.spec;
+    const { vulnerability } = spec.finding_metadata;
+    const originalIds = [
+      vulnerability.meta.name,
+      ...vulnerability.spec.aliases,
+    ];
+    const name = oversizedPackage ? "x".repeat(513) : "npm://example@1.0.0";
+    const aliases = oversizedAliases
+      ? Array.from({ length: 100 }, (_, i) => `MAL-alias-${i}`)
+      : ["MAL-alias"];
+    const malwareId = "MAL-2099-0001";
+    const input = {
+      ...base,
+      spec: {
+        ...spec,
+        target_dependency_package_name: name,
+        finding_metadata: {
+          vulnerability,
+          malware: {
+            meta: { name: malwareId },
+            spec: { aliases: [originalIds[0], ...aliases] },
+          },
+        },
+      },
+    };
+    const current = normalizeEndorFindings(input);
+    expect(current.excluded).toEqual([]);
+    expect(current.findings[0]).toMatchObject({
+      source_finding_id: input.uuid,
+      evidence: {
+        advisory_ids: oversizedAliases
+          ? originalIds
+          : [...originalIds, malwareId, ...aliases],
+        source_data: input,
+      },
+    });
+    expect(current.findings[0]!.evidence.packages!.map((p) => p.name)).toEqual(
+      oversizedPackage ? [] : spec.dependency_file_paths.map(() => name),
+    );
+    expect(requiresStructuredEndorReport(current)).toBe(
+      oversizedPackage || oversizedAliases,
+    );
+  },
+);
+
+test("Endor keeps its original projection for duplicate or malformed malware metadata", () => {
+  const base = endorFinding();
+  const { vulnerability } = base.spec.finding_metadata;
+  for (const finding_metadata of [
+    { vulnerability, malware: vulnerability },
+    { malware: "unavailable" },
+    { malware: { meta: [], spec: "unknown" } },
+  ]) {
+    const input = {
+      ...base,
+      spec: {
+        ...base.spec,
+        target_dependency_package_name: "npm://another-package@2.0.0",
+        finding_metadata,
+      },
+    };
+    const current = normalizeEndorFindings(input);
+    expect(current.findings[0]!.evidence).toMatchObject({
+      advisory_ids: finding_metadata.vulnerability
+        ? [vulnerability.meta.name, ...vulnerability.spec.aliases]
+        : [],
+      source_data: input,
+    });
+    expect(current.findings[0]!.evidence.packages![0]!.name).toBe(
+      base.spec.target_dependency_name,
+    );
+  }
 });
 
 test("arrays and ListFindingsResponse use the same identities and empty lists are empty", () => {

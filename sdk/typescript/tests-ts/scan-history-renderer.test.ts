@@ -98,7 +98,7 @@ describe("scan history renderer", () => {
     expect(text).toContain("0 → 2");
   });
 
-  test("orders severity totals from critical to informational", () => {
+  test("orders severity totals and escapes labels in saved history", () => {
     const text = renderScanHistory(
       {
         scanId: "synthetic-scan",
@@ -106,6 +106,7 @@ describe("scan history renderer", () => {
         progress: { status: "complete" },
         findings: [],
         severityCounts: {
+          ["fu\u001b[2Jture"]: 6,
           low: 4,
           informational: 5,
           medium: 3,
@@ -116,6 +117,8 @@ describe("scan history renderer", () => {
       "show",
       { color: false },
     );
+    expect(text).not.toContain("\u001b[2J");
+    expect(text).toContain("6 FUTURE");
     expect(text).toMatch(
       /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
     );
@@ -555,6 +558,29 @@ describe("scan history renderer", () => {
     ]) {
       expect(output).toContain(expected);
     }
+  });
+
+  test("uses singular nouns in match-all counts of one", () => {
+    const output = renderScanHistory(
+      {
+        repository: "/demo/juice-shop",
+        scanCount: 1,
+        unavailableScans: 1,
+        matchedPairs: 1,
+        findingMatches: 1,
+      },
+      "match-all",
+      { color: false },
+    );
+    for (const expected of [
+      "1 scan ",
+      "1 comparison ",
+      "1 root-cause match",
+      "1 scan unavailable",
+    ]) {
+      expect(output).toContain(expected);
+    }
+    expect(output).not.toMatch(/1 (scans|comparisons|root-cause matches)/u);
   });
 
   test("renders related findings separately in scan details and comparisons", () => {

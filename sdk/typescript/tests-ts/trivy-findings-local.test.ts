@@ -72,13 +72,11 @@ test("normalized Trivy headers reject credentials before local or Cloud preparat
     repository: "repo-example",
     sourceKey: "example/project/main",
   };
-  const environment = { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" };
   await expect(
-    prepareNormalizedLocalImport(
-      input,
-      { ...options, sourceRepositoryUrl: foreignUrl },
-      { environment },
-    ),
+    prepareNormalizedLocalImport(input, {
+      ...options,
+      sourceRepositoryUrl: foreignUrl,
+    }),
   ).rejects.toThrow("--source-repository-url");
   input.report = trivyRepositoryHeader(
     "https://scanner:fixture@github.com/example/other",
@@ -88,7 +86,6 @@ test("normalized Trivy headers reject credentials before local or Cloud preparat
   await expect(local.prepare(input)).rejects.toThrow(error);
   await expect(
     prepareNormalizedExternalPublication(input, options, {
-      environment,
       credentials: async () => {
         throw new Error("Unexpected Cloud authentication");
       },

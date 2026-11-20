@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
-  exploitabilityMcpConfiguration,
   readProjectConfig,
   resolveScanSettings,
 } from "../src/project-config.js";
@@ -26,41 +23,6 @@ afterEach(cleanup);
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
-  [
-    "explicit exploitability discovery exclusions",
-    { exploitability: { scope: { exclude_paths: ["examples/demo.py"] } } },
-    true,
-  ],
-  [
-    "exploitability discovery exclusions must be a list",
-    { exploitability: { scope: { exclude_paths: "examples" } } },
-    false,
-  ],
-  [
-    "removed deployment server setting",
-    { exploitability: { deployment_status_mcps: ["releases"] } },
-    false,
-  ],
-  [
-    "catalog servers",
-    { exploitability: { service_catalog_mcps: ["catalog"] } },
-    true,
-  ],
-  [
-    "catalog servers must be a list",
-    { exploitability: { service_catalog_mcps: "catalog" } },
-    false,
-  ],
-  [
-    "runtime evidence servers",
-    { exploitability: { runtime_mcps: ["artifacts"] } },
-    true,
-  ],
-  [
-    "runtime evidence servers must be a list",
-    { exploitability: { runtime_mcps: "artifacts" } },
-    false,
-  ],
   ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
   ["owner artifact disabled", { scan: { owner_suggestions: false } }, true],
   [
@@ -186,181 +148,38 @@ const cases: [string, unknown, boolean][] = [
     false,
   ],
   ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
+  [
+    "runtime line has a source location",
+    {
+      exploitability: {
+        sinks: [
+          {
+            function: "decode",
+            runtime_selectors: [
+              { name: "decode", location: "codec.c", line: 8 },
+            ],
+          },
+        ],
+      },
+    },
+    true,
+  ],
+  [
+    "runtime line without a location",
+    {
+      exploitability: {
+        sinks: [
+          {
+            function: "decode",
+            runtime_selectors: [{ name: "decode", line: 8 }],
+          },
+        ],
+      },
+    },
+    false,
+  ],
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
-
-test("dependency checks separate instructions for selected enabled service catalog servers", () => {
-  const releases = {
-    url: "https://releases.example/mcp",
-    enabled_tools: ["lookup"],
-  };
-  const jobs = { command: "service-catalog" };
-  const codex = {
-    mcp_servers: {
-      releases,
-      jobs: { ...jobs, instructions: "Use the preview environment." },
-      removed: { enabled: false, instructions: "Disabled guidance." },
-      empty: {
-        command: "service-catalog",
-        enabled_tools: [],
-        instructions: "Empty guidance.",
-      },
-      unrelated: { command: "other", instructions: "Unselected guidance." },
-    },
-  };
-  const original = structuredClone(codex);
-  expect(exploitabilityMcpConfiguration(undefined)).toEqual({
-    servers: {},
-    catalogServers: {},
-    instructions: {},
-  });
-  expect(exploitabilityMcpConfiguration({ codex })).toEqual({
-    servers: {},
-    catalogServers: {},
-    instructions: {},
-  });
-  expect(
-    exploitabilityMcpConfiguration({
-      codex,
-      exploitability: {
-        service_catalog_mcps: ["jobs", "releases", "removed", "empty"],
-      },
-    }),
-  ).toEqual({
-    servers: { jobs, releases },
-    catalogServers: { jobs, releases },
-    instructions: { jobs: "Use the preview environment." },
-  });
-  expect(
-    exploitabilityMcpConfiguration({
-      codex,
-      exploitability: { runtime_mcps: ["jobs", "removed", "empty"] },
-    }),
-  ).toEqual({
-    servers: { jobs },
-    catalogServers: {},
-    instructions: { jobs: "Use the preview environment." },
-  });
-  expect(
-    exploitabilityMcpConfiguration({
-      codex,
-      exploitability: {
-        service_catalog_mcps: ["jobs"],
-        runtime_mcps: ["jobs", "releases"],
-      },
-    }),
-  ).toEqual({
-    servers: { jobs, releases },
-    catalogServers: { jobs },
-    instructions: { jobs: "Use the preview environment." },
-  });
-  expect(() =>
-    exploitabilityMcpConfiguration({
-      codex,
-      exploitability: { runtime_mcps: ["missing"] },
-    }),
-  ).toThrow("selected by exploitability.runtime_mcps");
-  expect(codex).toEqual(original);
-  for (const name of [
-    "missing",
-    "toString",
-    "codex_security_dependency",
-    "codex-security-dependency",
-  ]) {
-    expect(() =>
-      exploitabilityMcpConfiguration({
-        codex,
-        exploitability: { service_catalog_mcps: [name] },
-      }),
-    ).toThrow(ConfigurationError);
-  }
-  expect(() =>
-    exploitabilityMcpConfiguration({
-      codex: { mcp_servers: { releases: "invalid" } },
-      exploitability: { service_catalog_mcps: ["releases"] },
-    }),
-  ).toThrow(ConfigurationError);
-});
-
-test.each(
-  [true, null, ["Use preview."], { text: "Use preview." }].map(
-    (instructions) => ({
-      instructions,
-    }),
-  ),
-)(
-  "dependency checks reject non-string server instructions: %j",
-  ({ instructions }) => {
-    expect(() =>
-      exploitabilityMcpConfiguration({
-        codex: {
-          mcp_servers: { inventory: { command: "catalog", instructions } },
-        },
-        exploitability: { service_catalog_mcps: ["inventory"] },
-      }),
-    ).toThrow("codex.mcp_servers.inventory.instructions must be a string.");
-  },
-);
-
-test.each([true, false])(
-  "keeps project access settings and excludes exploitability instructions in Deep Scan workers (%p)",
-  async (daybreak) => {
-    const root = await temporaryDirectory();
-    const input = {
-      scan: { mode: "deep" },
-      codex: {
-        daybreak,
-        mcp_servers: {
-          inventory: {
-            command: "synthetic-catalog",
-            enabled_tools: ["get_running_revision"],
-            instructions: "Preserve inventory coverage metadata.",
-          },
-        },
-        analytics: { enabled: false },
-        shell_environment_policy: { inherit: "core" },
-        otel: { exporter: "none" },
-        skills: { config: [] },
-        agents: { reviewer: { description: "Synthetic reviewer." } },
-        features: {
-          view_image: false,
-          shell_tool: false,
-          cli_daybreak: daybreak,
-          api_key_cyber_access_programs: true,
-          api_key_model_discovery: false,
-        },
-      },
-    } satisfies ProjectConfigInput;
-    const original = structuredClone(input);
-    const { config, sources } = resolveScanSettings(
-      { input, directory: root },
-      {},
-      root,
-    );
-    expect(config.codexOverrides["mcp_servers"]).toEqual({
-      inventory: {
-        command: "synthetic-catalog",
-        enabled_tools: ["get_running_revision"],
-      },
-    });
-    expect(sources).not.toHaveProperty(
-      "codex.mcp_servers.inventory.instructions",
-    );
-    expect(input).toEqual(original);
-    const workerResult = execFileSync(
-      Bun.which("node")!,
-      [
-        "--experimental-strip-types",
-        fileURLToPath(
-          new URL("./support/replay-worker-boundary.ts", import.meta.url),
-        ),
-        root,
-      ],
-      { input: JSON.stringify(config.codexOverrides), encoding: "utf8" },
-    );
-    expect(JSON.parse(workerResult)).toEqual({ launches: 3 });
-  },
-);
 
 test("minute and deprecated hour settings follow source precedence", () => {
   const directory = process.cwd();
@@ -588,6 +407,70 @@ describe("project configuration input contract", () => {
 });
 
 describe("project configuration resolution", () => {
+  test.skipIf(process.platform === "win32")(
+    "follows a directory link before a parent component in the selected file",
+    async () => {
+      const root = await temporaryDirectory();
+      const selected = join(root, "selected");
+      const child = join(selected, "child");
+      await mkdir(child, { recursive: true });
+      await symlink(child, join(root, "link"));
+      for (const [directory, minutes] of [
+        [root, 2],
+        [selected, 7],
+      ] as const) {
+        await writeFile(
+          join(directory, "scan.json"),
+          JSON.stringify({
+            scan: { max_time_minutes: minutes },
+            output: { directory: "reports" },
+          }),
+        );
+      }
+      for (const [file, directory] of [
+        ["link/../scan.json", root],
+        [`${root}/link/../scan.json`, root],
+        ["scan.json", `${root}/link/..`],
+        [`${relative(process.cwd(), root)}/link/../scan.json`, ""],
+      ] as const) {
+        const project = await readProjectConfig(file, directory);
+        expect(project.path).toBe(join(selected, "scan.json"));
+        expect(resolveScanSettings(project, {}, root).options).toMatchObject({
+          maxTimeMinutes: 7,
+          outputDir: join(selected, "reports"),
+        });
+      }
+      await expect(
+        readProjectConfig("missing/../scan.json", root),
+      ).rejects.toMatchObject({
+        cause: { code: "ENOENT" },
+      });
+      const alias = join(root, "alias.json");
+      await symlink(join(selected, "scan.json"), alias);
+      expect((await readProjectConfig(alias)).directory).toBe(root);
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "does not select a replacement-character directory for a non-UTF-8 parent",
+    async () => {
+      const root = await temporaryDirectory();
+      const parent = Buffer.concat([
+        Buffer.from(`${root}/`),
+        Buffer.from([0xff]),
+      ]);
+      const child = Buffer.concat([parent, Buffer.from("/child")]);
+      await mkdir(child, { recursive: true });
+      await symlink(child, join(root, "link"));
+      await writeFile(Buffer.concat([parent, Buffer.from("/scan.json")]), "{}");
+      await mkdir(join(root, "\uFFFD"));
+      await writeFile(join(root, "\uFFFD", "scan.json"), "{}");
+      await expect(
+        readProjectConfig("link/../scan.json", root),
+      ).rejects.toThrow("valid UTF-8 path");
+    },
+  );
+
   test("resolves paths according to their layer and replaces lists", async () => {
     const root = await temporaryDirectory();
     const project = {

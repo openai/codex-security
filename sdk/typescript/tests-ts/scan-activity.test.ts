@@ -47,6 +47,31 @@ function sessionEvent(
   return { type: "response_item", payload };
 }
 
+function expectCommandPaths(
+  cmd: string,
+  shell: string | undefined,
+  paths: readonly string[],
+  repository = "/repo",
+) {
+  const args = { cmd, shell };
+  const live = {
+    type: "item.started",
+    item: { id: "live", type: "command_execution", command: cmd, shell },
+  };
+  const saved = sessionEvent({
+    type: "function_call",
+    name: "exec_command",
+    call_id: "saved",
+    arguments: JSON.stringify(args),
+  });
+  for (const activity of [
+    scanActivityFromEvent(live, repository),
+    scanActivityFromEvent(toolEvent("exec", args), repository),
+    scanActivityFromSessionEvent(saved, repository),
+  ])
+    expect(activity?.paths).toEqual([...paths]);
+}
+
 function commandActivityCase(
   _name: string,
   command: string,
@@ -61,6 +86,44 @@ function commandActivityCase(
 describe("scan activity", () => {
   test.each([
     [
+      '/bin/sh -c "cat \\"/repo/src/O\'Brien.ts\\""',
+      undefined,
+      ["src/O'Brien.ts"],
+    ],
+    [
+      '/bin/sh -c \'cat "$CODEX_SECURITY_REPOSITORY/src/O\'"\'Brien.ts\\""',
+      undefined,
+      ["src/O'Brien.ts"],
+    ],
+    ['cat "/repo/src/O\'Brien.ts"', undefined, ["src/O'Brien.ts"]],
+    ['cat "/repo/src/O\'Brien.ts"', "sh", ["src/O'Brien.ts"]],
+    [`cat '/repo/src/O'"'"'Brien.ts'`, "sh", ["src/O'Brien.ts"]],
+    ["cat /repo/src/O\\'Brien.ts", "sh", ["src/O'Brien.ts"]],
+    [`cat '/repo/src/say "hello".ts'`, "sh", ['src/say "hello".ts']],
+    ['cat "/repo/ leading.ts "', "/bin/bash", [" leading.ts "]],
+    [
+      'cat "$CODEX_SECURITY_REPOSITORY/src/O\'Brien.ts"',
+      "/bin/zsh",
+      ["src/O'Brien.ts"],
+    ],
+    ["sh -c \"cat '\\$CODEX_SECURITY_REPOSITORY/src/file.ts'\"", undefined, []],
+    ["ls '/repo/src/'", "sh", ["src"]],
+    ['cat "/repo/src/result:42:7"', "sh", ["src/result:42:7"]],
+    [
+      "/bin/sh -c \"cat '/repo/logs\\\\annual.txt'\"",
+      undefined,
+      ["logs\\annual.txt"],
+    ],
+    ["cat /repo/src/result:42:7", "sh", ["src/result"]],
+    ['cat "/repo/src/result:42:7"', undefined, ["src/result"]],
+    ['cat "/repo/src/result:42:7"', "/usr/bin/pwsh", ["src/result"]],
+  ] as const)(
+    "attributes quoted filenames in live and saved commands: %s (%p)",
+    (cmd, shell, paths) => expectCommandPaths(cmd, shell, paths),
+  );
+
+  test.each([
+    [
       "cat $CODEX_SECURITY_REPOSITORY/src/my\\ file.ts",
       "/repo",
       ["src/my file.ts"],
@@ -73,42 +136,49 @@ describe("scan activity", () => {
     [
       "cat \"/repo/two words\\ with.txt\" '/repo/quoted path.ts' /repo/my\\\tfile.ts",
       "/repo",
-      ["two words/ with.txt", "quoted path.ts", "my\tfile.ts"],
+      ["two words\\ with.txt", "quoted path.ts", "my\tfile.ts"],
     ],
-    ["cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts", "/repo", ["safe.ts"]],
+    [
+      "cat /repo/my\\ file.ts\\\\sibling /repo/safe.ts",
+      "/repo",
+      ["my file.ts\\sibling", "safe.ts"],
+    ],
+    [
+      "cat '/work\\tree/logs\\annual.txt' '/work\\tree/logs/annual.txt' '/work/tree/other.txt'",
+      "/work\\tree",
+      ["logs\\annual.txt", "logs/annual.txt"],
+    ],
   ] as const)(
-    "decodes unquoted blanks in recorded POSIX commands: %s",
+    "decodes literal paths in recorded POSIX commands: %s",
     (cmd, repository, paths) => {
-      for (const activity of [
-        scanActivityFromEvent(
-          {
-            type: "item.started",
-            item: {
-              id: "live",
-              type: "command_execution",
-              command: cmd,
-              shell: "/bin/bash",
-            },
-          },
-          repository,
-        ),
-        scanActivityFromEvent(
-          toolEvent("exec", { cmd, shell: "sh" }),
-          repository,
-        ),
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "function_call",
-            name: "exec_command",
-            call_id: "saved",
-            arguments: JSON.stringify({ cmd, shell: "/bin/zsh" }),
-          }),
-          repository,
-        ),
-      ])
-        expect(activity?.paths).toEqual([...paths]);
+      for (const shell of ["sh", "/bin/bash", "/bin/zsh"])
+        expectCommandPaths(cmd, shell, paths, repository);
     },
   );
+
+  test("keeps distinct POSIX filenames in structured tool paths", () => {
+    const repository = "/work\\tree";
+    const args = {
+      paths: [
+        repository + "/logs\\annual.txt",
+        repository + "/logs/annual.txt",
+        "/work/tree/other.txt",
+      ],
+    };
+    for (const activity of [
+      scanActivityFromEvent(toolEvent("read_file", args), repository),
+      scanActivityFromSessionEvent(
+        sessionEvent({
+          type: "function_call",
+          call_id: "read",
+          name: "read_file",
+          arguments: JSON.stringify(args),
+        }),
+        repository,
+      ),
+    ])
+      expect(activity?.paths).toEqual(["logs\\annual.txt", "logs/annual.txt"]);
+  });
 
   test.each([undefined, "/usr/bin/pwsh", "unknown"])(
     "preserves ordinary token boundaries for shell %p",
@@ -544,6 +614,16 @@ describe("scan activity", () => {
     (repository, path, inside) => {
       const paths = inside ? ["Src/A.ts"] : [];
       const cmd = `type "${path}"`;
+      expect(
+        scanActivityFromSessionEvent(
+          sessionEvent({
+            type: "local_shell_call",
+            call_id: "worker-argv",
+            action: { type: "exec", command: ["cat", path] },
+          }),
+          repository,
+        ),
+      ).toMatchObject({ paths });
       expect(
         scanActivityFromEvent(toolEvent("read_file", { path }), repository),
       ).toMatchObject({ paths });

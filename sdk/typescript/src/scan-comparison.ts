@@ -7,12 +7,9 @@ import {
   Codex,
   type CodexOptions,
   type CyberAccessProgram,
-  type McpToolCallItem,
   type ModelReasoningEffort,
-  type ThreadItem,
   type ThreadOptions,
   type TurnOptions,
-  type Usage,
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
@@ -35,7 +32,6 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
-  inlineToml,
   isExternalModelProvider,
   scanProviderEnvKey,
   mergedCodexConfig,
@@ -47,15 +43,9 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   structuredCodexConfig,
-  untrustedProjectConfigOverrides,
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import {
-  subtractTokenUsage,
-  tokenUsage,
-  type ScanTokenUsage,
-} from "./cost-model.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
@@ -108,12 +98,47 @@ interface SavedComparisonContext {
 
 export interface ScanMatchingBatch {
   afterScanId: string;
-  afterFindings: readonly Finding[];
+  afterFindings?: readonly Finding[];
   beforeScans: ({
     scanId: string;
-    findings: readonly Finding[];
+    findings?: readonly Finding[];
   } & SavedComparisonContext)[];
   knownFindingGroups?: readonly (readonly string[])[];
+}
+
+export type ScanMatchingPlan = JsonObject & {
+  repository: string;
+  scanCount: number;
+  unavailableScans: number;
+  skippedPairs: number;
+  batches: ScanMatchingBatch[];
+  findingsByScanId?: Record<string, readonly Finding[]>;
+};
+
+export function resolveMatchingBatch(
+  batch: ScanMatchingBatch,
+  findingsByScanId: ScanMatchingPlan["findingsByScanId"],
+) {
+  function findings(
+    scanId: string,
+    inline?: readonly Finding[],
+  ): readonly Finding[] {
+    const rows =
+      findingsByScanId === undefined ? inline : findingsByScanId?.[scanId];
+    if (!Array.isArray(rows))
+      throw new CodexSecurityError(
+        `Matching plan is missing findings for scan ${scanId}.`,
+      );
+    return rows;
+  }
+  return {
+    ...batch,
+    afterFindings: findings(batch.afterScanId, batch.afterFindings),
+    beforeScans: batch.beforeScans.map((scan) => ({
+      ...scan,
+      findings: findings(scan.scanId, scan.findings),
+    })),
+  };
 }
 
 export function selectedComparisonContext(
@@ -163,21 +188,11 @@ export function unionFindingGroups(
 /** @internal */
 interface ReadOnlyCodex {
   startThread(options: ThreadOptions): {
-    readonly id?: string | null;
     run(
       input: string,
       options: TurnOptions,
-    ): Promise<{
-      finalResponse: string;
-      usage?: Usage | null;
-      items?: ThreadItem[];
-    }>;
+    ): Promise<{ finalResponse: string }>;
   };
-}
-
-interface CatalogLookup {
-  servers: JsonObject;
-  onResult: (item: McpToolCallItem) => void;
 }
 
 export interface ReadOnlyCodexOptions {
@@ -186,8 +201,6 @@ export interface ReadOnlyCodexOptions {
   /** @internal Cyber access program already selected by the calling scan. */
   cyberAccessProgram?: CyberAccessProgram;
   config?: CodexSecurityConfig;
-  /** @internal Token usage from the completed helper turn. */
-  onUsage?: (usage: Usage) => void;
   /** @internal Private native profile owned by the calling scan. */
   nativeProfile?: { name: string; path: string };
   /** @internal */
@@ -573,10 +586,7 @@ export async function matchScanFindingsInternal(
 }
 
 async function startReadOnlyCodexThread(
-  options: ReadOnlyCodexOptions & {
-    selectedEnvironment?: Record<string, string>;
-    catalogLookup?: CatalogLookup;
-  },
+  options: ReadOnlyCodexOptions,
   runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
     nativeProviderEnvironment?: Record<string, string>;
   },
@@ -585,10 +595,8 @@ async function startReadOnlyCodexThread(
   cleanup?: () => Promise<void>;
 }> {
   const source = {
-    ...(options.selectedEnvironment ?? options.environment ?? process.env),
-    CODEX_HOME: scanCodexHome(
-      options.selectedEnvironment ?? options.environment ?? process.env,
-    ),
+    ...(options.environment ?? process.env),
+    CODEX_HOME: scanCodexHome(options.environment ?? process.env),
   };
   const config =
     options.config === undefined
@@ -678,30 +686,18 @@ async function startReadOnlyCodexThread(
     !commandAuth && !isExternalModelProvider(modelProvider)
       ? scanProviderEnvKey(providerConfig)
       : undefined;
-  const environment =
-    options.selectedEnvironment ??
-    (await comparisonEnvironment(
-      source,
-      accountStatus,
-      options.signal,
-      undefined,
-      providerConfig,
-      nativeKey,
-      options.auth,
-    ));
+  const environment = await comparisonEnvironment(
+    source,
+    accountStatus,
+    options.signal,
+    undefined,
+    providerConfig,
+    nativeKey,
+    options.auth,
+  );
   const command = resolveCodexCommand(environment);
-  const catalog = options.catalogLookup?.servers;
-  if (catalog !== undefined) delete sdkConfig["mcp_servers"];
   const codexOptions: CodexOptions = {
-    configOverrides: [
-      requestContext.configOverride,
-      ...(catalog === undefined
-        ? []
-        : [
-            ...untrustedProjectConfigOverrides(threadOptions.workingDirectory!),
-            `mcp_servers=${inlineToml(catalog)}`,
-          ]),
-    ],
+    configOverrides: [requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -714,16 +710,12 @@ async function startReadOnlyCodexThread(
     config: {
       ...sdkConfig,
       windows,
-      ...(catalog === undefined
-        ? {
-            mcp_servers: await disabledMcpServers(
-              await providerPreflightCommand(command, providerSettings),
-              config,
-              environment,
-              options,
-            ),
-          }
-        : {}),
+      mcp_servers: await disabledMcpServers(
+        await providerPreflightCommand(command, providerSettings),
+        config,
+        environment,
+        options,
+      ),
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       features: {
@@ -751,8 +743,8 @@ async function startReadOnlyCodexThread(
   const providers = resolveCodexProfile(providerSettings)["model_providers"];
   const ownProfile =
     options.nativeProfile === undefined &&
-    (catalog !== undefined ||
-      (isRecord(providers) && Object.keys(providers).length > 0))
+    isRecord(providers) &&
+    Object.keys(providers).length > 0
       ? await createProviderProfile(
           configuredCodexHome(environment),
           providerSettings,
@@ -776,7 +768,6 @@ async function startReadOnlyCodexThread(
         providerSettings,
         threadOptions.workingDirectory!,
         options.signal,
-        catalog === undefined ? undefined : Object.keys(catalog),
       );
       codexOptions.configOverrides = permissions.configOverrides;
       requestedPermissionProfile = permissions.permissionProfileId;
@@ -808,89 +799,29 @@ async function startReadOnlyCodexThread(
   }
 }
 
-export interface ReadOnlyCodexSession {
-  run(prompt: string, outputSchema: unknown): Promise<string>;
-  close(): Promise<void>;
-}
-
-export async function createReadOnlyCodexSession(
-  options: ReadOnlyCodexOptions & {
-    selectedEnvironment?: Record<string, string>;
-    catalogLookup?: CatalogLookup;
-  },
+export async function runReadOnlyCodex(
+  prompt: string,
+  outputSchema: unknown,
+  options: ReadOnlyCodexOptions,
   runtimeOptions: {
     surface: CodexSecuritySurface;
     command: string;
     threadSource: ReadOnlyCodexThreadSource;
   },
-): Promise<ReadOnlyCodexSession> {
+): Promise<string> {
   const { thread, cleanup } = await startReadOnlyCodexThread(
     options,
     runtimeOptions,
   );
-  let closed = false;
-  let previousUsage: { threadId: string; usage: ScanTokenUsage } | undefined;
-  return {
-    async run(prompt, outputSchema) {
-      if (closed)
-        throw new CodexSecurityError("The read-only session is closed.");
-      const turn = await thread.run(prompt, {
-        outputSchema,
-        cyberAccessProgram: options.cyberAccessProgram,
-        signal: options.signal,
-      });
-      if (turn.usage && options.onUsage) {
-        let usage = turn.usage;
-        // Native exec emits the thread's cumulative counters. The injected
-        // client contract still supplies ordinary per-turn usage.
-        const threadId = options.codex === undefined ? thread.id : undefined;
-        const snapshot = threadId ? tokenUsage(usage) : null;
-        if (threadId && snapshot?.total_tokens) {
-          // Native exec emits zero when it has no usage notification. Keep the
-          // previous baseline through that case and through missing usage.
-          if (previousUsage?.threadId === threadId) {
-            const delta = subtractTokenUsage(snapshot, previousUsage.usage);
-            if (delta) {
-              const { total_tokens: _, ...turnUsage } = delta;
-              usage = turnUsage;
-            }
-          }
-          previousUsage = { threadId, usage: snapshot };
-        }
-        notify(() => options.onUsage?.(usage));
-      }
-      const lookup = options.catalogLookup;
-      if (lookup) {
-        for (const item of turn.items ?? []) {
-          if (
-            item.type === "mcp_tool_call" &&
-            item.status !== "in_progress" &&
-            Object.hasOwn(lookup.servers, item.server)
-          )
-            lookup.onResult(item);
-        }
-      }
-      return turn.finalResponse;
-    },
-    async close() {
-      if (closed) return;
-      closed = true;
-      await cleanup?.();
-    },
-  };
-}
-
-export async function runReadOnlyCodex(
-  prompt: string,
-  outputSchema: unknown,
-  options: Parameters<typeof createReadOnlyCodexSession>[0],
-  runtimeOptions: Parameters<typeof createReadOnlyCodexSession>[1],
-): Promise<string> {
-  const session = await createReadOnlyCodexSession(options, runtimeOptions);
   try {
-    return await session.run(prompt, outputSchema);
+    const turn = await thread.run(prompt, {
+      outputSchema,
+      cyberAccessProgram: options.cyberAccessProgram,
+      signal: options.signal,
+    });
+    return turn.finalResponse;
   } finally {
-    await session.close();
+    await cleanup?.();
   }
 }
 
@@ -946,32 +877,40 @@ export async function matchCompletedScan(
   const previousOccurrences = new Set(
     options.previousFindings.map(({ occurrenceId }) => occurrenceId),
   );
+  const previousScans = new Set(
+    options.previousFindings.flatMap((finding) =>
+      Array.isArray(finding["knownScanIds"]) ? finding["knownScanIds"] : [],
+    ),
+  );
   const falsePositiveScans = new Map(
     options.falsePositives.map(
       ({ findingId, sourceScanId }) => [findingId, sourceScanId] as const,
     ),
   );
 
-  const { batches } = (await options.workbench([
+  const plan = (await options.workbench([
     "list-unmatched-scan-pairs",
     "--repository",
     options.repository,
-  ])) as {
-    batches?: ScanMatchingBatch[];
-  };
-  const batch = batches?.find(
+    "--after-scan-id",
+    options.scanId,
+  ])) as ScanMatchingPlan;
+  const selected = plan.batches?.find(
     ({ afterScanId }) => afterScanId === options.scanId,
   );
-  if (batch === undefined) return;
+  if (selected === undefined) return;
+  const batch = resolveMatchingBatch(selected, plan.findingsByScanId);
 
   // A saved comparison covers the whole pair. Let the catalogue group repeated
   // occurrences instead of dropping findings from the selected scans.
-  const beforeScans = batch.beforeScans.filter(({ scanId, findings }) =>
-    findings.some(
-      (finding) =>
-        previousOccurrences.has(finding.occurrenceId) ||
-        falsePositiveScans.get(finding["findingId"]) === scanId,
-    ),
+  const beforeScans = batch.beforeScans.filter(
+    ({ scanId, findings }) =>
+      previousScans.has(scanId) ||
+      findings.some(
+        (finding) =>
+          previousOccurrences.has(finding.occurrenceId) ||
+          falsePositiveScans.get(finding["findingId"]) === scanId,
+      ),
   );
   if (beforeScans.length === 0) return;
 

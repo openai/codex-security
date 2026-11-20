@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, rm, symlink, watch, writeFile } from "node:fs/promises";
@@ -15,7 +16,6 @@ import {
 } from "./deep_scan_coordinator_fixture.ts";
 import { importSource } from "./import-module.ts";
 
-const python = process.env.PYTHON?.trim() || "python3";
 const pluginRoot = resolve(import.meta.dirname, "../..");
 const { checkFreshTarget } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },

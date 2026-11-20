@@ -13,6 +13,9 @@ const rates = [
   ["gpt-5.6-sol", 4000n, 400n, 5000n, 20000n],
   ["gpt-5.6-terra", 2000n, 200n, 2500n, 12000n],
   ["gpt-5.6-luna", 200n, 20n, 250n, 1200n],
+  ["openai.gpt-6-sol", 2200n, 220n, 2750n, 11000n],
+  ["openai.gpt-6.1-sol", 2200n, 110n, 2750n, 11000n],
+  ["global.openai.gpt-6-sol", 2000n, 200n, 2500n, 10000n],
   ["openai.gpt-daybreak-blue-5.6-sol", 4400n, 440n, 5500n, 22000n],
 ] as const;
 const count = fc.integer({ min: 0, max: 1_000_000_000 });
@@ -49,7 +52,7 @@ describe("cost-model invariants", () => {
     expect(formatUsd(1234.5)).toBe("$1,234.50");
   });
 
-  test("matches an integer nanodollar oracle for every priced model", () => {
+  test("matches an integer nanodollar oracle for direct and Bedrock models", () => {
     fc.assert(
       fc.property(usageParts, (parts) => {
         const tokens = usage(parts);
@@ -69,19 +72,14 @@ describe("cost-model invariants", () => {
             BigInt(parts.cached) * cachedRate +
             BigInt(parts.written) * writeRate +
             BigInt(parts.output) * outputRate;
-          const identifiers = model.startsWith("openai.")
-            ? [model]
-            : [model, `openai.${model}`];
-          for (const selected of identifiers) {
-            expect(estimateScanCost(selected, tokens)).toMatchObject({
-              model: selected,
-              inputTokens: tokens.input_tokens,
-              cachedInputTokens: parts.cached,
-              cacheWriteInputTokens: parts.written,
-              outputTokens: parts.output,
-              estimatedUsd: Number(nanos) / 1_000_000_000,
-            });
-          }
+          expect(estimateScanCost(model, tokens)).toMatchObject({
+            model,
+            inputTokens: tokens.input_tokens,
+            cachedInputTokens: parts.cached,
+            cacheWriteInputTokens: parts.written,
+            outputTokens: parts.output,
+            estimatedUsd: Number(nanos) / 1_000_000_000,
+          });
         }
       }),
       propertyOptions,

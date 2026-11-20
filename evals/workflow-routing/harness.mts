@@ -31,7 +31,14 @@ export async function prepareRoutingEval(root: string) {
     });
   }
   const skills: Skill[] = [];
-  for (const name of (await readdir(join(runtime, "skills"))).sort()) {
+  const entries = await readdir(join(runtime, "skills"), {
+    withFileTypes: true,
+  });
+  const skillNames = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  for (const name of skillNames) {
     const source = await readFile(
       join(runtime, "skills", name, "SKILL.md"),
       "utf8",

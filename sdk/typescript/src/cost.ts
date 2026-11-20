@@ -1,3 +1,4 @@
+import { splitCommand } from "./command-words.js";
 import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 import type { JsonObject } from "./config.js";
 import { workbenchArgs } from "./workbench-arguments.js";
@@ -19,9 +20,9 @@ import { errorMessage } from "./errors.js";
 import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
-  subtractTokenUsage,
   tokenUsage,
   type ScanCost,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import {
@@ -333,6 +334,7 @@ function sessionObservation<T>(
 
 interface ScanCostTrackerOptions {
   codexHome: string;
+  pricingContext?: ScanPricingContext;
   model: string;
   repository?: string;
   scanDirectory?: string;
@@ -2446,7 +2448,11 @@ export class ScanCostTracker {
       this.#snapshot.measurement.missingThreadCount > 0
     )
       return this.#snapshot;
-    const cost = estimateScanCost(this.#options.model, fallbackUsage);
+    const cost = estimateScanCost(
+      this.#options.model,
+      fallbackUsage,
+      this.#options.pricingContext,
+    );
     const usage = tokenUsage(fallbackUsage);
     this.#setSnapshot(usage, cost, usage !== null, usage === null ? 0 : 1, 0);
     this.#reportUsage(usage);
@@ -2836,7 +2842,11 @@ export class ScanCostTracker {
     details?: Pick<ScanUsageMeasurement, "coverageScope" | "warnings">,
     reportCost = true,
   ): void {
-    const cost = estimateScanCost(this.#options.model, usage);
+    const cost = estimateScanCost(
+      this.#options.model,
+      usage,
+      this.#options.pricingContext,
+    );
     this.#setSnapshot(
       usage,
       cost,
@@ -4068,41 +4078,6 @@ function takeFirstIndex(heap: number[]): number {
   return first;
 }
 
-/** Decode the quoted argv rendering emitted by native command completions. */
-function splitCommand(command: string): string[] | null {
-  const words: string[] = [];
-  let word = "";
-  let started = false;
-  let quote: "'" | '"' | null = null;
-  for (let index = 0; index < command.length; index++) {
-    const character = command[index]!;
-    if (character === "\\" && quote !== "'") {
-      const next = command[++index];
-      if (next === undefined) return null;
-      if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))
-        word += "\\";
-      if (next !== "\n") word += next;
-      started = true;
-    } else if (quote !== null) {
-      if (character === quote) quote = null;
-      else word += character;
-    } else if (character === "'" || character === '"') {
-      quote = character;
-      started = true;
-    } else if (" \t\r\n".includes(character)) {
-      if (started) words.push(word);
-      word = "";
-      started = false;
-    } else {
-      word += character;
-      started = true;
-    }
-  }
-  if (quote !== null) return null;
-  if (started) words.push(word);
-  return words;
-}
-
 function sessionProgressUpdates(
   payload: Readonly<Record<string, unknown>>,
 ): ScanProgress[] {
@@ -4147,6 +4122,26 @@ export function addTokenUsage(
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
+}
+
+function subtractTokenUsage(
+  usage: ScanTokenUsage,
+  inherited: ScanTokenUsage,
+): ScanTokenUsage | null {
+  return tokenUsage({
+    input_tokens: usage.input_tokens - inherited.input_tokens,
+    cached_input_tokens:
+      usage.cached_input_tokens - inherited.cached_input_tokens,
+    cache_write_input_tokens:
+      usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
+    output_tokens: usage.output_tokens - inherited.output_tokens,
+    reasoning_output_tokens:
+      usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
+  });
 }
 
 function isBlockedLogRead(error: unknown): boolean {

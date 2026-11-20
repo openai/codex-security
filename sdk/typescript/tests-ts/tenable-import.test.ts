@@ -51,7 +51,13 @@ test("the reader preserves vendor state and optional severity and locations", as
   await fixture.writeJson({
     ...report,
     findings: [
-      { ...row, severity: "INFO", state: "FIXED" },
+      {
+        ...row,
+        severity: "INFO",
+        state: "FIXED",
+        description: "Outdated dependency",
+        solution: "Update the dependency",
+      },
       {
         ...row,
         finding_id: "00018",
@@ -63,8 +69,11 @@ test("the reader preserves vendor state and optional severity and locations", as
   const { findings } = await readTenableFindings(fixture.file, repositoryUrl);
   expect(findings[0]!.evidence).toMatchObject({
     severity: "informational",
+    description: "Outdated dependency",
     locations: [],
-    source_data: { finding: { state: "FIXED" } },
+    source_data: {
+      finding: { state: "FIXED", solution: "Update the dependency" },
+    },
   });
   expect(findings[1]!.evidence).toMatchObject({
     severity: "unknown",
@@ -182,12 +191,9 @@ test("file and normalized imports verify repository and finding identity, even f
   expect(runWorkbench).not.toHaveBeenCalled();
 });
 
-test("local opt-in and Cloud rejection precede file access or credentials", async () => {
+test("Cloud rejects local Tenable findings before file access or credential lookup", async () => {
   await using fixture = await checkout();
   const options = { ...source, repository: fixture.repository };
-  await expect(
-    prepareLocalExternalImport(fixture.file, options, { environment: {} }),
-  ).rejects.toThrow("CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1");
   const unexpected = mock(async () => {
     throw new Error("Unexpected Cloud call");
   });

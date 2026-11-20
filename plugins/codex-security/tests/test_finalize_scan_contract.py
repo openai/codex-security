@@ -1198,7 +1198,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         source_file = self.scan_dir / "source-file"
         source_file.write_text("not a directory\n", encoding="utf-8")
         for source_root in (self.scan_dir / "missing-source", source_file):
-            with self.subTest(source_root=source_root):
+            with self.subTest(source_root=str(source_root)):
                 result = self.run_finalizer(
                     "--export-format", "sarif", "--source-root", str(source_root)
                 )
@@ -2790,6 +2790,21 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(coverage["mode"], "repository")
         self.assertEqual(coverage["includePaths"], ["src/"])
         self.assertEqual(coverage["excludePaths"], [])
+
+    def test_completion_filters_findings_located_only_in_excluded_paths(self) -> None:
+        binding = self.completion_binding()
+        binding["scope"] = {"includePaths": ["."], "excludePaths": ["src"]}
+        title = self.findings["findings"][0]["title"]
+        self.write_scan()
+
+        manifest, findings, coverage = FINALIZER.finalize_scan(
+            self.scan_dir, completion_binding=binding
+        )
+
+        self.assertEqual(findings["findings"], [])
+        self.assertEqual(manifest["scan"]["scope"]["excludePaths"], ["src"])
+        self.assertEqual(coverage["excludePaths"], ["src"])
+        self.assertNotIn(title, (self.scan_dir / "report.md").read_text())
 
     def test_completion_binding_rejects_sealed_wrong_producer_without_rewriting(self) -> None:
         manifest, _, _ = self.write_sealed_scan()

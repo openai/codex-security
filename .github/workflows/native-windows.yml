@@ -43,10 +43,10 @@ jobs:
         with:
           architecture: ${{ matrix.arch }}
           compile: true
-          cache-dependency-path: |
-            sdk/typescript/pnpm-lock.yaml
-            plugins/codex-security/mcp-app/pnpm-lock.yaml
-      - name: Install helper dependencies
+          cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
+      # Earlier checkouts compile with the SDK and install the helper separately.
+      - name: Install helper dependencies for an alternate source commit
+        if: inputs.ref != '' && inputs.ref != github.sha
         working-directory: .
         run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
       - name: Set up Rust

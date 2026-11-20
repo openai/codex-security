@@ -151,6 +151,16 @@ class CaptureTests(unittest.TestCase):
                 chunk = self.csv("chunk", {**FINDING, "src": "lib/example.py", "pos": line})
                 self.capture(chunk, *LOCATIONS, error="must be a nonnegative integer")
 
+    def test_capture_only_writes_line_numbers_the_sdk_can_read_exactly(self):
+        row = {**FINDING, "src": "lib/example.py", "pos": "9007199254740992"}
+        self.capture(
+            self.csv("chunk", row), *LOCATIONS, error="exceeds the maximum exact line number"
+        )
+        self.assertFalse(self.output.exists())
+        row["pos"] = "9007199254740991"
+        result = self.capture(self.csv("chunk", row), *LOCATIONS)
+        self.assertEqual(result["findings"][0]["code_line_number"], 9007199254740991)
+
     def test_existing_output_is_preserved(self):
         self.output.write_bytes(b"previous")
         self.capture(self.csv("chunk", FINDING), error="selection.json")

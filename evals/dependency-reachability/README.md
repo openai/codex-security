@@ -1,226 +1,97 @@
 # Dependency reachability eval
 
-The default eval runs 23 checks against fresh snapshots of MailParser, Pillow,
-and Backstage. Each check invokes the shipped CLI with a CVE identifier. The mail
-intake, archive upload, archive worker, ZIP bundle, image, and Backstage task cases also
-supply the caller's permissions and entry point through an eval-only adapter.
-These cases require a built CLI that supports scoped eval inputs. Image cases
-include every format and native backend reachable from the configured caller;
-the captured-rollout cases additionally supply the captured-deployment assumption.
-The CLI fetches the advisory from OSV and runs the bundled `dependency-exploitability`
-skill with a fresh in-memory graph for each check. The checkout combines pinned
-upstream source with synthetic application and deployment files. Case IDs, full
-historical questions, and expected answers stay outside the checkout.
+This suite runs the installed dependency exploitability CLI against two small Git projects. One supplies measured stack evidence for a synthetic availability bug. The other tests how the independently reviewed workflow distinguishes two configured deployments of the same public dependency. The grader lives outside both checkouts.
+
+| Case              | Inputs and deciding outcome                                                                                                                                                                                                                                                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `positive`        | An anonymous client sends a valid empty batch to a loopback summary service. The loaded sample-summary 0.2.0 library throws, terminating the disposable process. A separate health client can no longer connect. The packet ties the version and source commit to that process. Expect `exploitable` for a caller in the service's network namespace. |
+| `fixed`           | The same application running sample-summary 0.2.1 sums an empty batch to zero and stays healthy. Expect `ruled_out` with a citation to the running version.                                                                                                                                                                                           |
+| `unbound`         | Omit only the running source commit from the positive capture. Leave the affected version, original frames and source checkout intact. The report must identify the missing build-to-source link and leave the outcome `unknown` or `potentially_exploitable`.                                                                                        |
+| `missing-version` | Omit the runtime binding entirely. A conclusive verdict fails the grade. The report must name the missing dependency version or copy.                                                                                                                                                                                                                 |
+| `mixed-services`  | Run a repository CVE check for linkify-it. The configured notes service installs 5.0.0 and exposes its parser to request input. The reviews service installs fixed 5.0.2. Expect `potentially_exploitable` and `ruled_out` respectively, with citations specific to each build.                                                                       |
+| `mixed-package`   | Run `check npm:linkify-it` against a fresh copy of the same project. Find the advisory inside the package report and grade both service decisions independently.                                                                                                                                                                                      |
+
+The example summary package and CVE-2099-1001 are fictional. The external observer takes a V8 breakpoint inside the actual library during a request, verifies the running checkout and loaded module, and saves the frames in their original order. A fresh, uninstrumented process must produce the same HTTP results with the same requests. The expected answers, probe requests and probe outcomes stay outside the investigator inputs.
+
+The `mixed-evidence` case uses the same checkout as `mixed-services` and configures a read-only stdio MCP server through `exploitability.evidence_sources`. The server returns synthetic observations for the notes service. One lookup identifies the running revision and package, and another records an anonymous client's request to the parser. The expected verdicts are `exploitable` for notes and `ruled_out` for reviews. In `mixed-evidence-no-access`, the server still reports the running build but has no record of a client request. The expected notes verdict becomes `potentially_exploitable`.
+
+The grader checks the cited service, tool, arguments, and exact response against the server's independent transcript in `source-calls.json`. Each response includes a freshly generated record ID so a report from an earlier run cannot stand in for a new lookup.
+
+The mixed-services project uses the published linkify-it CVE-2026-48801, npm distribution URLs and integrity digests. Each service runs a shared handler using its own lockfile and Docker build argument. The checkout establishes the configured build. The two evidence-source cases supply the additional observations through MCP. [Published advisory](https://github.com/advisories/GHSA-22p9-wv53-3rq4)
+
+## Run
+
+Use Node.js 22.13 or later, Git and a built CLI with the `@openai/codex-security/stack-packet` export. Point `CLI` to the JavaScript entry point of the installed package to test packed resources. For a local build use `sdk/typescript/bin/codex-security.mjs`. The runner sets `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` on its CLI processes. Live cases use OSV and the CLI's normal model credentials. Repository cases also use OpenGrep.
+
+From the repository root, capture the ground truth and run the offline host contracts. Every `--out` path must be new. Omitting it creates a temporary output directory.
 
 ```sh
-codex-security exploitability check CVE-2025-14874 --json
+runner=evals/dependency-reachability/run.mjs
+CLI=/absolute/path/to/node_modules/@openai/codex-security/bin/codex-security.mjs
+outputs=$(mktemp -d)
+node "$runner" behavior --out "$outputs/observed"
+node "$runner" contracts --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/contracts"
+node --test evals/dependency-reachability/test-eval.mjs
 ```
 
-The CLI reviewer checks the evidence before the command returns a report.
-The eval then grades that report against the expected verdict and source
-citations for the case. Only the eval grader has those expectations.
-New reports use the `places-v2` rubric. The historical fixtures supply a target
-place, its evidence, and its expected verdict. A source exclusion remains valid
-while an independent use is unresolved. Target accuracy covers the expected
-places only. For cases with exact deployment and lookup records, provide versioned
-per-place expectations for identity, source operation, advisory conditions,
-original receipt and search coverage. The grader records each criterion
-separately. Grade missing records as justified unknowns when the missing fact
-decides the verdict. Keep expectations that require unavailable inputs labeled
-as unsupported. Keep archived `legacy-aggregate-v1` scores and comparisons
-separate from v2 scores. The original blind snapshots retain their source,
-advisory and legacy `commandStatus` expectations.
-Record wall time and token use alongside accuracy. Use `--cli PATH` to select
-a specific built CLI, allowing concurrent evals of frozen builds.
+The offline contract drives the public `run` commands from a scripted caller and checks a finalized fixed-version report against the original binding. It also alters the returned evidence and checks that the grader detects it. This measures the host and grader. The live run measures the model's investigation.
 
-The wheel fixtures select official artifacts by URL and SHA256. Their bundled
-library manifests record static inspection of those exact wheels: native library
-hashes, version getters, dynamic linkage and matching Python source. These are
-artifact facts, not observations of a running service. The archive-worker
-fixtures select a local Docker build that copies the application and installs
-its locked dependencies; an unspecified external image would not establish
-those same source or dependency facts.
-
-The Nodemailer cases also include the locked `@zone-eu/mailsplit` and `libmime`
-source, with artifact hashes and original licenses. Their npm tarballs were
-verified against the upstream lockfile's integrity values before extraction.
-This makes MIME boundary and header handling available to the repository-only
-reviewer, including on the corresponding negative cases. These source fixtures
-are evidence for the selected packages, not a runnable dependency installation.
-
-| Package    | CVE            | What varies across snapshots                                                                                              |
-| ---------- | -------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Nodemailer | CVE-2025-14874 | Mail routing, a downstream patch, attachment processing, and which archived message or ZIP member a consumer reads.       |
-| linkify-it | CVE-2026-48801 | MailParser options, input handling, and whether the receiver implementation is available.                                 |
-| glibc      | CVE-2024-2961  | The conversion direction used by MailParser's native charset decoder.                                                     |
-| libwebp    | CVE-2023-4863  | Image decoding versus encoding, the library bundled in a wheel, and the build loaded by a serving process during rollout. |
-| vm2        | CVE-2023-37466 | How the Backstage starter handles a user-supplied task parameter in a full v1.14.1 checkout.                              |
-
-## Run the CLI eval
-
-Use Node.js 22.22+, Git, and the same model credentials you use with the CLI.
-Install OpenGrep and ensure `PATH` resolves `opengrep` to an executable outside
-the scanned checkout.
-From the repository root, download the verified universal native artifact for
-the checkout's native sources. Replace `RUN_ID` and `native-universal-COMMIT`
-with the ID and artifact name from the successful GitHub Actions run.
-[Native package inputs](../../plugins/codex-security/native/README.md#package-inputs)
+Run all cases through actual CLI sessions or select one with `--case positive`. Set `--model MODEL` to use the same model across builds. Supplying `--packets` reuses the original input bytes, frame order and timestamps. Each investigator still gets its own clean checkout. Without that option the suite takes new measurements.
 
 ```sh
-gh run download RUN_ID --name native-universal-COMMIT --dir plugins/codex-security/native/prebuilt
-pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
-pnpm --dir sdk/typescript install --frozen-lockfile
-pnpm --dir sdk/typescript run build:plugin
-pnpm --dir sdk/typescript run build
+node "$runner" live --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/live"
+node "$runner" live --case mixed-evidence --cli "$CLI" --out "$outputs/evidence"
+node "$runner" live --case mixed-evidence-no-access --cli "$CLI" --out "$outputs/missing-access"
+node "$runner" benchmark --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/benchmark"
 ```
 
-For a quick check with no upstream clones, select `mixed-services` explicitly.
-This standalone smoke case checks whether the command finds both services using
-a shared HTTP handler and distinguishes their installed versions of `linkify-it`.
-It runs separately from the 23 checks. Live runs access OSV and consume model usage.
+Both live runners save `stderr.log` in each case's output directory. If the CLI exits unsuccessfully, they also save its stdout byte-for-byte in `stdout.log`, even when it produced no report. Both logs use file mode `0600`. Successful CLI runs save the finalized JSON for grading. The grader checks scope, original frame indices, Git source and capture citations, exact claim revisions, and the deciding evidence. For a live stack check it verifies the reviewed draft’s digest and approval for the assessed work item. For a repository or package check it also checks independent claim approval and each service's selected lockfile. The suite exits nonzero for an execution failure or a failed grade. A valid `unknown` conclusion is an assessment and is graded against its case. See `results.json` for the per-case status, source and fixture fingerprints and elapsed time.
+
+The benchmark initializes five fresh SQLite attempts. Each timed trial writes one batch of ten source-backed claims and reads them back in another CLI process. It checks all ten IDs, revisions, hashes and payloads and records the median, including CLI startup time. Fixture preparation and state initialization take place before timing.
+
+## Pinned upstream suites
+
+The optional suites materialize 23 source snapshots and run ordinary reviewed CVE checks. A caller scope is supplied through the public project config, `exploitability.scope.instructions`. Each isolated checkout combines a pinned upstream source tree and the selected synthetic application or build files. The CLI never receives a case ID, expected verdict or grading rubric.
+
+| Suite        | Cases | What changes                                                                                                                                                                  |
+| ------------ | ----: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mailparser` |    16 | Direct and queued parsing, disabled or unmounted routing, an external recipient, a backported address parser, filtered headers, MIME-part promotion and ZIP extraction paths. |
+| `pillow`     |     6 | WebP decode versus encode, official wheel selection, a backported system library, and which library copy a synthetic worker has loaded.                                       |
+| `backstage`  |     1 | Which inputs the configured task API, catalog, template and skeleton actually expose to the sandboxed operation.                                                              |
+
+The SHA-256 manifest pins five GitHub archives by full revision, ten selected upstream files and two published npm archives. Snapshot preparation also checks the MIME packages' lockfile SHA-512 integrity and individual file hashes. Upstream source is staged as inert evidence. The checkout's dependency installation scripts and application code are never executed by the snapshot builder. The published wheel manifests describe the exact wheel artifacts in those cases. Rollout records and application overlays are synthetic.
+
+Fetch the sources once into a local cache (about 226 MiB). This optional step uses Python 3.12 or later with HTTPS access to GitHub and npm. Snapshot assembly and verification then work offline. Live runs use the selected CLI's OSV access, OpenGrep and model credentials.
 
 ```sh
-node --experimental-strip-types evals/dependency-reachability/run.mts --case mixed-services
+cache=$(mktemp -d)
+python3 evals/dependency-reachability/upstream/assets.py fetch "$cache"
+node evals/dependency-reachability/upstream.mjs --cache "$cache" --prepare-only
+node evals/dependency-reachability/upstream.mjs --cache "$cache" --suite mailparser --cli "$CLI"
+node evals/dependency-reachability/upstream.mjs --cache "$cache" --case fixed-decode --cli "$CLI"
+node evals/dependency-reachability/upstream.mjs --cache "$cache" --case task-parameter --cli "$CLI"
 ```
 
-The 23 checks read pinned Git objects from `--repos DIR`, under
-`<owner>/<repository>`. For one MailParser backport check, two clones suffice.
+To regrade saved CLI reports, pass `--grade-existing RESULTS_DIR` instead of `--cli PATH`. This re-creates the pinned Git source and preserves the original report bytes.
+
+With no selector, the upstream runner evaluates all 23 cases sequentially. `--help` lists their IDs. `--prepare-only` verifies materialization and every required evidence group against the generated Git commit. A live case checks one assessed location's identity, expected version, deciding source citations, caller-specific conditions and claim approval. Alternatives within an evidence group are equivalent. All groups must be supported by the same assessed use. The expected distribution is nine `potentially_exploitable`, twelve `ruled_out` and two `unknown`. It describes the rubric; actual per-case scores and execution failures are recorded when the suite runs.
+
+### Compare investigator and skill runs
+
+Use the same cache, model, and case IDs for both CLI builds. Each case has an isolated checkout. `sourceSha` identifies the complete staged checkout, including the synthetic application. The output includes execution failures and full-rubric grades. The grader requires a captured checkout trace of the target dependency and validates the scope, timestamps, outcome and completeness of its search audit.
 
 ```sh
-repos="$(mktemp -d)"
-mkdir -p "$repos/nodemailer"
-git clone --no-checkout https://github.com/nodemailer/mailparser.git "$repos/nodemailer/mailparser"
-git clone --no-checkout https://github.com/nodemailer/nodemailer.git "$repos/nodemailer/nodemailer"
-node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos" --case address-backport
+runner=evals/dependency-reachability/upstream.mjs
+node "$runner" --cache "$CACHE" --cli "$OLD_CLI" --model "$MODEL" --jobs 3 --out "$OUT/original"
+node "$runner" --cache "$CACHE" --cli "$NEW_CLI" --model "$MODEL" --jobs 3 --out "$OUT/candidate"
 ```
 
-Add the remaining repositories and omit the selector to run all 23 checks.
+To run the standalone attack-path skill baseline, build the SDK and install its eval dependencies, then run the following command. It uses each case’s historical caller question, the production skill, an isolated Codex home, and an offline read-only checkout. The baseline answer contains a version, verdict, reason and exact source quotations. Its grader checks the submitted quotes against the pinned Git blobs. The saved prompt digest and checkout SHA identify the inputs. Reviewed CLI grades use the separate per-use evidence rubric.
 
 ```sh
-mkdir -p "$repos/python-pillow" "$repos/backstage" "$repos/alpinelinux"
-git clone --no-checkout https://github.com/python-pillow/Pillow.git "$repos/python-pillow/Pillow"
-git clone --no-checkout https://github.com/python-pillow/pillow-wheels.git "$repos/python-pillow/pillow-wheels"
-git clone --branch v1.14.1 --single-branch --no-checkout https://github.com/backstage/backstage.git "$repos/backstage/backstage"
-git clone --no-checkout https://github.com/alpinelinux/aports.git "$repos/alpinelinux/aports"
-node --experimental-strip-types evals/dependency-reachability/run.mts --repos "$repos"
+node --experimental-strip-types "$runner" --cache "$CACHE" --skill-baseline --model "$MODEL" --jobs 3 --out "$OUT/skill"
 ```
 
-Use `--case ID` for one snapshot or `--suite mailparser`, `--suite pillow`, or
-`--suite backstage` for one project. `--suite challenge` selects the ten patch,
-attachment, archived-mail, and ZIP cases. Checks run sequentially by default.
-Set `--jobs N` to run up to N commands concurrently.
-Use `--model MODEL` to select the assessment model. Omitting it uses the CLI's
-default model. The selected model is recorded in each case's command arguments.
+The [application mapping suite](../package-application-mapping/README.md) exercises launcher selection and catalog evidence on five further fixtures.
 
-## Grade and compare runs
-
-For each of the 23 cases, the grader looks for the expected dependency use in
-the CLI report. That use must identify the component, version, verdict, and
-location, explain its reasoning, and cite the deciding lines in the snapshot.
-For `places-v2`, each expected place needs its own route, build, process or
-artifact identity proven by the cited snapshot. One reported use can satisfy
-one place. The grade separates discovery, the raw verdict and a verdict backed
-by the expected evidence. Other uses can have different verdicts. The smoke
-case requires both service verdicts and their deployment evidence. A failed
-grade or CLI error exits nonzero.
-
-Evidence groups are conjunctive: every group must be covered, while alternatives
-within a group express equivalent evidence for one fact. A `completeFile` anchor
-requires the union of validated citation ranges to cover the entire file, for
-example when the deciding fact is an absent receipt. Affirmative controls require
-their deciding section: the read-only catalog and its fixed locations/rules do
-not require unrelated backend authentication lines. Separate required anchors
-allow split or overlapping citations to cover that section. Whole-file checks
-remain necessary for bounded absence claims, such as inspecting every line of a
-template. `evidenceCorrect` measures this source coverage, not the semantic quality
-of the explanation; the CLI's reviewer handles the latter. A passing target use
-does not certify every other use in the report.
-
-The v2 audit checks the captured checkout trace for the dependency, validates
-its timing and outcome fields, and records whether some scopes completed or
-only partial results were observed. Audit fidelity does not establish complete
-source discovery. Lookup completeness is `not_measurable` when the fixture
-does not provide expected backend calls and results. With those expectations,
-the grader compares provider, tool, scope, result, completeness and evidence
-reference. A partial or wrong-scope no-match is insufficient to rule out a
-deployment. The original aggregate grade remains available for legacy reports.
-
-The wheel fixture measures the direct WebP path and encoder through the
-recorded `_webp` extension. Its artifact inspection does not identify the
-copy selected by an alternate TIFF decoder. Such a path can be reported as a
-separate unresolved place without earning credit for the direct WebP target.
-
-The Backstage target is the configured portal task path, including workflow and
-fixed-skeleton rendering. Its expected exclusion does not cover standalone
-backends elsewhere in the upstream checkout.
-It assesses configured checkout behavior, not the contents of an observed
-running image; citing a particular convenience build script is not required.
-
-The external-worker case requires `version: null` for its absent HTTP receiver.
-The local checkout's known version does not identify that receiver. Native
-Charset also requires `version: null`: its runtime file declares glibc 2.39,
-but does not bind that declaration to the selected native library. Its citation
-is still required. The fixed UTF-8 output independently rules out the local
-operation without resolving the library version. These `commandVersion`
-overrides apply only to CLI grading; the historical scoped questions ask for
-an image version that the CLI snapshots do not establish. Other cases retain
-exact version matching, including explicitly listed distribution-version aliases.
-
-The current 23 snapshots have nine expected `potentially_exploitable` uses,
-twelve `ruled_out` and two `unknown`. None establishes both a running
-affected use and access by the relevant caller. A captured worker can prove
-what is running while a desired route leaves public access unconfirmed.
-Earlier runs used `exploitable` for some code-level findings and are scored
-under their original contract.
-
-Each `reports/command-*/report.json` records the command, source revision,
-snapshot digest, per-case grade, command wall time, and token usage when
-available. Scoped cases also record `callerScope`. Compare the same cases,
-snapshot digests, caller scopes, model settings, and job count across runs. Check
-pass counts and individual use grades alongside time and input, cached input,
-and output tokens. Unavailable usage is reported as
-`null`.
-
-Changes to artifact selection or build fixtures change snapshot digests. Keep
-the earlier scores and rerun those cases with the corrected inputs; do not
-rescore old outputs as though they had received the new evidence. Changes only
-to grading can be evaluated against saved reports on their original snapshots.
-
-## Historical skill baseline
-
-`run-skill-baseline.mts` runs `attack-path-analysis` directly on the 23 caller-scoped
-questions. It supplies the entry point, caller permissions, and advisory.
-Earlier scores used those scoped prompts and earlier fixture digests. Use
-fresh CLI runs to measure changes to the current command and scope.
-
-```sh
-node --experimental-strip-types evals/dependency-reachability/run-skill-baseline.mts --repos "$repos" --case address-backport
-```
-
-Use `--help` for case and suite selectors. To compare a trusted local adapter,
-append `-- /absolute/path/to/adapter`. It runs in a copy of the snapshot,
-reads the scoped question and output instructions from stdin, and writes one
-JSON answer to stdout. The scoped grader checks the verdict, dependency
-version, and exact source quotes. Baseline reports are written to
-`reports/run-*/report.json`. [Shared eval runtime](../secret-discovery/README.md#run)
-
-## Quick sampled-stack eval
-
-From the repository root, run the built CLI on two synthetic packets with the same model. Each starts one investigator. The first packet binds the sampled service to a fixed dependency version. The second leaves the running version unknown.
-
-```sh
-node --experimental-strip-types evals/dependency-reachability/run-stack-fixture.mts --model "$MODEL"
-```
-
-Use `--cli /checkout/sdk/typescript/bin/codex-security.mjs` to select another built checkout. The grader checks the original frame indices and workload, work-item coverage, exact claim references, and source or capture citations. The fixed case must cite the version binding to rule out the path. The unbound case must identify the missing deployed version. Each run saves the reports, fixture digests, CLI revision and elapsed times under `evals/dependency-reachability/reports/stack-*/`.
-
-## Deterministic checks
-
-CI runs these checks without model calls or upstream clones.
-
-```sh
-pnpm --dir evals/triage-finding install --frozen-lockfile
-pnpm --dir sdk/typescript run build:evals
-node --experimental-strip-types --test evals/dependency-reachability/test_*.mts
-python3 -B -m unittest discover -s evals/dependency-reachability/fixtures/zip -p test_catalog.py
-```
+To compare a local adapter with the skill, run the same `--skill-baseline` command and append `-- COMMAND [ARG...]`. The process receives the question on stdin in the staged checkout and returns the same JSON answer on stdout.

@@ -91,6 +91,11 @@
             }
           ]
         },
+        "exclude_paths": {
+          "description": "Literal files or directories relative to the selected repository. Exclusions take precedence over inclusions.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "knowledge_base": {
           "description": "Context files or directories, relative to this file. An empty list selects no additional context.",
           "type": "array",
@@ -159,21 +164,11 @@
       },
       "additionalProperties": false
     },
-    "codex": {
-      "description": "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply. mcp_servers.<name>.instructions supplies string guidance for exploitability checks and is removed before passing server configuration to Codex.",
-      "type": "object",
-      "properties": {
-        "model": { "type": "string", "minLength": 1 },
-        "model_reasoning_effort": { "type": "string", "minLength": 1 },
-        "model_provider": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": { "$ref": "#/definitions/__schema0" }
-    },
     "exploitability": {
       "type": "object",
       "properties": {
         "sources": {
-          "description": "Complete supplied source boundary. An empty array supplies a boundary with no members. Omit to discover sources.",
+          "description": "Complete set of caller-supplied source endpoints for the investigated scenario. An empty list closes this boundary.",
           "type": "array",
           "items": {
             "type": "object",
@@ -199,20 +194,21 @@
                   "type": "object",
                   "properties": {
                     "name": { "type": "string", "minLength": 1 },
-                    "observed_name": { "type": "string", "minLength": 1 },
-                    "frame_type": { "type": "string", "minLength": 1 },
                     "location": { "type": "string", "minLength": 1 },
                     "binary": { "type": "string", "minLength": 1 },
                     "line": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
                       "maximum": 9007199254740991
-                    },
-                    "build_id": { "type": "string", "minLength": 1 },
-                    "build_hash": { "type": "string", "minLength": 1 }
+                    }
                   },
                   "required": ["name"],
-                  "additionalProperties": false
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
+                  "if": { "properties": { "line": {} }, "required": ["line"] },
+                  "then": {
+                    "properties": { "location": {} },
+                    "required": ["location"]
+                  }
                 }
               },
               "package": { "type": "string", "minLength": 1 },
@@ -258,7 +254,7 @@
           }
         },
         "sinks": {
-          "description": "Complete supplied sink boundary. An empty array supplies a boundary with no members. Omit to discover sinks.",
+          "description": "Complete set of caller-supplied sink endpoints for the investigated scenario. An empty list closes this boundary.",
           "type": "array",
           "items": {
             "type": "object",
@@ -284,20 +280,21 @@
                   "type": "object",
                   "properties": {
                     "name": { "type": "string", "minLength": 1 },
-                    "observed_name": { "type": "string", "minLength": 1 },
-                    "frame_type": { "type": "string", "minLength": 1 },
                     "location": { "type": "string", "minLength": 1 },
                     "binary": { "type": "string", "minLength": 1 },
                     "line": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
                       "maximum": 9007199254740991
-                    },
-                    "build_id": { "type": "string", "minLength": 1 },
-                    "build_hash": { "type": "string", "minLength": 1 }
+                    }
                   },
                   "required": ["name"],
-                  "additionalProperties": false
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
+                  "if": { "properties": { "line": {} }, "required": ["line"] },
+                  "then": {
+                    "properties": { "location": {} },
+                    "required": ["location"]
+                  }
                 }
               },
               "package": { "type": "string", "minLength": 1 },
@@ -346,30 +343,51 @@
           "type": "object",
           "properties": {
             "instructions": {
-              "description": "Plain-text instructions identifying the callers, workloads or other scenario to assess.",
+              "description": "Caller-provided investigation boundaries and assumptions.",
               "type": "string",
               "minLength": 1
             },
             "exclude_paths": {
-              "description": "Literal checkout-relative files or directories to omit from broad exploitability structural discovery. Explicit file traces and exact caller leads can revisit them.",
+              "description": "Literal checkout-relative paths to omit from broad discovery. Exact source or build evidence can reopen a path.",
               "type": "array",
               "items": { "type": "string", "minLength": 1 }
             }
           },
           "additionalProperties": false
         },
-        "service_catalog_mcps": {
-          "description": "Read-only service catalog servers selected from codex.mcp_servers for service identities, running revisions and access observations in exploitability checks. Defaults to none.",
+        "evidence_sources": {
+          "description": "MCP servers the investigator can query during a reviewed dependency check.",
           "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "runtime_mcps": {
-          "description": "Read-only runtime evidence servers selected from codex.mcp_servers. These servers are available to the investigator and runtime lookups without serving as source-to-service catalogs. Defaults to none.",
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Server name in codex.mcp_servers."
+              },
+              "instructions": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "When to use this server and what evidence its tools can provide."
+              }
+            },
+            "required": ["server", "instructions"],
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
+    },
+    "codex": {
+      "description": "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply.",
+      "type": "object",
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "model_reasoning_effort": { "type": "string", "minLength": 1 },
+        "model_provider": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": { "$ref": "#/definitions/__schema1" }
     },
     "limits": {
       "type": "object",
@@ -418,6 +436,20 @@
           "type": "object",
           "propertyNames": { "type": "string" },
           "additionalProperties": { "$ref": "#/definitions/__schema0" }
+        }
+      ]
+    },
+    "__schema1": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/definitions/__schema1" } },
+        {
+          "type": "object",
+          "propertyNames": { "type": "string" },
+          "additionalProperties": { "$ref": "#/definitions/__schema1" }
         }
       ]
     }

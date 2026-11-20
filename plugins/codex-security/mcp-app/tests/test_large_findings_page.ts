@@ -1,3 +1,4 @@
+import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { rm } from "node:fs/promises";
@@ -11,7 +12,6 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const exec = promisify(execFile);
 const pluginRoot = path.dirname(applicationRoot);
-const python = process.env.PYTHON || "python3";
 
 await test("returns an accepted 50-finding Unicode page through the MCP subprocess", async () => {
   const root = await temporaryDirectory("codex-security-large-findings-");

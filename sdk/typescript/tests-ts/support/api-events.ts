@@ -108,11 +108,10 @@ export function runEvents(
   });
 }
 
-export async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-  yield {
-    type: "turn.failed",
-    error: { message: "Could not draft fixes." },
-  };
+export async function* failedEvents(
+  message = "Could not draft fixes.",
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "turn.failed", error: { message } };
 }
 
 export function completedCodex(root: string, threadId: string | null = null) {

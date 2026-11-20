@@ -47,9 +47,8 @@ export type {
 } from "./project-config-schema.js";
 export type {
   DependencyEndpointConfiguration,
-  DependencyRuntimeScope,
   DependencyRuntimeSelector,
-} from "./dependency-endpoints.js";
+} from "./dependency-caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
 export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
@@ -99,7 +98,7 @@ export type {
   ScanUsageObservation,
   ScanWorkerEvent,
 } from "./cost.js";
-export type { ScanTokenUsage } from "./cost-model.js";
+export type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -237,9 +236,17 @@ export type {
 } from "./external-findings-publish.js";
 export {
   prepareNormalizedLocalImport,
+  listLocalExternalImports,
   listLocalExternalFindings,
+  listLocalFindingPublications,
+  selectLocalExternalFindings,
 } from "./external-findings-local.js";
 export type {
+  ExternalFindingProvenance,
+  LocalExternalFindingSelection,
+  SelectedLocalExternalFindings,
+  StoredExternalImport,
+  StoredFindingPublication,
   StoredExternalFinding,
   NormalizedLocalImportOptions,
   LocalExternalImportDependencies,
@@ -334,6 +341,8 @@ export type {
   ClassifySeverityRecordsResult,
   CanonicalSeverityAssessment,
   SeverityClassificationReviewRequest,
+  SeverityDiagnosticCode,
+  SeverityRecordDiagnosticCode,
 } from "./classify-severity-records.js";
 export { validateRecords } from "./validation-records.js";
 export type {
@@ -356,7 +365,13 @@ export {
   prepareLocalExternalImport,
   type LocalExternalImportOptions,
 } from "./external-findings-import.js";
+export {
+  prepareStoredFindingsPublication,
+  type StoredFindingsPublication,
+  type StoredFindingsPublicationGroup,
+} from "./stored-findings-publication.js";
 export { readTenableFindings } from "./tenable-findings.js";
+export { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,

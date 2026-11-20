@@ -891,62 +891,6 @@ test(async function testDirectScanSession() {
   });
 });
 
-test(async function testStandaloneMcpIsolation() {
-  const layer = (
-    type: string,
-    mcp_servers: object,
-    disabledReason?: string,
-  ) => ({
-    name: { type },
-    config: { mcp_servers },
-    disabledReason,
-  });
-  const common = [
-    layer("sessionFlags", { inventory: { command: "selected" } }),
-    layer("project", { inventory: { command: "ignored" } }, "untrusted"),
-  ];
-  for (const [extraLayer, rejected] of [
-    [layer("system", { inactive: { enabled: false } }), false],
-    [layer("system", { other: { command: "unselected" } }), true],
-    [
-      layer("system", { inventory: { enabled: false, env: { EXTRA: "1" } } }),
-      true,
-    ],
-    [layer("user", { other: { command: "unselected" } }), true],
-    [layer("user", { inventory: { enabled: false, args: ["extra"] } }), true],
-  ] as const) {
-    await withFakeCodex(
-      {
-        configResult: {
-          ...configReadResult(expectedProfile),
-          layers: [...common, extraLayer],
-        },
-        catalogResults: [catalogResult(true)],
-      },
-      async ({ codexPath, cwd, callsPath }) => {
-        const checked = preflightDeepScanWorkerPermissionProfile({
-          codexPath,
-          cwd,
-          configOverrides: rawOverrides,
-          expectedProfile,
-          signal: new AbortController().signal,
-          allowedMcpServers: ["inventory"],
-        });
-        if (rejected)
-          await assert.rejects(checked, /cannot isolate MCP server/u);
-        else await checked;
-        assert.ok(
-          (await readJsonLines(callsPath)).some(
-            (call) =>
-              call.method === "config/read" &&
-              (call.params as { includeLayers: boolean }).includeLayers,
-          ),
-        );
-      },
-    );
-  }
-});
-
 test(async function testParentTurnCyberAccessProgram() {
   const parentTurn = {
     threadId: "fixture-parent-thread",
@@ -1194,7 +1138,13 @@ async function withFakeCodex(
     }
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
-    await rm(root, { recursive: true, force: true });
+    // On Windows a terminated fixture descendant may briefly retain its working directory.
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
   }
 }
 

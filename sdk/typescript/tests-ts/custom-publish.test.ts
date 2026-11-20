@@ -33,6 +33,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
     expect(String(url)).toBe("http://synthetic.test/service/v1/bulk/findings");
     expect(options).toEqual({
       method: "POST",
+      redirect: "manual",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         findings: document.findings,
@@ -194,35 +195,39 @@ test("does not retry failed uploads or report incomplete receipts as successful"
   }
 });
 
-test("keeps an aborted upload outcome indeterminate after submission", async () => {
-  const { scan } = await fixture();
-  const controller = new AbortController();
-  const reason = new Error("Synthetic upload cancellation");
-  const observed: PublicationTelemetry[] = [];
-  const fetchMock = mock(async () => {
-    controller.abort(reason);
-    throw reason;
-  });
-  await expect(
-    publishScanToCustom(
-      scan,
+test.each([false, true])(
+  "keeps an aborted upload indeterminate after submission (options disposed: %s)",
+  async (disposeOptions) => {
+    const { scan } = await fixture();
+    const controller = new AbortController();
+    const reason = new Error("Synthetic upload cancellation");
+    const observed: PublicationTelemetry[] = [];
+    const { proxy, revoke } = Proxy.revocable(
       {
         findingsUrl: "http://synthetic.test",
         signal: controller.signal,
-        onTelemetry: (event) => observed.push(event),
+        onTelemetry: (event: PublicationTelemetry) => observed.push(event),
       },
-      { fetch: fetchMock },
-    ),
-  ).rejects.toBe(reason);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(observed).toEqual([
-    expect.objectContaining({
-      outcome: "indeterminate",
-      attempted: true,
-      counts: expect.objectContaining({ acknowledged: null, failed: null }),
-    }),
-  ]);
-});
+      {},
+    );
+    const fetchMock = mock(async () => {
+      controller.abort(reason);
+      if (disposeOptions) revoke();
+      throw reason;
+    });
+    await expect(
+      publishScanToCustom(scan, proxy, { fetch: fetchMock }),
+    ).rejects.toBe(reason);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(observed).toEqual([
+      expect.objectContaining({
+        outcome: "indeterminate",
+        attempted: true,
+        counts: expect.objectContaining({ acknowledged: null, failed: null }),
+      }),
+    ]);
+  },
+);
 
 test.each(["failed", "canceled"] as const)(
   "observes custom publication %s before preparation without replacing the error",

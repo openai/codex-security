@@ -26,7 +26,7 @@ The documented startup runs a dependency-free Node.js process on
 `127.0.0.1:4310`, with `PORT` selecting another local port. Each application
 instance creates fresh in-memory users, sessions, invoices, policies, previews,
 connector credentials, and deliveries. Restarting discards that state.
-[Startup](app/server.mjs#L269), [store](app/store.mjs#L8).
+[Startup](app/server.mjs#L284), [store](app/store.mjs#L8).
 
 ```mermaid
 flowchart LR
@@ -78,7 +78,7 @@ browser interprets the resulting page.
 Connector credentials carry authority beyond the ordinary invoice view. A
 diagnostic download or an invoice copy must not transfer that authority to its
 recipient. The Ledger bearer route has a separate authentication path from the
-session-protected application. [Route boundaries](app/server.mjs#L92),
+session-protected application. [Route boundaries](app/server.mjs#L100),
 [Ledger authentication](app/integrations.mjs#L53).
 
 ### Controls already present
@@ -87,7 +87,7 @@ Passwords use salted scrypt records and timing-safe comparison. Sessions use
 random tokens, expire after eight hours, and are removed on logout or when an
 expired session is checked. Cookies use `HttpOnly` and `SameSite=Strict`.
 [Password records](app/store.mjs#L3), [sessions](app/accounts.mjs#L12),
-[cookie settings](app/server.mjs#L100).
+[cookie settings](app/server.mjs#L113).
 
 The router applies a common session gate after its public and bearer-authenticated
 routes. Invoice lists and most invoice operations check workspace ownership;
@@ -100,7 +100,7 @@ JSON writes require a JSON object, amounts receive positive-integer validation,
 and responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 The rendering code has an HTML-escaping helper, and browser notices and previews
 use `textContent`. An escaping helper protects only values passed through it.
-[Request parsing](app/server.mjs#L54), [rendering](app/views.mjs#L1),
+[Request parsing](app/server.mjs#L56), [rendering](app/views.mjs#L1),
 [browser updates](app/public/client.js#L43).
 
 ## 3. Threat scenarios and intended protections
@@ -114,7 +114,7 @@ Neither this model nor the number of rows establishes a scanner's detection scor
 | Boundary and potential failure                                                                      | Intended protection                                                                                                                             | Source to review                                                                          |
 | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Member to connector authority: a diagnostic export discloses a reusable credential.                 | Export only diagnostic fields that the recipient is allowed to see; keep connector secrets server-side.                                         | [Support report](app/integrations.mjs#L16)                                                |
-| Workspace to workspace: an invoice read returns a record without checking its owner.                | Apply workspace authorization to every object read as well as writes.                                                                           | [Individual invoice route](app/server.mjs#L227), [ownership helper](app/invoices.mjs#L21) |
+| Workspace to workspace: an invoice read returns a record without checking its owner.                | Apply workspace authorization to every object read as well as writes.                                                                           | [Individual invoice route](app/server.mjs#L240), [ownership helper](app/invoices.mjs#L21) |
 | Workspace to shared cache: a valid preview request receives another workspace's cached content.     | Cache identity must include the workspace and invoice identity, with versioning for invalidation.                                               | [Preview cache](app/invoices.mjs#L71)                                                     |
 | Reviewed version to sent version: editing leaves an old approval effective.                         | Sending requires approval of the current invoice version; edits invalidate or supersede earlier approval.                                       | [Edit, approve, and send](app/invoices.mjs#L34)                                           |
 | Import input to review decision: unsupported or failed review permits an over-limit import.         | Required review fails closed; unsupported schemas and reviewer errors cannot imply approval.                                                    | [Import review](app/imports.mjs#L35)                                                      |
@@ -124,11 +124,11 @@ Neither this model nor the number of rows establishes a scanner's detection scor
 | Member to administrator: a self-service profile edit changes authorization attributes.              | Allow only intended profile fields to change and keep role assignment outside self-service profile updates.                                     | [Profile update](app/accounts.mjs#L49), [role check](app/invoices.mjs#L10)                |
 | Stored note to another user's browser: note content becomes active HTML.                            | Encode note content for its rendering context; if formatting is supported, use an explicit safe formatting policy.                              | [Comments](app/invoices.mjs#L84), [invoice rendering](app/views.mjs#L71)                  |
 
-Availability also needs review beyond those ten cases. The parser buffers a
-complete request body, login performs synchronous password derivation, and the
-store has no application-defined collection limits. Assess the caller's reach
-and the resource consumed before assigning impact; this model sets no arbitrary
-request or rate thresholds. [Body buffering](app/server.mjs#L54),
+Availability also needs review beyond those ten cases. The parser accepts JSON
+bodies up to 64 KiB and checks the byte count as each chunk arrives. Login
+performs synchronous password derivation, and the store has no application-defined
+collection limits. Assess the caller's reach and the resource consumed before
+assigning impact. [Body buffering](app/server.mjs#L56),
 [password verification](app/accounts.mjs#L12), [collections](app/store.mjs#L99).
 
 ## 4. Assumptions, impact, and verification
@@ -154,8 +154,8 @@ The direct executable binds to loopback, but the exported `createApp()` returns
 an unbound server. Remote exposure, reverse proxies, TLS, persistent storage, and
 multiple processes would change this model; none is a supported deployment for
 this sample. The current cookie and in-memory design are not a production
-deployment contract. [Server construction](app/server.mjs#L86),
-[listener](app/server.mjs#L269).
+deployment contract. [Server construction](app/server.mjs#L94),
+[listener](app/server.mjs#L284).
 
 Revisit this model when routes, ownership rules, approval transitions, credential
 recipients, rendering, or storage change. Run the harness to preserve the QA

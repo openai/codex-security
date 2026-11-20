@@ -25,9 +25,7 @@ codex-security dedupe --scan SCAN_ID --findings-url https://findings.example.com
 ```
 
 Replace `SCAN_ID` with the ID of a completed scan, or use `latest` for the
-current repository. For local setup or migration, see
-[embedding credentials and backups](#local-embeddings-and-backups) or
-[moving from the bundled service](#local-service-removal).
+current repository. For local setup, see [embedding credentials and backups](#local-embeddings-and-backups).
 
 The CLI prepares missing or stale embeddings for the local repository's stored
 findings, searches them, and saves reviewed duplicate groups in the workbench
@@ -46,13 +44,21 @@ select logical findings using their current stored bodies; dedupe does not
 replace newer bodies with old scan artifacts. A local database does not include
 findings stored only in a separate Docker volume or remote service.
 
-A scan or workflow selector is required. `--scan` also accepts a unique ID
-prefix. The scan must have sealed artifacts and a local checkout available.
-Local `latest` lookup matches the exact checkout path without Git. Matching
-across worktrees or clones additionally requires a Git executable outside all
-saved scan targets. If an unrelated historical target includes the available
-Git installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
-saved scan ID instead.
+A scan or workflow selector is required. Use a full scan ID, a unique prefix, or
+`latest` for the current repository. The scan must be complete and its artifacts
+sealed. Reviews that read source also require the local checkout.
+
+Local `latest` verifies the checkout generation and component scope. Non-Git
+targets match by exact path. Git history, including matches across worktrees or
+clones, requires a Git executable outside all saved checkout directories. For a
+legacy Git target without a recorded checkout directory, set `CODEX_SECURITY_GIT`
+to an absolute, trusted Git executable. If a saved checkout contains the
+available Git installation, select the scan by its explicit ID.
+
+For older history, use an absolute `PYTHON` path when selecting system Python.
+If Bun cannot locate a trusted Node.js helper, run local deduplication with
+Node.js.
+
 By default, candidates come from its manifest's `scan.target.targetId`. Use
 `--all-repositories` to search the whole selected database or service.
 
@@ -134,6 +140,7 @@ The CLI and SDK return the same result:
 {
   "scanId": "scan_example_001",
   "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
+  "scanRepresentativeFindingIds": ["csf_852f90d6e1177502ff113d4a"],
   "duplicateGroups": [],
   "deduplicationStatus": "completed"
 }
@@ -142,8 +149,12 @@ The CLI and SDK return the same result:
 `uniqueFindingIds` contains one representative for each selected finding after
 accepted groups are collapsed. A representative can come from outside the scan.
 Each group lists its canonical finding first: highest reported severity, then
-finding ID to break ties. Group associations are saved before returning success;
-the original findings and scan artifacts remain unchanged.
+finding ID to break ties. `scanRepresentativeFindingIds` gives the highest-ranked
+member from the selected scan for each canonical ID in the same order, including
+ungrouped findings. Pass these IDs to severity classification or Linear publication
+for that scan. The SDK also returns them when resuming older saved workflows.
+Dedupe saves the group associations separately from the original findings and
+scan artifacts before returning success.
 
 If a model refuses a review, the result uses `completed_with_refusals` and adds
 `refusals`. Each entry contains `decision: "NO_DECISION"`, `stage`, `model`,
@@ -358,8 +369,9 @@ results, and these callbacks add no network destination or separate files.
 
 ## Compatible endpoint contract
 
-The retained HTTP clients use these endpoints on the supplied base URL,
-preserving its base path:
+The HTTP client appends these paths to the configured base URL, preserving any base path.
+It follows redirects within that origin (scheme, host, and port). If the service
+moves to another origin, set `--findings-url` to its new base URL.
 
 | Method | Path                                    | Response                                                                 |
 | ------ | --------------------------------------- | ------------------------------------------------------------------------ |
@@ -371,8 +383,8 @@ Publication sends `{findings, repositoryId}`. Candidate requests include either
 `repositoryId` or `allRepositories=true`. Group writes send
 `{groups: [[findingId, ...], ...]}`; repeated membership must be idempotent for
 workflow retries. Both POST endpoints must persist their writes before
-acknowledging them and return a JSON body. An explicit URL selects this remote
-contract instead of local SQLite. This package no longer implements or hosts the HTTP endpoints.
+acknowledging them and return a JSON body. Supply your service’s base URL to use
+these endpoints. With no URL, deduplication uses local SQLite.
 
 SDK findings client failures preserve the endpoint's error code and message with
 the HTTP status. Other responses retain the HTTP-status diagnostic. Retry
@@ -382,20 +394,16 @@ behavior uses the HTTP status and `Retry-After`.
 
 ### Local service removal
 
-The `serve` command (including `--port`), `start:server` script,
-`dist/server/index.js` entrypoint, `startFindingsServer` SDK export, browser
-dashboard, and findings-service Compose deployment have been removed.
-`HOST`, `PORT`, and `CODEX_SECURITY_FINDINGS_IMAGE` no longer configure a bundled
-service. The dashboard storage projection is also removed.
+If you previously used the bundled HTTP service, back up the SQLite state
+directory or service volume. Set `CODEX_SECURITY_STATE_DIR` to the directory
+that contains the existing database to keep using its saved scans, findings,
+and duplicate groups. For clients that need HTTP, configure a service that
+implements the [endpoint contract](#compatible-endpoint-contract).
 
-Existing SQLite databases, migrations, saved scans, findings, and duplicate
-groups are retained. No data migration or deletion is performed. Keep any
-existing service volume or state directory and back it up before changing
-deployments; local deduplication uses the database selected by
-`CODEX_SECURITY_STATE_DIR`, not a separate service volume automatically.
+### Use SQLite from the SDK
 
-`@openai/codex-security/server` continues to export `OpenAiFindingEmbedder`,
-`SqliteFindingsStore`, and their storage types for direct storage users.
+`@openai/codex-security/server` exports `OpenAiFindingEmbedder`,
+`SqliteFindingsStore`, and their storage types.
 
 For direct embedding/storage integrations, `OpenAiFindingEmbedder` accepts a
 static key or `() => string | Promise<string>` as its first argument. It calls

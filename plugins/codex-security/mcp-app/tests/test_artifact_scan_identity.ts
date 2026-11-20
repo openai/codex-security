@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { readJson } from "./support/json.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -1185,25 +1186,22 @@ for (const layout of ["standard", "diff"] as const) {
       [{ ...first, summary: "Revised evidence." }, second],
       { complete: true },
     );
-    const { stdout } = await execFileAsync(
-      process.env.PYTHON?.trim() || "python3",
-      [
-        "-c",
-        `import json,sys
+    const { stdout } = await execFileAsync(fixturePython, [
+      "-c",
+      `import json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from finalize_scan_contract import _prepare_scan_finalization
 root=Path(sys.argv[2])
-documents=tuple(json.loads((root/name).read_text()) for name in ('scan-manifest.json','findings.json','coverage.json'))
+documents=tuple(json.loads((root/name).read_text(encoding='utf-8')) for name in ('scan-manifest.json','findings.json','coverage.json'))
 documents[0]['scan'].update(id=sys.argv[3],status='completed',producer={'name':'test','version':'1'},startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
 for document in documents[1:]: document['scanId']=sys.argv[3]
 prepared=_prepare_scan_finalization(root,draft_documents=documents)
 print(len(prepared.findings['findings']))`,
-        fileURLToPath(new URL("../../scripts", import.meta.url)),
-        f.root,
-        f.context.scanId!,
-      ],
-    );
+      fileURLToPath(new URL("../../scripts", import.meta.url)),
+      f.root,
+      f.context.scanId!,
+    ]);
     assert.equal(stdout.trim(), "2");
   });
 }

@@ -8,7 +8,10 @@ import {
   readTrivyFindings,
   trivyRepositoryUrl,
 } from "../src/trivy-findings.js";
-import { trivyReport } from "./support/trivy-import-fixtures.js";
+import {
+  trivyReport,
+  trivyReportWithManyLocations,
+} from "./support/trivy-import-fixtures.js";
 
 function normalizeAtRoot(input: unknown) {
   return normalizeTrivyFindings(input, "cloud", ".");
@@ -570,6 +573,25 @@ test("declaration ranges come from an unambiguous package at the reported path",
   group.Packages.push({ ...other, FilePath: selected.FilePath });
   expect(run().locations![1]!.line).toBeNull();
   expect(run().source_data?.["package"]).toBeUndefined();
+});
+
+test("Cloud keeps a repeated lockfile dependency with all native declaration ranges", () => {
+  const report = trivyReportWithManyLocations();
+  const ranges = report.Results[1]!.Packages[0]!.Locations;
+  const current = normalizeAtRoot(report);
+  const local = normalizeTrivyFindings(report, "local", ".");
+  const [, repeated] = current.findings;
+  expect(current.excluded).toEqual([]);
+  expect(repeated!.source_finding_id).toBe(
+    local.findings[1]!.source_finding_id,
+  );
+  expect(local.findings[1]!.evidence.locations).toHaveLength(101);
+  expect(repeated!.evidence.locations).toEqual(
+    local.findings[1]!.evidence.locations!.slice(0, 100),
+  );
+  expect(repeated!.evidence.source_data?.["package"]).toMatchObject({
+    Locations: ranges,
+  });
 });
 
 test("only ID-less detections use a unique name/version match from inventory", () => {

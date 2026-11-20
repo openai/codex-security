@@ -574,10 +574,36 @@ describe("publish scan to custom", () => {
     },
   );
 
+  test("identifies an invalid custom destination URL in JSON", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.publishScanToCustom = async () => fail("must not publish");
+    expect(
+      await runCli(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          "--to",
+          "custom",
+          "--findings-url",
+          "not-a-url",
+          "--json",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("--findings-url");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Invalid value for --findings-url: Invalid URL",
+      fieldErrors: [{ path: "findingsUrl" }],
+    });
+  });
+
   test.each([
     [["--to", "custom"], "requires --findings-url"],
     [["--to", "custom", "--findings-url", "--dry-run"], "--findings-url"],
-    [["--to", "custom", "--findings-url", "not-a-url"], "URL"],
     [
       [
         "--to",
@@ -726,9 +752,12 @@ describe("publish check", () => {
     expect(stdout.text().trim()).toBe("");
   });
 
-  test.each(["completed-scan", "~/completed-scan"])(
+  test.each([
+    ["completed-scan", DESTINATION_OPTIONS.slice(2)],
+    ["~/completed-scan", DESTINATION_OPTIONS],
+  ] as const)(
     "resolves %s and shared options without invoking publication",
-    async (scanDir) => {
+    async (scanDir, options) => {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       const currentDirectory = join(tmpdir(), "codex-security-check-current");
@@ -781,7 +810,7 @@ describe("publish check", () => {
             "publish",
             "check",
             scanDir,
-            ...DESTINATION_OPTIONS,
+            ...options,
             "--linear-api-key",
             "explicit-key",
             "--linear-assignee",

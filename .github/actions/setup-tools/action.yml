@@ -10,12 +10,12 @@ inputs:
   architecture:
     description: Node.js architecture; empty selects the runner architecture.
   compile:
-    description: Compile TypeScript tools after setup.
+    description: Install the plugin dependencies and compile the native and CI tools.
 runs:
   using: composite
   steps:
     - name: Set up pnpm
-      uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       with:
         package_json_file: package.json
     # setup-node saves its cache only after a successful job.
@@ -31,6 +31,6 @@ runs:
       shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
       working-directory: .
       run: |
-        pnpm --dir sdk/typescript install --frozen-lockfile
+        pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
         ${{ runner.os == 'Windows' && 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' || '' }}
-        pnpm --dir sdk/typescript run build:ci
+        pnpm --dir plugins/codex-security/mcp-app exec tsc -p ../../../sdk/typescript/tsconfig.ci.json --typeRoots ./node_modules/@types

@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { canonicalJson } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 
 const goImports = z.object({
@@ -89,6 +91,7 @@ const osvRecord = z.object({
     .nullish()
     .transform((ids) => ids ?? []),
   withdrawn: z.string().optional(),
+  modified: z.string().optional(),
   summary: z.string().optional(),
   details: z.string().optional(),
   references: z
@@ -105,27 +108,39 @@ type OsvRecord = z.infer<typeof osvRecord>;
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 const cvePattern = /^CVE-\d{4}-\d{4,}$/u;
 
-export const dependencyAdvisoryDetailsSchema = z.object({
-  id: z.string().optional(),
+const advisoryFields = {
   aliases: z.array(z.string()).optional(),
   url: z.string(),
   references: z.array(advisoryReference).optional(),
-  source: z.object({ type: z.string(), url: z.string() }).optional(),
+  source: advisoryReference.optional(),
   type: z.string().optional(),
+  summary: z.string().optional(),
   body: z.string().optional(),
   vulnerabilities: z.array(githubVulnerability).optional(),
   lookupErrors: z.array(advisoryLookupError).optional(),
-  summary: z.string().optional(),
-  overview: z.string().optional(),
-  applicability: z.string().optional(),
   affected: z.array(
     affected.extend({
       ecosystem_specific: z.union([goImports, rustAffects]).optional(),
     }),
   ),
   vulnerableFunctions: z.array(z.string()).optional(),
+};
+
+export const dependencyAdvisoryDetailsSchema = z.object({
+  id: z.string().optional(),
+  ...advisoryFields,
+  overview: z.string().optional(),
+  applicability: z.string().optional(),
 });
-type Advisory = z.infer<typeof dependencyAdvisoryDetailsSchema>;
+
+// The normalized record emitted by OSV/GitHub lookup, also accepted when
+// replaying a captured-stack investigation without a network lookup.
+const advisoryRecord = z.strictObject({
+  id: z.string().min(1),
+  ...advisoryFields,
+  modified: z.string().optional(),
+});
+type Advisory = z.infer<typeof advisoryRecord>;
 
 export interface DependencyPackage {
   ecosystem: string;
@@ -134,13 +149,32 @@ export interface DependencyPackage {
 
 export interface PackageAdvisory {
   id: string;
-  advisories: Advisory[];
+  advisories: FrozenDependencyAdvisory[];
 }
 
-export type DependencyIssue =
-  | Awaited<ReturnType<typeof lookupDependencyAdvisory>>
-  | (PackageAdvisory & { package: DependencyPackage })
-  | { package: DependencyPackage; vulnDescription: string };
+export const advisoryTriggerInstructions = [
+  "Describe what an attacker must control, how the affected operation must be used, and which downstream behavior is required for impact. Include only necessary conditions grounded in the vulnerability evidence. Make each condition concise and independently checkable.",
+  "For a given affected operation, combine alternative ways to meet the same requirement into one condition joined by OR. Treat example payloads, optional configurations, and example impacts as illustrations unless the evidence establishes a requirement.",
+] as const;
+
+export const frozenDependencyAdvisorySchema = advisoryRecord
+  .extend({
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  })
+  .refine(({ sha256, ...record }) => freezeAdvisory(record).sha256 === sha256, {
+    message: "Frozen advisory SHA-256 mismatch.",
+  });
+export type FrozenDependencyAdvisory = z.infer<
+  typeof frozenDependencyAdvisorySchema
+>;
+
+/** Hash the exact advisory fields retained for the investigator, including version events. */
+function freezeAdvisory(advisory: Advisory) {
+  return {
+    ...advisory,
+    sha256: createHash("sha256").update(canonicalJson(advisory)).digest("hex"),
+  };
+}
 
 export function parseDependencyPackage(subject: string): DependencyPackage {
   const parts = subject.trim().split(":");
@@ -174,25 +208,6 @@ export function parseDependencyPackage(subject: string): DependencyPackage {
   return { ecosystem: parts.slice(0, nameIndex).join(":"), name };
 }
 
-/** Keep opening prose, excluding code blocks and later sections. */
-function openingOverview(details: string | undefined): string | undefined {
-  const [paragraph] = (details ?? "")
-    .trimStart()
-    .replace(
-      /^#{1,6} +(summary|overview|impact)[ \t]*\r?\n(?:[ \t]*\r?\n)*/iu,
-      "",
-    )
-    .split(/\r?\n(?:[ \t]*\r?\n|(?=#))/u, 1);
-  if (
-    !paragraph ||
-    paragraph.length > 800 ||
-    /^(?:\s|[<>#~]|[-*+] |\d+\. )/mu.test(paragraph)
-  )
-    return;
-  if (paragraph.replace(/`[\w.:-]+(?:\(\))?`/gu, "").includes("`")) return;
-  return paragraph.trim().replaceAll(/\r?\n/gu, " ");
-}
-
 function* unfencedDetailsLines(details: string | undefined) {
   let fence = "";
   for (const line of (details ?? "").split(/\r?\n/u)) {
@@ -207,41 +222,6 @@ function* unfencedDetailsLines(details: string | undefined) {
     }
     yield line;
   }
-}
-
-/** Include prose and lists under the advisory's applicability headings. */
-function applicabilityText(details: string | undefined): string | undefined {
-  const lines: string[] = [];
-  let collecting = false;
-  for (const line of unfencedDetailsLines(details)) {
-    const heading = line.match(/^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/u);
-    if (heading) {
-      collecting =
-        /^(?:am i affected\??|who is affected\??|affected (?:configurations|environments|deployments)|applicability|prerequisites)$/iu.test(
-          heading[1]!,
-        );
-      if (collecting) lines.push("");
-    } else if (collecting) {
-      lines.push(line);
-    }
-  }
-
-  const prose = lines
-    .join("\n")
-    .split(/\n[ \t]*\n/u)
-    .filter(
-      (block) =>
-        // Omit indented code, HTML/media, and inline code other than symbols
-        // or configuration settings (e.g. `enabled = true`).
-        block.trim() &&
-        !/^(?: {4}|\t| {0,3}[<>]| {0,3}!\[)/mu.test(block) &&
-        !block
-          .replace(/`[\w.:\[\]-]+(?:\(\))?(?:[ \t]*=[ \t]*[\w.-]+)?`/gu, "")
-          .includes("`"),
-    )
-    .join("\n\n")
-    .trim();
-  return prose || undefined;
 }
 
 function vulnerableFunctions(details: string | undefined): string[] {
@@ -265,24 +245,29 @@ function vulnerableFunctions(details: string | undefined): string[] {
   return [...functions];
 }
 
-export function parseDependencyAdvisoryDetails(value: unknown): Advisory {
-  return projectAdvisory(osvRecord.parse(value));
-}
-
 function projectAdvisory(record: OsvRecord): Advisory {
-  const overview = openingOverview(record.details);
-  const applicability = applicabilityText(record.details);
-  const functions = vulnerableFunctions(record.details);
+  const symbols = new Set(vulnerableFunctions(record.details));
+  for (const entry of record.affected) {
+    const specific =
+      "ecosystem_specific" in entry ? entry.ecosystem_specific : undefined;
+    if (specific && "imports" in specific) {
+      for (const mod of specific.imports)
+        for (const symbol of mod.symbols ?? []) symbols.add(symbol);
+    } else if (specific && "affects" in specific) {
+      for (const symbol of specific.affects.functions ?? [])
+        symbols.add(symbol);
+    }
+  }
   return {
     id: record.id,
     ...(record.aliases.length && { aliases: record.aliases }),
     url: `https://osv.dev/vulnerability/${encodeURIComponent(record.id)}`,
     ...(record.references.length && { references: record.references }),
     ...(record.summary && { summary: record.summary }),
-    ...(overview && { overview }),
-    ...(applicability && { applicability }),
+    ...(record.details && { body: record.details }),
+    ...(record.modified && { modified: record.modified }),
     affected: record.affected,
-    ...(functions.length && { vulnerableFunctions: functions }),
+    ...(symbols.size && { vulnerableFunctions: [...symbols].sort() }),
   };
 }
 
@@ -393,6 +378,13 @@ async function lookupGithubAdvisory(
         ...record.references.map((url) => ({ type: "WEB", url })),
       ],
     };
+    const functions = [
+      ...new Set([
+        ...(result.vulnerableFunctions ?? []),
+        ...record.vulnerabilities.flatMap((v) => v.vulnerable_functions ?? []),
+      ]),
+    ].sort();
+    if (functions.length) result.vulnerableFunctions = functions;
     return { advisory: result };
   } catch (error) {
     signal?.throwIfAborted();
@@ -476,7 +468,7 @@ export async function lookupDependencyAdvisory(
     );
   if (lookupErrors.length)
     for (const advisory of advisories) advisory.lookupErrors = lookupErrors;
-  return { cve, advisories };
+  return { cve, advisories: advisories.map(freezeAdvisory) };
 }
 
 const queryPage = z.object({
@@ -535,7 +527,7 @@ export async function lookupPackageAdvisories(
     const published = ids.filter((id) => records.has(id));
     return {
       id: ids.find((id) => cvePattern.test(id)) ?? published[0]!,
-      advisories: published.map((id) => records.get(id)!),
+      advisories: published.map((id) => freezeAdvisory(records.get(id)!)),
     };
   }).sort((left, right) => left.id.localeCompare(right.id));
 }

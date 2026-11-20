@@ -4,6 +4,10 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import stripAnsi from "strip-ansi";
 import stringWidth from "string-width";
+import {
+  TerminalErrorListener,
+  type TerminalStream,
+} from "./terminal-stream.js";
 import { fitCell, fitLine, graphemes } from "./terminal-columns.js";
 import { isRecord } from "./record.js";
 import type { ScanAuthMode, ScanBudget } from "./api.js";
@@ -26,6 +30,7 @@ import {
   formatScanCosts,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import { formatDeepScanReviews } from "./scan-progress.js";
@@ -60,11 +65,8 @@ const COMPONENT_STATUS = {
   failed: "Failed",
 } as const;
 
-interface DashboardStream {
+interface DashboardStream extends TerminalStream {
   readonly writableNeedDrain?: boolean;
-  write(chunk: string, callback?: (error?: Error | null) => void): unknown;
-  on?(event: "error", listener: (error: Error) => void): unknown;
-  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly columns?: number;
   readonly rows?: number;
 }
@@ -92,7 +94,9 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
+  pricingContext?: ScanPricingContext;
   maxCostUsd?: number;
+  maxTotalCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
   color?: boolean;
@@ -191,8 +195,7 @@ export class ScanDashboard {
   #source: "all" | "main" | number = "all";
   #inputWasRaw = false;
   #noteCount = 0;
-  #observingStreamErrors = false;
-  readonly #onStreamError = (): void => {};
+  readonly #terminalErrors: TerminalErrorListener;
   #keyInput: PassThrough | null = null;
   #ss3Parameters = false;
   #inputKeys: {
@@ -398,6 +401,7 @@ export class ScanDashboard {
 
   public constructor(stream: DashboardStream, options: ScanDashboardOptions) {
     this.#stream = stream;
+    this.#terminalErrors = new TerminalErrorListener(stream);
     this.#options = options;
     this.#startedAt = options.clock.now();
   }
@@ -410,10 +414,7 @@ export class ScanDashboard {
     }
     this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
     try {
-      if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
-        this.#stream.on("error", this.#onStreamError);
-        this.#observingStreamErrors = true;
-      }
+      this.#terminalErrors.start();
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
         this.#setKeyInput(new PassThrough());
@@ -455,21 +456,7 @@ export class ScanDashboard {
         `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
       );
     } finally {
-      if (this.#observingStreamErrors) {
-        try {
-          this.#stream.write("", () => {
-            queueMicrotask(() => {
-              if (this.#timer === null && this.#observingStreamErrors) {
-                this.#stream.off?.("error", this.#onStreamError);
-                this.#observingStreamErrors = false;
-              }
-            });
-          });
-        } catch {
-          this.#stream.off?.("error", this.#onStreamError);
-          this.#observingStreamErrors = false;
-        }
-      }
+      this.#terminalErrors.stop();
     }
   }
 
@@ -484,6 +471,7 @@ export class ScanDashboard {
         ...this.#options,
         presentation: "scan",
         componentName: receipt.name,
+        maxCostUsd: receipt.maxCostUsd ?? this.#options.maxCostUsd,
       });
       dashboard.setStage(COMPONENT_STATUS.pending);
       dashboard.note(`Scope: ${receipt.paths.join(", ")}`);
@@ -500,6 +488,8 @@ export class ScanDashboard {
     const { dashboard } = component;
     if (receipt.status !== component.receipt.status) {
       if (receipt.status === "started") {
+        if (receipt.maxCostUsd !== undefined)
+          dashboard.#options.maxCostUsd = receipt.maxCostUsd;
         dashboard.#startedAt = this.#options.clock.now();
         dashboard.setStage("Preparing scan");
       } else if (receipt.status !== "pending") {
@@ -1071,7 +1061,9 @@ export class ScanDashboard {
 
   get #showCost(): boolean {
     return (
-      this.#options.showCost === true || this.#options.maxCostUsd !== undefined
+      this.#options.showCost === true ||
+      this.#options.maxCostUsd !== undefined ||
+      this.#options.maxTotalCostUsd !== undefined
     );
   }
 
@@ -1086,11 +1078,20 @@ export class ScanDashboard {
     const costs = this.#components.flatMap(({ dashboard }) =>
       dashboard.#cost === null ? [] : [dashboard.#cost],
     );
-    return wrapActivity(
-      "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)}${this.#components.some(({ dashboard }) => dashboard.#usageCoverage !== "complete") ? " (partial)" : ""} · component scans only`,
-      this.#width(),
+    const partial = this.#components.some(
+      ({ dashboard }) => dashboard.#usageCoverage !== "complete",
     );
+    const lines = [
+      (costs.length ? formatScanCosts(costs) : "waiting for usage") +
+        (partial ? " (partial)" : ""),
+      "component scans only",
+    ];
+    if (this.#options.maxTotalCostUsd !== undefined)
+      lines.push(`${formatUsd(this.#options.maxTotalCostUsd)} total limit`);
+    const perComponent = this.#components[0]?.receipt.maxCostUsd;
+    if (perComponent !== undefined)
+      lines.push(`up to ${formatUsd(perComponent)} per component`);
+    return wrapActivity("  COST     ", lines.join(" · "), this.#width());
   }
 
   #width(): number {
@@ -1165,10 +1166,11 @@ export class ScanDashboard {
     if (
       this.#cost === null &&
       this.#options.maxCostUsd === undefined &&
-      estimateScanCost(this.#options.model?.model, {
-        input_tokens: 0,
-        output_tokens: 0,
-      }) === null
+      estimateScanCost(
+        this.#options.model?.model,
+        { input_tokens: 0, output_tokens: 0 },
+        this.#options.pricingContext,
+      ) === null
     ) {
       return [];
     }
@@ -1753,5 +1755,8 @@ function budgetBar(cost: number, limit: number): string {
 }
 
 function terminalText(value: string): string {
-  return stripAnsi(value).replaceAll(/[\u0000-\u001F\u007F]/gu, " ");
+  return stripAnsi(value).replaceAll(
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
+    " ",
+  );
 }

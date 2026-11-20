@@ -4,8 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, realpath, writeFile, mkdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { parseInputs } from '../src/inputs.js';
-import { resolveTarget, validateEvent, originMatches, git, gitEnvironment, type EventContext } from '../src/targets.js';
+import { parseInputs } from '../src/inputs.ts';
+import { resolveTarget, validateEvent, originMatches, git, gitEnvironment, type EventContext } from '../src/targets.ts';
 
 function eventContext(head = 'a'.repeat(40), eventName = 'pull_request', base = head): EventContext {
   const repository = 'example/repo';

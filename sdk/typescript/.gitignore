@@ -1,8 +1,11 @@
 /dist/
 /_bundled_plugin/
+/.plugin-build-*/
 /node_modules
 /coverage/
 /reports/
 /.stryker-tmp/
 /private_release/dist/
 /*.tsbuildinfo
+/schemas/dependency-stack-inputs-v1.schema.json
+/schemas/stack-investigation-report-v1.schema.json

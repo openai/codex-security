@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
 import {
+  normalizeGitHubAdvisories,
+  normalizeGitHubCodeScanningAlerts,
+} from "../src/github-findings.js";
+import {
   createAndReplayFinding,
   localReportFixture,
   updateStoredFinding,
@@ -65,18 +69,81 @@ test.each(["code-scanning", "repository-advisory", "global-advisory"] as const)(
 );
 
 test.each(["code-scanning", "repository-advisory"] as const)(
-  "GitHub %s refuses to attach another repository's evidence locally",
+  "GitHub %s checks repository scope for raw and previously normalized findings",
   async (kind) => {
+    const wrongRepository = "https://github.com/example/other";
     await using fixture = await localReportFixture(
       "github.json",
       { provider: "github", sourceKey: "github/example/project" },
-      { remote: "https://github.com/example/other" },
+      { remote: wrongRepository },
     );
-    await fixture.writeJson([githubSource(kind)]);
+    const source = githubSource(kind);
+    await fixture.writeJson([source]);
     await expect(fixture.prepare()).rejects.toThrow(/repository/iu);
     expect(await fixture.read()).toEqual([]);
+
+    const input =
+      source.source === "github-code-scanning"
+        ? normalizeGitHubCodeScanningAlerts([source], "local")
+        : normalizeGitHubAdvisories([source], "local");
+    const row = input.findings[0]!;
+    const details = row.evidence.details!;
+    details.repository!.url = wrongRepository;
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(
+      "does not match the original GitHub finding",
+    );
+    delete row.evidence.details;
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(
+      /configured remote/iu,
+    );
+    fixture.git(
+      "remote",
+      "set-url",
+      "origin",
+      "git@github.com:Example/Project.git",
+    );
+    expect(
+      (await fixture.prepareNormalized(input)).preview.findings,
+    ).toHaveLength(1);
+    row.evidence.details = details;
+    details.repository!.url = "https://github.com:8443/example/project";
+    await expect(fixture.prepareNormalized(input)).rejects.toThrow(
+      "does not match the original GitHub finding",
+    );
+    details.repository!.url = "https://github.com:443/example/project";
+    row.source_finding_id = "existing-sdk-occurrence";
+    const saved = await (await fixture.prepareNormalized(input)).import();
+    expect(saved.counts.created).toBe(1);
+    expect((await fixture.read())[0]?.sourceFindingId).toBe(
+      row.source_finding_id,
+    );
   },
 );
+
+test("a retained global advisory may be investigated in another repository", async () => {
+  const remote = "https://github.com/example/other";
+  await using fixture = await localReportFixture(
+    "github.json",
+    { provider: "github", sourceKey: "github/global-advisories" },
+    { remote },
+  );
+  const input = normalizeGitHubAdvisories(
+    [importedAdvisory("global")],
+    "local",
+  );
+  const evidence = input.findings[0]!.evidence;
+  expect(
+    (await fixture.prepareNormalized(input)).preview.findings,
+  ).toHaveLength(1);
+  evidence.details = {
+    kind: "advisory",
+    advisory: { source: "repository" },
+    repository: { url: remote },
+  };
+  await expect(fixture.prepareNormalized(input)).rejects.toThrow(
+    "Global advisory evidence cannot claim a source repository",
+  );
+});
 
 test.each(["code-scanning", "repository-advisory"] as const)(
   "GitHub %s matches custom Enterprise repository names without changing source evidence",

@@ -509,9 +509,7 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
     if earlier_identity is not None:
         older = copy.deepcopy(draft)
         older["coverage"]["surfaces"][-1]["id"] = earlier_identity
-        checkpoint = write_checkpoint(
-            Path(source["artifact_dir"]) / "checkpoints", older, mtime_ns=50
-        )
+        write_checkpoint(Path(source["artifact_dir"]) / "checkpoints", older, mtime_ns=50)
     if selected_checkpoint:
         output = Path(source["artifact_dir"])
         checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=300)
@@ -695,7 +693,7 @@ def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_par
     output = Path(source["artifact_dir"])
     older = copy.deepcopy(draft)
     older["coverage"]["surfaces"][0]["id"] = "restored"
-    checkpoint = write_checkpoint(output / "checkpoints", older, mtime_ns=50)
+    write_checkpoint(output / "checkpoints", older, mtime_ns=50)
     selected = copy.deepcopy(older)
     selected["coverage"]["surfaces"][0]["notes"] = "Updated review."
     checkpoint = write_checkpoint(output / "checkpoints", selected, mtime_ns=300)
@@ -817,7 +815,7 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
     output = Path(source["artifact_dir"])
     older = copy.deepcopy(draft)
     older["coverage"]["surfaces"][0]["id"] = "restored"
-    checkpoint = write_checkpoint(output / "checkpoints", older, mtime_ns=50)
+    write_checkpoint(output / "checkpoints", older, mtime_ns=50)
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][0].update(
         id="first/0",
@@ -1280,9 +1278,13 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, reverse):
-    refs = ["artifacts/review.md", "artifacts/Review.md"]
+@pytest.mark.parametrize(
+    ("historical", "reverse"),
+    [("missing", False), ("directory", False), ("case-variant", False), ("case-variant", True)],
+)
+def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical, reverse):
+    old_ref = "artifacts/review.md" if historical == "case-variant" else "artifacts/old.md"
+    refs = [old_ref, "artifacts/Review.md"]
     if reverse:
         refs.reverse()
     surface = {"id": "api", "label": "API", "disposition": "no_issue_found"}
@@ -1291,7 +1293,9 @@ def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, r
     output = Path(source["artifact_dir"])
     (output / "artifacts/review.md").unlink()
     (output / "artifacts/Review.md").write_text("Retained historical evidence.\n")
-    if (output / "artifacts/review.md").exists():
+    if historical == "directory":
+        (output / old_ref).mkdir()
+    elif (output / old_ref).exists():
         pytest.skip("This regression requires case-sensitive receipt paths.")
     (output / "artifacts/replacement.md").write_text("Current review evidence.\n")
     prefix = output.relative_to(tmp_path).as_posix() + "/"
@@ -1312,17 +1316,16 @@ def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, r
     )
     write_checkpoint(output / "checkpoints", current, mtime_ns=300)
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Interrupted retry before checkpoint-head publication.",
-    )
-    assert documents is not None
-    retained = documents[2]["surfaces"][0]["receiptRefs"]
+    documents = recover(tmp_path, [source], warnings=warnings)
+    (row,) = documents[2]["surfaces"]
+    retained = row["receiptRefs"]
+    if historical == "directory":
+        assert row["disposition"] == "needs_follow_up"
+        assert prefix + "artifacts/Review.md" in retained
+        assert prefix + old_ref not in retained
+        assert not any("Replaced invalid saved coverage receipt" in warning for warning in warnings)
+        return
+    assert row["disposition"] == "no_issue_found"
     assert set(retained) == {prefix + "artifacts/Review.md", prefix + "artifacts/replacement.md"}
     assert any("Replaced invalid saved coverage receipt" in warning for warning in warnings)
     scan = {
@@ -1446,7 +1449,7 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
                 },
             ),
         ]:
-            checkpoint = write_checkpoint(
+            write_checkpoint(
                 output / "checkpoints",
                 saved_draft("coverage-scan", surfaces=[row]),
                 mtime_ns=modified,
@@ -1487,7 +1490,7 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
                 }
             ],
         )
-        checkpoint = write_checkpoint(output / "checkpoints", pending, mtime_ns=400)
+        write_checkpoint(output / "checkpoints", pending, mtime_ns=400)
         source["attempt"] = 2
     os.utime(output / "result.json", ns=(300, 300))
     if not missing:
@@ -1679,7 +1682,7 @@ def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, un
     select_checkpoint(output, checkpoint, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     if unselected:
-        checkpoint = write_checkpoint(
+        write_checkpoint(
             output / "checkpoints",
             saved_draft("coverage-scan", surfaces=[surface("reader", ["review.md"])]),
             mtime_ns=400,

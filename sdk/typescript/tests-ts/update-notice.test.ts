@@ -1,12 +1,21 @@
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { once } from "node:events";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  constants,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { resolving } from "./support/promises.js";
 import { describe, expect, test, mock } from "bun:test";
 import {
   checkForUpdate,
   formatUpdateNotice,
+  installUpdate,
   updateCommand,
 } from "../src/version.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
@@ -160,6 +169,179 @@ describe("CLI update notice", () => {
     }
   });
 
+  test("selects supported options for workspace roots and optional dependencies", () => {
+    const directories = createTemporaryDirectoriesSync(true);
+    const root = directories.create("codex-update-options-");
+    const entrypoint = join(
+      root,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "dist",
+      "version.js",
+    );
+    try {
+      writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: ['apps/*']");
+      for (const [manager, category, expected] of [
+        [
+          "pnpm",
+          "optionalDependencies",
+          "pnpm add --workspace-root --save-optional",
+        ],
+        ["pnpm", "peerDependencies", "pnpm add --workspace-root --save-peer"],
+        ["bun", "optionalDependencies", "bun add --optional"],
+      ] as const) {
+        writeFileSync(
+          join(root, "package.json"),
+          JSON.stringify({
+            packageManager: manager + "@1.0.0",
+            [category]: { "@openai/codex-security": "0.9.0" },
+          }),
+        );
+        expect(updateCommand({}, entrypoint)).toBe(
+          expected + " @openai/codex-security@latest",
+        );
+      }
+    } finally {
+      directories.cleanup();
+    }
+  });
+
+  test("project updates provide a command without loading package-manager configuration", async () => {
+    const directories = createTemporaryDirectoriesSync(true);
+    const project = directories.create("codex-update-project-");
+    const marker = join(project, "manager-ran");
+    const entrypoint = join(
+      project,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "dist",
+      "version.js",
+    );
+    try {
+      writeFileSync(
+        join(project, ".npmrc"),
+        "@openai:registry=http://127.0.0.1:1/",
+      );
+      writeFileSync(
+        join(project, "package.json"),
+        JSON.stringify({
+          devDependencies: { "@openai/codex-security": "0.9.0" },
+          scripts: { preinstall: "node hook.cjs" },
+        }),
+      );
+      writeFileSync(
+        join(project, "hook.cjs"),
+        'require("node:fs").writeFileSync("manager-ran", "ran")',
+      );
+      writeFileSync(
+        join(project, process.platform === "win32" ? "npm.cmd" : "npm"),
+        process.platform === "win32"
+          ? '@echo ran > "%UPDATE_MARKER%"'
+          : '#!/bin/sh\necho ran > "$UPDATE_MARKER"',
+        { mode: 0o755 },
+      );
+      const env = {
+        PATH: project,
+        UPDATE_MARKER: marker,
+        npm_config_userconfig: join(project, ".npmrc"),
+      };
+      await expect(installUpdate(env, entrypoint)).rejects.toThrow(
+        `Run npm install --save-dev @openai/codex-security@latest from ${JSON.stringify(project)}`,
+      );
+      expect(existsSync(marker)).toBe(false);
+      writeFileSync(join(project, "package.json"), "{}");
+      await expect(installUpdate(env, entrypoint)).rejects.toThrow(
+        "from the project that declares",
+      );
+      await expect(
+        installUpdate({ ...env, npm_command: "exec" }, entrypoint),
+      ).rejects.toThrow("npx @openai/codex-security@latest");
+    } finally {
+      directories.cleanup();
+    }
+  });
+
+  test("global npm updates support nvm checkouts and isolate npm from the invoking project", async () => {
+    const directories = createTemporaryDirectoriesSync(true);
+    const root = directories.create("codex-update-global-");
+    const nvm = join(root, ".nvm");
+    const prefix = join(nvm, "versions", "node", "v24.0.0");
+    const windows = process.platform === "win32";
+    const bin = windows ? prefix : join(prefix, "bin");
+    const modules = join(
+      windows ? prefix : join(prefix, "lib"),
+      "node_modules",
+    );
+    const npmBin = join(modules, "npm", "bin");
+    const node = join(bin, windows ? "node.exe" : "node");
+    const entrypoint = join(
+      modules,
+      "@openai",
+      "codex-security",
+      "dist",
+      "version.js",
+    );
+    const record = join(prefix, "invocation.json");
+    try {
+      mkdirSync(join(nvm, ".git"), { recursive: true });
+      mkdirSync(bin, { recursive: true });
+      mkdirSync(npmBin, { recursive: true });
+      copyFileSync(process.execPath, node, constants.COPYFILE_FICLONE);
+      writeFileSync(
+        join(npmBin, "npm-cli.js"),
+        `require("node:fs").writeFileSync(${JSON.stringify(record)}, JSON.stringify({cwd: process.cwd(), env: process.env, args: process.argv.slice(2)}));`,
+      );
+      const env = {
+        PATH: prefix,
+        OPENAI_API_KEY: "test-value",
+        NODE_OPTIONS: "--require=missing.cjs",
+        npm_config_registry: "http://127.0.0.1:1/",
+      };
+      await installUpdate(env, entrypoint, node);
+      const call = JSON.parse(readFileSync(record, "utf8"));
+      expect(call.env.OPENAI_API_KEY).toBeUndefined();
+      expect(call.env.NODE_OPTIONS).toBeUndefined();
+      expect(call.env.npm_config_registry).toBeUndefined();
+      expect(existsSync(call.cwd)).toBe(false);
+      expect(call.env.HOME).toBe(call.cwd);
+      expect(call.env.PATH).toBe(bin);
+      expect(call.env.npm_config_userconfig).toBe(join(call.cwd, "user.npmrc"));
+      expect(call.env.npm_config_globalconfig).toBe(
+        join(call.cwd, "global.npmrc"),
+      );
+      expect(call.args).toEqual([
+        "install",
+        "-g",
+        "@openai/codex-security@latest",
+        "--prefix",
+        prefix,
+        "--ignore-scripts",
+        "--registry=https://registry.npmjs.org/",
+        "--@openai:registry=https://registry.npmjs.org/",
+      ]);
+    } finally {
+      directories.cleanup();
+    }
+  });
+
+  test("metadata takes precedence over an explicit update", async () => {
+    for (const flag of ["--help", "--version", "--schema", "--llms"]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["--update", flag],
+          dependencies({
+            environment: { npm_command: "exec" },
+          }),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).not.toBe("");
+      expect(stderr.text()).toBe("");
+    }
+  });
+
   test("recognizes Windows globals through a linked Node directory", () => {
     const temporaryDirectories = createTemporaryDirectoriesSync(true);
     const root = temporaryDirectories.create("codex-update-notice-");
@@ -184,6 +366,18 @@ describe("CLI update notice", () => {
       temporaryDirectories.cleanup();
     }
   });
+
+  test.skipIf(process.platform !== "linux")(
+    "keeps local npm updates local in case-distinct Linux directories",
+    () => {
+      for (const directory of ["Lib", "_NPX", ".YARN"]) {
+        const entrypoint = `/workspace/${directory}/node_modules/pkg/dist/version.js`;
+        expect(updateCommand({}, entrypoint)).toBe(
+          "npm install @openai/codex-security@latest",
+        );
+      }
+    },
+  );
 
   test("ignores current, older, invalid, and lower prerelease versions", async () => {
     for (const [current, latest, available] of [
@@ -248,6 +442,7 @@ describe("CLI update notice", () => {
     for (const environment of [
       { CODEX_SECURITY_NO_UPDATE_NOTICE: "1" },
       { NO_UPDATE_NOTIFIER: "1" },
+      { npm_config_update_notifier: "false" },
       { CI: "true" },
     ]) {
       expect(

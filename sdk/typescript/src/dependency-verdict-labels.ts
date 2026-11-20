@@ -1,4 +1,4 @@
-import type { DependencyVerdict } from "./dependency-reachability.js";
+import type { DependencyVerdict } from "./dependency-stack-use.js";
 
 /** Human-facing labels; serialized verdict keys are unchanged. */
 export const dependencyVerdictLabels = {

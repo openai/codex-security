@@ -69,8 +69,6 @@ export function runCommand(
   });
 }
 
-export { pythonExecutable } from "./python.js";
-
 export function writeSource(
   repository: string,
   path: string,

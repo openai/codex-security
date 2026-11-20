@@ -10,8 +10,7 @@ mean and how to interpret the result.
 Keep the same provider and source key for later exports of the same vendor
 project and finding family. For example, use
 `github.com/OWNER/REPO/dependabot` for Dependabot alerts. An updated local import
-under that key replaces evidence for its existing record. A key containing
-today's date would create another record for the same alert.
+under that key replaces evidence for its existing record. A source key that changes with each export creates another record for the same alert.
 
 | Destination                | What identifies the record                                                                                                                                                                             |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -25,9 +24,11 @@ which changes can give an occurrence a different ID.
 | Report                                                                                | What identifies one record                                                                                                                                                               |
 | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
-| [AWS Continuum](continuum.md)                                                         | Continuum finding ARN. A list summary and a detailed response for that ARN identify the same finding.                                                                                    |
-| [Tenable One local pilot](tenable.md)                                                 | Exact Tenable `finding_id` within the local checkout and a stable tenant/asset source key. Use the Code Repository asset UUID in the key.                                                |
+| [ArmorCode](armorcode.md)                                                             | ArmorCode finding ID (`id`) within the source key.                                                                                                                                       |
+| [AWS Continuum](continuum.md)                                                         | Issue ARN for issue exports. For finding exports, a list summary and a detailed response share the finding ARN.                                                                          |
+| [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id` within the local checkout and a stable tenant/asset source key. Use the Code Repository asset UUID in the key.                                                |
 | [Checkmarx SAST](checkmarx.md)                                                        | Checkmarx One uses the similarity ID and result hash. CxSAST scopes the similarity ID and ordered flow to the project and query.                                                         |
+| [CrowdStrike](crowdstrike.md)                                                         | FCS IaC rule UUID, file, line, resource type and name, reason and module path. A detection on a new line gets a new ID.                                                                  |
 | [Wiz](wiz.md)                                                                         | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
 | [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)   | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
 | [GitHub advisories](github-security-advisories.md)                                    | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
@@ -49,15 +50,19 @@ inspect the reader’s exclusions or input error before retrying.
 
 Imported records start with `assessment.state` set to `not_assessed`. The
 [evidence schema](../../sdk/typescript/schemas/external-findings.schema.json)
-defines the fields the reader can populate.
+defines the fields under `evidence`. Read the normalized fields first. Use the
+saved vendor record to investigate a detail the scanner did not expose there.
 
-| Field                          | How to use it                                                                                                                                             |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `title`, `severity`            | Required source evidence. Severity can be `unknown`. A scanner verdict or suppression can be reported alongside it.                                       |
-| `packages[]`                   | Compare an observed `installed_version` with the reported `vulnerable_version_range` and `fixed_versions`. An advisory may supply only a range or fix.    |
-| `locations[]`, `code_revision` | Navigate to a reported repository path and line at the scanned revision when available. `details.code.end_line` extends the first location.               |
-| `details`                      | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
-| `source_data`                  | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
+| Field                                                      | How to use it                                                                                                                                             |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`, `description`, `severity`                         | The title identifies what the scanner reported. An optional description explains the finding. Severity can be `unknown`.                                  |
+| `url`                                                      | Open the scanner finding or advisory supplied by the reader. This link can lead to a vendor portal that requires sign-in.                                 |
+| `details.repository.url`, `details.file_url`               | Open the source repository or the reported file. A repository link alone does not identify a file or revision.                                            |
+| `advisory_ids[]`, `details.weakness_ids[]`, `details.rule` | CVE and GHSA IDs identify vulnerabilities or advisories. CWEs classify weaknesses. A rule ID identifies the scanner check.                                |
+| `packages[]`                                               | Compare an observed `installed_version` with the reported `vulnerable_version_range` and `fixed_versions`. An advisory may supply only a range or fix.    |
+| `locations[]`, `code_revision`                             | Navigate to a reported repository path and line at the scanned revision when available. `details.code.end_line` extends the first location.               |
+| `details`                                                  | Optional context for `sast`, `secret`, `iac` or `advisory` findings. For GHSA, `details.advisory.source` distinguishes repository and global disclosures. |
+| `source_data`                                              | The vendor fields retained for this record. Keep the original export when you need scan-wide diagnostics or inventory.                                    |
 
 Use finite JSON numbers in evidence and report metadata. Supply integers outside
 JavaScript’s safe range as strings to preserve their value. In SDK inputs, use
@@ -72,8 +77,14 @@ readers also apply the Cloud size limit to the evidence they return.
 
 ## Operate the two destinations
 
-**Local.** Run `codex-security findings imported PATH --format json` with the
-repository path from the preview. Each record includes
+**Local.** Run `codex-security findings imported PATH` with the repository path
+from the preview. In a terminal, the list shows the source key and finding ID,
+severity and title. It also shows the first reported package and location,
+the primary reference, and a distinct file link when available. Installed,
+affected and fixed package versions appear when the scanner supplied them. If the reported
+scanner differs from the stored provider, both appear (for example, OpenGrep
+and `semgrep`). A rule-ID title can include a short scanner message. Pass `--format json` for
+all locations and the complete saved evidence. Each record includes
 `sourceKey`, `sourceFindingId`, `version`, `evidence` and `assessment`.
 
 **Private Cloud inbox.** Check the format, size and digest under
@@ -81,10 +92,19 @@ repository path from the preview. Each record includes
 unprocessed findings. Open a finding in the inbox to assess it and publish
 the assessment when you're ready to share it.
 
+Reimporting identical evidence for the same occurrence leaves the saved
+observation in place. If the job reports `source_order_unknown`, Cloud
+received different evidence for an existing finding and needs its current
+observation version before replacing it. Check the previous observation and
+the new evidence before retrying. A newer scanner timestamp alone cannot
+authorize that update.
+
 **Cloud repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
-report for the imported evidence.
+report for the imported evidence. If this destination requires a known
+severity, findings whose scanner reported no severity appear in the preview's
+exclusions. The private inbox also accepts unknown severity.
 
 The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply
@@ -109,12 +129,12 @@ request before the response was lost.
 1. If the interrupted result includes `savedSubmission`, keep that checkpoint.
    Preview the original export with `--dry-run --format json` using the same
    build, state directory, Cloud account, endpoint and import settings.
-2. Check `accountId`, `destination` and `resumed` in the preview. When `resumed`
-   is true, confirm the command to continue the saved submission. The
-   repository publisher also preserves the original expected versions. When it is false, review the fresh submission before
-   confirming. If a repository reset retires the old submission and preparation
-   returns an error, run `--dry-run` again and review the new destination and
-   environment before confirming.
+2. Check `accountId`, `destination` and `resumed` in the preview. If `resumed`
+   is true, confirmation continues the saved submission. The repository
+   publisher also preserves the original expected versions. If `resumed` is
+   false, review the new submission before confirming. If a repository reset
+   retired the submission, run another dry run to review the new repository
+   and environment.
 
 For a failed or cancelled private job, a fresh preview identifies the previous
 job and confirmation starts a new attempt. A lost response from an active job
@@ -125,34 +145,18 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Use the same SDK version throughout a submission when possible.
+For stored findings, reprepare the interrupted source group with its saved selection
+and review ID. Its checkpoint belongs to the selected checkout and finding versions.
+After a repository reset, the workbench records any acknowledged receipts before
+retiring the old request. Review the new destination before publishing again.
 
-Older SDK checkpoints saved the destination repository ID without the catalog
-URL. After a repository rename, retry those requests with the original
-normalized findings and report metadata, omitting supplemental source
-repository declarations. A new declaration needs a matching current catalog
-entry or a URL recorded when the request was approved.
-
-If a hosted Semgrep or Snyk request is pending, rerun the original input to
-finish it before submitting updated evidence for any of the same findings.
-Selections with distinct scanner-issued IDs can proceed independently on the
-same deployment, account, repository, connector, provider and source key.
-When an older checkpoint establishes only the source, finish that request
-before submitting another selection for that source. Use the SDK build that
-created the request and include the original report context and caller-added
-fields. Older SDKs included some fields in the checkpoint filename without
-retaining them in the saved request. If the publisher cannot identify the
-deployment of an older request, rerun it on its original deployment. An
-identified repository reset retires the request and requires fresh approval.
-
-After an SDK upgrade, retry with the original input. An older SDK could approve
-different bytes from those its JSON export contained. When the SDK verifies
-the old selection and request bytes, it resumes with the original request IDs
-and skips batches that already have receipts. If it cannot verify the original
-request, it preserves the checkpoint and stops before uploading. A saved JSON
-export can lose information from the original SDK input. If a getter makes it
-impossible to identify which findings were approved, the SDK can also stop a
-new submission for the same source and destination.
+**Upgrading from an earlier import client.** Finish pending Cloud submissions with
+the CLI or SDK build that created their checkpoints. Keep the original input and
+state directory. If the outcome is uncertain, check the private inbox job or
+read back the repository’s source reports to identify the accepted findings
+before preparing a fresh submission. The current client starts a new approval
+for a submission made with the retired checkpoint format.
+[Verify an import](README.md#verify-the-import)
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

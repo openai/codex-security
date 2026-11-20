@@ -2,6 +2,10 @@ import { spawn } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import {
+  configuredExecutableValue,
+  isExecutableFile,
+} from "./executable-path.ts";
 
 type PythonPlatform = NodeJS.Platform;
 
@@ -11,6 +15,7 @@ interface ResolvePythonCommandOptions {
   homeDirectory?: string;
   isUsableExecutable?: (candidate: string) => Promise<boolean>;
   platform?: PythonPlatform;
+  workingDirectory?: string;
 }
 
 const MISSING_PYTHON_HELPER_MESSAGE =
@@ -29,16 +34,38 @@ export async function resolvePythonCommand(
   ) {
     return process.env.CODEX_SECURITY_PYTHON_COMMAND;
   }
-  const configuredPython = options.configuredPython ?? process.env.PYTHON;
-  if (configuredPython?.trim()) {
-    return configuredPython.trim();
-  }
-
   const platform = options.platform ?? process.platform;
+  const configuredPython = configuredExecutableValue(
+    options.configuredPython ?? process.env.PYTHON,
+    platform,
+    (value) =>
+      isExecutableFile(
+        value.startsWith("/")
+          ? value
+          : `${options.workingDirectory ?? process.cwd()}/${value}`,
+      ),
+  );
+  if (configuredPython) return configuredPython;
+
   const pathImplementation = platform === "win32" ? path.win32 : path.posix;
-  const cacheDirectory =
-    (options.cacheDirectory ?? process.env.XDG_CACHE_HOME) ||
-    pathImplementation.join(options.homeDirectory ?? homedir(), ".cache");
+  const systemPython = platform === "win32" ? "python" : "python3";
+  let cacheDirectory = options.cacheDirectory ?? process.env.XDG_CACHE_HOME;
+  if (!cacheDirectory) {
+    try {
+      cacheDirectory = pathImplementation.join(
+        options.homeDirectory ?? homedir(),
+        ".cache",
+      );
+    } catch (error) {
+      // A numeric Linux UID can have no home directory for the managed cache.
+      if (
+        platform === "linux" &&
+        (error as { info?: NodeJS.ErrnoException }).info?.code === "ENOENT"
+      )
+        return systemPython;
+      throw error;
+    }
+  }
   const bundledPythonRoot = pathImplementation.join(
     cacheDirectory,
     "codex-runtimes",
@@ -65,7 +92,7 @@ export async function resolvePythonCommand(
       return candidate;
     }
   }
-  return platform === "win32" ? "python" : "python3";
+  return systemPython;
 }
 
 /**

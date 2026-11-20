@@ -732,21 +732,37 @@ describe("live scan dashboard", () => {
   });
 
   test.each([
-    ["unknown-model", false],
-    ["gpt-5.6-cyber", true],
-  ] as const)("shows a cost row only when %s has pricing", (model, priced) => {
-    const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, {
-      model: { model, reasoningEffort: "xhigh" },
-      showCost: true,
-    });
-    dashboard.start();
-    const frame = lastFrame(stderr);
-    expect(/^\s*COST\b/m.test(frame)).toBe(priced);
-    if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
-    expect(frame).not.toContain("model pricing missing");
-    dashboard.stop();
-  });
+    ["unknown-model", undefined, false],
+    ["gpt-5.6-cyber", undefined, true],
+    [
+      "openai.gpt-5.6-cyber",
+      { provider: "amazon-bedrock", region: "us-gov-east-1" },
+      true,
+    ],
+    [
+      "openai.gpt-5.6-cyber",
+      { provider: "amazon-bedrock", region: "us-gov-west-1" },
+      false,
+    ],
+    ["gpt-6-astra", { provider: "gcp" }, false],
+    ["openai/gpt-oss-120b-maas", { provider: "gcp" }, true],
+  ] as const)(
+    "shows a cost row only when %s has pricing in %j",
+    (model, pricingContext, priced) => {
+      const stderr = capture(true);
+      const dashboard = createDashboard(stderr.stream, {
+        model: { model, reasoningEffort: "xhigh" },
+        pricingContext,
+        showCost: true,
+      });
+      dashboard.start();
+      const frame = lastFrame(stderr);
+      expect(/^\s*COST\b/m.test(frame)).toBe(priced);
+      if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
+      expect(frame).not.toContain("model pricing missing");
+      dashboard.stop();
+    },
+  );
 
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
@@ -1592,7 +1608,7 @@ describe("live scan dashboard", () => {
       { length: 20 },
       (_, index) => ({
         id: `c${index}`,
-        name: `Component ${index}`,
+        name: `Component\u0085${index}`,
         paths: [`src/${index}`],
         status: "pending",
         outputDir: `/synthetic/${index}`,
@@ -1618,6 +1634,7 @@ describe("live scan dashboard", () => {
         .every((line) => line.length <= 80),
     ).toBe(true);
     input.emit("data", "\r");
+    expect(frame()).toContain("project  ·  Component 19");
     expect(frame()).not.toContain("COST");
     input.emit("data", "\u0003");
     expect(onInterrupt).toHaveBeenCalled();
@@ -1767,14 +1784,14 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("handles asynchronous dashboard stream failures while a scan is active", async () => {
+  test("keeps dashboard stream errors protected through a restart and the final write", async () => {
     let redraw: (() => void) | undefined;
     let failRedraw = false;
     const stream = new Writable({
       autoDestroy: false,
       write(_chunk, _encoding, callback) {
         if (failRedraw) {
-          queueMicrotask(() => callback(new Error("Dashboard output failed.")));
+          setImmediate(() => callback(new Error("Dashboard output failed.")));
         } else {
           callback();
         }
@@ -1792,18 +1809,23 @@ describe("live scan dashboard", () => {
     });
 
     dashboard.start();
+    dashboard.stop();
+    dashboard.start();
     expect(stream.listenerCount("error")).toBe(1);
-    const failure = new Promise<Error>((resolve) =>
-      stream.once("error", resolve),
+    const failure = new Promise<[Error, number]>((resolve) =>
+      stream.once("error", (error) =>
+        resolve([error, stream.listenerCount("error")]),
+      ),
     );
     failRedraw = true;
     redraw?.();
     dashboard.stop();
     expect(stream.listenerCount("error")).toBe(2);
 
-    await expect(failure).resolves.toMatchObject({
-      message: "Dashboard output failed.",
-    });
+    await expect(failure).resolves.toEqual([
+      new Error("Dashboard output failed."),
+      1,
+    ]);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(stream.listenerCount("error")).toBe(0);
   });

@@ -2,13 +2,8 @@
 
 Start with the [deterministic triage checks](triage-finding/README.md#check-the-harness) or the harness tests linked below. These run locally without model calls. Model evaluations are opt-in and consume usage on the account you configure.
 
-- Dependency reachability runs 23 public CLI checks across five CVEs, grades
-  the expected dependency uses, and records command wall time and token usage.
-  It also includes a standalone two-service smoke case and the historical
-  caller-scoped skill baseline. [Setup and cases](dependency-reachability/README.md)
-- [Package-to-application mapping](package-application-mapping/README.md) checks
-  which configured applications use a package and verifies the recorded graph
-  edges on tiny synthetic checkouts.
+- [Dependency reachability](dependency-reachability/README.md) grades local CVE and
+  package investigations against controlled application builds and measured stack evidence.
 - [Triage finding](triage-finding/README.md): Promptfoo input contracts, OSS
   calibration, and SastBench. This suite owns its private package and lockfile.
 - [Secret discovery](secret-discovery/README.md): checks whether the production
@@ -23,11 +18,11 @@ Start with the [deterministic triage checks](triage-finding/README.md#check-the-
 - The [skill review fixtures](check-skills/README.md) cover pre-install decisions
   for individual skill files and bundles, including cross-file behavior.
 
-CI runs the deterministic triage, dependency-reachability, [secret-discovery](secret-discovery/README.md#deterministic-checks), [time-budget](standard-time-budget/README.md#interpretation-and-checks), and [workflow-routing](workflow-routing/README.md#deterministic-checks) checks. The [MCP suite](../plugins/codex-security/mcp-app/TESTING.md) covers Deep Scan iterations, recovery, publication, and the real-IPC reducer regression.
+CI runs the deterministic triage, [secret-discovery](secret-discovery/README.md#deterministic-checks), [time-budget](standard-time-budget/README.md#interpretation-and-checks), and [workflow-routing](workflow-routing/README.md#deterministic-checks) checks. The [MCP suite](../plugins/codex-security/mcp-app/TESTING.md) covers Deep Scan iterations, recovery, and publication.
 
 ## Build the evaluation tools
 
-For the dependency-reachability, package-to-application mapping, secret-discovery, Standard time-budget and workflow-routing suites, [install the SDK and MCP dependencies](../sdk/typescript/TESTING.md#install-dependencies), then run these commands from the repository root. The eval type-check includes the triage sources, so it needs the triage package’s dependencies too.
+For the secret-discovery, Standard time-budget and workflow-routing suites, [install the SDK and MCP dependencies](../sdk/typescript/TESTING.md#install-dependencies), then run these commands from the repository root. The eval type-check includes the triage sources, so it needs the triage package’s dependencies too.
 
 ```sh
 pnpm --dir evals/triage-finding install --frozen-lockfile

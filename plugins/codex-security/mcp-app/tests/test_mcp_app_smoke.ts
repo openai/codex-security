@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { gitText } from "../scripts/git.mjs";
@@ -72,8 +73,10 @@ assert.equal(
 );
 assert.deepEqual(mcpConfig.mcpServers["codex-security"].args, ["--stdio"]);
 assert.equal(mcpConfig.mcpServers["codex-security"].tool_timeout_sec, 349_200);
-assert.deepEqual(
+const forwardedEnvironment = new Set(
   mcpConfig.mcpServers["codex-security"].env_vars,
+);
+assert.deepEqual(
   [
     "CODEX_HOME",
     "CODEX_SQLITE_HOME",
@@ -86,6 +89,7 @@ assert.deepEqual(
     "CODEX_ELECTRON_RESOURCES_PATH",
     "CODEX_MANAGED_PACKAGE_ROOT",
     "CODEX_MCP_NODE_PATH",
+    "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
@@ -113,12 +117,13 @@ assert.deepEqual(
     "PYTHONUTF8",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
-    "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_EXCLUDE_PATHS",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_SCAN_DIR",
     "CODEX_SECURITY_PLUGIN_ROOT",
+    "CODEX_SECURITY_REPOSITORY",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_SURFACE",
@@ -130,8 +135,9 @@ assert.deepEqual(
     "REQUESTS_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
     "XDG_CACHE_HOME",
-  ],
-  "The MCP process and SDK workers must inherit provider routing and authentication, runtime paths, and enterprise proxy/certificate configuration.",
+  ].filter((name) => !forwardedEnvironment.has(name)),
+  [],
+  "The MCP process must forward all required environment variables.",
 );
 const target = await temporaryDirectory("codex-security-target-");
 const replacementTarget = await temporaryDirectory(
@@ -343,6 +349,7 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
   if (scope !== scope.trim() && scope.trim() !== "./")
     await mkdir(path.join(targetPath, scope.trim()));
   await writeFile(path.join(targetPath, scope, "source.py"), "pass\n");
+  await writeFile(path.join(targetPath, "SECURITY.md"), "Review this scope.");
   await writeFile(path.join(targetPath, "outside.py"), "pass\n");
   const userContext = "--data\nUnicode Ä 日本語\n".repeat(200).trim();
   const nonUiStateDir = path.join(tmpdir(), randomUUID());
@@ -441,6 +448,7 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
       assertScanTarget(launched._meta, launched.structuredContent.scan.scanId);
       assert.equal(launched.structuredContent.scan.targetPath, canonicalTarget);
       assert.equal(launched.structuredContent.scan.scope, scope);
+      assert.equal(launched.structuredContent.securityPolicyPaths, undefined);
       assert.deepEqual(
         launched.structuredContent.scan.contract.scope.requiredIncludePaths,
         [scope],
@@ -530,14 +538,13 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(result.scan.scanId, result.scanId);
     assert.equal(result.scan.scanDir, result.scanDir);
     assert.equal(result.scan.handoffClaimToken, undefined);
-    assert.equal(result.workspace.results.handoffClaimToken, undefined);
+    assert.equal(result.workspace, undefined);
     assert.equal(result.scan.continuationThreadId, ownerThread);
-    assert.equal(result.scan.progress.phase, "preflight");
+    assert.equal(result.scan.progress.phase, "threat_model");
     assert.equal(result.scan.progress.status, "running");
     assert.equal(result.scan.model, "gpt-5.6-sol");
     assert.equal(result.scan.reasoningEffort, "high");
     assert.equal(result.scan.userContext, headlessContext);
-    assert.equal(result.workspace.userContext, headlessContext);
 
     const joined = await headlessServer.callTool(4, {
       name: "start_codex_security_standard_scan",
@@ -550,6 +557,11 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assertNoError(joined);
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
+    assert.match(
+      started.result.content[0].text,
+      /Skip it for Amazon Bedrock or API-key-only scans/,
+    );
+    assert.doesNotMatch(joined.result.content[0].text, /access-advisory/);
     for (const response of [started, joined]) {
       assertScanTarget(response.result._meta, result.scanId);
       assert.deepEqual(
@@ -557,13 +569,9 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
         result.scan.lifecycle,
       );
       assert.equal(result.scan.lifecycle.status, "running");
-      assert.match(
-        response.result.content[0].text,
-        /references\/scan-runtime\.md/,
-      );
       assert.doesNotMatch(
         response.result.content[0].text,
-        /security_scan preflight/,
+        /Daybreak|scan-runtime|preflight/,
       );
     }
     assert.equal(
@@ -601,7 +609,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: {
         scanId: result.scanId,
         handoffClaimToken: result.handoffClaimToken,
-        phase: "threat_model",
+        phase: "discovery",
       },
       _meta: { "openai/threadId": ownerThread },
     });
@@ -619,7 +627,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     );
     assert.equal(
       rejoinedAfterPreflight.structuredContent.scan.progress.phase,
-      "threat_model",
+      "discovery",
     );
 
     for (const threadSource of [undefined, "security_scan"]) {
@@ -754,7 +762,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
         assert.equal(scan.progress.status, "running");
         const { deepScan } = JSON.parse(
           execFileSync(
-            process.env.PYTHON?.trim() || "python3",
+            fixturePython,
             [
               path.join(pluginRoot, "scripts", "workbench_db.py"),
               "get-deep-scan",
@@ -809,7 +817,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
 
     const publicationFailure =
       "Saved result publication failed: fixture retained result publication failure";
-    execFileSync(process.env.PYTHON?.trim() || "python3", [
+    execFileSync(fixturePython, [
       "-c",
       `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
@@ -1629,6 +1637,13 @@ try {
   );
   const exportFindings = findTool("export_codex_security_findings");
   const listFindings = findTool("list_codex_security_findings");
+  for (const tool of [
+    startHeadlessStandardScan,
+    startPromptOnlyScan,
+    getScanContext,
+  ]) {
+    assert.equal(tool._meta["openai/requestedEntitlements"], undefined);
+  }
   assert.deepEqual(start.inputSchema.required, ["sessionId"]);
   assert.equal(startDeepScan.annotations.idempotentHint, true);
   assert.equal(
@@ -2282,10 +2297,46 @@ try {
   const delivered = await testServer.callSuccessfulTool(2003, {
     name: "get_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId },
-    _meta: { "openai/threadId": "fixture-thread" },
+    _meta: {
+      threadId: "fixture-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: {
+            schemaVersion: 1,
+            status: "not_granted",
+            grants: [],
+            stale: false,
+          },
+        },
+      },
+    },
   });
   assert.equal(delivered.structuredContent.scan.handoffStatus, "delivered");
   assert.equal(delivered.structuredContent.scan.handoffClaimToken, undefined);
+  assert.equal(delivered.structuredContent.scan.progress.phase, "threat_model");
+  assert.equal(delivered.structuredContent.securityPolicyPaths, undefined);
+  assert.match(
+    delivered.content[0].text,
+    /Skip it for Amazon Bedrock or API-key-only scans/,
+  );
+  assert.doesNotMatch(delivered.content[0].text, /lacks Daybreak access/);
+  const repeatedHandoff = await testServer.callTool(2004, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+    _meta: {
+      threadId: "fixture-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: { cyber_trusted_access: grantedTrustedAccess },
+      },
+    },
+  });
+  assertNoError(repeatedHandoff);
+  assert.doesNotMatch(
+    repeatedHandoff.result.content[0].text,
+    /Daybreak|access-advisory/,
+  );
   assert.equal(
     delivered.structuredContent.workspace.results.handoffClaimToken,
     undefined,
@@ -2355,7 +2406,7 @@ try {
     appUserContext,
   );
 
-  const readyPreflightProgress = await testServer.callSuccessfulTool(90164, {
+  const mappingProgress = await testServer.callSuccessfulTool(90164, {
     name: "update_codex_security_scan_progress",
     _meta: {
       "openai/threadId": "fixture-thread",
@@ -2369,23 +2420,29 @@ try {
       handoffClaimToken,
       phaseItemsTotal: 4,
       phaseItemsCompleted: 4,
-      phaseProgressUnit: "checks",
+      phaseProgressUnit: "threat_surfaces",
     },
   });
-  assert.equal(
-    readyPreflightProgress.structuredContent.scan.model,
-    "gpt-5.6-terra",
-  );
-  assert.equal(
-    readyPreflightProgress.structuredContent.scan.reasoningEffort,
-    "low",
-  );
+  const savedPreflight = await testServer.callSuccessfulTool(90165, {
+    name: "get_codex_security_scan",
+    arguments: { scanId },
+  });
+  const savedScan = savedPreflight.structuredContent.scan;
+  assert.deepEqual(mappingProgress.structuredContent, {
+    scan: {
+      scanId,
+      progress: savedScan.progress,
+      userContext: appUserContext,
+    },
+  });
+  assert.equal(savedScan.model, "gpt-5.6-terra");
+  assert.equal(savedScan.reasoningEffort, "low");
   assert.deepEqual(
-    readyPreflightProgress.structuredContent.scan.progress.preflightProgress,
-    { completed: 4, total: 4 },
+    mappingProgress.structuredContent.scan.progress.preflightProgress,
+    { completed: 0, total: 0 },
   );
   assert.equal(
-    readyPreflightProgress.structuredContent.scan.userContext,
+    mappingProgress.structuredContent.scan.userContext,
     appUserContext,
   );
 
@@ -2429,8 +2486,8 @@ try {
     unit: "candidate_findings",
   });
   assert.deepEqual(updated.structuredContent.scan.progress.preflightProgress, {
-    completed: 4,
-    total: 4,
+    completed: 0,
+    total: 0,
   });
 
   await writeCompletedContract(initializedScanDir, scanId, snapshotDigest);
@@ -2563,6 +2620,46 @@ try {
       index === 1 ? null : generationActionToken,
     );
   }
+  const stageContext = (
+    id: number,
+    fields: { occurrenceId: string; requestId: string; actionToken: string },
+  ) =>
+    testServer.callTool(id, {
+      name: "get_codex_security_scan_context",
+      arguments: { scanId, ...fields },
+      _meta: { "openai/threadId": "synthetic-remediation-thread" },
+    });
+  const generationClaim = {
+    occurrenceId,
+    requestId: remediationRequestId.toUpperCase(),
+    actionToken: generationActionToken.toUpperCase(),
+  };
+  const otherFinding = await stageContext(6301, {
+    ...generationClaim,
+    occurrenceId: results.findings[1].occurrenceId,
+  });
+  assert.equal(otherFinding.result.isError, true);
+  const stage = await stageContext(6300, generationClaim);
+  assertNoError(stage);
+  assert.deepEqual(Object.keys(stage.result.structuredContent), ["scan"]);
+  const scopedScan = stage.result.structuredContent.scan;
+  assert.deepEqual(Object.keys(scopedScan).sort(), [
+    "findings",
+    "scanDir",
+    "scanId",
+    "targetPath",
+    "targetRevision",
+  ]);
+  assert.deepEqual(
+    scopedScan.findings.map(
+      (entry: { occurrenceId: string }) => entry.occurrenceId,
+    ),
+    [occurrenceId],
+  );
+  assert.equal(
+    scopedScan.findings[0].remediationState.actionClaimToken,
+    generationActionToken,
+  );
   const rejectedPendingClose = await testServer.callTool(161, {
     name: "set_codex_security_finding_triage",
     arguments: { occurrenceId, status: "closed", closeReason: "already_fixed" },
@@ -2587,15 +2684,22 @@ try {
   const generatedPatch = await testServer.callSuccessfulTool(62, {
     name: "set_codex_security_finding_remediation",
     arguments: {
-      actionToken: generationActionToken,
+      actionToken: generationActionToken.toUpperCase(),
       occurrenceId,
-      requestId: remediationRequestId,
+      requestId: remediationRequestId.toUpperCase(),
       expectedVersion: 1,
       state: "generated",
       patch: remediationPatch,
       summary: "Contain archive extraction under the output root.",
     },
   });
+  assert.deepEqual(Object.keys(generatedPatch.structuredContent), ["scan"]);
+  assert.deepEqual(
+    generatedPatch.structuredContent.scan.findings.map(
+      (entry: { occurrenceId: string }) => entry.occurrenceId,
+    ),
+    [occurrenceId],
+  );
   const generatedFinding = generatedPatch.structuredContent.scan.findings[0];
   const remediation = generatedFinding.remediationState;
   const savedPatchPath = path.join(initializedScanDir, remediation.patchPath);
@@ -2651,7 +2755,10 @@ try {
     markedApplyDelivered.structuredContent.scan.findings[0].remediationState
       .actionDeliveredAt,
   );
-  execFileSync("git", ["apply", "--no-index", savedPatchPath], { cwd: target });
+  execFileSync("git", ["apply", "--no-index", "-"], {
+    cwd: target,
+    input: await readFile(savedPatchPath),
+  });
   assert.match(
     await readFile(path.join(target, "src/a.py"), "utf8"),
     /^fixed\r?\n$/,
@@ -2716,6 +2823,16 @@ try {
     "verify",
   );
 
+  const refreshedStage = await stageContext(6322, {
+    ...generationClaim,
+    actionToken: verifyActionToken,
+  });
+  assertNoError(refreshedStage);
+  assert.equal(
+    refreshedStage.result.structuredContent.scan.findings[0].remediationState
+      .version,
+    6,
+  );
   const verifiedPatch = await testServer.callSuccessfulTool(170, {
     name: "set_codex_security_finding_remediation",
     arguments: {
@@ -2780,12 +2897,14 @@ try {
     },
   });
   const { patchDigest, patchPath } =
-    generatedLatin1.structuredContent.scan.findings[1].remediationState;
+    generatedLatin1.structuredContent.scan.findings[0].remediationState;
   const latin1PatchPath = path.join(initializedScanDir, patchPath);
   assert.equal(patchDigest, `sha256:${hash("sha256", latin1Patch)}`);
-  assert.deepEqual(await readFile(latin1PatchPath), latin1Patch);
-  execFileSync("git", ["apply", "--no-index", latin1PatchPath], {
+  const savedLatin1Patch = await readFile(latin1PatchPath);
+  assert.deepEqual(savedLatin1Patch, latin1Patch);
+  execFileSync("git", ["apply", "--no-index", "-"], {
     cwd: target,
+    input: savedLatin1Patch,
   });
   assert.match(await readFile(latin1Source, "latin1"), /^résolu\r?\n$/);
 
@@ -3016,6 +3135,19 @@ try {
     fallbackContext.structuredContent.workspace.results.handoffClaimToken,
     undefined,
   );
+  const cancelReplay = await testServer.callSuccessfulTool(22192, {
+    name: "cancel_codex_security_scan",
+    arguments: { scanId: canceledScanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.equal(
+    cancelReplay.structuredContent.workspace.results.scanId,
+    canceledScanId,
+  );
+  assert.equal(
+    cancelReplay.structuredContent.workspace.results.progress.status,
+    "canceled",
+  );
   const recoveryArtifactRead = (id: number) =>
     testServer.callTool(id, {
       name: "list_codex_security_review_items",
@@ -3053,6 +3185,11 @@ try {
       .handoffClaimToken,
     undefined,
   );
+  await testServer.callSuccessfulTool(20176, {
+    name: "get_codex_security_scan_context",
+    arguments: { scanId: fallbackScanId },
+    _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
+  });
   const afterRecovery = await recoveryArtifactRead(20175);
   assert.equal(afterRecovery.result.isError, true);
   assert.match(
@@ -3069,7 +3206,7 @@ try {
     "delivered",
   );
   const rotatedFallbackClaimToken = `recovery_${randomUUID()}`;
-  execFileSync(process.env.PYTHON?.trim() || "python3", [
+  execFileSync(fixturePython, [
     "-c",
     `import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:

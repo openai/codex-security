@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 interface RosterGap {
   id: string;
   description: string;
@@ -8,11 +6,6 @@ interface RosterGap {
 interface GapResolution {
   id: string;
   sourceRef: string;
-}
-
-export interface DependencySourceWorkCoverage {
-  generation(): number;
-  limitations(): string[];
 }
 
 interface RosterPage {
@@ -34,25 +27,12 @@ interface NewPartition {
   paths: readonly string[];
 }
 
-interface OwnedPartition {
-  partitionId: string;
-  owner: string;
-  expectedRevision: number;
-}
-
-interface Handoff {
-  recipient: string;
-  newPartitionId: string;
-  paths: readonly string[];
-}
-
 interface Roster {
   id: string;
   owner: string;
   revision: number;
   declaredComplete: boolean;
   paths: Set<string>;
-  pathListSha256: string;
   assignments: Map<string, string>;
   gaps: Map<string, string>;
   pages: {
@@ -72,7 +52,6 @@ interface Partition {
   revision: number;
   paths: Set<string>;
   examined: Set<string>;
-  handoff?: Handoff;
 }
 
 function checkedPaths(paths: readonly string[]): string[] {
@@ -100,7 +79,6 @@ function rosterSummary(roster: Roster) {
     pageCount: roster.pages.length,
     matchedFileCount: roster.paths.size,
     assignedFileCount: roster.assignments.size,
-    pathListSha256: roster.pathListSha256,
   };
 }
 
@@ -112,15 +90,6 @@ function partitionSummary(partition: Partition) {
     revision: partition.revision,
     fileCount: partition.paths.size,
     remainingFileCount: partition.paths.size - partition.examined.size,
-    ...(partition.handoff
-      ? {
-          handoff: {
-            recipient: partition.handoff.recipient,
-            newPartitionId: partition.handoff.newPartitionId,
-            fileCount: partition.handoff.paths.length,
-          },
-        }
-      : {}),
   };
 }
 
@@ -132,7 +101,6 @@ function partitionSummary(partition: Partition) {
 export function createDependencySourceWorklist() {
   const rosters = new Map<string, Roster>();
   const partitions = new Map<string, Partition>();
-  const pendingPartitionIds = new Set<string>();
   let generation = 0;
 
   function getRoster(id: string): Roster {
@@ -145,35 +113,6 @@ export function createDependencySourceWorklist() {
     const partition = partitions.get(id);
     if (!partition) throw new Error("Unknown source partition.");
     return partition;
-  }
-
-  function requireAvailablePartition(id: string) {
-    if (partitions.has(id) || pendingPartitionIds.has(id))
-      throw new Error("Source partition ID is already in use.");
-  }
-
-  function requireOwner(input: OwnedPartition) {
-    const partition = getPartition(input.partitionId);
-    if (
-      partition.owner !== input.owner ||
-      partition.revision !== input.expectedRevision
-    ) {
-      throw new Error("Source partition owner or revision changed.");
-    }
-    return partition;
-  }
-
-  function partitionPaths(partition: Partition, paths: readonly string[]) {
-    const unique = checkedPaths(paths);
-    if (unique.some((path) => !partition.paths.has(path))) {
-      throw new Error("Path is outside the source partition.");
-    }
-    return unique;
-  }
-
-  function requireNoHandoff(partition: Partition) {
-    if (partition.handoff)
-      throw new Error("Resolve the pending source handoff first.");
   }
 
   return {
@@ -228,9 +167,6 @@ export function createDependencySourceWorklist() {
         gaps,
         pages: [...(old?.pages ?? []), page],
         paths,
-        pathListSha256: createHash("sha256")
-          .update(JSON.stringify([...paths].sort()))
-          .digest("hex"),
         assignments: old?.assignments ?? new Map<string, string>(),
       };
       rosters.set(input.id, roster);
@@ -240,7 +176,8 @@ export function createDependencySourceWorklist() {
 
     createPartition(input: NewPartition) {
       const roster = getRoster(input.rosterId);
-      requireAvailablePartition(input.id);
+      if (partitions.has(input.id))
+        throw new Error("Source partition ID is already in use.");
       const paths = checkedPaths(input.paths);
       if (!paths.length || paths.some((path) => !roster.paths.has(path))) {
         throw new Error("Source partition requires paths in its roster.");
@@ -262,79 +199,18 @@ export function createDependencySourceWorklist() {
       return partitionSummary(partition);
     },
 
-    recordExamined(input: OwnedPartition & { paths: readonly string[] }) {
-      const partition = requireOwner(input);
-      requireNoHandoff(partition);
-      const paths = partitionPaths(partition, input.paths);
+    recordExamined(input: { partitionId: string; paths: readonly string[] }) {
+      const partition = getPartition(input.partitionId);
+      const paths = checkedPaths(input.paths);
+      if (paths.some((path) => !partition.paths.has(path))) {
+        throw new Error("Path is outside the source partition.");
+      }
+      const before = partition.examined.size;
       for (const path of paths) partition.examined.add(path);
-      partition.revision++;
-      generation++;
-      return partitionSummary(partition);
-    },
-
-    offerHandoff(input: OwnedPartition & Handoff) {
-      const partition = requireOwner(input);
-      requireNoHandoff(partition);
-      requireAvailablePartition(input.newPartitionId);
-      const paths = partitionPaths(partition, input.paths);
-      if (!paths.length || input.recipient === input.owner)
-        throw new Error("A source handoff requires paths and a new owner.");
-      partition.handoff = {
-        recipient: input.recipient,
-        newPartitionId: input.newPartitionId,
-        paths,
-      };
-      pendingPartitionIds.add(input.newPartitionId);
-      partition.revision++;
-      generation++;
-      return partitionSummary(partition);
-    },
-
-    acceptHandoff(input: {
-      partitionId: string;
-      recipient: string;
-      expectedRevision: number;
-    }) {
-      const old = getPartition(input.partitionId);
-      const handoff = old.handoff;
-      if (
-        !handoff ||
-        old.revision !== input.expectedRevision ||
-        handoff.recipient !== input.recipient
-      ) {
-        throw new Error("Source handoff recipient or revision changed.");
+      if (partition.examined.size !== before) {
+        partition.revision++;
+        generation++;
       }
-      const roster = getRoster(old.rosterId);
-      const next: Partition = {
-        id: handoff.newPartitionId,
-        rosterId: old.rosterId,
-        owner: handoff.recipient,
-        revision: 1,
-        paths: new Set(handoff.paths),
-        examined: new Set(
-          handoff.paths.filter((path) => old.examined.has(path)),
-        ),
-      };
-      for (const path of handoff.paths) {
-        old.paths.delete(path);
-        old.examined.delete(path);
-        roster.assignments.set(path, next.id);
-      }
-      partitions.set(next.id, next);
-      pendingPartitionIds.delete(next.id);
-      delete old.handoff;
-      old.revision++;
-      generation++;
-      return { from: partitionSummary(old), to: partitionSummary(next) };
-    },
-
-    cancelHandoff(input: OwnedPartition) {
-      const partition = requireOwner(input);
-      if (!partition.handoff) throw new Error("No pending source handoff.");
-      pendingPartitionIds.delete(partition.handoff.newPartitionId);
-      delete partition.handoff;
-      partition.revision++;
-      generation++;
       return partitionSummary(partition);
     },
 
@@ -364,12 +240,6 @@ export function createDependencySourceWorklist() {
                 " has unexamined files " +
                 JSON.stringify(remaining.sort()),
             );
-          if (partition.handoff)
-            gaps.push(
-              scope +
-                " awaits handoff acknowledgment for " +
-                JSON.stringify(partition.handoff.paths),
-            );
         }
         if (!gaps.length) continue;
         const references = [
@@ -393,10 +263,8 @@ export function createDependencySourceWorklist() {
 
     summary() {
       let remainingFileCount = 0;
-      let pendingHandoffCount = 0;
       for (const partition of partitions.values()) {
         remainingFileCount += partition.paths.size - partition.examined.size;
-        if (partition.handoff) pendingHandoffCount++;
       }
       const rosterSummaries = [...rosters.values()].map(rosterSummary);
       return {
@@ -414,7 +282,6 @@ export function createDependencySourceWorklist() {
           0,
         ),
         remainingFileCount,
-        pendingHandoffCount,
       };
     },
 
@@ -448,9 +315,6 @@ export function createDependencySourceWorklist() {
         ...partitionSummary(partition),
         paths,
         remaining: paths.filter((path) => !partition.examined.has(path)),
-        ...(partition.handoff
-          ? { handoffPaths: [...partition.handoff.paths] }
-          : {}),
       };
     },
   };

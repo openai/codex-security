@@ -4,11 +4,14 @@ import { basename, dirname, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
 import { writeCodexConfig, type JsonObject } from "./config.js";
 import { canonicalConfigPath } from "./runtime.js";
-import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
+import {
+  DEEP_SCAN_SETTINGS,
+  DEFAULT_DEEP_SCAN_SETTINGS,
+  hoursConflict,
+} from "./deep-scan-defaults.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   DEFAULT_SCAN_MODE,
-  DEEP_SCAN_SETTINGS,
   DeepScanSettingsSchema,
   ScanSettingsSchema,
   type DeepScanOptions,
@@ -24,7 +27,6 @@ export interface ResolvedDeepScanConfig {
   sources: DeepScanSources;
   source: string;
   document: TomlTable;
-  overrides: DeepScanOptions;
 }
 
 export function deepScanOptions(
@@ -54,11 +56,7 @@ export function deepScanOptions(
       );
     }
     const hours = minutes.data / 60;
-    if (
-      selected.maxTimeHours !== undefined &&
-      Math.abs(selected.maxTimeHours - hours) >
-        Number.EPSILON * Math.max(selected.maxTimeHours, hours)
-    ) {
+    if (hoursConflict(hours, selected.maxTimeHours)) {
       throw new CodexSecurityError(
         "Conflicting maxTimeMinutes / --max-time and maxTimeHours / --max-time-hours settings.",
       );
@@ -119,26 +117,23 @@ export async function resolveDeepScanConfig(
       `Unknown Codex Security Deep Scan configuration ${unknown.join(", ")} in ${source}.`,
     );
   }
-  const settings = {
-    ...DEFAULT_DEEP_SCAN_SETTINGS,
-  } as Required<DeepScanOptions>;
+  const settings: Required<DeepScanOptions> = { ...DEFAULT_DEEP_SCAN_SETTINGS };
   const sources = {} as DeepScanSources;
   for (const [name, key] of DEEP_SCAN_SETTINGS) {
-    let value = Object.hasOwn(configured, key)
-      ? configured[key]
-      : DEFAULT_DEEP_SCAN_SETTINGS[name];
-    if (name === "workers" && value === "auto")
-      value = DEFAULT_DEEP_SCAN_SETTINGS.workers;
-    if (explicit[name] !== undefined) value = explicit[name];
+    const legacy = Object.hasOwn(configured, key) ? configured[key] : undefined;
+    const override = explicit[name];
     sources[name] =
-      explicit[name] !== undefined
+      override !== undefined
         ? "override"
-        : Object.hasOwn(configured, key)
+        : legacy !== undefined
           ? "legacy"
           : "default";
+    const value = override ?? legacy ?? settings[name];
     settings[name] = requireDeepScanValue(
       name,
-      value,
+      name === "workers" && value === "auto"
+        ? DEFAULT_DEEP_SCAN_SETTINGS.workers
+        : value,
       sources[name] === "legacy" ? `${key} in ${source}` : name,
     );
   }
@@ -147,7 +142,6 @@ export async function resolveDeepScanConfig(
     sources,
     source,
     document,
-    overrides: explicit,
   };
 }
 
@@ -160,29 +154,24 @@ export async function writeDeepScanConfig(
     canonicalConfigPath(resolved.source),
     runtimeConfigPath(destination),
   ]);
-  let document = resolved.document;
-  const sameFile = source === target;
-  if (sameFile) {
-    if (Object.keys(resolved.overrides).length === 0) return;
-    document = await readDeepScanDocument(destination);
-  }
-  // An isolated runtime needs a complete snapshot. An ambient file keeps
-  // inherited defaults unset so future releases can still update them.
-  const settings = sameFile ? resolved.overrides : resolved.settings;
-  const retainAmbientSettings =
-    sameFile &&
-    DEEP_SCAN_SETTINGS.some(([name]) => settings[name] === undefined);
+  const ambient = source === target;
+  const fields = DEEP_SCAN_SETTINGS.filter(
+    ([name]) => !ambient || resolved.sources[name] === "override",
+  );
+  if (fields.length === 0) return;
+  const document = ambient
+    ? await readDeepScanDocument(destination)
+    : resolved.document;
+  // A complete snapshot replaces the Deep table. Partial ambient writes preserve other keys.
   await writeCodexConfig(destination, {
     ...document,
     ...(workerRuntime === undefined ? {} : { worker_runtime: workerRuntime }),
     deep_scan: {
-      ...(retainAmbientSettings
+      ...(fields.length < DEEP_SCAN_SETTINGS.length
         ? (document["deep_scan"] as TomlTable | undefined)
         : {}),
       ...Object.fromEntries(
-        DEEP_SCAN_SETTINGS.filter(([name]) => settings[name] !== undefined).map(
-          ([name, key]) => [key, settings[name]],
-        ),
+        fields.map(([name, key]) => [key, resolved.settings[name]]),
       ),
     },
   } as JsonObject);

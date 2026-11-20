@@ -1,234 +1,302 @@
+import { hash } from "node:crypto";
 import { closeSync, lstatSync, openSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { CodexSecurityError } from "./errors.js";
+import { canonicalJson } from "./record.js";
+import { sqliteDatabaseOpener, type RuntimeDatabase } from "./runtime.js";
 
-type Parameter = string | number | null;
-type Row = Record<string, string | number | null>;
-interface Statement {
-  run(...parameters: Parameter[]): { changes: number | bigint };
-  get(...parameters: Parameter[]): Row | null | undefined;
-  all(...parameters: Parameter[]): Row[];
-}
-interface Database {
-  prepare(sql: string): Statement;
-  exec(sql: string): void;
-  close(): void;
-}
-
-const applicationId = 0x43534558; // CSEX
+const applicationId = 0x43534941; // CSIA (Codex Security Investigation Attempt)
 const schemaVersion = 1;
+type Row = Record<string, string | number>;
+type SyncCallback<T> = (() => T) &
+  ([Extract<T, PromiseLike<unknown>>] extends [never] ? unknown : never);
 
-function preparePath(path: string, create: boolean): boolean {
-  if (path === ":memory:") return true;
-  if (create) {
-    try {
-      closeSync(openSync(path, "wx", 0o600));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
+function callSynchronously<T>(fn: () => T): T {
+  const message = "Investigation database callbacks must be synchronous.";
+  if (Object.prototype.toString.call(fn) === "[object AsyncFunction]")
+    throw new CodexSecurityError(message);
+  const result = fn();
+  if (typeof (result as { then?: unknown } | null)?.then === "function") {
+    // A JavaScript caller can return a rejected promise from an ordinary function.
+    // The synchronous error reports the contract violation and the transaction rolls back.
+    void Promise.resolve(result).catch(() => {});
+    throw new CodexSecurityError(message);
   }
-  const file = lstatSync(path);
-  if (!file.isFile())
-    throw new CodexSecurityError("Investigation state must be a regular file.");
-  return file.size === 0;
+  return result;
 }
 
-/** One investigation attempt, shared by the commands operating on it. */
+function encode(value: unknown): string {
+  const json = canonicalJson(value);
+  if (json === undefined)
+    throw new CodexSecurityError("Investigation records must be JSON values.");
+  return json;
+}
+
+export function dependencyRecordHash(value: unknown): string {
+  return hash("sha256", encode(value));
+}
+
+export interface StoredClaim<T> {
+  id: string;
+  revision: number;
+  hash: string;
+  value: T;
+}
+
+function readClaim<T>(row: Row): StoredClaim<T> {
+  return {
+    id: String(row["id"]),
+    revision: Number(row["revision"]),
+    hash: String(row["hash"]),
+    value: JSON.parse(String(row["value"])) as T,
+  };
+}
+
+/** Synchronous transactions keep compare-and-swap and retry receipts atomic across processes. */
 export class DependencyAttemptStore {
-  private readonly db: Database;
-  readonly reviewOwner = randomUUID();
-  private readonly statements = new Map<string, Statement>();
+  private readonly db: RuntimeDatabase;
+  private readonly statements = new Map<
+    string,
+    ReturnType<RuntimeDatabase["prepare"]>
+  >();
   private depth = 0;
-  private commitCallbacks: (() => void)[] = [];
-  private closed = false;
 
   constructor(path: string, { create = true }: { create?: boolean } = {}) {
-    const empty = preparePath(path, create);
-    const require = createRequire(import.meta.url);
-    const Driver = (
-      process.versions["bun"]
-        ? require("bun:sqlite").Database
-        : require("node:sqlite").DatabaseSync
-    ) as new (path: string) => Database;
-    this.db = new Driver(path);
+    let empty = true;
+    if (path !== ":memory:") {
+      path = resolve(path);
+      if (create) {
+        try {
+          closeSync(openSync(path, "wx", 0o600));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+      }
+      const file = lstatSync(path);
+      if (!file.isFile())
+        throw new CodexSecurityError(
+          "Investigation state must be a regular file.",
+        );
+      empty = file.size === 0;
+    }
+    this.db = sqliteDatabaseOpener()(path);
     try {
       this.db.exec("PRAGMA busy_timeout = 5000");
       this.transaction(() => {
-        const app = this.statement("PRAGMA application_id").get()?.[
-          "application_id"
-        ];
-        const version = this.statement("PRAGMA user_version").get()?.[
-          "user_version"
-        ];
+        const app = this.rows("PRAGMA application_id")[0]?.["application_id"];
+        const version = this.rows("PRAGMA user_version")[0]?.["user_version"];
         if (app === applicationId && version === schemaVersion) return;
         if (
           !create ||
           !empty ||
           app !== 0 ||
           version !== 0 ||
-          this.statement("SELECT 1 FROM sqlite_schema LIMIT 1").get()
-        ) {
+          this.rows("SELECT 1 FROM sqlite_schema LIMIT 1").length
+        )
           throw new CodexSecurityError(
-            "Unrecognized investigation state database or schema version.",
+            "Unrecognized investigation database or schema version.",
           );
-        }
         this.db.exec(`
-          CREATE TABLE attempt_records (
-            kind TEXT NOT NULL,
-            id TEXT NOT NULL,
-            value TEXT NOT NULL,
-            PRIMARY KEY (kind, id)
-          );
-          CREATE TABLE claim_revisions (
-            id TEXT NOT NULL,
-            revision INTEGER NOT NULL,
-            hash TEXT NOT NULL,
-            value TEXT NOT NULL,
-            PRIMARY KEY (id, revision)
-          );
-          CREATE TABLE claim_dependencies (
-            premise_id TEXT NOT NULL,
-            premise_revision INTEGER NOT NULL,
-            premise_hash TEXT NOT NULL,
-            dependent_id TEXT NOT NULL,
-            dependent_revision INTEGER NOT NULL,
-            PRIMARY KEY (premise_id, premise_revision, premise_hash, dependent_id, dependent_revision)
-          ) WITHOUT ROWID;
-          CREATE TABLE claim_review_leases (
-            id TEXT NOT NULL,
-            revision INTEGER NOT NULL,
-            hash TEXT NOT NULL,
-            pid INTEGER NOT NULL,
-            owner TEXT NOT NULL,
-            PRIMARY KEY (id, revision)
-          );
+          CREATE TABLE attempt_identity (slot INTEGER PRIMARY KEY CHECK(slot = 1), value TEXT NOT NULL);
+          CREATE TABLE records (kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (kind, id));
+          CREATE TABLE operations (id TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT NOT NULL);
+          CREATE TABLE claims (id TEXT NOT NULL, revision INTEGER NOT NULL, hash TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (id, revision));
           PRAGMA application_id = ${applicationId};
           PRAGMA user_version = ${schemaVersion};
         `);
       });
-      // Reviews are performed by live processes. Reopen may follow a process exit
-      // which left an otherwise valid pending claim without its reviewer.
-      for (const row of this.statement(
-        "SELECT DISTINCT pid FROM claim_review_leases",
-      ).all()) {
-        const pid = row["pid"] as number;
-        try {
-          process.kill(pid, 0);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
-          this.statement("DELETE FROM claim_review_leases WHERE pid = ?").run(
-            pid,
-          );
-        }
-      }
     } catch (error) {
-      this.db.close();
+      this.close();
       throw error;
     }
   }
 
-  statement(sql: string): Statement {
+  private rows(sql: string, ...parameters: (string | number)[]): Row[] {
     let statement = this.statements.get(sql);
     if (!statement) {
       statement = this.db.prepare(sql);
       this.statements.set(sql, statement);
     }
-    return statement;
+    return statement.all(...parameters) as Row[];
   }
 
-  /** A synchronous writer may compose a batch from several smaller mutations. */
-  transaction<T>(operation: () => T): T {
-    return this.withTransaction("BEGIN IMMEDIATE", operation);
-  }
-
-  read<T>(operation: () => T): T {
-    if (this.depth > 0) return operation();
-    return this.withTransaction("BEGIN", operation);
-  }
-
-  private withTransaction<T>(begin: string, operation: () => T): T {
-    const depth = this.depth;
-    const savepoint = `attempt_${depth}`;
-    this.db.exec(depth === 0 ? begin : `SAVEPOINT ${savepoint}`);
+  private withTransaction<T>(begin: string, fn: () => T): T {
+    const nested = this.depth > 0;
+    const savepoint = `attempt_${this.depth}`;
+    this.db.exec(nested ? `SAVEPOINT ${savepoint}` : begin);
     this.depth++;
-    const callbackCount = this.commitCallbacks.length;
-    let result: T;
     try {
-      result = operation();
-      this.db.exec(depth === 0 ? "COMMIT" : `RELEASE ${savepoint}`);
+      const result = fn();
+      this.db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT");
+      return result;
     } catch (error) {
-      this.commitCallbacks.length = callbackCount;
       this.db.exec(
-        depth === 0
-          ? "ROLLBACK"
-          : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`,
+        nested ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : "ROLLBACK",
       );
       throw error;
     } finally {
       this.depth--;
     }
-    if (depth === 0) {
-      const callbacks = this.commitCallbacks;
-      this.commitCallbacks = [];
-      for (const callback of callbacks) callback();
-    }
-    return result;
   }
 
-  afterCommit(callback: () => void): void {
-    if (this.depth === 0) callback();
-    else this.commitCallbacks.push(callback);
+  transaction<T>(fn: SyncCallback<T>): T {
+    return this.withTransaction("BEGIN IMMEDIATE", () => callSynchronously(fn));
+  }
+
+  read<T>(fn: SyncCallback<T>): T {
+    return this.depth
+      ? callSynchronously(fn)
+      : this.withTransaction("BEGIN", () => callSynchronously(fn));
+  }
+
+  bindIdentity(identity: unknown): void {
+    const value = encode(identity);
+    this.transaction(() => {
+      const row = this.rows(
+        "SELECT value FROM attempt_identity WHERE slot = 1",
+      )[0];
+      if (!row) this.rows("INSERT INTO attempt_identity VALUES (1, ?)", value);
+      else if (row["value"] !== value)
+        throw new CodexSecurityError(
+          "Database belongs to a different investigation attempt.",
+        );
+    });
   }
 
   get<T>(kind: string, id: string): T | undefined {
-    const row = this.statement(
-      "SELECT value FROM attempt_records WHERE kind = ? AND id = ?",
-    ).get(kind, id);
-    return row ? (JSON.parse(row["value"] as string) as T) : undefined;
+    const row = this.rows(
+      "SELECT value FROM records WHERE kind = ? AND id = ?",
+      kind,
+      id,
+    )[0];
+    return row && JSON.parse(String(row["value"]));
   }
 
   set(kind: string, id: string, value: unknown): void {
-    const json = JSON.stringify(value);
-    if (json === undefined)
-      throw new CodexSecurityError("Attempt records must be JSON values.");
-    this.statement(
-      "INSERT INTO attempt_records (kind, id, value) VALUES (?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET value = excluded.value",
-    ).run(kind, id, json);
+    this.rows(
+      "INSERT INTO records (kind, id, value) VALUES (?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET value = excluded.value",
+      kind,
+      id,
+      encode(value),
+    );
   }
 
-  values<T>(kind: string): T[] {
-    return this.statement(
-      "SELECT value FROM attempt_records WHERE kind = ? ORDER BY rowid",
-    )
-      .all(kind)
-      .map((row) => JSON.parse(row["value"] as string) as T);
+  delete(kind: string, id: string): void {
+    this.rows("DELETE FROM records WHERE kind = ? AND id = ?", kind, id);
   }
 
   keys(kind: string): string[] {
-    return this.statement(
-      "SELECT id FROM attempt_records WHERE kind = ? ORDER BY rowid",
-    )
-      .all(kind)
-      .map((row) => row["id"] as string);
+    return this.rows(
+      "SELECT id FROM records WHERE kind = ? ORDER BY rowid",
+      kind,
+    ).map((row) => String(row["id"]));
   }
 
-  size(kind: string): number {
-    return this.statement(
-      "SELECT COUNT(*) AS size FROM attempt_records WHERE kind = ?",
-    ).get(kind)!["size"] as number;
+  values<T>(kind: string): T[] {
+    return this.rows(
+      "SELECT value FROM records WHERE kind = ? ORDER BY rowid",
+      kind,
+    ).map((row) => JSON.parse(String(row["value"])));
+  }
+
+  operation<T>(
+    operationId: string,
+    command: string,
+    input: unknown,
+  ): { result: T } | undefined {
+    const receipt = this.rows(
+      "SELECT digest, result FROM operations WHERE id = ?",
+      operationId,
+    )[0];
+    if (!receipt) return;
+    if (receipt["digest"] !== dependencyRecordHash({ command, input }))
+      throw new CodexSecurityError(
+        "Operation ID already belongs to a different request.",
+      );
+    return { result: JSON.parse(String(receipt["result"])) as T };
+  }
+
+  mutate<T>(
+    operationId: string | undefined,
+    command: string,
+    input: unknown,
+    write: SyncCallback<T>,
+  ): T {
+    return this.withTransaction("BEGIN IMMEDIATE", () => {
+      if (operationId === undefined) return callSynchronously(write);
+      const receipt = this.operation<T>(operationId, command, input);
+      if (receipt) return receipt.result;
+      const digest = dependencyRecordHash({ command, input });
+      const result = callSynchronously(write);
+      this.rows(
+        "INSERT INTO operations VALUES (?, ?, ?)",
+        operationId,
+        digest,
+        encode(result),
+      );
+      return result;
+    });
+  }
+
+  claim<T>(id: string, revision?: number): StoredClaim<T> | undefined {
+    const rows =
+      revision === undefined
+        ? this.rows(
+            "SELECT * FROM claims WHERE id = ? ORDER BY revision DESC LIMIT 1",
+            id,
+          )
+        : this.rows(
+            "SELECT * FROM claims WHERE id = ? AND revision = ?",
+            id,
+            revision,
+          );
+    return rows[0] && readClaim<T>(rows[0]);
+  }
+
+  claims<T>(): StoredClaim<T>[] {
+    return this.rows(
+      "SELECT c.* FROM claims c JOIN (SELECT id, MAX(revision) AS revision FROM claims GROUP BY id) latest USING (id, revision) ORDER BY c.id",
+    ).map(readClaim<T>);
+  }
+
+  recordClaim<T>(
+    id: string,
+    value: T,
+    expectedRevision?: number,
+  ): StoredClaim<T> {
+    const json = encode(value);
+    const digest = hash("sha256", json);
+    return this.transaction(() => {
+      const current = this.claim<T>(id);
+      const revision = current?.revision ?? 0;
+      if (expectedRevision !== undefined && expectedRevision !== revision)
+        throw new CodexSecurityError(
+          `Claim ${id} expected revision ${expectedRevision}, current revision is ${revision}.`,
+        );
+      if (current?.hash === digest) return current;
+      if (current && expectedRevision === undefined)
+        throw new CodexSecurityError(
+          `Replacing claim ${id} requires its expected revision.`,
+        );
+      this.rows(
+        "INSERT INTO claims VALUES (?, ?, ?, ?)",
+        id,
+        revision + 1,
+        digest,
+        json,
+      );
+      return {
+        id,
+        revision: revision + 1,
+        hash: digest,
+        value: JSON.parse(json),
+      };
+    });
   }
 
   close(): void {
-    if (this.closed) return;
-    try {
-      this.statement("DELETE FROM claim_review_leases WHERE owner = ?").run(
-        this.reviewOwner,
-      );
-    } finally {
-      this.db.close();
-      this.statements.clear();
-      this.closed = true;
-    }
+    for (const statement of this.statements.values()) statement.finalize?.();
+    this.statements.clear();
+    this.db.close();
   }
 }

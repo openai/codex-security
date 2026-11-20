@@ -16,7 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
-import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
+import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
@@ -185,17 +185,17 @@ export async function createProfileCodex(
   profileName: string,
   requestedPermissionProfile?: string,
 ): Promise<Codex> {
-  const command =
-    options.codexPathOverride ?? resolveCodexCommand(options.env).command;
+  const { command, environment } = await nativeCodexLaunch(
+    options.codexPathOverride ?? resolveCodexCommand(options.env).command,
+    options.env,
+  );
   const client = await nativeProfileClient();
   return client.createCodexProfileClient({
     ...options,
     codexPathOverride: executablePathForSpawn(command),
     profileName,
     requestedPermissionProfile,
-    ...(options.env === undefined
-      ? {}
-      : { env: bundledCodexSdkEnvironment(command, options.env) }),
+    env: environment,
   }) as Codex;
 }
 
@@ -206,7 +206,6 @@ export async function preflightReadOnlyProfileCodex(
   providerConfig: JsonObject,
   cwd: string,
   signal?: AbortSignal,
-  allowedMcpServers?: readonly string[],
 ): Promise<{ permissionProfileId: string; configOverrides: string[] }> {
   const preflight = await nativePermissionPreflight();
   const permissionProfileId =
@@ -216,22 +215,19 @@ export async function preflightReadOnlyProfileCodex(
     `default_permissions=${JSON.stringify(permissionProfileId)}`,
     `permissions.${permissionProfileId}=${inlineToml(expectedProfile)}`,
   ];
-  const command =
-    options.codexPathOverride ?? resolveCodexCommand(options.env).command;
+  const { command, environment: env } = await nativeCodexLaunch(
+    options.codexPathOverride ?? resolveCodexCommand(options.env).command,
+    options.env,
+  );
   const client = await nativeProfileClient();
   const providers = resolveCodexProfile(providerConfig)["model_providers"];
   const definitions = isRecord(providers)
     ? (client.preflightProviderDefinitions(providers) as JsonObject)
     : {};
-  const env =
-    options.env === undefined
-      ? undefined
-      : bundledCodexSdkEnvironment(command, options.env);
   await withCodexPreflightLock(env, signal, async () => {
     await preflight.preflightDeepScanWorkerPermissionProfile({
       codexPath: executablePathForSpawn(command),
       cwd,
-      allowedMcpServers,
       configOverrides: [
         ...client.profileConfigOverrides(options.config ?? {}),
         ...configOverrides,

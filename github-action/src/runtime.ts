@@ -2,9 +2,9 @@ import { which } from '@actions/io';
 import fs from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
-import { runProcess, safeLogLines } from './process.js';
-import { cleanupRuntime, MARKER, ROOT_PREFIX } from './runtime-cleanup.js';
-export { cleanupRuntime } from './runtime-cleanup.js';
+import { runProcess, safeLogLines } from './process.ts';
+import { cleanupRuntime, MARKER, ROOT_PREFIX } from './runtime-cleanup.ts';
+export { cleanupRuntime } from './runtime-cleanup.ts';
 import runtimeManifest from '../runtime/package.json' with { type: 'json' };
 
 export const SUPPORTED_CLI_VERSION = runtimeManifest.dependencies['@openai/codex-security'];

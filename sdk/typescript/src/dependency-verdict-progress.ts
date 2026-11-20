@@ -1,8 +1,109 @@
-import type { DependencyProgressEvent } from "./dependency-progress.js";
-import { progressText as oneLine } from "./dependency-progress.js";
-import type { DependencyUse } from "./dependency-reachability.js";
+import { dependencyRecordHash } from "./dependency-attempt-store.js";
+import type { VerifiedUse } from "./dependency-reviewed-claims.js";
+import { premiseKey } from "./dependency-review-queue.js";
+import { stripVTControlCharacters } from "node:util";
+import { formatSecurityPolicyText } from "./security-policy.js";
+import type { ReviewedDependencyUse } from "./dependency-reachability.js";
+import type { DependencyProgressSink } from "./dependency-check-output.js";
 
+function oneLine(value: string): string {
+  return formatSecurityPolicyText(
+    stripVTControlCharacters(value)
+      .replaceAll(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\s]+/gu, " ")
+      .trim(),
+  );
+}
+
+type DependencyUse = Pick<
+  ReviewedDependencyUse,
+  "location" | "component" | "version" | "verdict" | "reason" | "evidence"
+> &
+  Partial<
+    Pick<
+      ReviewedDependencyUse,
+      "proof" | "place" | "observations" | "deployment"
+    >
+  >;
 type CallSite = { path: string; line: number };
+const callLocation = (s: CallSite) => s.path + ":" + s.line;
+const covers = (
+  range: { path: string; startLine: number; endLine: number },
+  s: CallSite,
+) =>
+  range.path === s.path && range.startLine <= s.line && s.line <= range.endLine;
+
+export function reviewedDependencyCallSite(
+  use: DependencyUse,
+  candidates: readonly CallSite[],
+): CallSite | undefined {
+  // Prefer an explicitly cited caller over the inner sink shared by wrappers.
+  const anchors = new Map<string, CallSite>();
+  for (const [path, ranges] of Map.groupBy(use.evidence, ({ path }) => path)) {
+    const prefix = `${path}:`;
+    for (
+      let index = use.location.indexOf(prefix);
+      index >= 0;
+      index = use.location.indexOf(prefix, index + prefix.length)
+    ) {
+      if (index > 0 && /[^\s(\[]/u.test(use.location[index - 1]!)) continue;
+      const match = /^(\d+)(?=$|[\s),;\]])/u.exec(
+        use.location.slice(index + prefix.length),
+      );
+      const site = { path, line: Number(match?.[1]) };
+      if (ranges.some((range) => covers(range, site)))
+        anchors.set(callLocation(site), site);
+    }
+  }
+  const sink = use.proof?.sink?.callSite;
+  if (anchors.size > 1 && sink) anchors.delete(callLocation(sink));
+  if (anchors.size) {
+    return anchors.size === 1 ? anchors.values().next().value : undefined;
+  }
+  const callers = new Map<string, CallSite>();
+  for (const { path, line } of candidates) {
+    const site = { path, line };
+    if (sink && callLocation(site) === callLocation(sink)) continue;
+    if (use.evidence.some((range) => covers(range, site)))
+      callers.set(callLocation(site), site);
+  }
+  return callers.size === 1 ? callers.values().next().value : undefined;
+}
+
+/** Compare only approvals grounded in the same exclusion or independently approved premise. */
+export function sharedVerdictEvidence(
+  use: VerifiedUse,
+  callSite: CallSite | undefined,
+  evidenceKeys: readonly string[],
+) {
+  if (use.verdict !== "ruled_out" || !callSite) return [];
+  const keys = new Set(evidenceKeys);
+  const exclusions = use.proof.conditions
+    .filter((condition) => condition.status === "ruled_out")
+    .flatMap((condition) => condition.citations);
+  const shared =
+    use.evidence.some(
+      (ref) =>
+        keys.has(dependencyRecordHash(ref)) &&
+        !covers(ref, callSite) &&
+        exclusions.some((site) => covers(ref, site)),
+    ) || use.premises?.some((ref) => keys.has(premiseKey(ref)));
+  if (!shared) return [];
+  const protectedSites = use.proof.conditions.flatMap(
+    (condition) => condition.citations,
+  );
+  if (use.proof.sink) protectedSites.push(use.proof.sink.callSite);
+  for (const source of use.evidence) {
+    if (
+      source.startLine === source.endLine &&
+      covers(source, callSite) &&
+      !protectedSites.some((site) => covers(source, site)) &&
+      keys.delete(dependencyRecordHash(source))
+    )
+      keys.add("caller-line:" + dependencyRecordHash(source.excerpt));
+  }
+  return [...keys];
+}
+
 export interface DependencyVerdictUpdate {
   use: DependencyUse;
   callSite: CallSite | undefined;
@@ -67,7 +168,7 @@ interface Group {
 
 export function createDependencyVerdictProgress(
   subject: string,
-  emit: (event: DependencyProgressEvent) => void,
+  emit: DependencyProgressSink | undefined,
 ) {
   // Multiple submitted IDs can name one call and selected place. Keep their
   // latest accepted opinions so withdrawing an alias doesn't erase another.
@@ -84,9 +185,7 @@ export function createDependencyVerdictProgress(
     group?: Group,
     previousVerdict?: Entry["verdict"],
   ) {
-    emit({
-      type: "reviewed",
-      subject,
+    emit?.("reviewed", subject, {
       location: entry.caller,
       locationKind: entry.locationKind,
       ...(entry.scope && { scope: entry.scope }),
@@ -119,9 +218,7 @@ export function createDependencyVerdictProgress(
         count.assessments === group.lastCount?.assessments
       )
         continue;
-      emit({
-        type: "reviewed_group",
-        subject,
+      emit?.("reviewed_group", subject, {
         location: first.caller,
         verdict: first.verdict,
         reason: first.reason,

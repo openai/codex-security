@@ -4,34 +4,23 @@ import {
   mkdtemp,
   readdir,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import {
-  dependencies as cliDependencies,
-  FakeSignals,
-} from "./cli-fixtures.js";
+import { readLocalExternalFindings } from "../src/external-findings-local.js";
+import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { opengrepJson } from "./support/opengrep-import-fixtures.js";
 import {
   inspectorReport,
   inspectorRepositoryUrl,
 } from "./support/inspector-import-fixtures.js";
-
-const dependencies: typeof cliDependencies = (options = {}) => {
-  const result = cliDependencies(options);
-  return {
-    ...result,
-    environment: {
-      ...result.environment,
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
-    },
-  };
-};
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -140,6 +129,9 @@ test.each(["local", "cloud"])(
     await writeFile(f.file, JSON.stringify({ ...input, errors: [], paths }));
     const clean = createCliTest(main);
     expect(await clean.runCli(command, f.deps)).toBe(0);
+    expect(clean.stderr.text()).toBe(
+      "codex-security: warning: Use --source-repository-url only after verifying that every finding belongs to the repository you specify.\n",
+    );
     expect(JSON.parse(clean.stdout.text())).toMatchObject({
       read: 0,
       ready: 0,
@@ -187,7 +179,7 @@ test("local preview and declined confirmation do not create database state or us
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question, defaultValue) => {
-          expect(question).toContain("Store these 1 findings locally");
+          expect(question).toBe("Store this finding locally?");
           expect(defaultValue).toBe(false);
           expect(declined.stderr.text()).toContain(f.repository);
           expect(declined.stderr.text()).toContain(f.record.id);
@@ -218,6 +210,14 @@ test("CLI imports a vendor report, reads local evidence, and updates the same so
     assessment: { state: "not_assessed" },
     evidence: { severity: "high", source_data: f.record },
   });
+  const terminal = createCliTest(main, { stdout: true });
+  expect(
+    await terminal.runCli([...f.command.slice(0, -2), "--yes"], f.deps),
+  ).toBe(0);
+  expect(terminal.stdout.text()).toContain(
+    `Stored evidence${process.platform === "win32" ? " (PowerShell)" : ""}: codex-security findings imported '${f.repository}'`,
+  );
+
   const repeated = createCliTest(main);
   expect(await repeated.runCli([...f.command, "--yes"], f.deps)).toBe(0);
   expect(JSON.parse(repeated.stdout.text()).counts).toEqual({
@@ -379,6 +379,17 @@ test("CLI imports OpenGrep evidence locally without assessing it", async () => {
       },
     },
   });
+  const terminal = createCliTest(main, { stdout: true });
+  expect(
+    await terminal.runCli(["findings", "imported", "example project"], f.deps),
+  ).toBe(0);
+  const display = terminal.stdout.text();
+  expect(display).toContain(`[unknown] ${findings[0].evidence.title}`);
+  expect(display).toContain("Message: Synthetic finding");
+  expect(display).toContain("Scanner: OpenGrep");
+  expect(display).toContain(
+    `Source: semgrep (example/opengrep)  Finding ID: ${findings[0].sourceFindingId}`,
+  );
 });
 
 test("local dry runs and imports reject an entirely excluded report before opening the workbench", async () => {
@@ -415,7 +426,9 @@ test("local import confirms exclusions and returns partial status after storing 
       externalPublicationPrompt: {
         isInteractive: () => true,
         confirm: async (question) => {
-          expect(question).toContain("skip 1 excluded records");
+          expect(question).toBe(
+            "Store this finding locally and skip 1 excluded record?",
+          );
           expect(cli.stderr.text()).toContain("Excluded: 1");
           return true;
         },
@@ -475,13 +488,91 @@ test.each(["SIGINT", "SIGTERM"] as const)(
   },
 );
 
+test.each([true, false])(
+  "imported readback summarizes only reported package versions on a terminal (installed version: %s)",
+  async (hasInstalledVersion) => {
+    const repository = resolve("workspace", "project");
+    const deps = dependencies({ currentDirectory: repository });
+    const pkg = {
+      name: "example-package",
+      vulnerable_version_range: "<2.0.0",
+      ...(hasInstalledVersion
+        ? { installed_version: "1.5.0", fixed_versions: ["2.0.0", "2.1.0"] }
+        : {}),
+    };
+    const reference = "https://example.test/alerts/42";
+    const fileUrl = hasInstalledVersion
+      ? "https://example.test/project/blob/test-fixture/src/app.ts"
+      : reference;
+    deps.readLocalExternalFindings = async () => ({
+      repository,
+      findings: [
+        {
+          repository,
+          id: "external-1",
+          version: 1,
+          provider: "github",
+          sourceKey: "example/project",
+          sourceFindingId: "42",
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          assessment: { state: "not_assessed" },
+          evidence: {
+            title: "Dependency\nissue",
+            severity: "high",
+            packages: [pkg],
+            locations: hasInstalledVersion
+              ? [{ path: "src/app.ts", line: 12 }]
+              : [],
+            url: reference,
+            details: { kind: "advisory", file_url: fileUrl },
+            source_data: { vendorField: "raw details" },
+          },
+        },
+      ],
+    });
+    const args = ["findings", "imported"];
+    const interactive = createCliTest(main, { stdout: true });
+    expect(await interactive.runCli(args, deps)).toBe(0);
+    const text = interactive.stdout.text();
+    expect(text).toContain("[high] Dependency issue");
+    expect(text).toContain("github (example/project)  Finding ID: 42");
+    const packageLine = text
+      .split("\n")
+      .find((line) => line.includes("Package:"));
+    expect(packageLine?.trim()).toBe(
+      hasInstalledVersion
+        ? "Package: example-package  Installed: 1.5.0  Affected: <2.0.0  Fixed: 2.0.0, 2.1.0"
+        : "Package: example-package  Affected: <2.0.0",
+    );
+    expect(text).toContain(`Reference: ${reference}`);
+    if (hasInstalledVersion) {
+      expect(text).toContain("Location: src/app.ts:12");
+      expect(text).toContain(`File: ${fileUrl}`);
+    } else {
+      expect(text).not.toContain("Location:");
+      expect(text).not.toContain("File:");
+    }
+    expect(text).not.toContain("vendorField");
+
+    const explicit = createCliTest(main, { stdout: true });
+    expect(await explicit.runCli([...args, "--format", "json"], deps)).toBe(0);
+    const stored = JSON.parse(explicit.stdout.text()).findings[0].evidence;
+    expect(stored.packages).toEqual([pkg]);
+    expect(stored.source_data.vendorField).toBe("raw details");
+    const piped = createCliTest(main, { stdout: false });
+    expect(await piped.runCli(args, deps)).toBe(0);
+    expect(piped.stdout.text()).toContain("vendorField");
+  },
+);
+
 test("imported readback resolves its repository argument and supports structured output", async () => {
   const deps = dependencies({ currentDirectory: resolve("workspace") });
-  deps.listLocalExternalFindings = async ({ repository }, settings) => {
+  deps.readLocalExternalFindings = async ({ repository }, settings) => {
     expect(repository).toBe(resolve("workspace", "project"));
     expect(settings?.environment).toBe(deps.environment);
     expect(settings?.signal?.aborted).toBe(false);
-    return [];
+    return { repository: resolve("selected project"), findings: [] };
   };
   const cli = createCliTest(main);
   expect(
@@ -491,10 +582,40 @@ test("imported readback resolves its repository argument and supports structured
     ),
   ).toBe(0);
   expect(JSON.parse(cli.stdout.text())).toEqual({
-    repository: resolve("workspace", "project"),
+    repository: resolve("selected project"),
     findings: [],
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "imported readback labels the repository used for an empty query after an alias changes",
+  async () => {
+    const f = await fixture();
+    const other = join(f.root, "other");
+    for (const repo of [f.repository, other])
+      await mkdir(join(repo, "child"), { recursive: true });
+    const entry = join(f.root, "entry");
+    await mkdir(entry);
+    const link = join(entry, "link");
+    const replacement = join(entry, "replacement");
+    await symlink(join(f.repository, "child"), link);
+    await symlink(join(other, "child"), replacement);
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(["findings", "imported", `${link}${sep}..`, "--json"], {
+        ...f.deps,
+        readLocalExternalFindings: async (selection, settings) => {
+          await rename(replacement, link);
+          return readLocalExternalFindings(selection, settings);
+        },
+      }),
+    ).toBe(0);
+    expect(JSON.parse(cli.stdout.text())).toEqual({
+      repository: other,
+      findings: [],
+    });
+  },
+);
 
 for (const format of ["json", "jsonl"] as const) {
   test.each(["SIGINT", "SIGTERM"] as const)(
@@ -505,7 +626,7 @@ for (const format of ["json", "jsonl"] as const) {
         signals,
         currentDirectory: resolve("workspace"),
       });
-      deps.listLocalExternalFindings = async (_selection, settings) => {
+      deps.readLocalExternalFindings = async (_selection, settings) => {
         expect(settings?.signal).toBeDefined();
         signals.emit(signalName);
         settings!.signal!.throwIfAborted();
@@ -528,6 +649,38 @@ for (const format of ["json", "jsonl"] as const) {
     },
   );
 }
+
+test("imported readback honors an interruption before resolving the repository", async () => {
+  const signals = new FakeSignals();
+  const deps = dependencies({
+    currentDirectory: resolve("workspace"),
+    signals,
+  });
+  deps.addSignalListener = (signal, listener) => {
+    signals.add(signal, listener);
+    if (signal === "SIGINT") listener();
+  };
+  deps.readLocalExternalFindings = async () => {
+    throw new Error("Interrupted readback reached the workbench");
+  };
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [
+        "findings",
+        "imported",
+        "missing/../repo",
+        "--format",
+        "json",
+        "--full-output",
+      ],
+      deps,
+    ),
+  ).toBe(130);
+  expect(JSON.parse(cli.stdout.text()).error.message).toBe("SIGINT");
+  expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+});
 
 test("finding import requires an explicit destination and advertises local repository paths", async () => {
   const cli = createCliTest(main);

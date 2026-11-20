@@ -731,7 +731,10 @@ export function localProvider(
                 .split("\n")
                 .some(
                   (line) =>
-                    line.includes("Bad file descriptor (os error 9)") &&
+                    (line.includes("Bad file descriptor (os error 9)") ||
+                      line.includes(
+                        "No such file or directory (os error 2)",
+                      )) &&
                     names.some((name) => line.includes(name + ":")),
                 )
             )
