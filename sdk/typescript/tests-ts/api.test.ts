@@ -3681,6 +3681,13 @@ if __name__ == "__main__":
 
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
+      prepareRuntime: async () => ({
+        ...preparedRuntime(codexHome),
+        environment: {
+          CODEX_SECURITY_POLICY_BASE: "a".repeat(40),
+          Codex_Security_Policy_Base: "b".repeat(40),
+        },
+      }),
       runWorkbench: async (
         _options: unknown,
         args: readonly string[],
@@ -3706,6 +3713,9 @@ if __name__ == "__main__":
     await expect(client.run(repository)).rejects.toThrow(
       "target contract captured",
     );
+    const env = createCodex.mock.lastCall?.[0]?.env;
+    expect(env).not.toHaveProperty("CODEX_SECURITY_POLICY_BASE");
+    expect(env).not.toHaveProperty("Codex_Security_Policy_Base");
     expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
       CODEX_SECURITY_TARGET_KIND: "git_worktree",
       CODEX_SECURITY_TARGET_REVISION: "cafebabe",

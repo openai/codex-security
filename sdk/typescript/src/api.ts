@@ -1086,7 +1086,7 @@ export class CodexSecurity {
       );
       const git = await inspectTrustedExecutable(
         "git",
-        withoutProviderKey(
+        withoutEnvironmentKey(
           selectedScanEnvironment(
             runtime.environment,
             options.auth,
@@ -2418,7 +2418,7 @@ export class CodexSecurity {
       } = session;
       let git: InspectedExecutable = {
         executable: null,
-        environment: withoutProviderKey(
+        environment: withoutEnvironmentKey(
           selectedScanEnvironment(
             runtime.environment,
             options.auth,
@@ -4819,6 +4819,10 @@ export class CodexSecurity {
       pluginVersion: session.runtime.plugin.version,
       providerFamily: requestContext.metadata["codex_security_provider"],
     });
+    const inheritedEnvironment = withoutEnvironmentKey(
+      session.runtime.environment,
+      "CODEX_SECURITY_POLICY_BASE",
+    );
     const pluginPaths = {
       ...runtimePaths,
       [SDK_NODE_SEARCH_PATH]:
@@ -4830,7 +4834,7 @@ export class CodexSecurity {
     if (hosted !== undefined) {
       const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
       const environment = definedEnvironment({
-        ...environmentWithGit(session.runtime.environment, git),
+        ...environmentWithGit(inheritedEnvironment, git),
         ...pluginPaths,
       });
       const model = scanModelConfiguration(session.effectiveConfig);
@@ -4952,8 +4956,8 @@ export class CodexSecurity {
           withoutCodexHome(
             selectedScanEnvironment(
               commandAuth
-                ? withoutOpenAiApiKeys(runtime.environment)
-                : runtime.environment,
+                ? withoutOpenAiApiKeys(inheritedEnvironment)
+                : inheritedEnvironment,
               auth,
               modelProvider,
               providerEnvKey,
@@ -5324,7 +5328,7 @@ export class CodexSecurity {
         );
       }
       notifyObserver(options, "onAuthentication")(authentication);
-      const helperEnvironment = withoutProviderKey(
+      const helperEnvironment = withoutEnvironmentKey(
         scanEnvironment,
         providerEnvKey,
       );
@@ -6994,8 +6998,7 @@ export async function runtimeScanAuthentication(
   return authentication;
 }
 
-/** Local helpers do not authenticate model requests. */
-function withoutProviderKey(
+function withoutEnvironmentKey(
   environment: ProcessEnvironment,
   key: string | undefined,
 ): ProcessEnvironment {
