@@ -1317,6 +1317,21 @@ def _read_rollout_usage(
     return usage
 
 
+class _TurnUsage:
+    """Keep a turn’s counters provisional until all of its response receipts arrive."""
+
+    def __init__(self) -> None:
+        self.model: str | None = None
+        self.total = _empty_token_usage()
+        self.models: dict[str | None, dict[str, int]] = {}
+        self.counters = _empty_token_usage()
+        self.response_usage = _empty_token_usage()
+        self.has_receipts = False
+        self.has_turn_total = False
+        self.ambiguous_cache = False
+        self.ambiguous_model = False
+
+
 def _read_rollout_usage_with_extent(
     session: RolloutSession,
     *,
@@ -1330,31 +1345,24 @@ def _read_rollout_usage_with_extent(
 ) -> tuple[RolloutUsage, int]:
     parsed_events = 0
     result = RolloutUsage(_empty_token_usage(), set(), None, {})
-    total = _empty_token_usage()
-    counter_total = _empty_token_usage()
+    turn = _TurnUsage()
+    turns: dict[str | None, _TurnUsage] = {None: turn}
     warnings = result.warnings
     previous = _empty_token_usage()
     after_compaction = False
     previous_cache_writes_reported = True
     prefix_unclassified = 0
     prefix_missing_cache: set[str] = set()
-    ambiguous_legacy_cache = False
     boundary_reached = False
     session_started_at: datetime | None = None
-    completed_legacy_capacity = 0
-    completed_legacy_models: set[str | None] = set()
     current_turn_id: str | None = None
     current_model: str | None = None
     response_ids: set[str] = set()
-    response_usage_observed = False
     response_tokens = 0
     expected_response_tokens = 0
     response_epoch_owned = False
-    local_models: dict[str | None, dict[str, int]] = {}
     finished_total = _empty_token_usage()
     finished_models: dict[str | None, dict[str, int]] = {}
-    observed_response_usage = _empty_token_usage()
-    native_receipts = False
     completed_turn_measured = False
     direct_control_session = False
     started_turns: set[str] = set()
@@ -1370,51 +1378,6 @@ def _read_rollout_usage_with_extent(
             and timestamp > completed_at
             and (completed_turn_id is None or turn_id != completed_turn_id)
         )
-
-    def finish_turn() -> None:
-        nonlocal total, counter_total, local_models, response_usage_observed, native_receipts
-        nonlocal ambiguous_legacy_cache, completed_legacy_capacity
-        if not response_usage_observed:
-            completed_legacy_capacity += _uncached_input(total)
-            completed_legacy_models.update(
-                model for model, usage in local_models.items() if _uncached_input(usage) > 0
-            )
-            if ambiguous_legacy_cache:
-                warnings.add("token_breakdown_unavailable")
-        ambiguous_legacy_cache = False
-        # Turn receipts supersede overlapping legacy counters. Older receipts
-        # lack a turn total, so retain the measured counter remainder as unknown-model usage.
-        remainder = (
-            {key: max(0, counter_total[key] - total[key]) for key in TOKEN_FIELDS.values()}
-            if not native_receipts
-            else _empty_token_usage()
-        )
-        remainder["cachedInputTokens"] = min(
-            remainder["cachedInputTokens"], remainder["inputTokens"]
-        )
-        remainder["cacheWriteInputTokens"] = min(
-            remainder["cacheWriteInputTokens"],
-            remainder["inputTokens"] - remainder["cachedInputTokens"],
-        )
-        remainder["reasoningOutputTokens"] = min(
-            remainder["reasoningOutputTokens"], remainder["outputTokens"]
-        )
-        remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
-        if remainder["totalTokens"] > 0:
-            if response_usage_observed:
-                warnings.add("token_receipts_incomplete")
-            _add_token_usage(total, remainder)
-            _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
-        if response_usage_observed:
-            warnings.discard("token_counter_regressed")
-        _add_token_usage(finished_total, total)
-        for model, usage in local_models.items():
-            _add_token_usage(finished_models.setdefault(model, _empty_token_usage()), usage)
-        total = _empty_token_usage()
-        counter_total = _empty_token_usage()
-        local_models = {}
-        response_usage_observed = False
-        native_receipts = False
 
     with _rollout_lines(session.path, verify_end=True) as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -1511,10 +1474,9 @@ def _read_rollout_usage_with_extent(
                     and next_turn_id != completed_turn_id
                 ):
                     break
-                if next_turn_id != current_turn_id:
-                    finish_turn()
-                    observed_response_usage = _empty_token_usage()
-                current_turn_id = next_turn_id
+                current_turn_id = next_turn_id if isinstance(next_turn_id, str) else None
+                turn = turns.setdefault(current_turn_id, _TurnUsage())
+                turn.model = current_model
                 if event.get("type") == "event_msg" and (
                     owner_turn_id is None or current_turn_id == owner_turn_id
                 ):
@@ -1569,7 +1531,7 @@ def _read_rollout_usage_with_extent(
                     and not past_scan_end(timestamp, current_turn_id)
                     and (owner_turn_id is None or current_turn_id == owner_turn_id)
                     and "compaction_response_id" not in payload
-                    and not response_usage_observed
+                    and not turn.has_receipts
                 ):
                     warnings.add("compaction_usage_unavailable")
                 # Later receipt counters describe a new compaction epoch and cannot
@@ -1600,8 +1562,15 @@ def _read_rollout_usage_with_extent(
                 receipt_turn_id = payload.get("turn_id")
                 if past_scan_end(timestamp, receipt_turn_id):
                     continue
+                if not isinstance(receipt_turn_id, str):
+                    receipt_turn_id = current_turn_id
                 if current_turn_id is None:
                     current_turn_id = receipt_turn_id
+                    if current_turn_id not in turns:
+                        # The receipt identifies the initial counters from an unlabelled turn.
+                        turns[current_turn_id] = turns.pop(None)
+                    turn = turns[current_turn_id]
+                    turn.model = current_model
                     if isinstance(current_turn_id, str) and (
                         owner_turn_id is None or current_turn_id == owner_turn_id
                     ):
@@ -1609,8 +1578,9 @@ def _read_rollout_usage_with_extent(
                 if response_id in response_ids:
                     continue
                 response_ids.add(response_id)
+                receipt_turn = turns.setdefault(receipt_turn_id, _TurnUsage())
                 turn_usage = _usage_counts(payload.get("turn_token_usage"))
-                _add_token_usage(observed_response_usage, usage)
+                _add_token_usage(receipt_turn.response_usage, usage)
                 cumulative = _usage_counts(payload.get("thread_token_usage"))
                 if cumulative is not None and turn_usage is None:
                     expected_response_tokens = max(
@@ -1621,7 +1591,7 @@ def _read_rollout_usage_with_extent(
                     measured_turns.add(receipt_turn_id)
                 if timestamp < started_at:
                     if turn_usage is not None:
-                        observed_response_usage = turn_usage
+                        receipt_turn.response_usage = turn_usage
                     continue
                 if (
                     owner_turn_id is not None
@@ -1629,9 +1599,9 @@ def _read_rollout_usage_with_extent(
                 ):
                     continue
                 if turn_usage is not None:
-                    native_receipts = True
+                    receipt_turn.has_turn_total = True
                     if any(
-                        turn_usage[key] > observed_response_usage[key]
+                        turn_usage[key] > receipt_turn.response_usage[key]
                         for key in TOKEN_FIELDS.values()
                     ):
                         warnings.add("token_record_incomplete")
@@ -1639,16 +1609,16 @@ def _read_rollout_usage_with_extent(
                     response_epoch_owned = True
                 if completed_turn_id is not None and receipt_turn_id == completed_turn_id:
                     completed_turn_measured = True
-                if not response_usage_observed:
-                    response_usage_observed = True
-                    total = _empty_token_usage()
-                    local_models = {}
+                if not receipt_turn.has_receipts:
+                    receipt_turn.has_receipts = True
+                    receipt_turn.total = _empty_token_usage()
+                    receipt_turn.models = {}
                 result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
-                model = payload.get("model", current_model)
+                model = payload.get("model", receipt_turn.model)
                 if not isinstance(model, str):
                     model = None
-                _add_token_usage(total, usage)
-                _add_token_usage(local_models.setdefault(model, _empty_token_usage()), usage)
+                _add_token_usage(receipt_turn.total, usage)
+                _add_token_usage(receipt_turn.models.setdefault(model, _empty_token_usage()), usage)
                 if (
                     resume_owner
                     and receipt_turn_id == current_turn_id
@@ -1657,7 +1627,7 @@ def _read_rollout_usage_with_extent(
                 ):
                     # Matching thread totals account for turns left open or failed before resume.
                     if cumulative is not None and all(
-                        cumulative[key] == finished_total[key] + total[key]
+                        cumulative[key] == sum(part.total[key] for part in turns.values())
                         for key in TOKEN_FIELDS.values()
                     ):
                         open_turns.intersection_update({current_turn_id})
@@ -1749,21 +1719,31 @@ def _read_rollout_usage_with_extent(
                 completed_turn_measured = True
             result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
             delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
-            if not response_usage_observed:
-                local_models.setdefault(current_model, _empty_token_usage())
+            if not turn.has_receipts:
+                turn.models.setdefault(current_model, _empty_token_usage())
             if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
             cache_write_capacity = (
-                _uncached_input(total) + delta["inputTokens"]
+                _uncached_input(turn.total) + delta["inputTokens"]
                 if refines_classification
                 else delta["inputTokens"]
             )
             # Late cumulative cache details can classify an earlier legacy turn.
-            completed_capacity = (
-                completed_legacy_capacity
-                if refines_classification and not response_usage_observed
-                else 0
-            )
+            previous_parts = []
+            if (
+                refines_classification
+                and not turn.has_receipts
+                and delta["cacheWriteInputTokens"] + delta["cachedInputTokens"]
+                > cache_write_capacity
+            ):
+                previous_parts = [
+                    (prior, model, usage)
+                    for prior in turns.values()
+                    if prior is not turn and not prior.has_receipts
+                    for model, usage in prior.models.items()
+                    if _uncached_input(usage)
+                ]
+            completed_capacity = sum(_uncached_input(usage) for _, _, usage in previous_parts)
             if (
                 prefix_unclassified > 0
                 and refines_classification
@@ -1776,34 +1756,68 @@ def _read_rollout_usage_with_extent(
                 )
             ):
                 # The newly classified tokens could have occurred before this scan.
-                ambiguous_legacy_cache = True
+                turn.ambiguous_cache = True
             for key in ("cacheWriteInputTokens", "cachedInputTokens"):
                 current = min(delta[key], cache_write_capacity)
                 completed = min(delta[key] - current, completed_capacity)
-                if completed and ambiguous_legacy_cache:
+                if completed and turn.ambiguous_cache:
                     warnings.add("token_breakdown_unavailable")
                 delta[key] = current
                 cache_write_capacity -= current
                 completed_capacity -= completed
                 if completed:
-                    # Only one eligible legacy model makes a later cache correction attributable.
-                    if len(completed_legacy_models) == 1:
-                        finished_models[next(iter(completed_legacy_models))][key] += completed
-                    completed_legacy_capacity -= completed
-                    if not completed_legacy_capacity:
-                        completed_legacy_models.clear()
-                    finished_total[key] += completed
+                    if completed_capacity and len({model for _, model, _ in previous_parts}) > 1:
+                        for prior, _, _ in previous_parts:
+                            prior.ambiguous_model = True
+                    for prior, _, usage in previous_parts:
+                        classified = min(_uncached_input(usage), completed)
+                        usage[key] += classified
+                        prior.total[key] += classified
+                        completed -= classified
+                        if completed == 0:
+                            break
             delta["reasoningOutputTokens"] = min(
                 delta["reasoningOutputTokens"], delta["outputTokens"]
             )
-            _add_token_usage(counter_total, delta)
-            if not response_usage_observed:
-                _add_token_usage(total, delta)
-                _add_token_usage(
-                    local_models.setdefault(current_model, _empty_token_usage()), delta
-                )
+            _add_token_usage(turn.counters, delta)
+            if not turn.has_receipts:
+                _add_token_usage(turn.total, delta)
+                _add_token_usage(turn.models.setdefault(current_model, _empty_token_usage()), delta)
 
-    finish_turn()
+    for turn in turns.values():
+        if turn.ambiguous_cache and not turn.has_receipts:
+            warnings.add("token_breakdown_unavailable")
+        # Turn receipts supersede overlapping legacy counters. Older receipts
+        # lack a turn total, so retain the measured counter remainder as unknown-model usage.
+        remainder = (
+            {key: max(0, turn.counters[key] - turn.total[key]) for key in TOKEN_FIELDS.values()}
+            if not turn.has_turn_total
+            else _empty_token_usage()
+        )
+        remainder["cachedInputTokens"] = min(
+            remainder["cachedInputTokens"], remainder["inputTokens"]
+        )
+        remainder["cacheWriteInputTokens"] = min(
+            remainder["cacheWriteInputTokens"],
+            remainder["inputTokens"] - remainder["cachedInputTokens"],
+        )
+        remainder["reasoningOutputTokens"] = min(
+            remainder["reasoningOutputTokens"], remainder["outputTokens"]
+        )
+        remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
+        if remainder["totalTokens"] > 0:
+            if turn.has_receipts:
+                warnings.add("token_receipts_incomplete")
+            _add_token_usage(turn.total, remainder)
+            _add_token_usage(turn.models.setdefault(None, _empty_token_usage()), remainder)
+        if turn.has_receipts:
+            warnings.discard("token_counter_regressed")
+        _add_token_usage(finished_total, turn.total)
+        for model, usage in turn.models.items():
+            _add_token_usage(finished_models.setdefault(model, _empty_token_usage()), usage)
+
+    if any(turn.ambiguous_model and not turn.has_receipts for turn in turns.values()):
+        finished_models = {None: finished_total}
 
     if response_epoch_owned and expected_response_tokens > response_tokens:
         warnings.add("token_receipts_incomplete")
