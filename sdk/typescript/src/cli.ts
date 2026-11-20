@@ -13250,34 +13250,21 @@ async function bindSshConfiguration(
     const words = literalTransportWords(command);
     if (!words?.[0] || (process.platform === "win32" && command.includes("\\")))
       throw unsupportedSshCommand();
-    const [program, first, ...rest] = words;
-    // A nested SSH client selects a new configuration. Interpreter options
-    // and dispatchers can select a second program by name or inline code.
-    if (
-      /^(?:ssh|eval|source|\.)$/iu.test(
-        basename(program!).replace(/\.exe$/iu, ""),
-      )
-    )
+    const launcher = basename(words[0]).replace(/\.exe$/iu, "");
+    // Nested clients and shell dispatch can select another configuration or program.
+    if (/^(?:ssh|eval|source|\.)$/iu.test(launcher))
       throw unsupportedSshCommand();
+    const netcat = /^(?:nc|ncat|netcat)$/iu.test(launcher);
     const stockProxy =
       /^\/usr\/(?:lib|libexec)\/systemd\/systemd-ssh-proxy (?:%h|unix\/run\/ssh-unix-local\/socket) %p$/u.test(
         command,
       ) ||
       command === "/usr/bin/sss_ssh_knownhostsproxy -p %p %h" ||
       command === "/usr/bin/sss_ssh_knownhosts %H";
-    if (stockProxy) words.length = 1;
-    else if (first !== undefined) {
-      const netcat = /^(?:nc|ncat|netcat)(?:\.exe)?$/iu.test(
-        basename(program!),
-      );
-      if (
-        (!netcat && !first.includes("/")) ||
-        first.startsWith("-") ||
-        rest.some((arg) => arg.startsWith("-"))
-      )
-        throw unsupportedSshCommand();
-    }
     for (const [index, word] of words.entries()) {
+      if (index && stockProxy) break;
+      if ((index && word.startsWith("-")) || word.split("/").includes(".."))
+        throw unsupportedSshCommand();
       if (index === 0 && /^[a-z\d_.+-]+$/iu.test(word)) {
         invocation.launchers.add(word);
         continue;
@@ -13286,7 +13273,9 @@ async function bindSshConfiguration(
       // A command or file path must have a stable spelling before ssh expands it.
       if (process.platform === "win32" && /^[a-z]:(?!\/)/iu.test(word))
         throw unsupportedSshCommand();
-      if (index && /^(?:[a-z\d_.:@+,=\[\]-]|%[hnpr])+$/iu.test(word)) continue;
+      const script = index === 1 && !netcat;
+      if (index && !script && /^(?:[a-z\d_.:@+,=\[\]-]|%[hnpr])+$/iu.test(word))
+        continue;
       const absolute =
         process.platform === "win32"
           ? /^[a-z]:\//iu.test(word)
@@ -13298,9 +13287,11 @@ async function bindSshConfiguration(
         throw unsupportedSshCommand();
       const path = absolute ? word : invocation.cwd + word;
       const physical = trust(path, unsupportedSshCommand);
-      // A command in an inactive Host block may be absent.
+      // An interpreter can resolve a missing script through an alternate
+      // extension. Bind an existing script even in an inactive Host block.
       const exists = existsSync(physical);
-      if (!exists && /\s/u.test(word)) throw unsupportedSshCommand();
+      if (!exists && (script || /\s/u.test(word)))
+        throw unsupportedSshCommand();
       await bindPatchTransportFile(
         path,
         !index && exists ? "executable" : "ssh-input",
@@ -13609,8 +13600,11 @@ async function pinPublicationCommand(
         continue;
       }
       if (name === "SSH_SK_PROVIDER") {
-        sshEnvironment[name] =
-          value.toLowerCase() === "internal" ? value : await bindFile(value);
+        const internal = value.toLowerCase() === "internal";
+        const provider = internal ? value : await bindFile(value);
+        if (!internal)
+          dependencies.patchTransportAccess?.afterHook.add(provider);
+        sshEnvironment[name] = provider;
         continue;
       }
       // OpenSSH searches PATH for its prompt. It executes SHELL directly
