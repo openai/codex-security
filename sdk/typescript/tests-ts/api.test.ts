@@ -17061,6 +17061,14 @@ if __name__ == "__main__":
               expect(options.environment?.["CODEX_SQLITE_HOME"]).toBe(
                 sqliteHome,
               );
+              if (args[0] === "register-cli-scan") {
+                expect(
+                  JSON.parse(input!).recipe.sealedUsagePaths,
+                ).toMatchObject({
+                  CODEX_HOME: codexHome,
+                  CODEX_SQLITE_HOME: sqliteHome,
+                });
+              }
               return mockWorkbench(args, input);
             },
             createCodex: (options) => ({

@@ -63,6 +63,7 @@ async function interruptedScan(
   bulk = false,
   {
     recipeRepositoryAlias = false,
+    sqliteHome,
     ...settings
   }: Pick<
     ScanOptions,
@@ -80,6 +81,7 @@ async function interruptedScan(
     config?: JsonObject;
     providerProfile?: JsonObject;
     recipeRepositoryAlias?: boolean;
+    sqliteHome?: string;
     executableSourcePaths?: string[];
     target?: { kind: "paths"; paths: string[] };
     sealedPricing?: JsonObject;
@@ -174,6 +176,7 @@ async function interruptedScan(
     TMP: process.env["TMP"],
     CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    ...(sqliteHome ? { CODEX_SQLITE_HOME: sqliteHome } : {}),
     ...(modelProvider === "amazon-bedrock"
       ? { AWS_PROFILE: "synthetic-bedrock" }
       : {}),
@@ -203,6 +206,14 @@ async function interruptedScan(
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
     ...settings,
+    ...(sqliteHome
+      ? {
+          sealedUsagePaths: {
+            CODEX_HOME: codexHome,
+            CODEX_SQLITE_HOME: sqliteHome,
+          },
+        }
+      : {}),
     ...(knowledgeSnapshot === undefined
       ? {}
       : {
@@ -1652,17 +1663,19 @@ test.each([false, true])(
   },
 );
 
-test.each(["complete", "partial", "unpriced"] as const)(
+test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
   "sealed SDK resume reconciles %s usage and cost before the completion receipt",
   async (scenario) => {
     const model =
       scenario === "unpriced" ? "synthetic-unpriced-model" : "gpt-5.6-sol";
+    const sqliteHome =
+      scenario === "configured SQLite" ? await temporaryDirectory() : undefined;
     const f = await interruptedScan(
       "deep",
       false,
       scenario === "complete"
         ? { config: { profile: "review" }, sealedPricing: { model } }
-        : { config: { model } },
+        : { config: { model }, sqliteHome },
     );
     const worker = randomUUID();
     const timestamp = new Date().toISOString();
@@ -1705,7 +1718,9 @@ test.each(["complete", "partial", "unpriced"] as const)(
     );
     if (scenario !== "partial")
       await appendFile(f.sessionPath, JSON.stringify(counter) + "\n");
-    const database = new Database(join(f.codexHome, "state_5.sqlite"));
+    const database = new Database(
+      join(sqliteHome ?? f.codexHome, "state_5.sqlite"),
+    );
     try {
       database.exec(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)",
@@ -1725,7 +1740,18 @@ test.each(["complete", "partial", "unpriced"] as const)(
       database.close();
     }
     await sealWithOriginalPlugin(f);
-    const client = resumeDependencies(f, () =>
+    const ambient = join(f.root, "ambient-home");
+    const environment = {
+      ...f.environment,
+      CODEX_HOME: ambient,
+      ...(sqliteHome
+        ? {
+            CODEX_SQLITE_HOME: ambient,
+            CODEX_STATE_DB: join(ambient, "state_5.sqlite"),
+          }
+        : {}),
+    };
+    const client = resumeDependencies({ ...f, environment }, () =>
       fail("Unexpected new model session"),
     ).createSecurity({});
     const options = {
@@ -1749,7 +1775,7 @@ test.each(["complete", "partial", "unpriced"] as const)(
         await expect(
           client.run(f.repository, { ...options, maxCostUsd: 1 }),
         ).rejects.toThrow("usage is incomplete");
-      if (scenario === "complete")
+      if (scenario === "complete" || scenario === "configured SQLite")
         await expect(
           client.run(f.repository, { ...options, maxCostUsd: 0.001 }),
         ).rejects.toMatchObject({ name: "ScanCostLimitExceededError" });
