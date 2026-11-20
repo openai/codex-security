@@ -412,7 +412,7 @@ glob_scan_max_depth = 8
       RpcMessage
     >;
     expect(Object.keys(profiles)).toEqual([name]);
-    const storeDenies = Object.entries(snapshotProfile!["filesystem"]).filter(
+    const snapshotDenies = Object.entries(snapshotProfile!["filesystem"]).filter(
       ([, access]) =>
         access === "deny" || (access as RpcMessage)["."] === "deny",
     );
@@ -420,7 +420,7 @@ glob_scan_max_depth = 8
       ...Object.fromEntries(
         permissions.readOnlyPaths.map((path) => [path, { ".": "read" }]),
       ),
-      ...Object.fromEntries(storeDenies),
+      ...Object.fromEntries(snapshotDenies),
       ...(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {}),
     };
     expect(snapshotProfile).toEqual({
@@ -487,21 +487,21 @@ glob_scan_max_depth = 8
         return result["stdout"] as string;
       });
     }
-    const stores = new Set([
+    const deniedFiles = new Set([
       ...(permissions.credentialStorePaths ?? []),
+      ...(shellPolicy?.paths ?? []),
       ...(process.platform === "win32"
         ? (permissions.externalConfigPaths ?? [])
         : []),
-      ...(shellPolicy?.paths ?? []),
     ]);
-    const fileDenies = storeDenies.filter(
+    const fileDenies = snapshotDenies.filter(
       ([path]) => !path.endsWith("{*.config.toml,.*.config.toml.tmp}"),
     );
-    expect(fileDenies).toHaveLength(stores.size);
-    for (const store of stores) {
+    expect(fileDenies).toHaveLength(deniedFiles.size);
+    for (const file of deniedFiles) {
       expect(
         fileDenies.filter(([key, access]) =>
-          access === "deny" ? matchesGlob(store, key) : key === store,
+          access === "deny" ? matchesGlob(file, key) : key === file,
         ),
       ).toHaveLength(1);
     }
@@ -657,12 +657,14 @@ catch (error) { process.stdout.write(error.code); }`),
 
 async function captureFilterPermissions(
   repository: string,
-  environment: NodeJS.ProcessEnv,
+  environment: NodeJS.ProcessEnv & { HOME: string },
   driver: string,
   program: string,
 ): Promise<PatchPermissions> {
   for (const [key, value] of [
-    ["clean", "node " + program],
+    // The Windows sandbox can open the script inside its workspace but
+    // cannot stat the private parent of the CI fixture during realpath.
+    ["clean", "node --preserve-symlinks-main " + program],
     ["required", "true"],
   ] as const)
     execFileSync(
@@ -686,6 +688,12 @@ async function captureFilterPermissions(
       if (output?.appServer?.permissions)
         selected = {
           ...output.appServer.permissions,
+          // Grant ordinary reads in the synthetic operator home so both
+          // probes exercise the individual file denies.
+          readOnlyPaths: [
+            ...output.appServer.permissions.readOnlyPaths,
+            environment.HOME,
+          ],
           snapshotConfig: output.appServer.snapshotConfig,
         };
       throw new Error(stopped);
@@ -1174,18 +1182,12 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
         ],
       ] as const)
         execFileSync("git", ["config", "--file", config, setting, value]);
-      const permissions = await captureFilterPermissions(
+      return captureFilterPermissions(
         repository,
         environment,
         "auth-file",
         program,
       );
-      // The operator fixture lives outside the app-server's synthetic user
-      // profile. Give both tools read access so the file denies are exercised.
-      return {
-        ...permissions,
-        readOnlyPaths: [...permissions.readOnlyPaths, operator],
-      };
     },
     { set: policySet, paths: [policyCluster] },
   );
