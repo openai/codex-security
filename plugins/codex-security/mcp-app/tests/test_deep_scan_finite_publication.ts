@@ -14,6 +14,10 @@ import {
 } from "./deep_scan_coordinator_fixture.ts";
 import { draftFixture } from "./scan-draft-recovery-fixture.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  legacyAcceptedFinding,
+  legacyRawDiscoveryFinding,
+} from "./legacy-accepted-finding.ts";
 
 const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },
@@ -79,7 +83,12 @@ test("Deep engine publishes an accepted historical scan without another model tu
   const source = finding("shared", "api/source.py");
   const legacy = {
     scanId: run.scanId,
-    findings: [{ ...source, extensions: { measurement: "OVERFLOW" } }],
+    findings: [
+      {
+        ...legacyRawDiscoveryFinding(source),
+        extensions: { measurement: "OVERFLOW" },
+      },
+    ],
     threatModel: { summary: "Historical model", measurement: "OVERFLOW" },
   };
   const encode = (value: unknown) =>
@@ -156,10 +165,12 @@ test("Deep engine publishes an accepted historical scan without another model tu
   assert.equal(checkpoint.threatModel.measurement, null);
   const selectedPath = store.iterations.at(-1)!.resultPath;
   assert.equal(draft.deepScanPublication.resultPath, selectedPath);
-  const retained = checkpoint.findings[0];
-  assert.equal(
-    retained.provenance.sourceFindings[0].finding.extensions.measurement,
-    null,
+  assert.deepEqual(
+    checkpoint.findings[0].provenance.sourceFindings[0].finding,
+    {
+      ...legacyAcceptedFinding(source),
+      extensions: { measurement: null },
+    },
   );
   assert.equal(await readFile(workerPath, "utf8"), rawWorker);
   const saved = JSON.parse(await readFile(selectedPath, "utf8"));

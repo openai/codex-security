@@ -28,7 +28,7 @@ import {
 } from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
-import { normalizeAcceptedDiscoveryFinding } from "./accepted-discovery-normalization.js";
+import { normalizePersistedFindingDetails } from "./finding-normalization.js";
 import { requireRegularFile } from "./deep-scan/artifacts.js";
 import coverageDocument from "../../schemas/coverage.schema.json" with { type: "json" };
 import findingsDocument from "../../schemas/findings.schema.json" with { type: "json" };
@@ -3086,7 +3086,8 @@ export function parseAcceptedDiscoveryDraft(input: unknown): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible) && Array.isArray(compatible.findings)) {
     for (const finding of compatible.findings) {
-      if (isObject(finding)) normalizeAcceptedDiscoveryFinding(finding);
+      if (isObject(finding))
+        normalizePersistedFindingDetails(finding, "accepted-discovery");
     }
   }
   return parseAcceptedDeepScanDraft(compatible);
