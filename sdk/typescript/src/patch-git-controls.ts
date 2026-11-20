@@ -595,8 +595,12 @@ async function credentialPointerFiles(
     awsAccountHome(environment),
     accountHomeDirectory(),
   ]);
-  selectFile(configuredCodexHome(environment), "auth.json");
-  selectFile(codexSecurityCredentialHome(environment), "auth.json");
+  const protectCodexHome = (home: string, subdirectory = "") => {
+    for (const file of ["auth.json", ".credentials.json", "config.toml"])
+      selectFile(home, join(subdirectory, file));
+  };
+  protectCodexHome(configuredCodexHome(environment));
+  protectCodexHome(codexSecurityCredentialHome(environment));
   if (
     process.platform === "win32" &&
     environment["HOMEDRIVE"] &&
@@ -613,8 +617,8 @@ async function credentialPointerFiles(
         ? relativeFile(home, join("AppData", "Roaming", "postgresql"))
         : home,
     );
+    protectCodexHome(home, ".codex");
     for (const file of [
-      join(".codex", "auth.json"),
       join(".config", "gh", "hosts.yml"),
       join(".config", "gcloud", gcloudCredentials),
       join(".docker", "config.json"),
@@ -2059,7 +2063,7 @@ export async function capturePatchGitControls(
                 (_match, prefix: string) =>
                   prefix +
                   pathBytes(dirname(control.canonical))
-                    .replace(/[[*?]/gu, "\\$&")
+                    .replace(/[\\[*?]/gu, "\\$&")
                     .replace(/\/?$/u, "/"),
               );
               const expanded = value && expandedIncludes.get(value);
