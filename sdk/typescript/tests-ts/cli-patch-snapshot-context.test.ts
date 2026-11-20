@@ -688,6 +688,10 @@ test.each([
       await rename(objects, pool);
       await mkdir(objects);
       environment[selector] = pool;
+      // Git stats each ancestor of an absolute alternate. The Windows sandbox
+      // uses USERPROFILE to grant access to the actual profile ancestor.
+      if (process.platform === "win32")
+        environment["USERPROFILE"] = process.env["USERPROFILE"];
     }
     const index = await readFile(join(repository, ".git", "index"));
     let snapshots = 0;
