@@ -2980,6 +2980,8 @@ Credentials in the standard gcloud directory, the same file under
 `CLOUDSDK_CONFIG`, and the file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
 GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
 the standard `glab-cli` configuration directories and Git administration.
+PostgreSQL password file protection covers `PGPASSFILE`, `~/.pgpass` on
+Unix and `%APPDATA%\postgresql\pgpass.conf` on Windows.
 The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
