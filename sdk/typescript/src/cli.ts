@@ -108,6 +108,7 @@ import {
   withPatchGitIndex,
 } from "./patch-git-controls.js";
 import {
+  credentialFileVariable,
   filterCommandConfig,
   proxyUserinfo,
   removePatchCredentials,
@@ -2013,7 +2014,7 @@ for (const [name, value] of bindings) {
   else process.env[name] = value;
 }
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo});
+removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });

@@ -8,17 +8,22 @@ export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 export const httpCredentialFile =
   /^http(?:\..*)?\.(?:cookiefile|(?:proxy)?ssl(?:key|cert))$/iu;
 
+export const credentialFileVariable =
+  /^(?:GOOGLE_APPLICATION_CREDENTIALS|PG(?:PASSFILE|SERVICEFILE|SSLCERT|SSLKEY)|TERRAFORM_CONFIG|TF_CLI_CONFIG_FILE)$/iu;
+
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
   environment: NodeJS.ProcessEnv,
   credentialNames: readonly string[],
   stripAwsCredentials?: boolean,
   proxyCredentials = proxyUserinfo,
+  fileVariable = credentialFileVariable,
 ): void {
   for (const [name, value] of Object.entries(environment)) {
     if (
-      /^(?:TF_CLI_CONFIG_FILE$|TERRAFORM_CONFIG$|TF_TOKEN_)/iu.test(name) ||
-      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PG(?:PASSFILE|PASSWORD|SERVICEFILE|SSLCERT|SSLKEY))$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
+      fileVariable.test(name) ||
+      /^TF_TOKEN_/iu.test(name) ||
+      /^(?:DATABASE_URL|DOCKER_CONFIG|GH_CONFIG_DIR|GLAB_CONFIG_DIR|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
         name,
       ) ||
       credentialNames.includes(name.toUpperCase()) ||
@@ -190,7 +195,7 @@ const plan = JSON.parse(
 );
 const environment = { ...process.env };
 const removeCredentials = ${removePatchCredentials};
-removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo});
+removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo}, ${credentialFileVariable});
 environment.CODEX_HOME = plan.home;
 
 filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile});

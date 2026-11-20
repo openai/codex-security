@@ -28,6 +28,7 @@ import {
   sep,
 } from "node:path";
 import {
+  credentialFileVariable,
   httpCredentialFile,
   proxyUserinfo,
   withoutUrlCredentials,
@@ -651,6 +652,11 @@ async function credentialPointerFiles(
   }
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
+    if (credentialFileVariable.test(name.toUpperCase())) {
+      selected.add(value);
+      selected.add(normalize(value));
+      continue;
+    }
     switch (name.toUpperCase()) {
       case "KUBECONFIG":
         for (const path of goPathList(value)) if (path) selected.add(path);
@@ -666,16 +672,6 @@ async function credentialPointerFiles(
         break;
       case "PGSYSCONFDIR":
         selectFile(value, "pg_service.conf");
-        break;
-      case "GOOGLE_APPLICATION_CREDENTIALS":
-      case "PGPASSFILE":
-      case "PGSERVICEFILE":
-      case "PGSSLKEY":
-      case "PGSSLCERT":
-      case "TF_CLI_CONFIG_FILE":
-      case "TERRAFORM_CONFIG":
-        selected.add(value);
-        selected.add(normalize(value));
         break;
       case "NPM_CONFIG_USERCONFIG": {
         selected.add(value);
