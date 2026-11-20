@@ -2265,6 +2265,7 @@ export class CodexSecurity {
     let completionCost: ScanCost | ReturnType<typeof measuredScanCost> = null;
     let validationThreadId: string | undefined;
     let nativeTurnFailure: string | undefined;
+    let latestPhase: ScanProgress["phase"] = "preflight";
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -2671,7 +2672,6 @@ export class CodexSecurity {
         standardCapabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
-      let latestPhase: ScanProgress["phase"] = "preflight";
       let reviewItems: ScanProgress["reviewItems"];
       let lastProgress: string | null = null;
       const progressKey = (progress: ScanProgress): string =>
@@ -3722,6 +3722,7 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         pricingContext,
+        localStandard: releaseStandardScan !== undefined,
         onTurnStatus: (status, message) => {
           scanTurnStatus = status;
           // A later caller abort during iterator cleanup cannot undo a reported failure.
@@ -4305,6 +4306,27 @@ export class CodexSecurity {
         }
       }
       if (
+        releaseStandardScan !== undefined &&
+        isNativePolicyRefusal(nativeTurnFailure)
+      ) {
+        runPostScan = null;
+        if (activeScan !== null && latestPhase !== "preflight") {
+          // Progress can advance only while the scan is running. A failed
+          // progress write must still allow fail-scan to seal retained work.
+          await workbench(
+            { ...activeScan.options, signal: undefined },
+            workbenchArgs("update-progress", {
+              scanId: activeScan.id,
+              phase: latestPhase,
+            }),
+          ).catch((cause) => {
+            notifyObserver(
+              options,
+              "onWarning",
+            )(`Could not save scan progress: ${errorMessage(cause)}`);
+          });
+        }
+      } else if (
         activeScan !== null &&
         releaseStandardScan !== undefined &&
         !signal.aborted &&
@@ -6109,6 +6131,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   model?: string;
   pricingContext?: ScanPricingContext;
   onFinalize?: (usage: unknown) => Promise<unknown>;
+  localStandard?: boolean;
   onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
@@ -6137,6 +6160,14 @@ export async function runScanEvents(
           options.onTurnStatus?.("completed");
         if (event.type === "turn.failed")
           options.onTurnStatus?.("failed", turnFailureMessage(event["error"]));
+        // Native Codex emits the refusal as an error before turn.failed.
+        // readCodexTurn throws on that first error and closes the stream.
+        if (
+          options.localStandard &&
+          event.type === "error" &&
+          isNativePolicyRefusal(event["message"])
+        )
+          options.onTurnStatus?.("failed", event["message"]);
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
@@ -7220,6 +7251,23 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
       ? { retryAfterSeconds }
       : {}),
   };
+}
+
+// A failed native turn exposes only its message. A longer transport diagnostic
+// can quote these words and still be resumable.
+const NATIVE_POLICY_REFUSALS = new Set([
+  "Request blocked by cyberPolicy.",
+  "Request blocked by a safety policy violation.",
+  "This content was flagged for possible cybersecurity risk.",
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+  "This content was flagged for potentially high-risk cyber activity.",
+  "This request has been flagged for possible cybersecurity risk.",
+  "This request has been flagged for potentially high-risk cyber activity.",
+  "This request was blocked due to a misalignment policy violation.",
+]);
+
+function isNativePolicyRefusal(message: unknown): message is string {
+  return typeof message === "string" && NATIVE_POLICY_REFUSALS.has(message);
 }
 
 // A failed turn must fail the scan whatever its error payload looks like.

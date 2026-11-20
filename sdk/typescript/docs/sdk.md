@@ -193,7 +193,7 @@ is no exclusions. Requested exclusions are recorded in `result.manifest.scan.sco
 | `knowledgeBasePaths`                        | Supporting text, PDF, DOCX files, or directories.                              |
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
-| `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
+| `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions. Skipped on a known primary local Standard refusal.     |
 | `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
 | `archiveExisting`                           | Move previous results aside before reusing `outputDir`.                        |
