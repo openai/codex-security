@@ -3112,7 +3112,14 @@ and a drive letter for an explicit store on Windows. The same rules cover
 `.netrc` and `_netrc` in the host user's effective home directory, the file
 selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
-URL-specific values. The rules protect the account's `.ssh` directory,
+URL-specific values. SSH protection covers identities selected by `-i` and
+`-o IdentityFile=...` in `GIT_SSH_COMMAND` or your Git `core.sshCommand`.
+The CLI also reads static `IdentityFile` entries in standard user and system
+SSH configuration, an explicit `-F` file, and their `Include` files outside
+the checkout. Includes support literal paths and one `*` in the filename.
+Use absolute paths for identities outside `.ssh` so the CLI can identify
+the files before running the model or a Git filter. The trusted transport
+retains its SSH command. The rules also protect the account's `.ssh` directory,
 file-based SSH signing keys selected by `user.signingKey`, and the default
 GnuPG homes (`~/.gnupg` and Roaming AppData on Windows). Set `GNUPGHOME`
 to identify a custom GnuPG home. Its directory is protected and the selector
