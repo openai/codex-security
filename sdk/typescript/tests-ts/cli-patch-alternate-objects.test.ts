@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   mkdir,
@@ -9,11 +9,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { delimiter, join, relative, sep } from "node:path";
-import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import {
+  runGitRepositoryCommand,
+  patchDirectories,
+  runIssuePatch,
+} from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 function quoted(path: string): string {
   return `"${[...Buffer.from(path)]
@@ -83,8 +85,7 @@ async function patch(
     .map((line) => line.slice("alternate: ".length));
   let controls: readonly string[] = [];
   let launches = 0;
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: cwd,
+  const outcome = await runIssuePatch(cwd, {
     environment,
     onRepositoryCommand: (command, args, directory, options) =>
       runGitRepositoryCommand(command, args, directory, {

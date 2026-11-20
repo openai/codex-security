@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import {
   copyFile,
   link,
@@ -14,13 +14,11 @@ import {
   publicationRepository,
   runGitRepositoryCommand,
   runWorkflow,
-  resultWithFindings,
-  savedScan,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 test.each(["compiled exec directory", "config separator in executable path"])(
   "native Git proxy resolves the %s",
   async (scenario) => {
@@ -51,13 +49,11 @@ test.each(["compiled exec directory", "config separator in executable path"])(
         name + " for " + host,
       );
     let selected: string | undefined;
-    const result = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    const result = await runSavedPublication(
+      directory,
       {
-        currentDirectory: directory,
         environment,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+
         onRepositoryCommand: (tool, args, cwd, options) => {
           if (tool !== "git") return "";
           if (compiled && args.includes("ls-remote")) {

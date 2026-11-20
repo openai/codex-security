@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   cp,
@@ -13,15 +13,16 @@ import {
 } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { selectedGitFileReference } from "../src/patch-git-controls.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
-  runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
+  gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 for (const mode of [
   "absolute",
@@ -33,10 +34,7 @@ for (const mode of [
   test(`retains storage selected through an explicit Git file: ${mode}`, async () => {
     const repository = await fixtures.create("patch-selected-file-");
     const support = await fixtures.create("patch-selected-file-support-");
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     await writeFile(join(repository, "app.ts"), "before\n");
     await writeFile(
       join(repository, ".gitignore"),
@@ -102,14 +100,9 @@ for (const mode of [
         linkType,
       );
     }
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory,
+    const outcome = await runIssuePatch(currentDirectory, {
       environment,
-      onRepositoryCommand: (command, args, cwd, options) =>
-        runGitRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: { ...environment, ...options?.environment },
-        }),
+      onRepositoryCommand: gitWithEnvironment(environment),
       onCodex: async (_args, output) => {
         expect(output!.appServer!.snapshotStoragePaths).toEqual([
           join(administration, "lfs"),
@@ -162,10 +155,7 @@ for (const mode of [
   test(`retains selected common-directory storage under explicit GIT_DIR: ${mode}`, async () => {
     const main = await fixtures.create("patch-common-storage-main-");
     const selected = await fixtures.create("patch-common-storage-selected-");
-    const git = repositoryGit(main);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(main);
     await writeFile(join(main, "app.ts"), "before\n");
     git("add", "app.ts");
     git("commit", "-m", "Synthetic common storage baseline");
@@ -214,14 +204,9 @@ for (const mode of [
       await symlink(join(common, "lfs"), join(replacement, "lfs"), linkType);
     }
     let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected,
+    const outcome = await runIssuePatch(selected, {
       environment,
-      onRepositoryCommand: (command, args, cwd, options) =>
-        runGitRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: { ...environment, ...options?.environment },
-        }),
+      onRepositoryCommand: gitWithEnvironment(environment),
       onCodex: async (_args, output) => {
         launches++;
         expect(output!.appServer!.snapshotStoragePaths).toEqual(
@@ -278,10 +263,7 @@ test.each([
     const main = await fixtures.create("patch-common-main-");
     const selected = await fixtures.create("patch-common-selected-");
     const other = await fixtures.create("patch-common-other-");
-    const git = repositoryGit(main);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(main);
     await writeFile(join(main, "app.ts"), "before\n");
     git("add", "app.ts");
     git("commit", "-m", "Synthetic common-directory baseline");
@@ -315,8 +297,7 @@ test.each([
     const otherMarker = await readFile(join(other, ".git"));
     const afterTurnCommands: string[][] = [];
     let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: selected,
+    const outcome = await runIssuePatch(selected, {
       environment,
       onRepositoryCommand: (command, args, cwd, options) => {
         if (launches > 0) afterTurnCommands.push([...args]);
@@ -377,10 +358,7 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
     async ({ retarget }) => {
       const root = await fixtures.create("patch-selector-alias-");
       const support = await fixtures.create("patch-selector-support-");
-      const git = repositoryGit(root);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(root);
       await writeFile(join(root, "app.ts"), "before\n");
       await writeFile(
         join(root, ".gitignore"),
@@ -433,30 +411,26 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
       const otherIndex = await readFile(join(replacement, "index"));
       let launches = 0;
       const afterTurnCommands: string[][] = [];
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: root,
-          environment,
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (launches > 0) afterTurnCommands.push([...args]);
-            return runGitRepositoryCommand(command, args, cwd, {
-              ...options,
-              environment: { ...environment, ...options?.environment },
-            });
-          },
-          onCodex: async (_args, output) => {
-            launches++;
-            if (retarget) {
-              await rename(alias, join(root, "original-administration"));
-              await symlink(replacement, alias, linkType);
-            }
-            await writeFile(join(root, "app.ts"), "after\n");
-            output?.stdout.write("Synthetic patch complete.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(root, {
+        environment,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (launches > 0) afterTurnCommands.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
         },
-      );
+        onCodex: async (_args, output) => {
+          launches++;
+          if (retarget) {
+            await rename(alias, join(root, "original-administration"));
+            await symlink(replacement, alias, linkType);
+          }
+          await writeFile(join(root, "app.ts"), "after\n");
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(retarget ? 2 : 0);
       expect(launches).toBe(1);
       if (retarget) {

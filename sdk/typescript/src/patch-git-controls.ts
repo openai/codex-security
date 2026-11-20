@@ -34,8 +34,11 @@ import {
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
 import { awsAccountHome, awsProfileFiles } from "./continuum-aws.js";
-import { configuredCodexHome } from "./auth.js";
-import { codexSecurityCredentialHome } from "./runtime.js";
+import { configuredCodexHome, environmentEntry } from "./auth.js";
+import {
+  codexSecurityCredentialHome,
+  type ProcessEnvironment,
+} from "./runtime.js";
 import { gitAlternatePathBytes, gitMarkerRoot } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
@@ -1038,28 +1041,43 @@ export type PatchGitControlMode = "sandbox" | "external" | "resumed-hook";
 export async function capturePatchGitControls(
   directory: string,
   runGit: RunGit,
-  usesWorktreeMarker: boolean,
-  usesCommonDirectoryMarker = true,
-  selectedGitDirectory?: string,
-  configuration = {
-    global: process.env["GIT_CONFIG_GLOBAL"],
-    system: process.env["GIT_CONFIG_SYSTEM"],
-    noSystem: process.env["GIT_CONFIG_NOSYSTEM"],
-    xdgConfigHome: process.env["XDG_CONFIG_HOME"],
-    objectDirectory: process.env["GIT_OBJECT_DIRECTORY"],
-    alternateObjectDirectories: process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
-  },
-  automaticPublication = false,
-  mode: PatchGitControlMode = "sandbox",
-  credentialStorePaths = new Set<string>(),
-  commandParameters: string | null = process.env["GIT_CONFIG_PARAMETERS"] ??
-    null,
-  userProfile: string | null = process.env["USERPROFILE"] ?? null,
-  netrc: string | null = process.env["NETRC"] ?? null,
-  pointerEnvironment: Readonly<Record<string, unknown>> = process.env,
-  shellSettings?: Readonly<Record<string, unknown>>,
-  onSnapshotConfig?: (config: PatchSnapshotConfig) => void,
+  {
+    usesWorktreeMarker = true,
+    usesCommonDirectoryMarker = true,
+    selectedGitDirectory,
+    environment = process.env,
+    automaticPublication = false,
+    mode = "sandbox",
+    credentialStorePaths = new Set<string>(),
+    shellSettings,
+    onSnapshotConfig,
+  }: {
+    usesWorktreeMarker?: boolean;
+    usesCommonDirectoryMarker?: boolean;
+    selectedGitDirectory?: string;
+    environment?: ProcessEnvironment;
+    automaticPublication?: boolean;
+    mode?: PatchGitControlMode;
+    credentialStorePaths?: Set<string>;
+    shellSettings?: Readonly<Record<string, unknown>>;
+    onSnapshotConfig?: (config: PatchSnapshotConfig) => void;
+  } = {},
 ): Promise<PatchGitControls | undefined> {
+  const globalConfig = environmentEntry(environment, "GIT_CONFIG_GLOBAL");
+  const systemConfig = environmentEntry(environment, "GIT_CONFIG_SYSTEM");
+  const noSystem = environmentEntry(environment, "GIT_CONFIG_NOSYSTEM");
+  const xdgConfigHome = environmentEntry(environment, "XDG_CONFIG_HOME");
+  const objectDirectory = environmentEntry(environment, "GIT_OBJECT_DIRECTORY");
+  const alternatePaths = environmentEntry(
+    environment,
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  );
+  const commandParameters = environmentEntry(
+    environment,
+    "GIT_CONFIG_PARAMETERS",
+  );
+  const userProfile = environmentEntry(environment, "USERPROFILE");
+  const netrc = environmentEntry(environment, "NETRC");
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
       ...options,
@@ -1440,8 +1458,8 @@ export async function capturePatchGitControls(
   if (mode !== "external") {
     const legacy = await expandConfigurationPath("~/.git-credentials");
     if (legacy) await protectStore(relativeFile(root, legacy));
-    const xdg = configuration.xdgConfigHome
-      ? relativeFile(configuration.xdgConfigHome, "git/credentials")
+    const xdg = xdgConfigHome
+      ? relativeFile(xdgConfigHome, "git/credentials")
       : await expandConfigurationPath("~/.config/git/credentials");
     if (xdg) await protectStore(relativeFile(root, xdg));
     // Git for Windows can initialize HOME from the drive and home path.
@@ -1464,21 +1482,20 @@ export async function capturePatchGitControls(
   }
   const globalConfigurationPaths: string[] = [];
   let systemConfigurationPath: string | undefined;
-  if (configuration.global !== undefined) {
-    if (configuration.global !== "")
-      globalConfigurationPaths.push(configuration.global);
+  if (globalConfig !== undefined) {
+    if (globalConfig !== "") globalConfigurationPaths.push(globalConfig);
   } else {
     for (const path of [
-      configuration.xdgConfigHome
-        ? `${configuration.xdgConfigHome}/git/config`
+      xdgConfigHome
+        ? `${xdgConfigHome}/git/config`
         : await expandConfigurationPath("~/.config/git/config"),
       await expandConfigurationPath("~/.gitconfig"),
     ])
       if (path !== undefined) globalConfigurationPaths.push(path);
   }
-  if (configuration.system) {
+  if (systemConfig) {
     const disabled =
-      configuration.noSystem === undefined
+      noSystem === undefined
         ? "false"
         : (
             await runControl(
@@ -1486,7 +1503,7 @@ export async function capturePatchGitControls(
               root,
               [
                 "-c",
-                `codexsecurity.patchnosystem=${configuration.noSystem}`,
+                `codexsecurity.patchnosystem=${noSystem}`,
                 "config",
                 "--type=bool",
                 "--get",
@@ -1495,7 +1512,7 @@ export async function capturePatchGitControls(
               { environment: configurationEnvironment },
             )
           ).trim();
-    if (disabled === "false") systemConfigurationPath = configuration.system;
+    if (disabled === "false") systemConfigurationPath = systemConfig;
   }
   const insideSelectedRoots = (path: string): boolean =>
     inside(root, path) ||
@@ -1651,16 +1668,12 @@ export async function capturePatchGitControls(
   };
   const inheritedPointers = credentialPointers();
   if (mode !== "external") {
-    await collectCredentialPointers(
-      inheritedPointers,
-      root,
-      pointerEnvironment,
-    );
+    await collectCredentialPointers(inheritedPointers, root, environment);
     if (shellSettings)
       await collectCredentialPointers(
         inheritedPointers,
         root,
-        pointerEnvironment,
+        environment,
         shellSettings,
       );
   }
@@ -2430,10 +2443,10 @@ export async function capturePatchGitControls(
             "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
           );
       }
-      if (canonical === root && configuration.objectDirectory !== undefined) {
+      if (canonical === root && objectDirectory !== undefined) {
         if (capture)
           await rememberControl(
-            relativeFile(root, configuration.objectDirectory),
+            relativeFile(root, objectDirectory),
             true,
             false,
           );
@@ -2693,7 +2706,7 @@ export async function capturePatchGitControls(
           GIT_CONFIG_PARAMETERS: patchFilterParameters(
             passiveFilters,
             false,
-            commandParameters ?? undefined,
+            commandParameters,
           ),
         },
       };
@@ -2857,7 +2870,7 @@ export async function capturePatchGitControls(
   }
   const alternateObjectDirectories: string[] = [];
   for (let bytes of gitAlternatePathBytes(
-    Buffer.from(configuration.alternateObjectDirectories ?? ""),
+    Buffer.from(alternatePaths ?? ""),
     delimiter,
   )) {
     const nul = bytes.indexOf(0);
@@ -2931,12 +2944,7 @@ export async function capturePatchGitControls(
       const added = credentialPointers();
       for (const source of new Set(settings))
         if (source)
-          await collectCredentialPointers(
-            added,
-            root,
-            pointerEnvironment,
-            source,
-          );
+          await collectCredentialPointers(added, root, environment, source);
       for (const file of inheritedPointers.files) added.files.delete(file);
       for (const dir of inheritedPointers.directories)
         added.directories.delete(dir);

@@ -1,8 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchSnapshotEnvironment,
   patchSnapshotWindowsConfig,
@@ -11,10 +10,11 @@ import {
   publicationRepository,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  runIssuePatch,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 for (const mode of [
   "replace direct hook",
@@ -307,9 +307,7 @@ for (const mode of [
     git("config", "includeIf.onbranch:future-branch.path", "branch-config");
     const head = git("rev-parse", "HEAD");
     let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: directory,
-      onRepositoryCommand: runGitRepositoryCommand,
+    const outcome = await runIssuePatch(directory, {
       onCodex: async (_args, output) => {
         launches++;
         await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");

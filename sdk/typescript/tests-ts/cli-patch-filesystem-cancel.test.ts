@@ -1,6 +1,6 @@
-import { afterEach, expect, mock, test } from "bun:test";
 import fs from "node:fs";
 import filesystem, { readFile, writeFile } from "node:fs/promises";
+import { expect, mock, test } from "bun:test";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,12 +10,11 @@ import {
   publicationRepository,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 for (const kind of ["directory", "ignored file"] as const) {
   const name = `cancels ${kind} preparation and waits for filesystem cleanup`;

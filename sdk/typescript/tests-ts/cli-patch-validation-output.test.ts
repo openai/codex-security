@@ -1,7 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { appendFile, chmod, link, readFile, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   publicationRepository,
   repositoryGit,
@@ -9,10 +8,10 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 const diagnostic = (value: string) => value.replaceAll(sep, "/");
 
 for (const source of ["supplied", "saved", "batch", "scan"] as const)

@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   readFile,
@@ -9,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   completePatches,
   publicationRepository,
@@ -18,10 +17,11 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 test("later patch grants remove writable directories from SSH's command search path", async () => {
   const { directory, git } = await publicationRepository(fixtures);
@@ -58,10 +58,9 @@ test("later patch grants remove writable directories from SSH's command search p
   let turns = 0;
   let preflightPath: string | undefined;
   let pushPath: string | undefined;
-  const outcome = await runWorkflow(
-    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+  const outcome = await runSavedPublication(
+    directory,
     {
-      currentDirectory: directory,
       environment,
       manualCodexPreparation: true,
       onWorkbench: () =>
@@ -288,13 +287,11 @@ test.each(["github.example.test", "gitlab.com"])(
       GIT_CONFIG_VALUE_0: "preserved",
     };
     let transports = 0;
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    const outcome = await runSavedPublication(
+      directory,
       {
-        currentDirectory: directory,
         environment,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+
         onCodex: model,
         onRepositoryCommand: (command, args, cwd, options) => {
           expect(args.join("\n")).not.toContain(credential);
@@ -362,12 +359,9 @@ test.each([
   git("config", "--add", "remote.origin.pushurl", helper);
   const model = mock(async () => 0);
   const commands: string[] = [];
-  const outcome = await runWorkflow(
-    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+  const outcome = await runSavedPublication(
+    directory,
     {
-      currentDirectory: directory,
-      onWorkbench: () =>
-        savedScan(resultWithFindings(["high"]), "scan-1", directory),
       onCodex: model,
       onRepositoryCommand: (command, args, cwd, options) => {
         commands.push(args.includes("ls-remote") ? "transport" : command);
@@ -488,13 +482,11 @@ test.each(["local", "included checkout", "operator"])(
         git("config", "--file", global, "include.path", included);
     }
     let attempted = false;
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    const outcome = await runSavedPublication(
+      directory,
       {
-        currentDirectory: directory,
         environment,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+
         onRepositoryCommand: (command, args, cwd, options) => {
           if (command !== "git") return "[]";
           if (args.includes("ls-remote")) {
@@ -539,13 +531,11 @@ async function runSshPreflight(
   };
   let hostnameCommand: string | undefined;
   const model = mock(async () => 0);
-  const outcome = await runWorkflow(
-    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+  const outcome = await runSavedPublication(
+    selected,
     {
-      currentDirectory: selected,
       environment,
-      onWorkbench: () =>
-        savedScan(resultWithFindings(["high"]), "scan-1", selected),
+
       onCodex: model,
       onRepositoryCommand: (command, args, cwd, options) => {
         if (command !== "git") return "[]";

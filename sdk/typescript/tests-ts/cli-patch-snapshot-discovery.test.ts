@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import {
   mkdir,
   readFile,
@@ -8,22 +8,19 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
-  runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 async function initialize(root: string, file: string) {
   await mkdir(root, { recursive: true });
-  const git = repositoryGit(root);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
+  const git = initializePatchGit(root);
   await writeFile(join(root, file), "before\n");
   git("add", ".");
   return git;
@@ -115,8 +112,7 @@ for (const transition of [
         : await realpath(join(selected, ".git"));
     const snapshots: string[] = [];
     let launches = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: root,
+    const outcome = await runIssuePatch(root, {
       onRepositoryCommand: async (command, args, cwd, options) => {
         const output = await runGitRepositoryCommand(
           command,
@@ -185,8 +181,7 @@ test("patch discovery refuses new reachable administration before snapshot bookk
   let operator: Awaited<ReturnType<typeof operatorHook>> | undefined;
   const afterTurn: string[][] = [];
   let launches = 0;
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: root,
+  const outcome = await runIssuePatch(root, {
     onRepositoryCommand: (command, args, cwd, options) => {
       if (launches > 0) afterTurn.push([...args]);
       return runGitRepositoryCommand(command, args, cwd, options);

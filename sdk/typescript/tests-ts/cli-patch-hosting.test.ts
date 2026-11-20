@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -18,7 +18,6 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 import {
   resultWithFindings,
@@ -28,11 +27,12 @@ import {
   runGitRepositoryCommand,
   runLocalHostingTransport,
   publicationRepository as createPublicationRepository,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
 
 describe("patch change tracking", () => {
-  const fixtures = createTemporaryDirectories(true);
-  afterEach(fixtures.cleanup);
+  const fixtures = patchDirectories();
   const publicationRepository = () => createPublicationRepository(fixtures);
 
   async function loopbackTls(
@@ -582,13 +582,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         git("config", "credential.helper", helper("local"));
         git("remote", "set-url", "origin", remote);
         let modelCalls = 0;
-        const outcome = await runWorkflow(
-          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        const outcome = await runSavedPublication(
+          directory,
           {
-            currentDirectory: directory,
             environment,
-            onWorkbench: () =>
-              savedScan(resultWithFindings(["high"]), "scan-1", directory),
+
             onCodex: async (args, output) => {
               modelCalls++;
               if (retarget) {
@@ -828,13 +826,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         "git@github.example.test:example/repository.git",
       );
       const model = mock(async () => 0);
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      const outcome = await runSavedPublication(
+        directory,
         {
-          currentDirectory: directory,
           environment,
-          onWorkbench: () =>
-            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+
           onCodex: model,
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"
@@ -893,13 +889,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       SSH_ASKPASS: askPass,
       SSH_ASKPASS_REQUIRE: "force",
     };
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    const outcome = await runSavedPublication(
+      directory,
       {
-        currentDirectory: directory,
         environment,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+
         onCodex: async (args, output) => {
           await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
           completePatches(args, output);
@@ -1208,20 +1202,16 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           return 0;
         },
       );
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
-          currentDirectory: directory,
-          onWorkbench: () => savedScan(result, "scan-1", directory),
-          onCodex,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
-        },
-      );
+      const outcome = await runSavedPublication(directory, {
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onCodex,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
       expect(onCodex).toHaveBeenCalledTimes(blocked ? 0 : 1);
       if (blocked) {
@@ -1275,20 +1265,16 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           return 0;
         },
       );
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
-          currentDirectory: directory,
-          onWorkbench: () => savedScan(result, "scan-1", directory),
-          onCodex,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
-        },
-      );
+      const outcome = await runSavedPublication(directory, {
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onCodex,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1",
+      });
       const blocked = collision === "destination";
       expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
       expect(onCodex).toHaveBeenCalledTimes(blocked ? 0 : 1);
@@ -1684,22 +1670,18 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           return 0;
         },
       );
-      const outcome = await runWorkflow(
-        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-        {
-          currentDirectory: directory,
-          onWorkbench: () => savedScan(result, "scan-1", directory),
-          onCodex,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : args[0] === "repo"
-                ? "synthetic-origin-id"
-                : args[1] === "list"
-                  ? "[]"
-                  : "https://github.example.test/example/repository/pull/1",
-        },
-      );
+      const outcome = await runSavedPublication(directory, {
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onCodex,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, options)
+            : args[0] === "repo"
+              ? "synthetic-origin-id"
+              : args[1] === "list"
+                ? "[]"
+                : "https://github.example.test/example/repository/pull/1",
+      });
       expect(outcome.exitCode, outcome.stderr).toBe(occupied || option ? 2 : 0);
       expect(onCodex).toHaveBeenCalledTimes(
         destination === "occupied" || option ? 0 : 1,

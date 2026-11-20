@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
 import {
@@ -18,15 +18,16 @@ import {
   runGitRepositoryCommand,
   repositoryGit,
   runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchSnapshotEnvironment,
   patchSnapshotWindowsConfig,
 } from "./support/patch-snapshot-environment.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 const authHeader = "Authorization: Bearer synthetic-fixture";
 
@@ -231,8 +232,7 @@ test.each([
     // external configuration Git sees after the controls have already been captured.
     const edit = mode === "unselected filter" ? "ordinary.txt" : "new.probe";
     let changed = false;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: directory,
+    const outcome = await runIssuePatch(directory, {
       environment,
       manualCodexPreparation: true,
       onRepositoryCommand(command, args, cwd, options) {
@@ -327,8 +327,7 @@ test.each([
       GIT_CONFIG_GLOBAL: global,
       GIT_CONFIG_PARAMETERS: "'filter.lfs.process=git-lfs filter-process'",
     };
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: directory,
+    const outcome = await runIssuePatch(directory, {
       environment,
       onRepositoryCommand(tool, args, cwd, options) {
         return runGitRepositoryCommand(tool, args, cwd, {
@@ -397,10 +396,7 @@ for (const fixture of [
 ${changed ? `try { fs.writeFileSync(${JSON.stringify(witness)}, "model-changed"); } catch (error) { if (error.code !== "EACCES" && error.code !== "EPERM" && error.code !== "EROFS") throw error; }` : ""}
 process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
       const initialize = async (directory: string) => {
-        const git = repositoryGit(directory);
-        git("init", "--initial-branch=main");
-        git("config", "user.name", "Synthetic User");
-        git("config", "user.email", "synthetic@example.test");
+        const git = initializePatchGit(directory);
         return git;
       };
       const inner = await initialize(nested);

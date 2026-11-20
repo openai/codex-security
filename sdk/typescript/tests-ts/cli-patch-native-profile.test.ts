@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import {
   mkdir,
@@ -19,15 +19,17 @@ import {
   capturePatchGitControls,
   type PatchSnapshotConfig,
 } from "../src/patch-git-controls.js";
-import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
+import {
+  runGitRepositoryCommand,
+  patchDirectories,
+  runIssuePatch,
+} from "./cli-patch-fixtures.js";
 import {
   patchSnapshotEnvironment,
   patchSnapshotWindowsConfig,
 } from "./support/patch-snapshot-environment.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 type RpcMessage = Record<string, any>;
 type PatchPermissions = NonNullable<
@@ -154,24 +156,9 @@ async function resolvePatchProfile(
             ...options?.environment,
           },
         }),
-      true,
-      true,
-      undefined,
       {
-        global: selectedConfig,
-        system: undefined,
-        noSystem: "1",
-        xdgConfigHome: gitEnvironment.XDG_CONFIG_HOME,
-        objectDirectory: undefined,
-        alternateObjectDirectories: undefined,
+        environment: gitEnvironment,
       },
-      false,
-      "sandbox",
-      undefined,
-      undefined,
-      home,
-      null,
-      gitEnvironment,
     );
     expect(controls).toBeDefined();
     expect([...controls!.externalConfigPaths].sort()).toEqual(
@@ -701,8 +688,7 @@ async function captureFilterPermissions(
   // Collect the permissions the CLI passes to its native app-server.
   let selected: PatchPermissions | undefined;
   const stopped = "Captured synthetic patch permissions";
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: repository,
+  const outcome = await runIssuePatch(repository, {
     environment: { ...process.env, ...environment },
     manualCodexPreparation: true,
     onRepositoryCommand: (cmd, args, cwd, options) =>

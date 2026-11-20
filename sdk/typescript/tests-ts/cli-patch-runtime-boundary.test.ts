@@ -1,17 +1,15 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import * as runtime from "../src/runtime.js";
+import * as executables from "../src/trusted-executable.js";
+import { expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
-import * as runtime from "../src/runtime.js";
-import * as executables from "../src/trusted-executable.js";
-import { repositoryGit } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { repositoryGit, patchDirectories } from "./cli-patch-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 test("a private-index snapshot reuses only unchanged profiles outside its writable roots", async () => {
   const name =

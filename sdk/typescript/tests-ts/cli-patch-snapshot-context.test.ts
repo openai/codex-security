@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -22,15 +22,16 @@ import {
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchSnapshotEnvironment,
   patchSnapshotWindowsConfig,
 } from "./support/patch-snapshot-environment.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 // Native Windows snapshots repeat account and file ACL setup per Git command.
 const nativeSnapshotTimeout = process.platform === "win32" ? 180_000 : 30_000;
 const windows = patchSnapshotWindowsConfig();
@@ -50,10 +51,7 @@ test
     const root = await fixtures.create("patch-unused-lfs-");
     const repository = join(root, "repository");
     await mkdir(repository);
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     await writeFile(join(repository, "app.ts"), "original\n");
     git("add", ".");
     git("commit", "-m", "Synthetic unused LFS baseline");
@@ -77,24 +75,19 @@ test
     let patched = false;
     await chmod(readOnly, mode === "inaccessible" ? 0 : 0o555);
     try {
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: repository,
-          onRepositoryCommand: runGitRepositoryCommand,
-          onCodex: async (_args, output) => {
-            patched = true;
-            if (mode === "used")
-              await writeFile(
-                join(repository, "payload.bin"),
-                "Synthetic LFS payload\n",
-              );
-            await writeFile(join(repository, "app.ts"), "fixed\n");
-            output!.stdout.write("Synthetic patch complete.\n");
-            return 0;
-          },
+      const outcome = await runIssuePatch(repository, {
+        onCodex: async (_args, output) => {
+          patched = true;
+          if (mode === "used")
+            await writeFile(
+              join(repository, "payload.bin"),
+              "Synthetic LFS payload\n",
+            );
+          await writeFile(join(repository, "app.ts"), "fixed\n");
+          output!.stdout.write("Synthetic patch complete.\n");
+          return 0;
         },
-      );
+      });
       expect(patched).toBe(true);
       expect(outcome.exitCode, outcome.stderr).toBe(mode === "used" ? 2 : 0);
       if (mode === "used")
@@ -116,10 +109,7 @@ test.each(["unused", "abort", "unexpected failure"])(
     const root = await fixtures.create("patch-optional-lfs-config-");
     const repository = join(root, "repository");
     await mkdir(repository);
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     await writeFile(join(repository, "app.ts"), "before\n");
     git("add", ".");
     git("commit", "-m", "Synthetic optional LFS baseline");
@@ -140,8 +130,7 @@ test.each(["unused", "abort", "unexpected failure"])(
             })
           : undefined;
     let started = false;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: repository,
+    const outcome = await runIssuePatch(repository, {
       environment,
       onRepositoryCommand: (command, args, cwd, options) => {
         if (failure !== undefined && args.includes("lfs.storage"))
@@ -240,8 +229,7 @@ test(
     git("commit", "-m", "Synthetic home fallback baseline");
     expect(git("show", "HEAD:data")).toBe("LOWERCASE SOURCE");
     const trees: string[] = [];
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: repository,
+    const outcome = await runIssuePatch(repository, {
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
@@ -304,10 +292,7 @@ test
       home = join(root, "home");
     await Promise.all([mkdir(repository), mkdir(home)]);
     await writeFile(join(home, "config.toml"), windows);
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     git("lfs", "install", "--local", "--skip-repo");
     await writeFile(
       join(repository, ".gitattributes"),
@@ -401,8 +386,7 @@ test
     const originalIndex = await readFile(join(repository, ".git", "index"));
     const payload = "Synthetic first LFS payload\n";
     let storagePaths: readonly string[] = [];
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: repository,
+    const outcome = await runIssuePatch(repository, {
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
@@ -709,8 +693,7 @@ test.each([
     let snapshots = 0;
     const bindings: NodeJS.ProcessEnv[] = [];
     const trees: string[] = [];
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: repository,
+    const outcome = await runIssuePatch(repository, {
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
@@ -848,10 +831,7 @@ test.each([
           : {}),
       },
     );
-    const git = repositoryGit(repository);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
+    const git = initializePatchGit(repository);
     const source = join(repository, "app.ts");
     await writeFile(source, "before\n");
     git("add", ".");
@@ -1123,10 +1103,7 @@ test.each([
     await Promise.all([mkdir(parent), mkdir(home)]);
     await writeFile(join(home, "config.toml"), windows);
     const initialize = (directory: string) => {
-      const git = repositoryGit(directory);
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
+      const git = initializePatchGit(directory);
       return git;
     };
     const parentGit = initialize(parent);
@@ -1248,8 +1225,7 @@ process.stdout.write(input);
         ...(mode === "configured" ? { GIT_CONFIG_GLOBAL: globalConfig } : {}),
       },
     );
-    const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: repository,
+    const result = await runIssuePatch(repository, {
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {

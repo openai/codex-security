@@ -1,7 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { mkdir, readFile, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchRiskAssessment,
   publicationRepository,
@@ -10,10 +9,11 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 for (const [indexState, stage] of [
   ["staged", undefined],
@@ -67,53 +67,47 @@ for (const [indexState, stage] of [
     const before = git("ls-files", "--stage", "unrelated.txt");
     const head = git("rev-parse", "HEAD");
     let pushes = 0;
-    const result = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", directory),
-        onCodex: async (_args, output) => {
-          await writeFile(
-            join(directory, "selected.txt"),
-            stage === undefined
-              ? "Independent change\n"
-              : normalized
-                ? await readFile(file)
-                : git(
-                    "show",
-                    stage === 0 ? ":unrelated.txt" : `:${stage}:unrelated.txt`,
-                  ) + "\n",
-          );
-          output!.stdout.write(
-            JSON.stringify({
-              patches: [
-                {
-                  occurrenceId: "occ_1",
-                  status: "verified",
-                  files: ["selected.txt"],
-                  verification: "Synthetic verification.",
-                },
-              ],
-            }),
-          );
-          return 0;
-        },
-        onRepositoryCommand: (command, args, cwd, options) => {
-          if (command === "git") {
-            if (args.includes("push")) {
-              pushes++;
-              if (copied)
-                throw new Error("Unexpected publication of staged content");
-            }
-            return runGitRepositoryCommand(command, args, cwd, options);
-          }
-          return args[1] === "list"
-            ? "[]"
-            : "https://github.example.test/example/repository/pull/1";
-        },
+    const result = await runSavedPublication(directory, {
+      onCodex: async (_args, output) => {
+        await writeFile(
+          join(directory, "selected.txt"),
+          stage === undefined
+            ? "Independent change\n"
+            : normalized
+              ? await readFile(file)
+              : git(
+                  "show",
+                  stage === 0 ? ":unrelated.txt" : `:${stage}:unrelated.txt`,
+                ) + "\n",
+        );
+        output!.stdout.write(
+          JSON.stringify({
+            patches: [
+              {
+                occurrenceId: "occ_1",
+                status: "verified",
+                files: ["selected.txt"],
+                verification: "Synthetic verification.",
+              },
+            ],
+          }),
+        );
+        return 0;
       },
-    );
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (command === "git") {
+          if (args.includes("push")) {
+            pushes++;
+            if (copied)
+              throw new Error("Unexpected publication of staged content");
+          }
+          return runGitRepositoryCommand(command, args, cwd, options);
+        }
+        return args[1] === "list"
+          ? "[]"
+          : "https://github.example.test/example/repository/pull/1";
+      },
+    });
     expect(git("ls-files", "--stage", "unrelated.txt")).toBe(before);
     expect(await readFile(file, "utf8")).toBe(normalized ? marker : baseline);
     expect(pushes).toBe(copied ? 0 : 1);

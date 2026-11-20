@@ -12109,6 +12109,13 @@ function isSshPatchRemote(remote: string): boolean {
   );
 }
 
+// Let the filesystem traverse link/.. in the same order as Git.
+function resolveGitControlPath(directory: string, file: string): string {
+  if (isAbsolute(file)) return file;
+  const prefix = parse(file).root;
+  return `${resolve(directory, prefix)}${sep}${file.slice(prefix.length)}`;
+}
+
 async function operatorPatchConfig(
   scope: string,
   origin: string,
@@ -12118,12 +12125,7 @@ async function operatorPatchConfig(
     return false;
   if (!origin.startsWith("file:")) return true;
   // A global include retains global scope even when its file is in the checkout.
-  const file = origin.slice(5);
-  const prefix = parse(file).root;
-  // Let the filesystem traverse link/.. in the same order as Git.
-  const path = isAbsolute(file)
-    ? file
-    : `${resolve(caller, prefix)}${sep}${file.slice(prefix.length)}`;
+  const path = resolveGitControlPath(caller, origin.slice(5));
   const physical = await realpath(path);
   return [root, caller].every(
     (directory) =>
@@ -16703,47 +16705,30 @@ async function readPatchGitControls(
           },
         },
       ),
-    selectedGitDirectory === undefined,
-    environmentValue(dependencies.environment, "GIT_COMMON_DIR") === undefined,
-    selectedGitDirectory === undefined || isAbsolute(selectedGitDirectory)
-      ? selectedGitDirectory
-      : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
     {
-      global: environmentEntry(dependencies.environment, "GIT_CONFIG_GLOBAL"),
-      system: environmentEntry(dependencies.environment, "GIT_CONFIG_SYSTEM"),
-      noSystem: environmentEntry(
-        dependencies.environment,
-        "GIT_CONFIG_NOSYSTEM",
-      ),
-      xdgConfigHome: environmentEntry(
-        dependencies.environment,
-        "XDG_CONFIG_HOME",
-      ),
-      objectDirectory: environmentEntry(
-        dependencies.environment,
-        "GIT_OBJECT_DIRECTORY",
-      ),
-      alternateObjectDirectories: environmentEntry(
-        dependencies.environment,
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-      ),
+      usesWorktreeMarker: selectedGitDirectory === undefined,
+      usesCommonDirectoryMarker:
+        environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
+        undefined,
+      selectedGitDirectory:
+        selectedGitDirectory === undefined
+          ? undefined
+          : resolveGitControlPath(directory, selectedGitDirectory),
+      automaticPublication,
+      mode,
+      credentialStorePaths,
+      environment: dependencies.environment,
+      shellSettings:
+        mode === "external"
+          ? undefined
+          : (shellSettings ??
+            shellEnvironmentSettings(
+              resolveCodexProfile(
+                await readCodexHomeConfig(dependencies.environment),
+              ),
+            )),
+      onSnapshotConfig,
     },
-    automaticPublication,
-    mode,
-    credentialStorePaths,
-    environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
-    environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
-    environmentEntry(dependencies.environment, "NETRC") ?? null,
-    dependencies.environment,
-    mode === "external"
-      ? undefined
-      : (shellSettings ??
-          shellEnvironmentSettings(
-            resolveCodexProfile(
-              await readCodexHomeConfig(dependencies.environment),
-            ),
-          )),
-    onSnapshotConfig,
   );
 }
 

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
@@ -13,11 +13,13 @@ import {
 } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
+import {
+  runGitRepositoryCommand,
+  runWorkflow,
+  patchDirectories,
+} from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 const configurations = [
   "local",

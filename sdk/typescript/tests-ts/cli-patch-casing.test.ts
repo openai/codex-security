@@ -1,5 +1,5 @@
-import { afterEach, expect, mock, test } from "bun:test";
 import fs from "node:fs";
+import { expect, mock, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,14 +9,13 @@ import {
   completePatches,
   runPublication,
   runPublicationCommand,
-  runWorkflow,
   savedScan,
+  patchDirectories,
+  runSavedPublication,
 } from "./cli-patch-fixtures.js";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 // Exercise filesystem aliases on every host while retaining real Git status,
 // index, commits, and local-remote publication. Native filesystem controls below
@@ -61,29 +60,25 @@ test.each([
   try {
     const result = resultWithFindings(["high"]);
     result.findings.findings[0]!.locations[0]!.path = reported;
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: directory,
-        result,
-        onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: (command, args, cwd, options) => {
-          const separator = args.indexOf("--");
-          const translated = args.map((arg, i) =>
-            separator >= 0 && i > separator && arg === reported ? stored : arg,
-          );
-          return runPublicationCommand(command, translated, cwd, options);
-        },
-        onCodex: async (args, output) => {
-          await writeFile(
-            join(directory, stored),
-            "fixed\nsynthetic local edit\n",
-          );
-          completePatches(args, output, "verified", [reported]);
-          return 0;
-        },
+    const outcome = await runSavedPublication(directory, {
+      result,
+      onWorkbench: () => savedScan(result, "scan-1", directory),
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const separator = args.indexOf("--");
+        const translated = args.map((arg, i) =>
+          separator >= 0 && i > separator && arg === reported ? stored : arg,
+        );
+        return runPublicationCommand(command, translated, cwd, options);
       },
-    );
+      onCodex: async (args, output) => {
+        await writeFile(
+          join(directory, stored),
+          "fixed\nsynthetic local edit\n",
+        );
+        completePatches(args, output, "verified", [reported]);
+        return 0;
+      },
+    });
     expect(outcome.exitCode, outcome.stderr).toBe(2);
     expect(outcome.stderr).toContain("uncommitted changes before patching");
     expect(git("rev-parse", "HEAD")).toBe(head);
@@ -159,21 +154,17 @@ test("keeps distinct native filesystem paths and refs publishable", async () => 
   const result = resultWithFindings(["high"]);
   result.findings.findings[0]!.locations[0]!.path = "readme.md";
   let modelCalls = 0;
-  const outcome = await runWorkflow(
-    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-    {
-      currentDirectory: directory,
-      result,
-      onWorkbench: () => savedScan(result, "scan-1", directory),
-      onRepositoryCommand: runPublicationCommand,
-      onCodex: async (args, output) => {
-        modelCalls++;
-        await writeFile(join(directory, "readme.md"), "fixed lower\n");
-        completePatches(args, output, "verified", ["readme.md"]);
-        return 0;
-      },
+  const outcome = await runSavedPublication(directory, {
+    result,
+    onWorkbench: () => savedScan(result, "scan-1", directory),
+    onRepositoryCommand: runPublicationCommand,
+    onCodex: async (args, output) => {
+      modelCalls++;
+      await writeFile(join(directory, "readme.md"), "fixed lower\n");
+      completePatches(args, output, "verified", ["readme.md"]);
+      return 0;
     },
-  );
+  });
   expect(outcome.exitCode, outcome.stderr).toBe(distinct ? 0 : 2);
   expect(modelCalls).toBe(distinct ? 1 : 0);
   expect(await readFile(join(directory, "README.md"), "utf8")).toBe(

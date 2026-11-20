@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import {
   mkdir,
   readFile,
@@ -9,23 +9,21 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, sep } from "node:path";
-import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   patchRiskAssessment,
-  repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
+  gitWithEnvironment,
 } from "./cli-patch-fixtures.js";
 
-const fixtures = createTemporaryDirectories(true);
-afterEach(fixtures.cleanup);
+const fixtures = patchDirectories();
 
 async function initialize(directory: string) {
   await mkdir(directory, { recursive: true });
-  const git = repositoryGit(directory);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
+  const git = initializePatchGit(directory);
   await writeFile(join(directory, "app.ts"), "original\n");
   git("add", ".");
   git("commit", "-m", "Synthetic baseline");
@@ -68,11 +66,7 @@ test.each(["GIT_DIR", "GIT_WORK_TREE"])(
       {
         currentDirectory: caller,
         environment,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          runGitRepositoryCommand(command, args, cwd, {
-            ...options,
-            environment: { ...environment, ...options?.environment },
-          }),
+        onRepositoryCommand: gitWithEnvironment(environment),
         onCodex: async (_args, output) => {
           if (output?.appServer?.prompt.includes("immutable patch artifact")) {
             assessments++;
@@ -211,8 +205,7 @@ test.skipIf(process.platform !== "linux").each([false, true])(
     const aliasIndex = await readFile(join(alias, ".git/index"));
     const aliasCommands: string[][] = [];
     let modelCalls = 0;
-    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: root,
+    const outcome = await runIssuePatch(root, {
       onRepositoryCommand: (command, args, cwd, options) => {
         if (
           cwd === alias ||

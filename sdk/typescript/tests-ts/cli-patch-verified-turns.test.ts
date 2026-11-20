@@ -16,6 +16,7 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
   savedScan,
+  initializePatchGit,
 } from "./cli-patch-fixtures.js";
 
 const publicationDirectories = createApiTestFixtures("codex-security-publish-");
@@ -35,10 +36,7 @@ async function publicationFixtures(
   const repository = join(root, "repository");
   const remote = join(root, "remote.git");
   await mkdir(join(repository, "src"), { recursive: true });
-  const git = repositoryGit(repository);
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
+  const git = initializePatchGit(repository);
   git("config", "commit.gpgsign", "false");
   for (const [path, contents] of Object.entries(files)) {
     const file = join(repository, path);
