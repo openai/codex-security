@@ -69,13 +69,6 @@ export function codexSecurityPrivatePaths(
     codexSecurityStateDirectory(environment),
     "workbench.sqlite3",
   );
-  const githubConfigDirectory =
-    environmentEntry(environment, "GH_CONFIG_DIR") ||
-    (environmentEntry(environment, "XDG_CONFIG_HOME")
-      ? join(environmentEntry(environment, "XDG_CONFIG_HOME")!, "gh")
-      : process.platform === "win32" && environmentEntry(environment, "AppData")
-        ? join(environmentEntry(environment, "AppData")!, "GitHub CLI")
-        : undefined);
   return [
     codexSecurityCredentialHome(environment),
     join(homedir(), ".ssh"),
@@ -83,16 +76,17 @@ export function codexSecurityPrivatePaths(
     join(homedir(), ".config", "gh"),
     join(expandHome("~", environment), ".config", "gh"),
     ...[process.env, environment].flatMap((source) => {
+      const explicit = environmentEntry(source, "GH_CONFIG_DIR");
       const appData = environmentEntry(source, "AppData");
       const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
       return [
+        ...(explicit ? [expandHome(explicit, source)] : []),
         ...(xdg ? [join(xdg, "gh")] : []),
         ...(process.platform === "win32" && appData
           ? [join(appData, "GitHub CLI")]
           : []),
       ];
     }),
-    ...(githubConfigDirectory ? [githubConfigDirectory] : []),
     stateDatabase,
     `${stateDatabase}-wal`,
     `${stateDatabase}-shm`,

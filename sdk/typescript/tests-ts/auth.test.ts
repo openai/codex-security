@@ -587,6 +587,7 @@ test("retains the Codex configuration path and parsing error", async () => {
 test("private credential paths retain default GitHub stores with overrides", async () => {
   const root = await temporaryDirectory();
   const host = join(root, "host-appdata");
+  const hostGh = join(root, "host-gh");
   const caller = join(root, "caller-appdata");
   const callerHome = join(root, "caller-home");
   const explicit = join(root, "explicit-gh");
@@ -596,6 +597,7 @@ test("private credential paths retain default GitHub stores with overrides", asy
 const {codexSecurityPrivatePaths} = await import(${JSON.stringify(auth)});
 Object.defineProperty(process, "platform", {value: "win32"});
 process.env.AppData = ${JSON.stringify(host)};
+process.env.GH_CONFIG_DIR = ${JSON.stringify(hostGh)};
 const base = {CODEX_HOME: ${JSON.stringify(join(root, "codex"))}, AppData: ${JSON.stringify(caller)}, USERPROFILE: ${JSON.stringify(callerHome)}};
 const outputs = [
   {...base, GH_CONFIG_DIR: ${JSON.stringify(explicit)}},
@@ -603,13 +605,15 @@ const outputs = [
   {...base, GH_CONFIG_DIR: ${JSON.stringify(explicit)}, XDG_CONFIG_HOME: ${JSON.stringify(xdg)}}
 ].map(environment => {
   const paths = codexSecurityPrivatePaths(environment);
-  return [
-    paths.includes(${JSON.stringify(join(host, "GitHub CLI"))}),
-    paths.includes(${JSON.stringify(join(caller, "GitHub CLI"))}),
-    paths.includes(environment.GH_CONFIG_DIR ?? ${JSON.stringify(join(xdg, "gh"))}),
-    environment.XDG_CONFIG_HOME ? paths.includes(${JSON.stringify(join(xdg, "gh"))}) : true,
-    paths.includes(${JSON.stringify(join(callerHome, ".config", "gh"))})
+  const expected = [
+    ${JSON.stringify(hostGh)},
+    ${JSON.stringify(join(host, "GitHub CLI"))},
+    ${JSON.stringify(join(caller, "GitHub CLI"))},
+    ${JSON.stringify(join(callerHome, ".config", "gh"))}
   ];
+  if (environment.GH_CONFIG_DIR) expected.push(environment.GH_CONFIG_DIR);
+  if (environment.XDG_CONFIG_HOME) expected.push(${JSON.stringify(join(xdg, "gh"))});
+  return expected.filter(path => !paths.includes(path));
 });
 console.log(JSON.stringify(outputs));
 `;
@@ -617,9 +621,5 @@ console.log(JSON.stringify(outputs));
     env: process.env,
   });
   expect(child.exitCode, child.stderr.toString()).toBe(0);
-  expect(JSON.parse(child.stdout.toString())).toEqual([
-    [true, true, true, true, true],
-    [true, true, true, true, true],
-    [true, true, true, true, true],
-  ]);
+  expect(JSON.parse(child.stdout.toString())).toEqual([[], [], []]);
 });
