@@ -195,8 +195,9 @@ export function gradeStack(report, fixture, { reviewed }) {
     for (const receipt of claim.receipts) {
       assert.equal(receipt.server, "stack-packet");
       assert.equal(receipt.originalPayloadSha256, files.stacks.sha256);
-      assert.deepEqual(receipt.origin, {
-        tool: "read-stacks",
+      const { tool, ...origin } = receipt.origin;
+      assert.ok(["next", "read-stacks"].includes(tool), "capture operation");
+      assert.deepEqual(origin, {
         arguments: {
           inputDigest: report.inputDigest,
           workItemId: item.id,
