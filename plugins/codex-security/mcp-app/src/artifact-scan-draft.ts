@@ -1230,6 +1230,7 @@ async function mergeSavedDraft(
   },
 ) {
   const preserveSurfaceIds = sameSavedSurface === undefined;
+  const deferredSurfaceTargets = new Map<number, (number | undefined)[]>();
   const sameSurface = (left: JsonObject, right: JsonObject) =>
     matchesSavedCoverageSource(surfaceContent(right), surfaceContent(left));
   const sources = savedSources.map(({ input }) => input);
@@ -1646,7 +1647,10 @@ async function mergeSavedDraft(
         )
       );
     });
-    const unmatchedSurfaces = [...result.reviewState.surfaces];
+    const unmatchedSurfaces = result.reviewState.surfaces.map(
+      (surface, index) => ({ surface, index }),
+    );
+    const surfaceTargets = new Map<JsonObject, number>();
     const normalized = preserveSurfaceIds
       ? surfaceNormalization(
           source.reviewState.surfaces,
@@ -1667,7 +1671,7 @@ async function mergeSavedDraft(
         : (["raw"] as const);
       for (const form of forms) {
         previousSurfaces = previousSurfaces.filter((surface) => {
-          const index = unmatchedSurfaces.findIndex((current) => {
+          const index = unmatchedSurfaces.findIndex(({ surface: current }) => {
             const pair =
               form === "raw"
                 ? ([surface, current] as const)
@@ -1681,7 +1685,10 @@ async function mergeSavedDraft(
             return pair !== undefined && matches(pair[0], pair[1]);
           });
           if (index < 0) return true;
-          if (preserveSurfaceIds) unmatchedSurfaces.splice(index, 1);
+          if (preserveSurfaceIds) {
+            surfaceTargets.set(surface, unmatchedSurfaces[index]!.index);
+            unmatchedSurfaces.splice(index, 1);
+          }
           return false;
         });
       }
@@ -1709,14 +1716,43 @@ async function mergeSavedDraft(
             )
           : [],
     };
+    if (preserveSurfaceIds)
+      previousSurfaces.forEach((surface, index) => {
+        surfaceTargets.set(surface, result.reviewState.surfaces.length + index);
+      });
     result.reviewState.surfaces = preserveSurfaceIds
       ? [...result.reviewState.surfaces, ...previousCoverage.surfaces]
       : exactUnion(result.reviewState.surfaces, previousCoverage.surfaces);
+    const deferredCount = result.reviewState.deferred.length;
     result.reviewState = preserveScanCoverage(
       result.reviewState,
       previousCoverage,
       ambiguousDeferredIds,
     );
+    if (
+      preserveSurfaceIds &&
+      result.reviewState.deferred.length > deferredCount
+    ) {
+      // Keep retained links bound to the matched occurrence, including after reordering.
+      const sourceTargets = new Map<unknown, number | undefined>();
+      for (const surface of source.reviewState.surfaces) {
+        if (!sourceTargets.has(surface.id))
+          sourceTargets.set(surface.id, surfaceTargets.get(surface));
+      }
+      for (
+        let index = deferredCount;
+        index < result.reviewState.deferred.length;
+        index++
+      ) {
+        const links = result.reviewState.deferred[index]!.surfaceIds as
+          string[] | undefined;
+        if (links !== undefined)
+          deferredSurfaceTargets.set(
+            index,
+            links.map((id) => sourceTargets.get(id)),
+          );
+      }
+    }
   }
   result.reviewState.deferred = normalizeDeferred(result.reviewState.deferred);
   if (!preserveSurfaceIds)
@@ -1730,6 +1766,7 @@ async function mergeSavedDraft(
     selectedReceiptsBySurface,
     closedDeferredIds,
     resolvedSurfaces,
+    deferredSurfaceTargets,
   };
 }
 
@@ -1946,7 +1983,7 @@ export async function reconcileAcceptedWorkerHistory(
   history: SavedScanDraft[],
   receiptDigests: ReadonlyMap<string, string>,
   previouslyAccepted = false,
-): Promise<ScanDraftInput> {
+) {
   requireFiniteNumbers(input);
   const savedSources = structuredClone(history);
   const initial = structuredClone(input);
@@ -1998,7 +2035,10 @@ export async function reconcileAcceptedWorkerHistory(
   await reconcileSavedReceipts(context, merged, { receiptDigests });
   const { result } = merged;
   result.findings = workerFindingsWithinScope(context, result.findings);
-  return parsePersistedScanDraft(result);
+  return {
+    result: parsePersistedScanDraft(result),
+    deferredSurfaceTargets: merged.deferredSurfaceTargets,
+  };
 }
 
 function savedSurfaceIdentity(

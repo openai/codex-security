@@ -214,6 +214,7 @@ export async function readAcceptedDiscovery(
   );
   const { context } = draft;
   let result = draft.result;
+  let deferredSurfaceTargets = new Map<number, (number | undefined)[]>();
   const surfaceIdentities = [
     ...surfaceNormalization(result.reviewState.surfaces).values(),
   ];
@@ -277,13 +278,15 @@ export async function readAcceptedDiscovery(
     }
   }
   if (history.length) {
-    result = await reconcileAcceptedWorkerHistory(
+    const reconciled = await reconcileAcceptedWorkerHistory(
       context,
       result,
       history,
       receiptDigests,
       admission === "previously-accepted",
     );
+    result = reconciled.result;
+    deferredSurfaceTargets = reconciled.deferredSurfaceTargets;
     if (admission === "new") validateWorkerReport(result);
     validateRetainedCoverage(result.reviewState);
   }
@@ -315,6 +318,7 @@ export async function readAcceptedDiscovery(
           surfaceIdentities,
         })),
       ],
+      deferredSurfaceTargets,
     ),
   };
 }
@@ -334,6 +338,10 @@ export function scanCoverage(
     coverage: ScanDraftInput["reviewState"];
     surfaceIdentities?: SurfaceNormalization[];
   }[] = [{ coverage: worker.result.reviewState }],
+  deferredSurfaceTargets: ReadonlyMap<
+    number,
+    readonly (number | undefined)[]
+  > = new Map(),
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -615,9 +623,12 @@ export function scanCoverage(
       ...(item.surfaceIds === undefined
         ? {}
         : {
-            surfaceIds: (item.surfaceIds as string[]).map(
-              (id) => surfaceIds.get(id) ?? id,
-            ),
+            surfaceIds: (item.surfaceIds as string[]).map((id, linkIndex) => {
+              const target = deferredSurfaceTargets.get(index)?.[linkIndex];
+              return target === undefined
+                ? (surfaceIds.get(id) ?? id)
+                : surfaces[target]!.id;
+            }),
           }),
     })),
     ...(coverage.resolvedDeferred === undefined

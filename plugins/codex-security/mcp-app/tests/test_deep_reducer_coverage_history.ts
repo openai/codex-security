@@ -22,9 +22,12 @@ const source = fileURLToPath(new URL("../src", import.meta.url));
 const { parsePersistedScanDraft } = await importSource(
   path.join(source, "artifact-scan-draft.ts"),
 );
-const { persistedScanUnion, parseScanUnion } = await importSource(
-  path.join(source, "deep-scan/artifact-validation.ts"),
-);
+const {
+  persistedScanUnion,
+  parseScanUnion,
+  scanUnionToDraft,
+  readAcceptedDiscovery,
+} = await importSource(path.join(source, "deep-scan/artifact-validation.ts"));
 const { mergeBatch } = await importSource(
   path.join(source, "deep-scan/iteration.ts"),
 );
@@ -83,6 +86,97 @@ async function publishAndReplay(
   assert.deepEqual(parseScanUnion(stored).findings, result.findings);
   assert.deepEqual(await aggregate(), result);
   return result;
+}
+
+for (const archived of [false, true]) {
+  for (const currentIds of [
+    "duplicates",
+    "reordered duplicates",
+    "explicit",
+    "authored task",
+  ]) {
+    test(`retained task links follow matched surfaces: archived=${archived}, ${currentIds}`, async (t) => {
+      const f = await workerHistoryFixture(t, archived ? 2 : 1);
+      const surfaces = ["First", "Second"].map((label) => ({
+        id: "api",
+        label,
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      }));
+      await f.record(
+        reviewDraft(false, {
+          surfaces,
+          deferred: [
+            {
+              id: "later",
+              reason: "Synthetic follow-up",
+              surfaceIds: ["api-2"],
+            },
+          ],
+        }),
+      );
+      if (archived) await f.archive();
+      await mkdir(f.output, { recursive: true });
+      const current = structuredClone(surfaces);
+      if (currentIds === "explicit") current[1]!.id = "api-2";
+      if (currentIds === "reordered duplicates") current.reverse();
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(
+          reviewDraft(true, {
+            surfaces: current,
+            deferred:
+              currentIds === "authored task"
+                ? [
+                    {
+                      id: "current",
+                      reason: "Current follow-up",
+                      surfaceIds: ["api"],
+                    },
+                  ]
+                : [],
+          }),
+        ),
+      );
+      const before = await artifactTree(f.workerRoot);
+      const accepted = await f.readAccepted();
+      assert.deepEqual(accepted.result.reviewState.surfaces, current);
+      const resumed = await readAcceptedDiscovery(
+        f.artifacts,
+        f.worker,
+        scanId,
+        {},
+        "previously-accepted",
+      );
+      assert.deepEqual(resumed.coverage, accepted.coverage);
+      const aggregate = await publishAndReplay(f);
+      const published = scanUnionToDraft(aggregate).reviewState;
+      assert.equal(published.surfaces.length, 2);
+      assert.equal(
+        published.deferred.length,
+        currentIds === "authored task" ? 2 : 1,
+      );
+      assert.deepEqual(
+        published.deferred.find(
+          (row: { reason: string }) => row.reason === "Synthetic follow-up",
+        ).surfaceIds,
+        [
+          published.surfaces.find(
+            (row: { label: string }) => row.label === "Second",
+          ).id,
+        ],
+      );
+      if (currentIds === "authored task") {
+        assert.deepEqual(
+          published.deferred.find(
+            (row: { reason: string }) => row.reason === "Current follow-up",
+          ).surfaceIds,
+          [published.surfaces[0].id],
+        );
+      }
+      assert.deepEqual(await artifactTree(f.workerRoot), before);
+    });
+  }
 }
 
 for (const close of [false, true]) {

@@ -519,7 +519,7 @@ def merge_saved_results(
         model_draft["complete"] = False
     if frozen_source_digests is not None and "canonical" in parent_context:
         canonical = parent_context["canonical"]
-        parent = drafts_by_path[canonical]
+        parent = copy.deepcopy(drafts_by_path[canonical])
         parent_model_source = canonical
         parent_modified = int(
             parent_context.get("canonicalObservedAtNs", source_order[canonical][1])
@@ -843,6 +843,12 @@ def merge_saved_results(
                 worker_id,
                 worker["attempt"],
             ):
+                if worker is not None and field == "surfaces":
+                    retained = coverage_origins.retained_record(
+                        field, item, index, worker, source, coverage, reviewed_attempts
+                    )
+                    if retained is not None:
+                        return copy.deepcopy(retained)
                 return item
             # Reproduced outputs and links from omitted checkpoints use the
             # accepted worker's surface namespace.
@@ -1261,15 +1267,11 @@ def merge_saved_results(
 
     source_order["parent"] = (0, parent_modified)
 
-    def projection_key(field: str, item: dict[str, Any]) -> tuple[str, str]:
-        # Publication may rename canonical IDs and add retained finding history.
-        ignored = {"id", "previousFindings"} if field == "surfaces" else {"id"}
-        content = {
-            key: value
-            for key, value in canonical_coverage_record(field, item).items()
-            if key not in ignored
-        }
-        return field, _digest(content)
+    projection_key = partial(
+        projection.projection_key,
+        canonical_coverage_record=canonical_coverage_record,
+        _digest=_digest,
+    )
 
     projected_sources: dict[tuple[str, str], tuple[str, dict[str, Any], tuple[int, int]]] = {}
     accepted_pending_candidates: set[tuple[str, int, str]] = set()

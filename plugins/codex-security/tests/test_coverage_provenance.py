@@ -1743,6 +1743,120 @@ def test_recovery_preserves_accepted_links_across_attempts(
     assert all(path.read_bytes() == data for path, data in original.items())
 
 
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("duplicate_ids", [False, True])
+def test_recovery_preserves_matched_surface_task_links(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, duplicate_ids
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    first = {
+        "id": "api",
+        "label": "First synthetic review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    second = {**first, "id": "api-2", "label": "Second synthetic review"}
+    task = {"id": "later", "reason": "Synthetic follow-up", "surfaceIds": ["api-2"]}
+    current = [{**second, "id": "api" if duplicate_ids else "api-2"}, first]
+    archive = result.parent.parent / "attempts/attempt-01/result.json"
+    archive.parent.mkdir(parents=True)
+    for target, rows, tasks in ((archive, [first, second], [task]), (result, current, [])):
+        target.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "reviewState": {
+                        **scan.coverage,
+                        "completeness": "partial",
+                        "surfaces": rows,
+                        "deferred": tasks,
+                    },
+                }
+            )
+        )
+    checkpoint_draft = json.loads(archive.read_text())
+    checkpoint_draft["complete"] = True
+    for directory in (archive.parent, result.parent):
+        checkpoint = write_checkpoint(directory / "checkpoints", checkpoint_draft)
+        select_checkpoint(directory, checkpoint, mtime_ns=100_000_000_000)
+        os.utime(checkpoint, ns=(100_000_000_000, 100_000_000_000))
+    os.utime(archive, ns=(100_000_000_000, 100_000_000_000))
+    os.utime(result, ns=(200_000_000_000, 200_000_000_000))
+    original = {
+        target: target.read_bytes()
+        for target in result.parent.parent.rglob("*")
+        if target.is_file()
+    }
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-2-surface-{index}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate(current, 1)
+    ]
+    published_task = {
+        **task,
+        "id": f"{worker_id}-attempt-2-deferred-1",
+        "surfaceIds": [surfaces[0]["id"]],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "later"},
+    }
+    prior_surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-1-surface-{index}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate((first, second), 1)
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": prior_surfaces,
+            "deferred": [
+                {
+                    **published_task,
+                    "id": f"{worker_id}-attempt-1-deferred-1",
+                    "surfaceIds": [prior_surfaces[1]["id"]],
+                }
+            ],
+            "reviews": [{"workerId": worker_id, "attempt": 1}],
+        },
+    )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": surfaces,
+            "deferred": [published_task],
+            "reviews": [{"workerId": worker_id, "attempt": attempt} for attempt in (1, 2)],
+        },
+    )
+    head = scan.scan_dir / "checkpoint-head.json"
+    checkpoint = scan.scan_dir / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    observed_at = checkpoint.stat().st_mtime_ns + 1_000_000
+    os.utime(head, ns=(observed_at, observed_at))
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert [row for row in recovered["deferred"] if row.get("reason") == task["reason"]] == [
+        published_task
+    ]
+    assert recovered["surfaces"] == surfaces
+    assert all(target.read_bytes() == data for target, data in original.items())
+
+
 @pytest.mark.parametrize(
     "variant",
     ["unchanged", "reordered", "reserved", "roundtrip", "mixed_origins", "priority", "outer_proto"],

@@ -919,6 +919,16 @@ class SavedCoverageProjection:
         )
         return retained
 
+    def projection_key(self, field, item, canonical_coverage_record, _digest):
+        # Publication may rename canonical IDs and add retained finding history.
+        ignored = {"id", "previousFindings"} if field == "surfaces" else {"id"}
+        content = {
+            key: value
+            for key, value in canonical_coverage_record(field, item).items()
+            if key not in ignored
+        }
+        return field, _digest(content)
+
     def retained_record(self, coverage, field, item, canonical_record):
         item = canonical_record(field, item)
         if field == "surfaces":
