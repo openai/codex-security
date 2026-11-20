@@ -46,6 +46,7 @@ import {
   modelFilePath,
   readModelFileInputs,
   validateModelFileInputs,
+  workerModelInputConfig,
   type ModelFileInputs,
 } from "./model-file-inputs.js";
 import { writePrivateFile } from "./artifacts.js";
@@ -130,10 +131,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   async validateModelFileInputs(signal: AbortSignal): Promise<void> {
     const saved = this.modelSettings.modelFileInputs;
     if (!saved) return;
-    const runtime = await this.getRuntimeSettings(
-      await snapshotWorkerEnvironment(),
-    );
-    await validateModelFileInputs(saved, runtime.config, signal);
+    const environment = await snapshotWorkerEnvironment();
+    const runtime = await this.getRuntimeSettings(environment);
+    const config = await workerModelInputConfig(environment, runtime, signal);
+    await validateModelFileInputs(saved, config, signal);
   }
 
   private getRuntimeSettings(environment: Record<string, string>) {
@@ -1184,10 +1185,11 @@ export async function workerRuntimeSettings(
 }
 
 export async function currentModelFileInputs(): Promise<ModelFileInputs> {
-  const settings = await workerRuntimeSettings(
-    await snapshotWorkerEnvironment(),
+  const environment = await snapshotWorkerEnvironment();
+  const runtime = await workerRuntimeSettings(environment);
+  return readModelFileInputs(
+    await workerModelInputConfig(environment, runtime),
   );
-  return readModelFileInputs(settings.config);
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {

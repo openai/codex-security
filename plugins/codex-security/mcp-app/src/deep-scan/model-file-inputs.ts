@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { constants, open } from "node:fs/promises";
+import { constants, open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { parse } from "smol-toml";
 import { z } from "zod";
 
 export const modelFileSettings = [
@@ -73,6 +74,46 @@ export async function readModelFileInputs(
 }
 
 export class DeepScanModelInputRecoveryError extends Error {}
+
+/** Include the user and native profile settings Codex loads beneath worker overrides. */
+export async function workerModelInputConfig(
+  environment: Record<string, string>,
+  runtime: { config: Record<string, unknown>; nativeProfile?: string },
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const home = environment.CODEX_HOME || join(homedir(), ".codex");
+  const files = ["config.toml"];
+  if (runtime.nativeProfile) files.push(runtime.nativeProfile + ".config.toml");
+  const inherited: Record<string, unknown> = {};
+  for (const file of files) {
+    let config;
+    try {
+      config = parse(
+        await readFile(join(home, file), { encoding: "utf8", signal }),
+      );
+    } catch (cause) {
+      signal?.throwIfAborted();
+      if (
+        file === "config.toml" &&
+        (cause as NodeJS.ErrnoException).code === "ENOENT"
+      )
+        continue;
+      throw new DeepScanModelInputRecoveryError(
+        `Could not read the Deep Scan's model settings in ${file}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
+      );
+    }
+    for (const key of modelInputSettings) {
+      const value = config[key];
+      if (typeof value === "string")
+        inherited[key] =
+          key === "developer_instructions" || !value
+            ? value
+            : modelFilePath(value, home);
+    }
+  }
+  return { ...inherited, ...runtime.config };
+}
 
 export async function validateModelFileInputs(
   saved: ModelFileInputs,
