@@ -10937,7 +10937,7 @@ async function executeDependencyAgent(
   toolsUrl?: string,
 ): Promise<string> {
   const project = await selectedProjectConfig(request.config, dependencies);
-  const explicit = parseCodexOverrides(
+  const explicit = parseCodexOverrideValues(
     request.codex ?? [],
     request.model,
     request.effort,
@@ -11011,6 +11011,7 @@ async function executeDependencyAgent(
     mergeCodexOverrides(configured, explicit),
     scanCodexHome(dependencies.environment),
   );
+  requireExternalProviderModel(overrides, explicit["model_provider"]);
   const model = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );

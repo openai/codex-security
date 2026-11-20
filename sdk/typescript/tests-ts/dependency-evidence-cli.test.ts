@@ -85,6 +85,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     config,
     JSON.stringify({
       codex: {
+        model: "fixture-model",
         agents: {
           max_concurrent_threads_per_session: 7,
           default_subagent_reasoning_effort: "xhigh",
@@ -114,6 +115,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       "--config",
       config,
       "--codex",
+      'model_provider="openrouter"',
+      "--codex",
       "features.multi_agent_v2.max_concurrent_threads_per_session=49",
       "--codex",
       'model_reasoning_effort="medium"',
@@ -131,6 +134,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       currentDirectory: repo.path,
       environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
       async onCodex(args, output, _environment, prompt) {
+        expect(args).toContain('model_provider="openrouter"');
+        expect(args).toContain('model="fixture-model"');
         const payload = JSON.parse(
           (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
         );
