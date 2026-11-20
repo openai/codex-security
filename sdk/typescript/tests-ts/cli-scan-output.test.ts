@@ -243,8 +243,8 @@ async function runInvalid(args: string[]) {
 
 async function expectScanFailures(
   message: string,
-  leadingArgs: string[],
-  trailingArgs: string[] = [],
+  leadingArgs: readonly string[],
+  trailingArgs: readonly string[] = [],
 ) {
   for (const fullOutput of [false, true]) {
     const { stdout, stderr } = await runInvalid([
