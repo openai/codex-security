@@ -2172,7 +2172,7 @@ function isPatchStartupOverride(name: string): boolean {
   return (
     /^OPENSSL_(?:CONF(?:_INCLUDE)?|MODULES|ENGINES)$/iu.test(name) ||
     (process.platform !== "win32" && /^(?:LD|DYLD)_/u.test(name)) ||
-    /^(?:PYTHON(?:HOME|PATH|USERBASE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
+    /^(?:PYTHON(?:HOME|PATH|USERBASE|NOUSERSITE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
       name,
     ) ||
     /^(?:NODE_(?:OPTIONS|PATH)|BUN_OPTIONS|PERL(?:5?LIB|5OPT)|GITPERLLIB|RUBY(?:LIB|OPT)|RUBYGEMS_GEMDEPS|GEM_(?:HOME|PATH)|BASH_ENV|ENV|ZDOTDIR|BASH_FUNC_.+%%)$/iu.test(
@@ -2474,6 +2474,7 @@ export async function runRepositoryCommand(
     // Git, hosting clients and the sandbox launcher all start on the host.
     for (const name of Object.keys(environment))
       if (isPatchStartupOverride(name)) delete environment[name];
+    environment["PYTHONNOUSERSITE"] = "1";
     const credentialNames = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",

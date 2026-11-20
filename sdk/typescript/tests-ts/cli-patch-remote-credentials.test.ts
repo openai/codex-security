@@ -683,6 +683,7 @@ test.each([
     const name = "transport.cjs";
     const startup = {
       PYTHONPATH: directory,
+      PYTHONNOUSERSITE: "0",
       NODE_PATH: directory,
       OPENSSL_CONF: join(directory, "synthetic.cnf"),
       OPENSSL_CONF_INCLUDE: directory,
@@ -692,7 +693,8 @@ test.each([
     await writeFile(startup.OPENSSL_CONF, "");
     const script =
       `const inherited = Object.entries(${JSON.stringify(startup)}).some(([key, value]) => process.env[key] === value);\n` +
-      'const phase = inherited ? "inherited" : process.env.PATCH_SSH_PHASE;\n' +
+      'const isolated = !inherited && process.env.PYTHONNOUSERSITE === "1";\n' +
+      'const phase = isolated ? process.env.PATCH_SSH_PHASE : "inherited";\n' +
       'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
     const checkoutScript = join(directory, name).replaceAll("\\", "/");
     const shell =

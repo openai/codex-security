@@ -3082,8 +3082,10 @@ configuration that Git delegates inherit.
 
 Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 `PYTHONHOME`, `NODE_OPTIONS`, and `BASH_ENV` before launching Git, hosting
-clients, and the sandbox runner on the host. On Unix they also clear native
-loader overrides (`LD_*` and `DYLD_*`).
+clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
+to disable Python’s default user site-packages directory. If your wrapper uses
+`python -E` to ignore environment settings, add `-s` to skip that directory.
+On Unix they also clear native loader overrides (`LD_*` and `DYLD_*`).
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
 `OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
 OpenSSL configuration and module directories. Configure required cryptographic
