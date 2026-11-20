@@ -539,12 +539,7 @@ async function runSshPreflight(
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_SSH_VARIANT: "ssh",
     PATCH_SSH_MARKER: marker,
-    ...(hostnameEnvironment && {
-      GITLAB_HOST: "gitlab.example.invalid",
-      PYTHONPATH: selected,
-      NODE_PATH: selected,
-      ...hostnameEnvironment,
-    }),
+    ...hostnameEnvironment,
   };
   let hostnameCommand: string | undefined;
   const model = mock(async () => 0);
@@ -696,8 +691,18 @@ test.each([
     const config = join(external, "ssh_config");
     const marker = join(external, "invoked");
     const name = "transport.cjs";
+    const startup = {
+      PYTHONPATH: directory,
+      NODE_PATH: directory,
+      OPENSSL_CONF: join(directory, "synthetic.cnf"),
+      OPENSSL_CONF_INCLUDE: directory,
+      OPENSSL_MODULES: directory,
+      OPENSSL_ENGINES: directory,
+    };
+    await writeFile(startup.OPENSSL_CONF, "");
     const script =
-      'const phase = process.env.PYTHONPATH || process.env.NODE_PATH ? "inherited" : process.env.PATCH_SSH_PHASE;\n' +
+      `const inherited = Object.entries(${JSON.stringify(startup)}).some(([key, value]) => process.env[key] === value);\n` +
+      'const phase = inherited ? "inherited" : process.env.PATCH_SSH_PHASE;\n' +
       'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
     const checkoutScript = join(directory, name).replaceAll("\\", "/");
     const shell =
@@ -787,9 +792,8 @@ test.each([
         env: {
           ...process.env,
           ...shell,
+          ...startup,
           PATCH_SSH_MARKER: marker,
-          PYTHONPATH: directory,
-          NODE_PATH: directory,
         },
       },
     );
@@ -824,7 +828,7 @@ test.each([
       directory,
       global,
       marker,
-      shell,
+      { ...shell, ...startup, GITLAB_HOST: "gitlab.example.invalid" },
       location === "changed-config"
         ? () => writeFile(leaf, "# changed\n", { flag: "a" })
         : undefined,

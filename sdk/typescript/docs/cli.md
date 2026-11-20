@@ -3088,6 +3088,10 @@ configuration that Git delegates inherit.
 Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 `PYTHONHOME`, `NODE_OPTIONS`, and `BASH_ENV` before launching Git, hosting
 clients, and the sandbox runner on the host.
+On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
+`OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
+OpenSSL configuration and module directories. Configure required cryptographic
+policies in those defaults.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.

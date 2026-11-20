@@ -29,6 +29,69 @@ const fixtures = patchDirectories();
 const branch = "codex-security/patch-scan-1";
 
 describe("GitHub patch destinations", () => {
+  test
+    .skipIf(process.platform === "win32")
+    .each(["stable", "replaced", "removed caller"])(
+    "binds a relative GitHub CLI socket across the patch: %s",
+    async (mode) => {
+      const { directory } = await publicationRepository(fixtures);
+      const caller = join(directory, "src");
+      const config = await fixtures.create("gh-");
+      const name = " gh";
+      await writeFile(
+        join(config, "config.yml"),
+        `http_unix_socket: "${name}"\n`,
+      );
+      const listen = (base: string) =>
+        Bun.serve({ unix: join(base, name), fetch: () => new Response() });
+      const sockets = [listen(caller)];
+      let edited = false;
+      let callsAfterEdit = 0;
+      try {
+        const outcome = await runPublicationWorkflow("issue", {
+          currentDirectory: caller,
+          environment: { GH_CONFIG_DIR: config },
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "gh") {
+              if (edited) callsAfterEdit++;
+              if (args[0] === "config") {
+                expect(args).toEqual(["config", "get", "http_unix_socket"]);
+                return name + "\n";
+              }
+            }
+            return runPublicationCommand(command, args, cwd, options);
+          },
+          onCodex: async (_args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            if (mode === "replaced") {
+              await unlink(join(caller, name));
+              sockets.push(listen(caller));
+            } else if (mode === "removed caller") {
+              await rm(caller, { recursive: true });
+              sockets.push(listen(directory));
+            }
+            edited = true;
+            output?.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+        });
+        expect(edited, outcome.stderr).toBe(true);
+        if (mode === "stable") {
+          expect(outcome.exitCode, outcome.stderr).toBe(0);
+          expect(callsAfterEdit).toBeGreaterThan(0);
+        } else {
+          expect(outcome.exitCode, outcome.stderr).toBe(2);
+          expect(outcome.stderr).toContain(
+            "GitHub CLI configuration changed before publication",
+          );
+          expect(callsAfterEdit).toBe(0);
+        }
+      } finally {
+        for (const socket of sockets) await socket.stop(true);
+      }
+    },
+  );
+
   test.each([
     ["GitHub", "creation"],
     ["GitLab", "creation"],
@@ -728,6 +791,7 @@ test.each([
     onRepositoryCommand: async (command, args, cwd, options) => {
       if (command === "git")
         return runGitRepositoryCommand(command, args, cwd, options);
+      if (command === "gh" && args[0] === "config") return "\n";
       if (removed) {
         readsAfterRemoval++;
         expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(config);
