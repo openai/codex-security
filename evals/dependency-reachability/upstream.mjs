@@ -19,9 +19,11 @@ import { compareRuns } from "./upstream/compare.mjs";
 import { gradeSnapshot, validateSnapshot } from "./upstream/grade.mjs";
 
 const suites = ["original", "added", ...new Set(cases.map((c) => c.suite))];
-const usage = `Usage: node upstream.mjs --cache DIR [--suite ${suites.join("|")}] [--case ID]
+const usage = `Usage: node upstream.mjs --cache DIR [--suite ${suites.join("|")}] [--case ID ...]
        (--prepare-only | --cli PATH | --skill-baseline | --grade-existing RESULTS_DIR) [--jobs N] [--model MODEL] [--out NEW_DIR]
-       With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled)
+       Repeat --case ID to select several cases.
+       With --cli or --grade-existing: [--grader enabled|disabled|both] (default enabled for live runs)
+       Regrading uses the cases and grader from results.json when available. Pass selectors to narrow the run.
        With --cli: [--isolated-state] creates a fresh CLI state directory per invocation.
        For --skill-baseline, append -- COMMAND [ARG...] to evaluate a local adapter on the original cases.
 Fetch verified public inputs using: python3 upstream/assets.py fetch CACHE`;
@@ -32,7 +34,7 @@ const { values } = parseArgs({
   options: {
     cache: { type: "string" },
     suite: { type: "string" },
-    case: { type: "string" },
+    case: { type: "string", multiple: true },
     cli: { type: "string" },
     grader: { type: "string" },
     "isolated-state": { type: "boolean" },
@@ -50,8 +52,19 @@ if (values.help) {
   process.exit(0);
 }
 const jobs = Number(values.jobs);
-const existing = values["grade-existing"];
-const grader = values.grader ?? "enabled";
+const existing = values["grade-existing"] && resolve(values["grade-existing"]);
+let previous;
+if (existing) {
+  try {
+    previous = JSON.parse(
+      await readFile(join(existing, "results.json"), "utf8"),
+    );
+  } catch (error) {
+    // A directory of reports can also be graded with explicit selectors.
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+const grader = values.grader ?? previous?.grader ?? "enabled";
 if (
   !Number.isSafeInteger(jobs) ||
   jobs < 1 ||
@@ -69,15 +82,28 @@ if (
   ].filter(Boolean).length !== 1
 )
   throw Error(usage);
+if (
+  previous?.grader &&
+  previous.grader !== "both" &&
+  previous.grader !== grader
+)
+  throw Error(`The saved run only contains grader ${previous.grader}.`);
 
 const original = new Set(originalCases.map((c) => c.id));
+const savedIds = previous?.selected ?? previous?.results?.map((r) => r.id);
 const selected = cases.filter((c) => {
-  if (values.case && c.id !== values.case) return false;
+  if (values.case && !values.case.includes(c.id)) return false;
+  if (savedIds && !savedIds.includes(c.id)) return false;
   if (values["skill-baseline"] && !original.has(c.id)) return false;
   if (values.suite === "original") return original.has(c.id);
   if (values.suite === "added") return !original.has(c.id);
   return !values.suite || c.suite === values.suite;
 });
+const ids = selected.map((c) => c.id);
+const requested = values.case ?? (values.suite ? [] : savedIds) ?? [];
+const unmatched = requested.filter((id) => !ids.includes(id));
+if (unmatched.length)
+  throw Error("Cases unavailable for this selection: " + unmatched.join(", "));
 if (!selected.length) throw Error("No matching cases.\n" + usage);
 const cli = values.cli && (await realpath(resolve(values.cli)));
 const cache = resolve(values.cache);
@@ -93,6 +119,7 @@ for (const signal of ["SIGINT", "SIGTERM"])
   });
 
 const paired = grader === "both";
+const pairedReports = (previous?.grader ?? grader) === "both";
 const modes = paired ? ["enabled", "disabled"] : [grader];
 if (paired) {
   for (const mode of modes) await mkdir(join(out, mode), { mode: 0o700 });
@@ -185,6 +212,25 @@ async function checkRepository(task, repo, scratch, dest, result) {
   return report;
 }
 
+async function readSavedReport(task, result) {
+  const { id } = task.scenario;
+  const dir = pairedReports
+    ? join(existing, task.grader, id)
+    : join(existing, id);
+  const attempt = previous?.results?.find(
+    (r) => r.id === id && (!r.grader || r.grader === task.grader),
+  );
+  if (attempt?.status === "execution_error") {
+    // Keep a failed investigation in the denominator with its original diagnostic.
+    Object.assign(result, attempt);
+    throw Error(attempt.error ?? `Investigation failed, see ${dir}`);
+  }
+  result.elapsedMs = attempt?.elapsedMs;
+  result.argv = attempt?.argv;
+  result.reviewBatches = await reviewBatches(join(dir, "progress.jsonl"));
+  return JSON.parse(await readFile(join(dir, "report.json"), "utf8"));
+}
+
 async function runCase(task, runSkill) {
   const { scenario } = task;
   const scratch = await mkdtemp(join(tmpdir(), "upstream-eval-"));
@@ -200,6 +246,7 @@ async function runCase(task, runSkill) {
   };
   try {
     await mkdir(dest, { mode: 0o700 });
+    const savedReport = existing && (await readSavedReport(task, result));
     const { repo, sha } = prepare(scenario, scratch);
     result.sourceSha = sha;
     result.evidence = validateSnapshot(scenario, repo, sha);
@@ -224,16 +271,9 @@ async function runCase(task, runSkill) {
       await jsonFile(join(dest, "answer.json"), answer);
       result.status = grade.pass ? "passed" : "grade_error";
     } else {
-      let report;
-      if (existing) {
-        const input = join(existing, task.path);
-        report = JSON.parse(await readFile(join(input, "report.json"), "utf8"));
-        result.reviewBatches = await reviewBatches(
-          join(input, "progress.jsonl"),
-        );
-      } else {
-        report = await checkRepository(task, repo, scratch, dest, result);
-      }
+      const report = existing
+        ? savedReport
+        : await checkRepository(task, repo, scratch, dest, result);
       result.status = "grade_error";
       if (report.advisoryDetails)
         result.advisorySha256 = sha256(JSON.stringify(report.advisoryDetails));
@@ -244,7 +284,7 @@ async function runCase(task, runSkill) {
           sha,
           "report used a different checkout",
         );
-      if (paired)
+      if (pairedReports)
         assert(
           report.assumptions?.some((s) => s.includes(scenario.callerScope)),
           "report is missing the supplied caller scope",
@@ -263,7 +303,6 @@ async function runCase(task, runSkill) {
   await saved;
 }
 
-const ids = selected.map((c) => c.id);
 function comparison() {
   return compareRuns(ids, [...results.values()]);
 }
@@ -273,7 +312,8 @@ async function saveResults() {
     tmp,
     JSON.stringify(
       {
-        model: values.model ?? null,
+        model: previous ? (previous.model ?? null) : (values.model ?? null),
+        regradedFrom: existing,
         jobs,
         isolatedState: cli ? !!values["isolated-state"] : undefined,
         grader: cli || existing ? grader : undefined,

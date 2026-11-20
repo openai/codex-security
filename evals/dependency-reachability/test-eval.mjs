@@ -505,6 +505,72 @@ test("the evidence grader checks citations against the stdio server's original r
   );
 });
 
+test("regrading a saved subset infers its cases and mode and can select one side", async () => {
+  const saved = await mkdtemp(join(root, "paired-"));
+  const selected = ["direct-links", "disabled-links", "queued-links"];
+  const failure = {
+    id: "direct-links",
+    grader: "disabled",
+    elapsedMs: 24,
+    exitCode: 2,
+    error: "investigation stopped",
+    status: "execution_error",
+  };
+  await jsonFile(join(saved, "results.json"), {
+    model: "eval-model",
+    grader: "both",
+    selected,
+    results: [failure],
+  });
+  async function replay(out, ...args) {
+    const run = spawnSync(
+      process.execPath,
+      [
+        join(import.meta.dirname, "upstream.mjs"),
+        "--cache",
+        ".",
+        "--grade-existing",
+        saved,
+        "--out",
+        out,
+        ...args,
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.ifError(run.error);
+    assert.equal(run.status, 1, run.stderr);
+    return JSON.parse(await readFile(join(root, out, "results.json"), "utf8"));
+  }
+
+  const all = await replay("both");
+  assert.deepEqual(all.selected, selected);
+  assert.equal(all.model, "eval-model");
+  assert.equal(all.grader, "both");
+  assert.equal(all.comparison.enabled.executionErrors, 3);
+  assert.equal(all.comparison.disabled.executionErrors, 3);
+
+  const subset = await replay(
+    "subset",
+    "--grader",
+    "disabled",
+    "--case",
+    "direct-links",
+    "--case",
+    "queued-links",
+  );
+  assert.deepEqual(subset.selected, ["direct-links", "queued-links"]);
+  const [stopped, missing] = subset.results;
+  assert.equal(stopped.error, failure.error);
+  assert.equal(stopped.elapsedMs, failure.elapsedMs);
+  assert.equal(stopped.exitCode, failure.exitCode);
+  assert.equal(missing.grader, "disabled");
+  assert(
+    missing.error.includes(
+      join(saved, "disabled", "queued-links", "report.json"),
+    ),
+  );
+});
+
 test("caller scope selects different clip services in an identical checkout", async () => {
   const { cases } = await import("./upstream/cases.mjs");
   const mobile = cases.find((c) => c.id === "clips-mobile-caller");
