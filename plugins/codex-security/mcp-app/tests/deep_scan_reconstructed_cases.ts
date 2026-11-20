@@ -45,8 +45,8 @@ export async function testReconstructedWorkers() {
     };
     const observerSandbox =
       name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials;
-    const filesystem = { ...deniedWorkerPermissionProfile.filesystem };
-    delete filesystem["glob_scan_max_depth"];
+    const { glob_scan_max_depth: _depth, ...filesystem } =
+      deniedWorkerPermissionProfile.filesystem;
     const fixture = await fakeCodexFixture({
       ...deniedWorkerPermissionProfile,
       filesystem,
