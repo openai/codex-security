@@ -28,6 +28,7 @@ export interface ScanExpectation {
   repository: string;
   repositoryRevision: string | null;
   target: NormalizedTarget;
+  excludePaths?: readonly string[];
   mode: ScanMode;
   pluginVersion: string;
 }
@@ -254,6 +255,13 @@ function validateExpectation(
   }
 
   const requested = expectation.target;
+  if (
+    JSON.stringify(scan.scope.excludePaths) !==
+    JSON.stringify(expectation.excludePaths ?? [])
+  )
+    throw new ContractValidationError(
+      "Manifest exclusions do not match the requested scan scope.",
+    );
   if (!workbenchValidated) {
     const target = scan.target;
     if (requested.kind === "refs" || requested.kind === "working_tree") {

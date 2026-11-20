@@ -451,7 +451,7 @@ def test_automatic_matching_uses_completion_order(workbench_api, workbench_db, t
 
 
 def test_matching_reads_each_scan_once_and_skips_cached_links(
-    workbench_api, workbench_db, tmp_path
+    workbench_api, workbench_db, tmp_path, monkeypatch
 ):
     history = workbench_api["scan_history"]
     db = workbench_db
@@ -478,13 +478,23 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
             for batch in result["batches"]
         ]
 
+    monkeypatch.delenv("CODEX_SECURITY_MATCHING_PLAN_FORMAT", raising=False)
+    inline = pending()
+    assert "findingsByScanId" not in inline
+    assert inline["batches"][0]["afterFindings"][0]["occurrenceId"] == "scan-1"
+    assert inline["batches"][0]["beforeScans"][0]["findings"][0]["occurrenceId"] == "scan-0"
+
+    monkeypatch.setenv("CODEX_SECURITY_MATCHING_PLAN_FORMAT", "compact")
+    queries.clear()
+    backfilled.clear()
     result = pending()
     assert result["scanCount"] == 3
     assert batches(result) == [("scan-1", ["scan-0"]), ("scan-2", ["scan-0", "scan-1"])]
-    for batch in result["batches"]:
-        assert [row["occurrenceId"] for row in batch["afterFindings"]] == [batch["afterScanId"]]
-        for before in batch["beforeScans"]:
-            assert [row["occurrenceId"] for row in before["findings"]] == [before["scanId"]]
+    assert {
+        scan_id: [row["occurrenceId"] for row in findings]
+        for scan_id, findings in result["findingsByScanId"].items()
+    } == {scan_id: [scan_id] for scan_id in ("scan-0", "scan-1", "scan-2")}
+    assert json.dumps(result).count('"occurrenceId"') == 3
     assert sorted(backfilled) == ["scan-0", "scan-1", "scan-2"]
     assert sum("from finding_occurrences " in sql.lower() for sql in queries) <= 3
 
@@ -493,6 +503,7 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
     queries.clear()
     cached = pending()
     assert (cached["batches"], cached["skippedPairs"]) == ([], 3)
+    assert cached["findingsByScanId"] == {}
     assert not any("FROM scan_comparison_matches" in sql for sql in queries)
 
     for scan in ("foreign-a", "foreign-b"):
