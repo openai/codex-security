@@ -12,6 +12,7 @@ import {
 import {
   parsePersistedScanDraft,
   matchesSavedCoverageSource,
+  comparableSavedCoverageSource,
   surfaceNormalization,
   normalizedSurfacePair,
   type SurfaceNormalization,
@@ -376,6 +377,28 @@ export function scanCoverage(
     surface?: SurfaceNormalization;
   };
   const origins = new Map<string, Origin[]>();
+  const comparableRows = new Map<
+    string,
+    Map<unknown, JsonObject | undefined>
+  >();
+  const comparable = (field: string, row: unknown) => {
+    let rows = comparableRows.get(field);
+    if (rows === undefined) {
+      rows = new Map();
+      comparableRows.set(field, rows);
+    }
+    if (!rows.has(row))
+      rows.set(
+        row,
+        comparableSavedCoverageSource(
+          field,
+          row,
+          artifactPrefix,
+          receiptDigests,
+        ),
+      );
+    return rows.get(row);
+  };
   const matchesOrigin = (
     field: string,
     item: JsonObject,
@@ -384,7 +407,7 @@ export function scanCoverage(
     form: "raw" | "normalized" | "group",
     currentSurface: SurfaceNormalization | undefined,
   ) => {
-    let previous = origin.row;
+    let previous = comparable(field, origin.row)!;
     if (form !== "raw") {
       const pair = normalizedSurfacePair(
         previous,
@@ -405,13 +428,7 @@ export function scanCoverage(
           !["candidateId", "candidate", "finding"].some((key) => key in item)))
     )
       item = { ...item, id: previous.id };
-    return matchesSavedCoverageSource(
-      field,
-      item,
-      previous,
-      artifactPrefix,
-      receiptDigests,
-    );
+    return matchesSavedCoverageSource(item, previous);
   };
   const findOrigin = (
     field: string,
@@ -459,7 +476,7 @@ export function scanCoverage(
       for (const row of rows) {
         const index = findOrigin(
           field,
-          row,
+          comparable(field, row)!,
           unmatched,
           reserved,
           normalized?.get(row),
@@ -496,11 +513,8 @@ export function scanCoverage(
         (row, index) =>
           !matched.has(index) &&
           matchesSavedCoverageSource(
-            field,
-            item,
-            row,
-            artifactPrefix,
-            receiptDigests,
+            comparable(field, item),
+            comparable(field, row),
           ),
       );
       if (index < 0) return undefined;
@@ -525,7 +539,7 @@ export function scanCoverage(
     }
     let origin = provenance;
     const previous = savedOrigins(field);
-    const comparison = { ...item };
+    const comparison = { ...comparable(field, item)! };
     if (source !== undefined && source.id === undefined) delete comparison.id;
     const index = findOrigin(
       field,

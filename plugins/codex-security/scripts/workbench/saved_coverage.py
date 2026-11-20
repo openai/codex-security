@@ -787,6 +787,9 @@ class SavedCoverageOrigins:
             "explicitExclusions",
         }:
             return None
+        published_rows = _coverage_rows(published, field)
+        if not published_rows:
+            return None
 
         def comparable(value, projected=False, inferred_identity=False):
             original = value
@@ -855,7 +858,7 @@ class SavedCoverageOrigins:
             for offset, row in enumerate(original_rows[:index], 1)
         )
         matches = []
-        for row in _coverage_rows(published, field):
+        for row in published_rows:
             if not isinstance(row, dict):
                 continue
             provenance = row.get("provenance")

@@ -1,3 +1,4 @@
+import { importModule } from "./import-module.ts";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { TestContext } from "node:test";
@@ -39,7 +40,33 @@ export function finding(id: string, repositoryPath: string) {
   };
 }
 
+export function reviewDraft<Finding extends Record<string, unknown>>(
+  complete: boolean,
+  reviewState: Record<string, unknown> = {},
+  findings: Finding[] = [],
+) {
+  const draft = workerDraft(findings);
+  return {
+    ...draft,
+    complete,
+    reviewState: { ...draft.reviewState, ...reviewState },
+  };
+}
+
+function loadHistoryRuntime() {
+  return importModule({
+    stdin: {
+      contents: `export { recordCodexSecurityWorkerScanDraft } from "./artifact-scan-draft.ts";
+        export { archiveDirectory, createDeepScanArtifacts } from "./deep-scan/artifacts.ts";
+        export { readAcceptedDiscovery, validateDiscoveryArtifacts } from "./deep-scan/artifact-validation.ts";`,
+      resolveDir: path.join(import.meta.dirname, "../src"),
+    },
+  });
+}
+let historyRuntime: ReturnType<typeof loadHistoryRuntime> | undefined;
+
 export async function workerHistoryFixture(t: TestContext, attempt: number) {
+  const runtime = await (historyRuntime ??= loadHistoryRuntime());
   const root = await temporaryDirectory("worker-history-", true);
   t.after(() => rm(root, { recursive: true, force: true }));
   const scanRoot = path.join(root, "scan");
@@ -57,6 +84,7 @@ export async function workerHistoryFixture(t: TestContext, attempt: number) {
     layout: "worker",
   };
   const worker = { id: "synthetic-worker", attempt, resultPath };
+  const artifacts = runtime.createDeepScanArtifacts(scanRoot);
   return {
     root,
     scanRoot,
@@ -65,5 +93,14 @@ export async function workerHistoryFixture(t: TestContext, attempt: number) {
     resultPath,
     workerContext,
     worker,
+    artifacts,
+    record: (draft: unknown) =>
+      runtime.recordCodexSecurityWorkerScanDraft(workerContext, draft),
+    readAccepted: () =>
+      runtime.readAcceptedDiscovery(artifacts, worker, scanId),
+    validate: () =>
+      runtime.validateDiscoveryArtifacts(artifacts, resultPath, scanId),
+    archive: (destination = path.join(workerRoot, "attempts/attempt-01")) =>
+      runtime.archiveDirectory(output, destination),
   };
 }

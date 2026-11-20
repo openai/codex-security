@@ -6,6 +6,7 @@ import {
   readdir,
   rm,
   utimes,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -14,8 +15,9 @@ import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import {
   workerHistoryFixture,
-  scanId,
   workerDraft,
+  reviewDraft,
+  scanId,
 } from "./scan-draft-fixture.ts";
 
 const { readAcceptedDiscovery } = await importSource(
@@ -36,39 +38,26 @@ const { archiveDirectory, createDeepScanArtifacts } = await importSource(
 
 test("three actual cumulative worker attempts retain original coverage ownership", async (t) => {
   const f = await workerHistoryFixture(t, 3);
-  const worker = f.workerContext;
+
   for (const attempt of [1, 2, 3]) {
     await mkdir(f.output, { recursive: true });
-    await recordCodexSecurityWorkerScanDraft(
-      worker,
-      workerDraft([], {
-        complete: attempt === 3,
-        reviewState: {
-          surfaces: [
-            {
-              id: `surface-${attempt}`,
-              label: `Review ${attempt}`,
-              disposition: "no_issue_found",
-            },
-          ],
-          explicitExclusions: [],
-          deferred: [],
-        },
+    await f.record(
+      reviewDraft(attempt === 3, {
+        surfaces: [
+          {
+            id: `surface-${attempt}`,
+            label: `Review ${attempt}`,
+            disposition: "no_issue_found",
+          },
+        ],
       }),
     );
     if (attempt < 3)
-      await archiveDirectory(
-        f.output,
+      await f.archive(
         path.join(f.workerRoot, "attempts", `attempt-0${attempt}`),
       );
   }
-  const source = (
-    await readAcceptedDiscovery(
-      createDeepScanArtifacts(f.scanRoot),
-      f.worker,
-      scanId,
-    )
-  ).coverage;
+  const source = (await f.readAccepted()).coverage;
   for (const attempt of [1, 2, 3]) {
     assert.equal(
       source.surfaces.find(
@@ -116,27 +105,18 @@ test("an accepted retry reconciles each occurrence of a legacy ID-less surface",
   await writeFile(
     f.resultPath,
     JSON.stringify(
-      workerDraft([], {
-        complete: true,
-        reviewState: {
-          surfaces: [
-            { ...single, receiptRefs: [] },
-            ...["first", "second", "third"].map((id) => ({ ...repeated, id })),
-            { ...named, id: "current" },
-            { ...mixed, id: "known" },
-            { ...mixed, id: "assigned" },
-          ],
-          explicitExclusions: [],
-          deferred: [],
-        },
+      reviewDraft(true, {
+        surfaces: [
+          { ...single, receiptRefs: [] },
+          ...["first", "second", "third"].map((id) => ({ ...repeated, id })),
+          { ...named, id: "current" },
+          { ...mixed, id: "known" },
+          { ...mixed, id: "assigned" },
+        ],
       }),
     ),
   );
-  const { coverage } = await readAcceptedDiscovery(
-    createDeepScanArtifacts(f.scanRoot),
-    f.worker,
-    scanId,
-  );
+  const { coverage } = await f.readAccepted();
   assert.deepEqual(
     coverage.surfaces.map(
       (row: { label: string; provenance: { attempt: number } }) => [
@@ -223,7 +203,7 @@ for (const field of [
   for (const sameText of [false, true]) {
     test(`accepted ${field} occurrences retain one source attempt each, same text=${sameText}`, async (t) => {
       const f = await workerHistoryFixture(t, 3);
-      const worker = f.workerContext;
+
       const archives: Array<[string, Buffer]> = [];
       for (const attempt of [1, 2, 3]) {
         const rows = Array.from({ length: attempt }, (_, index) => {
@@ -236,16 +216,9 @@ for (const field of [
               ? { pattern: "synthetic/excluded/**", reason: text }
               : { reason: text };
         });
-        await recordCodexSecurityWorkerScanDraft(
-          worker,
-          workerDraft([], {
-            complete: true,
-            reviewState: {
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [],
-              [field]: rows,
-            },
+        await f.record(
+          reviewDraft(true, {
+            [field]: rows,
           }),
         );
         if (attempt < 3) {
@@ -254,19 +227,13 @@ for (const field of [
             "attempts",
             `attempt-0${attempt}`,
           );
-          await archiveDirectory(f.output, archive);
+          await f.archive(archive);
           const result = path.join(archive, "result.json");
           archives.push([result, await readFile(result)]);
         }
       }
       const accepted = await readFile(f.resultPath);
-      const source = (
-        await readAcceptedDiscovery(
-          createDeepScanArtifacts(f.scanRoot),
-          f.worker,
-          scanId,
-        )
-      ).coverage;
+      const source = (await f.readAccepted()).coverage;
       assert.equal(source[field].length, 3);
       assert.deepEqual(
         source[field].map(
@@ -289,22 +256,16 @@ for (const field of [
 for (const id of ["opaque/review:shared", { section: "shared" }]) {
   test(`independent exclusions retain a shared ${typeof id} extension ID`, async (t) => {
     const f = await workerHistoryFixture(t, 3);
-    const worker = f.workerContext;
+
     for (const reason of [
       "Synthetic first exclusion.",
       "Synthetic independent exclusion.",
     ]) {
-      await recordCodexSecurityWorkerScanDraft(
-        worker,
-        workerDraft([], {
-          complete: true,
-          reviewState: {
-            surfaces: [],
-            explicitExclusions: [
-              { id, pattern: "synthetic/excluded/**", reason },
-            ],
-            deferred: [],
-          },
+      await f.record(
+        reviewDraft(true, {
+          explicitExclusions: [
+            { id, pattern: "synthetic/excluded/**", reason },
+          ],
         }),
       );
     }
@@ -326,30 +287,21 @@ for (const id of ["opaque/review:shared", { section: "shared" }]) {
 
 test("readable retry origin survives one unsafe unrelated archive", async (t) => {
   const f = await workerHistoryFixture(t, 3);
-  const worker = f.workerContext;
-  await recordCodexSecurityWorkerScanDraft(
-    worker,
-    workerDraft([], {
-      complete: false,
-      reviewState: {
-        surfaces: [
-          {
-            id: "saved-review",
-            label: "Synthetic retained review",
-            disposition: "no_issue_found",
-          },
-        ],
-        explicitExclusions: [],
-        deferred: [],
-      },
+
+  await f.record(
+    reviewDraft(false, {
+      surfaces: [
+        {
+          id: "saved-review",
+          label: "Synthetic retained review",
+          disposition: "no_issue_found",
+        },
+      ],
     }),
   );
   const archive = path.join(f.workerRoot, "attempts/attempt-01");
-  await archiveDirectory(f.output, archive);
-  await recordCodexSecurityWorkerScanDraft(
-    worker,
-    workerDraft([], { complete: true }),
-  );
+  await f.archive(archive);
+  await f.record(reviewDraft(true));
   const current = await readFile(f.resultPath);
   const historical = await readFile(path.join(archive, "result.json"));
   await mkdir(
@@ -357,14 +309,10 @@ test("readable retry origin survives one unsafe unrelated archive", async (t) =>
     { recursive: true },
   );
   await assert.rejects(
-    readArchivedWorkerCheckpoints(worker),
+    readArchivedWorkerCheckpoints(f.workerContext),
     /archived checkpoint head is not a safe file/,
   );
-  const source = await readAcceptedDiscovery(
-    createDeepScanArtifacts(f.scanRoot),
-    f.worker,
-    scanId,
-  );
+  const source = await f.readAccepted();
   assert.equal(source.coverage.surfaces.length, 1);
   assert.equal(source.coverage.surfaces[0].provenance.attempt, 1);
   assert.deepEqual(await readFile(f.resultPath), current);
@@ -380,9 +328,10 @@ test("retry coverage ignores projected origin claims and rejects invalid archive
     reason: "Retained review",
     provenance: { note: "Worker note" },
   };
-  const draft = workerDraft([], {
-    complete: true,
-    reviewState: { surfaces: [], explicitExclusions: [], deferred: [row] },
+  const draft = reviewDraft(true, {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [row],
   });
   await mkdir(f.output, { recursive: true });
   await writeFile(f.resultPath, JSON.stringify(draft));
@@ -406,11 +355,7 @@ test("retry coverage ignores projected origin claims and rejects invalid archive
     await mkdir(archive, { recursive: true });
     await writeFile(path.join(archive, "result.json"), JSON.stringify(saved));
   }
-  const { coverage } = await readAcceptedDiscovery(
-    createDeepScanArtifacts(f.scanRoot),
-    f.worker,
-    scanId,
-  );
+  const { coverage } = await f.readAccepted();
   assert.equal(coverage.deferred.length, 1, JSON.stringify(coverage.deferred));
   assert.equal(coverage.deferred[0].provenance.attempt, 1);
   assert.equal(coverage.deferred[0].provenance.note, "Worker note");
@@ -427,21 +372,16 @@ test("archived shared receipts follow the surface's reference order", async (t) 
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, "Synthetic review receipt.\n");
   }
-  const checkpoint = workerDraft([], {
-    complete: false,
-    reviewState: {
-      surfaces: [
-        {
-          id: "saved-review",
-          label: "Synthetic retained review",
-          disposition: "no_issue_found",
-          receiptRefs,
-          provenance: { scanReceiptRefs: [receiptRefs[1]] },
-        },
-      ],
-      explicitExclusions: [],
-      deferred: [],
-    },
+  const checkpoint = reviewDraft(false, {
+    surfaces: [
+      {
+        id: "saved-review",
+        label: "Synthetic retained review",
+        disposition: "no_issue_found",
+        receiptRefs,
+        provenance: { scanReceiptRefs: [receiptRefs[1]] },
+      },
+    ],
   });
   const directory = path.join(f.workerRoot, "attempts/attempt-01/checkpoints");
   await mkdir(directory, { recursive: true });
@@ -1334,3 +1274,80 @@ test("typed retry keeps named occurrence priority beside an older anonymous surf
     before,
   );
 });
+for (const ref of [
+  "artifacts/review.txt",
+  "artifacts/./review.txt",
+  "artifacts//review.txt",
+]) {
+  for (const state of ["copied", "changed", "missing-archive"]) {
+    test(`supported typed writer receipt origin (${ref}, ${state})`, async (t) => {
+      const f = await workerHistoryFixture(t, 2);
+      const { workerRoot, output, resultPath } = f;
+      await mkdir(path.join(output, "artifacts"), { recursive: true });
+      await writeFile(
+        path.join(output, "artifacts/review.txt"),
+        "Synthetic original receipt.\n",
+      );
+      const draft = reviewDraft(false, {
+        surfaces: [
+          {
+            label: "Synthetic receipt review",
+            disposition: "needs_follow_up",
+            receiptRefs: [ref],
+          },
+        ],
+      });
+      await f.record(draft);
+      const saved = JSON.parse(await readFile(resultPath, "utf8"));
+      assert.equal(
+        typeof saved.reviewState.surfaces[0].id,
+        "string",
+        "typed writer assigns implicit ID before retry snapshot",
+      );
+      const archive = path.join(workerRoot, "attempts/attempt-01");
+      await cp(output, archive, {
+        recursive: true,
+        preserveTimestamps: true,
+      });
+      const archivedBytes = await readFile(path.join(archive, "result.json"));
+      if (state === "changed")
+        await writeFile(
+          path.join(output, "artifacts/review.txt"),
+          "Synthetic changed receipt.\n",
+        );
+      if (state === "missing-archive")
+        await unlink(path.join(archive, "artifacts/review.txt"));
+      await f.record({
+        ...draft,
+        complete: true,
+      });
+      const current = JSON.parse(await readFile(resultPath, "utf8"));
+      assert.equal(
+        current.reviewState.surfaces.length,
+        1,
+        "supported resumed writer retains one matching normalized surface",
+      );
+      assert.equal(
+        current.reviewState.surfaces[0].id,
+        saved.reviewState.surfaces[0].id,
+      );
+      assert.deepEqual(
+        current.reviewState.surfaces[0].receiptRefs,
+        saved.reviewState.surfaces[0].receiptRefs,
+      );
+      const resultBytes = await readFile(resultPath);
+      const worker = await f.readAccepted();
+      const surface = worker.coverage.surfaces[0];
+      assert.equal(
+        surface.provenance.attempt,
+        state === "copied" ? 1 : 2,
+        "identical readable receipt retains original attempt; changed/missing evidence retains current attempt",
+      );
+      assert.deepEqual(
+        await readFile(path.join(archive, "result.json")),
+        archivedBytes,
+      );
+      assert.deepEqual(await readFile(resultPath), resultBytes);
+    });
+  }
+}
