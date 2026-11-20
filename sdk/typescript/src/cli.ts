@@ -50,7 +50,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { isIP } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import {
   basename,
   delimiter,
@@ -100,8 +100,10 @@ import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   activePatchPublicationHooks,
   capturePatchGitControls,
+  defaultSshConfigs,
   githubConfigDirectory,
   githubConfigFiles,
+  gitlabConfigFiles,
   patchFilterParameters,
   PATCH_LOCAL_GIT_ENVIRONMENT,
   type PatchGitControlMode,
@@ -1711,9 +1713,12 @@ async function patchWorkspaceProfile(
     if (hasDeniedParent(path)) continue;
     if (process.platform === "win32" && !existsSync(path)) {
       filesystem[windowsMissingStorePattern(path)] = "deny";
-    } else if (process.platform === "linux" && !existsSync(dirname(path))) {
-      // Bubblewrap cannot mount below a missing parent. Its glob walk finds files,
-      // so match both the future store and any files it contains as a directory.
+    } else if (
+      (process.platform === "linux" || process.platform === "darwin") &&
+      !existsSync(dirname(path))
+    ) {
+      // Bubblewrap cannot mount below a missing parent. Seatbelt can compile
+      // the same subtree pattern without resolving every absent literal root.
       // The impossible [.] filename starts the native glob at the parent.
       const leaf = escapeCredentialGlob(basename(path));
       const pattern = join(
@@ -1947,15 +1952,22 @@ interface PatchRiskAssessment extends PatchRiskReport {
   tree?: string;
 }
 
+type PatchHostingProvider = "gh" | "glab";
+
 type PatchTransportFile = {
   target: string;
   stamp: string;
   digest?: string;
-  kind: "github-config" | "executable" | "file" | "known-hosts";
+  kind:
+    PatchHostingProvider | "ssh-config" | "executable" | "file" | "known-hosts";
 };
 
 interface PatchTransportAccess {
-  verifyGitHubConfig?: () => Promise<string>;
+  sshPatterns?: Map<string, () => Promise<void>>;
+  verifyHostingConfig?: Record<
+    PatchHostingProvider,
+    () => Promise<NodeJS.ProcessEnv>
+  >;
   readonly writable: Set<string>;
   readonly invocations: Map<string, string>;
   readonly implicitLaunchers: Map<string, string | null>;
@@ -3964,15 +3976,16 @@ export async function main(
           },
         };
       }
-      if (command === "gh" && patchTransportAccess.verifyGitHubConfig) {
+      const verify = patchTransportAccess.verifyHostingConfig;
+      if (verify && (command === "gh" || command === "glab")) {
         options.environment = {
           ...options.environment,
-          GH_CONFIG_DIR: await patchTransportAccess.verifyGitHubConfig(),
+          ...(await verify[command]()),
         };
       }
       // The hostname probe invokes the same selected SSH launcher as the transport.
       if (
-        command === "gh" ||
+        command !== "git" ||
         options.patchTransport ||
         (args[0] === "-c" &&
           args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
@@ -3983,6 +3996,9 @@ export async function main(
         const prePush =
           options.patchTransport?.pushing &&
           publicationHooks?.events.has("pre-push");
+        for (const verifyPattern of patchTransportAccess.sshPatterns?.values() ??
+          [])
+          await verifyPattern();
         for (const [path, selected] of patchTransportFiles) {
           const checkLinks =
             (options.patchTransport?.mirrors &&
@@ -12075,10 +12091,12 @@ async function patchPublicationDestination(
     crossRepository?: boolean;
   }[];
   // Capture after trusted provider reads, which can migrate or refresh credentials.
-  // A branch include may select GitHub only after the patch changes branches.
+  // Branch-conditioned settings can select the other provider after checkout.
   if (dependencies.patchTransportAccess)
-    dependencies.patchTransportAccess.verifyGitHubConfig ??=
-      await captureGitHubConfig(repository, dependencies.environment);
+    dependencies.patchTransportAccess.verifyHostingConfig ??= {
+      gh: await captureHostingConfig("gh", repository, dependencies),
+      glab: await captureHostingConfig("glab", repository, dependencies),
+    };
 
   if (gitlab || !candidates.length)
     return {
@@ -12224,11 +12242,13 @@ async function patchTransportDirectories(
 
 function patchTransportChanged(kind: PatchTransportFile["kind"]) {
   const label =
-    kind === "github-config"
+    kind === "gh"
       ? "GitHub CLI configuration"
-      : kind === "executable"
-        ? "executable"
-        : "file";
+      : kind === "glab"
+        ? "GitLab CLI configuration"
+        : kind === "executable"
+          ? "executable"
+          : "file";
   return new CodexSecurityError(
     `Patch transport ${label} changed before publication. Inspect the selected transport settings and files before resuming.`,
   );
@@ -12238,11 +12258,15 @@ async function patchTransportIdentity(
   path: string,
   kind: PatchTransportFile["kind"],
   selected?: PatchTransportFile,
-  options: { updatedHostKeys?: boolean; writers?: PatchTransportAccess } = {},
+  options: {
+    sshIncludes?: string[];
+    updatedHostKeys?: boolean;
+    writers?: PatchTransportAccess;
+  } = {},
 ): Promise<PatchTransportFile> {
   const target = await realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (
-      kind === "github-config" &&
+      (kind === "gh" || kind === "glab" || kind === "ssh-config") &&
       !selected?.stamp &&
       ["ENOENT", "ENOTDIR"].includes(error.code ?? "")
     )
@@ -12270,9 +12294,14 @@ async function patchTransportIdentity(
       throw new CodexSecurityError(
         "Patch publication requires regular files for SSH transport operands.",
       );
-    const digest = await hashPatchFile(
-      file.createReadStream({ autoClose: false }),
-    );
+    let digest: string;
+    if (options.sshIncludes) {
+      const bytes = await file.readFile();
+      options.sshIncludes.push(...sshConfigIncludes(bytes.toString("utf8")));
+      digest = createHash("sha256").update(bytes).digest("hex");
+    } else {
+      digest = await hashPatchFile(file.createReadStream({ autoClose: false }));
+    }
     if (
       selected?.digest !== undefined &&
       !options.updatedHostKeys &&
@@ -12285,27 +12314,42 @@ async function patchTransportIdentity(
   }
 }
 
-async function captureGitHubConfig(
-  cwd: string,
-  environment: NodeJS.ProcessEnv,
+async function captureHostingConfig(
+  provider: PatchHostingProvider,
+  repository: string,
+  dependencies: CliDependencies,
 ) {
   try {
-    const directory = resolve(
-      process.platform === "win32" ? cwd : await canonicalConfigPath(cwd),
-      githubConfigDirectory(environment),
-    );
-    const files = new Map<string, PatchTransportFile>();
-    for (const name of githubConfigFiles) {
-      const path = join(directory, name);
-      files.set(path, await patchTransportIdentity(path, "github-config"));
+    const { environment } = dependencies;
+    const cwd =
+      process.platform === "win32"
+        ? repository
+        : await canonicalConfigPath(repository);
+    const pinned: NodeJS.ProcessEnv = {};
+    const paths = new Set<string>();
+    if (provider === "gh") {
+      const directory = resolve(cwd, githubConfigDirectory(environment));
+      pinned["GH_CONFIG_DIR"] = directory;
+      for (const name of githubConfigFiles) paths.add(join(directory, name));
+    } else {
+      const directory = environmentEntry(environment, "GLAB_CONFIG_DIR");
+      if (directory) pinned["GLAB_CONFIG_DIR"] = resolve(cwd, directory);
+      for (const path of gitlabConfigFiles(environment))
+        paths.add(resolve(cwd, path));
+      const local = await patchGitDirectories(repository, dependencies);
+      local.add(join(cwd, ".git"));
+      for (const root of local) paths.add(join(root, "glab-cli", "config.yml"));
     }
+    const files = new Map<string, PatchTransportFile>();
+    for (const path of paths)
+      files.set(path, await patchTransportIdentity(path, provider));
     return async () => {
       for (const [path, file] of files)
-        await patchTransportIdentity(path, file.kind, file);
-      return directory;
+        await patchTransportIdentity(path, provider, file);
+      return pinned;
     };
   } catch (error) {
-    // A GitLab-only publication need not read GitHub credentials.
+    // Surface capture errors when invoking the affected provider.
     return () => Promise.reject(error);
   }
 }
@@ -13068,6 +13112,138 @@ async function bindPublicationCredentialHelper(
 
 class UnsupportedCredentialHelper extends Error {}
 
+function unsupportedSshInclude() {
+  return new CodexSecurityError(
+    "Cannot bind the SSH configuration Include for patch publication. Use a self-contained SSH config outside the checkout, or static include paths outside every writable root.",
+  );
+}
+
+function sshConfigIncludes(contents: string): string[] {
+  const paths: string[] = [];
+  for (const raw of contents.split("\n")) {
+    const line = raw.split("\0", 1)[0]!.replace(/[ \t\r\f]+$/u, "");
+    // OpenSSH's keyword reader accepts double quotes and an optional '='.
+    // Detect unusual spellings too, then require unambiguous static syntax.
+    if (!/^[\s=]*include/iu.test(line.replaceAll('"', ""))) continue;
+    const directive =
+      /^[ \t\r]*include(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
+    if (!directive || process.platform === "win32")
+      throw unsupportedSshInclude();
+    let args = directive[1]!;
+    while (args) {
+      const word = /^(?:"([^"]+)"|([^'"\t ]+))(?:[ \t]+|$)/u.exec(args);
+      if (!word) throw unsupportedSshInclude();
+      const path = (word[1] ?? word[2])!;
+      if (/['%$\\?[\]{}=\r\f#\ufffd]/u.test(path))
+        throw unsupportedSshInclude();
+      paths.push(path);
+      args = args.slice(word[0].length);
+    }
+  }
+  return paths;
+}
+
+async function bindSshConfiguration(
+  config: string,
+  directory: string,
+  roots: readonly string[],
+  dependencies: CliDependencies,
+  system?: string,
+) {
+  const access = dependencies.patchTransportAccess;
+  const host = await trustedHostPathResolver(directory, [
+    ...roots,
+    ...(access?.writable ?? []),
+  ]);
+  const trust = (path: string) => {
+    const physical = host(path);
+    if (!physical) throw unsupportedSshInclude();
+    requireStablePatchTransportTarget(physical, access);
+    access?.invocations.set(path, physical);
+    return physical;
+  };
+  const visited = new Set<string>();
+  const expand = (pattern: string) => {
+    if (isAbsolute(pattern)) return [pattern];
+    if (pattern.startsWith("~") && !pattern.startsWith("~/"))
+      throw unsupportedSshInclude();
+    if (system) return [system + "/" + pattern];
+    const suffix = pattern.startsWith("~/")
+      ? pattern.slice(1)
+      : "/.ssh/" + pattern;
+    // glob(GLOB_TILDE) can use HOME, while OpenSSH's own expansion uses pw_dir.
+    const account = userInfo().homedir;
+    const home = dependencies.environment["HOME"] ?? account;
+    return [...new Set([home, account])].map((base) => {
+      if (/[*?[\]\\]/u.test(base)) throw unsupportedSshInclude();
+      return (isAbsolute(base) ? base : "/" + base) + suffix;
+    });
+  };
+  const select = async (pattern: string) => {
+    if (!pattern.includes("*")) return [pattern];
+    const parent = dirname(pattern);
+    const [prefix, suffix, more] = basename(pattern).split("*");
+    if (parent.includes("*") || suffix === undefined || more !== undefined)
+      throw unsupportedSshInclude();
+    // The complete set of matching entries must remain outside write grants,
+    // including when no file matches during preflight.
+    const target = trust(parent);
+    const matches = (name: string) =>
+      name.length >= prefix!.length + suffix.length &&
+      name.startsWith(prefix!) &&
+      name.endsWith(suffix) &&
+      (!name.startsWith(".") || prefix!.startsWith("."));
+    const list = async () => {
+      const entries = await readdir(parent).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return [];
+          throw error;
+        },
+      );
+      return entries.filter(matches).sort();
+    };
+    const names = await list();
+    if (access) {
+      const patterns = (access.sshPatterns ??= new Map());
+      if (!patterns.has(pattern))
+        patterns.set(pattern, async () => {
+          for (const root of access.writable)
+            if (dirname(root) === target && matches(basename(root)))
+              throw writablePatchTransportError(root);
+          if ((await list()).join("\0") !== names.join("\0"))
+            throw patchTransportChanged("file");
+        });
+    }
+    return names.map((name) => {
+      if (name.includes("\ufffd")) throw unsupportedSshInclude();
+      return parent + "/" + name;
+    });
+  };
+  const visit = async (path: string, depth: number): Promise<void> => {
+    if (visited.has(path)) return;
+    visited.add(path);
+    if (depth > 16) throw unsupportedSshInclude();
+    trust(path);
+    const includes: string[] = [];
+    const files = dependencies.patchTransportFiles;
+    const config = await patchTransportIdentity(
+      path,
+      "ssh-config",
+      files?.get(path),
+      {
+        sshIncludes: includes,
+      },
+    );
+    files?.set(path, config);
+    access?.afterHook.add(path);
+    for (const include of includes)
+      for (const pattern of expand(include))
+        for (const child of await select(pattern))
+          await visit(child, depth + 1);
+  };
+  await visit(config, 0);
+}
+
 async function pinPublicationCommand(
   command: string | readonly string[],
   protectedRoots: string[],
@@ -13182,6 +13358,7 @@ async function pinPublicationCommand(
       args[i] = arg === option ? target : option + "=" + target;
     }
   } else if (kind === "ssh" && /^ssh(?:\.exe)?$/iu.test(basename(program))) {
+    let explicit = false;
     for (let i = 0; i < args.length; i++) {
       const arg = args[i]!;
       if (/^-[46AaCqTtv]+$/u.test(arg)) continue;
@@ -13190,9 +13367,17 @@ async function pinPublicationCommand(
       const value = arg.length > 2 ? arg.slice(2) : args[++i];
       if (!value) throw unsupported();
       let bound = value;
+      if (option === "-F") explicit = true;
       if (option === "-F" && value.toLowerCase() === "none") continue;
       if (option === "-F" || option === "-i") {
         bound = await bindFile(value);
+        if (option === "-F")
+          await bindSshConfiguration(
+            bound,
+            directory,
+            protectedRoots,
+            dependencies,
+          );
       } else if (option === "-o") {
         const pathSetting = /^(IdentityFile|UserKnownHostsFile)=(.+)$/iu.exec(
           value,
@@ -13223,6 +13408,18 @@ async function pinPublicationCommand(
       if (bound.includes("%") || bound.includes("${")) throw unsupported();
       args[i] = arg.length > 2 ? option + bound : bound;
     }
+    if (!explicit)
+      for (const [path, system] of defaultSshConfigs(
+        executable,
+        dependencies.environment,
+      ))
+        await bindSshConfiguration(
+          path,
+          directory,
+          protectedRoots,
+          dependencies,
+          system,
+        );
   } else if (
     args.length &&
     !(
@@ -14213,10 +14410,10 @@ function gitPublicationPathMetadata(path: Buffer) {
   });
 }
 
-async function checkPatchReflogs(
+async function patchGitDirectories(
   repository: string,
   dependencies: CliDependencies,
-): Promise<void> {
+) {
   const directories = new Set<string>();
   for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
     const output = await dependencies.runRepositoryCommand(
@@ -14227,6 +14424,14 @@ async function checkPatchReflogs(
     );
     directories.add(await realpath(output.replace(/\n$/u, "")));
   }
+  return directories;
+}
+
+async function checkPatchReflogs(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const directories = await patchGitDirectories(repository, dependencies);
   // Git appends in place to existing logs. Check both worktree and shared refs.
   const pending = [...directories].map((path) =>
     Buffer.from(join(path, "logs")),

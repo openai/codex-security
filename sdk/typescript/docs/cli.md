@@ -3221,6 +3221,17 @@ environment. Publication rechecks the selected files before running SSH.
 If they change, inspect them before retrying. A resumed publication selects
 the current operator settings. With `--external-sandbox`, the operator supplies
 the filesystem isolation.
+
+Publication binds the OpenSSH configuration selected by `-F`. With the default
+search it checks the account's `.ssh/config` and system files under `/etc/ssh`,
+standard installation prefixes or `%ProgramData%\ssh` on Windows. On Unix it
+follows static `Include` paths, including `~/` paths, double-quoted names
+containing spaces and `*` globs in the filename. Relative includes start in
+`~/.ssh` for user configurations and the system configuration directory for
+system configurations. For dynamic expansions, complex globs, Windows includes
+or custom installation paths, select a self-contained configuration outside
+patch-writable directories with `-F /absolute/path`.
+
 For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
 publication also rechecks the selected executable before starting Git.
 A pre-push hook can run before Git launches another process for packing
