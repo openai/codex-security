@@ -9,7 +9,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,6 @@ from finalize_scan_contract import (
 from review_state import checkpoint_review_state, review_state, uses_legacy_review
 from workbench.storage import archived_deep_path, archived_worker_paths
 from workbench_coverage_receipts import capture_receipt_checkpoints, clear_scan_receipt_refs
-from workbench_validation import has_verified_selected_result, latest_publication_reference
 
 
 class _CheckpointSnapshotError(ContractError):
@@ -766,6 +765,57 @@ def _require_selected_result(scan: Any, selection: dict[str, Any]) -> None:
         )
 
 
+def _latest_publication_reference(connection: Any, scan: Any) -> tuple[str | None, str | None]:
+    # Publication follows the reducer's original prompt directory, even after archival.
+    reducer = _latest_iteration(
+        _saved_workers(connection, scan),
+        key=lambda worker: (_reducer_sequence(Path(worker["prompt_path"]).parent), worker["id"]),
+    )
+    if reducer is None:
+        return None, None
+    if reducer["accepted_result_path"] and reducer["accepted_result_sha256"]:
+        return reducer["accepted_result_path"], reducer["accepted_result_sha256"]
+
+    # A migrated reducer can have its only frozen reference in a successor's merge claim.
+    claim = connection.execute(
+        "SELECT previous_result_path, previous_result_sha256 FROM deep_scan_merge_claims "
+        "WHERE scan_id = ? AND previous_worker_id = ? "
+        "AND previous_result_path <> '' AND previous_result_sha256 <> '' ORDER BY rowid LIMIT 1",
+        (scan["id"], reducer["id"]),
+    ).fetchone()
+    if claim:
+        return archived_deep_path(Path(scan["scan_dir"]), claim[0]), claim[1]
+    return reducer["result_manifest_path"], None
+
+
+def has_verified_selected_result(
+    db: Any, connection: Any, scan: Any, *, reference: tuple[str | None, str | None] | None = None
+) -> bool:
+    """Verify persisted Deep publication authority before using the artifact read contract."""
+    if scan["mode"] != "deep":
+        return False
+    run = db.deep_scan.find_supported_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
+    try:
+        if selection is None:
+            if run is None or run["workflow_version"] not in {
+                "deep-scan-mcp/v1",
+                "deep-security-scan/v1",
+            }:
+                return False
+            path, digest = reference or _latest_publication_reference(connection, scan)
+            if not path or not digest:
+                return False
+            selection = {
+                "resultPath": Path(path).relative_to(scan["scan_dir"]).as_posix(),
+                "resultSha256": digest,
+            }
+        _require_selected_result(scan, selection)
+        return selection["resultPath"] is not None
+    except (ContractError, ValueError) as exc:
+        raise RecoverableContractError(str(exc)) from exc
+
+
 def bind_selected_publication(
     selection: dict[str, Any], prepared: PreparedScanFinalization
 ) -> None:
@@ -935,7 +985,7 @@ def _require_current_deep_publication(
                 raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
             return False
 
-        reference = latest_publication_reference(db, connection, scan)
+        reference = _latest_publication_reference(connection, scan)
         selected_result = reference[0]
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
@@ -1021,15 +1071,21 @@ def _has_accepted_discovery_result(worker: Any) -> bool:
     )
 
 
+def _reducer_sequence(output: Path) -> int:
+    label = output.parent.name if output.name == "output" else output.name
+    match = re.fullmatch(r"dedup-([0-9]+)", label)
+    return int(match[1]) if match else 0
+
+
 def _iteration_order(worker: Any) -> tuple[int, str, str]:
     result = worker["result_manifest_path"]
     output = Path(result).parent if result else Path(worker["artifact_dir"])
-    label = output.parent.name if output.name == "output" else output.name
-    match = re.fullmatch(r"dedup-([0-9]+)", label)
-    return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
+    return (_reducer_sequence(output), worker["completed_at"] or "", worker["id"])
 
 
-def _latest_iteration(workers: Iterable[Any]) -> Any | None:
+def _latest_iteration(
+    workers: Iterable[Any], *, key: Callable[[Any], tuple] = _iteration_order
+) -> Any | None:
     return max(
         (
             worker
@@ -1038,7 +1094,7 @@ def _latest_iteration(workers: Iterable[Any]) -> Any | None:
             and worker["status"] == "succeeded"
             and worker["result_manifest_path"]
         ),
-        key=_iteration_order,
+        key=key,
         default=None,
     )
 
