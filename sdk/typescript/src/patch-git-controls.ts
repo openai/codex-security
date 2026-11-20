@@ -452,7 +452,9 @@ const realControlPath = async (path: string) =>
 
 // Append before realpath so a link/.. path keeps the filesystem's meaning.
 const relativeFile = (directory: string, path: string) =>
-  isAbsolute(path) ? path : `${directory}${sep}${path}`;
+  isAbsolute(path)
+    ? path
+    : directory + (directory.endsWith(sep) ? "" : sep) + path;
 
 function httpCredentialPath(directory: string, file: string): string {
   if (process.platform === "win32") {
