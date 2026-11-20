@@ -908,6 +908,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   await mkdir(defaultGh, { recursive: true });
   await mkdir(terraformDir, { recursive: true });
   const npm = join(operator, "selected npmrc");
+  const npmGlobal = join(operator, "selected global npmrc");
   await mkdir(registry);
   const clusterList = (files: string[]) =>
     files
@@ -926,6 +927,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     TERRAFORM_CONFIG: legacyTerraformConfig,
     GOOGLE_APPLICATION_CREDENTIALS: cloudKey,
     NPM_CONFIG_USERCONFIG: npm,
+    npm_config_globalconfig: "${HOME}/selected global npmrc",
   };
   const policySet = {
     ...pointers,
@@ -1046,6 +1048,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(operator, ".kube", "config"),
     join(operator, ".npmrc"),
     npm,
+    npmGlobal,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
   const createInput = (i: number) =>

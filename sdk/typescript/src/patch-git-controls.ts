@@ -675,14 +675,52 @@ async function credentialPointerFiles(
     selectFile(dir, "credentials.tfrc.json");
     await selectFragments(dir, /\.tfrc(?:\.json)?$/u);
   }
+  const npmConfigPath = (value: string) => {
+    // npm trims path settings and expands environment references before '~'.
+    const expanded = value
+      .trim()
+      .replace(
+        /(?<!\\)(\\*)\$\{([^$?{}]+)(\?)?\}/gu,
+        (
+          match,
+          escapes: string,
+          variable: string,
+          optional: string | undefined,
+        ) => {
+          if (escapes.length % 2) return match.slice((escapes.length + 1) / 2);
+          const replacement = environment[key(variable)];
+          return (
+            escapes.slice(escapes.length / 2) +
+            (typeof replacement === "string"
+              ? replacement
+              : optional
+                ? ""
+                : "${" + variable + "}")
+          );
+        },
+      );
+    const homePrefix = process.platform === "win32" ? /^~[\\/]/u : /^~\//u;
+    if (homePrefix.test(expanded)) {
+      const home = environment[key("HOME")];
+      return resolve(
+        typeof home === "string" && home ? home : homedir(),
+        expanded.slice(2),
+      );
+    }
+    return expanded && normalize(expanded);
+  };
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
-    if (credentialFileVariable.test(name.toUpperCase())) {
+    const variable = name.toUpperCase();
+    if (credentialFileVariable.test(variable)) {
       selected.add(value);
-      selected.add(normalize(value));
+      const path = variable.startsWith("NPM_CONFIG_")
+        ? npmConfigPath(value)
+        : normalize(value);
+      if (path) selected.add(path);
       continue;
     }
-    switch (name.toUpperCase()) {
+    switch (variable) {
       case "KUBECONFIG":
         for (const path of goPathList(value)) if (path) selected.add(path);
         break;
@@ -698,44 +736,6 @@ async function credentialPointerFiles(
       case "PGSYSCONFDIR":
         selectFile(value, "pg_service.conf");
         break;
-      case "NPM_CONFIG_USERCONFIG": {
-        selected.add(value);
-        // npm trims path settings and expands environment references before '~'.
-        const expanded = value
-          .trim()
-          .replace(
-            /(?<!\\)(\\*)\$\{([^$?{}]+)(\?)?\}/gu,
-            (
-              match,
-              escapes: string,
-              variable: string,
-              optional: string | undefined,
-            ) => {
-              if (escapes.length % 2)
-                return match.slice((escapes.length + 1) / 2);
-              const replacement = environment[key(variable)];
-              return (
-                escapes.slice(escapes.length / 2) +
-                (typeof replacement === "string"
-                  ? replacement
-                  : optional
-                    ? ""
-                    : "${" + variable + "}")
-              );
-            },
-          );
-        const homePrefix = process.platform === "win32" ? /^~[\\/]/u : /^~\//u;
-        if (homePrefix.test(expanded)) {
-          const home = environment[key("HOME")];
-          selected.add(
-            resolve(
-              typeof home === "string" && home ? home : homedir(),
-              expanded.slice(2),
-            ),
-          );
-        } else if (expanded) selected.add(normalize(expanded));
-        break;
-      }
     }
   }
   return selected;
