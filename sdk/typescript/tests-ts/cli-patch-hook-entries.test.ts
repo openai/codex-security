@@ -23,7 +23,7 @@ import {
   savedScan,
   patchDirectories,
   initializePatchGit,
-  runIssuePatch,
+  observeIssuePatch,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -126,17 +126,9 @@ test.each([false, true])(
     const head = git("rev-parse", "HEAD");
     const index = await readFile(join(root, ".git", "index"));
     const config = await readFile(join(root, ".git", "config"));
-    let launches = 0;
-    let controls: readonly string[] = [];
-    const afterTurn: string[][] = [];
-    const outcome = await runIssuePatch(root, {
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurn.push([...args]);
-        return runGitRepositoryCommand(command, args, cwd, options);
-      },
-      onCodex: async (_args, output) => {
-        launches++;
-        controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+    const { outcome, launches, afterTurn, controls } = await observeIssuePatch(
+      root,
+      async () => {
         await writeFile(source, "after\n");
         if (activate) {
           await rename(source, join(root, "retained-app.ts"));
@@ -145,10 +137,8 @@ test.each([false, true])(
             mode: 0o755,
           });
         }
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+    );
     expect(launches).toBe(1);
     expect(controls).not.toContain(source);
     if (activate) {
@@ -203,26 +193,16 @@ test.each([false, true])(
     const head = git("rev-parse", "HEAD");
     const index = await readFile(join(root, ".git", "index"));
     const config = await readFile(join(root, ".git", "config"));
-    let launches = 0;
-    let controls: readonly string[] = [];
-    const afterTurn: string[][] = [];
-    const outcome = await runIssuePatch(root, {
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurn.push([...args]);
-        return runGitRepositoryCommand(command, args, cwd, options);
-      },
-      onCodex: async (_args, output) => {
-        launches++;
-        controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+    const { outcome, launches, afterTurn, controls } = await observeIssuePatch(
+      root,
+      async () => {
         await writeFile(source, "after\n");
         if (activate) {
           await rename(directory, join(root, "retained-update"));
           await writeFile(directory, script, { mode: 0o755 });
         }
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+    );
     expect(launches).toBe(1);
     expect(controls).toContain(join(root, ".git"));
     expect(controls).not.toContain(directory);
@@ -269,17 +249,9 @@ test.each(["add", "rename", "remove", "replace directory"] as const)(
     const head = git("rev-parse", "HEAD");
     const index = await readFile(join(root, ".git", "index"));
     const config = await readFile(join(root, ".git", "config"));
-    let launches = 0;
-    let controls: readonly string[] = [];
-    const afterTurn: string[][] = [];
-    const outcome = await runIssuePatch(root, {
-      onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurn.push([...args]);
-        return runGitRepositoryCommand(command, args, cwd, options);
-      },
-      onCodex: async (_args, output) => {
-        launches++;
-        controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+    const { outcome, launches, afterTurn, controls } = await observeIssuePatch(
+      root,
+      async () => {
         await writeFile(join(root, "app.ts"), "after\n");
         if (operation === "rename") {
           await rename(directory, join(root, "renamed-update"));
@@ -291,10 +263,8 @@ test.each(["add", "rename", "remove", "replace directory"] as const)(
           await mkdir(directory);
           await writeFile(join(directory, "module.ts"), "new source\n");
         }
-        output?.stdout.write("Synthetic patch complete.\n");
-        return 0;
       },
-    });
+    );
     expect(launches).toBe(1);
     expect(controls).toContain(join(root, ".git"));
     expect(controls).not.toContain(directory);

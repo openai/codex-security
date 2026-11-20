@@ -7,14 +7,46 @@ import {
   resultWithFindings,
   runGitRepositoryCommand,
   runLocalHostingTransport,
+  runPublicationCommand,
   runWorkflow,
   savedScan,
   patchDirectories,
 } from "./cli-patch-fixtures.js";
 import { pathToFileURL } from "node:url";
 
-describe("GitHub patch endpoint ports", () => {
+describe("GitHub patch destinations", () => {
   const fixtures = patchDirectories();
+
+  test("rejects gh configuration created by the patch before reusing the provider", async () => {
+    const { directory } = await publicationRepository(fixtures);
+    let edited = false;
+    let providerCallsAfterEdit = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment: { GH_CONFIG_DIR: "src" },
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command === "gh" && edited) providerCallsAfterEdit++;
+          return runPublicationCommand(command, args, cwd, options);
+        },
+        onCodex: async (_args, output) => {
+          await writeFile(
+            join(directory, "src/config.yml"),
+            "http_unix_socket: synthetic.sock\n",
+          );
+          edited = true;
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain(
+      "GitHub CLI configuration changed before publication",
+    );
+    expect(providerCallsAfterEdit).toBe(0);
+  });
 
   test.each([
     ...[false, true].flatMap((resume) =>

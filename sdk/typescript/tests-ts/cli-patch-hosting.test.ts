@@ -29,6 +29,7 @@ import {
   publicationRepository as createPublicationRepository,
   patchDirectories,
   runSavedPublication,
+  runPublicationCommand,
 } from "./cli-patch-fixtures.js";
 
 describe("patch change tracking", () => {
@@ -963,12 +964,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (tool, args, cwd, options) =>
-            tool === "git"
-              ? runGitRepositoryCommand(tool, args, cwd, options)
-              : args[1] === "list"
-                ? "[]"
-                : "https://github.example.test/example/repository/pull/1",
+          onRepositoryCommand: runPublicationCommand,
         },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(0);
@@ -1001,12 +997,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           output?.stdout.write("Synthetic patch complete.\n");
           return 0;
         },
-        onRepositoryCommand: (tool, args, cwd, options) =>
-          tool === "git"
-            ? runGitRepositoryCommand(tool, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: runPublicationCommand,
       },
     );
     await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
@@ -1205,12 +1196,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       const outcome = await runSavedPublication(directory, {
         onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: runPublicationCommand,
       });
       expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
       expect(onCodex).toHaveBeenCalledTimes(blocked ? 0 : 1);
@@ -1268,12 +1254,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       const outcome = await runSavedPublication(directory, {
         onWorkbench: () => savedScan(result, "scan-1", directory),
         onCodex,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: runPublicationCommand,
       });
       const blocked = collision === "destination";
       expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);

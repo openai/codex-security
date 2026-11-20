@@ -3080,8 +3080,13 @@ including SMTP passwords for individual identities and CVS passwords for
 specific access methods. The CLI also removes these secrets from the command
 configuration that Git delegates inherit.
 
-On Unix, publication commands that delegate hooks clear `LD_*` and `DYLD_*`
-loader overrides before starting Git and its helpers.
+Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
+`PYTHONHOME`, `NODE_OPTIONS`, and `BASH_ENV` before launching Git, hosting
+clients, and the sandbox runner on the host. On Unix they also clear native
+loader overrides (`LD_*` and `DYLD_*`).
+Install host wrapper dependencies alongside the trusted launcher or in its
+interpreter environment. Set overrides for snapshot filters in the sandbox’s
+shell environment policy.
 
 HTTPS publication runs named Git credential helpers and executable wrappers
 outside the checkout. Operator settings can also select `!gh auth git-credential`
@@ -3098,7 +3103,7 @@ and a drive letter for an explicit store on Windows. The same rules cover
 selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
 URL-specific values. Delegates also have deny rules for the account's `.ssh`
-directory, GitHub CLI logins in `hosts.yml`, `.docker/config.json`,
+directory, GitHub CLI’s `hosts.yml` and `config.yml`, `.docker/config.json`,
 `.kube/config`, `.npmrc`, and `.pypirc`. The rules cover home-directory defaults
 and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
 `NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. For pip, they cover

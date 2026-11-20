@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { runRepositoryCommand } from "../src/cli.js";
 import {
   completePatches,
   publicationRepository,
@@ -527,7 +528,11 @@ async function runSshPreflight(
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_SSH_VARIANT: "ssh",
     PATCH_SSH_MARKER: marker,
-    ...(inspectHostname ? { GITLAB_HOST: "gitlab.example.invalid" } : {}),
+    ...(inspectHostname && {
+      GITLAB_HOST: "gitlab.example.invalid",
+      PYTHONPATH: selected,
+      NODE_PATH: selected,
+    }),
   };
   let hostnameCommand: string | undefined;
   const model = mock(async () => 0);
@@ -545,7 +550,11 @@ async function runSshPreflight(
             ? "preflight"
             : undefined;
         if (phase === "hostname") hostnameCommand = args[1];
-        return runGitRepositoryCommand(command, args, cwd, {
+        const run =
+          inspectHostname && phase
+            ? runRepositoryCommand
+            : runGitRepositoryCommand;
+        return run(command, args, cwd, {
           ...options,
           environment: {
             ...environment,
@@ -663,7 +672,8 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
     const marker = join(external, "invoked");
     const name = "transport.cjs";
     const script =
-      'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, process.env.PATCH_SSH_PHASE + ":" + process.argv[2] + "\\n");\n';
+      'const phase = process.env.PYTHONPATH || process.env.NODE_PATH ? "inherited" : process.env.PATCH_SSH_PHASE;\n' +
+      'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
     await writeFile(join(directory, name), script);
     if (location === "operator-absolute")
       await writeFile(join(external, name), script);
@@ -703,7 +713,8 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
         env: {
           ...process.env,
           PATCH_SSH_MARKER: marker,
-          PATCH_SSH_PHASE: "control",
+          PYTHONPATH: directory,
+          NODE_PATH: directory,
         },
       },
     );
@@ -715,7 +726,7 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
         return "";
       },
     );
-    expect(rawMarker, control.stderr).toContain("control:match");
+    expect(rawMarker, control.stderr).toContain("inherited:match");
     await unlink(marker);
 
     // Git's POSIX shell may find its bundled OpenSSH before the Windows client.

@@ -25,6 +25,7 @@ import {
   initializePatchGit,
   runIssuePatch,
   runSavedPublication,
+  observeIssuePatch,
 } from "./cli-patch-fixtures.js";
 import { execFileSync } from "node:child_process";
 import { constants } from "node:fs";
@@ -87,35 +88,27 @@ for (const mode of [
       const head = git("rev-parse", "HEAD");
       const index = await readFile(join(root, ".git", "index"));
       const config = await readFile(join(root, ".git", "config"));
-      let launches = 0;
-      let protectedPaths: readonly string[] = [];
-      const afterTurn: string[][] = [];
       const changed =
         mode === "overlapping configuration"
           ? "[synthetic]\n value = changed\n"
           : `${script}# Synthetic source edit\n`;
-      const outcome = await runIssuePatch(root, {
-        onRepositoryCommand: (command, args, cwd, options) => {
-          if (launches > 0) afterTurn.push([...args]);
-          return runGitRepositoryCommand(command, args, cwd, options);
-        },
-        onCodex: async (_args, output) => {
-          launches++;
-          protectedPaths = output?.appServer?.permissions?.readOnlyPaths ?? [];
-          await writeFile(source, "after\n");
-          if (mode === "activate permissions") {
-            await chmod(hook, 0o755);
-          } else if (mode === "edit inactive file") {
-            await writeFile(hook, changed);
-          } else {
-            await writeFile(`${hook}.replacement`, changed, {
-              mode: mode === "replace with executable" ? 0o755 : 0o644,
-            });
-            await rename(`${hook}.replacement`, hook);
-          }
-          output?.stdout.write("Synthetic patch complete.\n");
-          return 0;
-        },
+      const {
+        outcome,
+        launches,
+        afterTurn,
+        controls: protectedPaths,
+      } = await observeIssuePatch(root, async () => {
+        await writeFile(source, "after\n");
+        if (mode === "activate permissions") {
+          await chmod(hook, 0o755);
+        } else if (mode === "edit inactive file") {
+          await writeFile(hook, changed);
+        } else {
+          await writeFile(`${hook}.replacement`, changed, {
+            mode: mode === "replace with executable" ? 0o755 : 0o644,
+          });
+          await rename(`${hook}.replacement`, hook);
+        }
       });
       expect(launches).toBe(1);
       expect(protectedPaths).toContain(join(root, ".git"));
@@ -316,18 +309,9 @@ for (const kind of [
           if (kind === "snapshot hook loop") await unlink(operator);
           await symlink(unavailable, unavailable);
         }
-        let launches = 0;
-        let controls: readonly string[] = [];
         let effectsBefore = "";
-        const afterTurn: string[][] = [];
-        const outcome = await runIssuePatch(root, {
-          onRepositoryCommand: (command, args, cwd, options) => {
-            if (launches > 0) afterTurn.push([...args]);
-            return runGitRepositoryCommand(command, args, cwd, options);
-          },
-          onCodex: async (_args, output) => {
-            launches++;
-            controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+        const { outcome, launches, afterTurn, controls } =
+          await observeIssuePatch(root, async () => {
             effectsBefore = await readFile(effect, "utf8").catch(() => "");
             if (activate) {
               if (denied) await chmod(permissionDirectory, 0o755);
@@ -339,10 +323,7 @@ for (const kind of [
               }
             }
             await writeFile(join(root, "app.ts"), "after\n");
-            output?.stdout.write("Synthetic patch complete.\n");
-            return 0;
-          },
-        });
+          });
         const effectsAfter = await readFile(effect, "utf8").catch(() => "");
         expect(launches).toBe(1);
         expect(controls).not.toContain(unavailable);

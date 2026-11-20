@@ -14,6 +14,7 @@ import {
   runWorkflow,
   patchDirectories,
   runSavedPublication,
+  initializePatchGit,
 } from "./cli-patch-fixtures.js";
 
 const fixtures = patchDirectories();
@@ -176,9 +177,7 @@ test.each(["root", "nested", "disabled"])(
     const selected = repositoryGit(checkout);
     if (mode === "nested") {
       await mkdir(checkout);
-      selected("init", "--initial-branch=main");
-      selected("config", "user.name", "Synthetic User");
-      selected("config", "user.email", "synthetic@example.test");
+      initializePatchGit(checkout);
     }
     selected("config", "filter.passthrough.clean", "cat");
     if (mode === "disabled")
@@ -249,9 +248,7 @@ test.each([
     const selected = repositoryGit(checkout);
     if (mode === "nested") {
       await mkdir(checkout);
-      selected("init", "--initial-branch=main");
-      selected("config", "user.name", "Synthetic User");
-      selected("config", "user.email", "synthetic@example.test");
+      initializePatchGit(checkout);
     }
     const file = "src/finding-1.ts";
     const local = join(checkout, "private.txt");
