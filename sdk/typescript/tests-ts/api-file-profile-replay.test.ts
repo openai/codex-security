@@ -456,6 +456,7 @@ test.each(
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "synthetic stop after registration",
       );
+      expect(recipe).toBeDefined();
       expect(recipe!["sealedPricing"]).toEqual({ model: "initial-model" });
       if (skills === "inherited")
         expect(recipe!["executableSourceRoots"]).toContain(skillCheckout);

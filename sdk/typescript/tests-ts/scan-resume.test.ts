@@ -3,7 +3,12 @@ import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
-import { readJson, readJsonLines, writeJson } from "./support/json.js";
+import {
+  jsonLines,
+  readJson,
+  readJsonLines,
+  writeJson,
+} from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
@@ -358,6 +363,7 @@ async function interruptedScan(
     scanId,
     threadId,
     registration,
+    resumeOptions: { mode, outputDir: scanDir, resumeScanId: scanId },
     sessionPath,
     checkpoint,
     input,
@@ -1224,7 +1230,7 @@ function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
-  >,
+  > = () => fail("Unexpected model launch"),
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
   createOperationTelemetry?: ConstructorParameters<
     typeof TestClient
@@ -1317,7 +1323,7 @@ test("bulk recovery passes saved executable source paths to SDK startup", async 
     executableSourcePaths: [projectPath],
   });
   await rm(join(f.root, "results.jsonl"));
-  const deps = resumeDependencies(f, () => fail("Unexpected model launch"));
+  const deps = resumeDependencies(f);
   const { runCli, stderr, stdout } = createCliTest(main);
   const startupPaths: Array<readonly string[] | undefined> = [];
   await runCli(
@@ -1682,9 +1688,7 @@ test.each([false, true])(
     });
     if (sealed) await sealWithOriginalPlugin(f);
     const { stderr, runCli } = createCliTest(main);
-    const deps = resumeDependencies(f, () =>
-      fail("Unexpected new model session"),
-    );
+    const deps = resumeDependencies(f);
     deps.environment = {
       ...deps.environment,
       OPENROUTER_API_KEY: sealed ? "synthetic-provider-key" : undefined,
@@ -1716,6 +1720,10 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
             config: { profile: "review" },
             sealedPricing: { model },
             executableSourceRoots: [],
+            scanInputs: {
+              ...scanInputIdentity("Keep the original scan instructions."),
+              modelFileInputs: { model_instructions_file: null },
+            },
           }
         : { config: { model }, sqliteHome },
     );
@@ -1729,15 +1737,19 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
       reasoning_output_tokens: 0,
       total_tokens: 1000,
     };
-    const counter = {
+    const event = (payload: JsonObject) => ({
       timestamp,
       type: "event_msg",
-      payload: { type: "token_count", info: { total_token_usage: counters } },
-    };
+      payload,
+    });
+    const counter = event({
+      type: "token_count",
+      info: { total_token_usage: counters },
+    });
     const workerPath = join(f.codexHome, "sessions", `rollout-${worker}.jsonl`);
     await writeFile(
       workerPath,
-      [
+      jsonLines([
         {
           type: "session_meta",
           payload: {
@@ -1747,16 +1759,10 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
             },
           },
         },
-        {
-          timestamp,
-          type: "event_msg",
-          payload: { type: "task_started", turn_id: "worker-turn" },
-        },
+        event({ type: "task_started", turn_id: "worker-turn" }),
         counter,
-        { timestamp, type: "event_msg", payload: { type: "task_complete" } },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join("\n") + "\n",
+        event({ type: "task_complete" }),
+      ]) + "\n",
     );
     if (scenario !== "partial")
       await appendFile(f.sessionPath, JSON.stringify(counter) + "\n");
@@ -1793,56 +1799,53 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
           }
         : {}),
     };
-    const client = resumeDependencies({ ...f, environment }, () =>
-      fail("Unexpected new model session"),
-    ).createSecurity({});
-    const options = {
-      mode: "deep" as const,
-      resumeScanId: f.scanId,
-      outputDir: f.scanDir,
-    };
+    const deps = resumeDependencies({ ...f, environment });
+    await using client = deps.createSecurity({});
+    const options = f.resumeOptions;
     const total = scenario === "partial" ? 1000 : 2000;
     const coverage = scenario === "partial" ? "partial" : "complete";
-    try {
-      expect(
-        await f.command([
-          "read-scan-usage",
-          "--scan-id",
-          f.scanId,
-          "--thread-id",
-          f.threadId,
-        ]),
-      ).toMatchObject({ coverage, totalTokens: total });
-      if (scenario === "partial")
-        await expect(
-          client.run(f.repository, { ...options, maxCostUsd: 1 }),
-        ).rejects.toThrow("usage is incomplete");
-      if (scenario === "complete" || scenario === "configured SQLite")
-        await expect(
-          client.run(f.repository, { ...options, maxCostUsd: 0.001 }),
-        ).rejects.toMatchObject({ name: "ScanCostLimitExceededError" });
-      const result = await client.run(f.repository, options);
-      expect(result.turnResult.usage).toMatchObject({ total_tokens: total });
-      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
-        "scan"
-      ] as JsonObject;
-      expect(saved["usage"]).toMatchObject({ coverage, totalTokens: total });
-      if (scenario === "unpriced") {
-        expect(result.cost).toBeNull();
-        expect(saved["cost"]).toBeUndefined();
-      } else {
-        expect(result.cost).toMatchObject({
-          model,
-          inputTokens: total,
-          estimatedUsd: total * 0.000004,
-        });
-        expect(saved["cost"]).toEqual(result.cost);
-      }
-    } finally {
-      await client.close();
+    expect(
+      await f.command([
+        "read-scan-usage",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+      ]),
+    ).toMatchObject({ coverage, totalTokens: total });
+    if (scenario === "partial")
+      await expect(
+        client.run(f.repository, { ...options, maxCostUsd: 1 }),
+      ).rejects.toThrow("usage is incomplete");
+    if (scenario === "complete" || scenario === "configured SQLite")
+      await expect(
+        client.run(f.repository, { ...options, maxCostUsd: 0.001 }),
+      ).rejects.toMatchObject({ name: "ScanCostLimitExceededError" });
+    const result = await client.run(f.repository, options);
+    expect(result.turnResult.usage).toMatchObject({ total_tokens: total });
+    const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+      "scan"
+    ] as JsonObject;
+    expect(saved["usage"]).toMatchObject({ coverage, totalTokens: total });
+    if (scenario === "unpriced") {
+      expect(result.cost).toBeNull();
+      expect(saved["cost"]).toBeUndefined();
+    } else {
+      expect(result.cost).toMatchObject({
+        model,
+        inputTokens: total,
+        estimatedUsd: total * 0.000004,
+      });
+      expect(saved["cost"]).toEqual(result.cost);
     }
   },
 );
+
+async function expectUnprobed(executable: string) {
+  await expect(readFile(executable + ".ran", "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+}
 
 async function modelInputCheckout(filename = "instructions.md") {
   const checkout = await temporaryDirectory();
@@ -1921,29 +1924,20 @@ test
       HOME: dirname(checkout),
       PATH: bin,
     };
-    const client = resumeDependencies({ ...f, environment }, () =>
-      fail("Unexpected model launch"),
-    ).createSecurity({
+    const deps = resumeDependencies({ ...f, environment });
+    await using client = deps.createSecurity({
       pythonPath: "python3",
       ...(sourceKind === "resupplied"
         ? { executableSourcePaths: [source] }
         : {}),
     });
-    try {
-      await expect(
-        client.run(f.repository, {
-          mode: "deep",
-          resumeScanId: f.scanId,
-          outputDir: f.scanDir,
-          requireSealedResume: true,
-        }),
-      ).rejects.toThrow("interpreter is unavailable or unusable");
-      await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(f.repository, {
+        ...f.resumeOptions,
+        requireSealedResume: true,
+      }),
+    ).rejects.toThrow("interpreter is unavailable or unusable");
+    await expectUnprobed(python);
   },
 );
 
@@ -1994,18 +1988,14 @@ test.skipIf(process.platform === "win32").each([
     );
     await expect(
       client.run(f.repository, {
-        mode: "deep",
-        resumeScanId: f.scanId,
-        outputDir: f.scanDir,
+        ...f.resumeOptions,
         requireSealedResume: stage === "after sealing",
         ...(stage === "with post-scan work"
           ? { postScanPrompt: await readFile(source, "utf8") }
           : {}),
       }),
     ).rejects.toThrow("interpreter is unavailable or unusable");
-    await expect(readFile(launcher + ".ran", "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expectUnprobed(launcher);
   },
 );
 
@@ -2044,19 +2034,15 @@ test.skipIf(process.platform === "win32")(
     await sealWithOriginalPlugin(f);
     await rm(join(checkout, ".git"), { recursive: true });
     f.environment.PATH = [bin, dirname(trusted)].join(delimiter);
-    await using client = resumeDependencies(f, () =>
-      fail("Unexpected model launch"),
-    ).createSecurity({ pythonPath: "python3" });
+    await using client = resumeDependencies(f).createSecurity({
+      pythonPath: "python3",
+    });
     const result = await client.run(f.repository, {
-      mode: "deep",
-      resumeScanId: f.scanId,
-      outputDir: f.scanDir,
+      ...f.resumeOptions,
       requireSealedResume: true,
     });
     expect(result.manifest.scan.id).toBe(f.scanId);
-    await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expectUnprobed(python);
   },
 );
 
@@ -2087,13 +2073,9 @@ test
     const f = await interruptedScan("deep", false, recipe);
     await sealWithOriginalPlugin(f);
     await rm(f.repository, { recursive: true });
-    const clients = resumeDependencies(f, () =>
-      fail("Unexpected model launch"),
-    );
+    const clients = resumeDependencies(f);
     const options = {
-      mode: "deep" as const,
-      outputDir: f.scanDir,
-      resumeScanId: f.scanId,
+      ...f.resumeOptions,
       requireSealedResume: true,
     };
     if (kind === "legacy native") {
@@ -2103,9 +2085,7 @@ test
       await expect(named.run(f.repository, options)).rejects.toThrow(
         /absolute trusted interpreter/i,
       );
-      await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
+      await expectUnprobed(python);
     }
     await using client = clients.createSecurity({
       pythonPath:
@@ -2182,9 +2162,7 @@ test.skipIf(process.platform === "win32").each([
         CODEX_CLI_PATH: join(f.root, "absent-codex"),
       },
     });
-    await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expectUnprobed(python);
     const refused =
       selection === "absolute" ||
       (legacyProfile && selection !== "trusted absolute");
@@ -2206,14 +2184,8 @@ test("sealed SDK resumes the registered path scope after the checkout is removed
   await rm(f.repository, { recursive: true });
   const other = await temporaryDirectory();
   Object.assign(f.environment, { HOME: other });
-  await using client = resumeDependencies(f, () =>
-    fail("Unexpected model launch"),
-  ).createSecurity({});
-  const options = {
-    mode: "deep" as const,
-    outputDir: f.scanDir,
-    resumeScanId: f.scanId,
-  };
+  await using client = resumeDependencies(f).createSecurity({});
+  const options = f.resumeOptions;
   await expect(
     client.run(f.repository, { ...options, target: ["other"] }),
   ).rejects.toThrow("requested target differs");
@@ -2257,9 +2229,7 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
     recipeRepositoryAlias: true,
   });
   await sealWithOriginalPlugin(f);
-  const client = resumeDependencies(f, () =>
-    fail("Unexpected new model session"),
-  ).createSecurity({});
+  await using client = resumeDependencies(f).createSecurity({});
   const upperOutput = join(f.root, basename(f.scanDir).toUpperCase());
   const caseInsensitive = existsSync(upperOutput);
   let outputDir = caseInsensitive ? upperOutput : f.scanDir;
@@ -2271,52 +2241,44 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
     await symlink(f.root, parentAlias);
     outputDir = join(parentAlias, basename(outputDir));
   }
-  const options = {
-    mode: "deep" as const,
-    resumeScanId: f.scanId,
-    outputDir,
-  };
-  try {
-    const unrelatedOutput = caseInsensitive
-      ? join(f.root, "unrelated-output")
-      : upperOutput;
-    await mkdir(unrelatedOutput, { mode: 0o700 });
-    await cp(
-      join(f.scanDir, "scan-manifest.json"),
-      join(unrelatedOutput, "scan-manifest.json"),
-    );
-    await expect(
-      client.run(f.repository, { ...options, outputDir: unrelatedOutput }),
-    ).rejects.toThrow("mismatched scan resume context");
-    await expect(client.run(f.root, options)).rejects.toThrow(
+  const options = { ...f.resumeOptions, outputDir };
+  const unrelatedOutput = caseInsensitive
+    ? join(f.root, "unrelated-output")
+    : upperOutput;
+  await mkdir(unrelatedOutput, { mode: 0o700 });
+  await cp(
+    join(f.scanDir, "scan-manifest.json"),
+    join(unrelatedOutput, "scan-manifest.json"),
+  );
+  await expect(
+    client.run(f.repository, { ...options, outputDir: unrelatedOutput }),
+  ).rejects.toThrow("mismatched scan resume context");
+  await expect(client.run(f.root, options)).rejects.toThrow(
+    "mismatched scan resume context",
+  );
+  let repository = f.repository;
+  if (process.platform !== "win32") {
+    const other = await temporaryDirectory();
+    const otherRepository = join(other, basename(f.repository));
+    await mkdir(otherRepository);
+    const foreignLink = join(f.root, "foreign-link");
+    await symlink(otherRepository, foreignLink);
+    const foreign = `${foreignLink}/../${basename(f.repository)}`;
+    await expect(client.run(foreign, options)).rejects.toThrow(
       "mismatched scan resume context",
     );
-    let repository = f.repository;
-    if (process.platform !== "win32") {
-      const other = await temporaryDirectory();
-      const otherRepository = join(other, basename(f.repository));
-      await mkdir(otherRepository);
-      const foreignLink = join(f.root, "foreign-link");
-      await symlink(otherRepository, foreignLink);
-      const foreign = `${foreignLink}/../${basename(f.repository)}`;
-      await expect(client.run(foreign, options)).rejects.toThrow(
-        "mismatched scan resume context",
-      );
-      await rm(foreignLink);
-      await expect(client.run(foreign, options)).rejects.toThrow(
-        "mismatched scan resume context",
-      );
+    await rm(foreignLink);
+    await expect(client.run(foreign, options)).rejects.toThrow(
+      "mismatched scan resume context",
+    );
 
-      const savedLink = join(other, "saved-link");
-      await symlink(f.scanDir, savedLink);
-      repository = `${savedLink}/../${basename(f.repository)}`;
-    }
-    const result = await client.run(repository, options);
-    expect(result.manifest.scan.id).toBe(f.scanId);
-    expect(result.threadId).toBe(f.threadId);
-  } finally {
-    await client.close();
+    const savedLink = join(other, "saved-link");
+    await symlink(f.scanDir, savedLink);
+    repository = `${savedLink}/../${basename(f.repository)}`;
   }
+  const result = await client.run(repository, options);
+  expect(result.manifest.scan.id).toBe(f.scanId);
+  expect(result.threadId).toBe(f.threadId);
 });
 
 test.each([

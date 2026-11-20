@@ -314,8 +314,8 @@ import {
   resolveInputPath,
   resolveParentTraversal,
   resolvePluginPath,
-  resolvePluginSource,
   resolvePluginPython,
+  resolvePluginSource,
   resolveScanOutputPath,
   runWorkbench,
   sameOutputDirectory,
@@ -2943,17 +2943,18 @@ export class CodexSecurity {
           workerProviderEnvironment,
           session.nativeProviderEnvironment,
         );
-      const modelFilePaths =
+      const configPaths =
         mode === "deep"
-          ? MODEL_FILE_SETTINGS.flatMap((key) => {
-              const value = workerRuntimeConfig[key];
-              return typeof value === "string" && value ? [value] : [];
-            })
-          : [];
-      if (modelFilePaths.length && this.#dependencies.hostedScan === undefined)
+          ? scanConfigSourcePaths(
+              workerRuntimeConfig,
+              scanDir,
+              workerProviderEnvironment,
+            )
+          : undefined;
+      if (configPaths?.model.length && !hosted)
         await requireDeepScanExecutable(
           this.#codexCommand().command,
-          modelFilePaths,
+          configPaths.model,
           signal,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
@@ -3313,14 +3314,13 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
-      if (mode === "deep") {
-        const configPaths = scanConfigSourcePaths(
-          workerRuntimeConfig,
-          scanDir,
-          workerProviderEnvironment,
-        );
+      if (configPaths) {
         const resolvedSources = await Promise.all(
-          modelFilePaths.map((path) => realpath(path)),
+          configPaths.model.map(async (path) =>
+            canonicalConfigPath(
+              await resolveParentTraversal(path, { allowMissing: true }),
+            ),
+          ),
         );
         const executableSources = [
           ...new Set([

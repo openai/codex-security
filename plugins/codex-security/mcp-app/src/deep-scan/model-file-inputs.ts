@@ -36,40 +36,36 @@ export function modelFilePath(value: string, directory: string): string {
     : resolve(directory, expanded);
 }
 
+async function readModelInput(
+  setting: (typeof modelInputSettings)[number],
+  value: unknown,
+  signal?: AbortSignal,
+) {
+  signal?.throwIfAborted();
+  if (typeof value !== "string") return null;
+  const hash = createHash("sha256");
+  if (setting === "developer_instructions")
+    return { sha256: hash.update(value).digest("hex") };
+  if (!value) return null;
+  const file = await open(value, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!(await file.stat()).isFile())
+      throw new Error(`Expected a regular file for ${setting}: ${value}`);
+    return {
+      path: value,
+      sha256: hash.update(await file.readFile({ signal })).digest("hex"),
+    };
+  } finally {
+    await file.close();
+  }
+}
+
 export async function readModelFileInputs(
   config: Record<string, unknown>,
-  settings: readonly (typeof modelInputSettings)[number][] = modelInputSettings,
-  signal?: AbortSignal,
 ): Promise<ModelFileInputs> {
   const inputs: ModelFileInputs = {};
-  for (const setting of settings) {
-    signal?.throwIfAborted();
-    const value = config[setting];
-    if (setting === "developer_instructions") {
-      inputs[setting] =
-        typeof value === "string"
-          ? { sha256: createHash("sha256").update(value).digest("hex") }
-          : null;
-      continue;
-    }
-    if (typeof value !== "string" || value.length === 0) {
-      inputs[setting] = null;
-      continue;
-    }
-    const file = await open(value, constants.O_RDONLY | constants.O_NONBLOCK);
-    try {
-      if (!(await file.stat()).isFile())
-        throw new Error(`Expected a regular file for ${setting}: ${value}`);
-      inputs[setting] = {
-        path: value,
-        sha256: createHash("sha256")
-          .update(await file.readFile({ signal }))
-          .digest("hex"),
-      };
-    } finally {
-      await file.close();
-    }
-  }
+  for (const setting of modelInputSettings)
+    inputs[setting] = await readModelInput(setting, config[setting]);
   return inputs;
 }
 
@@ -125,7 +121,7 @@ export async function validateModelFileInputs(
     if (expected === undefined) continue;
     let actual;
     try {
-      actual = (await readModelFileInputs(config, [setting], signal))[setting];
+      actual = await readModelInput(setting, config[setting], signal);
     } catch (cause) {
       signal.throwIfAborted();
       throw new DeepScanModelInputRecoveryError(

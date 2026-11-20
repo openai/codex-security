@@ -83,6 +83,12 @@ test("restored model inputs resume the same host run without spending a discover
   assert.deepEqual(store.workerUpdates, []);
   assert.deepEqual(store.failureMessages, []);
   await writeFile(file, "original");
+  delete config.model_instructions_file;
+  await assert.rejects(
+    runCoordinator(fixture, store, executor),
+    /model_instructions_file changed/u,
+  );
+  config.model_instructions_file = file;
   config.experimental_compact_prompt_file = file;
   await assert.rejects(
     runCoordinator(fixture, store, executor),

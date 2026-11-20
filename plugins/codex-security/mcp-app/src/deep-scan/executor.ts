@@ -120,7 +120,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     signal: AbortSignal;
     promise: Promise<BoundCodexExecutable>;
   };
-  private executableRoots?: Promise<string[]>;
+  private executableRoots?: string[];
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
   private pluginVersion?: Promise<string | undefined>;
 
@@ -174,22 +174,42 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     environment: NodeJS.ProcessEnv,
     cwd: string,
     signal: AbortSignal,
-    allow: (path: string) => boolean,
+    config: Record<string, unknown>,
   ): Promise<BoundCodexExecutable> {
+    const bind = async () => {
+      const { artifactContext, configSourcePaths, modelFileInputs } =
+        this.modelSettings;
+      const target = artifactContext?.repoRoot;
+      // Keep the original source boundaries even if executable selection needs a retry.
+      this.executableRoots ??= await workerExecutableRoots(target, [
+        ...(configSourcePaths ?? []),
+        ...Object.values(modelFileInputs ?? {}).flatMap((input) =>
+          input?.path ? [input.path] : [],
+        ),
+        ...modelFileSettings.flatMap((key) => {
+          const path = config[key];
+          return typeof path === "string" && path ? [path] : [];
+        }),
+      ]);
+      return bindCodexExecutable(
+        environment,
+        cwd,
+        signal,
+        this.executableRoots,
+      );
+    };
     while (true) {
       signal.throwIfAborted();
       let binding = this.codexExecutable;
       if (!binding) {
         binding = {
           signal,
-          promise: bindCodexExecutable(environment, cwd, allow, signal).catch(
-            (error) => {
-              // An unsuccessful snapshot has not pinned an executable yet.
-              if (this.codexExecutable === binding)
-                this.codexExecutable = undefined;
-              throw error;
-            },
-          ),
+          promise: bind().catch((error) => {
+            // An unsuccessful snapshot has not pinned an executable yet.
+            if (this.codexExecutable === binding)
+              this.codexExecutable = undefined;
+            throw error;
+          }),
         };
         this.codexExecutable = binding;
       }
@@ -415,29 +435,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "CODEX_API_KEY",
         process.platform,
       )?.trim();
-      const sources = [
-        ...(this.modelSettings.configSourcePaths ?? []),
-        ...Object.values(this.modelSettings.modelFileInputs ?? {}).flatMap(
-          (input) => (input?.path ? [input.path] : []),
-        ),
-        ...modelFileSettings.flatMap((key) => {
-          const path = runtimeSettings.config[key];
-          return typeof path === "string" && path.length ? [path] : [];
-        }),
-      ];
-      const roots = await (this.executableRoots ??= workerExecutableRoots(
-        this.modelSettings.artifactContext?.repoRoot,
-        sources,
-      ).catch((error: unknown) => {
-        this.executableRoots = undefined;
-        throw error;
-      }));
-      const allow = (path: string) => outsideExecutableRoots(path, roots);
       const executable = await this.getCodexExecutable(
         childEnv,
         originalCwd,
         request.signal,
-        allow,
+        runtimeSettings.config,
       );
       await verifyBoundCodexExecutable(executable, request.signal);
       const preflightOptions = {
@@ -884,10 +886,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function bindCodexExecutable(
   env: NodeJS.ProcessEnv,
   originalCwd: string,
-  allow: (path: string) => boolean,
   signal?: AbortSignal,
+  roots: readonly string[] = [],
 ): Promise<BoundCodexExecutable> {
   signal?.throwIfAborted();
+  const allow = (path: string) => outsideExecutableRoots(path, roots);
   const path = resolveCodexPath(
     env,
     process.platform,
@@ -895,12 +898,7 @@ async function bindCodexExecutable(
     originalCwd,
     allow,
   );
-  if (!allow(path))
-    throw new DeepScanNonRetryableError(
-      "The selected Codex executable is inside a protected scan or configuration checkout.",
-    );
-  const destination = await fs.realpath(path);
-  if (!allow(destination))
+  if (!allow(path) || !allow(await fs.realpath(path)))
     throw new DeepScanNonRetryableError(
       "The selected Codex executable is inside a protected scan or configuration checkout.",
     );

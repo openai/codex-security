@@ -15351,6 +15351,7 @@ if __name__ == "__main__":
       await expect(resume()).rejects.toThrow(`${setting} changed`);
       expect(commands).not.toContain("fail-scan");
       expect(routed).not.toHaveBeenCalled();
+      // Early receipts retained only the digest. They must still detect a changed file.
       const inputs = recipe["scanInputs"] as JsonObject;
       const receipt = (inputs["modelFileInputs"] as JsonObject)[
         setting
