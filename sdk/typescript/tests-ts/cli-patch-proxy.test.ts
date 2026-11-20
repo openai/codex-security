@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import {
   publicationRepository,
@@ -78,7 +78,16 @@ test.each(["compiled exec directory", "config separator in executable path"])(
   },
 );
 
-test("one native push uses the configured proxy for each destination", async () => {
+test("one native push uses the configured proxy for each destination", () =>
+  checkNativePush("approved"));
+test("one checkout-selected mirror blocks a native push to all destinations", () =>
+  checkNativePush("unapproved mirror"));
+test("a pre-push hook cannot modify the next destination's proxy through a hard link", () =>
+  checkNativePush("linked proxy"));
+
+async function checkNativePush(
+  scenario: "approved" | "unapproved mirror" | "linked proxy",
+) {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-proxy-routes-");
   const system = join(external, "system.gitconfig");
@@ -107,7 +116,15 @@ test("one native push uses the configured proxy for each destination", async () 
     const host = "127.0.0.1:" + port;
     const remote = "git://" + host + "/team/repository.git";
     if (port === 1) git("remote", "set-url", "origin", remote);
-    git("config", "--add", "remote.origin.pushurl", remote);
+    git(
+      "config",
+      ...(scenario !== "unapproved mirror" || port === 1
+        ? ["--file", include]
+        : []),
+      "--add",
+      "remote.origin.pushurl",
+      remote,
+    );
     const receiver = join(external, "receiver-" + port);
     git("init", "--bare", receiver);
     receivers.push(receiver);
@@ -130,6 +147,20 @@ exec git receive-pack ${literal}
       "--add",
       "core.gitProxy",
       name + " for " + host,
+    );
+  }
+  if (scenario === "linked proxy") {
+    const home = await fixtures.create("patch-proxy-home-");
+    environment["CODEX_HOME"] = home;
+    await writeFile(
+      join(home, "config.toml"),
+      "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n",
+    );
+    await link(join(external, "proxy-2"), join(directory, "proxy-alias"));
+    await writeFile(
+      join(directory, ".git", "hooks", "pre-push"),
+      "#!/bin/sh\n: > proxy-alias\n",
+      { mode: 0o700 },
     );
   }
   let pushes = 0;
@@ -168,9 +199,20 @@ exec git receive-pack ${literal}
     },
     { localHosting: false },
   );
+  if (scenario !== "approved") {
+    expect(outcome.stderr).toContain(
+      scenario === "linked proxy"
+        ? "hard-linked Git proxy"
+        : "multiple destinations",
+    );
+    expect(pushes).toBe(0);
+    for (const receiver of receivers)
+      expect(git("--git-dir", receiver, "for-each-ref")).toBe("");
+    return;
+  }
   expect(pushes, outcome.stderr).toBe(1);
   for (const receiver of receivers)
     expect(
       git("--git-dir", receiver, "rev-parse", "refs/heads/" + branch),
     ).toBe(commit);
-});
+}
