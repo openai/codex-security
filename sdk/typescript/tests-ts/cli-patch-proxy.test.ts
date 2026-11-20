@@ -91,6 +91,10 @@ test("a pre-push hook cannot modify the next destination's SSH launcher through 
 test("a pre-push hook cannot modify the next destination's SSH script operand through a hard link", () =>
   checkNativePush("linked launcher", "ssh-script"));
 test.skipIf(process.platform === "win32")(
+  "a pre-push hook cannot replace the HTTPS helper for the next destination",
+  () => checkNativePush("linked launcher", "https"),
+);
+test.skipIf(process.platform === "win32")(
   "a pre-push hook cannot replace the Git child launcher for a single destination",
   () => checkNativePush("linked launcher", "single"),
 );
@@ -101,7 +105,7 @@ test.skipIf(process.platform === "win32")(
 
 async function checkNativePush(
   scenario: "approved" | "unapproved mirror" | "linked launcher",
-  route: "proxy" | "ssh" | "ssh-script" | "single" = "proxy",
+  route: "proxy" | "ssh" | "ssh-script" | "https" | "single" = "proxy",
 ) {
   const { directory, git } = await publicationRepository(fixtures);
   const external = await fixtures.create("patch-proxy-routes-");
@@ -129,9 +133,10 @@ async function checkNativePush(
   const receivers: string[] = [];
   for (const port of route === "single" ? [1] : [1, 2]) {
     const host = "127.0.0.1:" + port;
-    const ssh = port === 2 && route !== "proxy";
-    const remote =
-      (ssh ? "ssh://git@" : "git://") + host + "/team/repository.git";
+    const ssh = port === 2 && route.startsWith("ssh");
+    const https = port === 2 && route === "https";
+    const protocol = ssh ? "ssh://git@" : https ? "https://" : "git://";
+    const remote = protocol + host + "/team/repository.git";
     if (port === 1) git("remote", "set-url", "origin", remote);
     git(
       "config",
@@ -145,6 +150,7 @@ async function checkNativePush(
     const receiver = join(external, "receiver-" + port);
     git("init", "--bare", receiver);
     receivers.push(receiver);
+    if (https) continue;
     const name = "transport-" + port;
     const launcher = join(external, name);
     const literal =
@@ -186,7 +192,11 @@ dd bs=1 count=$((0x$header - 4)) of=/dev/null 2>/dev/null || exit 1
       "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n",
     );
     let launcher = join(external, "transport-2");
-    if (route === "single") {
+    if (route === "https") {
+      environment["GIT_EXEC_PATH"] = external;
+      launcher = join(external, "git-remote-https");
+      await writeFile(launcher, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    } else if (route === "single") {
       const execPath = join(external, "libexec", "git-core");
       await mkdir(execPath, { recursive: true });
       environment["GIT_EXEC_PATH"] = execPath;
