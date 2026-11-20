@@ -50,7 +50,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { isIP } from "node:net";
-import { tmpdir, userInfo } from "node:os";
+import { devNull, tmpdir } from "node:os";
 import {
   basename,
   delimiter,
@@ -118,6 +118,12 @@ import {
   withPatchGitIndex,
   type PatchGitAdministrationReference,
 } from "./patch-git-controls.js";
+import {
+  sshConfigEntries,
+  sshIncludeWords,
+  unsupportedSshInclude,
+  walkSshConfiguration,
+} from "./patch-ssh-config.js";
 import {
   patchCredentialKind,
   filterCommandConfig,
@@ -2340,6 +2346,9 @@ async function restrictRepositoryLoader(
 function isPatchStartupOverride(name: string): boolean {
   return (
     /^OPENSSL_(?:CONF(?:_INCLUDE)?|MODULES|ENGINES)$/iu.test(name) ||
+    /^(?:TCL_LIBRARY|TK_LIBRARY|TCLLIBPATH|TCL\d+[._]\d+_TM_PATH)$/iu.test(
+      name,
+    ) ||
     /^(?:PYTHON(?:HOME|PATH|USERBASE|NOUSERSITE|PLATLIBDIR|STARTUP|PYCACHEPREFIX|EXECUTABLE)|__PYVENV_LAUNCHER__)$/iu.test(
       name,
     ) ||
@@ -2660,6 +2669,8 @@ export async function runRepositoryCommand(
     for (const name of Object.keys(environment))
       if (isPatchStartupOverride(name)) delete environment[name];
     environment["PYTHONNOUSERSITE"] = "1";
+    // Zsh reads $HOME/.zshenv even for a script when ZDOTDIR is unset.
+    environment["ZDOTDIR"] = devNull;
     await restrictRepositoryLoader(
       environment,
       protectedRoots,
@@ -13758,12 +13769,6 @@ async function bindPublicationCredentialHelper(
 
 class UnsupportedCredentialHelper extends Error {}
 
-function unsupportedSshInclude() {
-  return new CodexSecurityError(
-    "Cannot bind the SSH configuration Include for patch publication. Use a self-contained SSH config outside the checkout, or static include paths outside every writable root.",
-  );
-}
-
 function unsupportedSshCommand() {
   return new CodexSecurityError(
     "Cannot bind the SSH configuration command for patch publication. Use a static executable and script outside every patch-writable directory.",
@@ -13797,22 +13802,12 @@ function sshConfigReferences(
   includes: string[],
   commands: string[],
 ): void {
-  for (const raw of contents.split("\n")) {
-    const line = raw.split("\0", 1)[0]!.replace(/[ \t\r\f]+$/u, "");
-    // OpenSSH's keyword reader accepts double quotes and an optional '='.
-    // Detect unusual spellings too, then require unambiguous static syntax.
-    const keyword =
-      /^[\s=]*(include|match|proxycommand|localcommand|knownhostscommand|pkcs11provider|smartcarddevice|securitykeyprovider|xauthlocation)/iu
-        .exec(line.replaceAll('"', ""))?.[1]
-        ?.toLowerCase();
-    if (!keyword) continue;
-    const directive =
-      /^[ \t\r]*([a-z\d]+)(?:[ \t\r]*=[ \t\r]*|[ \t\r]+)(.*)$/isu.exec(line);
-    if (!directive || directive[1]!.toLowerCase() !== keyword)
+  for (const { keyword, args } of sshConfigEntries(contents)) {
+    if (keyword === "identityfile") continue;
+    if (args === undefined)
       throw keyword === "include"
         ? unsupportedSshInclude()
         : unsupportedSshCommand();
-    let args = directive[2]!;
     if (
       /^(?:pkcs11provider|smartcarddevice|securitykeyprovider|xauthlocation)$/u.test(
         keyword,
@@ -13855,16 +13850,7 @@ function sshConfigReferences(
       }
       continue;
     }
-    if (process.platform === "win32") throw unsupportedSshInclude();
-    while (args) {
-      const word = /^(?:"([^"]+)"|([^'"\t ]+))(?:[ \t]+|$)/u.exec(args);
-      if (!word) throw unsupportedSshInclude();
-      const path = (word[1] ?? word[2])!;
-      if (/['%$\\?[\]{}=\r\f#\ufffd]/u.test(path))
-        throw unsupportedSshInclude();
-      includes.push(path);
-      args = args.slice(word[0].length);
-    }
+    for (const word of sshIncludeWords(args)) includes.push(word);
   }
 }
 
@@ -13942,89 +13928,46 @@ async function bindSshConfiguration(
       access?.afterHook.add(path);
     }
   };
-  const visited = new Set<string>();
-  const expand = (pattern: string) => {
-    if (isAbsolute(pattern)) return [pattern];
-    if (pattern.startsWith("~") && !pattern.startsWith("~/"))
-      throw unsupportedSshInclude();
-    if (system) return [system + "/" + pattern];
-    const suffix = pattern.startsWith("~/")
-      ? pattern.slice(1)
-      : "/.ssh/" + pattern;
-    // glob(GLOB_TILDE) can use HOME, while OpenSSH's own expansion uses pw_dir.
-    const account = userInfo().homedir;
-    const home = dependencies.environment["HOME"] ?? account;
-    return [...new Set([home, account])].map((base) => {
-      if (/[*?[\]\\]/u.test(base)) throw unsupportedSshInclude();
-      return (isAbsolute(base) ? base : "/" + base) + suffix;
-    });
-  };
-  const select = async (pattern: string) => {
-    if (!pattern.includes("*")) return [pattern];
-    const parent = dirname(pattern);
-    const [prefix, suffix, more] = basename(pattern).split("*");
-    if (parent.includes("*") || suffix === undefined || more !== undefined)
-      throw unsupportedSshInclude();
-    // The complete set of matching entries must remain outside write grants,
-    // including when no file matches during preflight.
-    const target = trust(parent);
-    const matches = (name: string) =>
-      name.length >= prefix!.length + suffix.length &&
-      name.startsWith(prefix!) &&
-      name.endsWith(suffix) &&
-      (!name.startsWith(".") || prefix!.startsWith("."));
-    const list = async () => {
-      const entries = await readdir(parent).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return [];
-          throw error;
+  await walkSshConfiguration(config, dependencies.environment, system, {
+    strict: true,
+    inspect: async (path) => {
+      trust(path);
+      const includes: string[] = [];
+      const commands: string[] = [];
+      const files = dependencies.patchTransportFiles;
+      const config = await patchTransportIdentity(
+        path,
+        "ssh-input",
+        files?.get(path),
+        {
+          inspectContents: (bytes) =>
+            sshConfigReferences(bytes.toString("utf8"), includes, commands),
         },
       );
-      return entries.filter(matches).sort();
-    };
-    const names = await list();
-    if (access) {
-      const patterns = (access.sshPatterns ??= new Map());
-      if (!patterns.has(pattern))
-        patterns.set(pattern, async () => {
-          for (const root of access.writable)
-            if (dirname(root) === target && matches(basename(root)))
-              throw writablePatchTransportError(root);
-          if ((await list()).join("\0") !== names.join("\0"))
-            throw patchTransportChanged("file");
-        });
-    }
-    return names.map((name) => {
-      if (name.includes("\ufffd")) throw unsupportedSshInclude();
-      return parent + "/" + name;
-    });
-  };
-  const visit = async (path: string, depth: number): Promise<void> => {
-    if (visited.has(path)) return;
-    visited.add(path);
-    if (depth > 16) throw unsupportedSshInclude();
-    trust(path);
-    const includes: string[] = [];
-    const commands: string[] = [];
-    const files = dependencies.patchTransportFiles;
-    const config = await patchTransportIdentity(
-      path,
-      "ssh-input",
-      files?.get(path),
-      {
-        inspectContents: (bytes) =>
-          sshConfigReferences(bytes.toString("utf8"), includes, commands),
-      },
-    );
-    files?.set(path, config);
-    access?.afterHook.add(path);
-    for (const command of commands) await bindCommand(command);
-    for (const include of includes)
-      for (const pattern of expand(include))
-        for (const child of await select(pattern))
-          await visit(child, depth + 1);
-  };
-  await visit(config, 0);
+      files?.set(path, config);
+      access?.afterHook.add(path);
+      for (const command of commands) await bindCommand(command);
+      return includes;
+    },
+    listMatches: async (pattern, parent, matches, list) => {
+      // The complete set of matching entries must remain outside write grants,
+      // including when no file matches during preflight.
+      const target = trust(parent);
+      const names = await list();
+      if (access) {
+        const patterns = (access.sshPatterns ??= new Map());
+        if (!patterns.has(pattern))
+          patterns.set(pattern, async () => {
+            for (const root of access.writable)
+              if (dirname(root) === target && matches(basename(root)))
+                throw writablePatchTransportError(root);
+            if ((await list()).join("\0") !== names.join("\0"))
+              throw patchTransportChanged("file");
+          });
+      }
+      return names;
+    },
+  });
 }
 
 async function pinPublicationCommand(
@@ -14083,13 +14026,10 @@ async function pinPublicationCommand(
         fileKind = "missing-known-hosts";
       }
     }
-    if (
-      !physical ||
-      protectedRoots.some(
-        (protectedRoot) => !isOutsidePath(relative(protectedRoot, physical)),
-      )
-    )
-      throw unsupported();
+    // Check the path supplied by the operator before pinning its final file.
+    // A checkout link could otherwise hide an SSH config from credential discovery.
+    const host = await trustedHostPathResolver(directory, protectedRoots);
+    if (!physical || host(file) !== physical) throw unsupported();
     requireStablePatchTransportTarget(
       physical,
       dependencies.patchTransportAccess,
@@ -14102,11 +14042,6 @@ async function pinPublicationCommand(
     if (kind === "credential")
       dependencies.patchTransportAccess?.afterHook.add(physical);
     if (kind === "credential" && file !== physical) {
-      const resolveHostPath = await trustedHostPathResolver(
-        directory,
-        protectedRoots,
-      );
-      if (resolveHostPath(file) !== physical) throw unsupported();
       // Re-reading the Git settings on the patch branch must not retarget a
       // credential script through a directory that a model turn could edit.
       await bindPatchTransportFile(file, "file", dependencies);

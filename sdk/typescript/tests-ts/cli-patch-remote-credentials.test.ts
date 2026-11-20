@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   completePatches,
+  directoryLinkType,
   fixSavedFinding,
   publicationRepository,
   repositoryGit,
@@ -739,6 +740,8 @@ test.each([
   "checkout-relative",
   "operator-absolute",
   "checkout-include",
+  "checkout-linked-config",
+  "operator-linked-config",
   "checkout-provider",
   "checkout-proxy",
   "checkout-match",
@@ -752,7 +755,7 @@ test.each([
     const { directory, git } = await publicationRepository(fixtures);
     const external = await fixtures.create("patch-ssh-config-");
     const global = join(external, "gitconfig");
-    const config = join(external, "ssh_config");
+    let config = join(external, "ssh_config");
     const marker = join(external, "invoked");
     const name = "transport.cjs";
     const startup = {
@@ -763,11 +766,16 @@ test.each([
       OPENSSL_CONF_INCLUDE: directory,
       OPENSSL_MODULES: directory,
       OPENSSL_ENGINES: directory,
+      TCL_LIBRARY: directory,
+      TK_LIBRARY: directory,
+      TCLLIBPATH: directory,
+      TCL8_6_TM_PATH: directory,
+      "TCL8.6_TM_PATH": directory,
     };
     await writeFile(startup.OPENSSL_CONF, "");
     const script =
       `const inherited = Object.entries(${JSON.stringify(startup)}).some(([key, value]) => process.env[key] === value);\n` +
-      'const isolated = !inherited && process.env.PYTHONNOUSERSITE === "1";\n' +
+      'const isolated = !inherited && process.env.PYTHONNOUSERSITE === "1" && process.env.ZDOTDIR === require("node:os").devNull;\n' +
       'const phase = isolated ? process.env.PATCH_SSH_PHASE : "inherited";\n' +
       'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, phase + ":" + process.argv[2] + "\\n");\n';
     const checkoutScript = join(directory, name).replaceAll("\\", "/");
@@ -840,6 +848,12 @@ test.each([
     git("commit", "-m", "Add synthetic repository SSH command");
     const sshCommand = (file: string) =>
       `ssh -F "${file.replaceAll("\\", "/")}"`;
+    if (location.endsWith("-linked-config")) {
+      const parent = location.startsWith("checkout-") ? directory : external;
+      const alias = join(parent, "ssh-settings");
+      await symlink(external, alias, directoryLinkType);
+      config = join(alias, "ssh_config");
+    }
     git("config", "--file", global, "core.sshCommand", sshCommand(config));
 
     // The raw SSH connection invokes both commands from this checkout.

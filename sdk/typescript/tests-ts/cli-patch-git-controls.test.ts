@@ -15,7 +15,7 @@ import filesystem, {
 } from "node:fs/promises";
 import { describe, expect, mock, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { join, relative, sep } from "node:path";
+import { join, parse, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCodexSkillCommand } from "../src/cli.js";
 import {
@@ -162,6 +162,31 @@ const externalAdministrationError =
 
 describe("patch Git administration", () => {
   const fixtures = patchDirectories();
+
+  test("resuming a hook from a component only inherits SSH identities from outside the checkout", async () => {
+    const operator = await fixtures.create("patch-ssh-operator-");
+    const repo = join(operator, "repo");
+    const caller = join(repo, "component");
+    await mkdir(caller, { recursive: true });
+    initializePatchGit(repo);
+    const key = join(operator, "key");
+    const ordinary = join(operator, "ordinary");
+    const ssh = join(operator, "ssh");
+    await writeFile(ssh, "");
+    await writeFile(join(repo, "ssh.conf"), `IdentityFile "${ordinary}"\n`);
+    // Publication runs SSH in the executable's volume root.
+    const identity = relative(parse(ssh).root, key);
+    await writeFile(join(operator, "ssh.conf"), `IdentityFile "${identity}"\n`);
+    const environment = { GIT_SSH_COMMAND: `"${ssh}" -F ../ssh.conf` };
+    const paths = new Set<string>();
+    await captureControls(caller, environment, {
+      mode: "resumed-hook",
+      environment,
+      credentialStorePaths: paths,
+    });
+    expect(paths.has(key)).toBeTrue();
+    expect(paths.has(ordinary)).toBeFalse();
+  });
 
   test.skipIf(process.platform !== "win32")(
     "empty APPDATA protects the external ADC selected through a checkout junction",

@@ -919,6 +919,7 @@ test("patch model and clean filters cannot read selected authentication files", 
     at("cluster two"),
   ];
   const policyCluster = at("policy cluster");
+  const policyIdentity = at("policy identity");
   const gh = "selected gh";
   const cloudConfig = at("selected gcloud");
   const cloudDefault = "application_default_credentials.json";
@@ -962,6 +963,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   );
   const pointers = {
     ...selectedFiles,
+    GIT_SSH_COMMAND:
+      'ssh -i "$HOME/ssh transport key" -i~/joined-identity -oIdentityFile=%d/option-identity',
     KUBECONFIG: clusterList(clusterFiles),
     DOCKER_CONFIG: at("selected registry"),
     DOCKER_CERT_PATH: at("docker tls"),
@@ -1005,6 +1008,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   };
   const policySet = {
     ...pointers,
+    GIT_SSH_COMMAND: `ssh -o 'IdentityFile="${policyIdentity}" # comment'`,
     KUBECONFIG: clusterList([...clusterFiles, policyCluster]),
     FILTER_FIXTURE_SETTING: "from shell policy",
   };
@@ -1066,12 +1070,32 @@ test("patch model and clean filters cannot read selected authentication files", 
     join(xdg, "git"),
   ])
     await mkdir(dir, { recursive: true });
+  await writeFile(
+    at(".ssh/config"),
+    'IdentityFile2 "~/default ssh identity"\n',
+  );
+  await writeFile(
+    at("custom ssh config"),
+    'Include "' + at("*.ssh-settings") + '"\n',
+  );
+  await writeFile(
+    at("one.ssh-settings"),
+    'Host synthetic\n  IdentityFile "' + at("included ssh identity") + '"\n',
+  );
   const glabRoots = [".config", xdg, "xdg-extra"];
   if (windows || mac) glabRoots.push(platformConfig);
   const data = environment.XDG_DATA_HOME;
   const existing = [
     [auth(0), auth(1), ".netrc"],
     ["signing identity", "signing identity.pub"],
+    [
+      "ssh transport key",
+      "policy identity",
+      "joined-identity",
+      "option-identity",
+      "default ssh identity",
+      "included ssh identity",
+    ],
     ["proxy key.pem", "origin identity.pem"],
     ".pypirc",
     files(".anaconda", "keyring", "config.toml"),
@@ -1103,6 +1127,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   const lateFiles = [
     [auth(2), auth(3), ...(drive ? [auth(4), auth(5)] : [])],
     ["after-capture.config.toml", "codex-home/after-capture.config.toml"],
+    "configured ssh identity",
     ...[".codex", ".", "codex-home"].map((home) =>
       files(home, "auth.json", ".credentials.json", "config.toml"),
     ),
@@ -1366,6 +1391,7 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
           ),
         }),
         "gpg.format": "ssh",
+        "core.sshCommand": `ssh -F "${at("custom ssh config")}" -i "${at("configured ssh identity")}"`,
         "user.signingKey": "~/signing identity.pub",
         "credential.plaintextStorePath": at("configured store"),
         "http.sslCert": "~/origin identity.pem",
@@ -1387,7 +1413,7 @@ for (const path of ${JSON.stringify(selectedGhFiles)}) {
         program,
       );
     },
-    { set: policySet, paths: [policyCluster] },
+    { set: policySet, paths: [policyCluster, policyIdentity] },
   );
 }, 180_000);
 

@@ -3094,10 +3094,14 @@ Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
 clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
 to disable Python’s default user site-packages directory. If your wrapper uses
 `python -E` to ignore environment settings, add `-s` to skip that directory.
+They point `ZDOTDIR` at the system null device so Zsh wrappers skip user startup
+files such as `~/.zshenv`. Put required settings in the trusted wrapper.
 On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
 `OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
 OpenSSL configuration and module directories. Configure required cryptographic
 policies in those defaults.
+For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
+versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
 Install host wrapper dependencies alongside the trusted launcher or in its
 interpreter environment. Set overrides for snapshot filters in the sandbox’s
 shell environment policy.
@@ -3116,7 +3120,14 @@ and a drive letter for an explicit store on Windows. The same rules cover
 `.netrc` and `_netrc` in the host user's effective home directory, the file
 selected by libcurl's `NETRC` environment variable, and files selected by Git's
 `http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
-URL-specific values. The rules protect the account's `.ssh` directory,
+URL-specific values. SSH protection covers identities selected by `-i` and
+`-o IdentityFile=...` in `GIT_SSH_COMMAND` or your Git `core.sshCommand`.
+The CLI also reads static `IdentityFile` entries in standard user and system
+SSH configuration, an explicit `-F` file, and their `Include` files outside
+the checkout. Includes support literal paths and one `*` in the filename.
+Use absolute paths for identities outside `.ssh` so the CLI can identify
+the files before running the model or a Git filter. The trusted transport
+retains its SSH command. The rules also protect the account's `.ssh` directory,
 file-based SSH signing keys selected by `user.signingKey`, and the default
 GnuPG homes (`~/.gnupg` and Roaming AppData on Windows). Set `GNUPGHOME`
 to identify a custom GnuPG home. Its directory is protected and the selector
@@ -3251,6 +3262,7 @@ Publication checks the source of `core.sshCommand` and binds its executable
 before Git probes a host or examines remote branches. Keep SSH, askpass and
 proxy launchers, identity files and explicit configuration files outside
 directories the patch can write. Use absolute paths for explicit file operands.
+Keep each symlink in those paths outside the checkout.
 Identity files and configuration files selected by `-i` or `-F` must already
 exist. OpenSSH can create a new `UserKnownHostsFile` during a connection when
 its parent directory exists outside the patch's writable roots. SSH and its
