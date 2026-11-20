@@ -1378,7 +1378,7 @@ export class CodexSecurity {
           return { path, contents: (await readFile(path, "utf8")).trim() };
         };
         const compactPrompt = resolvedConfig["compact_prompt"];
-        const configurationDigest = workflowDigest({
+        const configuration = {
           model,
           reasoningEffort,
           modelSettings: Object.fromEntries(
@@ -1401,7 +1401,9 @@ export class CodexSecurity {
                 : await instructionFile("experimental_compact_prompt_file"),
           },
           provider,
-          providerConfiguration,
+          providerConfiguration: assessmentProviderSettings(
+            providerConfiguration,
+          ),
           ...(pricingContext?.provider === "amazon-bedrock"
             ? { bedrockRegion: pricingContext.region }
             : {}),
@@ -1415,7 +1417,8 @@ export class CodexSecurity {
               : null,
           skill: contract.skillDigest,
           workflow: "focused-dependency-assessment-v1",
-        });
+        };
+        const configurationDigest = workflowDigest(configuration);
         const previousCost =
           continuing && !result.model.costPending
             ? (result.model.cost ?? null)
@@ -1427,10 +1430,13 @@ export class CodexSecurity {
             result.model.threadId !== null ||
             result.assessments.some((item) => item.threadId !== undefined));
         if (continuing) {
+          const savedDigest = result.assessmentContext!.configurationDigest;
+          // Migrate earlier checkpoints when their full provider settings still match.
           if (
-            result.assessmentContext!.configurationDigest !== null &&
-            result.assessmentContext!.configurationDigest !==
-              configurationDigest
+            savedDigest !== null &&
+            savedDigest !== configurationDigest &&
+            savedDigest !==
+              workflowDigest({ ...configuration, providerConfiguration })
           )
             throw new CodexSecurityError(
               "Dependency assessment model, effort, provider, instructions, or skill changed. Use the original settings or start a new run.",
@@ -8156,6 +8162,36 @@ export function scanRuntimeCodexConfig(
       },
     },
   };
+}
+
+const providerCredentialNames = {
+  http_headers: new Set([
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "api-key",
+    "x-api-key",
+    "x-goog-api-key",
+    "x-auth-token",
+    "ocp-apim-subscription-key",
+  ]),
+  query_params: new Set(["api-key", "api_key", "apikey", "access_token"]),
+};
+
+function assessmentProviderSettings(provider: unknown) {
+  if (!isRecord(provider)) return provider;
+  const settings = { ...provider };
+  delete settings["experimental_bearer_token"];
+  for (const [field, credentials] of Object.entries(providerCredentialNames)) {
+    const values = settings[field];
+    if (!isRecord(values)) continue;
+    const retained = Object.entries(values).filter(
+      ([name]) => !credentials.has(name.toLowerCase()),
+    );
+    if (retained.length) settings[field] = Object.fromEntries(retained);
+    else delete settings[field];
+  }
+  return settings;
 }
 
 function dependencyPermissions(

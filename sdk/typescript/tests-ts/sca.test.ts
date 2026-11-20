@@ -2957,22 +2957,60 @@ test("continues a budget-stopped run without repeating matching or completed ass
   );
 });
 
+function customProvider(settings: JsonObject = {}) {
+  return {
+    model_provider: "synthetic.provider",
+    model_providers: {
+      "synthetic.provider": {
+        name: "Synthetic provider",
+        base_url: "https://provider.example.invalid/v1",
+        wire_api: "responses",
+        requires_openai_auth: true,
+        ...settings,
+      },
+    },
+  };
+}
+
+test("continuation reuses completed assessments after a provider credential rotation", async () => {
+  const credentials = (token: string) =>
+    customProvider({
+      experimental_bearer_token: token,
+      http_headers: { Authorization: `Bearer ${token}`, "X-API-Key": token },
+      query_params: { access_token: token },
+    });
+  await using f = await fixture({
+    turns: ["completed", "unauthorized"],
+    codexOverrides: credentials("synthetic-expired"),
+  });
+  const initial = await f.scan();
+  expect(initial.assessments[1]!.error).toContain("401 Unauthorized");
+  Object.assign(
+    f.client.config.codexOverrides!,
+    credentials("synthetic-rotated"),
+  );
+  const resumed = await f.scan();
+  expect(resumed.status, resumed.diagnostics.join("\n")).toBe("completed");
+  expect(resumed.assessmentContext?.configurationDigest).toBe(
+    initial.assessmentContext?.configurationDigest,
+  );
+  expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(3);
+});
+
 test.each([
   "source",
   "configuration",
   "provider",
+  "provider header",
+  "provider query",
   "endpoint",
   "environment endpoint",
   "Bedrock region",
 ] as const)(
   "refuses continuation after changed %s and preserves saved artifacts",
   async (change) => {
-    const provider = {
-      name: "Synthetic provider",
-      base_url: "https://provider.example.invalid/v1",
-      wire_api: "responses",
-      requires_openai_auth: true,
-    };
     await using f = await fixture({
       turns: ["completed", "malformed"],
       codexOverrides:
@@ -2982,10 +3020,7 @@ test.each([
             ? { openai_base_url: "https://provider.example.invalid/v1" }
             : change === "environment endpoint"
               ? {}
-              : {
-                  model_provider: "synthetic.provider",
-                  model_providers: { "synthetic.provider": provider },
-                },
+              : customProvider(),
     });
     if (change === "Bedrock region")
       Object.assign(f.environment, { AWS_REGION: "us-east-1" });
@@ -3011,14 +3046,16 @@ test.each([
         openai_base_url: "https://changed.example.invalid/v1",
       });
     else
-      Object.assign(f.client.config.codexOverrides!, {
-        model_providers: {
-          "synthetic.provider": {
-            ...provider,
-            base_url: "https://changed.example.invalid/v1",
-          },
-        },
-      });
+      Object.assign(
+        f.client.config.codexOverrides!,
+        customProvider(
+          change === "provider header"
+            ? { http_headers: { "OpenAI-Project": "synthetic-other" } }
+            : change === "provider query"
+              ? { query_params: { "api-version": "synthetic-other" } }
+              : { base_url: "https://changed.example.invalid/v1" },
+        ),
+      );
     const checkpoint = await readFile(f.resultPath, "utf8");
     await expect(f.scan()).rejects.toThrow(
       change === "source"
@@ -3519,17 +3556,7 @@ test.each(["built-in", "custom provider"] as const)(
       codexOverrides:
         kind === "built-in"
           ? { openai_base_url: endpoint }
-          : {
-              model_provider: "synthetic.provider",
-              model_providers: {
-                "synthetic.provider": {
-                  name: "Synthetic provider",
-                  base_url: endpoint,
-                  wire_api: "responses",
-                  requires_openai_auth: true,
-                },
-              },
-            },
+          : customProvider({ base_url: endpoint }),
     });
     Object.assign(f.environment, {
       OPENAI_BASE_URL: "https://ignored.example.invalid/v1",
