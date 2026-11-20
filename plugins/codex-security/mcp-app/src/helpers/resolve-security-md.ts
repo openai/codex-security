@@ -331,8 +331,6 @@ async function revisionGuidance(
   scope: string | undefined,
   posixHome: string | undefined,
 ): Promise<string> {
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(revision))
-    throw new Error("the policy revision must be a full Git commit ID");
   const root = resolve(expandHome(repo, posixHome));
   // Include ancestors of deleted paths and paths replaced by links in HEAD.
   const path =
@@ -353,13 +351,15 @@ async function revisionGuidance(
       );
     return result.stdout;
   }
-  const tree = await readGit([
-    "ls-tree",
-    "-rz",
-    revision + "^{commit}",
-    "--",
-    ...paths,
-  ]);
+  const commit = revision.toLowerCase();
+  if (
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit) ||
+    (await readGit(["rev-parse", "--verify", commit + "^{commit}"]))
+      .toString("ascii")
+      .trim() !== commit
+  )
+    throw new Error("the policy revision must be a full Git commit ID");
+  const tree = await readGit(["ls-tree", "-rz", commit, "--", ...paths]);
   const blobs = new Map<string, string>();
   for (const record of decodeGitPath(tree).split("\0")) {
     const match = /^100(?:644|755) blob ([0-9a-f]+)\t([\s\S]+)$/u.exec(record);
@@ -491,7 +491,7 @@ export async function resolveSecurityMdCommand(
     if (
       boundRevision !== undefined &&
       values.revision !== undefined &&
-      values.revision !== boundRevision
+      values.revision.toLowerCase() !== boundRevision.toLowerCase()
     )
       throw new Error("policy revision differs from the scan's bound base");
     const revision = boundRevision ?? values.revision;
