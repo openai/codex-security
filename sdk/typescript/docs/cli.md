@@ -3184,8 +3184,11 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 ### Create or resume a draft pull request
 
-The CLI clears `LD_*` and `DYLD_*` when launching repository commands so
-the system loader cannot pick up libraries from the patch's working directory.
+For repository commands, the CLI preserves trusted absolute directories from
+`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`, and
+`DYLD_VERSIONED_LIBRARY_PATH` in search order. It skips entries that depend on
+the working directory or expose patch-writable libraries and clears other
+`LD_*` and `DYLD_*` settings before launch.
 
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
 Publication checks the source of `core.sshCommand` and binds its executable
