@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import sys
+import uuid
 from collections.abc import Iterable, Iterator
 from fractions import Fraction
 from functools import cache
@@ -822,9 +823,11 @@ def compare_scans(
         )
         else None
     )
-    deferred_paths = [
-        path for task in after_coverage.get("deferred", []) for path in task.get("paths", [])
-    ]
+    deferred_paths = {
+        PurePosixPath(path)
+        for task in after_coverage.get("deferred", [])
+        for path in task.get("paths", [])
+    }
     before_findings = _scan_findings(connection, before["id"])
     before_paths: dict[str, set[str]] = {key: set() for key in before_findings}
     for occurrence_id, path in connection.execute(
@@ -867,6 +870,7 @@ def compare_scans(
             "severity": selected["severity"],
             "title": selected["title"],
         }
+        paths = {path for row in previous_rows for path in before_paths[row["id"]]}
         side = "after" if current_rows else "before"
         uncertain_reason = next(
             (
@@ -895,21 +899,15 @@ def compare_scans(
             status = "new"
         elif not all(
             scan_covers_path(
-                after,
-                target_id=after["target_id"],
-                path=path,
-                coverage=after_coverage,
+                after, target_id=after["target_id"], path=path, coverage=after_coverage
             )
-            for row in previous_rows
-            for path in before_paths[row["id"]]
+            for path in paths
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        elif any(
-            _path_within(path, scope)
-            for row in previous_rows
-            for path in before_paths[row["id"]]
-            for scope in deferred_paths
+        elif PurePosixPath(".") in deferred_paths or any(
+            path in deferred_paths or not deferred_paths.isdisjoint(path.parents)
+            for path in map(PurePosixPath, paths)
         ):
             status = "not_observed"
             item["reason"] = "Review of the affected path was deferred in the later scan."
@@ -925,13 +923,7 @@ def compare_scans(
             item["reason"] = "Not observed in the later scan; remediation has not been verified."
         if not current_rows:
             decisions = [
-                {
-                    "occurrenceId": row["id"],
-                    "status": row["triage_status"],
-                    "closeReason": row["close_reason"],
-                    "note": row["note"],
-                    **({"fixedRevision": row["fixed_revision"]} if row["fixed_revision"] else {}),
-                }
+                {"occurrenceId": row["id"], **_triage_fields(row)}
                 for row in previous_rows
                 if row["triage_status"] == "closed"
             ]
@@ -1285,20 +1277,68 @@ def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) 
     ).fetchone()[0]
 
 
+def record_finding_decision(
+    connection: sqlite3.Connection,
+    occurrence_id: str,
+    status: str,
+    close_reason: str | None,
+    note: str | None,
+    fixed_revision: str | None,
+    timestamp: str,
+) -> None:
+    """Record a change to the current triage state and append its audit entry in the caller's transaction."""
+    decision = (occurrence_id, status, close_reason, note, fixed_revision, timestamp)
+    changed = connection.execute(
+        """
+        INSERT INTO finding_triage (occurrence_id, status, close_reason, note, fixed_revision, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(occurrence_id) DO UPDATE SET
+            status = excluded.status,
+            close_reason = excluded.close_reason,
+            note = excluded.note,
+            fixed_revision = excluded.fixed_revision,
+            updated_at = excluded.updated_at
+        WHERE (status, close_reason, note, fixed_revision)
+            IS NOT (excluded.status, excluded.close_reason, excluded.note, excluded.fixed_revision)
+          AND NOT (
+            -- Keep verification evidence when a legacy client replays the same closure.
+            fixed_revision IS NOT NULL AND excluded.fixed_revision IS NULL
+            AND close_reason IS 'already_fixed'
+            AND (status, close_reason) IS (excluded.status, excluded.close_reason)
+            AND (excluded.note IS NULL OR excluded.note IS note)
+          )
+        """,
+        decision,
+    )
+    if changed.rowcount:
+        connection.execute(
+            """
+            INSERT INTO finding_decisions (
+                id, occurrence_id, status, close_reason, note, fixed_revision, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), *decision),
+        )
+
+
+def _triage_fields(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "status": row["triage_status"],
+        "closeReason": row["close_reason"],
+        "note": row["note"],
+        **({"fixedRevision": row["fixed_revision"]} if row["fixed_revision"] is not None else {}),
+    }
+
+
 def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
     row = connection.execute(
-        "SELECT status, close_reason, note, updated_at, fixed_revision FROM finding_triage WHERE occurrence_id = ?",
+        "SELECT status AS triage_status, close_reason, note, updated_at, fixed_revision "
+        "FROM finding_triage WHERE occurrence_id = ?",
         (occurrence_id,),
     ).fetchone()
     if row is None:
         return {"status": "open"}
-    return {
-        "closeReason": row["close_reason"],
-        **({"fixedRevision": row["fixed_revision"]} if row["fixed_revision"] is not None else {}),
-        "note": row["note"],
-        "status": row["status"],
-        "updatedAt": row["updated_at"],
-    }
+    return {**_triage_fields(row), "updatedAt": row["updated_at"]}
 
 
 def finding_matches(

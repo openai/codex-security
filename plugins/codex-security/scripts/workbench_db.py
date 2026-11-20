@@ -79,7 +79,7 @@ from workbench_constants import (
     FINDINGS_RESULT_LIMIT,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_feedback import get_scan_feedback, record_finding_decision
+from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
@@ -1913,7 +1913,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     remediation,
                     require_applied_content=True,
                 )
-        record_finding_decision(
+        scan_history.record_finding_decision(
             connection, occurrence["id"], args.status, close_reason, note, fixed_revision, now()
         )
     return scan_context(connection, occurrence["scan_id"])

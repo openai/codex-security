@@ -1063,16 +1063,11 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
     bound = close("--fixed-revision", sha1.upper(), "--note", note)
     assert bound["fixedRevision"] == sha1
     assert bound["note"] == note
-    repeated_decision = close("--fixed-revision", sha1, "--note", note)
-    assert repeated_decision == bound
-    repeated_note = close("--note", note)
-    assert repeated_note == bound
-    repeated_close = close()
-    assert repeated_close == bound
-    rebound = close("--fixed-revision", sha256, "--note", note)
-    assert rebound["fixedRevision"] == sha256
-    unbound = close("--note", "Updated unbound rationale")
-    assert "fixedRevision" not in unbound
+    assert close("--fixed-revision", sha1, "--note", note) == bound
+    assert close("--note", note) == bound
+    assert close() == bound
+    assert close("--fixed-revision", sha256, "--note", note)["fixedRevision"] == sha256
+    assert "fixedRevision" not in close("--note", "Updated unbound rationale")
     close("--fixed-revision", sha256, "--note", note)
     reopened = set_triage(state_dir, occurrence, "open")["scan"]["findings"][0]["triage"]
     assert reopened["status"] == "open"
@@ -1090,6 +1085,14 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
             ("closed", "already_fixed", note, sha256),
             ("open", None, None, None),
         ]
+        # A legacy writer can leave an old revision attached to an open row.
+        db.execute(
+            "UPDATE finding_triage SET fixed_revision = ? WHERE occurrence_id = ?",
+            (sha256, occurrence),
+        )
+    closed = close()
+    assert closed["status"] == "closed"
+    assert "fixedRevision" not in closed
 
 
 def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_autocrlf) -> None:

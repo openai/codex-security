@@ -16,7 +16,7 @@ export interface Migration {
 
 // Python owns the repository-dependent migrations 67–71.
 export const migrations: readonly Migration[] = history.filter(
-  (item) => item.version <= 66 || item.version >= 72,
+  (item) => item.version <= 66 || item.version === 72 || item.version === 80,
 );
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;

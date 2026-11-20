@@ -1094,23 +1094,23 @@ def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: 
     (repo / "README.md").write_text("updated fixture\n")
     subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=repo, check=True)
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
-    corrected = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
-    excluded = create_cli_scan(
-        state, root, repo, target_revision=revision, finding=False, paths=["README.md"]
-    )
-    deferred = create_cli_scan(
-        state, root, repo, target_revision=revision, finding=False, deferred_path="pages"
-    )
-    unrelated = create_cli_scan(
-        state, root, repo, target_revision=revision, finding=False, deferred_path="pages/[id].ts"
-    )
+
+    def scan_revision(**options):
+        return create_cli_scan(
+            state, root, repo, target_revision=revision, finding=False, **options
+        )
+
+    corrected = scan_revision()
+    excluded = scan_revision(paths=["README.md"])
+    deferred = scan_revision(deferred_path="pages")
+    unrelated = scan_revision(deferred_path="pages/[id].ts")
     subprocess.run(["git", "replace", revision, original_revision], cwd=repo, check=True)
     subprocess.run(["git", "reset", "--hard", revision], cwd=repo, check=True)
-    replacement = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
+    replacement = scan_revision()
     subprocess.run(["git", "replace", "-d", revision], cwd=repo, check=True)
     subprocess.run(["git", "reset", "--hard", revision], cwd=repo, check=True)
     (repo / "README.md").write_text("local edit\n")
-    dirty = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
+    dirty = scan_revision()
     row = compare_scan_pair(state, before, corrected)["findings"][0]
     assert row["status"] == "not_observed"
     note = "Confirmed the corrected behavior in a regression test."
