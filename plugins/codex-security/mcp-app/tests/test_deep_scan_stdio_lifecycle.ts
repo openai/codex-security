@@ -2731,7 +2731,7 @@ if (workbenchArgs[0] === 'complete-scan' && process.env.FAKE_WORKBENCH_FINALIZER
   appendFileSync(process.env.FAKE_WORKBENCH_FINALIZER_LOG, JSON.stringify(args) + '\\n');
   const finalizerControl = process.env.FAKE_WORKBENCH_FINALIZER_CONTROL;
   const readFinalizerControl = () => {
-    try { return readFileSync(finalizerControl, 'utf8'); }
+    try { return readFileSync(finalizerControl, 'utf8') || 'wait'; }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   };
   while ((finalizerMode = readFinalizerControl()) === 'wait') {
