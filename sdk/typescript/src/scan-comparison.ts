@@ -423,7 +423,8 @@ export async function matchScanFindingsInternal(
           // Native clients expose failed turns and exec failures as ordinary Error messages.
           const nativeMessage = error.message
             .replace(/^Codex Exec exited with (?:code \d+|signal \S+): /u, "")
-            .replace(/^Error: /u, "");
+            .replace(/^Error: /u, "")
+            .replace(/^Error running remote compact task: /u, "");
           if (
             nativeMessage.startsWith("Error loading configuration:") ||
             nativeMessage.startsWith("failed to load bootstrap configuration")

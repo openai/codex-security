@@ -1508,6 +1508,16 @@ describe("CLI workbench", () => {
             "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
           ],
           [
+            "remote compaction refresh",
+            "turn",
+            "Error running remote compact task: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+          ],
+          [
+            "wrapped remote compaction 401",
+            "exit",
+            "Error: Error running remote compact task: unexpected status 401 Unauthorized: synthetic authentication failure",
+          ],
+          [
             "permission fallback",
             "fallback",
             "Configured value for `permission_profile` is disallowed by requirements; falling back from `synthetic_read_only` to required value `:workspace`.",
