@@ -148,6 +148,8 @@ const failureReasons: Record<string, string> = {
   "policy-accordance-turn":
     "This request was refused in accordance with the safety policy.",
   "policy-terse-turn": "Refused due to the safety policy",
+  "policy-biological-turn":
+    "This content was flagged for possible biological risk.",
   "policy-request": "Request rejected: cyber_policy.",
   ...refusalMessages,
   "policy-reported-error":
@@ -277,6 +279,7 @@ const modelFailures = new Set([
   "policy-turn",
   "policy-accordance-turn",
   "policy-terse-turn",
+  "policy-biological-turn",
   "failed-turn",
   "rate-limit-turn",
   "server-error",
@@ -1007,6 +1010,7 @@ test.each([
   "This request was refused under the safety policy",
   "This request was refused under the content policy",
   "Request flagged for potentially high-risk cyber activity.",
+  "This content was flagged for possible biological risk.",
   "I cannot help with this request.",
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",

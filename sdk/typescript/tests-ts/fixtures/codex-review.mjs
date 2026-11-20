@@ -60,6 +60,10 @@ const turnFailures = {
     message: "Refused due to the safety policy",
     codexErrorInfo: "other",
   },
+  "policy-biological-turn": {
+    message: "This content was flagged for possible biological risk.",
+    codexErrorInfo: "other",
+  },
   "failed-turn": {
     message: "Rate limit exceeded",
     codexErrorInfo: "usageLimitExceeded",

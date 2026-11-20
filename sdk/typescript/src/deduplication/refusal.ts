@@ -34,6 +34,7 @@ export function isReviewRefusal(
   }
   return [
     /\bflagged for possible cybersecurity risk\b/iu,
+    /\bflagged for possible biological risk\b/iu,
     /\bflagged for potentially high-risk cyber activity\b/iu,
     /\bcyber[_\s-]?policy\b/iu,
     /\b(?:cybersecurity|cyber)[ _-]*policy[ _-]*(?:violation|refusal|refused)\b/iu,
