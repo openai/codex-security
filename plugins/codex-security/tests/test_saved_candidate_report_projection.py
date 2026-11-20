@@ -511,7 +511,8 @@ def test_main_coverage_surface_references_keep_their_worker() -> None:
     surfaces = [
         {"id": "shared-surface", "workerId": worker} for worker in ("worker-two", "worker-one")
     ]
-    assert CANDIDATES.surface_reference_key("shared-surface", deferred, surfaces) == (
+    by_id = CANDIDATES.index_surfaces(surfaces)
+    assert CANDIDATES.surface_reference_key("shared-surface", deferred, by_id) == (
         "worker-one",
         "shared-surface",
     )

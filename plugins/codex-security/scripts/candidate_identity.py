@@ -140,20 +140,35 @@ def _deferred_candidate_id(row: dict[str, Any]) -> str | None:
     return identity if isinstance(identity, str) else None
 
 
+def index_surfaces(surfaces: Any) -> dict[str, list[dict[str, Any]]]:
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    if isinstance(surfaces, list):
+        for surface in surfaces:
+            if isinstance(surface, dict) and isinstance(surface.get("id"), str):
+                by_id.setdefault(surface["id"], []).append(surface)
+    return by_id
+
+
 def surface_reference_key(
-    surface_id: Any, source: dict[str, Any], surfaces: list[dict[str, Any]]
+    surface_id: str, source: dict[str, Any], by_id: dict[str, list[dict[str, Any]]]
 ) -> CandidateKey | None:
-    """Prefer the matching owner for duplicate IDs; unique references may be shared."""
-    matches = [surface for surface in surfaces if surface.get("id") == surface_id]
-    target = next(
-        (
-            surface
-            for surface in matches
-            if candidate_owner(coverage_owner(surface)) == candidate_owner(coverage_owner(source))
-        ),
-        matches[0] if len(matches) == 1 else source,
-    )
+    """Only a unique surface ID can be referenced across owners."""
+    matches = by_id.get(surface_id, [])
+    target = matches[0] if len(matches) == 1 else source
     return candidate_key(surface_id, coverage_owner(target))
+
+
+def referenced_surface_keys(
+    rows: list[Any], by_id: dict[str, list[dict[str, Any]]]
+) -> set[CandidateKey | None]:
+    keys = set()
+    for row in rows:
+        refs = row.get("surfaceIds") if isinstance(row, dict) else None
+        if isinstance(refs, list):
+            keys.update(
+                surface_reference_key(ref, row, by_id) for ref in refs if isinstance(ref, str)
+            )
+    return keys
 
 
 def reducer_coverage(coverage: dict[str, Any], candidates: list[Any]) -> dict[str, Any]:
@@ -248,28 +263,20 @@ def resolved_candidate_surface_keys(
     sources: list[tuple[str, dict[str, Any], str | None]], candidates: set[CandidateKey]
 ) -> set[CandidateKey | None]:
     """Resolve each dismissed candidate's references in its saved surface context."""
-    return {
-        surface_reference_key(
-            surface_id,
-            item,
-            [
-                surface
-                for surfaces in [draft["reviewState"].get("surfaces")]
-                if isinstance(surfaces, list)
-                for surface in surfaces
-                if isinstance(surface, dict)
-            ],
-        )
-        for _, draft, worker_id in sources
-        for items in [draft["reviewState"].get("deferred", [])]
-        if isinstance(items, list)
-        for item in items
-        if isinstance(item, dict) and coverage_candidate_key(item, worker_id) in candidates
-        for surface_ids in [item.get("surfaceIds", [])]
-        if isinstance(surface_ids, list)
-        for surface_id in surface_ids
-        if isinstance(surface_id, str)
-    }
+    keys = set()
+    for _, draft, worker_id in sources:
+        review = draft["reviewState"]
+        deferred = review.get("deferred")
+        if not isinstance(deferred, list):
+            continue
+        dismissed = [
+            row
+            for row in deferred
+            if isinstance(row, dict) and coverage_candidate_key(row, worker_id) in candidates
+        ]
+        if dismissed:
+            keys.update(referenced_surface_keys(dismissed, index_surfaces(review.get("surfaces"))))
+    return keys
 
 
 def retain_recovered_candidate_gaps(

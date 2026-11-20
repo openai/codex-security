@@ -20,7 +20,9 @@ from candidate_identity import (
     diff_candidate_disposition,
     finding_candidate_id,
     finding_candidate_key,
+    index_surfaces,
     is_candidate_row,
+    referenced_surface_keys,
     resolved_candidate_surface_keys,
     surface_reference_key,
     unresolved_candidates,
@@ -87,15 +89,11 @@ def project_resolved_candidate_rows(
     *,
     pending: list[dict[str, Any]] | None = None,
 ) -> list[Any]:
-    surfaces = [row for row in rows if isinstance(row, dict)] if field == "surfaces" else []
-    referenced_surfaces = {
-        surface_reference_key(surface_id, item, surfaces)
-        for item in pending or []
-        for refs in [item.get("surfaceIds", [])]
-        if isinstance(refs, list)
-        for surface_id in refs
-        if isinstance(surface_id, str)
-    }
+    referenced_surfaces = (
+        referenced_surface_keys(pending, index_surfaces(rows))
+        if pending and field == "surfaces"
+        else set()
+    )
     retained = []
     for row in rows:
         state = states.get(coverage_candidate_key(row, owner)) if isinstance(row, dict) else None
@@ -358,7 +356,7 @@ def preserve_budget_candidates(
     }
     deferred_by_candidate = {}
     surfaces_by_candidate = {}
-    surfaces_by_id = {}
+    surfaces_by_id = index_surfaces(coverage["surfaces"])
     for field, index in (
         ("deferred", deferred_by_candidate),
         ("surfaces", surfaces_by_candidate),
@@ -366,26 +364,13 @@ def preserve_budget_candidates(
         for item in coverage[field]:
             if isinstance(item, dict) and (key := coverage_candidate_key(item)) is not None:
                 index.setdefault(key, []).append(item)
-    for surface in coverage["surfaces"]:
-        if isinstance(surface, dict) and isinstance(surface.get("id"), str):
-            surfaces_by_id.setdefault(surface["id"], []).append(surface)
     coverage["deferred"] = [
         item
         for item in coverage["deferred"]
         if not isinstance(item, dict)
         or dispositions.get(coverage_candidate_key(item), "needs_follow_up") == "needs_follow_up"
     ]
-    # Only surviving references protect shared surfaces. Index by ID while retaining
-    # owner-specific rows, so each reference need not scan every saved surface.
-    referenced = {
-        surface_reference_key(surface_id, item, surfaces_by_id.get(surface_id, []))
-        for item in coverage["deferred"]
-        if isinstance(item, dict)
-        for surface_ids in [item.get("surfaceIds", [])]
-        if isinstance(surface_ids, list)
-        for surface_id in surface_ids
-        if isinstance(surface_id, str)
-    }
+    referenced = referenced_surface_keys(coverage["deferred"], surfaces_by_id)
     used_ids = {
         field: {
             item["id"]
@@ -500,7 +485,7 @@ def preserve_budget_candidates(
                 and not any(
                     surface.get("disposition") == "needs_follow_up"
                     and candidate_key(surface_id, coverage_owner(surface))
-                    == surface_reference_key(surface_id, item, surfaces_by_id[surface_id])
+                    == surface_reference_key(surface_id, item, surfaces_by_id)
                     for surface_id in item.get("surfaceIds", [])
                     if isinstance(surface_id, str)
                     for surface in surfaces_by_id.get(surface_id, [])
@@ -1309,22 +1294,16 @@ def reconcile_diff_candidate_sources(
 def discard_resolved_diff_surfaces(coverage, diff_resolved, resolved_surface_keys):
     if diff_resolved and isinstance(coverage.get("surfaces"), list):
         # Shared evidence belongs to surviving candidates and explicit references.
-        deferred = coverage.get("deferred", [])
-        surfaces = [item for item in coverage["surfaces"] if isinstance(item, dict)]
+        deferred = coverage.get("deferred")
+        pending = deferred if isinstance(deferred, list) else []
         pending_candidate_keys = {
             key
-            for item in (deferred if isinstance(deferred, list) else [])
+            for item in pending
             if isinstance(item, dict) and (key := coverage_candidate_key(item)) is not None
         }
-        pending_surface_keys = {
-            surface_reference_key(surface_id, item, surfaces)
-            for item in (deferred if isinstance(deferred, list) else [])
-            if isinstance(item, dict)
-            for surface_ids in [item.get("surfaceIds", [])]
-            if isinstance(surface_ids, list)
-            for surface_id in surface_ids
-            if isinstance(surface_id, str)
-        }
+        pending_surface_keys = referenced_surface_keys(
+            pending, index_surfaces(coverage["surfaces"])
+        )
         coverage["surfaces"] = [
             item
             for item in coverage["surfaces"]
