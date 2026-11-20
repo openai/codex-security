@@ -2002,12 +2002,13 @@ type PatchTransportFile = {
     | "missing-known-hosts";
 };
 
+type LibraryCheck = "trusted" | "blocked" | "unusable";
+
 interface PatchWriters {
   readonly writable: Set<string>;
   external?: boolean;
   unknownWriters?: boolean;
-  libraryChecks?: Map<string, Promise<boolean>>;
-  initialLibraries?: Set<string>;
+  libraryDirectories?: Map<string, Promise<LibraryCheck>>;
 }
 
 interface PatchTransportAccess extends PatchWriters {
@@ -2208,28 +2209,27 @@ function patchFileStamp(entry: { dev: bigint; ino: bigint; ctimeNs: bigint }) {
   return [entry.dev, entry.ino, entry.ctimeNs].join(":");
 }
 
-async function trustedLibraryDirectory(
+async function inspectLibraryDirectory(
   directory: string,
   resolvePath: (path: string) => string | null,
   roots: readonly string[],
-  allowSingleLink: boolean,
-): Promise<boolean> {
+): Promise<LibraryCheck> {
   const selected = resolvePath(directory);
-  if (!selected || !selected.isWellFormed()) return false;
+  if (!selected || !selected.isWellFormed()) return "blocked";
   const directories = new Set([selected]);
   try {
     // Library lookup can descend into hardware-specific directories and frameworks.
     for (const parent of directories) {
       if (roots.some((root) => !isOutsidePath(relative(parent, root))))
-        return false;
+        return "blocked";
       for (const bytes of await readdir(parent, { encoding: "buffer" })) {
-        if (!isUtf8(bytes)) return false;
+        if (!isUtf8(bytes)) return "unusable";
         const name = bytes.toString();
         let path = join(parent, name);
         let entry = lstatSync(path, { bigint: true });
         if (entry.isSymbolicLink()) {
           const target = resolvePath(path);
-          if (!target || !target.isWellFormed()) return false;
+          if (!target || !target.isWellFormed()) return "blocked";
           path = target;
           const resolved = lstatSync(path, {
             bigint: true,
@@ -2240,13 +2240,14 @@ async function trustedLibraryDirectory(
         }
         if (entry.isDirectory()) directories.add(path);
         if (!entry.isFile()) continue;
-        if (allowSingleLink && entry.nlink === 1n) continue;
-        if (await mutableThroughLink(path, entry)) return false;
+        // A single-link file may have had a writable alias during an earlier
+        // patch. A fresh invocation or --resume-pr has no prior link count.
+        if (await mutableThroughLink(path, entry)) return "unusable";
       }
     }
-    return true;
+    return "trusted";
   } catch {
-    return false;
+    return "unusable";
   }
 }
 
@@ -2288,35 +2289,23 @@ async function restrictRepositoryLoader(
       "/proc",
       "/dev/fd",
     ]);
-    const checked = (writers.libraryChecks ??= new Map());
-    const initial = (writers.initialLibraries ??= new Set());
+    const checked = (writers.libraryDirectories ??= new Map());
     const elf = name === "LD_LIBRARY_PATH";
     const allowed: string[] = [];
     for (const path of value.split(elf ? /[:;]/u : ":")) {
       // The ELF loader expands tokens such as $ORIGIN for each child.
       if (!isAbsolute(path)) continue;
       if (elf && /\n|\$\{?(?:ORIGIN|LIB|PLATFORM)\b/u.test(path)) continue;
-      // Bubblewrap mounts and Seatbelt prevent creating links across write
-      // grants. Check for existing aliases before a writer can open and unlink
-      // one, then check the directory again when the grants change.
-      const allowSingleLink =
-        (process.platform === "linux" || process.platform === "darwin") &&
-        (!writers.writable.size || initial.has(path));
-      const key = JSON.stringify([path, roots, allowSingleLink]);
-      let check = checked.get(key);
+      const key = JSON.stringify([path, roots]);
+      let check = checked.get(path) ?? checked.get(key);
       if (!check) {
-        check = trustedLibraryDirectory(
-          path,
-          resolvePath,
-          roots,
-          allowSingleLink,
-        );
+        check = inspectLibraryDirectory(path, resolvePath, roots);
         checked.set(key, check);
       }
-      if (await check) {
-        if (!writers.writable.size) initial.add(path);
-        allowed.push(path);
-      }
+      const result = await check;
+      // A mutable or unreadable installation is unusable under every root set.
+      if (result === "unusable") checked.set(path, check);
+      if (result === "trusted") allowed.push(path);
     }
     if (allowed.length) environment[name] = allowed.join(":");
   }

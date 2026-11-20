@@ -59,8 +59,8 @@ test.skipIf(process.platform === "win32")(
     const viaDirectory = join(tools, "via-directory");
     const grant = join(tools, "grant");
     for (const path of [first, last, viaFile, grant, shared]) await mkdir(path);
-    await writeFile(join(first, "library.1"), "trusted");
-    await symlink("library.1", join(first, "library"));
+    await mkdir(join(first, "nested"));
+    await symlink("nested", join(first, "alias"));
     await writeFile(join(checkout, "library"), "writable");
     await link(join(checkout, "library"), join(shared, "library"));
     await symlink(checkout, viaDirectory);
@@ -100,12 +100,14 @@ test.skipIf(process.platform === "win32")(
         });
       expect(await inspect(first)).toBe(last);
       expect(await inspect()).toBe([first, last].join(":"));
+      loaderAccess.writable.add(first);
+      expect(await inspect()).toBe(last);
     }
   },
 );
 
 test.skipIf(process.platform === "win32")(
-  "host Git selects single-link libraries before patch writers can open an alias",
+  "host Git excludes a changed library on retry after its checkout alias is removed",
   async () => {
     const checkout = await fixtures.create("loader-checkout-");
     const tools = await fixtures.create("loader-tools-");
@@ -113,51 +115,17 @@ test.skipIf(process.platform === "win32")(
     const library = join(tools, "library");
     const alias = join(checkout, "edit");
     const paths = [tools, fallback].join(":");
-    const inspect = (loaderAccess: { writable: Set<string> }) =>
+    const current = { writable: new Set<string>() };
+    const inspect = (loaderAccess = current) =>
       inspectLoader(checkout, "LD_LIBRARY_PATH", paths, { loaderAccess });
     await writeFile(library, "original");
-    const early = { writable: new Set<string>() };
-    expect(await inspect(early)).toBe(paths);
-    repositoryGit(checkout)("init");
-    await runRepositoryCommand(
-      "git",
-      [
-        "-c",
-        'alias.probe=!f() { cat "$1" > local && ln local copy && ! ln "$1" edit; }; f',
-        "probe",
-        library,
-      ],
-      checkout,
-      {
-        loaderAccess: early,
-        environment: { LD_LIBRARY_PATH: paths },
-        sandbox: {
-          directory: checkout,
-          environment: {
-            ...process.env,
-            CODEX_HOME: await fixtures.create("loader-home-"),
-          },
-          profile: {
-            extends: ":workspace",
-            workspace_roots: {},
-            filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
-          },
-        },
-      },
-    );
-    expect(early.writable.has(checkout)).toBe(true);
-    expect(await inspect(early)).toBe(paths);
-    early.writable.add(library);
-    expect(await inspect(early)).toBe(fallback);
-
-    const linked = { writable: new Set<string>() };
     await link(library, alias);
-    expect(await inspect(linked)).toBe(fallback);
-    linked.writable.add(checkout);
+    expect(await inspect()).toBe(fallback);
+    current.writable.add(checkout);
     await writeFile(alias, "modified");
     await unlink(alias);
-    expect(await inspect(linked)).toBe(fallback);
-    expect(await inspect({ writable: new Set([checkout]) })).toBe(fallback);
+    expect(await inspect()).toBe(fallback);
+    expect(await inspect({ writable: new Set() })).toBe(fallback);
   },
 );
 
