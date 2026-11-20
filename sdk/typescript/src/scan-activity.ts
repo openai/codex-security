@@ -207,6 +207,14 @@ function unwrapCommand(command: string) {
   };
 }
 
+export function isSessionToolCall(type: unknown): boolean {
+  return (
+    type === "function_call" ||
+    type === "custom_tool_call" ||
+    type === "local_shell_call"
+  );
+}
+
 export function scanActivityFromSessionEvent(
   event: Readonly<Record<string, unknown>>,
   repository: string,
@@ -253,13 +261,7 @@ export function scanActivityFromSessionEvent(
   if (payload["type"] === "message" && payload["role"] === "assistant") {
     return sessionProse(id, "message", payload["content"]);
   }
-  if (
-    payload["type"] !== "function_call" &&
-    payload["type"] !== "custom_tool_call" &&
-    payload["type"] !== "local_shell_call"
-  ) {
-    return null;
-  }
+  if (!isSessionToolCall(payload["type"])) return null;
   const arguments_ = sessionCallArguments(payload);
   const name =
     typeof payload["name"] === "string"

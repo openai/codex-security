@@ -31,6 +31,7 @@ import {
   type ScanTokenUsage,
 } from "./cost-model.js";
 import {
+  isSessionToolCall,
   isWindowsActivityDrive,
   scanActivityFromSessionEvent,
   sessionContentText,
@@ -396,12 +397,9 @@ export interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
-function createSessionUsage(
-  observeUsage: boolean,
-  observeActivityPaths = false,
-) {
+function createSessionUsage(observeUsage: boolean, aliasRepository?: string) {
   return {
-    observeActivityPaths,
+    aliasRepository,
     offset: 0,
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
@@ -2489,15 +2487,15 @@ export class ScanCostTracker {
     if (this.#threadId === null) return;
     const observeUsage = this.#options.onUsageObservation !== undefined;
     const repository =
-      this.#options.onActivity === undefined &&
-      !this.#options.verifyActivityDirectory
+      this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    // Only admitted worker sessions can supply source-host file observations.
-    const deferActivities =
-      repository !== undefined &&
-      this.#options.activityObservations !== undefined &&
-      isWindowsActivityDrive(repository);
+    const aliasRepository =
+      this.#options.activityObservations &&
+      this.#options.repository &&
+      isWindowsActivityDrive(this.#options.repository)
+        ? this.#options.repository
+        : undefined;
     const collectionErrors: unknown[] = [];
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
@@ -2518,16 +2516,14 @@ export class ScanCostTracker {
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
-            session = createSessionUsage(observeUsage);
+            session = createSessionUsage(observeUsage, aliasRepository);
             this.#sessions.set(path, session);
           }
           try {
             await readSessionUsage(
               path,
               session,
-              deferActivities && !session.observeActivityPaths
-                ? undefined
-                : repository,
+              repository,
               progressThread,
               undefined,
               true,
@@ -2633,33 +2629,19 @@ export class ScanCostTracker {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
       let session = tracked;
-      const activityRepository =
-        threadId === this.#threadId ? undefined : repository;
       const observe =
         !unreadable.has(tracked) &&
         (blockingReadError === undefined || observeHealthySessions);
-      const needWorkerActivities =
-        deferActivities &&
-        threadId !== this.#threadId &&
-        !tracked.observeActivityPaths;
-      const needSessionEvents =
-        this.#options.onSessionEvent !== undefined &&
-        session.events === undefined;
       if (observe && path.endsWith(".zst") && !tracked.compressedRead) {
         // The metadata pass associates this archive with the scan. A full read
         // starts at the beginning, including when retrying a partial decode.
         const archive: SessionUsage = createSessionUsage(
           observeUsage,
-          needWorkerActivities,
+          aliasRepository,
         );
         if (this.#options.onSessionEvent !== undefined) archive.events = [];
         try {
-          await readSessionUsage(
-            path,
-            archive,
-            activityRepository,
-            progressThread,
-          );
+          await readSessionUsage(path, archive, repository, progressThread);
         } catch (error) {
           collectionErrors.push(error);
         }
@@ -2670,19 +2652,20 @@ export class ScanCostTracker {
           session = archive;
           this.#sessions.set(path, archive);
         }
-      } else if (observe && (needSessionEvents || needWorkerActivities)) {
-        const replay: SessionUsage = createSessionUsage(
-          false,
-          needWorkerActivities,
-        );
-        if (needSessionEvents) replay.events = [];
+      } else if (
+        observe &&
+        this.#options.onSessionEvent !== undefined &&
+        session.events === undefined
+      ) {
+        const replay: SessionUsage = createSessionUsage(false);
+        replay.events = [];
         try {
-          // Read newly admitted observations at the exact original snapshot. Progress,
-          // usage and their source order always come from the first pass.
+          // Replay raw events only through the tracked snapshot. Keep its progress,
+          // usage and decoder so a failed read cannot replace authoritative state.
           await readSessionUsage(
             path,
             replay,
-            needWorkerActivities ? repository : undefined,
+            undefined,
             undefined,
             session.offset,
           );
@@ -2690,27 +2673,18 @@ export class ScanCostTracker {
             replay.offset === session.offset &&
             replay.threadId === threadId
           ) {
-            if (needWorkerActivities) {
-              session.activities = replay.activities;
-              session.calls = replay.calls;
-              session.prose = replay.prose;
-              session.reasoning = replay.reasoning;
-              session.reasoningCount = replay.reasoningCount;
-              session.observeActivityPaths = true;
-            }
-            if (needSessionEvents) session.events = replay.events;
-            if (needSessionEvents && this.#timer === null)
+            session.events = replay.events;
+            if (this.#timer === null)
               await readSessionUsage(
                 path,
                 session,
-                activityRepository,
+                repository,
                 progressThread,
                 "file-size",
               );
           }
         } catch (error) {
-          if (needSessionEvents) collectionErrors.push(error);
-          else this.#options.onObservationError?.(error);
+          collectionErrors.push(error);
         }
       }
       const receipt = usages.get(threadId);
@@ -2767,10 +2741,7 @@ export class ScanCostTracker {
       // A failed replay can leave activity/progress available without raw events.
       if (session.events !== undefined)
         reported.events = Math.max(reported.events, session.eventPosition);
-      if (
-        worker !== undefined &&
-        (!deferActivities || session.observeActivityPaths)
-      ) {
+      if (worker !== undefined) {
         for (const {
           position,
           value: activity,
@@ -3659,7 +3630,10 @@ function readSessionEvent(
         duplicate: false,
       });
     }
-    if (repository === undefined) return;
+    const activityRepository =
+      repository ??
+      (isSessionToolCall(payload["type"]) ? session.aliasRepository : undefined);
+    if (activityRepository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
       typeof payload["id"] === "string" &&
@@ -3677,7 +3651,7 @@ function readSessionEvent(
               summary: [summary],
             },
           },
-          repository,
+          activityRepository,
         );
         if (
           activity === null ||
@@ -3697,14 +3671,15 @@ function readSessionEvent(
     let ambiguous = false;
     const activity = scanActivityFromSessionEvent(
       event,
-      repository,
-      session.observeActivityPaths
+      activityRepository,
+      session.aliasRepository
         ? () => {
             ambiguous = true;
             return false;
           }
         : undefined,
     );
+    if (repository === undefined && !ambiguous) return;
     if (activity !== null) {
       if (activity.kind === "reasoning") {
         const reasoning = (session.reasoning ??= createSessionReasoning(
@@ -3736,7 +3711,7 @@ function readSessionEvent(
         activity,
       );
       if (ambiguous) observation.source = { event };
-      if (activity.status === "running") {
+      if (repository !== undefined && activity.status === "running") {
         session.calls.set(activity.id, observation);
       }
       session.activities.push(observation);

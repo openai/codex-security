@@ -9,6 +9,7 @@ import {
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
+import { isSessionToolCall } from "./scan-activity.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -281,9 +282,7 @@ export async function readScanLogs(options: ScanLogOptions) {
         observedPaths.size > 0 &&
         event["type"] === "response_item" &&
         isRecord(payload) &&
-        (payload["type"] === "function_call" ||
-          payload["type"] === "custom_tool_call" ||
-          payload["type"] === "local_shell_call")
+        isSessionToolCall(payload["type"])
           ? observedEventKey(session.threadId, event)
           : undefined;
       const paths =
