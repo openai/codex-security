@@ -475,8 +475,8 @@ function httpCredentialPath(directory: string, file: string): string {
   return relativeFile(directory, file);
 }
 
-// Windows Go clients accept quotes around KUBECONFIG entries containing ';'.
-function kubeConfigFiles(value: string): string[] {
+// Windows Go clients accept quotes around path list entries containing ';'.
+function goPathList(value: string): string[] {
   if (process.platform !== "win32") return value.split(delimiter);
   const files: string[] = [];
   let current = "";
@@ -499,6 +499,52 @@ function accountHomeDirectory(): string | undefined {
     // An effective UID need not have an entry in the password database.
     return undefined;
   }
+}
+
+function gitLabConfigRoots(
+  environment: NodeJS.ProcessEnv,
+  homes: Set<string | undefined>,
+): Set<string> {
+  // glab searches the legacy home location and the platform's XDG roots.
+  const windows = process.platform === "win32";
+  const homePrefix = windows ? /^%USERPROFILE%/u : /^(?:~|\$HOME)/u;
+  const roots = new Set<string>();
+  const xdg = [
+    environment["XDG_CONFIG_HOME"],
+    ...goPathList(environment["XDG_CONFIG_DIRS"] ?? ""),
+  ];
+  for (const dir of xdg) {
+    if (!dir) continue;
+    if (isAbsolute(dir)) roots.add(dir);
+    else if (homePrefix.test(dir))
+      for (const home of homes)
+        if (home) roots.add(join(home, dir.replace(homePrefix, "")));
+  }
+  for (const home of homes) {
+    if (!home) continue;
+    roots.add(relativeFile(home, ".config"));
+    if (windows) {
+      roots.add(relativeFile(home, join("AppData", "Local")));
+      roots.add(relativeFile(home, join("AppData", "Roaming")));
+    } else if (process.platform === "darwin") {
+      roots.add(relativeFile(home, join("Library", "Application Support")));
+      roots.add(relativeFile(home, join("Library", "Preferences")));
+    }
+  }
+  if (windows) {
+    for (const key of [
+      "LOCALAPPDATA",
+      "APPDATA",
+      "PROGRAMDATA",
+      "ALLUSERSPROFILE",
+    ])
+      if (environment[key]) roots.add(environment[key]);
+    roots.add(join((environment["SYSTEMDRIVE"] ?? "C:") + sep, "ProgramData"));
+  } else if (process.platform === "darwin") {
+    roots.add("/Library/Application Support");
+    roots.add("/Library/Preferences");
+  } else roots.add("/etc/xdg");
+  return roots;
 }
 
 function credentialPointerFiles(
@@ -561,11 +607,16 @@ function credentialPointerFiles(
   }
   if (environment["GH_CONFIG_DIR"])
     selected.add(join(environment["GH_CONFIG_DIR"], "hosts.yml"));
+  for (const root of gitLabConfigRoots(environment, homes))
+    selectFile(root, join("glab-cli", "config.yml"));
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
     switch (name.toUpperCase()) {
       case "KUBECONFIG":
-        for (const path of kubeConfigFiles(value)) if (path) selected.add(path);
+        for (const path of goPathList(value)) if (path) selected.add(path);
+        break;
+      case "GLAB_CONFIG_DIR":
+        selectFile(value, "config.yml");
         break;
       case "DOCKER_CONFIG":
         selectFile(value, "config.json");
@@ -1092,6 +1143,9 @@ export async function capturePatchGitControls(
   };
   const remember = async (path: string): Promise<void> => {
     const metadata = await stat(path, { bigint: true });
+    // glab config set can save a token in the repository configuration.
+    if (mode !== "external" && !administrationRoots.has(path))
+      await protectStore(join(path, "glab-cli", "config.yml"));
     administrationRoots.set(path, { dev: metadata.dev, ino: metadata.ino });
   };
   const controlPaths = new Map<

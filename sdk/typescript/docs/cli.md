@@ -2978,6 +2978,8 @@ and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, and
 `NPM_CONFIG_USERCONFIG`. They also cover Google Cloud Application Default
 Credentials in the standard gcloud directory, the same file under
 `CLOUDSDK_CONFIG`, and the file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
+GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
+the standard `glab-cli` configuration directories and Git administration.
 The host transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
