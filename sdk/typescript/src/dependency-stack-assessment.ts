@@ -13,11 +13,13 @@ import {
 } from "./dependency-stack-use.js";
 import {
   sampledStacksSchema,
+  stackManifestSchema,
   stackPacketWorkItems,
   stackSinkMatches,
   type StackPacket,
   type StackWorkItem,
 } from "./dependency-stack-packet.js";
+import { effectiveStackSinks } from "./dependency-stack-advisory.js";
 import { comparePythonReleases } from "./dependency-advisory-version.js";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import {
@@ -43,6 +45,21 @@ const stackUse = z.strictObject({
   evidence: useFields.evidence,
   proof: useFields.proof,
 });
+const questionCheck = z.strictObject({
+  question: text.describe("Exact deciding question from remainingQuestions."),
+  checked: text.describe(
+    "Where you checked and what the evidence established.",
+  ),
+  missingEvidence: text.describe(
+    "The specific missing artifact or fact needed to answer the question.",
+  ),
+  claims: z
+    .array(dependencyClaimReferenceSchema)
+    .min(1)
+    .describe(
+      "Recorded claims citing the source or capture inspected for this check.",
+    ),
+});
 const itemInput = z.strictObject({
   workItemId: text,
   verdict,
@@ -54,6 +71,12 @@ const itemInput = z.strictObject({
       "For an exploitable verdict, select the supporting claim whose cited evidence establishes attacker control of the deciding input on this path.",
     ),
   remainingQuestions: z.array(text).default([]),
+  questionChecks: z
+    .array(questionCheck)
+    .optional()
+    .describe(
+      "For each unresolved deciding question on an observed path, record the attempted check and cite the supporting claim revisions.",
+    ),
   frameIndices: z
     .array(z.number().int().nonnegative())
     .optional()
@@ -139,10 +162,17 @@ const observationCitation = z.strictObject({
   ),
   bindings: captured.bindings.unwrap(),
 });
+export const stackReviewDecisionSchema = z.strictObject({
+  workItemId: text,
+  reason: text,
+  followUp: text.nullable(),
+});
 export const stackInvestigationReportSchema = z.strictObject({
   schemaVersion: z.literal("codex-security.pipeline-stacks.report/v1"),
-  reviewPolicy: z.literal("single_agent"),
   cve: text,
+  advisoryDetails: stackManifestSchema.shape.advisoryDetails,
+  advisoryLookupError: stackManifestSchema.shape.advisoryLookupError,
+  triggerAnalysis: stackManifestSchema.shape.triggerAnalysis,
   runId: text,
   attemptId: text,
   inputDigest: digest,
@@ -164,6 +194,14 @@ export const stackInvestigationReportSchema = z.strictObject({
   claims: z.array(reportedClaim),
   coverage: coverageSchema,
   remainingQuestions: z.array(text),
+  review: z
+    .strictObject({
+      draftDigest: digest,
+      decisions: z.array(
+        stackReviewDecisionSchema.extend({ followUp: z.null() }),
+      ),
+    })
+    .nullable(),
 });
 export type StackInvestigationReport = z.output<
   typeof stackInvestigationReportSchema
@@ -325,7 +363,8 @@ function assessProof(
         );
     }
   }
-  if (row.verdict === "unknown") return;
+  if (row.verdict === "unknown")
+    return verifyQuestionChecks(row, work, records);
   if (!observation) fail("A decided stack assessment needs an observed sink.");
   if (!records.length)
     fail("A decided assessment needs at least one exact supporting claim.");
@@ -373,8 +412,9 @@ function assessProof(
     cited: hasBindingEvidence(index),
   }));
   // Packet decoding checks each catalog ID and its original sampled frame.
+  const sinks = effectiveStackSinks(packet);
   const matches = mapped.map(({ sinkId, rawIndex }) => {
-    const sink = packet.sinks.sinks.find((s) => s.id === sinkId)!;
+    const sink = sinks.find((s) => s.id === sinkId)!;
     const copies = bindingEvidence.filter(
       ({ binding }) =>
         binding.package === sink.package &&
@@ -564,6 +604,43 @@ function bindCapturedEvidence(row: StackAssessment, work: StackWorkItem) {
   };
 }
 
+function verifyQuestionChecks(
+  row: StackAssessment,
+  work: StackWorkItem,
+  records: readonly DependencyClaimRecord[],
+) {
+  if (
+    !work.observation ||
+    work.scopeConflicts.length ||
+    stackSinkMatches(work.observation).length === 0
+  )
+    return;
+  const remaining = new Set(row.remainingQuestions);
+  const byId = new Map(records.map((record) => [record.id, record]));
+  for (const check of row.questionChecks ?? []) {
+    if (!remaining.delete(check.question))
+      fail(
+        `Question check is duplicated or does not match a remaining question: ${check.question}`,
+      );
+    for (const ref of check.claims) {
+      const record = byId.get(ref.id);
+      if (
+        !record ||
+        record.revision !== ref.revision ||
+        record.hash !== ref.hash ||
+        (!record.excerpts.length && !record.receipts.length)
+      )
+        fail(
+          `Question check must cite a supporting claim with verified source or capture evidence: ${check.question}`,
+        );
+    }
+  }
+  if (remaining.size)
+    fail(
+      `Before recording unknown, investigate and cite an attempted check for each deciding question: ${[...remaining].join("; ")}`,
+    );
+}
+
 export async function prepareStackAssessment(
   input: unknown,
   work: StackWorkItem,
@@ -686,13 +763,22 @@ export function finalizeStackReport(
     packet.manifest;
   return stackInvestigationReportSchema.parse({
     schemaVersion: "codex-security.pipeline-stacks.report/v1",
-    reviewPolicy: "single_agent",
+    review: null,
     runId,
     attemptId,
     inputDigest,
     toolRevision,
     target,
     cve,
+    ...(packet.manifest.advisoryDetails && {
+      advisoryDetails: packet.manifest.advisoryDetails,
+    }),
+    ...(packet.manifest.advisoryLookupError && {
+      advisoryLookupError: packet.manifest.advisoryLookupError,
+    }),
+    ...(packet.manifest.triggerAnalysis && {
+      triggerAnalysis: packet.manifest.triggerAnalysis,
+    }),
     verdict: aggregateDependencyVerdict(paths, {
       unresolved: !!(
         coverage.truncated.length ||
