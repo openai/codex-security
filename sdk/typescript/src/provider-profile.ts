@@ -5,7 +5,11 @@ import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import { configuredCodexHome } from "./auth.js";
-import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import {
+  CodexSecurityError,
+  ConfigurationError,
+  errorMessage,
+} from "./errors.js";
 import {
   resolveCodexProfile,
   deepMerge,
@@ -250,9 +254,8 @@ export async function preflightReadOnlyProfileCodex(
       context: "helper",
     });
   }).catch((error: unknown) => {
-    if (error instanceof Error && error.name === "DeepScanNonRetryableError")
-      throw new ConfigurationError(error.message, { cause: error });
-    throw error;
+    if (signal?.aborted || error instanceof CodexSecurityError) throw error;
+    throw new ConfigurationError(errorMessage(error), { cause: error });
   });
   return { permissionProfileId, configOverrides };
 }

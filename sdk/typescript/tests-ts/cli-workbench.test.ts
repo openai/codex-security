@@ -1,15 +1,18 @@
 import { Codex } from "@openai/codex-sdk";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import * as childProcess from "node:child_process";
+import { mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, test, mock } from "bun:test";
+import { describe, expect, test, mock, spyOn } from "bun:test";
 import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { createProfileCodex } from "../src/provider-profile.js";
 import { nodeCommand } from "./support/shell.js";
 import { main } from "../src/cli.js";
+import { ConfigurationError } from "../src/errors.js";
+import { executablePathForSpawn } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
   disabledMcpServers,
@@ -1368,6 +1371,77 @@ describe("CLI workbench", () => {
       expect(saved).toEqual([["source", "empty"]]);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain("MCP configuration");
+    });
+
+    test("stops on a corrupt helper lock after saving an empty pair", async () => {
+      await using home = await scopedTemporaryDirectory("match-all-lock-");
+      await using work = await scopedTemporaryDirectory("match-all-work-");
+      const lock = join(home.path, ".codex-security-preflight");
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(
+        join(lock, ".codex-security-scan.sqlite3"),
+        "synthetic corrupt SQLite database",
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(home.path, "config.toml"),
+        'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nwire_api = "responses"\n[model_providers.synthetic.auth]\ncommand = "synthetic-auth"\n',
+      );
+      const preload = join(home.path, "mcp-list.mjs");
+      await writeFile(
+        preload,
+        'if (!process.argv.includes("mcp")) throw new Error("Unexpected native request");\nconsole.log("[]");\nprocess.exit(0);\n',
+      );
+      const { batches, saved, onWorkbench } = batchWithInitialSave();
+      batches[2]!.afterFindings.length = 0;
+      const { stdout, stderr, runCli } = createCliTest(main);
+      let failure: unknown;
+      const executable = nodeCommand().command;
+      const originalSpawn = childProcess.spawn;
+      const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+        ...input: Parameters<typeof originalSpawn>
+      ) => {
+        const [command, args, options] = input;
+        return command === executable ||
+          command === executablePathForSpawn(executable)
+          ? originalSpawn(executable, [preload, ...(args ?? [])], options ?? {})
+          : originalSpawn(...input);
+      }) as typeof originalSpawn);
+      let code: number;
+      try {
+        code = await runCli(
+          argv,
+          dependencies({
+            currentDirectory: work.path,
+            environment: {
+              CODEX_HOME: home.path,
+              CODEX_CLI_PATH: executable,
+            },
+            onWorkbench,
+            onMatch: (input, options) =>
+              matchScanFindings(input, options).catch((error: unknown) => {
+                failure = error;
+                throw error;
+              }),
+          }),
+        );
+      } finally {
+        spawnSpy.mockRestore();
+      }
+      expect(code, stderr.text()).toBe(2);
+      expect(saved).toEqual([["source", "empty"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).not.toContain("warning:");
+      expect(failure).toBeInstanceOf(ConfigurationError);
+      const cause = (failure as Error).cause;
+      expect(cause).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe((cause as Error).message);
+      expect((cause as Error).message).toContain("file is not a database");
+      expect(
+        (await readdir(home.path)).filter((name) =>
+          name.startsWith("codex_security_"),
+        ),
+      ).toEqual([]);
     });
 
     test("returns the first matcher error if every batch fails", async () => {
