@@ -143,6 +143,9 @@ permissions; newly created directories are private to you by default.
 | `findings.findings`               | Findings from this scan.                                         |
 | `reportPath`                      | Path to the Markdown report.                                     |
 | `review.excludedPaths`            | Additional paths the scan excluded.                              |
+| `review.unresolvedCandidates`     | Saved proof gaps. Several rows can refer to one candidate.       |
+| `unresolvedCandidateCount`        | Saved candidate identities requiring follow-up.                  |
+| `unresolvedCandidates`            | Saved candidate evidence and reasons for follow-up.              |
 | `repositoryFindings`              | This scan's findings plus earlier open findings, when available. |
 | `sarifPath`                       | SARIF export path, or `null`.                                    |
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |

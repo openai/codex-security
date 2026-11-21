@@ -396,7 +396,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
             if finding["provenance"].get("previousFindings") == []:
                 finding["provenance"].pop("previousFindings")
     assert findings_after == findings_before
-    assert after == before
+    assert after == {**before, "receiptSealVersion": 1}
 
 
 @pytest.mark.parametrize("earlier_checkpoint_first", [False, True])

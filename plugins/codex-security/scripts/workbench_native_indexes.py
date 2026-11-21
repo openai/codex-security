@@ -397,7 +397,6 @@ def list_repositories(
         if row["id"] is None:
             continue
         repository = by_target[target_id]
-        scan = scan_history.scan_summary(row)
         repository["scanCount"] += 1
         previous = latest_rows.get(target_id)
         if previous is None or (
@@ -406,7 +405,6 @@ def list_repositories(
             > scan_history._scan_completion_order(previous)
         ):
             latest_rows[target_id] = row
-            repository["latestScan"] = scan
 
     identities = RepositoryIdentityCache(connection)
     legacy_generations = _legacy_generations(connection, identities)
@@ -455,6 +453,9 @@ def list_repositories(
             }
             repositories = repositories[args.offset : end]
     for repository in repositories:
+        latest = latest_rows.get(repository["targetId"])
+        if latest is not None:
+            repository["latestScan"] = scan_history.scan_summary(latest)
         repository["openFindingsCount"] = open_findings_count(repository["targetId"])
         path = os.path.expanduser(repository["targetPath"])
         try:

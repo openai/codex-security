@@ -25,6 +25,7 @@ const distModules = [
   "auth",
   "bulk-scan-discovery",
   "bundled-plugin",
+  "candidates",
   "cli",
   "cli-argument",
   "cli-daybreak",

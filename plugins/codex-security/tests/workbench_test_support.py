@@ -46,6 +46,30 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     return module
 
 
+def write_provisional_review_state(scan_dir: Path, state: dict[str, Any]) -> None:
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    review = load_script("review_state")
+    if review.uses_legacy_review(manifest["scan"]):
+        (scan_dir / "coverage.json").write_text(json.dumps(state))
+    else:
+        manifest["scan"]["reviewState"] = {
+            key: value
+            for key, value in state.items()
+            if key
+            not in {
+                "documentType",
+                "schemaVersion",
+                "scanId",
+                "mode",
+                "inventoryStrategy",
+                "includePaths",
+                "excludePaths",
+            }
+        }
+        manifest_path.write_text(json.dumps(manifest))
+
+
 def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:
     """Reconstruct internal review state from the retained publication inputs."""
     review = load_script("review_state")

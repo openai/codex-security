@@ -163,7 +163,7 @@ for (const field of ["mode", "review"]) {
   assert.equal(manifest.validate(document), false);
 }
 const coverage = canonical.coverage;
-const validateCoverage = new Ajv2020().compile(coverage.schema);
+
 const coverageInZod = z.fromJSONSchema(coverage.schema);
 for (const fields of [
   { deferred: [{ id: "task", reason: "Review remains." }] },
@@ -203,7 +203,7 @@ for (const [path, valid] of [
 ] as const) {
   const deferred = [{ id: "task", reason: "Review remains.", paths: [path] }];
   const document = { ...coverage.example, deferred };
-  assert.equal(validateCoverage(document), valid, JSON.stringify(path));
+  assert.equal(coverage.validate(document), valid, JSON.stringify(path));
   assert.equal(
     coverageInZod.safeParse(document).success,
     valid,

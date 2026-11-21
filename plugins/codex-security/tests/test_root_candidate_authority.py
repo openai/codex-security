@@ -119,6 +119,9 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
         assert not recovered["resultsRecoveryNeeded"]
         assert (scan.scan_dir / "scan-manifest.json").read_bytes() == before
         assert read_review_state(workbench_db, scan.scan_dir) == coverage
+    if disposition == "rejected" and flow != "prepare":
+        review = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["review"]
+        assert not review.get("unresolvedCandidates")
     assert checkpoint.read_bytes() == original
 
 
@@ -140,6 +143,10 @@ def test_accepted_pending_root_tie_survives_canonical_disposition(
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert "completeness" not in coverage
     assert any(row.get("candidateId") == "candidate-review" for row in coverage["deferred"])
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert [row["candidateId"] for row in manifest["scan"]["review"]["unresolvedCandidates"]] == [
+        "candidate-review"
+    ]
     scan.recover()
     assert read_review_state(workbench_db, scan.scan_dir) == coverage
 

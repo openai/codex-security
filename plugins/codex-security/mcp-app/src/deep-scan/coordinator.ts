@@ -18,6 +18,7 @@ import {
 import {
   persistedScanUnion,
   parseScanUnion,
+  refreshCandidateFindingState,
   addScanCoverage,
   parseStoredScanDraft,
   scanUnionToDraft,
@@ -1025,6 +1026,7 @@ export class DeepScanCoordinator {
     );
     for (const worker of merged)
       addScanCoverage(result, worker, this.artifacts.scanDir);
+    refreshCandidateFindingState(result);
     return result;
   }
 
@@ -1087,7 +1089,7 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
-        this.state,
+        { ...this.state, workerId: worker.id },
         "previously-accepted",
       );
       recovered.push({
