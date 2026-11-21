@@ -241,6 +241,8 @@ export interface WorkbenchCommandOptions {
   currentDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
+  /** Read committed Deep settings through the existing private workbench channel. */
+  withExecutionSettings?: boolean;
 }
 
 export interface ScanArtifactRestorer {
@@ -2102,6 +2104,11 @@ export async function runWorkbench(
       : undefined;
     // Validate one JSON document before framing its unchanged source as payload.
     if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
+    const pythonProgram = registrationHandshake
+      ? WORKBENCH_REGISTRATION_PROGRAM
+      : (options.withExecutionSettings
+          ? "sys._codex_security_with_execution_settings = True\n"
+          : "") + WORKBENCH_SCRIPT_PROGRAM;
     const result = await runCodexCommand(
       { command },
       native
@@ -2112,10 +2119,7 @@ export async function runWorkbench(
             "utf8",
             "-B",
             "-c",
-            WORKBENCH_ARGUMENTS_PROGRAM +
-              (registrationHandshake
-                ? WORKBENCH_REGISTRATION_PROGRAM
-                : WORKBENCH_SCRIPT_PROGRAM),
+            WORKBENCH_ARGUMENTS_PROGRAM + pythonProgram,
             script,
           ],
       pluginHelperEnvironment({
@@ -4361,6 +4365,7 @@ export async function runCodexCommand(
         : ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
+      ...(cwd === undefined ? {} : { cwd }),
     },
   );
   let stdout = "";

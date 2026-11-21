@@ -15,7 +15,10 @@ interface WorkbenchModule {
     python: string,
     args: string[],
     input?: string | Buffer,
-    options?: { isolatedPython?: boolean },
+    options?: {
+      isolatedPython?: boolean;
+      withExecutionSettings?: boolean;
+    },
   ): Promise<Record<string, unknown>>;
 }
 
@@ -57,6 +60,30 @@ async function fixtureWorkbench(root: string, source: string) {
   );
   return executeWorkbench as WorkbenchModule["executeWorkbench"];
 }
+
+await test("Deep Scan execution settings reach the workbench child", async () => {
+  const root = await temporaryDirectory("workbench-internal-options-");
+  try {
+    const execute = await fixtureWorkbench(
+      root,
+      `import json, sys
+def main(*, with_execution_settings=False):
+    print(json.dumps({"settings": with_execution_settings,
+                      "args": sys.argv[1:], "input": sys.stdin.read()}))
+`,
+    );
+    for (const withExecutionSettings of [false, true]) {
+      const args = ["claim-deep-scan-coordinator", "--scan-id=fixture"];
+      const input = '{"worker":"fixture"}';
+      assert.deepEqual(
+        await execute(fixturePython, args, input, { withExecutionSettings }),
+        { settings: withExecutionSettings, args, input },
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 await test("Python compressed-rollout reads inherit the plugin Node without Node on PATH", async () => {
   const root = await temporaryDirectory("workbench-node-runtime-");
@@ -120,7 +147,7 @@ await test("workbench scalar arguments reach the Python parser literally", async
       `import json, sys
 sys.path.insert(0, ${JSON.stringify(scripts)})
 from workbench_cli import parse_args
-def main():
+def main(*, select_finalization=False, with_execution_settings=False):
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );
@@ -187,7 +214,7 @@ for (const variable of ["PYTHONPATH", "PYTHONUSERBASE"]) {
 
       const executeFixture = await fixtureWorkbench(
         root,
-        'import json, sys\nassert sys.dont_write_bytecode\ndef main():\n    print(json.dumps({"scans": []}))\n',
+        'import json, sys\nassert sys.dont_write_bytecode\ndef main(*, select_finalization=False, with_execution_settings=False):\n    print(json.dumps({"scans": []}))\n',
       );
       const result = await executeFixture(
         python,
@@ -235,7 +262,7 @@ await test("workbench can import dependencies installed in the Python user site"
     assert.equal(imported.trim(), "user-site dependency");
     const executeFixture = await fixtureWorkbench(
       root,
-      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main():\n    print(json.dumps({"dependency": VALUE}))\n',
+      'import json, sys\nassert sys.dont_write_bytecode\nfrom synthetic_dependency import VALUE\ndef main(*, select_finalization=False, with_execution_settings=False):\n    print(json.dumps({"dependency": VALUE}))\n',
     );
     assert.deepEqual(await executeFixture(python, ["list-scans"]), {
       dependency: "user-site dependency",

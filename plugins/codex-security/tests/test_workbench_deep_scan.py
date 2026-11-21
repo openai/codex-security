@@ -166,6 +166,12 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN retained_checkpoint_heads_json")
         connection.execute("ALTER TABLE workspaces DROP COLUMN deep_scan_config_json")
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN pending_target_project_path")
+        for table in ("deep_scan_attempt_sessions", "deep_scan_attempts", "deep_scan_merge_claims"):
+            connection.execute(f"DROP TABLE {table}")
+        for column in ("result_manifest_path", "result_manifest_sha256", "attempt"):
+            connection.execute(f"ALTER TABLE deep_scan_dedup_inputs DROP COLUMN {column}")
+        for column in ("finalization_input_json", "usage_owner_json", "execution_settings_json"):
+            connection.execute(f"ALTER TABLE deep_scan_runs DROP COLUMN {column}")
         connection.execute("DELETE FROM schema_migrations WHERE version > 53")
 
 
@@ -474,8 +480,31 @@ def test_archived_deep_scan_keeps_its_discovery_and_checkpoint_paths(
         next(row["artifactDir"] for row in after["workers"] if row["id"] == worker)
     )
     checkpoint = write_checkpoint(worker_output / "checkpoints", saved_draft(deep.id))
+    contents = checkpoint.read_bytes()
+    fresh_checkpoint = deep.directory / checkpoint.relative_to(archived)
+    fresh_checkpoint.parent.mkdir(parents=True)
+    fresh_checkpoint.write_bytes(contents)
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO deep_scan_attempts "
+            "(scan_id, worker_id, attempt, status, started_at, accepted_result_path, accepted_result_sha256) "
+            "SELECT scan_id, id, attempt, status, created_at, ?, ? FROM deep_scan_workers WHERE id = ? "
+            "ON CONFLICT (worker_id, attempt) DO UPDATE SET accepted_result_path = excluded.accepted_result_path, "
+            "accepted_result_sha256 = excluded.accepted_result_sha256",
+            (
+                str(fresh_checkpoint if legacy_archive else checkpoint),
+                hashlib.sha256(contents).hexdigest(),
+                worker,
+            ),
+        )
+    # A semantically identical edit still breaks the accepted byte digest. The
+    # matching bytes in the fresh scan must not satisfy the archived receipt.
+    checkpoint.write_bytes(contents + b"\n")
+    assert not deep.command("get-scan")["scan"]["resultsRecoveryNeeded"]
+    checkpoint.write_bytes(contents)
     assert deep.command("get-scan")["scan"]["resultsRecoveryNeeded"]
     deep.command("recover-scan-results")
+    assert fresh_checkpoint.read_bytes() == contents
     saved = json.loads((archived / "scan-manifest.json").read_text())
     assert checkpoint.relative_to(archived).as_posix() in saved["scan"]["preservedSources"]
 
@@ -493,8 +522,10 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         return claim_deep_scan_coordinator(state_dir, codex_home, scan_id)
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-        assert schema_version == (load_script("workbench_schema").MIGRATIONS[-1][0],)
+        migrations = connection.execute(
+            "SELECT * FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert migrations[-1][0] == load_script("workbench_schema").MIGRATIONS[-1][0]
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -528,8 +559,8 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert (
-            connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-            == schema_version
+            connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+            == migrations
         )
 
 

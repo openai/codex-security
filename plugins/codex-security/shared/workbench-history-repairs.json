@@ -1,5 +1,25 @@
 [
   [
+    "-- Move recognized Deep Scan preview receipts before repairing the released history.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    "    -- The writer owns this migration. Vacate its older slots without running its backfill.",
+    "    UNION SELECT 86, 'preserve original deep scan discovery context'",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    CASE WHEN EXISTS (SELECT 1 FROM schema_migrations AS newer",
+    "        WHERE newer.name = receipt.name AND newer.version > receipt.version)",
+    "        THEN 'DELETE FROM schema_migrations'",
+    "        ELSE 'UPDATE schema_migrations SET version = ' || destination END",
+    "        || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations AS receipt JOIN history USING (name)",
+    "WHERE (destination BETWEEN 82 AND 86 AND version BETWEEN 44 AND 77)",
+    "    OR (destination = 57 AND version IN (47, 49, 50, 51, 53, 54, 55, 56))",
+    "-- Vacate higher preview numbers before moving another receipt into their slots.",
+    "ORDER BY destination DESC;"
+  ],
+  [
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",
@@ -307,5 +327,15 @@
     "        quote((SELECT name FROM history WHERE version = 2)) || ', ?)'",
     "    FROM legacy WHERE present",
     "ORDER BY position;"
+  ],
+  [
+    "-- Validate Deep Scan receipts after relocating known preview versions.",
+    "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
+    "    json_extract(value, '$.name') AS name FROM json_each(:history))",
+    "SELECT 'error' AS operation,",
+    "    'Unsupported workbench migration receipt at version ' || receipt.version || '.' AS value",
+    "FROM schema_migrations AS receipt JOIN history USING (version)",
+    "WHERE receipt.version BETWEEN 82 AND 86 AND receipt.name != history.name",
+    "ORDER BY receipt.version LIMIT 1;"
   ]
 ]

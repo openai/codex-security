@@ -1582,6 +1582,7 @@ interface CliDependencies {
     protectedRoot?: PluginPythonOptions["protectedRoot"],
     gitProtectedRoots?: readonly string[],
     pluginPath?: string,
+    withExecutionSettings?: boolean,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1689,6 +1690,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     protectedRoot,
     gitProtectedRoots = [],
     pluginPath,
+    withExecutionSettings,
   ) => {
     const checkingTarget =
       args[0] === "get-scan" && args.includes("--check-target");
@@ -1769,6 +1771,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
               : await resolvePluginPath(pluginPath, workspace, signal),
           environment,
           signal,
+          withExecutionSettings,
           failureMessage: "Could not read Codex Security scan history",
         },
         args,
@@ -2738,6 +2741,7 @@ export async function main(
       value,
     pythonPath?: string,
     protectedRoot?: PluginPythonOptions["protectedRoot"],
+    withExecutionSettings?: boolean,
   ): Promise<JsonObject> => {
     try {
       return await select(
@@ -2749,6 +2753,9 @@ export async function main(
               undefined,
               pythonPath,
               protectedRoot,
+              undefined,
+              undefined,
+              withExecutionSettings,
             )),
       );
     } catch (error) {
@@ -3268,6 +3275,9 @@ export async function main(
             }
             return logs as unknown as JsonObject;
           },
+          undefined,
+          undefined,
+          true,
         );
         return streamedLogs === undefined ? result : undefined;
       },
@@ -8244,9 +8254,15 @@ export async function main(
         const scan =
           scanId === undefined
             ? undefined
-            : ((await history(["get-scan", "--scan-id", scanId]))[
-                "scan"
-              ] as ScanLogSource);
+            : ((
+                await history(
+                  ["get-scan", "--scan-id", scanId],
+                  undefined,
+                  undefined,
+                  undefined,
+                  options.includeLogs,
+                )
+              )["scan"] as ScanLogSource);
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {

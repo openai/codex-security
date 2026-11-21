@@ -32,6 +32,7 @@ import {
 import path from "node:path";
 import {
   testDeepScanLifecycle,
+  testStaleDiscoveryCheckpointRetriesBeforeAcceptance,
   testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus,
 } from "./deep_scan_lifecycle_cases.ts";
 import {
@@ -2896,6 +2897,7 @@ function registerCases<T extends unknown[]>(
 }
 
 after(() => temporaryDirectories.cleanup());
+test(testStaleDiscoveryCheckpointRetriesBeforeAcceptance);
 test("Deep Scan lifecycle", testDeepScanLifecycle);
 registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
   [false],

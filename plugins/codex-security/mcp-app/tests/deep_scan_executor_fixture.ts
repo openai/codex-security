@@ -8,6 +8,14 @@ import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 export const {
   resolveCodexPath,
+  WorkbenchDeepScanStore,
+  captureDeepScanExecutionSettings,
+  retainDeepScanExecutionSettings,
+  loadDeepScanExecutionSettings,
+  restoredDeepScanWorkerSettings,
+  classifyCodexWorkerError,
+  DeepScanNonRetryableError,
+  codexWorkerTurnError,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
   parseDeepScan,
