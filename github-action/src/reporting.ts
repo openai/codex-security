@@ -43,20 +43,54 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     ...(inputs.maxCost !== undefined ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : []),
     'Applicable root and nested SECURITY.md policy is discovered by the scanner.',
   ];
-  if (result.scopeLimitations?.length) {
-    parts.push('**Scope limitations**\n\n' + result.scopeLimitations.map(note => `- ${esc(note)}`).join('\n'));
+  const statusNotes: string[] = [];
+  if (result.reportStatus === 'partial') statusNotes.push('SARIF report is unavailable; scan results and other reports are still available.');
+  if (result.scanStatus !== 'completed') statusNotes.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
+  const footer = 'Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.';
+  const omittedFindings = (count: number) =>
+    `${count} additional ${count === 1 ? 'finding is' : 'findings are'} available in the JSON/SARIF reports.`;
+  const findingCount = result.findings.length;
+  const limit = 58_000 - Buffer.byteLength([...statusNotes, footer].join('\n\n'));
+
+  const renderBody = (budget: number) => {
+    let remaining = budget;
+    let summary = '';
+    // Counting a separator for the first block covers the one before the reserved text.
+    const append = (block: string, separator = '\n\n'): boolean => {
+      const bytes = Buffer.byteLength(block) + separator.length;
+      if (bytes > remaining) return false;
+      remaining -= bytes;
+      summary += summary ? separator + block : block;
+      return true;
+    };
+    for (const part of parts) append(part);
+    for (const [index, note] of (result.scopeLimitations ?? []).entries()) {
+      const line = `- ${esc(note)}`;
+      if (!append(index === 0 ? `**Scope limitations**\n\n${line}` : line, index === 0 ? '\n\n' : '\n')) break;
+    }
+    for (const note of statusNotes) summary += `\n\n${note}`;
+    for (const error of result.errors.slice(0, 10)) {
+      if (!append(`<pre>${esc(error)}</pre>`)) break;
+    }
+    let displayed = 0;
+    for (const finding of result.findings.slice(0, 30)) {
+      const block = `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`;
+      if (!append(block)) break;
+      displayed += 1;
+    }
+    return {summary, displayed, remaining};
+  };
+
+  // Try the full budget first so a summary that fits exactly keeps every block.
+  let body = renderBody(limit);
+  const omitted = findingCount - body.displayed;
+  if (omitted > 0 && Buffer.byteLength(omittedFindings(omitted)) + 2 > body.remaining) {
+    // The second pass can omit more findings, so reserve room for the largest count.
+    body = renderBody(limit - Buffer.byteLength(omittedFindings(findingCount)) - 2);
   }
-  if (result.reportStatus === 'partial') parts.push('SARIF report is unavailable; scan results and other reports are still available.');
-  if (result.scanStatus !== 'completed') parts.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
-  for (const error of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error)}</pre>`);
-  for (const finding of result.findings.slice(0, 30)) {
-    parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
-  }
-  const additional = result.findings.length - 30;
-  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? 'finding is' : 'findings are'} available in the JSON/SARIF reports.`);
-  parts.push('Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.');
-  // GitHub check output is byte bounded. Truncate at UTF-8 boundaries.
-  return Buffer.from(parts.join('\n\n')).subarray(0, 58_000).toString('utf8').replace(/\uFFFD$/, '');
+  const additional = findingCount - body.displayed;
+  const notice = additional > 0 ? `\n\n${omittedFindings(additional)}` : '';
+  return `${body.summary}${notice}\n\n${footer}`;
 }
 
 export function emitAnnotations(result: ScanResults): void {

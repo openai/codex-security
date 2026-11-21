@@ -36,6 +36,81 @@ test('findings beyond the summary limit are counted with the matching noun', () 
   assert.ok(summarize(31).includes('1 additional finding is available in the JSON/SARIF reports.'));
   assert.ok(summarize(32).includes('2 additional findings are available in the JSON/SARIF reports.'));
 });
+
+test('the summary byte limit keeps finding blocks and counts omitted findings', () => {
+  const finding = {severity:'low', title:'Finding', summary:'A & B < C. 😀 '.repeat(100), path:'src/app.ts', startLine:1} as const;
+  const findings = Array.from({length:31}, () => finding);
+  const result: ScanResults = {
+    scanStatus:'completed', policyStatus:'passed', reportStatus:'ready', findings, errors:[],
+    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''}, sarifUploadReady:false,
+  };
+  const inputs = parseInputs(() => '', '/checkout');
+  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
+  const summary = resultSummary(result, inputs, target);
+  const displayed = [...summary.matchAll(/<h3>/g)].length;
+
+  assert.ok(Buffer.byteLength(summary) <= 58_000);
+  assert.ok(displayed > 0 && displayed < 30);
+  assert.equal([...summary.matchAll(/<pre>/g)].length, displayed);
+  assert.equal([...summary.matchAll(/<\/pre>/g)].length, displayed);
+  assert.ok(summary.includes('😀'));
+  assert.ok(!summary.includes('\uFFFD'));
+  assert.ok(summary.includes(`${findings.length - displayed} additional findings are available in the JSON/SARIF reports.`));
+  assert.ok(summary.includes('Use the action outputs for full JSON and SARIF.'));
+});
+
+test('long scope notes leave room for the scan status and report guidance', () => {
+  const scopeLimitations = Array.from({length:4}, () => '&'.repeat(4000));
+  const result: ScanResults = {
+    scanStatus:'failed', policyStatus:'not-evaluated', reportStatus:'partial', findings:[], errors:[], scopeLimitations,
+    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''}, sarifUploadReady:false,
+  };
+  const inputs = parseInputs(() => '', '/checkout');
+  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
+  const summary = resultSummary(result, inputs, target);
+  const notes = summary.split('\n').filter(line => line.startsWith('- '));
+
+  assert.ok(Buffer.byteLength(summary) <= 58_000);
+  assert.ok(notes.length > 0 && notes.length < scopeLimitations.length);
+  assert.ok(notes.every(line => line === `- ${'&amp;'.repeat(4000)}`));
+  assert.ok(summary.includes('SARIF report is unavailable'));
+  assert.ok(summary.includes('Scan execution failed.'));
+  assert.ok(summary.includes('Use the action outputs for full JSON and SARIF.'));
+});
+
+test('the summary keeps the last finding when the complete report fits exactly', () => {
+  const result: ScanResults = {
+    scanStatus:'completed', policyStatus:'passed', reportStatus:'ready', sarifUploadReady:false,
+    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''},
+    findings:[{severity:'low', title:'Last finding', summary:'Synthetic explanation. '.repeat(12)}],
+    errors:['&'.repeat(4000), '&'.repeat(4000), '&'.repeat(3300)],
+  };
+  const inputs = parseInputs(() => '', '/checkout');
+  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
+  const summarize = () => resultSummary(result, inputs, target);
+  const padding = 'x'.repeat(58_000 - Buffer.byteLength(summarize()) - '\n\n<pre></pre>'.length);
+
+  result.errors.push(padding);
+  const exact = summarize();
+  assert.equal(Buffer.byteLength(exact), 58_000);
+  assert.ok(exact.includes('<h3>LOW: Last finding</h3>'));
+  assert.ok(!exact.includes('additional finding'));
+
+  result.errors[3] += 'x';
+  const over = summarize();
+  assert.ok(Buffer.byteLength(over) <= 58_000);
+  assert.ok(over.includes('1 additional finding is available in the JSON/SARIF reports.'));
+  assert.ok(!over.includes('<h3>LOW: Last finding</h3>'));
+
+  result.errors[3] = padding;
+  result.findings.push({severity:'low', title:'One more finding', summary:'Another synthetic explanation.'});
+  const needsNotice = summarize();
+  assert.ok(Buffer.byteLength(needsNotice) <= 58_000);
+  assert.ok(needsNotice.includes('2 additional findings are available in the JSON/SARIF reports.'));
+  assert.ok(!needsNotice.includes('<h3>'));
+  assert.ok(needsNotice.includes('Use the action outputs for full JSON and SARIF.'));
+});
+
 test('completed findings are subject to severity policy without a coverage qualification', () => {
   const result = {scanStatus:'completed',policyStatus:'failed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
     errors:[],findings:[{severity:'high',title:'Extraction issue',summary:'Archive traversal reaches files outside the destination.',path:'src/extract.ts',startLine:12}]} as unknown as ScanResults;
