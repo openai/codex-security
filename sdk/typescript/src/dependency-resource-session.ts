@@ -361,7 +361,8 @@ export function createDependencyResourceSession(
         )
           parents.set(item["agentThreadId"], threadId);
         if (
-          item["type"] === "mcpToolCall" &&
+          (item["type"] === "mcpToolCall" ||
+            item["type"] === "commandExecution") &&
           typeof item["id"] === "string" &&
           !closed
         ) {

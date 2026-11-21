@@ -17,6 +17,7 @@ import { isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
 import {
   investigationServer,
+  isCommandEvidence,
   type DependencyEvidenceRecord,
 } from "./dependency-evidence-sources.js";
 import type { LinkedDependencyEvidence } from "./dependency-linked-resources.js";
@@ -145,6 +146,9 @@ function receiptMetadata(record: DependencyEvidenceRecord) {
     originalPayloadSha256,
     server: record.server,
     tool: record.tool,
+    ...(isCommandEvidence(record) && {
+      commandPreview: record.result.command.slice(0, 160),
+    }),
     ...(linked.linkedFrom && {
       linkedFrom: linked.linkedFrom,
       contentSha256: linked.contentSha256,
@@ -391,7 +395,7 @@ export function createInvestigationSession(options: {
     {
       name: "read_dependency_evidence",
       description:
-        'List captured receipts, optionally filtering by server or tool. Pass {id} to read the original response or {id,path:["content",0,"text"]} to read its first text block. For JSON, selection.record starts inside structuredContent (textBlock:null) or a parsed JSON text block (textBlock:index). Use next as the offset for the next page. originalPayloadSha256 identifies the complete response.',
+        'List captured receipts, optionally filtering by server or tool. To list native command receipts with command previews, specify {tool:"command_execution"}. Pass {id} to read the original response or {id,path:["content",0,"text"]} to read its first text block. For JSON, selection.record starts inside structuredContent (textBlock:null) or a parsed JSON text block (textBlock:index). Use next as the offset for the next page. originalPayloadSha256 identifies the complete response.',
       inputSchema: z.toJSONSchema(readEvidence),
       run(raw) {
         const args = readEvidence.parse(raw);
@@ -405,6 +409,7 @@ export function createInvestigationSession(options: {
           for (const r of ledger.values()) {
             if ((server && r.server !== server) || (tool && r.tool !== tool))
               continue;
+            if (!tool && isCommandEvidence(r)) continue;
             if (count++ < offset) continue;
             if (page.length === pageLength)
               return { receipts: page, next: offset + pageLength };

@@ -39,6 +39,7 @@ import {
   runReviewedDependencyCheck,
 } from "../src/dependency-reviewed-check";
 import {
+  commandEvidenceTool,
   createDependencyEvidenceCapture,
   investigationServer,
   type DependencyEvidenceRecord,
@@ -2106,6 +2107,150 @@ test("linked resources remain on the host and the complete preview has a fixed b
   expect(JSON.stringify(preview)).not.toContain("fixture://original");
   expect(preview.length).toBeLessThan(originals.length);
   expect(Buffer.byteLength(JSON.stringify(preview))).toBeLessThan(24_001);
+});
+
+test("two callers reuse a reviewed comparison without publishing the command history", async () => {
+  const parser =
+    "export default function parse(value) { return String(value); }\n";
+  await using f = await fixture({
+    "reference.js": parser,
+    "fixture-parser.js": parser,
+    "app.js": 'import parse from "./fixture-parser.js";\nparse("first");\n',
+    "secondary.js":
+      'import parse from "./fixture-parser.js";\nparse("second");\n',
+  });
+  const capture = createDependencyEvidenceCapture({});
+  function observe(...args: string[]) {
+    const item = {
+      type: "commandExecution",
+      status: "completed",
+      command: ["git", ...args].join(" "),
+      cwd: f.path,
+      exitCode: 0,
+      aggregatedOutput: execFileSync("git", args, {
+        cwd: f.path,
+        encoding: "utf8",
+      }),
+    };
+    return capture({ method: "item/completed", params: { item } })!;
+  }
+  const comparison = observe(
+    "diff",
+    "--exit-code",
+    `${f.revision}:reference.js`,
+    `${f.revision}:fixture-parser.js`,
+  );
+  const unused = observe("ls-files");
+  const paths = ["app.js", "secondary.js"];
+  const statement =
+    "The selected parser matches the reference that only returns text.";
+  const id = "premise:implementation";
+  let reviews = 0;
+  const checked = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Check callers that use binary parsing.",
+      signal,
+    },
+    {
+      discover: async () => ({
+        ...f.discovery,
+        callers: paths.map((path) => ({ path, line: 2 })),
+      }),
+      async runAgent(req) {
+        const { call } = await req.investigationTools!();
+        if (!req.coordinator) {
+          expect(req.prompt).not.toContain(unused.sha256);
+          const { claims } = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+          for (const claim of claims) {
+            if (claim.id !== id) continue;
+            expect(claim.sources[0].source.excerpt).toContain(parser.trim());
+            expect(claim.availableEvidenceKeys).toContain(comparison.sha256);
+            const original = await call("read_dependency_evidence", {
+              id: comparison.sha256,
+            });
+            expect(original).toMatchObject({
+              text: JSON.stringify(comparison.result),
+            });
+            reviews++;
+          }
+          return approvedReview(claims);
+        }
+        req.onEvidence!(unused);
+        req.onEvidence!(comparison);
+        const listing = await call("read_dependency_evidence", {});
+        expect(JSON.stringify(listing)).not.toContain(comparison.sha256);
+        const { receipts } = (await call("read_dependency_evidence", {
+          tool: commandEvidenceTool,
+        })) as { receipts: { id: string; commandPreview: string }[] };
+        const match = receipts.find((r) =>
+          r.commandPreview.startsWith("git diff"),
+        );
+        expect(match?.id).toBe(comparison.sha256);
+        await call("submit_dependency_claims", {
+          claims: [
+            {
+              id: "implementation",
+              expectedRevision: 0,
+              scope: "1.1",
+              statement,
+              sources: [{ path: "reference.js", startLine: 1, endLine: 1 }],
+              receiptIds: [match!.id],
+              dependencies: [],
+            },
+          ],
+        });
+        const [premise] = (await call("query_dependency_claims", {
+          ids: [id],
+          wait: true,
+        })) as PremiseRef[];
+        const uses = paths.map((path) => ({
+          ...f.use,
+          location: path,
+          verdict: "ruled_out",
+          reason: statement,
+          premises: [reference(premise!)],
+          evidence: [
+            { path, startLine: 1, endLine: 2, supports: ["exclusion"] },
+          ],
+          proof: {
+            sink: { function: "parse", callSite: { path, line: 2 } },
+            conditions: [
+              {
+                label: "Binary parsing",
+                status: "ruled_out",
+                explanation: statement,
+                citations: [{ path, line: 1 }],
+              },
+            ],
+          },
+        }));
+        return JSON.stringify({ uses, limitations: [] });
+      },
+    },
+  );
+  if (!("checks" in checked)) throw Error("Expected a package check.");
+  const report = checked.checks[0]!;
+  expect(reviews).toBe(1);
+  expect(report.claimEvidence.receipts[comparison.sha256]).toEqual(comparison);
+  expect(JSON.stringify(report)).not.toContain(unused.sha256);
+  expect(JSON.stringify(report)).not.toContain("git ls-files");
+  const premise = report.claims.find((c) => c.id === id)!;
+  expect(premise.decision.evidenceKeys).toContain(comparison.sha256);
+  expect(report.uses).toHaveLength(paths.length);
+  for (const use of report.uses) {
+    expect(use).toMatchObject({
+      verdict: "ruled_out",
+      deployment: "unknown",
+      supportingClaims: [reference(premise)],
+    });
+    expect(use.decidingEvidence).toContainEqual({
+      kind: "receipt",
+      receiptId: comparison.sha256,
+      originalPayloadSha256: dependencyRecordHash(comparison.result),
+    });
+  }
 });
 
 test("native investigators share asynchronous reviews, immutable premises and paged original receipts", async () => {

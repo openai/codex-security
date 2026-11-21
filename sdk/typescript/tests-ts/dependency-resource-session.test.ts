@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { PassThrough, Writable } from "node:stream";
-import { dependencyResourcePermissionsMatch } from "../src/dependency-resource-session.js";
+import {
+  createDependencyResourceSession,
+  dependencyResourcePermissionsMatch,
+} from "../src/dependency-resource-session.js";
 import { readSkillCommandOutput } from "../src/cli.js";
 import {
   createDependencyEvidenceCapture,
@@ -169,6 +172,60 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
   ).toContain("last witness");
   expect(errors).toEqual([]);
   expect(usage).toMatchObject([{ input_tokens: 7, output_tokens: 4 }]);
+});
+
+test("only completed commands from the coordinator and its descendants reach the evidence ledger", async () => {
+  const capture = createDependencyEvidenceCapture({});
+  const records: DependencyEvidenceRecord[] = [];
+  const session = createDependencyResourceSession(
+    {
+      async item(event) {
+        const record = capture(event);
+        if (record) records.push(record);
+      },
+    },
+    () => {},
+  );
+  session.register("coordinator");
+  session.receive({
+    method: "item/completed",
+    params: {
+      threadId: "coordinator",
+      item: {
+        type: "subAgentActivity",
+        kind: "started",
+        agentThreadId: "child",
+      },
+    },
+  });
+  const command = (threadId: string, method = "item/completed") =>
+    session.receive({
+      method,
+      params: {
+        threadId,
+        item: {
+          id: "call-" + threadId,
+          type: "commandExecution",
+          source: "unifiedExecStartup",
+          status: "completed",
+          command: "pwd",
+          cwd: "/" + threadId,
+          exitCode: 0,
+          aggregatedOutput: "/" + threadId + "\n",
+        },
+      },
+    });
+  command("coordinator", "item/started");
+  command("coordinator");
+  command("child");
+  command("other");
+  session.close();
+  command("coordinator");
+  await session.drain();
+  expect(records.map((r) => r.result["output"])).toEqual([
+    "/coordinator\n",
+    "/child\n",
+  ]);
 });
 
 test("native permission table merging cannot silently widen linked evidence sessions", () => {

@@ -1,8 +1,58 @@
 import { expect, test } from "bun:test";
 import {
+  commandEvidenceTool,
   createDependencyEvidenceCapture,
+  investigationServer,
+  isCommandEvidence,
   selectDependencyEvidenceServers,
 } from "../src/dependency-evidence-sources.js";
+import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
+
+test("a command receipt binds the original invocation and output of a successful native command", () => {
+  const capture = createDependencyEvidenceCapture({});
+  const item = {
+    type: "commandExecution",
+    status: "completed",
+    command: "git show HEAD:'build record.txt'",
+    cwd: "/fixture app",
+    exitCode: 0,
+    aggregatedOutput: "build 1\r\n",
+  };
+  const record = (fields: Record<string, unknown>) =>
+    capture({
+      method: "item/completed",
+      params: { item: { ...item, ...fields } },
+    });
+  const expected = {
+    server: investigationServer,
+    tool: commandEvidenceTool,
+    arguments: {},
+    result: {
+      command: item.command,
+      cwd: item.cwd,
+      exitCode: 0,
+      output: item.aggregatedOutput,
+    },
+  };
+  const original = record({})!;
+  expect(original).toEqual({
+    ...expected,
+    sha256: dependencyRecordHash(expected),
+  });
+  expect(isCommandEvidence(original)).toBe(true);
+  expect(isCommandEvidence({ ...original, server: "external" })).toBe(false);
+  expect(record({ cwd: "/different" })?.sha256).not.toBe(original.sha256);
+  expect(record({ aggregatedOutput: "" })?.result["output"]).toBe("");
+  for (const fields of [
+    { status: "failed" },
+    { status: "inProgress" },
+    { exitCode: 1 },
+    { exitCode: null },
+    { aggregatedOutput: undefined },
+    { type: "agentMessage", text: JSON.stringify(item) },
+  ])
+    expect(record(fields)).toBeUndefined();
+});
 
 test("an investigator can cite only completed calls to its selected evidence tools", () => {
   const deployments = {
