@@ -46,7 +46,6 @@ import { readThreatModelPath } from "./artifact-export.js";
 import {
   ContractValidationError,
   OutputDirectoryNotEmptyError,
-  InvalidTargetError,
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
@@ -66,7 +65,6 @@ import {
 } from "./runtime.js";
 import {
   DiffTarget,
-  normalizeTarget,
   normalizeExcludedPaths,
   gitOutput,
   gitProtectionRoots,
@@ -734,12 +732,27 @@ async function runCampaign(
                       : { telemetryContext: { operationId } }),
                   });
                   if (result !== undefined) {
+                    if (!result.alreadyCompleted) {
+                      cost = result.cost;
+                      reservation?.record(cost);
+                      savedUsage = result.usage;
+                    }
                     const accepted = await loadRegistered();
-                    result =
+                    if (
                       accepted !== undefined &&
                       (await hasCampaignReport(scanDir))
-                        ? { ...result, ...accepted.contract }
-                        : undefined;
+                    ) {
+                      result = { ...result, ...accepted.contract };
+                    } else if (result.alreadyCompleted) {
+                      result = undefined;
+                    } else {
+                      // Recovery consumed this attempt. Replacement
+                      // work must obtain the next retry's budget reservation.
+                      attemptedResume = false;
+                      throw new Error(
+                        "Recovered scan output could not be verified.",
+                      );
+                    }
                   }
                 }
               }
@@ -1833,42 +1846,29 @@ async function verifiedCampaignCheckout(
   let expectedPaths: readonly unknown[] = ["."];
   if (requestedPaths !== undefined) {
     const metadata = await lstat(matchedRoot).catch(undefinedIfMissingFile);
-    if (metadata === undefined) {
-      // Normal completion removes the checkout. Registration preserves the
-      // canonical paths resolved from the authenticated scan request.
-      const target = authority.recipe["target"];
-      if (
-        !isRecord(target) ||
-        target["kind"] !== "paths" ||
-        !Array.isArray(target["paths"])
-      )
-        return undefined;
-      expectedPaths = target["paths"];
-    } else {
-      if (
-        !metadata.isDirectory() ||
-        relative(await realpath(matchedRoot), matchedRoot) !== ""
-      )
-        return undefined;
-      try {
-        const paths =
-          task.scope === undefined
-            ? requestedPaths
-            : [resolve(matchedRoot, task.scope)];
-        expectedPaths = (
-          await normalizeTarget(matchedRoot, paths, options.signal)
-        ).paths;
-      } catch (error) {
-        if (error instanceof InvalidTargetError) return undefined;
-        throw error;
-      }
-      if (
-        receipt?.scope !== undefined &&
-        receipt.resolvedScope === undefined &&
-        expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/u, "")
-      )
-        return undefined;
-    }
+    if (
+      metadata !== undefined &&
+      (!metadata.isDirectory() ||
+        relative(await realpath(matchedRoot), matchedRoot) !== "")
+    )
+      return undefined;
+    // Cleanup can remove all or part of a completed checkout. Registration
+    // preserves the canonical paths from the authenticated scan request.
+    const target = authority.recipe["target"];
+    if (
+      !isRecord(target) ||
+      target["kind"] !== "paths" ||
+      !Array.isArray(target["paths"])
+    )
+      return undefined;
+    expectedPaths = target["paths"];
+    if (
+      metadata !== undefined &&
+      receipt?.scope !== undefined &&
+      receipt.resolvedScope === undefined &&
+      expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/u, "")
+    )
+      return undefined;
   }
   const actualPaths = new Set(scope.includePaths);
   if (
