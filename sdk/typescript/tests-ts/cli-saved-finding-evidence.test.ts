@@ -8,6 +8,7 @@ import { resolvePluginPython } from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
+import { creation } from "./support/continuum-validation-fixtures.js";
 import { setFindingIdentity } from "./support/finding-identity.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import {
@@ -66,6 +67,7 @@ async function savedEvidence() {
     Object.assign(finding, {
       createdAt: "2000-01-01T00:00:00Z",
       remediationState: { status: "fixed" },
+      continuumAssessment: { verdict: "EXPLOITABLE", provider: "continuum" },
       matches: [{ occurrenceId: "stale-occurrence" }],
       knownSince: "2000-01-01T00:00:00Z",
       knownScanIds: ["stale-scan"],
@@ -140,23 +142,15 @@ test("saved patch and verification tasks receive complete sealed evidence and li
 
   const state = join(fixture.root, "state");
   const config = join(fixture.root, "project.json");
-  await writeFile(
-    config,
-    JSON.stringify({
-      scan: {
-        validation: {
-          provider: "continuum",
-          continuum: { environment_id: "synthetic" },
-        },
-      },
-    }),
-  );
+  const validation = {
+    provider: "continuum",
+    continuum: { environment_id: "synthetic" },
+  };
+  await writeFile(config, JSON.stringify({ scan: { validation } }));
   const assessment = {
     provider: "continuum",
     itemId: full.occurrenceId,
-    findingArn:
-      "arn:aws:continuum:us-east-1:123456789012:environments/synthetic/code-findings/f",
-    findingId: "f",
+    ...creation("f", "synthetic"),
     submittedAt: "2026-01-01T00:00:00Z",
     verdict: "DISCARDED",
     statusMessage: "Synthetic provider declined validation",
@@ -166,7 +160,7 @@ test("saved patch and verification tasks receive complete sealed evidence and li
     claimMatch: "unknown" as const,
     freshness: { stale: false, reasons: [] },
   };
-  const batch = spyOn(
+  using batch = spyOn(
     ContinuumValidationProvider.prototype,
     "validateBatch",
   ).mockResolvedValue([
@@ -177,37 +171,23 @@ test("saved patch and verification tasks receive complete sealed evidence and li
       record: assessment,
     },
   ]);
-  try {
-    // If state cannot be written, the original assessment still reaches stdout.
-    for (const directory of [fixture.repository, state]) {
-      const cli = createCliTest(main);
-      const current = dependencies({
-        onWorkbench: fixture.workbench,
-        environment: { CODEX_SECURITY_STATE_DIR: directory },
-      });
-      delete current.readSavedFindings;
-      expect(
-        await cli.runCli(
-          [
-            "validate",
-            "--scan",
-            fixture.scanId,
-            "-c",
-            config,
-            "--format",
-            "json",
-          ],
-          current,
-        ),
-        cli.stderr.text(),
-      ).toBe(0);
-      expect(JSON.parse(cli.stdout.text()).items).toEqual([assessment]);
-      expect(cli.stderr.text().includes("Could not save validation")).toBe(
-        directory === fixture.repository,
-      );
-    }
-  } finally {
-    batch.mockRestore();
+  // A failed save reports the error and still returns the provider result.
+  const args = ["validate", "--scan", fixture.scanId, "-c", config, "--json"];
+  for (const directory of [fixture.repository, state]) {
+    const cli = createCliTest(main);
+    const current = dependencies({
+      onWorkbench: fixture.workbench,
+      environment: { CODEX_SECURITY_STATE_DIR: directory },
+    });
+    delete current.readSavedFindings;
+    expect(await cli.runCli(args, current), cli.stderr.text()).toBe(0);
+    expect(JSON.parse(cli.stdout.text()).items).toEqual([assessment]);
+    expect(cli.stderr.text().includes("Could not save validation")).toBe(
+      directory === fixture.repository,
+    );
+    expect(batch.mock.calls.at(-1)![0][0]).not.toHaveProperty(
+      "continuumAssessment",
+    );
   }
   // A model-writable projection cannot replace the host conclusion.
   await writeFile(
@@ -268,6 +248,7 @@ test("saved patch and verification tasks receive complete sealed evidence and li
         verdict: assessment.verdict,
         statusMessage: assessment.statusMessage,
       },
+      remediationTests: full.remediationTests,
       codeEvidence: full.codeEvidence,
       validation: full.validation,
       writeup: full.writeup,

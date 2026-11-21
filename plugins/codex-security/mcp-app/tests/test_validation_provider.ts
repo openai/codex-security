@@ -86,6 +86,7 @@ for (const mixed of [false, true]) {
         severityAfter: "critical",
       };
       const old = JSON.stringify({
+        schemaVersion: mixed ? 2 : undefined,
         configuration,
         repositoryPath,
         records: { schemaVersion: 1, items: [record] },

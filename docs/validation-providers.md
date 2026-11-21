@@ -39,8 +39,8 @@ their AWS IDs and reuses finished assessments. The CLI can also poll a
 selection from the saved scan. SDK callers invoke `validate()` with the
 provider after `run()`. [SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider)
 
-After an upgrade, Codex withholds cached Continuum assessments that predate
-finding-specific verdict checks from patch and verify. Reading a scan makes
+After an upgrade, patch and verify skip cached Continuum assessments computed
+before the current finding and HTTP proof checks. Reading a scan makes
 no AWS requests. If the plugin shows `outdated`, explicitly complete the scan
 again to refresh its assessments. For CLI snapshots, rerun `validate --scan`
 for the affected occurrences. Use the original host state and configuration
@@ -82,24 +82,22 @@ content, another destination or loss of the host state can create a fresh
 submission. If a finding stays `SUBMITTED`, check the scan activity in the
 Continuum environment. The finding may be waiting for the next build.
 
-After `validate --scan` or `scan --validate`, the CLI saves terminal Continuum
-assessments in private host state. When you patch or verify a saved occurrence
-on that host, the CLI includes its assessment in the model input. The workbench
-also loads it for the assigned Generate and Verify actions. Apply uses the
-recorded patch unchanged. These reads make no AWS requests.
+### Patch and verify a saved occurrence
 
-The assessment includes AWS finding and issue identifiers, available artifact
-IDs, status, scope, freshness and any eligible proof observation. Treat the
-stored text and identifiers as sensitive. The host keeps CLI snapshots under
-`cli-continuum-*` in the CLI state directory. Both interfaces can also read
-assessments from the plugin's provider cache. Missing state leaves the
-original finding available for remediation. The reviewer checks the candidate
-against the original remediation tests and reports the AWS result separately.
+After validation, reopen the original occurrence on the same host. CLI patch
+and verify-fix and workbench Generate and Verify can read its saved assessment
+without AWS access. The model receives sensitive provider identifiers, status,
+scope, freshness and any eligible observation. It checks the candidate against
+the original remediation tests. Apply uses the recorded patch unchanged.
 
-For a scan bound to a Continuum environment, a CLI retry can finish the
-workbench's timed-out submission. When multiple terminal results describe the
-same submission and issue, the reviewer receives the latest assessment by
-validation artifact creation time. Ambiguous results are omitted.
+The workbench owns the whole scan's validation report and retries. The CLI
+saves individual results under `cli-continuum-*` in its private state directory.
+Validating a subset leaves the workbench's queue and report intact. For a
+timed-out workbench finding, only a retry of the same AWS submission can supply
+its result. For competing results on the same submission and issue, the latest
+AWS validation artifact wins. An invalid workbench result prevents a CLI
+result from a different submission taking its place. Missing or ambiguous
+evidence leaves the original finding available for remediation.
 
 Import is optional. To collect full AWS evidence or available patches, pass
 the returned `findingId` to
@@ -155,7 +153,7 @@ Each structured item uses these fields:
 | `severityAfter`           | Original severity unless current validation and scoring support this finding           |
 | `validationArtifactId`    | AWS identifier of the selected validation artifact, when available                     |
 | `scoringArtifactId`       | AWS identifier of the selected scoring artifact, when available                        |
-| `proofObservation`        | Selected AWS execution effect or source-analysis conclusion for a matched finding      |
+| `proofObservation`        | Observed HTTP effect from a matched finding                                            |
 | `providerSeverity`        | Provider's severity, when returned. Continuum reports the severity of the issue.       |
 | `resultScope`             | `finding` or `issue`, indicating the scope of the verdict                              |
 | `issueFindingCount`       | Number of distinct findings in the associated issue, when known                        |
@@ -199,35 +197,29 @@ Codex looks for a reasoning step whose `source` cites the first submitted
 location and whose `claim` describes the same kind of flaw. The citation
 must include the exact repository-relative path and a starting line within
 the submitted range. The citation and claim must occur in the same step.
-If the finding result has no reasoning chain, the adapter checks any proof
-code or source analysis in that result. It ignores the issue caption, console
-output and other findings' proofs. This comparison is a heuristic. Different
-flaws at the same location can share vocabulary.
 
-The adapter checks the AWS finding ARN, any echoed source ID, and the ID and
-type of each requested artifact. For a matching result, the supplemental
-severity can change if the issue has one member, all scoring signals identify
-that issue, and a single exploitability signal identifies the selected
-validation artifact and its verdict. The submission, validation, scoring and
-issue update timestamps must establish that order. If these scoring checks
-fail, the assessment explains the limitation and omits the scorer's
-reachability, factors and preconditions. The adapter selects the newest eligible
-linked scorer from the issue history. If another scorer might be newer, the
-linked scorer supplies its own evidence, while `severityAfter` retains the
-original severity. The current issue severity is available in `providerSeverity`.
+The same finding result must contain a complete HTTP
+[exploit artifact](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ValidationExploitArtifact.html).
+For `EXPLOITABLE`, the observed effect must be `DATA_LEAKED`, `ERROR_REVEALED`
+or `BEHAVIOR_CHANGED`. For `NOT_EXPLOITABLE`, it must be `NO_EFFECT`.
+Missing or contradictory evidence leaves the claim match unknown and preserves
+Codex severity. An executed program or source analysis on the issue cannot
+supply missing proof for an individual finding. Claim comparison remains a
+heuristic because distinct flaws can share a location and vocabulary.
 
-Legacy artifacts with an explicit conclusive per-finding verdict can qualify
-for matching and scoring when AWS omits the run status. A `proofObservation`
-requires a matched finding, explicit `COMPLETED` status and eligible linked
-scoring. For HTTP proof, Codex includes only the observed effect from that
-finding's [exploit artifact](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ValidationExploitArtifact.html).
-A reasoning step alone cannot establish execution. Codex omits the HTTP
-request, response and raw reasoning chain from the assessment.
+The newest eligible scorer supplies reachability and other scoring evidence.
+Its signals must identify the issue by ID or ARN, with a single exploitability
+signal referencing the selected proof and verdict. Timestamps must establish
+submission, validation, scoring and issue update in that order. To apply the
+issue severity to the finding, the proof must match, the issue must have one
+member and the linked scorer must be the newest on the issue. The issue
+severity is reported separately in `providerSeverity`.
 
-If the finding result itself includes proof code or source analysis, the
-observation distinguishes `execution` from `source_analysis`. The latter
-can include an inferred effect and summary. Observation text fields have
-whitespace normalized and are limited to 320 characters. Consult the selected
+A matched result with linked scoring and an explicit `COMPLETED` status can
+include an execution `proofObservation` with the observed HTTP effect.
+An older artifact with no run status can qualify for matching and scoring
+under the same checks, but carries no observation. Codex omits requests,
+responses and raw reasoning from the assessment. Consult the selected
 artifact for details. The original finding supplies the remediation criteria.
 
 ### Findings that share an issue

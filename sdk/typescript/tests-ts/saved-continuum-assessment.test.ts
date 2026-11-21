@@ -17,13 +17,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import * as gitMetadata from "../src/local-git-metadata.js";
-import { continuumAssessmentVersion } from "../src/cli-continuum-assessments.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
-import { remediationPrompt } from "../src/remediation.js";
 import {
   assessmentStateDirectories,
+  continuumAssessmentVersion,
+} from "../src/continuum-assessment-store.js";
+import {
   saveCliContinuumAssessments,
   savedContinuumAssessments,
 } from "../src/saved-continuum-assessment.js";
@@ -98,16 +99,28 @@ test("ignores missing cache even when the repository supplies a lookalike", asyn
 });
 test("rejects ambiguous occurrence IDs", async () => {
   await save([conclusion, conclusion, conclusion]);
+  await saveCli([conclusion]);
   expect((await read()).size).toBe(0);
 });
 test.each([
   { configuration: { ...config, extra: true } },
   { repositoryPath: "elsewhere" },
   { retry: undefined },
-])("rejects a mismatched or legacy result %j", async (extra) => {
-  await save([conclusion], extra);
-  expect((await read()).size).toBe(0);
-});
+  { records: { schemaVersion: 1, items: [null] } },
+])(
+  "an invalid bound result cannot release the submission pin %j",
+  async (extra) => {
+    const other = {
+      ...conclusion,
+      findingId: "other",
+      findingArn: prefix + "/code-findings/other",
+    };
+    await saveCli([other]);
+    expect((await read()).get("occ_a")).toEqual(other);
+    await save([conclusion], extra);
+    expect((await read()).size).toBe(0);
+  },
+);
 test.each([
   { issueId: "other" },
   { findingId: "other" },
@@ -117,6 +130,7 @@ test.each([
     issueArn: conclusion.issueArn.replace("/env/", "/other/"),
   },
 ])("rejects inconsistent external identity %j", async (extra) => {
+  await saveCli([conclusion]);
   await save([{ ...conclusion, ...extra }]);
   expect((await read()).size).toBe(0);
 });
@@ -183,36 +197,18 @@ test.skipIf(process.platform === "win32")(
 
 test("rejects paths redirected into repository content", async () => {
   const file = join(repo, "cache");
-  await writeFile(file, "{}");
+  await save([conclusion]);
+  await rename(path + ".result", file);
   await symlink(file, path + ".result");
   expect((await read()).size).toBe(0);
 });
-test.each(["patch", "verify"] as const)(
-  "%s asks for separate AWS and local evidence with original criteria",
-  async (operation) => {
-    const finding = {
-      occurrenceId: "occ_a",
-      remediationTests: ["criterion A"],
-    };
-    const context = {
-      operation,
-      pluginRoot: resolve("_bundled_plugin"),
-      verificationIds: ["occ_a"],
-    };
-    const baseline = await remediationPrompt({
-      ...context,
-      contents: [finding],
-    });
-    expect(baseline).not.toContain("continuumAssessment");
-    const contents = [{ ...finding, continuumAssessment: conclusion }];
-    const enriched = await remediationPrompt({ ...context, contents });
-    expect(enriched).toContain(JSON.stringify(contents));
-    expect(enriched).toContain(
-      "all its remediationTests as the acceptance criteria",
-    );
-    expect(enriched).toContain("separately give your local evidence");
-  },
-);
+async function cliDirectory() {
+  const name = (await readdir(root)).find((name) =>
+    name.startsWith("cli-continuum-"),
+  );
+  if (!name) throw new Error("Missing CLI assessment directory");
+  return join(root, name);
+}
 
 function saveCli(
   items: Omit<ValidationItemRecord, "severityBefore" | "severityAfter">[],
@@ -289,10 +285,7 @@ test.skipIf(process.platform === "win32")(
   "rejects a shared assessment directory on reads and writes without changing its permissions",
   async () => {
     await saveCli([conclusion]);
-    const [storage] = (await readdir(root)).filter((name) =>
-      name.startsWith("cli-continuum-"),
-    );
-    const directory = join(root, storage!);
+    const directory = await cliDirectory();
     await chmod(directory, 0o770);
     expect((await read()).size).toBe(0);
     await expect(saveCli([conclusion])).rejects.toThrow();
@@ -327,25 +320,33 @@ test("plugin binding restricts an ambiguous CLI selection to its destination", a
 test("keeps CLI storage outside repository control for writes and reloads", async () => {
   await expect(saveCli([conclusion], "env", repo)).rejects.toThrow();
   await saveCli([conclusion]);
-  const store = (await readdir(root)).find((name) =>
-    name.startsWith("cli-continuum-"),
-  );
-  expect(store).toBeDefined();
-  const dir = join(root, store!);
+  const dir = await cliDirectory();
   const moved = join(repo, "state");
   await rename(dir, moved);
   await symlink(moved, dir, process.platform === "win32" ? "junction" : "dir");
   expect((await read()).size).toBe(0);
   await expect(saveCli([conclusion])).rejects.toThrow();
 });
+
+test("rejects an external state path routed through a repository link before creating it", async () => {
+  const destination = join(root, "destination");
+  await mkdir(destination);
+  const relay = join(repo, "relay");
+  const alias = join(root, "alias");
+  const type = process.platform === "win32" ? "junction" : "dir";
+  await symlink(destination, relay, type);
+  await symlink(relay, alias, type);
+  await expect(
+    saveCli([conclusion], "env", join(alias, "new-state")),
+  ).rejects.toThrow();
+  expect(await readdir(destination)).not.toContain("new-state");
+});
+
 test("a changed snapshot invalidates only its own occurrence across caches", async () => {
   await save([conclusion]);
   const other = { ...conclusion, itemId: "occ_b" };
   await saveCli([conclusion, other]);
-  const [storage] = (await readdir(root)).filter((name) =>
-    name.startsWith("cli-continuum-"),
-  );
-  const directory = join(root, storage!);
+  const directory = await cliDirectory();
   for (const name of await readdir(directory)) {
     const filename = join(directory, name);
     const saved = JSON.parse(await readFile(filename, "utf8"));
@@ -379,40 +380,47 @@ const completed = {
   terminalStatus: "COMPLETED",
   proofObservation: observation,
 };
-test("a legacy plugin verdict only binds the original admission for a fresh CLI assessment", async () => {
-  await save([completed], { schemaVersion: undefined });
-  expect((await read()).size).toBe(0);
-  await saveCli([{ ...completed, submittedAt: "2026-11-21T01:20:00Z" }]);
-  expect((await read()).size).toBe(0);
-  await saveCli([conclusion]);
-  expect((await read()).get("occ_a")).toEqual(conclusion);
-});
+test.each([undefined, 2])(
+  "a legacy plugin verdict only binds the original admission for a fresh CLI assessment (version %s)",
+  async (schemaVersion) => {
+    await save([completed], { schemaVersion });
+    expect((await read()).size).toBe(0);
+    await saveCli([{ ...completed, submittedAt: "2026-11-21T01:20:00Z" }]);
+    expect((await read()).size).toBe(0);
+    await saveCli([conclusion]);
+    expect((await read()).get("occ_a")).toEqual(conclusion);
+  },
+);
 
-test("legacy CLI snapshots cannot supply or mask a refreshed assessment", async () => {
-  const repositoryPath = await realpath(repo);
-  const digest = (value: string) => hash("sha256", value);
-  const directory = join(
-    root,
-    "cli-continuum-" + digest(JSON.stringify([repositoryPath, "scan"])),
-  );
-  await mkdir(directory, { mode: 0o700 });
-  const raw = JSON.stringify({
-    schemaVersion: 1,
-    repositoryPath,
-    scanId: "scan",
-    environmentId: "env",
-    record: completed,
-  });
-  const filename = join(
-    directory,
-    ["occ_a", "env", raw].map(digest).join(".") + ".json",
-  );
-  await writeFile(filename, raw);
-  expect((await read()).size).toBe(0);
-  await saveCli([conclusion]);
-  expect((await read()).get("occ_a")).toEqual(conclusion);
-  expect(await readFile(filename, "utf8")).toEqual(raw);
-});
+test.each([1, 2])(
+  "v%i CLI snapshots cannot supply or mask a refreshed assessment",
+  async (schemaVersion) => {
+    const repositoryPath = await realpath(repo);
+    const digest = (value: string) => hash("sha256", value);
+    const directory = join(
+      root,
+      (schemaVersion === 1 ? "cli-continuum-" : "cli-continuum-v2-") +
+        digest(JSON.stringify([repositoryPath, "scan"])),
+    );
+    await mkdir(directory, { mode: 0o700 });
+    const raw = JSON.stringify({
+      schemaVersion,
+      repositoryPath,
+      scanId: "scan",
+      environmentId: "env",
+      record: completed,
+    });
+    const filename = join(
+      directory,
+      ["occ_a", "env", raw].map(digest).join(".") + ".json",
+    );
+    await writeFile(filename, raw);
+    expect((await read()).size).toBe(0);
+    await saveCli([conclusion]);
+    expect((await read()).get("occ_a")).toEqual(conclusion);
+    expect(await readFile(filename, "utf8")).toEqual(raw);
+  },
+);
 
 test.each(["execution", "source_analysis"] as const)(
   "preserves %s observations for the selected run",
@@ -429,6 +437,13 @@ test.each([
     freshness: {
       ...completed.freshness,
       evidenceCreatedAt: "2020-01-01T00:00:00Z",
+    },
+  },
+  {
+    freshness: {
+      ...completed.freshness,
+      validatedAt: "2026-11-21T02:00:00.000001Z",
+      evidenceCreatedAt: "2026-11-21T02:00:00.000002Z",
     },
   },
   { issueFindingCount: 2 },
@@ -465,7 +480,8 @@ test("an explicit CLI retry supersedes a cached plugin timeout only for the same
     verdict: "UNAVAILABLE",
     terminalStatus: undefined,
   };
-  await save([timeout]);
+  await save([timeout], { retry: [timeout] });
+  const pluginCache = await readFile(path + ".result", "utf8");
   await saveCli([
     { ...completed, submittedAt: "2026-11-21T01:20:00Z" },
     {
@@ -477,6 +493,7 @@ test("an explicit CLI retry supersedes a cached plugin timeout only for the same
   expect((await read()).get("occ_a")?.verdict).toBe("UNAVAILABLE");
   await saveCli([completed]);
   expect((await read()).get("occ_a")).toEqual(completed);
+  expect(await readFile(path + ".result", "utf8")).toBe(pluginCache);
 });
 
 test("chooses the newest artifact from the same admission and issue across CLI and plugin", async () => {
@@ -495,7 +512,7 @@ test("chooses the newest artifact from the same admission and issue across CLI a
     validationArtifactId: "newer",
     freshness: {
       ...failed.freshness,
-      evidenceCreatedAt: "2026-11-21T02:30:00Z",
+      evidenceCreatedAt: "2026-11-21T02:00:00.000001Z",
     },
   };
   await save([newer]);

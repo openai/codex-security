@@ -9,7 +9,7 @@ import {
 } from "./validation-provider.js";
 
 export { validationProviderFromConfiguration };
-export { continuumAssessmentVersion } from "./cli-continuum-assessments.js";
+export { continuumAssessmentVersion } from "./continuum-assessment-store.js";
 export { savedContinuumAssessments } from "./saved-continuum-assessment.js";
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };

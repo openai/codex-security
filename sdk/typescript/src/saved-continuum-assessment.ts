@@ -1,27 +1,15 @@
-import { lstat, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import {
+  assessmentStore,
   continuumAssessmentVersion,
-  readCliSnapshots,
-  writeCliSnapshots,
-} from "./cli-continuum-assessments.js";
-import { commandGitProtectionRoots } from "./local-git-metadata.js";
-import { readRegularInputFile } from "./prompt-files.js";
-import {
-  codexSecurityStateDirectory,
-  requireOutputDirectoryOwnership,
-  requireOutputOutsideRepositories,
-  requireWindowsOutputPath,
-  validatePreparedOutputDir,
-  type ProcessEnvironment,
-} from "./runtime.js";
+} from "./continuum-assessment-store.js";
+import { compareTimestamps } from "./timestamps.js";
+import type { ProcessEnvironment } from "./runtime.js";
 import type {
   ValidationProviderConfiguration,
   ValidationItemRecord,
 } from "./validation-provider.js";
-import { nullIfMissingFile } from "./targets.js";
 
 // The protected provider cache contains host settings and retry receipts as
 // well as conclusions. Only this allowlist crosses into model input.
@@ -65,7 +53,9 @@ const conclusion = z.object({
     reasons: z.array(text),
   }),
   reasons: z.array(z.object({ basis: text, reason: text })),
-});
+}) satisfies z.ZodType<
+  Omit<ValidationItemRecord, "severityBefore" | "severityAfter">
+>;
 type Conclusion = z.infer<typeof conclusion>;
 const binding = z.object({
   provider: z.string().trim().toLowerCase().pipe(z.literal("continuum")),
@@ -75,111 +65,62 @@ const binding = z.object({
   }),
 });
 const cached = z.object({
-  schemaVersion: z.number().optional(),
+  schemaVersion: z.literal([2, continuumAssessmentVersion]).optional(),
   configuration: z.unknown(),
   repositoryPath: z.string(),
   result: z.object({ provider: z.literal("continuum") }),
   records: z.object({
     schemaVersion: z.literal(1),
-    items: z.array(z.unknown()),
+    items: z.array(z.looseObject({ itemId: text.min(1) })),
   }),
-  retry: z.array(z.unknown()).nullish(),
+  // The retry field distinguishes caches supporting terminal status from legacy results.
+  retry: z.array(z.unknown()).nullable(),
 });
+
+// The provider owns attribution. Only forward a stored observation consistent
+// with its own identifiers, scope, run status and evidence time.
+function hasCurrentProof(item: Conclusion) {
+  const { validatedAt, evidenceCreatedAt, stale } = item.freshness;
+  return (
+    item.terminalStatus === "COMPLETED" &&
+    (item.verdict === "EXPLOITABLE" || item.verdict === "NOT_EXPLOITABLE") &&
+    (item.claimMatch === "on_target" ||
+      item.claimMatch === "on_target_escalated") &&
+    item.resultScope === "finding" &&
+    item.issueFindingCount === 1 &&
+    !item.joinedValidatedIssue &&
+    !stale &&
+    !!item.issueId &&
+    !!item.validationArtifactId &&
+    !!item.scoringArtifactId &&
+    !!validatedAt &&
+    compareTimestamps(validatedAt, item.submittedAt) >= 0 &&
+    (evidenceCreatedAt === undefined ||
+      compareTimestamps(evidenceCreatedAt, validatedAt) === 0)
+  );
+}
 
 function project(raw: unknown, environmentId: string, region?: string) {
   const item = conclusion.safeParse(raw);
   if (!item.success) return undefined;
   const record = item.data;
-  const suffix = "/code-findings/" + record.findingId;
-  const scope = record.findingArn.slice(0, -suffix.length);
-  if (
-    !record.findingArn.endsWith(suffix) ||
-    !/^arn:[^:]+:continuum:[^:]+:[0-9]{12}:environments\/[a-zA-Z0-9_-]+$/.test(
-      scope,
-    ) ||
-    (region && scope.split(":")[3] !== region) ||
-    !scope.endsWith("/" + environmentId)
-  )
-    return undefined;
-  if (
-    record.issueArn !==
-    (record.issueId ? scope + "/code-issues/" + record.issueId : undefined)
-  )
-    return undefined;
-  // An observation describes the original validation. A different group,
-  // run, or historical member cannot supply occurrence-level evidence.
-  if (
-    record.proofObservation &&
-    (record.terminalStatus !== "COMPLETED" ||
-      (record.verdict !== "EXPLOITABLE" &&
-        record.verdict !== "NOT_EXPLOITABLE") ||
-      !(
-        Date.parse(record.freshness.validatedAt ?? "") >=
-        Date.parse(record.submittedAt)
-      ) ||
-      (record.freshness.evidenceCreatedAt !== undefined &&
-        Date.parse(record.freshness.evidenceCreatedAt) !==
-          Date.parse(record.freshness.validatedAt ?? "")) ||
-      record.resultScope !== "finding" ||
-      (record.claimMatch !== "on_target" &&
-        record.claimMatch !== "on_target_escalated") ||
-      !record.scoringArtifactId ||
-      !record.validationArtifactId ||
-      !record.issueId ||
-      record.issueFindingCount !== 1 ||
-      record.joinedValidatedIssue ||
-      record.freshness.stale)
-  ) {
-    delete record.proofObservation;
-  }
-  return record;
-}
-
-async function readProtectedJson(
-  environment: ProcessEnvironment,
-  repositoryPath: string,
-  path: string,
-): Promise<unknown> {
-  try {
-    if (!(await lstat(path).catch(nullIfMissingFile))) return undefined;
-    const repository = await realpath(repositoryPath);
-    const roots = [
-      repository,
-      ...(await commandGitProtectionRoots(repository, environment)),
-    ];
-    const directory = await validatePreparedOutputDir(
-      dirname(path),
-      (location) => requireOutputOutsideRepositories(roots, location, "state"),
-      true,
+  const arn =
+    /^(arn:[^:]+:continuum:([^:]+):[0-9]{12}:environments\/([a-zA-Z0-9_-]+))\/code-findings\/([a-zA-Z0-9_-]+)$/.exec(
+      record.findingArn,
     );
-    if (process.platform === "win32") {
-      await requireWindowsOutputPath(directory, true);
-    } else if (((await lstat(directory)).mode & 0o022) !== 0) {
-      return null;
-    }
-    const file = join(directory, basename(path));
-    const metadata = await lstat(file, { bigint: true });
-    if (metadata.nlink !== 1n) return null;
-    if (process.platform !== "win32") {
-      requireOutputDirectoryOwnership({ uid: Number(metadata.uid) }, file);
-      if ((metadata.mode & 0o022n) !== 0n) return null;
-    }
-    const contents = await readRegularInputFile(path, repository, metadata);
-    return JSON.parse(contents) as unknown;
-  } catch {
-    // Distinguish an invalid binding from an absent one.
-    return null;
-  }
-}
-
-/** The plugin's existing binding directory predates the workbench default. */
-export function assessmentStateDirectories(environment: ProcessEnvironment) {
-  return {
-    plugin:
-      environment["CODEX_SECURITY_STATE_DIR"]?.trim() ||
-      join(homedir(), ".codex-security"),
-    cli: codexSecurityStateDirectory(environment),
-  };
+  if (!arn) return;
+  const [, scope, awsRegion, destination, findingId] = arn;
+  const issueArn = record.issueId && scope + "/code-issues/" + record.issueId;
+  if (
+    findingId !== record.findingId ||
+    destination !== environmentId ||
+    (region && region !== awsRegion) ||
+    record.issueArn !== issueArn
+  )
+    return;
+  if (record.proofObservation && !hasCurrentProof(record))
+    delete record.proofObservation;
+  return record;
 }
 
 /** Persist the same conclusions exposed to remediation. A polling timeout is
@@ -191,6 +132,7 @@ export async function saveCliContinuumAssessments(
   configuration: ValidationProviderConfiguration,
   records: readonly (ValidationItemRecord | undefined)[],
 ) {
+  if (configuration.provider.trim().toLowerCase() !== "continuum") return;
   const { environment_id, aws_region } = binding.parse(configuration).continuum;
   const terminal: Conclusion[] = [];
   for (const raw of records) {
@@ -198,14 +140,8 @@ export async function saveCliContinuumAssessments(
     if (value && value.verdict !== "UNAVAILABLE") terminal.push(value);
   }
   if (!terminal.length) return;
-  await writeCliSnapshots(
-    codexSecurityStateDirectory(environment),
-    repositoryPath,
-    scanId,
-    environment_id,
-    terminal,
-    environment,
-  );
+  const store = await assessmentStore(environment, scanId, repositoryPath);
+  await store.writeSnapshots(environment_id, terminal);
 }
 
 type Admission = Pick<Conclusion, "findingArn" | "submittedAt">;
@@ -214,41 +150,35 @@ function sameAdmission(a: Admission, b: Admission) {
 }
 
 function evidenceTime(item: Conclusion) {
-  return Date.parse(
-    item.freshness.evidenceCreatedAt ?? item.freshness.validatedAt ?? "",
-  );
+  return item.freshness.evidenceCreatedAt ?? item.freshness.validatedAt ?? "";
 }
 
-/** Use provider evidence creation time, never local completion/write order.
- * Timeouts can be resolved before an issue has even been assigned. */
-function selectConclusion(
-  prior: Conclusion | undefined,
-  candidates: Conclusion[],
-) {
-  if (prior && prior.verdict !== "UNAVAILABLE") candidates.push(prior);
-  const distinct = [
-    ...new Map(candidates.map((item) => [JSON.stringify(item), item])).values(),
-  ];
-  const first = distinct[0];
-  if (!first) return prior;
-  if (distinct.length === 1) return first;
-  if (!first.issueArn) return;
-  let newest: Conclusion | undefined;
-  let newestTime = -Infinity;
-  for (const item of distinct) {
-    const time = evidenceTime(item);
+/** A bound plugin result pins the submission. Compare terminal results by AWS
+ * artifact creation time within that submission and issue. A tie is ambiguous. */
+function selectConclusion(plugin: Conclusion | undefined, cli: Conclusion[]) {
+  let newest = plugin?.verdict === "UNAVAILABLE" ? undefined : plugin;
+  let tied = false;
+  for (const record of cli) {
+    if (!newest) {
+      newest = record;
+      continue;
+    }
+    if (isDeepStrictEqual(newest, record)) continue;
     if (
-      !sameAdmission(first, item) ||
-      item.issueArn !== first.issueArn ||
-      !Number.isFinite(time)
+      !sameAdmission(newest, record) ||
+      !newest.issueArn ||
+      newest.issueArn !== record.issueArn
     )
       return;
-    if (time > newestTime) {
-      newestTime = time;
-      newest = item;
-    } else if (time === newestTime) newest = undefined;
+    const delta = compareTimestamps(evidenceTime(record), evidenceTime(newest));
+    if (!Number.isFinite(delta)) return;
+    if (delta === 0) tied = true;
+    if (delta > 0) {
+      newest = record;
+      tied = false;
+    }
   }
-  return newest;
+  return tied ? undefined : (newest ?? plugin);
 }
 
 export async function savedContinuumAssessments(
@@ -258,75 +188,64 @@ export async function savedContinuumAssessments(
   occurrenceIds: readonly string[],
 ) {
   const assessments = new Map<string, Conclusion>();
-  // A legacy cache can still bind an occurrence to the original submission.
-  // Only a freshly assessed result for that admission may reach remediation.
-  const admissions = new Map<string, Admission>();
-  if (!id.safeParse(scanId).success || !occurrenceIds.length)
-    return assessments;
-  const requested = new Set(occurrenceIds);
-  let paths;
-  try {
-    paths = assessmentStateDirectories(environment);
-  } catch {
-    return assessments;
-  }
-  const base = join(paths.plugin, "validation-providers", scanId + ".json");
-  const config = await readProtectedJson(environment, repositoryPath, base);
+  if (!occurrenceIds.length) return assessments;
+  const store = await assessmentStore(
+    environment,
+    scanId,
+    repositoryPath,
+  ).catch(() => undefined);
+  if (!store) return assessments;
+  const config = await store.readBinding();
   const bound = binding.safeParse(config);
   if (config !== undefined && !bound.success) return assessments;
-  const environmentId = bound.data?.continuum.environment_id;
-  const region = bound.data?.continuum.aws_region;
-  if (environmentId) {
-    const parsed = cached.safeParse(
-      await readProtectedJson(environment, repositoryPath, base + ".result"),
-    );
+  const destination = bound.data?.continuum;
+  const requested = new Set(occurrenceIds);
+  // Keep legacy submission pins for refreshed CLI results without forwarding
+  // verdicts inferred under the old attribution rules.
+  const admissions = new Map<string, Admission>();
+  const result = destination && (await store.readPluginResult());
+  if (destination && result !== undefined) {
+    const saved = cached.safeParse(result).data;
+    // A damaged bound result can hide the original AWS finding ID. Do not
+    // substitute a CLI result for a potentially different submission.
     if (
-      parsed.success &&
-      parsed.data.repositoryPath === repositoryPath &&
-      JSON.stringify(config) === JSON.stringify(parsed.data.configuration)
-    ) {
-      const current =
-        parsed.data.schemaVersion === continuumAssessmentVersion &&
-        parsed.data.retry !== undefined;
-      for (const raw of parsed.data.records.items) {
-        const record = project(raw, environmentId, region);
-        if (!record || !requested.has(record.itemId)) continue;
-        if (admissions.has(record.itemId)) {
-          requested.delete(record.itemId);
-          assessments.delete(record.itemId);
-          continue;
-        }
-        admissions.set(record.itemId, record);
-        if (current) assessments.set(record.itemId, record);
+      saved?.repositoryPath !== repositoryPath ||
+      JSON.stringify(config) !== JSON.stringify(saved.configuration)
+    )
+      return assessments;
+    for (const raw of saved.records.items) {
+      if (!requested.has(raw.itemId)) continue;
+      const record = project(
+        raw,
+        destination.environment_id,
+        destination.aws_region,
+      );
+      if (!record || admissions.has(raw.itemId)) {
+        requested.delete(raw.itemId);
+        assessments.delete(raw.itemId);
+      } else {
+        admissions.set(raw.itemId, record);
+        if (saved.schemaVersion === continuumAssessmentVersion)
+          assessments.set(raw.itemId, record);
       }
     }
   }
-  const snapshots = await readCliSnapshots(
-    paths.cli,
-    repositoryPath,
-    scanId,
+  const snapshots = await store.readSnapshots(
     requested,
-    environmentId,
-    environment,
-  ).catch(() => undefined);
-  if (!snapshots) return assessments;
+    destination?.environment_id,
+  );
   for (const [occurrence, items] of snapshots) {
-    if (items === null) {
-      assessments.delete(occurrence);
-      continue;
-    }
-    const candidates: Conclusion[] = [];
-    const admission = admissions.get(occurrence);
-    for (const item of items) {
-      const record = project(item.record, item.environmentId, region);
-      if (
-        record &&
-        record.verdict !== "UNAVAILABLE" &&
-        (!admission || sameAdmission(record, admission))
-      )
-        candidates.push(record);
-    }
-    const selected = selectConclusion(assessments.get(occurrence), candidates);
+    const pin = admissions.get(occurrence);
+    const candidates = items?.flatMap(({ record, environmentId }) => {
+      const item = project(record, environmentId, destination?.aws_region);
+      return item &&
+        item.verdict !== "UNAVAILABLE" &&
+        (!pin || sameAdmission(item, pin))
+        ? [item]
+        : [];
+    });
+    const selected =
+      candidates && selectConclusion(assessments.get(occurrence), candidates);
     if (selected) assessments.set(occurrence, selected);
     else assessments.delete(occurrence);
   }

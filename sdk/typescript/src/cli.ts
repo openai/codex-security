@@ -7429,13 +7429,14 @@ export async function main(
                       provider.validate(finding, context),
                     ),
                   );
+              const items = results.map((result) => result.record);
               await saveForRemediation(
                 errorOutput,
                 dependencies.environment,
                 selected.repository,
                 selected.scanId,
                 configuration,
-                results.map((result) => result.record),
+                items,
               );
               exitCode = controller.signal.aborted
                 ? controller.signal.reason === "SIGTERM"
@@ -7448,7 +7449,7 @@ export async function main(
                 return {
                   schemaVersion: 1,
                   scanId: selected.scanId,
-                  items: results.map((result) => result.record),
+                  items,
                 };
               }
               await writeCliOutput(
@@ -10004,7 +10005,7 @@ async function selectSavedFindings(
           dependencies.runWorkbench,
         );
   const assessments =
-    purpose === "remediation" && selected.length
+    purpose === "remediation"
       ? await savedContinuumAssessments(
           dependencies.environment,
           scan.scanId,
@@ -10041,11 +10042,10 @@ async function selectSavedFindings(
         if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
         else delete hydrated[key];
       }
-      delete hydrated["continuumAssessment"];
       const assessment = assessments?.get(finding.occurrenceId);
-      return assessment
-        ? { ...hydrated, continuumAssessment: assessment }
-        : hydrated;
+      if (assessment) hydrated["continuumAssessment"] = assessment;
+      else delete hydrated["continuumAssessment"];
+      return hydrated;
     }),
   };
 }
