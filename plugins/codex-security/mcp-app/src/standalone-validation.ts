@@ -15,3 +15,13 @@ export const validationProviderFromConfiguration: (
   configuration: ValidationProviderConfiguration,
 ) => unknown = unavailable;
 export const assessPluginFindings: (...args: unknown[]) => never = unavailable;
+
+// Only the SDK can run the provider or update the saved assessment.
+export function withPublicationLock<T>(
+  _state: string,
+  _key: string,
+  _signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+) {
+  return operation();
+}

@@ -654,6 +654,7 @@ test("a bundled validation artifact includes only the selected finding's proof a
   };
   const selectedBody = {
     validationEvidence: {
+      terminalStatus: validation.terminalStatus,
       exploitable: selected.exploitable,
       perFindingResults: [selected],
     },

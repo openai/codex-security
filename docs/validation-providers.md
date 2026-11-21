@@ -28,13 +28,20 @@ For a plugin scan, include the project file in the request:
 
 > Scan this repository for security issues using codex-security.yaml.
 
-The existing completion tools run the configured provider after sealing; no new
-MCP tool or skill step is needed. Reopening a completed scan reuses results
-saved in protected host state, bound to the scan and its selected provider,
-rather than resubmitting. The supplemental files in the scan directory are
-output projections, not authoritative cache input. SDK callers explicitly
-invoke `validate()` with the provider after `run()`; see the
-[SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider).
+Standard and diff setup save the provider settings from the selected project
+file. Rejoining the scan uses that saved configuration.
+
+The plugin runs the configured provider after sealing the scan. Ask Codex to
+show the completed scan to read the last saved assessment from protected host
+state. If polling timed out, ask Codex to retry supplemental validation for
+that scan ID. Completing the scan again resumes polling accepted findings by
+their AWS IDs and reuses finished assessments. The CLI can also poll a
+selection from the saved scan. SDK callers invoke `validate()` with the
+provider after `run()`. [SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider)
+
+The first explicit completion after upgrading refreshes older cached
+assessments that predate terminal status handling. If the original submission
+predates AWS receipt storage on this host, the refresh can create a new finding.
 
 Provider work is outside Codex cost accounting. As with existing validation,
 `scan --validate` cannot be combined with a scan cost limit. Posture questions
@@ -67,7 +74,13 @@ After an interruption, rerun the command with the same scan ID, selection,
 environment and host state. Pending requests reuse the same document and token.
 Accepted findings resume at `GetCodeFinding`. A new finding, changed submitted
 content, another destination or loss of the host state can create a fresh
-submission. You can also use this command after a plugin scan times out.
+submission. If a finding stays `SUBMITTED`, check the scan activity in the
+Continuum environment. The finding may be waiting for the next build.
+
+To bring a finding back for remediation, pass the returned `findingId` to
+`codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT --format json`.
+Use the same AWS profile and Region as for validation. The collector retrieves
+the finding's evidence and any matching patches. [Collect, patch and verify a finding](scanner-imports/continuum.md#collect-a-finding-with-patches)
 
 ### Match an imported issue to local findings
 
@@ -111,8 +124,10 @@ Each structured item uses these fields:
 | `submittedAt`             | Original submission time                                                               |
 | `provider`                | Validation provider name                                                               |
 | `verdict`                 | Provider verdict, or `UNAVAILABLE`                                                     |
+| `terminalStatus`          | How the validation run ended, when reported by the provider                            |
+| `statusMessage`           | Provider explanation for a discarded or declined finding, when supplied                |
 | `severityBefore`          | Original Codex severity                                                                |
-| `severityAfter`           | Supplemental finding severity; original retained for issue scope or an unmatched claim |
+| `severityAfter`           | Original severity unless a conclusive finding-level result matches the submitted claim |
 | `providerSeverity`        | Provider's severity, when returned; issue severity for issue scope                     |
 | `resultScope`             | `finding` or `issue`: scope of the verdict and provider severity, when reported        |
 | `issueFindingCount`       | Number of distinct findings in the associated issue, when known                        |
@@ -149,8 +164,9 @@ combined severity.
 A provider can prove a related flaw without validating the submitted claim.
 Continuum labels that case “Not validated: Continuum proved a related flaw” and
 retains Codex severity (`claimMatch: different_flaw`). An `unknown` match also
-retains Codex severity. Claim matching is a small text-and-path heuristic, not a
-service-certified identity.
+retains Codex severity. Claim matching uses a text-and-path heuristic. For a
+conclusive verdict without a detailed proof, the heuristic uses the issue name
+and synopsis.
 
 ### Findings that share an issue
 
@@ -167,15 +183,30 @@ result if its artifact cannot be attributed individually.
 An explicit matching `perFindingResults` entry takes precedence, even in an older
 artifact; another finding's proof is never presented as this finding's proof.
 Issue-wide proof can be treated as finding-scoped only when the checked issue
-identity and sole contributor match this finding. Missing validation or scoring
-artifacts still keep the finding pending under the shared deadline.
+identity and sole contributor match this finding. For a conclusive verdict, the
+adapter waits for the scoring artifact within the shared deadline.
 
 If issue proof predates submission, the report says the finding joined an issue
 Continuum had already validated (`joinedValidatedIssue: true`). Validation,
 scoring and issue timestamps all participate in stale checking. Reachability
 comes only from the structured boolean value; missing or `UNKNOWN` stays unknown.
 
-### Unavailable or stale evidence
+### Inconclusive, unavailable or stale evidence
+
+Read `verdict` together with `terminalStatus`. For example, a run can end
+with `FAILED`, return `UNCERTAIN` for exploitability and still have a low
+issue score. Codex defers the assessment, preserves the original finding
+severity in `severityAfter` and reports the issue score in `providerSeverity`.
+A failed run or missing source also sets `unavailable`, so `validate --scan`
+exits with code 1.
+
+A partial run or an uncertain verdict also yields a deferred assessment.
+In plugin completion and `scan --validate --format json`, a deferred Continuum
+assessment sets `validation.status` to `incomplete`.
+`DISCARDED` and `NOT_PURSUED` yield `not_applicable` with the provider's
+explanation when available. All these outcomes have `claimMatch: unknown`.
+`validatedAt` requires a conclusive verdict and a timestamp from the
+validation artifact.
 
 Submission rejections, missing code locations, read errors, and polling deadlines
 produce unavailable assessments per finding. Other findings keep their results,
@@ -203,7 +234,7 @@ scan model. Keep profiles and custom AWS models outside the scanned checkout.
 The adapter sends reported code findings as sink-first OCSF 2002. It submits all
 items before polling up to four concurrently under one `wait_minutes` deadline,
 including throttling backoff. It follows created, duplicate, and merged issues
-and waits for both `VALIDATION_EVIDENCE` and scorer `EVIDENCE`. Recorded-shape
+and reads `VALIDATION_EVIDENCE` and scorer `EVIDENCE`. Recorded-shape
 tests are anonymised offline replays, not live results.
 
 Importing existing Continuum issues is a separate workflow; see the

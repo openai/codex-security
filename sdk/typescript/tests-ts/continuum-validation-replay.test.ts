@@ -78,6 +78,7 @@ describe("recorded shape, anonymised replay", () => {
     );
     expect(result.record).toMatchObject({
       verdict: "EXPLOITABLE",
+      terminalStatus: "COMPLETED",
       severityBefore: "high",
       severityAfter: "critical",
       claimMatch: "on_target",
@@ -107,6 +108,81 @@ describe("recorded shape, anonymised replay", () => {
 });
 
 describe("explicitly fake outcome variations", () => {
+  test.each([
+    ["FAILED", "UNCERTAIN", true],
+    ["NO_SOURCE_AVAILABLE", "UNCERTAIN", true],
+    ["PARTIAL", "EXPLOITABLE", false],
+    ["COMPLETED", "UNCERTAIN", false],
+    ["COMPLETED", undefined, false],
+  ] as const)(
+    "keeps %s distinct from verdict %s and retains the finding's severity",
+    async (terminalStatus, exploitable, failed) => {
+      const fake = structuredClone(recorded);
+      const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+      fake.artifacts[id].body.validationEvidence = {
+        terminalStatus,
+        exploitable,
+      };
+      fake.issue.severity = "LOW";
+      reachability(fake).value = false;
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.disposition).toBe("deferred");
+      expect(result.record).toMatchObject({
+        terminalStatus,
+        verdict: exploitable ?? "UNKNOWN",
+        severityBefore: "high",
+        severityAfter: "high",
+        providerSeverity: "low",
+        claimMatch: "unknown",
+      });
+      expect(result.record?.freshness.validatedAt).toBeUndefined();
+      expect(result.provenance.validatedAt).toBeUndefined();
+      expect(Boolean(result.unavailable)).toBe(failed);
+      expect(result.record?.unavailable).toBe(result.unavailable);
+      expect(result.report).toContain(terminalStatus);
+      expect(result.report).not.toMatch(/validated at|lower priority/iu);
+    },
+  );
+
+  test("returns a failed bundle immediately with its selected verdict even without scoring", async () => {
+    const fake = structuredClone(recorded);
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    fake.artifacts[id].body.validationEvidence = {
+      terminalStatus: "FAILED",
+      exploitable: "UNCERTAIN",
+      perFindingResults: [
+        { findingId: "another-finding", exploitable: "NOT_EXPLOITABLE" },
+        {
+          findingId: finding["findingId"],
+          exploitable: "EXPLOITABLE",
+          reasoningChain: ["Template injection"],
+        },
+      ],
+    };
+    fake.artifactLists.EVIDENCE.items = [];
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.unavailable).toContain("FAILED");
+    expect(result.record).toMatchObject({
+      terminalStatus: "FAILED",
+      verdict: "EXPLOITABLE",
+      resultScope: "finding",
+      severityAfter: "high",
+      claimMatch: "unknown",
+    });
+    expect(result.record?.freshness.validatedAt).toBeUndefined();
+  });
+
+  test("does not synthesize a timestamp when the validation artifact omits it", async () => {
+    const fake = structuredClone(recorded);
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    delete fake.artifacts[id].createdAt;
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record?.verdict).toBe("EXPLOITABLE");
+    expect(result.provenance.validatedAt).toBeUndefined();
+    expect(result.record?.freshness.validatedAt).toBeUndefined();
+    expect(result.report).not.toContain("current at submission");
+  });
+
   test("lowers supplemental severity for a NOT_EXPOSED graph answer", async () => {
     const fake = structuredClone(recorded);
     fake.issue.severity = "LOW";

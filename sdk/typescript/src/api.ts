@@ -511,7 +511,7 @@ const validationProvenanceSchema = z.strictObject({
   providerVersion: z.string(),
   referenceId: z.string().optional(),
   referenceUrl: z.string().optional(),
-  validatedAt: z.string(),
+  validatedAt: z.string().optional(),
 });
 
 const validationResponseSchema = z.strictObject({

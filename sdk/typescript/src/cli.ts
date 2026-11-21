@@ -465,8 +465,10 @@ import {
 import type { ProjectScope } from "./project-config-schema.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
+  supplementalValidationStatus,
   unavailableAssessment,
   type ValidationItemRecord,
+  type ValidationProviderAssessment,
 } from "./validation-provider.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
@@ -13175,8 +13177,9 @@ async function executeScan(
             validation = { status: "failed", findings: 0, reportPath };
             let completed = 0;
             const records: ValidationItemRecord[] = [];
+            let providerAssessments: ValidationProviderAssessment[] | undefined;
             try {
-              const providerAssessments =
+              providerAssessments =
                 validationProvider?.validateBatch === undefined
                   ? undefined
                   : await validationProvider
@@ -13217,7 +13220,7 @@ async function executeScan(
                     `item-${index + 1}`,
                 );
                 await report.writeFile(
-                  `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}; validated ${provenance.validatedAt}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}${provenance.validatedAt ? `; validated ${provenance.validatedAt}` : ""}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
                 );
                 completed += 1;
                 validation = { ...validation, findings: completed };
@@ -13237,7 +13240,10 @@ async function executeScan(
               );
             await checkTarget();
             validation = {
-              status: "complete",
+              status: supplementalValidationStatus(
+                validationProvider,
+                providerAssessments,
+              ),
               findings: validationInputs.length,
               reportPath,
               ...(recordsPath ? { recordsPath } : {}),

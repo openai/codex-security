@@ -203,13 +203,15 @@ scan:
 All keys below belong to `scan.validation.continuum`. Schema validation does not
 insert defaults; the adapter and AWS CLI apply them at runtime.
 
-| Key                | Meaning                                                | Default                                         |
-| ------------------ | ------------------------------------------------------ | ----------------------------------------------- |
-| `environment_id`   | Continuum environment containing the matching source   | Required                                        |
-| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                         |
-| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                        |
-| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                              |
-| `console_base_url` | Base URL used to construct issue links                 | `https://console.aws.amazon.com/continuum/home` |
+| Key                | Meaning                                                | Default                                           |
+| ------------------ | ------------------------------------------------------ | ------------------------------------------------- |
+| `environment_id`   | Continuum environment containing the matching source   | Required                                          |
+| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                           |
+| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                          |
+| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                                |
+| `console_base_url` | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
+
+Issue links use the Region from the AWS issue ARN.
 
 `--validate=NAME` overrides the provider name, not its settings. Without a
 configured provider, bare `--validate` keeps the existing Codex validation.

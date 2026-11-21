@@ -62,6 +62,10 @@ export function selectFindingValidationArtifact(
       ...(artifact["producer"] != null && { producer: artifact["producer"] }),
       body: {
         validationEvidence: {
+          ...(isRecord(validation) &&
+            typeof validation["terminalStatus"] === "string" && {
+              terminalStatus: validation["terminalStatus"],
+            }),
           ...(matches.length === 1 &&
             "exploitable" in matches[0]! && {
               exploitable: matches[0]!["exploitable"],

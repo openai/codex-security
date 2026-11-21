@@ -184,7 +184,7 @@ test("unknown configured provider fails explicitly without network access", () =
 });
 
 test.each(["--validate", "--validate=true", "--validate=continuum"])(
-  "%s preserves the repository positional and writes typed per-item JSON next to Markdown",
+  "%s writes the available records and reports incomplete validation for a mixed batch",
   async (flag) => {
     const root = await temporaryDirectory("provider-cli-");
     const repository = join(root, "repo"),
@@ -198,6 +198,17 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       reasons: [{ basis: "GRAPH" as const, reason: "Fake exposed deployment" }],
       claimMatch: "on_target" as const,
       issueUrl: "https://example.invalid/issue",
+      freshness: { stale: false, reasons: [] },
+    };
+    const failed = {
+      itemId: "fake-failed",
+      provider: "continuum",
+      verdict: "UNCERTAIN",
+      terminalStatus: "FAILED",
+      severityBefore: "medium",
+      severityAfter: "medium",
+      reasons: [],
+      claimMatch: "unknown" as const,
       freshness: { stale: false, reasons: [] },
     };
     const batch = spyOn(
@@ -214,6 +225,12 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
         },
         record,
       },
+      {
+        disposition: "deferred",
+        report: "Validation failed",
+        provenance: { provider: "continuum", providerVersion: "1" },
+        record: failed,
+      },
     ]);
     try {
       await mkdir(repository);
@@ -224,7 +241,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
         config,
         `scan:\n  validation:\n    provider: ${flag === "--validate=continuum" ? "fake-unknown" : "continuum"}\n    continuum:\n      environment_id: example\n`,
       );
-      const base = fakeResult(["high"]);
+      const base = fakeResult(["high", "medium"]);
       const result = new ScanResult({
         manifest: base.manifest,
         findings: base.findings,
@@ -248,13 +265,14 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       });
       expect(
         JSON.parse(await readFile(join(scanDir, "validation.json"), "utf8")),
-      ).toEqual({ schemaVersion: 1, items: [record] });
+      ).toEqual({ schemaVersion: 1, items: [record, failed] });
       expect(await readFile(join(scanDir, "validation.md"), "utf8")).toContain(
         "Fake supplemental report",
       );
-      expect(JSON.parse(cli.stdout.text()).validation.recordsPath).toBe(
-        join(scanDir, "validation.json"),
-      );
+      expect(JSON.parse(cli.stdout.text()).validation).toMatchObject({
+        status: "incomplete",
+        recordsPath: join(scanDir, "validation.json"),
+      });
     } finally {
       batch.mockRestore();
       await rm(root, { recursive: true, force: true });
