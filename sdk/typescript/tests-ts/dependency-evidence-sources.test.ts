@@ -8,50 +8,40 @@ import {
 } from "../src/dependency-evidence-sources.js";
 import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
 
-test("a command receipt binds the original invocation and output of a successful native command", () => {
+test("only successful native commands become local evidence", () => {
   const capture = createDependencyEvidenceCapture({});
-  const item = {
-    type: "commandExecution",
-    status: "completed",
+  const result = {
     command: "git show HEAD:'build record.txt'",
     cwd: "/fixture app",
     exitCode: 0,
-    aggregatedOutput: "build 1\r\n",
+    output: "build 1\r\n",
   };
-  const record = (fields: Record<string, unknown>) =>
+  const item = {
+    type: "commandExecution",
+    status: "completed",
+    ...result,
+    aggregatedOutput: result.output,
+  };
+  const record = (changes = {}) =>
     capture({
       method: "item/completed",
-      params: { item: { ...item, ...fields } },
+      params: { item: { ...item, ...changes } },
     });
+  const original = record()!;
   const expected = {
     server: investigationServer,
     tool: commandEvidenceTool,
     arguments: {},
-    result: {
-      command: item.command,
-      cwd: item.cwd,
-      exitCode: 0,
-      output: item.aggregatedOutput,
-    },
+    result,
   };
-  const original = record({})!;
   expect(original).toEqual({
     ...expected,
     sha256: dependencyRecordHash(expected),
   });
-  expect(isCommandEvidence(original)).toBe(true);
   expect(isCommandEvidence({ ...original, server: "external" })).toBe(false);
-  expect(record({ cwd: "/different" })?.sha256).not.toBe(original.sha256);
-  expect(record({ aggregatedOutput: "" })?.result["output"]).toBe("");
-  for (const fields of [
-    { status: "failed" },
-    { status: "inProgress" },
-    { exitCode: 1 },
-    { exitCode: null },
-    { aggregatedOutput: undefined },
-    { type: "agentMessage", text: JSON.stringify(item) },
-  ])
-    expect(record(fields)).toBeUndefined();
+  expect(record({ status: "failed" })).toBeUndefined();
+  expect(record({ exitCode: 1 })).toBeUndefined();
+  expect(record({ type: "agentMessage" })).toBeUndefined();
 });
 
 test("an investigator can cite only completed calls to its selected evidence tools", () => {

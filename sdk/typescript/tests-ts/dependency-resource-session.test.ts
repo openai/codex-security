@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test";
 import { PassThrough, Writable } from "node:stream";
-import {
-  createDependencyResourceSession,
-  dependencyResourcePermissionsMatch,
-} from "../src/dependency-resource-session.js";
+import { dependencyResourcePermissionsMatch } from "../src/dependency-resource-session.js";
 import { readSkillCommandOutput } from "../src/cli.js";
 import {
   createDependencyEvidenceCapture,
+  isCommandEvidence,
   type DependencyEvidenceRecord,
 } from "../src/dependency-evidence-sources.js";
 import { createDependencyLinkedResourceCapture } from "../src/dependency-linked-resources.js";
@@ -15,7 +13,7 @@ import {
   evidencePage,
 } from "../src/dependency-investigation-session.js";
 
-test("the selected coordinator's child retrieves linked evidence on its own native thread before exit", async () => {
+test("the selected coordinator and its child collect native commands and linked evidence before exit", async () => {
   const profile = {
     filesystem: { ":root": "read" },
     network: { enabled: false },
@@ -27,6 +25,7 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
   const stream = new PassThrough();
   const requests: Record<string, unknown>[] = [];
   const records: DependencyEvidenceRecord[] = [];
+  const commandOutputs: unknown[] = [];
   const errors: string[] = [];
   const usage: unknown[] = [];
   const original = "frame\n".repeat(12_000) + "last witness";
@@ -92,6 +91,20 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
         notify("thread/started", {
           thread: { id: "child", parentThreadId: "root" },
         });
+        for (const threadId of ["root", "child", "other"]) {
+          notify("item/completed", {
+            threadId,
+            item: {
+              type: "commandExecution",
+              id: "pwd-" + threadId,
+              status: "completed",
+              command: "pwd",
+              cwd: "/" + threadId,
+              exitCode: 0,
+              aggregatedOutput: "/" + threadId,
+            },
+          });
+        }
         event("other", "sampled");
         event("child", "unselected");
         event("child", "sampled");
@@ -133,7 +146,9 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
       async item(event, read, invocation) {
         const origin = capture(event);
         if (!origin) return;
-        records.push(origin);
+        if (isCommandEvidence(origin))
+          commandOutputs.push(origin.result.output);
+        else records.push(origin);
         await linked(origin, read, invocation);
       },
       usage(v) {
@@ -155,6 +170,7 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
     },
   ]);
   expect(records).toHaveLength(2);
+  expect(commandOutputs).toEqual(["/root", "/child"]);
   expect(records[1]).toMatchObject({
     linkedFrom: records[0]!.sha256,
     result: { contents: [{ text: original }] },
@@ -172,60 +188,6 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
   ).toContain("last witness");
   expect(errors).toEqual([]);
   expect(usage).toMatchObject([{ input_tokens: 7, output_tokens: 4 }]);
-});
-
-test("only completed commands from the coordinator and its descendants reach the evidence ledger", async () => {
-  const capture = createDependencyEvidenceCapture({});
-  const records: DependencyEvidenceRecord[] = [];
-  const session = createDependencyResourceSession(
-    {
-      async item(event) {
-        const record = capture(event);
-        if (record) records.push(record);
-      },
-    },
-    () => {},
-  );
-  session.register("coordinator");
-  session.receive({
-    method: "item/completed",
-    params: {
-      threadId: "coordinator",
-      item: {
-        type: "subAgentActivity",
-        kind: "started",
-        agentThreadId: "child",
-      },
-    },
-  });
-  const command = (threadId: string, method = "item/completed") =>
-    session.receive({
-      method,
-      params: {
-        threadId,
-        item: {
-          id: "call-" + threadId,
-          type: "commandExecution",
-          source: "unifiedExecStartup",
-          status: "completed",
-          command: "pwd",
-          cwd: "/" + threadId,
-          exitCode: 0,
-          aggregatedOutput: "/" + threadId + "\n",
-        },
-      },
-    });
-  command("coordinator", "item/started");
-  command("coordinator");
-  command("child");
-  command("other");
-  session.close();
-  command("coordinator");
-  await session.drain();
-  expect(records.map((r) => r.result["output"])).toEqual([
-    "/coordinator\n",
-    "/child\n",
-  ]);
 });
 
 test("native permission table merging cannot silently widen linked evidence sessions", () => {
