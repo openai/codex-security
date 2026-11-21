@@ -294,7 +294,8 @@ export function renderScanHistory(
         );
     }
   } else if (command === "show") {
-    const status = clean((result["progress"] as JsonObject)["status"]);
+    const progress = result["progress"] as JsonObject;
+    const status = clean(progress["status"]);
     const statusColor =
       status === "complete" ? 32 : status === "running" ? 36 : 31;
     lines.push(
@@ -373,8 +374,13 @@ export function renderScanHistory(
           .join(`  ${accent("·")}  `)}`,
       );
     }
-    const coverage = (result["progress"] as JsonObject)["coverage"] as
-      JsonObject | undefined;
+    const observation = progress["lastObservedPhase"] as JsonObject | undefined;
+    if (observation) {
+      lines.push(
+        `  ${strong("LAST REPORTED PHASE")}  ${clean(observation["phase"])}  ${accent("·")}  ${clean(observation["observedAt"])}`,
+      );
+    }
+    const coverage = progress["coverage"] as JsonObject | undefined;
     if (coverage) {
       const parts = [
         ...(coverage["worklistRows"] == null

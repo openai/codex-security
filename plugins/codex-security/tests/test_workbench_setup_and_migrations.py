@@ -120,6 +120,7 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (79, "retain the last observed phase of stopped Standard scans"),
 ]
 
 

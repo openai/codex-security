@@ -496,7 +496,14 @@ describe("scan history renderer", () => {
       renderScanHistory(
         {
           ...scan,
-          progress: { status: "failed" },
+          progress: {
+            status: "failed",
+            phase: "threat_model",
+            lastObservedPhase: {
+              phase: "discovery",
+              observedAt: "2026-01-02T12:01:00Z",
+            },
+          },
           failureMessage: "Repository checkout became unavailable.",
           findings: [],
         },
@@ -504,6 +511,9 @@ describe("scan history renderer", () => {
       ),
     );
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
+    expect(failed).toContain(
+      "LAST REPORTED PHASE  discovery  ·  2026-01-02T12:01:00Z",
+    );
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {

@@ -79,7 +79,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      workbenchMigrations[version - 1].name,
+      workbenchMigrations.find((item) => item.version === version)!.name,
     );
 }
 
@@ -1710,6 +1710,11 @@ with sqlite3.connect(sys.argv[2]) as connection:
               assert.equal(row[column], null);
               delete row[column];
             }
+          }
+        if (name === "scan_progress")
+          for (const row of rows as Record<string, unknown>[]) {
+            assert.equal(row.last_observed_phase_json, null);
+            delete row.last_observed_phase_json;
           }
         if (name === "workspaces")
           for (const row of rows as Record<string, unknown>[]) {

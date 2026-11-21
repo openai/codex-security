@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -13,10 +14,12 @@ from workbench_test_support import (
     cancel_scan,
     create_saved_workspace,
     empty_target_paths,
+    empty_target_scan,
     fail_scan,
     get_scan,
     load_script,
     mark_handoff_delivered,
+    run_workbench,
     scan_claim_command,
     scan_command,
     start_delivered_scan,
@@ -119,6 +122,134 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
         assert response["canceledScanId"] == scan_id
         assert response["results"]["scanId"] == (replacement_id if app else scan_id)
         assert response["results"]["progress"]["status"] == ("running" if app else "canceled")
+
+
+@pytest.mark.parametrize(
+    ("name", "statement"),
+    [
+        (
+            "bind new finding decisions to admitted scans",
+            "ALTER TABLE finding_decisions ADD COLUMN scan_sequence INTEGER;",
+        ),
+        (
+            "persist selected deep scan finalization input",
+            "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;",
+        ),
+    ],
+)
+@pytest.mark.parametrize("already_added", [False, True])
+def test_saved_phase_on_another_version_74_preview(tmp_path, name, statement, already_added):
+    state_dir, _, scan_id, _ = empty_target_scan(tmp_path)
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        if not already_added:
+            connection.execute("ALTER TABLE scan_progress DROP COLUMN last_observed_phase_json")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 79")
+        connection.execute(statement)
+        connection.execute("INSERT INTO schema_migrations VALUES (74, ?, 'preview-time')", (name,))
+
+    for _ in range(2):
+        scan = get_scan(state_dir, scan_id, "--progress-only")["scan"]
+        assert "lastObservedPhase" not in scan["progress"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name, applied_at FROM schema_migrations WHERE version = 74"
+        ).fetchone() == (name, "preview-time")
+
+
+@pytest.mark.parametrize("stop", ["fail-scan", "cancel-scan"])
+@pytest.mark.parametrize("coordinator_first", [False, True])
+def test_stop_retains_observation_separately_from_committed_progress(
+    tmp_path: Path, stop: str, coordinator_first: bool
+):
+    state_dir, _, scan_id, _ = empty_target_scan(tmp_path)
+    before = get_scan(state_dir, scan_id)["scan"]["progress"]
+    assert "lastObservedPhase" not in before
+    extra = ["--message", "Fixture interruption"] if stop == "fail-scan" else []
+    observed_at = before["updatedAt"]
+    if coordinator_first:
+        scan_command(state_dir, stop, scan_id, *extra)
+        stopped = get_scan(state_dir, scan_id)["scan"]
+        if stop == "fail-scan":
+            extra = ["--message", "Cleanup interruption"]
+    for phase in ("discovery", "reporting"):
+        scan_command(
+            state_dir,
+            stop,
+            scan_id,
+            *extra,
+            "--observed-phase",
+            phase,
+            "--phase-observed-at",
+            observed_at,
+        )
+    detail = get_scan(state_dir, scan_id)["scan"]
+    if coordinator_first:
+        assert detail["lifecycle"] == stopped["lifecycle"]
+        assert detail["progress"] == {
+            **stopped["progress"],
+            "lastObservedPhase": {"phase": "discovery", "observedAt": observed_at},
+        }
+    summary = run_workbench(state_dir, "list-scans")["scans"][0]
+    compact = get_scan(state_dir, scan_id, "--progress-only")["scan"]
+    for entry in (detail, summary, compact):
+        progress = entry["progress"]
+        assert progress["lastObservedPhase"] == {"phase": "discovery", "observedAt": observed_at}
+        assert progress["phase"] == before["phase"]
+        assert progress["coverage"] == before["coverage"]
+        assert progress["updatedAt"] == detail["lifecycle"]["finishedAt"]
+    if stop == "fail-scan":
+        assert detail["failureMessage"] == "Fixture interruption"
+
+
+@pytest.mark.parametrize("status", ["failed", "complete"])
+def test_cancellation_after_stop_preserves_only_failed_scan_observation(
+    tmp_path: Path, status: str
+):
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    if status == "failed":
+        fail_scan(state_dir, scan_id, "Coordinator failure")
+    else:
+        write_completed_contract(scan_dir, scan_id, target)
+        scan_command(state_dir, "complete-scan", scan_id)
+    before = get_scan(state_dir, scan_id)["scan"]
+    observed_at = before["progress"]["updatedAt"]
+    observation = ["--observed-phase", "discovery", "--phase-observed-at", observed_at]
+    wrong_thread = scan_command(
+        state_dir,
+        "cancel-scan",
+        scan_id,
+        "--thread-id",
+        "another-thread",
+        *observation,
+        check=False,
+    )
+    assert wrong_thread["returncode"] != 0
+    assert "owning Codex thread" in wrong_thread["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"] == before["progress"]
+    for phase in ("discovery", "reporting"):
+        rejected = scan_command(
+            state_dir,
+            "cancel-scan",
+            scan_id,
+            "--observed-phase",
+            phase,
+            "--phase-observed-at",
+            observed_at,
+            check=False,
+        )
+        assert rejected["returncode"] != 0
+        assert rejected["stderr"].strip() == "Only a running scan can be canceled."
+        after = get_scan(state_dir, scan_id)["scan"]
+        expected_progress = dict(before["progress"])
+        if status == "failed":
+            expected_progress["lastObservedPhase"] = {
+                "phase": "discovery",
+                "observedAt": observed_at,
+            }
+        assert after["progress"] == expected_progress
+        assert after["lifecycle"] == before["lifecycle"]
+        assert after["failureMessage"] == before["failureMessage"]
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:

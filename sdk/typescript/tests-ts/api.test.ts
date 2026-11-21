@@ -139,6 +139,10 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const pythonExecutable = useTestPython();
 
+function liveMessage(id: string, text: string): ThreadEvent {
+  return { type: "item.completed", item: { id, type: "agent_message", text } };
+}
+
 async function registerEightFileScan(
   _options: unknown,
   args: readonly string[],
@@ -4488,6 +4492,114 @@ if __name__ == "__main__":
     },
   );
 
+  test.each([
+    ["failure", true],
+    ["cancellation", true],
+    ["tool output only", false],
+    ["legacy plugin", false],
+    ["poll first", true],
+    ["stale live report", false],
+  ] as const)(
+    "saves only an accepted coordinator phase at its observation time on stop (%s)",
+    async (scenario, savesPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const runtime = preparedRuntime(codexHome);
+      if (scenario === "legacy plugin") {
+        const pluginRoot = await copyCredentialTestPlugin(root);
+        runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
+        const path = join(pluginRoot, ".codex-plugin", "plugin.json");
+        const manifest = JSON.parse(await readFile(path, "utf8"));
+        delete manifest.codexSecurity.stoppedScanPhaseObservation;
+        await writeFile(path, JSON.stringify(manifest));
+      }
+      const controller = new AbortController();
+      const observedAt = "2026-01-02T12:00:00.000Z";
+      let now = Date.parse(observedAt) - 60_000;
+      const pollFirst = ["poll first", "stale live report"].includes(scenario);
+      const polled = Promise.withResolvers<void>();
+      const review = progressMarker("validation", 1, 8);
+      const stale = progressMarker("discovery", 1, 8);
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        if (pollFirst) {
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          const messages = [stale, review].map((text) => ({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: { type: "AgentMessage", content: [{ type: "Text", text }] },
+            },
+          }));
+          await appendFile(rollout, jsonLines(messages) + "\n");
+          yield { type: "thread.started", thread_id: "thread-1" };
+          await polled.promise;
+          yield liveMessage("older", stale);
+        } else if (scenario !== "tool output only") {
+          yield liveMessage("inventory", progressMarker("discovery", 0, 8));
+        }
+        if (
+          scenario !== "tool output only" &&
+          scenario !== "stale live report"
+        ) {
+          now = Date.parse(observedAt);
+          yield liveMessage("review", review);
+        }
+        now += 60_000;
+        // A source read can quote a valid marker. A coordinator claim beyond
+        // the registered inventory also fails the existing eligibility check.
+        yield completedCommand(
+          "cat example.txt",
+          progressMarker("attack_path", 2, 8),
+        );
+        yield liveMessage("too-large", progressMarker("reporting", 3, 9));
+        if (scenario === "cancellation") controller.abort();
+        throw new Error("Synthetic scan interruption");
+      }
+      let stopped: readonly string[] | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        now: () => now,
+        prepareRuntime: async () => runtime,
+        createCodex: codexFactory(async () => ({ events: events() })),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "fail-scan" || args[0] === "cancel-scan")
+            stopped = args;
+          return registerEightFileScan(options, args, input);
+        },
+      });
+      let reports = 0;
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await expect(
+          client.run(repository, {
+            signal: controller.signal,
+            onProgress: ({ phase }) => {
+              if (phase !== "validation") return;
+              reports++;
+              polled.resolve();
+            },
+          }),
+        ).rejects.toThrow();
+      } finally {
+        clearInterval(keepAlive);
+      }
+      if (pollFirst) expect(reports).toBe(1);
+      expect(stopped?.[0]).toBe(
+        scenario === "cancellation" ? "cancel-scan" : "fail-scan",
+      );
+      if (savesPhase) {
+        expect(stopped?.slice(-4)).toEqual([
+          "--observed-phase",
+          "validation",
+          "--phase-observed-at",
+          observedAt,
+        ]);
+      } else {
+        expect(stopped).not.toContain("--observed-phase");
+        expect(stopped).not.toContain("--phase-observed-at");
+      }
+    },
+  );
+
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const commands: string[] = [];
@@ -5343,10 +5455,6 @@ if __name__ == "__main__":
           },
         },
       ];
-      const liveMessage = (id: string, text: string): ThreadEvent => ({
-        type: "item.completed",
-        item: { id, type: "agent_message", text },
-      });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: registerEightFileScan,

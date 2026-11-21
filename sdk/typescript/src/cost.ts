@@ -648,6 +648,25 @@ export class ScanCostTracker {
     );
   }
 
+  /** A saved report can become the current parent before its live copy arrives. */
+  public matchesCurrentParentProgress(
+    event: Readonly<Record<string, unknown>>,
+  ): boolean {
+    const live = this.#liveParentEvents.get(event);
+    const marker = live?.markers.at(-1);
+    const current = this.#parentProgress;
+    if (!live || !marker || !this.#parentIsEligible(current)) return false;
+    const order = compareSourceOrder(
+      { live, markerIndex: marker.index, order: marker.order },
+      current,
+    );
+    return (
+      order !== undefined &&
+      order >= 0 &&
+      progressKey(marker.progress) === progressKey(current.progress)
+    );
+  }
+
   /** Source acceptance is independent of duplicate observer notifications. */
   public deferParentInventory(event: Readonly<Record<string, unknown>>): void {
     const marker = this.#liveParentEvents.get(event)?.markers.at(-1);
