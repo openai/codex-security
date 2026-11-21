@@ -2565,6 +2565,15 @@ retain the full history of their attributed sessions and keep their existing
 worker-selection boundaries. This also applies to logs attached with
 `feedback --include-logs`.
 
+For scans on a local Windows drive, `scans logs --json` includes the primary
+SDK activities whose paths required a checkout identity check under
+`sessions[].observedActivities`. Each entry carries the live activity ID,
+kind, status, and repository-relative paths. For workers, the saved tool call
+is the source event, so its verified paths appear on the matching entry in
+`events[].paths`. The original Codex event stays in `event`. Retaining the
+scan's Codex home keeps these observations available after the checkout moves.
+Older logs retain their original event data.
+
 Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder

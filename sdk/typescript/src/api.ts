@@ -225,8 +225,14 @@ import {
   type SecurityPolicyStageResult,
   type SecurityPolicyTarget,
 } from "./security-policy.js";
+import { ActivityObservations } from "./observed-activities.js";
 import { writeMockScanDraft } from "./mock-scan.js";
-import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import {
+  isWindowsActivityDrive,
+  sameWindowsActivityDirectory,
+  scanActivitiesFromEvent,
+  type ScanActivity,
+} from "./scan-activity.js";
 import {
   matchCompletedScan,
   matchScanFindingsInternal,
@@ -3079,12 +3085,26 @@ export class CodexSecurity {
         );
       }
       const scanId = registeredScanId;
+      const verifyDirectory =
+        !hosted && process.platform === "win32"
+          ? sameWindowsActivityDirectory
+          : undefined;
+      const activityObservations =
+        isWindowsActivityDrive(repo) && (verifyDirectory || resumeThreadId)
+          ? new ActivityObservations(
+              runtime.codexHome,
+              scanId,
+              repo,
+              verifyDirectory,
+            )
+          : undefined;
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         pricingContext,
         repository: repo,
         scanDirectory: scanDir,
+        activityObservations,
         ...(mode === "deep"
           ? {
               workerReceipts: {
@@ -3720,6 +3740,7 @@ export class CodexSecurity {
         authentication,
         modelProvider,
         workbenchValidated: true,
+        activityObservations,
         model,
         pricingContext,
         onTurnStatus: (status, message) => {
@@ -6095,6 +6116,7 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
 
 interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   scanId?: string;
+  activityObservations?: ActivityObservations;
   thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
@@ -6126,6 +6148,7 @@ export async function runScanEvents(
   options: ScanEventRunOptions,
 ): Promise<ScanResult> {
   let scanStarted = false;
+  let activityThreadId = options.thread.id;
   let tacStatusReported = false;
   try {
     options.signal.throwIfAborted();
@@ -6154,10 +6177,15 @@ export async function runScanEvents(
             }
           }
         }
-        for (const activity of scanActivitiesFromEvent(
-          event,
-          options.expectation.repository,
-        )) {
+        if (
+          event.type === "thread.started" &&
+          typeof event["thread_id"] === "string"
+        )
+          activityThreadId = event["thread_id"];
+        const activities = options.activityObservations?.verifyDirectory
+          ? await options.activityObservations.primary(activityThreadId, event)
+          : scanActivitiesFromEvent(event, options.expectation.repository);
+        for (const activity of activities) {
           notifyObserver(options, "onActivity")(activity);
         }
         options.onProgressItem?.(event);
