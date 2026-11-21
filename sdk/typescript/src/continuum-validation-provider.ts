@@ -652,7 +652,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
             false,
           );
         }
-        // CreateCodeFinding returns only findingId and findingArn.
+        // CreateCodeFinding returns the finding identity before any issue is linked.
         // GetCodeFinding supplies the issue association as processing progresses.
         issueId =
           text(current["mergedIntoIssueId"]) ??

@@ -11,7 +11,7 @@
     "lib": ["ESNext"],
     "allowImportingTsExtensions": true,
     "paths": {
-      "@openai/codex-security/plugin-validation": [
+      "#validation-runtime": [
         "../../../sdk/typescript/src/plugin-validation.ts",
         "./src/standalone-validation.ts"
       ]

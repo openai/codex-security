@@ -7,7 +7,7 @@ import {
   validationProviderFromConfiguration,
   assessPluginFindings,
   type ValidationProviderConfiguration,
-} from "@openai/codex-security/plugin-validation";
+} from "#validation-runtime";
 import type { JsonObject } from "./types.js";
 import { protectedHostPathResolver } from "./helpers/inventory-git.js";
 

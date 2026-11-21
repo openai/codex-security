@@ -5,7 +5,7 @@ import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
 import { DEEP_SCAN_SETTINGS, hoursConflict } from "../deep-scan-settings.js";
 import schema from "./project-config.schema.json";
-import type { ValidationProviderConfiguration } from "@openai/codex-security/plugin-validation";
+import type { ValidationProviderConfiguration } from "#validation-runtime";
 
 let validate: ValidateFunction | undefined;
 export interface DeepScanProjectConfig {

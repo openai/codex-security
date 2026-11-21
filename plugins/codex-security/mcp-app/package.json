@@ -2,6 +2,9 @@
   "name": "codex-security-mcp-app",
   "version": "0.1.161",
   "type": "module",
+  "imports": {
+    "#validation-runtime": "./src/standalone-validation.ts"
+  },
   "private": true,
   "scripts": {
     "build": "node scripts/generate-artifact-schemas.mjs && tsc --noEmit",
