@@ -90,8 +90,15 @@ codex-security publish findings "$report" --to cloud --repository "$repo" \
 Check the account, repository and source ARNs. The preview identifies the inbox
 (`privateImport`) or repository environments (`requests`) that will receive them.
 Remove `--dry-run` and confirm. Match the resulting source IDs to the Continuum
-ARNs. A private inbox upload with changed evidence for the same ARN can return
-`source_order_unknown`. [Verify the import](README.md#verify-the-import)
+ARNs. [Verify the import](README.md#verify-the-import)
+
+To update an issue in your private inbox, collect a fresh report and preview
+it with the original source key. When the preview includes
+`privateImport.sourceCheckpoint`, confirmation authorizes replacing changed
+evidence for the selected ARNs as of that checkpoint. A resumed upload keeps
+its original checkpoint. Cloud reports a conflict if another import updated
+the same ARN after the checkpoint. On deployments that omit the checkpoint,
+changed evidence can return `source_order_unknown`.
 
 ## Identity, evidence, and repeat imports
 

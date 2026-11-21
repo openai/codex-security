@@ -32,9 +32,11 @@ export const privateJobVersions: Partial<
   veracode: 3,
 };
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);
+const sourceCheckpoint = z.string().min(1).optional();
 const contextSchema = z.object({
   object: z.literal("security.finding_import_context"),
   context_version: z.string().min(1),
+  source_checkpoint: sourceCheckpoint,
   can_upload: z.boolean(),
   can_create_import_jobs: z.boolean(),
   can_read: z.boolean(),
@@ -56,6 +58,7 @@ const jobSchema = z.object({
   id: z.string().regex(/^import_[0-9a-f]{32}$/u),
   request_id: z.uuid(),
   source: z.object({ provider: z.string(), source_key: z.string() }),
+  source_checkpoint: sourceCheckpoint.nullable(),
   input: z.object({
     type: z.literal("file"),
     file_id: fileId,
@@ -237,6 +240,7 @@ const checkpointSchema = z.object({
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
   jobApiVersion: jobVersion.optional(),
+  sourceCheckpoint,
   approvedRepositoryUrl: z.string(),
   approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
@@ -362,9 +366,12 @@ export function privateImportClient(
     return response;
   }
   return {
-    async context() {
+    async context(source?: ImportSource) {
+      const query = source
+        ? `?${new URLSearchParams({ provider: source.provider, source_key: source.source_key })}`
+        : "";
       return contextSchema.parse(
-        await (await request("/finding-imports/context")).json(),
+        await (await request(`/finding-imports/context${query}`)).json(),
       );
     },
     async upload(input: {
@@ -418,6 +425,7 @@ export function privateImportClient(
         fileId: string;
         format: PrivateImportFormat;
         source: ImportSource;
+        sourceCheckpoint?: string;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
         jobApiVersion?: PrivateJobVersion;
@@ -435,6 +443,7 @@ export function privateImportClient(
               request_id: input.requestId,
               context_version: input.contextVersion,
               source: input.source,
+              source_checkpoint: input.sourceCheckpoint,
               input: {
                 type: "file",
                 file_id: input.fileId,
@@ -455,6 +464,7 @@ export function privateImportClient(
           (id !== undefined && job.id !== id) ||
           job.request_id !== input.requestId ||
           job.input.file_id !== input.fileId ||
+          (job.source_checkpoint ?? undefined) !== input.sourceCheckpoint ||
           !matchesJobScope(job, input)
         )
           throw new CodexSecurityError(

@@ -1547,6 +1547,7 @@ async function privateUploadFixture(
     version: "original-inbox",
     formats: ["security.findings.v1"],
     recoverUpload: false,
+    sourceCheckpoint: undefined as string | undefined,
   };
   const uploads: { id: string; bytes: string }[] = [];
   const jobs: unknown[] = [];
@@ -1554,9 +1555,18 @@ async function privateUploadFixture(
   const deps = {
     ...f.deps,
     fetch: async (url: string, init: RequestInit) => {
-      const { pathname } = new URL(url);
-      if (pathname.endsWith("/finding-imports/context"))
-        return privateInboxContext(inbox.version, inbox.formats);
+      const { pathname, searchParams } = new URL(url);
+      if (pathname.endsWith("/finding-imports/context")) {
+        const exactSource =
+          searchParams.get("provider") === provider &&
+          searchParams.get("source_key") === settings.sourceKey;
+        return privateInboxContext(
+          inbox.version,
+          inbox.formats,
+          true,
+          exactSource ? inbox.sourceCheckpoint : undefined,
+        );
+      }
       if (pathname.includes("/finding-imports/file-requests/")) {
         const prior = uploads.find((upload) =>
           pathname.endsWith("/" + upload.id),
@@ -3791,6 +3801,43 @@ test("a Continuum private upload keeps every structured signal and reports confl
   expect((await (await prepareFile()).publish()).counts.created).toBe(1);
   expect(uploads).toHaveLength(1);
   expect(jobs).toHaveLength(1);
+});
+
+test("Continuum reimports use the reviewed source revision, including after a lost response", async () => {
+  const report = {
+    ...continuumIssueExport(),
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const { f, inbox, jobs, prepareFile } = await privateUploadFixture(
+    report,
+    "continuum",
+    continuumRepository,
+  );
+  inbox.sourceCheckpoint = "first";
+  const original = await prepareFile();
+  inbox.sourceCheckpoint = "concurrent";
+  const concurrent = await prepareFile();
+  await expect(original.publish()).rejects.toThrow(
+    "Interrupted private upload",
+  );
+  await expect(concurrent.publish()).rejects.toThrow(
+    "source checkpoint changed",
+  );
+
+  inbox.recoverUpload = true;
+  const resumed = await prepareFile();
+  expect(resumed.preview.privateImport?.sourceCheckpoint).toBe("first");
+  await resumed.publish();
+  expect(jobs).toMatchObject([{ source_checkpoint: "first" }]);
+
+  report.issues[0]!.issue.summary = "Updated issue evidence";
+  await writeFile(f.file, JSON.stringify(report));
+  const updated = await prepareFile();
+  expect(updated.preview.resumed).toBe(false);
+  expect(updated.preview.privateImport?.sourceCheckpoint).toBe("concurrent");
+  await expect(updated.publish()).rejects.toThrow("Interrupted private upload");
+  await (await prepareFile()).publish();
+  expect(jobs[1]).toMatchObject({ source_checkpoint: "concurrent" });
 });
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {
@@ -9088,10 +9135,12 @@ function privateInboxContext(
   context_version = "generation-a",
   formats = ["security.findings.v1"],
   canCreate = true,
+  source_checkpoint?: string,
 ) {
   return Response.json({
     object: "security.finding_import_context",
     context_version,
+    source_checkpoint,
     can_read: true,
     can_upload: canCreate,
     can_create_import_jobs: canCreate,
