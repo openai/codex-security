@@ -1,5 +1,5 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import type { ScanOptions } from "../src/index.js";
@@ -28,7 +28,7 @@ import {
   scanRegistrationArguments,
   workbenchCommand,
 } from "./support/workbench-command.js";
-import { FindingWorkflow } from "../src/finding-workflow.js";
+import { FindingWorkflow, workflowDigest } from "../src/finding-workflow.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { estimateScanCost } from "../src/cost-model.js";
@@ -42,6 +42,7 @@ test.each([
   "scan-interrupted",
   "prompt-files",
   "knowledge-snapshot",
+  "saved-knowledge-documents",
   "legacy-knowledge",
   "owner-success",
   "owner-failure",
@@ -65,22 +66,36 @@ test.each([
     const workflowId = "durable-scan";
     const scanPrompt = "Review synthetic authentication boundaries.";
     const promptFile = join(root, "instructions.md");
-    const knowledge =
-      scenario === "knowledge-snapshot" || scenario === "legacy-knowledge";
+    const preparedKnowledge =
+      scenario === "knowledge-snapshot" ||
+      scenario === "saved-knowledge-documents";
+    const knowledge = preparedKnowledge || scenario === "legacy-knowledge";
     if (scenario === "prompt-files" || knowledge)
       await writeFile(promptFile, scanPrompt);
+    const snapshot = preparedKnowledge
+      ? await readKnowledgeBaseSnapshot([promptFile])
+      : undefined;
     const knowledgeOptions = knowledge
-      ? {
-          knowledgeBasePaths: [promptFile],
-          ...(scenario === "knowledge-snapshot"
-            ? {
-                knowledgeBaseSnapshot: await readKnowledgeBaseSnapshot([
-                  promptFile,
-                ]),
-              }
-            : {}),
-        }
+      ? { knowledgeBasePaths: [promptFile], knowledgeBaseSnapshot: snapshot }
       : {};
+    const workflow = new FindingWorkflow(workflowId, environment);
+    const outputDir =
+      scenario === "completed" ? relative(process.cwd(), scanDir) : undefined;
+    const expectedDigest =
+      (snapshot || outputDir) &&
+      workflowDigest({
+        config: {},
+        options: {
+          target: "repository",
+          mode: "standard",
+          outputDir: outputDir ? resolve(outputDir) : undefined,
+          ...(scenario === "saved-knowledge-documents" && snapshot
+            ? { knowledgeBaseSnapshot: { documents: snapshot.documents } }
+            : knowledgeOptions),
+        },
+      });
+    if (outputDir || scenario === "saved-knowledge-documents")
+      await workflow.bind({ scanRequestDigest: expectedDigest });
     const ownerScenario = scenario.startsWith("owner-");
     const ownerFailure = scenario.startsWith("owner-failure");
     const receiptLost = scenario.endsWith("receipt-lost");
@@ -160,6 +175,7 @@ test.each([
     try {
       const options = {
         workflowId,
+        outputDir,
         ...knowledgeOptions,
         ownerSuggestions: ownerScenario || undefined,
         ...(scenario === "prompt-files" ? { scanPromptFile: promptFile } : {}),
@@ -179,8 +195,9 @@ test.each([
       if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
       const result = await resumed.run(repository, {
         workflowId,
+        outputDir,
         ...knowledgeOptions,
-        ...(scenario === "knowledge-snapshot"
+        ...(preparedKnowledge
           ? {
               knowledgeBaseSnapshot: await readKnowledgeBaseSnapshot([
                 promptFile,
@@ -236,17 +253,14 @@ test.each([
         });
         expect(reused?.measurement).toBeUndefined();
       }
-      expect(
-        (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
-          .status,
-      ).toBe("completed");
-      if (scenario === "completed") {
-        await expect(
-          resumed.run(repository, { workflowId, mode: "deep" }),
-        ).rejects.toThrow("already bound to a different");
-      }
+      const saved = await workflow.get();
+      expect(saved?.stages.scan.status).toBe("completed");
+      if (expectedDigest) expect(saved?.scanRequestDigest).toBe(expectedDigest);
+      await expect(
+        resumed.run(repository, { workflowId, mode: "deep" }),
+      ).rejects.toThrow("already bound to a different");
       if (knowledge) {
-        if (scenario === "knowledge-snapshot")
+        if (preparedKnowledge)
           await writeFile(promptFile, "Changed synthetic project guidance.");
         await expect(
           resumed.run(repository, {

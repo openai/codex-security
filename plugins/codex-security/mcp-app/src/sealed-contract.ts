@@ -67,6 +67,7 @@ export async function loadSealedContract(
     signal?: AbortSignal;
     // Preserve the existing readers' admission rules without changing public SDK options.
     profile?: ContractProfile;
+    validateRecoveryCoverage?: boolean;
   } = {},
 ): Promise<{
   contract: LoadedSealedContract;
@@ -201,7 +202,13 @@ export async function loadSealedContract(
       );
     }
 
-    validateCanonicalContract(manifest, findings, coverage, profile);
+    validateCanonicalContract(
+      manifest,
+      findings,
+      coverage,
+      profile,
+      profile === "tracking" || options.validateRecoveryCoverage === true,
+    );
 
     await validateSeal(
       scanRoot,
@@ -290,6 +297,7 @@ function validateCanonicalContract(
   findings: FindingsDocument,
   coverage: CoverageDocument | undefined,
   profile: ContractProfile,
+  validateRecoveryIdentities: boolean,
 ): void {
   const requireText = (value: string | undefined, context: string) => {
     if (profile === "sdk" && value === undefined) return;
@@ -400,7 +408,7 @@ function validateCanonicalContract(
     const context = `coverage.surfaces[${index}]`;
     requireText(surface.id, `${context}.id`);
     requireText(surface.label, `${context}.label`);
-    if (profile === "tracking" && surfaceIds.has(surface.id)) {
+    if (validateRecoveryIdentities && surfaceIds.has(surface.id)) {
       throw new ContractValidationError(`${context}.id: duplicate surface id.`);
     }
     surfaceIds.add(surface.id);
@@ -423,7 +431,7 @@ function validateCanonicalContract(
       }
     }
   }
-  if (profile === "tracking") {
+  if (validateRecoveryIdentities) {
     const resolvedDeferredIds = new Set<string>();
     for (const [index, resolved] of (
       coverage?.resolvedDeferred ?? []
@@ -487,8 +495,9 @@ function validateCanonicalContract(
       finding.codeEvidence ?? []
     ).entries()) {
       const evidenceContext = `${context}.codeEvidence[${evidenceIndex}]`;
-      if (profile === "tracking") {
+      if (profile === "tracking")
         requireText(evidence.code, `${evidenceContext}.code`);
+      if (validateRecoveryIdentities) {
         if (evidenceIds.has(evidence.id)) {
           throw new ContractValidationError(
             `${evidenceContext}.id: duplicate code-evidence id.`,

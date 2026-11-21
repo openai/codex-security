@@ -21,8 +21,8 @@ import { readProjectConfig } from "../src/project-config.js";
 import { git } from "./git-fixture.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { copyCompletedScanFixture } from "./plugin-root.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { registeredCampaignResult } from "./support/multiscan.js";
 import {
   createCliTest,
   captureCli,
@@ -585,19 +585,23 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     `id,repository,revision,mode,scope\nstandard,${input.repository},${revision},standard,lib\ndeep,${input.repository},${revision},deep,\n`,
   );
   const selected: ScanOptions[] = [];
-  const deps = dependencies({ currentDirectory: input.root });
+  const environment = {
+    ...process.env,
+    CODEX_HOME: join(input.root, "codex-home"),
+    CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
+  };
+  const deps = dependencies({ currentDirectory: input.root, environment });
   deps.createSecurity = (native) => {
     expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
-    return fakeSecurity(async (_repository, options = {}) => {
+    return fakeSecurity(async (repository, options = {}) => {
       selected.push(options);
-      const result = fakeResult(["high"]);
-      await mkdir(options.outputDir!, { recursive: true, mode: 0o700 });
-      await copyCompletedScanFixture(options.outputDir!);
-      await writeFile(
-        join(options.outputDir!, "report.md"),
-        "Synthetic report.",
+      return registeredCampaignResult(
+        environment,
+        native,
+        repository,
+        options,
+        "findings",
       );
-      return result;
     });
   };
   const args = [
@@ -610,7 +614,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     "--json",
   ];
   const output = captureCli(main, "stdout");
-  expect(await output.run(args, deps)).toBe(1);
+  expect(await output.run(args, deps), output.text()).toBe(1);
   expect(JSON.parse(output.text())).toMatchObject({
     completed: 2,
     failed: 0,
