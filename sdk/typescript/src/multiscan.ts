@@ -2135,7 +2135,7 @@ async function verifiedCampaignCheckout(
       }
     }
     if (
-      metadata !== undefined &&
+      (metadata !== undefined || target === undefined) &&
       receipt?.scope !== undefined &&
       receipt.resolvedScope === undefined &&
       expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/u, "")
