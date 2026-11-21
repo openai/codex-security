@@ -7204,21 +7204,34 @@ export async function main(
       },
     })
     .command("validate", {
-      usage: [{ suffix: "<findings...> [options]" }, { suffix: "--records" }],
+      alias: { config: "c" },
+      usage: [
+        { suffix: "<findings...> [options]" },
+        { suffix: "--scan ID -c FILE [FINDING_ID...]" },
+        { suffix: "--records" },
+      ],
       examples: [{ args: { "findings...": "findings.json" } }],
-      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
+      hint: "With --scan, submit open findings from a saved scan to the validation provider in the selected project file. Pass finding identifiers to narrow the selection. Use --records alone for host-provided reviews over JSON-RPC.",
+      output: jsonDocument.optional(),
       description:
-        "Assess candidate security findings using source evidence only.",
+        "Assess candidate security findings using source evidence, or submit sealed findings to a validation provider.",
       destructive: false,
       args: z.object({
         "findings...": z
           .string()
           .min(1, "A finding must not be empty.")
+          .optional()
           .describe(
-            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose.",
+            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose. With --scan, pass saved finding identifiers.",
           ),
       }),
       options: z.object({
+        config: PROJECT_CONFIG_OPTION,
+        scan: optionValue("--scan")
+          .optional()
+          .describe(
+            "Submit open findings from a saved scan ID or latest using the configured provider.",
+          ),
         records: z
           .boolean()
           .default(false)
@@ -7245,11 +7258,91 @@ export async function main(
           .optional()
           .describe("Return JSON matching a Codex-supported JSON Schema file."),
       }),
-      async run({ options }) {
+      async run({ options, format }) {
         let knowledgeBase: PreparedKnowledgeBase | undefined;
         try {
           if (options.records)
             throw new CodexSecurityError("Use validate --records alone.");
+          if (options.scan !== undefined) {
+            if (
+              options.model !== undefined ||
+              options.effort !== undefined ||
+              options.auth !== "auto" ||
+              options.codex.length ||
+              options.knowledgeBase.length ||
+              options.outputSchema ||
+              options.context ||
+              options.contextFile
+            )
+              throw new CodexSecurityError(
+                "Use only a selected project file and finding identifiers with validate --scan.",
+              );
+            const project = await selectedProjectConfig(
+              options.config,
+              dependencies,
+            );
+            const configuration = project?.input.scan?.validation;
+            if (!configuration)
+              throw new CodexSecurityError(
+                "Select a project file with scan.validation.provider using -c FILE.",
+              );
+            const provider = validationProviderFromConfiguration(configuration);
+            const selected = await selectSavedFindings(
+              positionals,
+              options.scan,
+              undefined,
+              dependencies,
+            );
+            const openIds = new Set(
+              selected.findings.flatMap((f) => [f.occurrenceId, f.findingId]),
+            );
+            if (positionals.some((id) => !openIds.has(id)))
+              throw new CodexSecurityError(
+                "Choose open findings for validation.",
+              );
+            const controller = new AbortController();
+            const removeSignals = listenForAbort(dependencies, controller);
+            try {
+              const context = {
+                repositoryPath: selected.repository,
+                signal: controller.signal,
+              };
+              const results = provider.validateBatch
+                ? await provider.validateBatch(selected.findings, context)
+                : await Promise.all(
+                    selected.findings.map((finding) =>
+                      provider.validate(finding, context),
+                    ),
+                  );
+              exitCode = controller.signal.aborted
+                ? controller.signal.reason === "SIGTERM"
+                  ? 143
+                  : 130
+                : results.some((r) => r.unavailable)
+                  ? 1
+                  : 0;
+              if (format === "json" || format === "jsonl") {
+                return {
+                  schemaVersion: 1,
+                  scanId: selected.scanId,
+                  items: results.map((result) => result.record),
+                };
+              }
+              await writeCliOutput(
+                output,
+                results.map((result) => result.report).join("\n\n") + "\n",
+              );
+              return;
+            } finally {
+              removeSignals();
+            }
+          }
+          if (options.config !== undefined)
+            throw new CodexSecurityError("Use --config with validate --scan.");
+          if (!positionals.length)
+            throw new CodexSecurityError(
+              "Validation requires a finding or --scan.",
+            );
           if (options.knowledgeBase.length > 0) {
             const directory = dependencies.currentDirectory();
             const checkout = await gitMarkerRoot(
@@ -8487,7 +8580,9 @@ export async function main(
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
-      (["validate", "logout"].includes(command) ||
+      ((command === "validate" &&
+        !argv.some((arg) => arg === "--scan" || arg.startsWith("--scan="))) ||
+        command === "logout" ||
         (command === "login" && following !== "status")) &&
       !inspection
     ) {
@@ -9625,7 +9720,7 @@ async function selectSavedFindings(
 ): Promise<SelectedFindings> {
   if (identifiers.some((identifier) => !isFindingIdentifier(identifier))) {
     throw new CodexSecurityError(
-      "Saved scan patching accepts only finding identifiers.",
+      "Saved scan selection accepts only finding identifiers.",
     );
   }
 

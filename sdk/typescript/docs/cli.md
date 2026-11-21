@@ -857,6 +857,19 @@ scan:
 codex-security scan . --validate -c codex-security.yaml
 ```
 
+To send findings from a completed scan, supply its scan ID and the selected
+occurrence IDs. Use `--scan latest` for the latest completed scan in the
+current directory. Omitting the IDs submits all open findings in that scan.
+
+```sh
+codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
+```
+
+The command writes results to stdout and exits with code 1 if any assessment
+is unavailable. Run it again using the same scan ID and host state to recover
+an interrupted submission or poll an accepted finding. JSON includes the
+AWS finding ID and ARN after acceptance, and the issue ID and ARN when found.
+
 In Codex CLI, explicitly select the same project file when requesting a plugin
 scan. Standard, diff and Deep Scan completion runs the configured provider on
 the MCP host after sealing, and includes its supplemental report and paths in
@@ -872,7 +885,9 @@ with matching suffixes on repeated runs and `validation.recordsPath` in CLI JSON
 The versioned document contains each item's verdict, before and after severity,
 provider severity, reason bases, claim match, issue URL and evidence freshness.
 Related flaws retain Codex severity. Sealed findings and `--fail-on-severity` do
-not change. Local-tree drift and provider source identity are not compared.
+not change. Continuum verifies that its only code source matches a Git remote
+of the scanned repository root. Evidence freshness describes its age and
+leaves the deployed revision unverified.
 See [validation providers](../../../docs/validation-providers.md)
 for configuration, permissions and limits.
 

@@ -1,11 +1,18 @@
+import {
+  continuumTestRepository,
+  registeredSource,
+  creation,
+  requestBody,
+} from "./support/continuum-validation-fixtures.js";
 import { describe, expect, test } from "bun:test";
 import {
   ContinuumValidationProvider,
   assessClaimMatch,
-  deterministicClientToken,
   findingToOcsf,
   type ContinuumAwsLauncher,
 } from "../src/continuum-validation-provider.js";
+
+const context = continuumTestRepository();
 
 const finding = {
   occurrenceId: "occ_demo",
@@ -24,14 +31,16 @@ const finding = {
 function fakeAws(link = "createdIssueId") {
   const calls: string[] = [];
   const launcher: ContinuumAwsLauncher = async (operation, args) => {
+    const setup = registeredSource(operation);
+    if (setup) return setup;
     calls.push(operation);
-    if (operation === "create-code-finding") return { findingId: "finding-1" };
+    if (operation === "create-code-finding") return creation("finding-1");
     if (operation === "get-code-finding")
       return {
         status: "CONFIRMED",
         [link]: "issue-1",
         findingArn:
-          "arn:aws:continuum:us-east-1:123456789012:environments/environment-1/code-findings/finding-1",
+          "arn:aws:continuum:us-east-1:123456789012:environments/environment1/code-findings/finding-1",
       };
     if (operation === "get-code-issue")
       return {
@@ -39,7 +48,7 @@ function fakeAws(link = "createdIssueId") {
         issueId: "issue-1",
         findingIds: ["finding-1"],
         issueArn:
-          "arn:aws:continuum:us-east-1:123456789012:environments/environment-1/code-issues/issue-1",
+          "arn:aws:continuum:us-east-1:123456789012:environments/environment1/code-issues/issue-1",
       };
     if (operation === "list-code-issue-artifacts")
       return {
@@ -88,7 +97,7 @@ function fakeAws(link = "createdIssueId") {
 function provider(launcher: ContinuumAwsLauncher) {
   let elapsed = 0;
   return new ContinuumValidationProvider({
-    environmentId: "environment-1",
+    environmentId: "environment1",
     launcher,
     now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
     delay: async (ms) => {
@@ -98,12 +107,92 @@ function provider(launcher: ContinuumAwsLauncher) {
 }
 
 describe("Continuum validation provider", () => {
+  test("replays the exact document after a lost response and resumes from its receipt", async () => {
+    const requests: string[] = [];
+    const aws = fakeAws();
+    let failPoll = true;
+    const launcher: ContinuumAwsLauncher = async (op, args, signal) => {
+      if (op === "create-code-finding") {
+        requests.push(requestBody(args));
+        if (requests.length === 1) throw new Error("receipt lost");
+      }
+      if (op === "get-code-finding" && failPoll)
+        throw new Error("read interrupted");
+      return aws.launcher(op, args, signal);
+    };
+    const at = (time: string) =>
+      new ContinuumValidationProvider({
+        environmentId: "environment1",
+        launcher,
+        now: () => new Date(time),
+      });
+    const submittedAt = "2026-11-13T00:00:00.000Z";
+    expect(
+      (await at(submittedAt).validate(finding, context)).unavailable,
+    ).toContain("receipt lost");
+    const pending = await at("2026-11-14").validate(finding, context);
+    expect(pending.record).toMatchObject({
+      ...creation("finding-1"),
+      submittedAt,
+      verdict: "UNAVAILABLE",
+    });
+    failPoll = false;
+    const complete = await at("2026-11-15").validate(finding, context);
+    expect(complete.record).toMatchObject({
+      ...creation("finding-1"),
+      submittedAt,
+      issueId: "issue-1",
+      issueArn:
+        "arn:aws:continuum:us-east-1:123456789012:environments/environment1/code-issues/issue-1",
+      verdict: "EXPLOITABLE",
+      resultScope: "finding",
+      freshness: { stale: false },
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toBe(requests[0]);
+    await at(submittedAt).validate(
+      { ...finding, summary: "Revised claim" },
+      context,
+    );
+    expect(JSON.parse(requests[2]!).clientToken).not.toBe(
+      JSON.parse(requests[0]!).clientToken,
+    );
+  });
+
+  test("concurrent senders share a receipt", async () => {
+    const aws = fakeAws();
+    const results = await Promise.all(
+      [provider(aws.launcher), provider(aws.launcher)].map((p) =>
+        p.validate(finding, context),
+      ),
+    );
+    expect(aws.calls.filter((op) => op === "create-code-finding")).toHaveLength(
+      1,
+    );
+    expect(results.map((r) => r.record?.verdict)).toEqual([
+      "EXPLOITABLE",
+      "EXPLOITABLE",
+    ]);
+  });
+
+  test("rejects a different source before sending the finding", async () => {
+    const aws = fakeAws();
+    const p = provider(
+      async (op, args, signal) =>
+        registeredSource(op, "environment1", "other/repo") ??
+        aws.launcher(op, args, signal),
+    );
+    const result = await p.validate(finding, context);
+    expect(result.unavailable).toContain("does not match");
+    expect(aws.calls).toEqual([]);
+  });
   test.each(["createdIssueId", "duplicateOfIssueId", "mergedIntoIssueId"])(
     "follows %s without projecting proof bodies",
     async (link) => {
-      const result = await provider(fakeAws(link).launcher).validate(finding, {
-        repositoryPath: "/repo",
-      });
+      const result = await provider(fakeAws(link).launcher).validate(
+        finding,
+        context,
+      );
       expect(result.unavailable).toBeUndefined();
       expect(result.provenance.referenceId).toBe("issue-1");
       expect(result.record?.claimMatch).toBe("on_target");
@@ -118,7 +207,7 @@ describe("Continuum validation provider", () => {
     const aws = fakeAws();
     const results = await provider(aws.launcher).validateBatch(
       [finding, { ...finding, occurrenceId: "second" }],
-      { repositoryPath: "/repo" },
+      context,
     );
     expect(results).toHaveLength(2);
     expect(aws.calls.slice(0, 2)).toEqual([
@@ -131,13 +220,16 @@ describe("Continuum validation provider", () => {
   test("contains a submission rejection to its item", async () => {
     const aws = fakeAws();
     const p = provider(async (op, args, signal) => {
-      if (op === "create-code-finding" && args.join(" ").includes("occ_demo"))
+      if (
+        op === "create-code-finding" &&
+        requestBody(args).includes("occ_demo")
+      )
         throw new Error("synthetic rejection");
       return aws.launcher(op, args, signal);
     });
     const results = await p.validateBatch(
       [finding, { ...finding, occurrenceId: "second" }],
-      { repositoryPath: "/repo" },
+      context,
     );
     expect(results[0]?.record?.unavailable).toContain("rejection");
     expect(results[1]?.record?.verdict).toBe("EXPLOITABLE");
@@ -146,9 +238,13 @@ describe("Continuum validation provider", () => {
   test("a downstream discard has unknown match and keeps Codex severity", async () => {
     const result = await provider(async (op) =>
       op === "create-code-finding"
-        ? { findingId: "finding-1" }
-        : { status: "DISCARDED", statusMessage: "Location not actionable" },
-    ).validate(finding, { repositoryPath: "/repo" });
+        ? creation("finding-1")
+        : (registeredSource(op) ?? {
+            ...creation("finding-1"),
+            status: "DISCARDED",
+            statusMessage: "Location not actionable",
+          }),
+    ).validate(finding, context);
     expect(result.record).toMatchObject({
       verdict: "DISCARDED",
       claimMatch: "unknown",
@@ -160,12 +256,12 @@ describe("Continuum validation provider", () => {
   test("reused evidence predating submission is stale", async () => {
     const aws = fakeAws("mergedIntoIssueId");
     const p = new ContinuumValidationProvider({
-      environmentId: "environment-1",
+      environmentId: "environment1",
       launcher: aws.launcher,
       now: () => new Date("2026-11-14T00:00:00Z"),
       delay: async () => {},
     });
-    const result = await p.validate(finding, { repositoryPath: "/repo" });
+    const result = await p.validate(finding, context);
     expect(result.record?.freshness.stale).toBe(true);
     expect(result.report).toContain("possibly stale");
   });
@@ -196,7 +292,7 @@ describe("Continuum validation provider", () => {
           ];
         }
         return response;
-      }).validate(finding, { repositoryPath: "/repo" });
+      }).validate(finding, context);
       expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
       expect(result.record?.resultScope).toBe("finding");
       expect(result.record?.claimMatch).toBe("unknown");
@@ -208,7 +304,7 @@ describe("Continuum validation provider", () => {
     const aws = fakeAws();
     let elapsed = 0;
     const p = new ContinuumValidationProvider({
-      environmentId: "environment-1",
+      environmentId: "environment1",
       waitMinutes: 0.1,
       now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
       delay: async (ms) => {
@@ -227,7 +323,7 @@ describe("Continuum validation provider", () => {
         return response;
       },
     });
-    const result = await p.validate(finding, { repositoryPath: "/repo" });
+    const result = await p.validate(finding, context);
     expect(result.record).toMatchObject({
       verdict: "EXPLOITABLE",
       resultScope: "issue",
@@ -243,7 +339,7 @@ describe("Continuum validation provider", () => {
     const polled: string[] = [];
     let elapsed = 0;
     const p = new ContinuumValidationProvider({
-      environmentId: "environment-1",
+      environmentId: "environment1",
       waitMinutes: 0.1,
       now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
       delay: async (ms) => {
@@ -252,18 +348,18 @@ describe("Continuum validation provider", () => {
       },
       launcher: async (op, args, signal) => {
         if (op === "create-code-finding")
-          return {
-            findingId: JSON.parse(args[1]!).ocsfDocument.finding_info.uid,
-          };
+          return creation(
+            JSON.parse(requestBody(args)).ocsfDocument.finding_info.uid,
+          );
         if (op === "get-code-finding") {
           const id = args.at(-1)!;
           polled.push(id);
-          if (id !== "item-5") return { status: "SUBMITTED" };
+          if (id !== "item-5") return { status: "SUBMITTED", ...creation(id) };
         }
         const response = await aws.launcher(op, args, signal);
         if (op === "get-code-finding")
           response["findingArn"] =
-            "arn:aws:continuum:us-east-1:123456789012:environments/environment-1/code-findings/item-5";
+            "arn:aws:continuum:us-east-1:123456789012:environments/environment1/code-findings/item-5";
         if (op === "get-code-issue") response["findingIds"] = ["item-5"];
         return response;
       },
@@ -273,7 +369,7 @@ describe("Continuum validation provider", () => {
         ...finding,
         occurrenceId: `item-${i + 1}`,
       })),
-      { repositoryPath: "/repo" },
+      context,
     );
     expect(
       result.slice(0, 4).every((row) => row.record?.verdict === "UNAVAILABLE"),
@@ -291,7 +387,7 @@ describe("Continuum validation provider", () => {
       if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
         response["createdAt"] = "2025-11-13T00:00:00Z";
       return response;
-    }).validate(finding, { repositoryPath: "/repo" });
+    }).validate(finding, context);
     expect(result.record?.freshness.stale).toBe(true);
     expect(result.report).toContain("possibly stale");
     expect(result.report).not.toContain("current at submission");
@@ -303,7 +399,7 @@ describe("Continuum validation provider", () => {
       const aws = fakeAws("duplicateOfIssueId");
       let elapsed = 0;
       const p = new ContinuumValidationProvider({
-        environmentId: "environment-1",
+        environmentId: "environment1",
         waitMinutes: 0.1,
         now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
         delay: async (ms) => {
@@ -321,7 +417,7 @@ describe("Continuum validation provider", () => {
           return response;
         },
       });
-      const result = await p.validate(finding, { repositoryPath: "/repo" });
+      const result = await p.validate(finding, context);
       expect(result.record?.verdict).toBe("UNAVAILABLE");
       expect(result.record?.severityAfter).toBe("high");
     },
@@ -358,7 +454,7 @@ describe("Continuum validation provider", () => {
         ];
       }
       return response;
-    }).validate(finding, { repositoryPath: "/repo" });
+    }).validate(finding, context);
     expect(fetched).toEqual(["new-validation", "older-validation"]);
     expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
   });
@@ -372,7 +468,7 @@ describe("Continuum validation provider", () => {
         response["severity"] = "CRITICAL";
       }
       return response;
-    }).validate(finding, { repositoryPath: "/repo" });
+    }).validate(finding, context);
     expect(aws.calls.filter((op) => op === "get-code-finding")).toHaveLength(1);
     expect(result.record).toMatchObject({
       resultScope: "issue",
@@ -395,7 +491,7 @@ describe("Continuum validation provider", () => {
   test("labels a finding joining an already validated shared issue and stale scoring", async () => {
     const aws = fakeAws("duplicateOfIssueId");
     const result = await new ContinuumValidationProvider({
-      environmentId: "environment-1",
+      environmentId: "environment1",
       now: () => new Date("2026-11-14T00:00:00Z"),
       delay: async () => {
         throw new Error("must not wait");
@@ -406,7 +502,7 @@ describe("Continuum validation provider", () => {
           response["findingIds"] = ["finding-1", "other-1"];
         return response;
       },
-    }).validate(finding, { repositoryPath: "/repo" });
+    }).validate(finding, context);
     expect(result.record).toMatchObject({
       resultScope: "issue",
       joinedValidatedIssue: true,
@@ -429,7 +525,7 @@ describe("Continuum validation provider", () => {
       if (op === "list-code-issue-artifacts" && rounds === 1)
         return { items: [] };
       return response;
-    }).validate(finding, { repositoryPath: "/repo" });
+    }).validate(finding, context);
     expect(rounds).toBe(2);
     expect(result.record?.resultScope).toBe("issue");
   });
@@ -458,7 +554,7 @@ describe("Continuum validation provider", () => {
             { findingId: "finding-1", exploitable: "NOT_EXPLOITABLE" },
           ];
         return response;
-      }).validate(finding, { repositoryPath: "/repo" });
+      }).validate(finding, context);
       expect(result.record).toMatchObject({
         resultScope: "finding",
         verdict: "NOT_EXPLOITABLE",
@@ -489,7 +585,7 @@ describe("Continuum validation provider", () => {
             },
           ];
         return response;
-      }).validate(finding, { repositoryPath: "/repo" });
+      }).validate(finding, context);
       expect(result.report).toContain(
         `reachable from attacker (basis ${basis})`,
       );
@@ -506,7 +602,7 @@ describe("Continuum validation provider", () => {
     let first = true,
       elapsed = 0;
     const p = new ContinuumValidationProvider({
-      environmentId: "environment-1",
+      environmentId: "environment1",
       launcher: async (op, args, signal) => {
         if (op === "create-code-finding" && first) {
           first = false;
@@ -519,24 +615,16 @@ describe("Continuum validation provider", () => {
         elapsed += ms;
       },
     });
-    expect(
-      (await p.validate(finding, { repositoryPath: "/repo" })).unavailable,
-    ).toBeUndefined();
+    expect((await p.validate(finding, context)).unavailable).toBeUndefined();
     expect(elapsed).toBe(1000);
   });
 
-  test("maps sink-first code findings and deterministic submission tokens", () => {
+  test("maps sink-first code findings", () => {
     const code = findingToOcsf(finding, new Date(0));
     expect(code["class_uid"]).toBe(2002);
     expect(
       (code["vulnerabilities"] as any[])[0].affected_code[0],
     ).toMatchObject({ file: { path: "src/store.ts" }, start_line: 40 });
-    expect(deterministicClientToken("environment-1", finding)).toBe(
-      deterministicClientToken("environment-1", finding),
-    );
-    expect(deterministicClientToken("environment-1", finding)).not.toBe(
-      deterministicClientToken("other", finding),
-    );
     expect(() => findingToOcsf({ title: "No location" })).toThrow(
       "no code location",
     );

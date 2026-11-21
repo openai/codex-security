@@ -39,6 +39,34 @@ Provider work is outside Codex cost accounting. As with existing validation,
 and other deferred review work are not submitted. External provider registry
 discovery is not supported.
 
+## Validate findings from a saved scan
+
+From the checkout, use `codex-security scans list --json` to find a completed
+scan and `codex-security scans show SCAN_ID --json` to inspect its findings.
+Submit a selection by occurrence ID with the trusted provider configuration.
+
+```sh
+codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
+```
+
+Supply multiple IDs separated by spaces. Omitting the IDs selects all open
+findings from the scan. `--scan latest` selects the latest completed scan in
+the current directory. The command reads the saved findings and runs the
+provider directly. Output goes to stdout. JSON contains `scanId` and one
+`items` entry per selected finding. Exit code 1 indicates at least one
+unavailable assessment. Check the individual records for accepted submissions.
+
+Continuum receives each selected finding's identifier, title, summary, severity,
+CWE when available, file paths and line ranges. Before calling
+`CreateCodeFinding`, the host saves the exact request and token in its private
+state directory under `continuum-submissions`. After acceptance it saves the
+AWS finding ID, ARN and original submission time, and deletes the request body.
+After an interruption, rerun the command with the same scan ID, selection,
+environment and host state. Pending requests reuse the same document and token.
+Accepted findings resume at `GetCodeFinding`. A new finding, changed submitted
+content, another destination or loss of the host state can create a fresh
+submission. You can also use this command after a plugin scan times out.
+
 ## Read the supplemental results
 
 CLI and plugin scans save two files beside the sealed scan report:
@@ -51,22 +79,25 @@ CLI and plugin scans save two files beside the sealed scan report:
 
 Each structured item uses these fields:
 
-| Field                  | Meaning                                                                                |
-| ---------------------- | -------------------------------------------------------------------------------------- |
-| `itemId`               | Codex finding identifier                                                               |
-| `provider`             | Validation provider name                                                               |
-| `verdict`              | Provider verdict, or `UNAVAILABLE`                                                     |
-| `severityBefore`       | Original Codex severity                                                                |
-| `severityAfter`        | Supplemental finding severity; original retained for issue scope or an unmatched claim |
-| `providerSeverity`     | Provider's severity, when returned; issue severity for issue scope                     |
-| `resultScope`          | `finding` or `issue`: scope of the verdict and provider severity, when reported        |
-| `issueFindingCount`    | Number of distinct findings in the associated issue, when known                        |
-| `joinedValidatedIssue` | Issue-scoped proof predates this finding's submission                                  |
-| `reasons`              | Entries with `basis` and `reason`                                                      |
-| `claimMatch`           | `on_target`, `on_target_escalated`, `different_flaw`, or `unknown`                     |
-| `issueUrl`             | Provider issue link, when available                                                    |
-| `freshness`            | Optional `validatedAt` timestamp, `stale` flag, and `reasons`                          |
-| `unavailable`          | Per-finding failure explanation, when present                                          |
+| Field                     | Meaning                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------- |
+| `itemId`                  | Codex finding identifier                                                               |
+| `findingId`, `findingArn` | AWS identity after acceptance, including when subsequent polling fails                 |
+| `issueId`, `issueArn`     | Associated AWS issue, when retrieved                                                   |
+| `submittedAt`             | Original submission time                                                               |
+| `provider`                | Validation provider name                                                               |
+| `verdict`                 | Provider verdict, or `UNAVAILABLE`                                                     |
+| `severityBefore`          | Original Codex severity                                                                |
+| `severityAfter`           | Supplemental finding severity; original retained for issue scope or an unmatched claim |
+| `providerSeverity`        | Provider's severity, when returned; issue severity for issue scope                     |
+| `resultScope`             | `finding` or `issue`: scope of the verdict and provider severity, when reported        |
+| `issueFindingCount`       | Number of distinct findings in the associated issue, when known                        |
+| `joinedValidatedIssue`    | Issue-scoped proof predates this finding's submission                                  |
+| `reasons`                 | Entries with `basis` and `reason`                                                      |
+| `claimMatch`              | `on_target`, `on_target_escalated`, `different_flaw`, or `unknown`                     |
+| `issueUrl`                | Provider issue link, when available                                                    |
+| `freshness`               | Optional `validatedAt` timestamp, `stale` flag, and `reasons`                          |
+| `unavailable`             | Per-finding failure explanation, when present                                          |
 
 `reachableFromAttacker`, when returned, is a structured boolean at `resultScope`;
 absence means unknown. Reason prose is never used to infer it.
@@ -129,15 +160,18 @@ and supplemental provider failures do not fail the sealed scan. Continuum record
 the assessment disposition is `deferred`.
 
 Evidence older than the submission is marked stale in `freshness` and Markdown.
-Current-at-submission evidence does not prove that the deployment runs the scanned
-code: deployment source identity and local-tree drift are not checked.
+Freshness describes the age of the evidence. Verifying that the deployed
+revision matches the scanned tree requires a separate revision comparison.
 
 ## AWS Continuum requirements
 
 Install AWS CLI v2.38.5 or later outside the checkout. Configure credentials and
-the Region for the selected environment. The environment must contain the
-matching source; the caller needs permission to submit findings and read
-findings, issues, and their artifacts. See
+the Region for the selected environment. Scan the Git repository root.
+Continuum must have a single Git repository as its only code source, matching
+a remote of that checkout. The adapter verifies the source using
+`GetEnvironment` and `GetIntegration` before sending any results.
+The caller also needs `CreateCodeFinding`, `GetCodeFinding`, `GetCodeIssue`,
+`ListCodeIssueArtifacts` and `GetCodeIssueArtifact`. See
 [AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html).
 Calls use the existing protected host AWS launcher and credential chain, not the
 scan model. Keep profiles and custom AWS models outside the scanned checkout.

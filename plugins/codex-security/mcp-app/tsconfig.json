@@ -8,7 +8,7 @@
     "strict": true,
     "target": "ES2022",
     "types": ["node"],
-    "lib": ["ES2025"],
+    "lib": ["ESNext"],
     "allowImportingTsExtensions": true
   },
   "include": ["*.ts", "src", "tests/**/*.ts", "scripts/*.mts"]

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -470,15 +471,21 @@ await test(
     try {
       const repository = join(root, "repository");
       const bin = join(root, "bin");
-      await mkdir(repository);
+      execFileSync("git", ["init", "-q", repository]);
+      execFileSync(
+        "git",
+        ["remote", "add", "origin", "https://github.com/example/project"],
+        { cwd: repository },
+      );
       await mkdir(bin);
       const aws = join(bin, "aws");
       await writeFile(
         aws,
         `#!/bin/sh
 case "$2" in
-create-code-finding) printf '{"findingId":"fixture-finding"}' ;;
-get-code-finding) printf '{"status":"DISCARDED","discardReason":"fixture rejection"}' ;;
+get-environment) printf '{"environmentArn":"arn:aws:continuum:us-east-1:123456789012:environments/example","configuration":{"codeConfiguration":{"sourceConfiguration":{"repositorySources":[{"integrationId":"demo","repository":"example/project"}]}}}}' ;;
+get-integration) printf '{"integrationType":"GITHUB"}' ;;
+create-code-finding|get-code-finding) printf '{"findingId":"fixture","findingArn":"arn:aws:continuum:us-east-1:123456789012:environments/example/code-findings/fixture","status":"DISCARDED","discardReason":"fixture rejection"}' ;;
 *) exit 1 ;;
 esac
 `,
@@ -491,7 +498,7 @@ esac
           scan: {
             validation: {
               provider: "continuum",
-              continuum: { environment_id: "synthetic-environment" },
+              continuum: { environment_id: "example" },
             },
           },
         }),

@@ -92,7 +92,7 @@ function configuredSources(environment: Record<string, unknown>) {
   };
 }
 
-async function singleRepositorySource(
+export async function singleRepositorySource(
   environment: Record<string, unknown>,
   getIntegration: (id: string) => Promise<Record<string, unknown>>,
 ) {
@@ -113,12 +113,13 @@ async function singleRepositorySource(
       ? "https://github.com"
       : gitLabIntegration.parse(integration).providerDetails.gitlab.instanceUrl;
   return {
+    platform: type.toLowerCase(),
     url: declaredScannerRepositoryUrl(
       `${base.replace(/\/$/u, "")}/${repository}`,
       "Continuum",
     ),
     // Mixed environments do not identify the Git source by the patch's AWS source name.
-    includePatches: s3Sources.length === 0,
+    gitOnly: s3Sources.length === 0,
   };
 }
 
@@ -334,7 +335,7 @@ export async function collectContinuumIssues(
   const { environmentId, signal } = options;
   const request = await continuumRequests(options, runAws);
   const environmentArgs = ["--environment-id", environmentId];
-  const { url: sourceRepositoryUrl, includePatches } =
+  const { url: sourceRepositoryUrl, gitOnly: includePatches } =
     await singleRepositorySource(
       await request("get-environment", environmentArgs),
       (id) => request("get-integration", ["--integration-id", id]),
