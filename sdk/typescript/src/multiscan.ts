@@ -1122,28 +1122,36 @@ async function claimCheckout(checkout: string, scanDir: string): Promise<void> {
   });
 }
 
+async function ownsCheckout(
+  checkout: string,
+  scanDir: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
+    undefinedIfMissingFile,
+  );
+  if (!marker?.isFile()) return false;
+  const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
+  return (
+    marker.size === expected.length &&
+    (
+      await readScanFile(
+        checkout,
+        CHECKOUT_MARKER,
+        "campaign checkout marker",
+        signal,
+      )
+    ).equals(expected)
+  );
+}
+
 async function removeCheckout(
   checkout: string,
   scanDir: string,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   try {
-    const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
-      undefinedIfMissingFile,
-    );
-    if (!marker?.isFile()) return undefined;
-    const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
-    if (
-      marker.size === expected.length &&
-      (
-        await readScanFile(
-          checkout,
-          CHECKOUT_MARKER,
-          "campaign checkout marker",
-          signal,
-        )
-      ).equals(expected)
-    ) {
+    if (await ownsCheckout(checkout, scanDir, signal)) {
       await rm(checkout, { recursive: true, force: true });
     }
   } catch (error) {
@@ -2019,7 +2027,14 @@ type RegisteredCampaignScan = Exclude<
 
 async function verifiedCampaignCheckout(
   { contract, authority }: RegisteredCampaignScan,
-  { options, task, checkout, recoveryCheckout, receipt }: CampaignAttempt,
+  {
+    options,
+    task,
+    scanDir,
+    checkout,
+    recoveryCheckout,
+    receipt,
+  }: CampaignAttempt,
   restorePaths?: (root: string, paths: readonly string[]) => Promise<void>,
 ): Promise<string | undefined> {
   const { manifest, mode } = contract;
@@ -2093,7 +2108,10 @@ async function verifiedCampaignCheckout(
       target !== undefined &&
       (metadata === undefined ||
         restorePaths === undefined ||
-        receipt?.cleanupPending === cleanupKind)
+        (receipt?.cleanupPending === cleanupKind &&
+          (await ownsCheckout(matchedRoot, scanDir, options.signal).catch(
+            () => false,
+          ))))
     ) {
       // Cleanup may remove all or part of a completed checkout. Registration
       // preserves the canonical paths from the authenticated scan request.
