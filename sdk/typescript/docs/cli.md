@@ -3025,6 +3025,8 @@ candidates.
 
 ### Patch existing findings
 
+A patch worker checks its stored account before starting remediation. Codex handles token refresh during normal use. If the session expires, run `codex-security login` and repeat the original patch command from the same checkout.
+
 `--scan latest` uses the current repository's latest completed scan. Patching
 supports JSON for saved findings, literal text, and files. Each finding gets a
 saved Codex desktop task. `--model` and `--effort` control the model.

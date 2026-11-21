@@ -7,6 +7,7 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   stat,
@@ -256,13 +257,25 @@ type ReadWorktreeGit = (
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean; readGit?: ReadWorktreeGit } = {},
+  options: {
+    requireIfPresent?: boolean;
+    readGit?: ReadWorktreeGit;
+    protectEmptyMarker?: boolean;
+  } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
   const readGit = options.readGit ?? gitOutput;
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
+  const protectedMarker = async (root: string): Promise<boolean> => {
+    if (!options.protectEmptyMarker) return false;
+    const marker = join(root, ".git");
+    return (
+      (await lstat(marker)).isDirectory() &&
+      (await readdir(marker)).length === 0
+    );
+  };
   let canonicalRoot: string;
   try {
     if (strict) {
@@ -289,6 +302,7 @@ export async function enclosingGitWorktreeRoot(
     throwIfAborted(signal);
     if (strict && error instanceof InvalidTargetError) throw error;
     if (markerRoot !== null) {
+      if (await protectedMarker(markerRoot)) return markerRoot;
       throw new InvalidTargetError(
         `Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible. ${errorMessage(error)}`,
         { cause: error },
@@ -303,6 +317,7 @@ export async function enclosingGitWorktreeRoot(
       canonicalRoot,
     ) !== ""
   ) {
+    if (await protectedMarker(markerRoot)) return markerRoot;
     throw new InvalidTargetError(
       "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
     );
@@ -315,12 +330,17 @@ export async function enclosingGitWorktreeRoot(
 export async function enclosingGitWorktreeRoots(
   repository: string,
   signal?: AbortSignal,
+  options: { protectEmptyAncestorMarkers?: boolean } = {},
 ): Promise<string[]> {
   const roots: string[] = [];
   let directory = repository;
   for (;;) {
     const root = await enclosingGitWorktreeRoot(directory, signal, {
       requireIfPresent: true,
+      // Once the selected checkout is bound, exclude even a masked ancestor
+      // from credential writes and keep walking to the outermost worktree.
+      protectEmptyMarker:
+        options.protectEmptyAncestorMarkers && roots.length > 0,
     });
     if (root === null) return roots;
     roots.push(root);

@@ -1640,6 +1640,42 @@ describe("CLI authentication", () => {
 });
 
 describe("skill authentication", () => {
+  const refreshFailure =
+    "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
+  const routingFailure = "Workspace routing discovery unauthorized (401)";
+  test.each([
+    [refreshFailure, false, false],
+    [null, false, false],
+    [routingFailure, true, false],
+    [routingFailure, true, true],
+  ] as const)(
+    "patch reads the stored account before remediation (%s, starts=%s, rate-limited=%s)",
+    async (detail, starts, limited) => {
+      const result = await runProviderSkill(stateDirectory, {
+        auth: "chatgpt",
+        overrides: [],
+        storedCredentials: true,
+        environment: {
+          SYNTHETIC_AUTH_ERRORS: JSON.stringify({
+            "account/read": detail,
+            "thread/start": limited ? "Rate limit exceeded" : undefined,
+          }),
+        },
+      });
+      const methods = result.requests.map(({ method }) => method);
+      expect(result.requests[methods.indexOf("account/read")]?.params).toEqual({
+        refreshToken: false,
+      });
+      expect(methods.includes("thread/start")).toBe(starts);
+      expect(result.status, result.stderr).toBe(starts && !limited ? 0 : 1);
+      if (!starts) expect(result.stderr).toContain("codex-security login");
+      if (limited)
+        expect(result.stderr).toContain("The request was rate limited.");
+      if (result.status && detail)
+        expect(result.stderr.split(detail)).toHaveLength(2);
+    },
+  );
+
   test.each(["patch", "verify-fix"] as const)(
     "%s inherits ambient command authentication through a null optional override",
     async (command) => {
@@ -2403,7 +2439,11 @@ describe("skill authentication", () => {
       expect(methods).toEqual([
         "initialize",
         "initialized",
-        ...(usesSessionKey ? ["account/login/start"] : []),
+        ...(usesSessionKey
+          ? ["account/login/start"]
+          : auth === "chatgpt"
+            ? ["account/read"]
+            : []),
         ...(loginFailure && usesSessionKey
           ? []
           : ["config/read", "thread/start"]),

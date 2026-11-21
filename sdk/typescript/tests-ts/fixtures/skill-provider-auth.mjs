@@ -25,13 +25,20 @@ if (process.env.SYNTHETIC_SKILL_COMMAND === "validate") {
     item: { type: "agent_message", text: "Synthetic validation complete" },
   });
 } else {
+  const errors = JSON.parse(process.env.SYNTHETIC_AUTH_ERRORS ?? "{}");
   for await (const line of createInterface({ input: process.stdin })) {
     const request = JSON.parse(line);
     record(request);
-    if (request.method === "initialize") {
+    const message = errors[request.method];
+    if (message) {
+      send({ id: request.id, error: { code: -32000, message } });
+    } else if (request.method === "initialize") {
       send({ id: request.id, result: {} });
     } else if (request.method === "account/login/start") {
       send({ id: request.id, result: { type: "apiKey" } });
+    } else if (request.method === "account/read") {
+      const account = message === null ? null : { type: "apiKey" };
+      send({ id: request.id, result: { requiresOpenaiAuth: true, account } });
     } else if (request.method === "config/read") {
       send({ id: request.id, result: { layers: [] } });
     } else if (request.method === "experimentalFeature/list") {
