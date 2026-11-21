@@ -18,6 +18,7 @@ export interface DeepScanProjectConfig {
 export async function readSelectedProjectConfig(
   file: string,
   canonicalTarget: string,
+  setupMode?: "standard" | "deep",
 ) {
   const spelling =
     process.platform !== "win32" && file.startsWith("~\\")
@@ -66,6 +67,29 @@ export async function readSelectedProjectConfig(
     };
     [key: string]: unknown;
   };
+  if (!setupMode) return { path, input };
+  const supported =
+    setupMode === "deep"
+      ? ["mode", "max_time_minutes", "deep", "validation"]
+      : ["mode", "validation"];
+  const unsupported = [
+    ...Object.keys(input).filter((key) => !["$schema", "scan"].includes(key)),
+    ...Object.keys(input.scan ?? {})
+      .filter((key) => !supported.includes(key))
+      .map((key) => `scan.${key}`),
+  ];
+  if (unsupported.length > 0) {
+    throw new Error(
+      setupMode === "deep"
+        ? `Unsupported native Deep Scan project settings: ${unsupported.join(", ")}. Only scan.mode, scan.max_time_minutes, scan.deep, and scan.validation are supported.`
+        : `Unsupported project settings for this scan: ${unsupported.join(", ")}. Only scan.mode and scan.validation are supported.`,
+    );
+  }
+  if (input.scan?.mode !== undefined && input.scan.mode !== setupMode) {
+    throw new Error(
+      `The selected project configuration must use scan.mode: ${setupMode} or omit scan.mode.`,
+    );
+  }
   return { path, input };
 }
 
@@ -77,26 +101,8 @@ export async function readDeepScanProjectConfig(
   const { path, input } = await readSelectedProjectConfig(
     file,
     canonicalTarget,
+    "deep",
   );
-  const unsupported = [
-    ...Object.keys(input).filter((key) => !["$schema", "scan"].includes(key)),
-    ...Object.keys(input.scan ?? {})
-      .filter(
-        (key) =>
-          !["mode", "max_time_minutes", "deep", "validation"].includes(key),
-      )
-      .map((key) => `scan.${key}`),
-  ];
-  if (unsupported.length > 0) {
-    throw new Error(
-      `Unsupported native Deep Scan project settings: ${unsupported.join(", ")}. Only scan.mode, scan.max_time_minutes, scan.deep, and scan.validation are supported.`,
-    );
-  }
-  if (input.scan?.mode !== undefined && input.scan.mode !== "deep") {
-    throw new Error(
-      "The selected project configuration must use scan.mode: deep or omit scan.mode.",
-    );
-  }
   const settings: DeepScanProjectConfig["settings"] = {};
   for (const [name, , field] of DEEP_SCAN_SETTINGS) {
     const value = input.scan?.deep?.[field];

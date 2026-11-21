@@ -38,17 +38,24 @@ import {
   type DeepWorkerParentSandbox,
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
-import { readDeepScanProjectConfig } from "./src/deep-scan/project-config.js";
+import {
+  readDeepScanProjectConfig,
+  readSelectedProjectConfig,
+} from "./src/deep-scan/project-config.js";
 import type {
   DeepScanLogEvent,
   DeepScanRunState,
 } from "./src/deep-scan/types.js";
 import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
 import {
-  bindValidationProvider,
+  bindValidationProviderConfiguration,
   validateCompletedScan,
   validationCompletionText,
 } from "./src/validation-provider.js";
+import {
+  validationProviderFromConfiguration,
+  type ValidationProviderConfiguration,
+} from "#validation-runtime";
 
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const trimmedText = z.string().trim();
@@ -835,17 +842,17 @@ export function createCodexSecurityServer(): McpServer {
       _meta: { ui: { visibility: ["app", "model"] } },
     },
     async ({ targetPath, scope, mode, diffTarget, projectConfigPath }) => {
-      const selected = await deepScanProjectSetup(
+      const selected = await projectSetup(
         targetPath,
         projectConfigPath,
         "preview",
+        mode,
       );
       const setup = await workbench("inspect-setup", {
-        targetPath: selected.targetPath,
+        ...selected,
         scope,
         mode,
         ...diffTargetFields(diffTarget),
-        deepScanProjectJson: selected.projectConfigJson,
       });
       return scanActionResult(
         { setup },
@@ -874,23 +881,23 @@ export function createCodexSecurityServer(): McpServer {
       diffTarget,
       projectConfigPath,
     }) => {
-      const selected = await deepScanProjectSetup(
+      const selected = await projectSetup(
         targetPath,
         projectConfigPath,
         "save",
+        mode,
       );
       return workspaceResult(
         (await workbench(
           "save-workspace",
           {
             workspaceId: sessionId,
-            targetPath: selected.targetPath,
+            ...selected,
             scope,
             mode,
             targetSummary,
             userContextStdin: Boolean(userContext),
             ...diffTargetFields(diffTarget),
-            deepScanProjectJson: selected.projectConfigJson,
           },
           userContext,
         )) as WorkspaceState,
@@ -909,7 +916,7 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ sessionId, model, reasoningEffort }) => {
-      const workspace = (await workbench("start-scan", {
+      const workspace = (await startWithValidation("start-scan", {
         workspaceId: sessionId,
         model,
         reasoningEffort,
@@ -1943,7 +1950,7 @@ async function startPromptOnlyScan(
 ): Promise<JsonObject> {
   const { mode, targetPath, scope, targetSummary, userContext, diffTarget } =
     input;
-  const started = await workbench(
+  return startWithValidation(
     "start-prompt-only-scan",
     {
       threadId,
@@ -1956,16 +1963,9 @@ async function startPromptOnlyScan(
       ...diffTargetFields(diffTarget),
       scanRoot: await scanRoot(),
     },
+    input.projectConfigPath,
     userContext,
   );
-  const scan = started.scan as JsonObject;
-  await bindValidationProvider(
-    String(scan.scanId),
-    String(scan.targetPath),
-    input.projectConfigPath,
-    started.startDisposition === "created",
-  );
-  return started;
 }
 
 async function startHeadlessStandardScan(
@@ -1979,7 +1979,7 @@ async function startHeadlessStandardScan(
   threadId: string,
   modelSettings: { model?: string; reasoningEffort?: string } = {},
 ): Promise<JsonObject> {
-  const started = await workbench(
+  return startWithValidation(
     "start-headless-standard-scan",
     {
       threadId,
@@ -1990,33 +1990,80 @@ async function startHeadlessStandardScan(
       userContextStdin: Boolean(input.userContext),
       scanRoot: await scanRoot(),
     },
+    input.projectConfigPath,
     input.userContext,
   );
-  const scan = started.scan as JsonObject;
-  await bindValidationProvider(
-    String(scan.scanId),
-    String(scan.targetPath),
-    input.projectConfigPath,
-    started.startDisposition === "created",
+}
+
+async function startWithValidation(
+  command: string,
+  args: WorkbenchFields,
+  projectConfigPath?: string,
+  userContext?: string,
+): Promise<JsonObject> {
+  let started = await workbench(
+    command,
+    { ...args, joinOnly: projectConfigPath !== undefined },
+    userContext,
   );
+  if (
+    projectConfigPath !== undefined &&
+    typeof started.newScanTarget === "string"
+  ) {
+    const selected = await validationProjectSetup(
+      projectConfigPath,
+      started.newScanTarget,
+    );
+    started = await workbench(command, { ...args, ...selected }, userContext);
+  }
+  const configuration = started.validationProviderConfiguration as
+    ValidationProviderConfiguration | undefined;
+  if (configuration) {
+    const { scanId } = (started.scan ?? started.results) as { scanId: string };
+    await bindValidationProviderConfiguration(scanId, configuration, true);
+    delete started.validationProviderConfiguration;
+  }
   return started;
 }
 
-async function deepScanProjectSetup(
+async function validationProjectSetup(
+  path: string,
+  targetPath: string,
+  setupMode?: "standard",
+) {
+  const { input } = await readSelectedProjectConfig(
+    path,
+    targetPath,
+    setupMode,
+  );
+  const validation = input.scan?.validation;
+  if (!validation) return { targetPath };
+  validationProviderFromConfiguration(validation);
+  return { targetPath, validationProjectJson: JSON.stringify({ validation }) };
+}
+
+async function projectSetup(
   targetPath: string,
   projectConfigPath: string | undefined,
   action: "preview" | "save",
+  mode: "standard" | "deep" | "diff",
 ) {
   if (projectConfigPath === undefined) return { targetPath };
   const inspectWithSetup =
     action === "preview" && (await isCanonicalDirectory(targetPath));
   if (!inspectWithSetup) targetPath = await inspectProjectTarget(targetPath);
   try {
+    if (mode !== "deep")
+      return await validationProjectSetup(
+        projectConfigPath,
+        targetPath,
+        "standard",
+      );
     const project = await readDeepScanProjectConfig(
       projectConfigPath,
       targetPath,
     );
-    return { targetPath, projectConfigJson: JSON.stringify(project) };
+    return { targetPath, deepScanProjectJson: JSON.stringify(project) };
   } catch (error) {
     // Target or Git errors take precedence over an invalid project file.
     if (inspectWithSetup) await inspectProjectTarget(targetPath);

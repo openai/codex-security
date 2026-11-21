@@ -90,6 +90,15 @@ the schema in this checkout. For a copy at your project root with
 `./node_modules/@openai/codex-security/schemas/project-config.schema.json`.
 You can also omit the hint. The CLI validates the file using its bundled schema.
 
+## Standard scans and change reviews in the plugin
+
+Pass an explicitly selected `projectConfigPath` to setup or a conversational
+scan start. These modes read `scan.validation` from the file. App setup accepts
+that setting and an optional `scan.mode: standard`. Inspection returns the
+provider name in `setup.validationProvider`. Saving setup or
+starting a conversational scan stores the selection before analysis begins.
+Rejoining the same scan uses the saved settings even if the file changes.
+
 ## Desktop and conversational Deep Scans
 
 Deep Scan setup accepts an explicitly selected `.yaml`, `.yml`, or `.json` project

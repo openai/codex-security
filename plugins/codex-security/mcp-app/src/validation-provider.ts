@@ -54,10 +54,7 @@ export async function bindValidationProviderConfiguration(
   validationProviderFromConfiguration(configuration);
   const path = configurationPath(scanId);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, JSON.stringify(configuration), {
-    flag: "wx",
-    mode: 0o600,
-  });
+  await replaceArtifactText(path, JSON.stringify(configuration));
 }
 
 /** Run only after the workbench has sealed the scan. Its artifacts stay unchanged. */
