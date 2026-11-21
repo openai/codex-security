@@ -6,6 +6,7 @@ import { propertyOptions } from "./support/property.js";
 const rates = [
   ["gpt-5.5", 5000n, 500n, 5000n, 30000n],
   ["gpt-5.5-2026-04-23", 5000n, 500n, 5000n, 30000n],
+  ["gpt-6.2-sol", 2000n, 100n, 2500n, 10000n],
   ["gpt-6.1-sol", 2000n, 100n, 2500n, 10000n],
   ["gpt-6-astra", 10000n, 1000n, 12500n, 50000n],
   ["gpt-6-luna", 100n, 10n, 125n, 500n],
