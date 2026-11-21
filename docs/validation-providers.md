@@ -127,15 +127,18 @@ Each structured item uses these fields:
 | `terminalStatus`          | How the validation run ended, when reported by the provider                            |
 | `statusMessage`           | Provider explanation for a discarded or declined finding, when supplied                |
 | `severityBefore`          | Original Codex severity                                                                |
-| `severityAfter`           | Original severity unless a conclusive finding-level result matches the submitted claim |
-| `providerSeverity`        | Provider's severity, when returned; issue severity for issue scope                     |
-| `resultScope`             | `finding` or `issue`: scope of the verdict and provider severity, when reported        |
+| `severityAfter`           | Original severity unless current validation and scoring support this finding           |
+| `validationArtifactId`    | AWS identifier of the selected validation artifact, when available                     |
+| `scoringArtifactId`       | AWS identifier of the selected scoring artifact, when available                        |
+| `proofObservation`        | Selected AWS execution effect or source-analysis conclusion for a matched finding      |
+| `providerSeverity`        | Provider's severity, when returned. Continuum reports the severity of the issue.       |
+| `resultScope`             | `finding` or `issue`, indicating the scope of the verdict                              |
 | `issueFindingCount`       | Number of distinct findings in the associated issue, when known                        |
 | `joinedValidatedIssue`    | Issue-scoped proof predates this finding's submission                                  |
 | `reasons`                 | Entries with `basis` and `reason`                                                      |
 | `claimMatch`              | `on_target`, `on_target_escalated`, `different_flaw`, or `unknown`                     |
 | `issueUrl`                | Provider issue link, when available                                                    |
-| `freshness`               | Optional `validatedAt` timestamp, `stale` flag, and `reasons`                          |
+| `freshness`               | Optional `evidenceCreatedAt` and `validatedAt` timestamps, `stale` flag, and `reasons` |
 | `unavailable`             | Per-finding failure explanation, when present                                          |
 
 `reachableFromAttacker`, when returned, is a structured boolean at `resultScope`;
@@ -164,9 +167,32 @@ combined severity.
 A provider can prove a related flaw without validating the submitted claim.
 Continuum labels that case “Not validated: Continuum proved a related flaw” and
 retains Codex severity (`claimMatch: different_flaw`). An `unknown` match also
-retains Codex severity. Claim matching uses a text-and-path heuristic. For a
-conclusive verdict without a detailed proof, the heuristic uses the issue name
-and synopsis.
+retains Codex severity. For a completed validation, the heuristic compares
+concepts in the finding with those in the source analysis summary or executed
+proof code. It requires a citation to the first submitted source location with
+the exact repository-relative path and a starting line within the submitted
+range. Abbreviated paths, bare filenames and citations found only in the issue
+caption or console output leave the match unknown. Flaws at the same location
+can share vocabulary. Check the selected artifact for the specific behavior.
+
+The adapter checks the AWS finding ARN, any echoed source ID, and the ID and
+type of each requested artifact. For a matching result, the supplemental
+severity can change if the issue has one member, all scoring signals identify
+that issue, and a single exploitability signal identifies the selected
+validation artifact and its verdict. The submission, validation, scoring and
+issue update timestamps must establish that order. If these scoring checks
+fail, the assessment explains the limitation and omits the scorer's
+reachability, factors and preconditions. The issue severity is available in
+`providerSeverity`.
+
+For a matched, completed validation with current linked scoring, the JSON
+record includes `proofObservation` when AWS provides an effect or source
+conclusion. An `execution` observation carries AWS’s observed `effect`.
+A `source_analysis` observation can include its inferred `effect` and
+`summary`. Each text field has whitespace normalized and is limited to
+320 characters. An effect such as `BEHAVIOR_CHANGED` gives the category
+of the observed result. Consult the identified artifact for the details
+of the execution. The original finding supplies the remediation criteria.
 
 ### Findings that share an issue
 

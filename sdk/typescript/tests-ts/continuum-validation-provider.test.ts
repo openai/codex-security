@@ -45,6 +45,7 @@ function fakeAws(link = "createdIssueId") {
     if (operation === "get-code-issue")
       return {
         severity: "HIGH",
+        updatedAt: "2026-11-13T00:00:00Z",
         issueId: "issue-1",
         findingIds: ["finding-1"],
         issueArn:
@@ -58,15 +59,24 @@ function fakeAws(link = "createdIssueId") {
       return args.at(-1) === "EVIDENCE"
         ? {
             artifactType: "EVIDENCE",
-            artifactId: "scorer-artifact",
+            artifactId: args.at(-1),
             createdAt: "2026-11-13T00:00:00Z",
             body: {
               prevalidationSignals: {
                 signals: [
                   {
+                    subjectRef: "issue-1",
                     dimension: "REACHABILITY_ENABLER",
                     conclusion: "The affected route is reachable.",
                     basis: "GRAPH",
+                  },
+                  {
+                    dimension: "EXPLOITABILITY",
+                    subjectRef: "issue-1",
+                    exploitability: {
+                      sourceValidationArtifactId: "VALIDATION_EVIDENCE",
+                      verdict: "EXPLOITABLE",
+                    },
                   },
                 ],
               },
@@ -74,15 +84,23 @@ function fakeAws(link = "createdIssueId") {
           }
         : {
             artifactType: "VALIDATION_EVIDENCE",
-            artifactId: "validation-artifact",
+            artifactId: args.at(-1),
             createdAt: "2026-11-13T00:00:00Z",
             body: {
               validationEvidence: {
                 verdict: "EXPLOITABLE",
+                terminalStatus: "COMPLETED",
                 executedProof: {
                   observedEffect: "cross-user authorization changed",
                   path: "src/store.ts",
-                  code: "RAW_PROOF_SHOULD_NEVER_APPEAR",
+                  code: {
+                    proofCode: [
+                      {
+                        content:
+                          "RAW_PROOF_SHOULD_NEVER_APPEAR cross-user authorization at src/store.ts:40",
+                      },
+                    ],
+                  },
                   output: "RAW_CONSOLE_SHOULD_NEVER_APPEAR",
                   payload: "RAW_PAYLOAD_SHOULD_NEVER_APPEAR",
                 },
@@ -107,6 +125,22 @@ function provider(launcher: ContinuumAwsLauncher) {
 }
 
 describe("Continuum validation provider", () => {
+  test("stops before reading the issue when the echoed source is a different occurrence", async () => {
+    const aws = fakeAws();
+    const result = await provider(async (op, args, signal) => {
+      const response = await aws.launcher(op, args, signal);
+      if (op === "get-code-finding")
+        response["sourceFindingId"] = "another-occurrence";
+      return response;
+    }).validate(finding, context);
+    expect(result.record).toMatchObject({
+      itemId: finding.occurrenceId,
+      verdict: "UNAVAILABLE",
+      severityAfter: "high",
+      claimMatch: "unknown",
+    });
+    expect(aws.calls).not.toContain("get-code-issue");
+  });
   test("replays the exact document after a lost response and resumes from its receipt", async () => {
     const requests: string[] = [];
     const aws = fakeAws();
@@ -603,7 +637,9 @@ describe("Continuum validation provider", () => {
         const response = await aws.launcher(op, args, signal);
         if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
           (response["body"] as any).prevalidationSignals.signals = [
+            ...(response["body"] as any).prevalidationSignals.signals,
             {
+              subjectRef: "issue-1",
               dimension: "LIKELIHOOD_ASSESSMENT",
               conclusion: "reachable",
               preconditions: {
@@ -669,16 +705,19 @@ describe("Continuum validation provider", () => {
 
 describe("claim matching", () => {
   test.each([
-    [{ effect: "authorization cross-user", path: "src/store.ts" }, "on_target"],
+    [
+      { effect: "authorization cross-user", path: "src/store.ts:40" },
+      "on_target",
+    ],
     [
       {
         effect: "authorization cross-user credential exposure",
-        path: "src/store.ts",
+        path: "src/store.ts:40",
       },
       "on_target_escalated",
     ],
     [
-      { effect: "resource exhaustion and denial", path: "src/store.ts" },
+      { effect: "resource exhaustion and denial", path: "src/store.ts:40" },
       "different_flaw",
     ],
     [{}, "unknown"],
@@ -689,3 +728,24 @@ describe("claim matching", () => {
     },
   );
 });
+
+test.each([
+  ["src/store.ts:40–42", "on_target"],
+  ["./src/store.ts#L42", "on_target"],
+  ["src/store.ts:12", "unknown"],
+  ["src/store.ts:400", "unknown"],
+  ["src/store.ts:40-3", "unknown"],
+  ["src/store.ts:1-1000", "unknown"],
+  ["src/store.ts", "unknown"],
+  ["store.ts:40", "unknown"],
+  ["lib/src/store.ts:40", "unknown"],
+  ["src/Store.ts:40", "unknown"],
+  ["src/route.ts:11", "unknown"],
+] as const)(
+  "checks the primary submitted location against %s",
+  (citation, match) => {
+    expect(
+      assessClaimMatch("Cross-user authorization in " + citation, finding),
+    ).toBe(match);
+  },
+);

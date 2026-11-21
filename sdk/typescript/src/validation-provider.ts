@@ -23,6 +23,14 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
+  validationArtifactId?: string;
+  scoringArtifactId?: string;
+  /** Selected provider conclusion for a matched, current finding. */
+  proofObservation?: {
+    kind: "execution" | "source_analysis";
+    effect?: string;
+    summary?: string;
+  };
   submittedAt?: string;
   provider: string;
   verdict: string;
@@ -44,6 +52,8 @@ export interface ValidationItemRecord {
   claimMatch: ValidationClaimMatch;
   issueUrl?: string;
   freshness: {
+    /** Creation time of the returned validation artifact, including inconclusive results. */
+    evidenceCreatedAt?: string;
     validatedAt?: string;
     stale: boolean;
     reasons: string[];
