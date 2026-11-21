@@ -60,6 +60,7 @@ import {
   type ScanOptions,
   type ScanProgress,
   type ScanWorkerEvent,
+  type ScanWorkerSpawnEvent,
   type ScanResult,
   type ScanSettings,
   type ValidationOptions,
@@ -145,6 +146,14 @@ const options: ScanOptions = {
   onWorkerEvent(event: ScanWorkerEvent) {
     event.kind satisfies "observed";
     event.worker satisfies number;
+  },
+  onWorkerSpawn(event: ScanWorkerSpawnEvent) {
+    event.attempt satisfies number;
+    if (event.kind === "failed") {
+      event.reason satisfies string;
+    } else {
+      event.kind satisfies "dispatch";
+    }
   },
 };
 

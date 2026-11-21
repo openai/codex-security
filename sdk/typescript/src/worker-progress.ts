@@ -1,4 +1,4 @@
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
 import { parseJson } from "./value.js";
 import { z } from "zod";
 
@@ -150,4 +150,54 @@ function dispatchStatus(
     parseJson(() => marker.slice(WORKER_STATUS_PREFIX.length)),
   );
   return parsed.success ? { kind: "dispatch", ...parsed.data } : null;
+}
+
+/** An attempt on the parent stream, numbered by first observation in this run. */
+export type ScanWorkerSpawnEvent =
+  | { kind: "dispatch"; attempt: number }
+  | { kind: "failed"; attempt: number; reason: string };
+
+export function createWorkerSpawnObserver(
+  notify: (event: ScanWorkerSpawnEvent) => void,
+) {
+  const attempts = new Map<string, { attempt: number; failed: boolean }>();
+  return (event: Readonly<Record<string, unknown>>) => {
+    const item = asRecord(event["item"]);
+    const id = item?.["id"];
+    if (
+      item?.["type"] !== "collab_tool_call" ||
+      item["tool"] !== "spawn_agent" ||
+      typeof id !== "string"
+    )
+      return;
+    const completed = event["type"] === "item.completed";
+    const failed = completed && item["status"] === "failed";
+    if (
+      !failed &&
+      event["type"] !== "item.started" &&
+      !(completed && item["status"] === "completed")
+    )
+      return;
+    const previous = attempts.get(id);
+    if (previous && (!failed || previous.failed)) return;
+    const attempt = previous?.attempt ?? attempts.size + 1;
+    attempts.set(id, { attempt, failed });
+    notify(
+      failed
+        ? { kind: "failed", attempt, reason: spawnFailureReason(item) }
+        : { kind: "dispatch", attempt },
+    );
+  };
+}
+
+function spawnFailureReason(item: Readonly<Record<string, unknown>>): string {
+  const error =
+    item["error"] ??
+    Object.values(asRecord(item["agents_states"]) ?? {}).find(
+      (state) => asRecord(state)?.["status"] === "errored",
+    );
+  const reason = isRecord(error) ? error["message"] : error;
+  return typeof reason === "string" && reason.trim() !== ""
+    ? reason
+    : "Delegated worker failed to start.";
 }
