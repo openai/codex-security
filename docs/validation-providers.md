@@ -77,7 +77,27 @@ content, another destination or loss of the host state can create a fresh
 submission. If a finding stays `SUBMITTED`, check the scan activity in the
 Continuum environment. The finding may be waiting for the next build.
 
-To bring a finding back for remediation, pass the returned `findingId` to
+After `validate --scan` or `scan --validate`, the CLI saves terminal Continuum
+assessments in private host state. When you patch or verify a saved occurrence
+on that host, the CLI includes its assessment in the model input. The workbench
+also loads it for the assigned Generate and Verify actions. Apply uses the
+recorded patch unchanged. These reads make no AWS requests.
+
+The assessment includes AWS finding and issue identifiers, available artifact
+IDs, status, scope, freshness and any eligible proof observation. Treat the
+stored text and identifiers as sensitive. The host keeps CLI snapshots under
+`cli-continuum-*` in the CLI state directory. Both interfaces can also read
+assessments from the plugin's provider cache. Missing state leaves the
+original finding available for remediation. The reviewer checks the candidate
+against the original remediation tests and reports the AWS result separately.
+
+For a scan bound to a Continuum environment, a CLI retry can finish the
+workbench's timed-out submission. When multiple terminal results describe the
+same submission and issue, the reviewer receives the latest assessment by
+validation artifact creation time. Ambiguous results are omitted.
+
+Import is optional. To collect full AWS evidence or available patches, pass
+the returned `findingId` to
 `codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT --format json`.
 Use the same AWS profile and Region as for validation. The collector retrieves
 the finding's evidence and any matching patches. [Collect, patch and verify a finding](scanner-imports/continuum.md#collect-a-finding-with-patches)

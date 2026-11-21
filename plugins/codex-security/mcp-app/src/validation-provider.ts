@@ -6,10 +6,12 @@ import { readSelectedProjectConfig } from "./deep-scan/project-config.js";
 import {
   validationProviderFromConfiguration,
   assessPluginFindings,
+  savedContinuumAssessments,
   withPublicationLock,
   type ValidationProviderConfiguration,
 } from "#validation-runtime";
 import type { JsonObject } from "./types.js";
+import { asRecord } from "./record.js";
 import { protectedHostPathResolver } from "./helpers/inventory-git.js";
 
 /** Text accompanies structured content so every MCP client exposes the result. */
@@ -30,6 +32,39 @@ function configurationPath(scanId: string): string {
     "validation-providers",
     `${scanId}.json`,
   );
+}
+
+/** Enrich the single occurrence returned by the workbench after authorizing its stage token. */
+export async function withAssignedAssessment(
+  context: JsonObject,
+): Promise<JsonObject> {
+  const scan = asRecord(context.scan);
+  const findings = scan?.findings;
+  const finding =
+    Array.isArray(findings) && findings.length === 1
+      ? asRecord(findings[0])
+      : undefined;
+  const action = asRecord(finding?.remediationState)?.pendingAction;
+  if (
+    (action !== "generate" && action !== "verify") ||
+    typeof scan?.scanId !== "string" ||
+    typeof scan.targetPath !== "string" ||
+    typeof finding?.occurrenceId !== "string"
+  ) {
+    return context;
+  }
+  const saved = await savedContinuumAssessments(
+    process.env,
+    scan.scanId,
+    scan.targetPath,
+    [finding.occurrenceId],
+  );
+  const continuumAssessment = saved.get(finding.occurrenceId);
+  if (!continuumAssessment) return context;
+  return {
+    ...context,
+    scan: { ...scan, findings: [{ ...finding, continuumAssessment }] },
+  };
 }
 
 /** Bind explicitly selected host configuration, never repository-discovered settings. */

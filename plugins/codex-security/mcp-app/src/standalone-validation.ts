@@ -16,6 +16,15 @@ export const validationProviderFromConfiguration: (
 ) => unknown = unavailable;
 export const assessPluginFindings: (...args: unknown[]) => never = unavailable;
 
+export async function savedContinuumAssessments(
+  _environment: Record<string, string | undefined>,
+  _scanId: string,
+  _repositoryPath: string,
+  _occurrenceIds: readonly string[],
+): Promise<Map<string, unknown>> {
+  return new Map();
+}
+
 // Only the SDK can run the provider or update the saved assessment.
 export function withPublicationLock<T>(
   _state: string,

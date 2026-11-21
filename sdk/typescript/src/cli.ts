@@ -463,6 +463,10 @@ import {
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import {
+  saveCliContinuumAssessments,
+  savedContinuumAssessments,
+} from "./saved-continuum-assessment.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
   supplementalValidationStatus,
@@ -7425,6 +7429,14 @@ export async function main(
                       provider.validate(finding, context),
                     ),
                   );
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                selected.repository,
+                selected.scanId,
+                configuration,
+                results.map((result) => result.record),
+              );
               exitCode = controller.signal.aborted
                 ? controller.signal.reason === "SIGTERM"
                   ? 143
@@ -7584,6 +7596,7 @@ export async function main(
                 options.scan,
                 options.severity,
                 dependencies,
+                "remediation",
               )
             : undefined;
           const imports = linear
@@ -7869,6 +7882,7 @@ export async function main(
               options.scan,
               options.severity,
               dependencies,
+              "remediation",
             );
             const validationPrompt = await resolvePatchValidationPrompt(
               options.validationPromptFile,
@@ -9856,11 +9870,26 @@ async function* workbenchFindings(
   } while (offset !== undefined);
 }
 
+async function saveForRemediation(
+  stderr: Writable,
+  ...args: Parameters<typeof saveCliContinuumAssessments>
+): Promise<void> {
+  try {
+    await saveCliContinuumAssessments(...args);
+  } catch (error) {
+    await writeCliOutput(
+      stderr,
+      `codex-security: Could not save validation for remediation: ${diagnosticValue(errorMessage(error))}\n`,
+    ).catch(() => {});
+  }
+}
+
 async function selectSavedFindings(
   identifiers: readonly string[],
   requestedScanId: string | undefined,
   severity: FailureSeverity | undefined,
   dependencies: CliDependencies,
+  purpose?: "remediation",
 ): Promise<SelectedFindings> {
   if (identifiers.some((identifier) => !isFindingIdentifier(identifier))) {
     throw new CodexSecurityError(
@@ -9974,6 +10003,15 @@ async function selectSavedFindings(
           scan.scanId,
           dependencies.runWorkbench,
         );
+  const assessments =
+    purpose === "remediation" && selected.length
+      ? await savedContinuumAssessments(
+          dependencies.environment,
+          scan.scanId,
+          scan.targetPath,
+          selected.map((finding) => finding.occurrenceId),
+        )
+      : undefined;
   const byOccurrence = new Map(
     fullFindings.map((finding) => [finding.occurrenceId, finding]),
   );
@@ -10003,7 +10041,11 @@ async function selectSavedFindings(
         if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
         else delete hydrated[key];
       }
-      return hydrated;
+      delete hydrated["continuumAssessment"];
+      const assessment = assessments?.get(finding.occurrenceId);
+      return assessment
+        ? { ...hydrated, continuumAssessment: assessment }
+        : hydrated;
     }),
   };
 }
@@ -13239,6 +13281,15 @@ async function executeScan(
                 { flag: "wx", mode: 0o600 },
               );
             await checkTarget();
+            if (configuredValidation)
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                repository,
+                result.manifest.scan.id,
+                configuredValidation,
+                records,
+              );
             validation = {
               status: supplementalValidationStatus(
                 validationProvider,

@@ -742,6 +742,29 @@ describe("read-only finding verification", () => {
     expect(await batches()).toEqual([[findings[0]!], [findings[1]!]]);
   });
 
+  test("reserves Continuum guidance once per enriched verification batch", async () => {
+    const findings = fakeResult(["high", "high", "high"]).findings.findings.map(
+      (finding, i) => ({
+        ...finding,
+        occurrenceId: `occ_${i}`,
+        title: "",
+        ...(i > 0 ? { continuumAssessment: { verdict: "FAILED" } } : {}),
+      }),
+    );
+    const prompt = await remediationPrompt({
+      operation: "verify",
+      contents: findings,
+      verificationIds: findings.map(({ occurrenceId }) => occurrenceId),
+      pluginRoot: PLUGIN_ROOT,
+    });
+    findings[2]!.title = "x".repeat((1 << 20) - [...prompt].length);
+    const sizes = async () =>
+      (await verificationBatches(findings, PLUGIN_ROOT)).map((b) => b.length);
+    expect(await sizes()).toEqual([3]);
+    findings[2]!.title += "x";
+    expect(await sizes()).toEqual([2, 1]);
+  });
+
   test("rejects an unfinished output slice before starting a verification", async () => {
     const cli = createCliTest(main);
     const deps = dependencies({

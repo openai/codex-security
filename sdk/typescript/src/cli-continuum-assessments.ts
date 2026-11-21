@@ -1,0 +1,146 @@
+import { hash } from "node:crypto";
+import { lstat, readdir, realpath } from "node:fs/promises";
+import { join } from "node:path";
+import { z } from "zod";
+import { commandGitProtectionRoots } from "./local-git-metadata.js";
+import { readRegularInputFile } from "./prompt-files.js";
+import { writeAtomicJson } from "./publication-state.js";
+import {
+  canonicalConfigPath,
+  prepareScanRegistrationOutput,
+  requireOutputOutsideRepositories,
+  validatePreparedOutputDir,
+} from "./runtime.js";
+
+const snapshot = z.object({
+  schemaVersion: z.literal(1),
+  repositoryPath: z.string(),
+  scanId: z.string(),
+  environmentId: z.string().min(1),
+  record: z.looseObject({ itemId: z.string() }),
+});
+type SavedRecord = { environmentId: string; record: unknown };
+
+async function assessmentDirectory(
+  stateDirectory: string,
+  repository: string,
+  scanId: string,
+  create: boolean,
+) {
+  const key = hash("sha256", JSON.stringify([repository, scanId]));
+  const directory = join(
+    await canonicalConfigPath(stateDirectory),
+    "cli-continuum-" + key,
+  );
+  // Most scans have no provider. Avoid Git discovery in that case.
+  if (!create) await lstat(directory);
+  const roots = [
+    repository,
+    ...(await commandGitProtectionRoots(repository, process.env)),
+  ];
+  const check = (path: string) =>
+    requireOutputOutsideRepositories(roots, path, "state");
+  check(directory);
+  if (create)
+    return prepareScanRegistrationOutput(
+      directory,
+      key,
+      undefined,
+      check,
+      true,
+    );
+  return validatePreparedOutputDir(directory, check, true);
+}
+
+function snapshotName(itemId: string, environmentId: string, raw: string) {
+  return (
+    [itemId, environmentId, raw].map((part) => hash("sha256", part)).join(".") +
+    ".json"
+  );
+}
+
+/** Write one immutable snapshot per distinct conclusion. Concurrent selections
+ * never replace each other's results, and retries with the same result converge. */
+export async function writeCliSnapshots(
+  stateDirectory: string,
+  repositoryPath: string,
+  scanId: string,
+  environmentId: string,
+  records: readonly { itemId: string }[],
+): Promise<void> {
+  const repository = await realpath(repositoryPath);
+  const directory = await assessmentDirectory(
+    stateDirectory,
+    repository,
+    scanId,
+    true,
+  );
+  for (const record of records) {
+    const value = {
+      schemaVersion: 1,
+      repositoryPath: repository,
+      scanId,
+      environmentId,
+      record,
+    };
+    const filename = snapshotName(
+      record.itemId,
+      environmentId,
+      JSON.stringify(value),
+    );
+    await writeAtomicJson(join(directory, filename), value);
+  }
+}
+
+export async function readCliSnapshots(
+  stateDirectory: string,
+  repositoryPath: string,
+  scanId: string,
+  requested: ReadonlySet<string>,
+  environmentId?: string,
+): Promise<Map<string, SavedRecord[]>> {
+  const repository = await realpath(repositoryPath);
+  const directory = await assessmentDirectory(
+    stateDirectory,
+    repository,
+    scanId,
+    false,
+  );
+  const byHash = new Map(
+    [...requested].map((item) => [hash("sha256", item), item]),
+  );
+  const destination = environmentId && hash("sha256", environmentId);
+  const records = new Map<string, SavedRecord[]>();
+  const invalid = new Set<string>();
+  for (const name of await readdir(directory)) {
+    const [occurrence, environment] = name.split(".");
+    const itemId = occurrence && byHash.get(occurrence);
+    if (
+      !itemId ||
+      (destination && environment !== destination) ||
+      !name.endsWith(".json")
+    )
+      continue;
+    try {
+      const raw = await readRegularInputFile(join(directory, name), repository);
+      const saved = snapshot.parse(JSON.parse(raw));
+      if (
+        saved.repositoryPath !== repository ||
+        saved.scanId !== scanId ||
+        saved.record.itemId !== itemId ||
+        snapshotName(itemId, saved.environmentId, raw) !== name
+      ) {
+        invalid.add(itemId);
+        continue;
+      }
+      const batch = records.get(itemId) ?? [];
+      batch.push(saved);
+      records.set(itemId, batch);
+    } catch {
+      // An unreadable candidate could conflict with another for this occurrence.
+      invalid.add(itemId);
+    }
+  }
+  for (const item of invalid) records.delete(item);
+  return records;
+}

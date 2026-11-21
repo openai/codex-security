@@ -9,6 +9,7 @@ import {
 } from "./validation-provider.js";
 
 export { validationProviderFromConfiguration };
+export { savedContinuumAssessments } from "./saved-continuum-assessment.js";
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };
 
