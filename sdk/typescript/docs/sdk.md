@@ -257,6 +257,12 @@ scorer), and preserves unknown future values. The built-in `ContinuumValidationP
 accepts `ContinuumValidationOptions`. Provider authors implement `validate()`
 and optionally `validateBatch()`; external registry discovery is not supported.
 
+Continuum returns `record.terminalStatus` alongside `record.verdict` when AWS
+supplies a run status. Check `disposition` before using a result to prioritize
+a finding. Failed and inconclusive runs are deferred. For discarded findings,
+read `record.statusMessage` for the reason. `provenance.validatedAt` and
+`record.freshness.validatedAt` are optional.
+
 ### Scan a diff
 
 ```ts

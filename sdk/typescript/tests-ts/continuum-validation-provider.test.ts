@@ -195,6 +195,11 @@ describe("Continuum validation provider", () => {
       );
       expect(result.unavailable).toBeUndefined();
       expect(result.provenance.referenceId).toBe("issue-1");
+      const url =
+        "https://us-east-1.console.aws.amazon.com/continuum/environments/environment1/code-vulnerabilities/issues/issue-1?region=us-east-1";
+      expect(result.provenance.referenceUrl).toBe(url);
+      expect(result.record?.issueUrl).toBe(url);
+      expect(result.report).toContain(url);
       expect(result.record?.claimMatch).toBe("on_target");
       expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
       expect(JSON.stringify(result.record)).not.toMatch(
@@ -202,6 +207,24 @@ describe("Continuum validation provider", () => {
       );
     },
   );
+
+  test("keeps the issue link and full diagnostic when reading evidence fails", async () => {
+    const aws = fakeAws();
+    const message = `Command failed: aws continuum get-code-issue-artifact --artifact-id ${"a".repeat(180)}\nAccessDeniedException`;
+    const p = new ContinuumValidationProvider({
+      environmentId: "environment1",
+      consoleBaseUrl: "https://console.example/continuum/",
+      launcher: async (op, args, signal) => {
+        if (op === "get-code-issue-artifact") throw new Error(message);
+        return aws.launcher(op, args, signal);
+      },
+    });
+    const result = await p.validate(finding, context);
+    expect(result.record?.unavailable).toBe(message);
+    expect(result.record?.issueUrl).toBe(
+      "https://console.example/continuum/environments/environment1/code-vulnerabilities/issues/issue-1?region=us-east-1",
+    );
+  });
 
   test("submits every item before polling", async () => {
     const aws = fakeAws();
@@ -232,6 +255,7 @@ describe("Continuum validation provider", () => {
       context,
     );
     expect(results[0]?.record?.unavailable).toContain("rejection");
+    expect(results[0]?.provenance.validatedAt).toBeUndefined();
     expect(results[1]?.record?.verdict).toBe("EXPLOITABLE");
   });
 
@@ -247,9 +271,16 @@ describe("Continuum validation provider", () => {
     ).validate(finding, context);
     expect(result.record).toMatchObject({
       verdict: "DISCARDED",
+      statusMessage: "Location not actionable",
       claimMatch: "unknown",
       severityAfter: "high",
     });
+    expect(result.disposition).toBe("not_applicable");
+    expect(result.record?.providerSeverity).toBeUndefined();
+    expect(result.record?.freshness.validatedAt).toBeUndefined();
+    expect(result.provenance.validatedAt).toBeUndefined();
+    expect(result.report).toContain("Location not actionable");
+    expect(result.report).not.toContain("validated at");
     expect(result.report).not.toContain("proved a related flaw");
   });
 

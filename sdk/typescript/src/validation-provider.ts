@@ -5,7 +5,7 @@ export interface ValidationProvenance {
   providerVersion: string;
   referenceId?: string;
   referenceUrl?: string;
-  validatedAt: string;
+  validatedAt?: string;
 }
 
 /** Known provenance categories, or a future category preserved as reported. */
@@ -26,6 +26,10 @@ export interface ValidationItemRecord {
   submittedAt?: string;
   provider: string;
   verdict: string;
+  /** How the external validation run ended, independently of its verdict. */
+  terminalStatus?: string;
+  /** Provider explanation when it declined the submission. */
+  statusMessage?: string;
   severityBefore: string;
   severityAfter: string;
   providerSeverity?: string;
@@ -87,6 +91,16 @@ export type ValidationProviderConfiguration = {
   [provider: string]: unknown;
 };
 
+export function supplementalValidationStatus(
+  provider: ValidationProvider | undefined,
+  assessments: readonly ValidationProviderAssessment[] | undefined,
+): "complete" | "incomplete" {
+  return provider?.name === "continuum" &&
+    assessments?.some((item) => item.disposition === "deferred")
+    ? "incomplete"
+    : "complete";
+}
+
 export function unavailableAssessment(
   provider: Pick<ValidationProvider, "name" | "version">,
   reason: unknown,
@@ -101,7 +115,6 @@ export function unavailableAssessment(
     provenance: {
       provider: provider.name,
       providerVersion: provider.version,
-      validatedAt: new Date().toISOString(),
     },
     report: `Unavailable: ${message}`,
   };

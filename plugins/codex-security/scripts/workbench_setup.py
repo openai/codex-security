@@ -236,6 +236,9 @@ def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
         )
     elif args.deep_scan_project_json is not None:
         raise SystemExit("Project Deep Scan settings require Deep Scan mode.")
+    elif getattr(args, "validation_project_json", None) is not None:
+        snapshot = json.loads(args.validation_project_json)
+        inspected["validationProvider"] = snapshot["validation"]["provider"]
     return inspected
 
 

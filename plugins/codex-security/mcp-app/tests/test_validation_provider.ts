@@ -28,6 +28,7 @@ function importSource(path: string) {
 
 const {
   bindValidationProvider,
+  readCompletedValidation,
   validateCompletedScan,
   validationCompletionText,
 } = (await importSource(
@@ -48,7 +49,7 @@ await test("unconfigured plugin scans never invoke a validation provider", async
   assert.equal(calls, 0);
 });
 
-await test("configured plugin completion returns supplemental results and preserves sealed artifacts", async () => {
+await test("explicit completion retries pending assessments and preserves terminal results and sealed artifacts", async () => {
   const root = await temporaryDirectory("plugin-validation-");
   const oldState = process.env.CODEX_SECURITY_STATE_DIR;
   process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
@@ -81,45 +82,55 @@ await test("configured plugin completion returns supplemental results and preser
       "security.json",
       true,
     );
-    let submitted = 0;
+    const calls: string[] = [];
     const scan = { scanId: "synthetic-scan", targetPath: repository, scanDir };
     const resolveProvider = () => ({
-      name: "fake",
+      name: "continuum",
       version: "1",
       async validate(finding: unknown, context: { repositoryPath: string }) {
-        submitted++;
+        const id = (finding as { occurrenceId: string }).occurrenceId;
+        const failed = id === "item-2";
+        const retry = calls.includes(id);
+        calls.push(id);
         assert.equal(context.repositoryPath, repository);
-        if ((finding as { occurrenceId: string }).occurrenceId === "item-2")
-          throw new Error("transport unavailable");
+        if (failed && !retry) throw new Error("transport unavailable");
         return {
-          disposition: "reportable" as const,
-          report: "High → Critical, internet-exposed (GRAPH)",
+          disposition: failed ? "deferred" : "reportable",
+          report: failed
+            ? "Validation failed"
+            : "High → Critical, internet-exposed (GRAPH)",
+          unavailable: failed ? "Validation failed" : undefined,
           provenance: {
-            provider: "fake",
+            provider: "continuum",
             providerVersion: "1",
             validatedAt: "2026-01-01",
           },
           record: {
-            itemId: "item-1",
-            provider: "fake",
-            verdict: "EXPLOITABLE",
+            itemId: id,
+            provider: "continuum",
+            verdict: failed ? "UNCERTAIN" : "EXPLOITABLE",
+            terminalStatus: failed ? "FAILED" : "COMPLETED",
             severityBefore: "high",
-            severityAfter: "critical",
+            severityAfter: failed ? "high" : "critical",
             reasons: [
               {
                 basis: "GRAPH" as const,
                 reason: "Detailed synthetic context.",
               },
             ],
-            claimMatch: "on_target" as const,
+            claimMatch: failed ? "unknown" : "on_target",
             freshness: { stale: false, reasons: [] },
           },
         };
       },
     });
     const result = await validateCompletedScan(scan, resolveProvider);
-    assert.equal(result?.status, "complete");
-    assert.equal(submitted, 2);
+    assert.equal(result?.status, "incomplete");
+    assert.equal(result?.retryable, true);
+    assert.match(
+      validationCompletionText(result),
+      /complete_codex_security_scan/,
+    );
     assert.match(String(result?.report), /High → Critical/);
     assert.match(validationCompletionText(result), /high → critical/i);
     assert.match(validationCompletionText(result), /GRAPH/);
@@ -138,7 +149,7 @@ await test("configured plugin completion returns supplemental results and preser
       saved.items[0].reasons[0].reason,
       "Detailed synthetic context.",
     );
-    // Rejoining cannot replace the selected provider; cached completion cannot resubmit.
+    // Rejoining cannot replace the selected provider.
     await bindValidationProvider(
       "synthetic-scan",
       repository,
@@ -157,10 +168,31 @@ await test("configured plugin completion returns supplemental results and preser
         summary: "Fabricated negative result",
       }),
     );
-    const cached = await validateCompletedScan(scan, resolveProvider);
-    assert.equal(cached?.status, "complete");
-    assert.match(validationCompletionText(cached), /transport unavailable/);
-    assert.equal(submitted, 2);
+    const read = await readCompletedValidation(scan);
+    assert.equal(read?.retryable, true);
+    assert.deepEqual(read?.items, saved.items);
+    assert.deepEqual(calls, ["item-1", "item-2"]);
+    assert.match(
+      await readFile(join(scanDir, "validation.md"), "utf8"),
+      /Fabricated/,
+    );
+    const [cached, joined] = await Promise.all([
+      validateCompletedScan(scan, resolveProvider),
+      validateCompletedScan(scan, resolveProvider),
+    ]);
+    assert.deepEqual(cached, joined);
+    assert.deepEqual(calls, ["item-1", "item-2", "item-2"]);
+    assert.equal(cached?.status, "incomplete");
+    assert.equal(cached?.retryable, undefined);
+    assert.match(validationCompletionText(cached), /FAILED/);
+    const { items } = JSON.parse(
+      await readFile(String(cached?.recordsPath), "utf8"),
+    );
+    assert.deepEqual(
+      items.map((item: { verdict: string }) => item.verdict),
+      ["EXPLOITABLE", "UNCERTAIN"],
+    );
+    assert.deepEqual((await readCompletedValidation(scan))?.items, items);
     assert.equal(cached?.findings, 2);
     assert.doesNotMatch(validationCompletionText(cached), /Fabricated/);
     assert.match(
@@ -472,7 +504,7 @@ await test("batch transport failure is supplemental, not a scan completion failu
 });
 
 await test(
-  "plugin adapter uses host path protection with a fake AWS process",
+  "plugin adapter resumes a receipt-backed scan with a fake AWS process",
   { skip: process.platform === "win32" },
   async () => {
     const root = await temporaryDirectory("plugin-aws-process-");
@@ -496,7 +528,13 @@ await test(
 case "$2" in
 get-environment) printf '{"environmentArn":"arn:aws:continuum:us-east-1:123456789012:environments/example","configuration":{"codeConfiguration":{"sourceConfiguration":{"repositorySources":[{"integrationId":"demo","repository":"example/project"}]}}}}' ;;
 get-integration) printf '{"integrationType":"GITHUB"}' ;;
-create-code-finding|get-code-finding) printf '{"findingId":"fixture","findingArn":"arn:aws:continuum:us-east-1:123456789012:environments/example/code-findings/fixture","status":"DISCARDED","discardReason":"fixture rejection"}' ;;
+create-code-finding)
+  [ ! -f "$0.created" ] || exit 1
+  touch "$0.created"
+  printf '{"findingId":"fixture","findingArn":"arn:aws:continuum:us-east-1:123456789012:environments/example/code-findings/fixture"}' ;;
+get-code-finding)
+  [ -f "$0.ready" ] || exit 1
+  printf '{"findingId":"fixture","findingArn":"arn:aws:continuum:us-east-1:123456789012:environments/example/code-findings/fixture","status":"DISCARDED","discardReason":"fixture rejection"}' ;;
 *) exit 1 ;;
 esac
 `,
@@ -534,14 +572,33 @@ esac
         "security.json",
         true,
       );
-      const result = await validateCompletedScan({
+      const scan = {
         scanId: "process-scan",
         targetPath: repository,
         scanDir: root,
-      });
+      };
+      const pending = await validateCompletedScan(scan);
+      assert.equal(pending?.retryable, true);
+      // Reproduce the previous aggregate cache format on plugin upgrade.
+      const cachePath = join(
+        root,
+        "state",
+        "validation-providers",
+        "process-scan.json.result",
+      );
+      const cache = JSON.parse(await readFile(cachePath, "utf8"));
+      delete cache.retry;
+      delete cache.result.retryable;
+      cache.result.status = "complete";
+      await writeFile(cachePath, JSON.stringify(cache));
+      await writeFile(aws + ".ready", "");
+      assert.equal((await readCompletedValidation(scan))?.status, "outdated");
+      const result = await validateCompletedScan(scan);
       assert.equal(result?.status, "complete");
+      assert.equal(result?.retryable, undefined);
       assert.match(String(result?.report), /DISCARDED/);
       assert.match(String(result?.report), /fixture rejection/);
+      assert.match(validationCompletionText(result), /fixture rejection/);
     } finally {
       if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
       else process.env.CODEX_SECURITY_STATE_DIR = oldState;

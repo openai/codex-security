@@ -1033,6 +1033,7 @@ test("local replay enriches one unassessed occurrence when the detailed record a
         body: {
           validationEvidence: {
             exploitable: "EXPLOITABLE",
+            terminalStatus: "COMPLETED",
             perFindingResults: [
               { findingId: finding.findingId, exploitable: "EXPLOITABLE" },
             ],

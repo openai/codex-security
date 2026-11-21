@@ -90,6 +90,15 @@ the schema in this checkout. For a copy at your project root with
 `./node_modules/@openai/codex-security/schemas/project-config.schema.json`.
 You can also omit the hint. The CLI validates the file using its bundled schema.
 
+## Standard scans and change reviews in the plugin
+
+Pass an explicitly selected `projectConfigPath` to setup or a conversational
+scan start. These modes read `scan.validation` from the file. App setup accepts
+that setting and an optional `scan.mode: standard`. Inspection returns the
+provider name in `setup.validationProvider`. Saving setup or
+starting a conversational scan stores the selection before analysis begins.
+Rejoining the same scan uses the saved settings even if the file changes.
+
 ## Desktop and conversational Deep Scans
 
 Deep Scan setup accepts an explicitly selected `.yaml`, `.yml`, or `.json` project
@@ -194,13 +203,15 @@ scan:
 All keys below belong to `scan.validation.continuum`. Schema validation does not
 insert defaults; the adapter and AWS CLI apply them at runtime.
 
-| Key                | Meaning                                                | Default                                         |
-| ------------------ | ------------------------------------------------------ | ----------------------------------------------- |
-| `environment_id`   | Continuum environment containing the matching source   | Required                                        |
-| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                         |
-| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                        |
-| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                              |
-| `console_base_url` | Base URL used to construct issue links                 | `https://console.aws.amazon.com/continuum/home` |
+| Key                | Meaning                                                | Default                                           |
+| ------------------ | ------------------------------------------------------ | ------------------------------------------------- |
+| `environment_id`   | Continuum environment containing the matching source   | Required                                          |
+| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                           |
+| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                          |
+| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                                |
+| `console_base_url` | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
+
+Issue links use the Region from the AWS issue ARN.
 
 `--validate=NAME` overrides the provider name, not its settings. Without a
 configured provider, bare `--validate` keeps the existing Codex validation.

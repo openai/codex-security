@@ -1011,9 +1011,13 @@ Provider reports add conclusions-only `validation.json` beside `validation.md`,
 with matching suffixes on repeated runs and `validation.recordsPath` in CLI JSON.
 The versioned document contains each item's verdict, before and after severity,
 provider severity, reason bases, claim match, issue URL and evidence freshness.
-Related flaws retain Codex severity. Sealed findings and `--fail-on-severity` do
-not change. Continuum verifies that its only code source matches a Git remote
-of the scanned repository root. Evidence freshness describes its age and
+Continuum reports `terminalStatus` separately from its exploitability verdict.
+Failed or inconclusive runs and discarded findings retain Codex severity and
+omit `freshness.validatedAt`. A discard can include a `statusMessage`.
+When Continuum defers an assessment, `scan --validate --format json` reports
+`validation.status` as `incomplete`. The sealed findings still determine
+`--fail-on-severity`. Continuum verifies that its only code source matches
+a Git remote of the scanned repository root. Evidence freshness describes its age and
 leaves the deployed revision unverified.
 See [validation providers](../../../docs/validation-providers.md)
 for configuration, permissions and limits.

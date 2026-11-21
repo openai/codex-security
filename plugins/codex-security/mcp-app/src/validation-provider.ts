@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { replaceArtifactText } from "./artifact-io.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,6 +6,7 @@ import { readSelectedProjectConfig } from "./deep-scan/project-config.js";
 import {
   validationProviderFromConfiguration,
   assessPluginFindings,
+  withPublicationLock,
   type ValidationProviderConfiguration,
 } from "#validation-runtime";
 import type { JsonObject } from "./types.js";
@@ -16,7 +17,10 @@ export function validationCompletionText(
   validation: JsonObject | undefined,
 ): string {
   if (!validation) return "";
-  return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}`;
+  const retry = validation.retryable
+    ? "\nOn request, retry unavailable findings with complete_codex_security_scan and this scan ID."
+    : "";
+  return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}${retry}`;
 }
 
 function configurationPath(scanId: string): string {
@@ -54,16 +58,66 @@ export async function bindValidationProviderConfiguration(
   validationProviderFromConfiguration(configuration);
   const path = configurationPath(scanId);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, JSON.stringify(configuration), {
-    flag: "wx",
-    mode: 0o600,
-  });
+  await replaceArtifactText(path, JSON.stringify(configuration));
 }
 
-/** Run only after the workbench has sealed the scan. Its artifacts stay unchanged. */
-export async function validateCompletedScan(
+interface SavedValidation {
+  configuration: ValidationProviderConfiguration;
+  repositoryPath: string;
+  records: { items: JsonObject[] };
+  result: JsonObject & { report: string };
+  retry?: unknown[] | null;
+}
+
+async function readSavedValidation(
+  path: string,
+  configuration: ValidationProviderConfiguration,
+  repositoryPath: string,
+): Promise<SavedValidation | undefined> {
+  let saved: SavedValidation;
+  try {
+    saved = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (
+    JSON.stringify(saved.configuration) !== JSON.stringify(configuration) ||
+    saved.repositoryPath !== repositoryPath
+  ) {
+    throw new Error(
+      "Saved validation does not match this scan's provider configuration.",
+    );
+  }
+  // Earlier caches predate terminal status handling. Refresh their
+  // assessments using any available receipts on the next explicit completion.
+  if (
+    saved.retry === undefined &&
+    saved.result.provider === "continuum" &&
+    saved.result.findings
+  ) {
+    saved.retry = [];
+    saved.result.status = "outdated";
+  }
+  return saved;
+}
+
+/** Run only after the workbench has sealed the scan. */
+export function validateCompletedScan(
   scan: JsonObject,
   resolveProvider = validationProviderFromConfiguration,
+) {
+  return completedScanValidation(scan, resolveProvider);
+}
+
+/** Read the last protected assessment without running the provider. */
+export function readCompletedValidation(scan: JsonObject) {
+  return completedScanValidation(scan);
+}
+
+async function completedScanValidation(
+  scan: JsonObject,
+  resolveProvider?: typeof validationProviderFromConfiguration,
 ): Promise<JsonObject | undefined> {
   if (typeof scan.scanId !== "string") return;
   let configuration: ValidationProviderConfiguration;
@@ -80,68 +134,72 @@ export async function validateCompletedScan(
     const repositoryPath = String(scan.targetPath);
     const reportPath = join(scanDir, "validation.md");
     const recordsPath = join(scanDir, "validation.json");
-    // Only protected host state can establish that this provider already ran.
     const cachePath = `${configurationPath(scan.scanId)}.result`;
-    let cached;
-    try {
-      cached = JSON.parse(await readFile(cachePath, "utf8"));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (cached) {
-      if (
-        JSON.stringify(cached.configuration) !==
-          JSON.stringify(configuration) ||
-        cached.repositoryPath !== repositoryPath
-      )
-        throw new Error(
-          "Saved validation does not match this scan's provider configuration.",
-        );
-      await replaceArtifactText(reportPath, cached.result.report);
-      await replaceArtifactText(
-        recordsPath,
-        JSON.stringify(cached.records, null, 2) + "\n",
-      );
-      return { ...cached.result, reportPath, recordsPath };
-    }
-    const { findings }: { findings: Record<string, unknown>[] } = JSON.parse(
-      await readFile(join(scanDir, "findings.json"), "utf8"),
-    );
-    const context = {
-      repositoryPath,
-      resolveHostPaths: protectedHostPathResolver,
-    };
-    const { providerName, summary, report, records } =
-      await assessPluginFindings(
-        configuration,
+    const readSaved = () =>
+      readSavedValidation(cachePath, configuration, repositoryPath);
+    if (!resolveProvider) {
+      const saved = await readSaved();
+      if (!saved) return;
+      const { status, provider, findings, summary, retryable } = saved.result;
+      if (status === "outdated") {
+        return {
+          status,
+          provider,
+          findings,
+          retryable: true,
+          message:
+            "Complete this scan again to refresh assessments with Continuum terminal statuses. Findings without a saved submission receipt may be submitted again.",
+        };
+      }
+      return {
+        status,
+        provider,
         findings,
-        context,
-        resolveProvider,
-      );
-    const result = {
-      status: "complete",
-      provider: providerName,
-      findings: findings.length,
-      reportPath,
-      recordsPath,
-      report,
-      summary,
-    };
-    await writeFile(
-      cachePath,
-      JSON.stringify({ configuration, repositoryPath, records, result }),
-      {
-        flag: "wx",
-        mode: 0o600,
+        summary,
+        retryable,
+        items: saved.records.items,
+      };
+    }
+    return await withPublicationLock(
+      dirname(cachePath),
+      scan.scanId,
+      undefined,
+      async () => {
+        let saved = await readSaved();
+        if (!saved || saved.retry) {
+          const { findings }: { findings: JsonObject[] } = JSON.parse(
+            await readFile(join(scanDir, "findings.json"), "utf8"),
+          );
+          const { providerName, status, summary, report, records, retry } =
+            await assessPluginFindings(
+              configuration,
+              findings,
+              { repositoryPath, resolveHostPaths: protectedHostPathResolver },
+              resolveProvider,
+              saved?.retry,
+            );
+          const result = {
+            status,
+            provider: providerName,
+            findings: findings.length,
+            reportPath,
+            recordsPath,
+            report,
+            summary,
+            ...(retry ? { retryable: true } : {}),
+          };
+          saved = { configuration, repositoryPath, records, result, retry };
+          await replaceArtifactText(cachePath, JSON.stringify(saved));
+        }
+        // These model-writable files are projections, never authoritative cache input.
+        await replaceArtifactText(reportPath, saved.result.report);
+        await replaceArtifactText(
+          recordsPath,
+          JSON.stringify(saved.records, null, 2) + "\n",
+        );
+        return { ...saved.result, reportPath, recordsPath };
       },
     );
-    // These model-writable files are projections, never authoritative cache input.
-    await replaceArtifactText(reportPath, report);
-    await replaceArtifactText(
-      recordsPath,
-      JSON.stringify(records, null, 2) + "\n",
-    );
-    return result;
   } catch (error) {
     // An unavailable supplemental provider must not turn a sealed scan into a failure.
     return {
