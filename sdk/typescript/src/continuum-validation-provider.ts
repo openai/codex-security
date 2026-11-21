@@ -48,6 +48,8 @@ export interface ContinuumValidationOptions {
   environmentId: string;
   awsProfile?: string;
   awsRegion?: string;
+  /** Send each finding’s local validation method and summary to AWS. Defaults to false. */
+  includeLocalValidation?: boolean;
   waitMinutes?: number;
   consoleBaseUrl?: string;
   launcher?: ContinuumAwsLauncher;
@@ -183,14 +185,28 @@ function severityId(level: string): number {
   );
 }
 
-/** Convert a code finding to sink-first OCSF 2002. */
+/**
+ * Convert a code finding to sink-first OCSF 2002. Opt in only after reviewing
+ * validation.method and validation.summary for transfer. Continuum stores the
+ * submitted document verbatim, including any sensitive text in those fields.
+ */
 export function findingToOcsf(
   finding: AnyFinding,
   now = new Date(),
+  options: Pick<ContinuumValidationOptions, "includeLocalValidation"> = {},
 ): Record<string, unknown> {
   const id = occurrence(finding);
   const title = text(finding["title"]) ?? id;
-  const summary = text(finding["summary"]) ?? title;
+  const originalSummary = text(finding["summary"]) ?? title;
+  let summary = originalSummary;
+  if (options.includeLocalValidation === true) {
+    const validation = object(finding["validation"]);
+    for (const field of ["method", "summary"]) {
+      const value = validation[field];
+      if (typeof value === "string" && value.trim())
+        summary += `\n\nCodex local validation ${field}\n${value}`;
+    }
+  }
   const selected = locations(finding);
   if (selected.length === 0)
     throw new Error(`${id} has no code location with real lines`);
@@ -211,7 +227,7 @@ export function findingToOcsf(
       ? { cwe: { uid: firstCwe, caption: firstCwe } }
       : { advisory: { uid: id, classification: "Codex Security finding" } }),
   };
-  return {
+  const document = {
     activity_id: 1,
     category_uid: 2,
     class_uid: 2002,
@@ -232,6 +248,15 @@ export function findingToOcsf(
     type_uid: 200201,
     vulnerabilities: [vulnerability],
   };
+  if (summary !== originalSummary) {
+    if (Array.from(summary).length > 65_536)
+      throw new Error(
+        "Continuum descriptions are limited to 65,536 characters.",
+      );
+    if (Buffer.byteLength(JSON.stringify(document), "utf8") > 256 * 1024)
+      throw new Error("Continuum OCSF document exceeds 256 KiB.");
+  }
+  return document;
 }
 
 function proofClaimMatch(
@@ -543,7 +568,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
               "not submittable: no structured item or code location",
             );
           const time = now();
-          submissions[index] = await submit(findingToOcsf(item, time), time);
+          submissions[index] = await submit(
+            findingToOcsf(item, time, this.#options),
+            time,
+          );
         } catch (error) {
           results[index] = unavailableAssessment(this, error);
         }
@@ -980,6 +1008,7 @@ export function continuumProviderFromConfig(
     environmentId: text(config["environment_id"]) ?? "",
     awsProfile: text(config["aws_profile"]),
     awsRegion: text(config["aws_region"]),
+    includeLocalValidation: config["include_local_validation"] === true,
     waitMinutes:
       typeof config["wait_minutes"] === "number"
         ? config["wait_minutes"]

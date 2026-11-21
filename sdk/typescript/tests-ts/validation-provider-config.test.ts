@@ -19,6 +19,7 @@ const configured = {
     environment_id: "environment-1",
     aws_profile: "continuum-personal",
     aws_region: "us-east-1",
+    include_local_validation: true,
     wait_minutes: 45,
   },
 };
@@ -31,6 +32,17 @@ test("parses scan.validation provider configuration", () => {
     resolveProjectConfig({ scan: { validation: configured } }, "/repo").options
       .validationProvider,
   ).toEqual(configured);
+});
+
+test("requires a boolean for the local validation opt-in", () => {
+  for (const value of ["true", "false", 1]) {
+    expect(
+      ValidationProviderSettingsSchema.safeParse({
+        ...configured,
+        continuum: { ...configured.continuum, include_local_validation: value },
+      }).success,
+    ).toBe(false);
+  }
 });
 
 test("no provider preserves the existing validation selection", () => {

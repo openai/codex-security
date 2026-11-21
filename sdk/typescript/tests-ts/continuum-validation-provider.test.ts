@@ -159,6 +159,43 @@ describe("Continuum validation provider", () => {
     );
   });
 
+  test("isolates opt-in requests from default receipts across retries", async () => {
+    const requests: string[] = [];
+    const aws = fakeAws();
+    const launcher: ContinuumAwsLauncher = (op, args, signal) => {
+      if (op === "create-code-finding") {
+        requests.push(requestBody(args));
+        if (requests.length === 2) throw new Error("enriched receipt lost");
+      }
+      return aws.launcher(op, args, signal);
+    };
+    const summary = "The demo returned both fixture records.";
+    const supplied = { ...finding, validation: { summary } };
+    const validate = (includeLocalValidation: boolean) =>
+      new ContinuumValidationProvider({
+        environmentId: "environment1",
+        includeLocalValidation,
+        launcher,
+        now: () => new Date(requests.length),
+      }).validate(supplied, context);
+
+    expect((await validate(false)).unavailable).toBeUndefined();
+    expect((await validate(true)).unavailable).toContain(
+      "enriched receipt lost",
+    );
+    expect((await validate(false)).unavailable).toBeUndefined();
+    expect(requests).toHaveLength(2);
+    expect((await validate(true)).unavailable).toBeUndefined();
+    expect((await validate(true)).unavailable).toBeUndefined();
+    expect(requests).toHaveLength(3);
+    expect(requests[0]).not.toContain(summary);
+    expect(requests[1]).toContain(summary);
+    expect(JSON.parse(requests[1]!).clientToken).not.toBe(
+      JSON.parse(requests[0]!).clientToken,
+    );
+    expect(requests[2]).toBe(requests[1]);
+  });
+
   test("concurrent senders share a receipt", async () => {
     const aws = fakeAws();
     const results = await Promise.all(

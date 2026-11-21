@@ -84,6 +84,7 @@ export const ValidationProviderSettingsSchema = z
         environment_id: z.string().min(1),
         aws_profile: z.string().min(1).optional(),
         aws_region: z.string().min(1).optional(),
+        include_local_validation: z.boolean().optional(),
         wait_minutes: z.number().positive().max(240).optional(),
         console_base_url: z.string().min(1).optional(),
       })

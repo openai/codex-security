@@ -64,7 +64,10 @@ await test("Deep Scan project reader retains the explicit validation provider", 
   try {
     const validation = {
       provider: "continuum",
-      continuum: { environment_id: "synthetic-environment" },
+      continuum: {
+        environment_id: "synthetic-environment",
+        include_local_validation: true,
+      },
     };
     await writeFile(
       join(root, "selected.json"),
@@ -272,7 +275,10 @@ await test("built MCP setup previews and saves the selected project before scan 
 
     const validation = {
       provider: "continuum",
-      continuum: { environment_id: "synthetic-environment" },
+      continuum: {
+        environment_id: "synthetic-environment",
+        include_local_validation: true,
+      },
     };
     const validationPath = join(root, "validation.json");
     const writeSelection = () =>

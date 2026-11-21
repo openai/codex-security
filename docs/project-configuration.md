@@ -203,15 +203,33 @@ scan:
 All keys below belong to `scan.validation.continuum`. Schema validation does not
 insert defaults; the adapter and AWS CLI apply them at runtime.
 
-| Key                | Meaning                                                | Default                                           |
-| ------------------ | ------------------------------------------------------ | ------------------------------------------------- |
-| `environment_id`   | Continuum environment containing the matching source   | Required                                          |
-| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                           |
-| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                          |
-| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                                |
-| `console_base_url` | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
+| Key                        | Meaning                                                                     | Default                                           |
+| -------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------- |
+| `environment_id`           | Continuum environment containing the matching source                        | Required                                          |
+| `aws_region`               | AWS Region for provider calls                                               | AWS CLI Region settings                           |
+| `aws_profile`              | Named AWS credential profile                                                | AWS CLI credential chain                          |
+| `include_local_validation` | Include the Codex validation method and summary in each finding sent to AWS | false                                             |
+| `wait_minutes`             | Shared polling deadline; positive, at most 240 minutes                      | 45                                                |
+| `console_base_url`         | Continuum console root used to construct issue links                        | `https://REGION.console.aws.amazon.com/continuum` |
 
 Issue links use the Region from the AWS issue ARN.
+
+To send local reproduction details, first review the selected findings for
+sensitive text. Set `scan.validation.continuum.include_local_validation` to
+`true` in the trusted project file. The adapter appends the exact nonblank
+`validation.method` and `validation.summary` strings to the OCSF finding
+description, message, and vulnerability description, labeled as Codex local
+validation. AWS stores the submitted document verbatim, including secrets
+present in those strings. The opt-in applies to every selected finding.
+Use `validate --scan` with occurrence IDs to limit the selection. Direct SDK
+callers can set `includeLocalValidation` on `ContinuumValidationProvider`.
+
+The adapter rejects an enriched document if a description exceeds 65,536
+characters or compact JSON exceeds 256 KiB. Changing the document creates a
+new request identity. AWS may link that request to an existing issue. Check
+the finding ID and evidence timestamp when attributing the result.
+[AWS document limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_CreateCodeFinding.html)
+and [field limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_FindingVulnerability.html).
 
 `--validate=NAME` overrides the provider name, not its settings. Without a
 configured provider, bare `--validate` keeps the existing Codex validation.
