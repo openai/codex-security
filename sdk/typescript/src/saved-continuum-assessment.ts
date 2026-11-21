@@ -1,6 +1,6 @@
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import {
   readCliSnapshots,
@@ -10,7 +10,10 @@ import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import { readRegularInputFile } from "./prompt-files.js";
 import {
   codexSecurityStateDirectory,
+  requireOutputDirectoryOwnership,
   requireOutputOutsideRepositories,
+  requireWindowsOutputPath,
+  validatePreparedOutputDir,
   type ProcessEnvironment,
 } from "./runtime.js";
 import type {
@@ -136,15 +139,30 @@ async function readProtectedJson(
   path: string,
 ): Promise<unknown> {
   try {
-    const real = await realpath(path).catch(nullIfMissingFile);
-    if (!real) return undefined;
+    if (!(await lstat(path).catch(nullIfMissingFile))) return undefined;
     const repository = await realpath(repositoryPath);
     const roots = [
       repository,
       ...(await commandGitProtectionRoots(repository, process.env)),
     ];
-    requireOutputOutsideRepositories(roots, real, "state");
-    const contents = await readRegularInputFile(path, repository);
+    const directory = await validatePreparedOutputDir(
+      dirname(path),
+      (location) => requireOutputOutsideRepositories(roots, location, "state"),
+      true,
+    );
+    if (process.platform === "win32") {
+      await requireWindowsOutputPath(directory, true);
+    } else if (((await lstat(directory)).mode & 0o022) !== 0) {
+      return null;
+    }
+    const file = join(directory, basename(path));
+    const metadata = await lstat(file, { bigint: true });
+    if (metadata.nlink !== 1n) return null;
+    if (process.platform !== "win32") {
+      requireOutputDirectoryOwnership({ uid: Number(metadata.uid) }, file);
+      if ((metadata.mode & 0o022n) !== 0n) return null;
+    }
+    const contents = await readRegularInputFile(path, repository, metadata);
     return JSON.parse(contents) as unknown;
   } catch {
     // Distinguish an invalid binding from an absent one.

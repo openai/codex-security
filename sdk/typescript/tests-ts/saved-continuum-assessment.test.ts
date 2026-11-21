@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as filesystem from "node:fs/promises";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -13,7 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 import { remediationPrompt } from "../src/remediation.js";
 import {
@@ -113,6 +115,45 @@ test.each([
   await save([{ ...conclusion, ...extra }]);
   expect((await read()).size).toBe(0);
 });
+test("rejects a plugin assessment editable through a checkout hard link", async () => {
+  await save([conclusion]);
+  const alias = join(repo, "alias.json");
+  await link(path + ".result", alias);
+  const forged = JSON.parse(await readFile(alias, "utf8"));
+  forged.records.items[0].verdict = "EXPLOITABLE";
+  await writeFile(alias, JSON.stringify(forged));
+  expect((await read()).size).toBe(0);
+});
+
+test("rejects plugin state in a directory another user can write", async () => {
+  await save([conclusion]);
+  expect((await read()).get("occ_a")).toEqual(conclusion);
+  const directory = dirname(path);
+  if (process.platform === "win32") {
+    execFileSync("icacls.exe", [directory, "/grant", "*S-1-1-0:W"]);
+  } else {
+    await chmod(directory, 0o775);
+  }
+  expect((await read()).size).toBe(0);
+});
+
+test.skipIf(process.platform === "win32")(
+  "accepts read-only sharing but rejects writable plugin files and ancestors",
+  async () => {
+    await save([conclusion]);
+    await chmod(dirname(path), 0o755);
+    for (const file of [path, path + ".result"]) {
+      await chmod(file, 0o664);
+      expect((await read()).size).toBe(0);
+      expect((await lstat(file)).mode & 0o777).toBe(0o664);
+      await chmod(file, 0o644);
+    }
+    expect((await read()).get("occ_a")).toEqual(conclusion);
+    await chmod(root, 0o777);
+    expect((await read()).size).toBe(0);
+  },
+);
+
 test("rejects paths redirected into repository content", async () => {
   const file = join(repo, "cache");
   await writeFile(file, "{}");
