@@ -85,6 +85,7 @@ import {
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
+  codexSecurityPrivateDirectories,
   codexSecurityPrivatePaths,
   environmentEntry,
   CodexLoginHandle,
@@ -7886,7 +7887,20 @@ function dependencyPermissions(
       ),
     ];
   });
+  const privateDirectories = new Set([
+    ...codexSecurityPrivateDirectories(environment),
+    ...codexSecurityPrivateDirectories(environment, workingDirectory),
+    ...[homedir(), resolve(workingDirectory, expandHome("~", environment))].map(
+      (home) => join(home, ".aws"),
+    ),
+    runtimeHome,
+    codexSecurityCredentialHome({}),
+    ...[defaultHome, ambientHome].flatMap((home) =>
+      ["sessions", "archived_sessions"].map((name) => join(home, name)),
+    ),
+  ]);
   const privatePaths = [
+    ...privateDirectories,
     ...codexSecurityPrivatePaths(environment),
     ...codexSecurityPrivatePaths(environment, workingDirectory),
     ...[
@@ -7898,7 +7912,6 @@ function dependencyPermissions(
       join(home, ".pypirc"),
       join(home, ".m2", "settings.xml"),
       join(home, ".m2", "settings-security.xml"),
-      join(home, ".aws"),
       join(home, ".netrc"),
       join(home, "_netrc"),
       join(home, ".gem", "credentials"),
@@ -7964,8 +7977,6 @@ function dependencyPermissions(
     join(npmHome, ".local", "share", "gem", "credentials"),
     join(npmHome, ".bundle", "config"),
     ...npmConfigs,
-    runtimeHome,
-    codexSecurityCredentialHome({}),
     join(defaultHome, "auth.json"),
     join(defaultHome, ".credentials.json"),
     join(defaultHome, "config.toml"),
@@ -7973,19 +7984,49 @@ function dependencyPermissions(
     join(ambientHome, "auth.json"),
     join(ambientHome, ".credentials.json"),
     join(ambientHome, "config.toml"),
-    ...[defaultHome, ambientHome].flatMap((home) =>
-      ["sessions", "archived_sessions", "history.jsonl"].map((name) =>
-        join(home, name),
-      ),
-    ),
+    ...[defaultHome, ambientHome].map((home) => join(home, "history.jsonl")),
   ];
   return {
     extends: ":read-only",
-    filesystem: Object.fromEntries(
-      privatePaths.map((path) => [path, { ".": "deny" }]),
-    ),
+    filesystem: {
+      ...Object.fromEntries(
+        privatePaths.map((path) =>
+          process.platform === "win32" && !privateDirectories.has(path)
+            ? [windowsCredentialFileGlob(path), "deny"]
+            : [path, { ".": "deny" }],
+        ),
+      ),
+      ...Object.fromEntries(
+        [defaultHome, ambientHome].map((home) => [
+          codexCredentialFileGlob(home),
+          "deny",
+        ]),
+      ),
+    },
     network: { enabled: false },
   };
+}
+
+function escapePermissionGlobPath(path: string): string {
+  return process.platform === "win32"
+    ? path.replace(/[*?[\]{}]/gu, "[$&]")
+    : path.replace(/[\\*?[\]{}]/gu, "\\$&");
+}
+
+function windowsCredentialFileGlob(path: string): string {
+  // Native Windows materializes absent literal deny roots as directories.
+  // The literal "*" alternative forces glob handling; it cannot name a Windows file.
+  return join(
+    escapePermissionGlobPath(dirname(path)),
+    `{${escapePermissionGlobPath(basename(path)).replaceAll(",", "[,]")},[*]}`,
+  );
+}
+
+function codexCredentialFileGlob(home: string): string {
+  return join(
+    escapePermissionGlobPath(home),
+    "{auth.json,config.toml,*.config.toml,.*.config.toml.tmp}",
+  );
 }
 
 function policyFilesystemPermissions(
@@ -8005,12 +8046,7 @@ function policyFilesystemPermissions(
   if (process.platform === "win32" && ambientHome !== undefined) {
     // A glob avoids materializing absent credentials as directories on Windows.
     // Absolute patterns also support literal metacharacters in the home path.
-    filesystem[
-      join(
-        ambientHome.replace(/[*?[\]{}]/gu, "[$&]"),
-        "{auth.json,config.toml,*.config.toml,.*.config.toml.tmp}",
-      )
-    ] = "deny";
+    filesystem[codexCredentialFileGlob(ambientHome)] = "deny";
   }
   return filesystem;
 }
