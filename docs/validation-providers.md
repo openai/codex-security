@@ -39,9 +39,14 @@ their AWS IDs and reuses finished assessments. The CLI can also poll a
 selection from the saved scan. SDK callers invoke `validate()` with the
 provider after `run()`. [SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider)
 
-The first explicit completion after upgrading refreshes older cached
-assessments that predate terminal status handling. If the original submission
-predates AWS receipt storage on this host, the refresh can create a new finding.
+After an upgrade, Codex withholds cached Continuum assessments that predate
+finding-specific verdict checks from patch and verify. Reading a scan makes
+no AWS requests. If the plugin shows `outdated`, explicitly complete the scan
+again to refresh its assessments. For CLI snapshots, rerun `validate --scan`
+for the affected occurrences. Use the original host state and configuration
+to reuse accepted submissions. A missing receipt can cause a new submission.
+If a CLI retry creates a new AWS finding for a plugin scan, complete the scan
+again to update the plugin’s saved finding ID before remediation.
 
 Provider work is outside Codex cost accounting. As with existing validation,
 `scan --validate` cannot be combined with a scan cost limit. Posture questions
@@ -161,8 +166,8 @@ Each structured item uses these fields:
 | `freshness`               | Optional `evidenceCreatedAt` and `validatedAt` timestamps, `stale` flag, and `reasons` |
 | `unavailable`             | Per-finding failure explanation, when present                                          |
 
-`reachableFromAttacker`, when returned, is a structured boolean at `resultScope`;
-absence means unknown. Reason prose is never used to infer it.
+Continuum reports `reachableFromAttacker` as a structured boolean from the
+issue's scoring evidence. Its absence means reachability is unknown.
 
 Reports contain conclusions, not raw proof bodies or validation console output.
 Custom SDK providers can omit `record`; their text assessment is still reported,
@@ -187,13 +192,17 @@ combined severity.
 A provider can prove a related flaw without validating the submitted claim.
 Continuum labels that case “Not validated: Continuum proved a related flaw” and
 retains Codex severity (`claimMatch: different_flaw`). An `unknown` match also
-retains Codex severity. For a conclusive verdict, the heuristic compares concepts
-in the finding with those in the executed proof code. If the code or observed
-effect is missing, it uses the source analysis summary. It requires a citation
-to the first submitted source location with the exact repository-relative path
-and a starting line within the submitted range. Abbreviated paths, bare filenames and citations found only in the issue
-caption or console output leave the match unknown. Flaws at the same location
-can share vocabulary. Check the selected artifact for the specific behavior.
+retains Codex severity.
+
+For a conclusive [per-finding verdict](https://docs.aws.amazon.com/continuum/latest/APIReference/API_PerFindingResult.html),
+Codex looks for a reasoning step whose `source` cites the first submitted
+location and whose `claim` describes the same kind of flaw. The citation
+must include the exact repository-relative path and a starting line within
+the submitted range. The citation and claim must occur in the same step.
+If the finding result has no reasoning chain, the adapter checks any proof
+code or source analysis in that result. It ignores the issue caption, console
+output and other findings' proofs. This comparison is a heuristic. Different
+flaws at the same location can share vocabulary.
 
 The adapter checks the AWS finding ARN, any echoed source ID, and the ID and
 type of each requested artifact. For a matching result, the supplemental
@@ -207,33 +216,41 @@ linked scorer from the issue history. If another scorer might be newer, the
 linked scorer supplies its own evidence, while `severityAfter` retains the
 original severity. The current issue severity is available in `providerSeverity`.
 
-Legacy artifacts with an explicit conclusive verdict can qualify for matching
-and scoring when AWS omits the run status. The JSON record includes
-`proofObservation` when a matched validation has an explicit `COMPLETED`
-status, eligible linked scoring and an effect or source conclusion from AWS. An `execution` observation carries AWS’s observed `effect`.
-A `source_analysis` observation can include its inferred `effect` and
-`summary`. Each text field has whitespace normalized and is limited to
-320 characters. An effect such as `BEHAVIOR_CHANGED` gives the category
-of the observed result. Consult the identified artifact for the details
-of the execution. The original finding supplies the remediation criteria.
+Legacy artifacts with an explicit conclusive per-finding verdict can qualify
+for matching and scoring when AWS omits the run status. A `proofObservation`
+requires a matched finding, explicit `COMPLETED` status and eligible linked
+scoring. For HTTP proof, Codex includes only the observed effect from that
+finding's [exploit artifact](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ValidationExploitArtifact.html).
+A reasoning step alone cannot establish execution. Codex omits the HTTP
+request, response and raw reasoning chain from the assessment.
+
+If the finding result itself includes proof code or source analysis, the
+observation distinguishes `execution` from `source_analysis`. The latter
+can include an inferred effect and summary. Observation text fields have
+whitespace normalized and are limited to 320 characters. Consult the selected
+artifact for details. The original finding supplies the remediation criteria.
 
 ### Findings that share an issue
 
 Continuum can group several findings into one issue. If validation and scoring
 artifacts exist but the validation cannot be attributed to this finding alone,
-the adapter returns promptly with an **issue-level result**, not an individual
-validation. It says how many other findings share the issue and reports that
-issue's verdict, severity and structured reachability with its reason basis.
-Codex's finding severity is retained; Continuum's issue severity is separate.
+the adapter returns promptly with an **issue-level result**. It gives the
+current number of findings and reports the issue's verdict, severity and
+structured reachability with its reason basis. Codex retains its finding severity.
 JSON records use `resultScope: "issue"`, `issueFindingCount`, and
-`claimMatch: "unknown"`. An issue with one member can also have an issue-scoped
-result if its artifact cannot be attributed individually.
+`claimMatch: "unknown"`. This applies even when the issue currently lists
+only the submitted finding. Membership can change after evidence collection.
 
-An explicit matching `perFindingResults` entry takes precedence, even in an older
-artifact; another finding's proof is never presented as this finding's proof.
-Issue-wide proof can be treated as finding-scoped only when the checked issue
-identity and sole contributor match this finding. For a conclusive verdict, the
-adapter waits for the scoring artifact within the shared deadline.
+Before reading artifacts, the adapter verifies the associated issue ARN and
+checks that the issue still lists the submitted AWS finding ID. This ties
+current severity and reachability to the issue associated with the submission.
+An artifact supports a finding verdict only when exactly one `perFindingResults`
+entry matches the submitted AWS finding ID and carries a recognized
+`exploitable` verdict. That entry takes precedence even in an older artifact.
+The claim comparison uses the projected finding evidence. If all artifacts
+lack a unique valid result for the finding, the adapter uses the newest
+overall verdict for the issue. For conclusive verdicts, the adapter waits for
+scoring within the shared deadline.
 
 If issue proof predates submission, the report says the finding joined an issue
 Continuum had already validated (`joinedValidatedIssue: true`). Validation,
@@ -248,6 +265,25 @@ issue score. Codex defers the assessment, preserves the original finding
 severity in `severityAfter` and reports the issue score in `providerSeverity`.
 A failed run or missing source also sets `unavailable`, so `validate --scan`
 exits with code 1.
+
+For `FAILED`, open `issueUrl` and check the validation run. If the cause is
+unclear, ask AWS for worker logs privately. Include `findingArn`, `issueArn`,
+`validationArtifactId` and `freshness.evidenceCreatedAt` from the same item.
+The plugin caches terminal failures. Repeating completion cannot restart the
+AWS worker.
+
+To check for progress on an issue, use the same AWS profile and Region.
+This read lists communication timestamps, producers and IDs.
+
+```sh
+aws continuum list-code-issue-artifacts --environment-id "$environment_id" \
+  --issue-id "$issue_id" --region "$region" --artifact-type AGENT_COMMUNICATION \
+  --query 'items[].{created:createdAt,producer:producer,id:artifactId}' --output table
+```
+
+Communications can describe a different finding, run or patch on the issue.
+Even a `ContinuumValidation` message can precede a failed run. Keep the
+message bodies private. Codex excludes them from claim matching and remediation.
 
 A partial run or an uncertain verdict also yields a deferred assessment.
 In plugin completion and `scan --validate --format json`, a deferred Continuum

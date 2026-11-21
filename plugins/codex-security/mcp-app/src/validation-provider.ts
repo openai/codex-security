@@ -6,6 +6,7 @@ import { readSelectedProjectConfig } from "./deep-scan/project-config.js";
 import {
   validationProviderFromConfiguration,
   assessPluginFindings,
+  continuumAssessmentVersion,
   savedContinuumAssessments,
   withPublicationLock,
   type ValidationProviderConfiguration,
@@ -20,7 +21,7 @@ export function validationCompletionText(
 ): string {
   if (!validation) return "";
   const retry = validation.retryable
-    ? "\nOn request, retry unavailable findings with complete_codex_security_scan and this scan ID."
+    ? `\nOn request, ${validation.status === "outdated" ? "refresh assessments" : "retry unavailable findings"} with complete_codex_security_scan and this scan ID.`
     : "";
   return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}${retry}`;
 }
@@ -97,6 +98,7 @@ export async function bindValidationProviderConfiguration(
 }
 
 interface SavedValidation {
+  schemaVersion?: number;
   configuration: ValidationProviderConfiguration;
   repositoryPath: string;
   records: { items: JsonObject[] };
@@ -124,12 +126,14 @@ async function readSavedValidation(
       "Saved validation does not match this scan's provider configuration.",
     );
   }
-  // Earlier caches predate terminal status handling. Refresh their
-  // assessments using any available receipts on the next explicit completion.
+  // Legacy terminal conclusions and mixed retry lists may both attribute an
+  // issue-wide verdict to one finding. Re-evaluate the whole batch from the
+  // separate submission receipts only when completion is explicitly requested.
   if (
-    saved.retry === undefined &&
+    (saved.schemaVersion !== continuumAssessmentVersion ||
+      saved.retry === undefined) &&
     saved.result.provider === "continuum" &&
-    saved.result.findings
+    (saved.result.findings || saved.records.items.length)
   ) {
     saved.retry = [];
     saved.result.status = "outdated";
@@ -183,7 +187,7 @@ async function completedScanValidation(
           findings,
           retryable: true,
           message:
-            "Complete this scan again to refresh assessments with Continuum terminal statuses. Findings without a saved submission receipt may be submitted again.",
+            "Complete this scan again to refresh Continuum terminal statuses and finding attribution. Findings without a saved submission receipt may be submitted again.",
         };
       }
       return {
@@ -223,7 +227,14 @@ async function completedScanValidation(
             summary,
             ...(retry ? { retryable: true } : {}),
           };
-          saved = { configuration, repositoryPath, records, result, retry };
+          saved = {
+            schemaVersion: continuumAssessmentVersion,
+            configuration,
+            repositoryPath,
+            records,
+            result,
+            retry,
+          };
           await replaceArtifactText(cachePath, JSON.stringify(saved));
         }
         // These model-writable files are projections, never authoritative cache input.

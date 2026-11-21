@@ -17,8 +17,12 @@ import {
   validatePreparedOutputDir,
 } from "./runtime.js";
 
+// V1 inferred historical attribution from current issue membership. Keep its
+// immutable snapshots separate so they can neither supply nor mask new proof.
+export const continuumAssessmentVersion = 2;
+
 const snapshot = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(continuumAssessmentVersion),
   repositoryPath: z.string(),
   scanId: z.string(),
   environmentId: z.string().min(1),
@@ -36,7 +40,7 @@ async function assessmentDirectory(
   const key = hash("sha256", JSON.stringify([repository, scanId]));
   const directory = join(
     await canonicalConfigPath(stateDirectory),
-    "cli-continuum-" + key,
+    `cli-continuum-v${continuumAssessmentVersion}-${key}`,
   );
   // Most scans have no provider. Avoid Git discovery in that case.
   if (!create) await lstat(directory);
@@ -95,7 +99,7 @@ export async function writeCliSnapshots(
   );
   for (const record of records) {
     const value = {
-      schemaVersion: 1,
+      schemaVersion: continuumAssessmentVersion,
       repositoryPath: repository,
       scanId,
       environmentId,

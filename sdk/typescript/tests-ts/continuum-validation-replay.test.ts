@@ -29,7 +29,7 @@ const finding: Record<string, unknown> & {
   occurrenceId: recorded.findings[recorded.issue.findingIds[0]].sourceFindingId,
 };
 
-/** Only the AWS transport is faked. Admission is synthetic, responses have recorded shape. */
+/** Admission and the external producer identity are synthetic. Issue evidence has the recorded shape. */
 function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
   return async (operation, args) => {
     const setup = registeredSource(operation, recorded.environmentId);
@@ -40,7 +40,11 @@ function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
         recorded.environmentId,
       );
     if (operation === "get-code-finding")
-      return { ...(Object.values(fixture.findings)[0] as object) };
+      return {
+        ...(Object.values(fixture.findings)[0] as object),
+        source: "Codex Security",
+        sourceFindingId: finding["occurrenceId"],
+      };
     if (operation === "get-code-issue") return structuredClone(fixture.issue);
     if (operation === "list-code-issue-artifacts")
       return structuredClone(fixture.artifactLists[args.at(-1)!]);
@@ -60,6 +64,11 @@ function provider(launcher = transport()) {
     },
   });
 }
+function validation(fixture: typeof recorded) {
+  const { artifactId } = fixture.artifactLists.VALIDATION_EVIDENCE.items[0];
+  return fixture.artifacts[artifactId].body.validationEvidence;
+}
+
 function reachability(fixture: typeof recorded) {
   const evidence = Object.values(fixture.artifacts).find(
     (a: any) => a.artifactType === "EVIDENCE",
@@ -69,21 +78,45 @@ function reachability(fixture: typeof recorded) {
   ).preconditions.reachableFromAttacker;
 }
 
-// The actual recording contains only a verdict. Give variants their own
-// independent observation when testing a successful proof-to-claim match.
-function withObservation() {
+// The recorded issue has no finding-specific result. Supply independent
+// synthetic AWS PerFindingResult data to exercise the positive path.
+const step = {
+  step: 1,
+  claim: "PRIVATE_CLAIM: Evaluating supplied template text permits injection.",
+  source: "src/templates.py:23",
+};
+const httpProof = {
+  httpMethod: "POST",
+  targetUrl: "https://example.invalid/PRIVATE_PATH",
+  payload: "PRIVATE_PAYLOAD",
+  responseStatus: 200,
+  responseSnippet: "PRIVATE_RESPONSE",
+  effect: "BEHAVIOR_CHANGED",
+};
+
+function withObservation(
+  proof: Record<string, unknown> = {
+    reasoningChain: [step],
+    exploitArtifact: httpProof,
+  },
+) {
   const fixture = structuredClone(recorded);
-  const proofId = fixture.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
-  fixture.artifacts[proofId].body.validationEvidence.sourceAnalysis = {
-    summary:
-      "In src/templates.py:23, evaluating supplied template text permits injection.",
-  };
+  validation(fixture).perFindingResults = [
+    {
+      findingId: finding["findingId"],
+      exploitable: "EXPLOITABLE",
+      ...structuredClone(proof),
+    },
+  ];
   return fixture;
 }
 
 describe("recorded shape, anonymised replay", () => {
-  test("reports the issue score and GRAPH exposure without inferring a match from an echoed caption", async () => {
+  test("keeps the recorded singleton's verdict, GRAPH exposure and severity on the issue", async () => {
     const result = await provider().validate(finding, context);
+    expect(result.report).toContain(
+      "Issue reachable from attacker (basis GRAPH)",
+    );
     expect(result.report).toContain("likelihood HIGH × impact HIGH");
     expect(result.report).toContain(
       "Deployment source identity is not compared",
@@ -94,6 +127,8 @@ describe("recorded shape, anonymised replay", () => {
       severityBefore: "high",
       severityAfter: "high",
       providerSeverity: "critical",
+      resultScope: "issue",
+      issueFindingCount: 1,
       claimMatch: "unknown",
       reachableFromAttacker: true,
       freshness: { stale: false },
@@ -131,16 +166,10 @@ describe("explicitly fake outcome variations", () => {
   ] as const)(
     "keeps %s distinct from verdict %s and retains the finding's severity",
     async (terminalStatus, exploitable, failed) => {
-      const fake = structuredClone(recorded);
-      const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
-      fake.artifacts[id].body.validationEvidence = {
-        terminalStatus,
-        exploitable,
-        sourceAnalysis: {
-          summary:
-            "In src/templates.py:23, evaluating supplied template text permits injection.",
-        },
-      };
+      const fake = withObservation();
+      validation(fake).terminalStatus = terminalStatus;
+      validation(fake).exploitable = exploitable;
+      validation(fake).perFindingResults[0].exploitable = exploitable;
       fake.issue.severity = "LOW";
       reachability(fake).value = false;
       const result = await provider(transport(fake)).validate(finding, context);
@@ -174,13 +203,18 @@ describe("explicitly fake outcome variations", () => {
         {
           findingId: finding["findingId"],
           exploitable: "EXPLOITABLE",
-          reasoningChain: ["Template injection"],
+          reasoningChain: [step],
+          exploitArtifact: httpProof,
         },
       ],
     };
     fake.artifactLists.EVIDENCE.items = [];
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.unavailable).toContain("FAILED");
+    expect(result.report).toContain(id);
+    expect(result.report).toContain(
+      new Date(fake.artifacts[id].createdAt).toISOString(),
+    );
     expect(result.record).toMatchObject({
       terminalStatus: "FAILED",
       verdict: "EXPLOITABLE",
@@ -211,7 +245,11 @@ describe("explicitly fake outcome variations", () => {
       reason: "NOT_EXPOSED: the observed deployment has no public ingress.",
     });
     const result = await provider(transport(fake)).validate(finding, context);
-    expect(result.record?.severityAfter).toBe("low");
+    expect(result.record).toMatchObject({
+      resultScope: "finding",
+      providerSeverity: "low",
+      severityAfter: "low",
+    });
     expect(result.report).toContain(
       "not reachable from attacker (basis GRAPH)",
     );
@@ -233,12 +271,142 @@ describe("explicitly fake outcome variations", () => {
           fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId,
         scoringArtifactId: fake.artifactLists.EVIDENCE.items[0].artifactId,
         reachableFromAttacker: true,
-        proofObservation: { kind: "source_analysis" },
+        resultScope: "finding",
+        proofObservation: { kind: "execution", effect: "BEHAVIOR_CHANGED" },
         severityAfter: "critical",
         claimMatch: "on_target",
       });
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
     },
   );
+
+  test.each([
+    "related caption",
+    "issue-level proof",
+    "conflicting entries",
+    "missing verdict",
+  ])("an issue's %s leaves the finding match unknown", async (scenario) => {
+    const fake = structuredClone(recorded);
+    if (scenario === "related caption") {
+      fake.issue.name = "Resource exhaustion and denial";
+      fake.issue.synopsis = "Resource exhaustion in src/templates.py";
+    } else if (scenario === "issue-level proof") {
+      validation(fake).executedProof = {
+        code: {
+          proofCode: [{ content: "Template injection in src/templates.py:23" }],
+        },
+        observedEffect: "BEHAVIOR_CHANGED",
+      };
+      validation(fake).reasoningChain = [step];
+      validation(fake).exploitArtifact = httpProof;
+    } else if (scenario === "conflicting entries") {
+      validation(fake).perFindingResults = [
+        { findingId: finding["findingId"], exploitable: "NOT_EXPLOITABLE" },
+        { findingId: finding["findingId"], exploitable: "UNCERTAIN" },
+      ];
+    } else {
+      validation(fake).perFindingResults = [
+        { findingId: finding["findingId"] },
+      ];
+    }
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record).toMatchObject({
+      verdict: "EXPLOITABLE",
+      resultScope: "issue",
+      claimMatch: "unknown",
+      severityAfter: "high",
+      providerSeverity: "critical",
+    });
+    expect(result.record?.proofObservation).toBeUndefined();
+    expect(result.report).not.toContain("findings false-positive");
+  });
+
+  test.each([
+    ["another line", [{ ...step, source: "src/templates.py:1" }]],
+    [
+      "split citation and claim",
+      [
+        { ...step, claim: "Reads input." },
+        { ...step, step: 2, source: "src/another.py:23" },
+      ],
+    ],
+    [
+      "citation only in the claim",
+      [
+        {
+          ...step,
+          source: "src/another.py:23",
+          claim: step.claim + " " + step.source,
+        },
+      ],
+    ],
+    [
+      "claim only in source",
+      [
+        {
+          ...step,
+          source: step.source + " " + step.claim,
+          claim: "Reads input.",
+        },
+      ],
+    ],
+    ["invalid step", [{ ...step, step: "1" }]],
+    ["unstructured reasoning", [step.claim + " " + step.source]],
+    ["missing reasoning", undefined],
+  ] as const)(
+    "does not attribute the HTTP proof with %s",
+    async (_, reasoningChain) => {
+      const fake = withObservation({
+        reasoningChain,
+        exploitArtifact: httpProof,
+      });
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        resultScope: "finding",
+        claimMatch: "unknown",
+        severityAfter: "high",
+      });
+      expect(result.record?.proofObservation).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    },
+  );
+
+  test.each([
+    ["reasoning only", undefined],
+    ["no effect", { ...httpProof, effect: "NO_EFFECT" }],
+    ["unknown effect", { ...httpProof, effect: "PRIVATE_EFFECT" }],
+    ["missing payload", { ...httpProof, payload: undefined }],
+    ["missing method", { ...httpProof, httpMethod: undefined }],
+    ["invalid method", { ...httpProof, httpMethod: "INVALID" }],
+    ["invalid target", { ...httpProof, targetUrl: "not a URL" }],
+  ] as const)(
+    "matches reasoning without claiming execution for %s",
+    async (_, exploitArtifact) => {
+      const fake = withObservation({ reasoningChain: [step], exploitArtifact });
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        claimMatch: "on_target",
+        severityAfter: "critical",
+      });
+      expect(result.record?.proofObservation).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    },
+  );
+
+  test("cannot borrow a sibling's or the issue's HTTP proof", async () => {
+    const fake = withObservation({ reasoningChain: [step] });
+    validation(fake).exploitArtifact = httpProof;
+    validation(fake).perFindingResults.unshift({
+      findingId: "another",
+      exploitable: "EXPLOITABLE",
+      reasoningChain: [step],
+      exploitArtifact: httpProof,
+    });
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record?.claimMatch).toBe("on_target");
+    expect(result.record?.proofObservation).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+  });
 
   test("retains matching and scoring for a conclusive legacy verdict without run status", async () => {
     const fake = withObservation();
@@ -262,15 +430,17 @@ describe("explicitly fake outcome variations", () => {
   ])(
     "uses the source analysis when execution is incomplete: %j",
     async (execution) => {
-      const fake = withObservation();
-      const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
-      const validation = fake.artifacts[id].body.validationEvidence;
-      validation.executedProof = execution;
+      const summary =
+        "In src/templates.py:23, evaluating supplied template text permits injection.";
+      const fake = withObservation({
+        sourceAnalysis: { summary },
+        executedProof: execution,
+      });
       const result = await provider(transport(fake)).validate(finding, context);
       expect(result.record?.severityAfter).toBe("critical");
       expect(result.record?.proofObservation).toEqual({
         kind: "source_analysis",
-        summary: validation.sourceAnalysis.summary,
+        summary,
       });
       expect(result.report).toContain("using source analysis");
     },
@@ -309,26 +479,27 @@ describe("explicitly fake outcome variations", () => {
       severityAfter: "high",
       providerSeverity: "critical",
     });
-    expect(result.record?.proofObservation?.kind).toBe("source_analysis");
+    expect(result.record?.proofObservation?.kind).toBe("execution");
     expect(result.record?.reachableFromAttacker).toBe(true);
     expect(result.report).toContain("latest issue score");
     expect(JSON.stringify(result)).not.toContain("UNRELATED_FACTORS");
   });
 
   test("returns the executed effect without copying the proof body", async () => {
-    const fake = structuredClone(recorded);
-    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
-    fake.artifacts[id].body.validationEvidence.executedProof = {
-      observedEffect: "BEHAVIOR_CHANGED",
-      code: {
-        proofCode: [
-          {
-            content: "PRIVATE_PROOF: template injection in src/templates.py:23",
-          },
-        ],
+    const fake = withObservation({
+      executedProof: {
+        observedEffect: "BEHAVIOR_CHANGED",
+        code: {
+          proofCode: [
+            {
+              content:
+                "PRIVATE_PROOF: template injection in src/templates.py:23",
+            },
+          ],
+        },
+        output: { consoleOutput: "PRIVATE_OUTPUT" },
       },
-      output: { consoleOutput: "PRIVATE_OUTPUT" },
-    };
+    });
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record?.proofObservation).toEqual({
       kind: "execution",
@@ -381,7 +552,7 @@ describe("explicitly fake outcome variations", () => {
       fake.artifacts[
         fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId
       ];
-    const validation = proof.body.validationEvidence;
+    const selected = proof.body.validationEvidence.perFindingResults[0];
     const signal = score.body.prevalidationSignals.signals[0];
     fake.issue.severity = "LOW";
     reachability(fake).value = false;
@@ -389,12 +560,10 @@ describe("explicitly fake outcome variations", () => {
     fake.issue.severityReasoning = "PRIVATE_FACTORS";
     switch (scenario) {
       case "different source path":
-        validation.sourceAnalysis.summary =
-          "Template injection in src/another.py";
+        selected.reasoningChain[0].source = "src/another.py:23";
         break;
       case "same basename at a different path":
-        validation.sourceAnalysis.summary =
-          "Template injection in tests/templates.py:23";
+        selected.reasoningChain[0].source = "tests/templates.py:23";
         break;
       case "stale proof":
         proof.createdAt = "2026-11-01T00:00:00Z";
@@ -431,13 +600,6 @@ describe("explicitly fake outcome variations", () => {
         break;
       case "shared issue score":
         fake.issue.findingIds.push("another-finding");
-        validation.perFindingResults = [
-          {
-            findingId: finding["findingId"],
-            sourceAnalysis: validation.sourceAnalysis,
-            exploitable: validation.exploitable,
-          },
-        ];
     }
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record).toMatchObject({
@@ -455,22 +617,10 @@ describe("explicitly fake outcome variations", () => {
   });
 
   test("a contradictory proof keeps Codex severity even in the same file", async () => {
-    const fake = structuredClone(recorded);
-    for (const a of Object.values(fake.artifacts) as any[])
-      if (a.artifactType === "VALIDATION_EVIDENCE") {
-        a.body.validationEvidence.executedProof = {
-          observedEffect: "BEHAVIOR_CHANGED",
-          code: {
-            proofCode: [
-              {
-                content:
-                  "Resource exhaustion and denial in src/templates.py:23",
-              },
-            ],
-          },
-          path: "src/templates.py",
-        };
-      }
+    const fake = withObservation({
+      reasoningChain: [{ ...step, claim: "Resource exhaustion and denial" }],
+      exploitArtifact: httpProof,
+    });
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record).toMatchObject({
       claimMatch: "different_flaw",
@@ -499,14 +649,27 @@ describe("explicitly fake outcome variations", () => {
     expect(result.report).not.toContain("lower priority");
   });
 
-  test("reports on-target not exploitable without changing the sealed finding", async () => {
-    const fake = withObservation();
-    for (const a of Object.values(fake.artifacts) as any[])
-      if (a.artifactType === "VALIDATION_EVIDENCE")
-        a.body.validationEvidence.exploitable = "NOT_EXPLOITABLE";
+  test("matches an explicit finding result that differs from the issue verdict", async () => {
+    const fake = structuredClone(recorded);
+    validation(fake).perFindingResults = [
+      {
+        findingId: finding["findingId"],
+        exploitable: "NOT_EXPLOITABLE",
+        reasoningChain: [
+          {
+            step: 1,
+            claim: "The supplied template is sandboxed.",
+            source: "src/templates.py:23",
+          },
+        ],
+      },
+    ];
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
+    expect(result.record?.resultScope).toBe("finding");
     expect(result.record?.claimMatch).toBe("on_target");
+    expect(result.record?.severityAfter).toBe("high");
+    expect(result.record?.proofObservation).toBeUndefined();
     expect(finding.severity.level).toBe("high");
   });
 
@@ -591,17 +754,17 @@ test.each(["EVIDENCE", "VALIDATION_EVIDENCE"])(
 );
 
 test("ignores a claim and location echoed in execution output", async () => {
-  const fake = structuredClone(recorded);
-  const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
-  fake.artifacts[id].body.validationEvidence.executedProof = {
-    code: {
-      proofCode: [{ content: "A template injection in src/other.py:23" }],
+  const fake = withObservation({
+    executedProof: {
+      code: {
+        proofCode: [{ content: "A template injection in src/other.py:23" }],
+      },
+      output: {
+        consoleOutput: "Submitted template injection in src/templates.py:23",
+      },
+      observedEffect: "BEHAVIOR_CHANGED",
     },
-    output: {
-      consoleOutput: "Submitted template injection in src/templates.py:23",
-    },
-    observedEffect: "BEHAVIOR_CHANGED",
-  };
+  });
   const result = await provider(transport(fake)).validate(finding, context);
   expect(result.record?.claimMatch).toBe("unknown");
   expect(result.record?.proofObservation).toBeUndefined();

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import {
+  continuumAssessmentVersion,
   readCliSnapshots,
   writeCliSnapshots,
 } from "./cli-continuum-assessments.js";
@@ -74,6 +75,7 @@ const binding = z.object({
   }),
 });
 const cached = z.object({
+  schemaVersion: z.number().optional(),
   configuration: z.unknown(),
   repositoryPath: z.string(),
   result: z.object({ provider: z.literal("continuum") }),
@@ -81,8 +83,7 @@ const cached = z.object({
     schemaVersion: z.literal(1),
     items: z.array(z.unknown()),
   }),
-  // The retry field distinguishes caches supporting terminal status from legacy results.
-  retry: z.array(z.unknown()).nullable(),
+  retry: z.array(z.unknown()).nullish(),
 });
 
 function project(raw: unknown, environmentId: string, region?: string) {
@@ -207,7 +208,8 @@ export async function saveCliContinuumAssessments(
   );
 }
 
-function sameAdmission(a: Conclusion, b: Conclusion) {
+type Admission = Pick<Conclusion, "findingArn" | "submittedAt">;
+function sameAdmission(a: Admission, b: Admission) {
   return a.findingArn === b.findingArn && a.submittedAt === b.submittedAt;
 }
 
@@ -219,10 +221,10 @@ function evidenceTime(item: Conclusion) {
 
 /** Use provider evidence creation time, never local completion/write order.
  * Timeouts can be resolved before an issue has even been assigned. */
-function selectConclusion(prior: Conclusion | undefined, cli: Conclusion[]) {
-  const candidates = prior
-    ? cli.filter((item) => sameAdmission(item, prior))
-    : cli;
+function selectConclusion(
+  prior: Conclusion | undefined,
+  candidates: Conclusion[],
+) {
   if (prior && prior.verdict !== "UNAVAILABLE") candidates.push(prior);
   const distinct = [
     ...new Map(candidates.map((item) => [JSON.stringify(item), item])).values(),
@@ -256,6 +258,9 @@ export async function savedContinuumAssessments(
   occurrenceIds: readonly string[],
 ) {
   const assessments = new Map<string, Conclusion>();
+  // A legacy cache can still bind an occurrence to the original submission.
+  // Only a freshly assessed result for that admission may reach remediation.
+  const admissions = new Map<string, Admission>();
   if (!id.safeParse(scanId).success || !occurrenceIds.length)
     return assessments;
   const requested = new Set(occurrenceIds);
@@ -280,15 +285,19 @@ export async function savedContinuumAssessments(
       parsed.data.repositoryPath === repositoryPath &&
       JSON.stringify(config) === JSON.stringify(parsed.data.configuration)
     ) {
+      const current =
+        parsed.data.schemaVersion === continuumAssessmentVersion &&
+        parsed.data.retry !== undefined;
       for (const raw of parsed.data.records.items) {
         const record = project(raw, environmentId, region);
         if (!record || !requested.has(record.itemId)) continue;
-        if (assessments.has(record.itemId)) {
+        if (admissions.has(record.itemId)) {
           requested.delete(record.itemId);
           assessments.delete(record.itemId);
           continue;
         }
-        assessments.set(record.itemId, record);
+        admissions.set(record.itemId, record);
+        if (current) assessments.set(record.itemId, record);
       }
     }
   }
@@ -307,9 +316,15 @@ export async function savedContinuumAssessments(
       continue;
     }
     const candidates: Conclusion[] = [];
+    const admission = admissions.get(occurrence);
     for (const item of items) {
       const record = project(item.record, item.environmentId, region);
-      if (record && record.verdict !== "UNAVAILABLE") candidates.push(record);
+      if (
+        record &&
+        record.verdict !== "UNAVAILABLE" &&
+        (!admission || sameAdmission(record, admission))
+      )
+        candidates.push(record);
     }
     const selected = selectConclusion(assessments.get(occurrence), candidates);
     if (selected) assessments.set(occurrence, selected);

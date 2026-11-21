@@ -2685,6 +2685,7 @@ try {
   };
   const saveAssessment = (item: object) =>
     writeJson(configFile + ".result", {
+      schemaVersion: 2,
       configuration,
       records: {
         schemaVersion: 1,

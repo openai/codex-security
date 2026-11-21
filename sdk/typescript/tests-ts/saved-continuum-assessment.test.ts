@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { hash } from "node:crypto";
 import * as filesystem from "node:fs/promises";
 import {
   chmod,
@@ -9,6 +10,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   symlink,
@@ -17,6 +19,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import * as gitMetadata from "../src/local-git-metadata.js";
+import { continuumAssessmentVersion } from "../src/cli-continuum-assessments.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 import { remediationPrompt } from "../src/remediation.js";
 import {
@@ -73,6 +76,7 @@ function save(items: unknown[], overrides: object = {}) {
   return writeFile(
     path + ".result",
     JSON.stringify({
+      schemaVersion: continuumAssessmentVersion,
       configuration: config,
       repositoryPath: repo,
       result: { provider: "continuum" },
@@ -375,6 +379,41 @@ const completed = {
   terminalStatus: "COMPLETED",
   proofObservation: observation,
 };
+test("a legacy plugin verdict only binds the original admission for a fresh CLI assessment", async () => {
+  await save([completed], { schemaVersion: undefined });
+  expect((await read()).size).toBe(0);
+  await saveCli([{ ...completed, submittedAt: "2026-11-21T01:20:00Z" }]);
+  expect((await read()).size).toBe(0);
+  await saveCli([conclusion]);
+  expect((await read()).get("occ_a")).toEqual(conclusion);
+});
+
+test("legacy CLI snapshots cannot supply or mask a refreshed assessment", async () => {
+  const repositoryPath = await realpath(repo);
+  const digest = (value: string) => hash("sha256", value);
+  const directory = join(
+    root,
+    "cli-continuum-" + digest(JSON.stringify([repositoryPath, "scan"])),
+  );
+  await mkdir(directory, { mode: 0o700 });
+  const raw = JSON.stringify({
+    schemaVersion: 1,
+    repositoryPath,
+    scanId: "scan",
+    environmentId: "env",
+    record: completed,
+  });
+  const filename = join(
+    directory,
+    ["occ_a", "env", raw].map(digest).join(".") + ".json",
+  );
+  await writeFile(filename, raw);
+  expect((await read()).size).toBe(0);
+  await saveCli([conclusion]);
+  expect((await read()).get("occ_a")).toEqual(conclusion);
+  expect(await readFile(filename, "utf8")).toEqual(raw);
+});
+
 test.each(["execution", "source_analysis"] as const)(
   "preserves %s observations for the selected run",
   async (kind) => {

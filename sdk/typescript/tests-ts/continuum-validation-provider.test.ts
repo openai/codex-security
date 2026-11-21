@@ -179,7 +179,7 @@ describe("Continuum validation provider", () => {
       issueArn:
         "arn:aws:continuum:us-east-1:123456789012:environments/environment1/code-issues/issue-1",
       verdict: "EXPLOITABLE",
-      resultScope: "finding",
+      resultScope: "issue",
       freshness: { stale: false },
     });
     expect(requests).toHaveLength(2);
@@ -234,7 +234,7 @@ describe("Continuum validation provider", () => {
       expect(result.provenance.referenceUrl).toBe(url);
       expect(result.record?.issueUrl).toBe(url);
       expect(result.report).toContain(url);
-      expect(result.record?.claimMatch).toBe("on_target");
+      expect(result.record?.claimMatch).toBe("unknown");
       expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
       expect(JSON.stringify(result.record)).not.toMatch(
         /RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u,
@@ -395,7 +395,7 @@ describe("Continuum validation provider", () => {
       claimMatch: "unknown",
       severityAfter: "high",
     });
-    expect(result.report).toContain("not an individual validation");
+    expect(result.report).toContain("issue-level result");
     expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
   });
 
@@ -545,10 +545,7 @@ describe("Continuum validation provider", () => {
       providerSeverity: "critical",
       claimMatch: "unknown",
     });
-    expect(result.report).toContain(
-      "grouped this finding with 2 other findings",
-    );
-    expect(result.report).toContain("not an individual validation");
+    expect(result.report).toContain("issue-level result");
     expect(result.report).toContain("Continuum issue severity: critical");
     expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
   });

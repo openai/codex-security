@@ -41,10 +41,10 @@ export interface ValidationItemRecord {
   severityBefore: string;
   severityAfter: string;
   providerSeverity?: string;
-  /** Scope of the verdict and provider severity, not the sealed Codex finding. */
+  /** Scope of the provider verdict. */
   resultScope?: ValidationResultScope;
   issueFindingCount?: number;
-  /** Structured attacker reachability at resultScope; absent means unknown. */
+  /** Structured attacker reachability from the provider's scoring evidence. */
   reachableFromAttacker?: boolean;
   /** Issue validation evidence existed before this finding was submitted. */
   joinedValidatedIssue?: boolean;

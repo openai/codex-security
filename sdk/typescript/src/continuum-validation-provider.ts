@@ -7,10 +7,7 @@ import { repositoryFilePath } from "./scanner-import.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prepareContinuumAws } from "./continuum-aws.js";
-import {
-  selectFindingValidationArtifact,
-  singleFindingValidationIssue,
-} from "./continuum-validation-evidence.js";
+import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
 import {
   type ValidationProvider,
@@ -266,6 +263,10 @@ function proofClaimMatch(
 ): ValidationClaimMatch {
   const raw = typeof proof === "string" ? proof : JSON.stringify(proof);
   if (!citesPrimaryLocation(raw, finding)) return "unknown";
+  return matchConcepts(raw, finding);
+}
+
+function matchConcepts(raw: string, finding: AnyFinding): ValidationClaimMatch {
   const semantic = locations(finding).reduce(
     (value, { path }) => value.replaceAll(path.toLowerCase(), ""),
     raw.toLowerCase(),
@@ -309,11 +310,71 @@ function evidenceRows(artifact: Record<string, unknown>) {
   return Array.isArray(signals) ? signals.map(object) : [];
 }
 
-function proofDetails(validation: Record<string, unknown>) {
-  // The selector removes results for siblings. Require one result for this ID.
+// Bind the citation to the claim in the same AWS ReasoningStep. A matching
+// path or concept elsewhere in the chain cannot supply the missing half.
+function reasoningMatch(
+  steps: unknown,
+  finding: AnyFinding,
+): ValidationClaimMatch {
+  if (!Array.isArray(steps)) return "unknown";
+  let result: ValidationClaimMatch = "unknown";
+  for (const value of steps) {
+    const { step, claim, source } = object(value);
+    if (
+      !Number.isInteger(step) ||
+      typeof claim !== "string" ||
+      typeof source !== "string" ||
+      !citesPrimaryLocation(source, finding)
+    )
+      continue;
+    const match = matchConcepts(claim, finding);
+    if (match === "on_target" || match === "on_target_escalated") return match;
+    if (match === "different_flaw") result = match;
+  }
+  return result;
+}
+
+// Project only a known effect. HTTP requests, responses, and reasoning may
+// contain sensitive data and are never copied into the assessment.
+function httpObservation(proof: Record<string, unknown>) {
+  const { effect, httpMethod, payload, targetUrl } = object(
+    proof["exploitArtifact"],
+  );
+  if (
+    typeof httpMethod !== "string" ||
+    !["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(
+      httpMethod,
+    ) ||
+    typeof payload !== "string" ||
+    typeof targetUrl !== "string" ||
+    !/^https?:\/\//iu.test(targetUrl) ||
+    !URL.canParse(targetUrl)
+  )
+    return;
+  if (
+    proof["exploitable"] === "EXPLOITABLE" &&
+    (effect === "DATA_LEAKED" ||
+      effect === "ERROR_REVEALED" ||
+      effect === "BEHAVIOR_CHANGED")
+  )
+    return { kind: "execution" as const, effect };
+}
+
+function proofDetails(
+  validation: Record<string, unknown>,
+  finding: AnyFinding,
+) {
+  // The selector removes siblings and requires a unique result with a verdict.
   const results = validation["perFindingResults"];
-  if (Array.isArray(results) && results.length !== 1) return;
-  const proof = Array.isArray(results) ? object(results[0]) : validation;
+  if (!Array.isArray(results) || results.length !== 1) return;
+  const proof = object(results[0]);
+  if (proof["reasoningChain"] !== undefined) {
+    return {
+      match: reasoningMatch(proof["reasoningChain"], finding),
+      description: "per-finding reasoning",
+      observation: httpObservation(proof),
+    };
+  }
   const executed = object(proof["executedProof"]);
   const observed = text(executed["observedEffect"]);
   const code = object(executed["code"])["proofCode"];
@@ -324,7 +385,7 @@ function proofDetails(validation: Record<string, unknown>) {
       .trim();
     if (evidence)
       return {
-        evidence,
+        match: proofClaimMatch(evidence, finding),
         description: "executed proof",
         observation: { kind: "execution" as const, effect: safeText(observed) },
       };
@@ -334,7 +395,7 @@ function proofDetails(validation: Record<string, unknown>) {
   const summary = text(analysis["summary"]);
   if (summary)
     return {
-      evidence: summary,
+      match: proofClaimMatch(summary, finding),
       description: "source analysis",
       observation: {
         kind: "source_analysis" as const,
@@ -745,7 +806,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     let validationArtifact: Record<string, unknown> | undefined;
     let likelihoodArtifact: Record<string, unknown> | undefined;
     let latestScore = false;
-    let resultScope: ValidationResultScope = "finding";
+    let resultScope: ValidationResultScope = "issue";
     let issueFindingCount: number | undefined;
     try {
       {
@@ -805,7 +866,6 @@ export class ContinuumValidationProvider implements ValidationProvider {
           if (!Array.isArray(ids) || !ids.includes(findingId)) return;
           issueFindingCount = new Set(ids).size;
           let issueFallback: Record<string, unknown> | undefined;
-          let soleFindingFallback: Record<string, unknown> | undefined;
           for (const kind of ["VALIDATION_EVIDENCE", "EVIDENCE"] as const) {
             const listed = await request("list-code-issue-artifacts", [
               "--environment-id",
@@ -874,17 +934,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
               );
               if (selected?.scope === "finding") {
                 validationArtifact = selected.artifact;
+                resultScope = "finding";
                 break;
-              }
-              if (
-                selected?.scope === "issue" &&
-                singleFindingValidationIssue(issue, issueId, {
-                  scope,
-                  id: findingId,
-                })
-              ) {
-                soleFindingFallback ??= selected.artifact;
-                continue;
               }
               // Keep issue proof separate. Search all histories first: an older
               // explicit result for this finding must beat this fallback.
@@ -897,11 +948,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
                 issueFallback = artifact;
             }
             if (kind === "VALIDATION_EVIDENCE") {
-              validationArtifact ??= soleFindingFallback;
-              if (!validationArtifact && issueFallback) {
-                validationArtifact = issueFallback;
-                resultScope = "issue";
-              }
+              validationArtifact ??= issueFallback;
               if (!validationArtifact) return;
             }
           }
@@ -951,12 +998,13 @@ export class ContinuumValidationProvider implements ValidationProvider {
   ): ValidationProviderAssessment {
     const conclusive = disposition === "reportable";
     const validation = validationBody(validationArtifact);
-    const proof = proofDetails(validation);
-    const match =
-      conclusive && resultScope === "finding" && proof
-        ? proofClaimMatch(proof.evidence, finding)
-        : "unknown";
+    const proof =
+      conclusive && resultScope === "finding"
+        ? proofDetails(validation, finding)
+        : undefined;
+    const match = proof?.match ?? "unknown";
 
+    const validationArtifactId = text(validationArtifact["artifactId"]);
     const artifactTime = Date.parse(
       text(validationArtifact["createdAt"]) ?? "",
     );
@@ -1039,7 +1087,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       : "validation time unknown";
     const scopeDescription =
       resultScope === "issue"
-        ? `Continuum grouped this finding with ${(issueFindingCount ?? 1) - 1} other findings into this issue. This is an issue-level result, not an individual validation of this finding. Codex severity is retained.${joinedValidatedIssue ? " This finding joined an issue Continuum had already validated; the issue proof predates this submission." : ""}`
+        ? `Continuum returned an issue-level result. The issue currently lists ${issueFindingCount} ${issueFindingCount === 1 ? "finding" : "findings"}. Codex severity is retained.${joinedValidatedIssue ? " This finding joined an issue Continuum had already validated. The issue proof predates this submission." : ""}`
         : "Continuum result for this finding.";
     const report = [
       `**Result scope:** ${scopeDescription}`,
@@ -1060,6 +1108,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
       "",
       reason,
       "",
+      ...(terminalStatus === "FAILED" && validationArtifactId
+        ? [
+            `To investigate the failed run, ask AWS privately for worker logs for validation artifact ${validationArtifactId}${evidenceCreatedAt ? ` (created ${evidenceCreatedAt})` : ""} on the issue below.`,
+            "",
+          ]
+        : []),
       ...(limitation ? [limitation, ""] : []),
       ...(regrade && reachableFromAttacker === false
         ? [
@@ -1077,7 +1131,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         provider: this.name,
         verdict,
         ...(terminalStatus && { terminalStatus }),
-        validationArtifactId: text(validationArtifact["artifactId"]),
+        validationArtifactId,
         scoringArtifactId: text(likelihoodArtifact["artifactId"]),
         ...(observation && { proofObservation: observation }),
         ...(statusMessage && { statusMessage }),
