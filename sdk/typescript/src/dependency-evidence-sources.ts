@@ -4,6 +4,7 @@ import { ConfigurationError } from "./errors.js";
 import { isRecord } from "./record.js";
 
 export const investigationServer = "dependency_investigation";
+export const commandEvidenceTool = "command_execution";
 
 export interface DependencyEvidenceSource {
   server: string;
@@ -16,6 +17,45 @@ export interface DependencyEvidenceRecord {
   arguments: unknown;
   result: Record<string, unknown>;
   sha256: string;
+}
+
+type CommandEvidence = DependencyEvidenceRecord & {
+  result: {
+    command: string;
+    cwd: string;
+    exitCode: number;
+    output: string | null;
+  };
+};
+
+export function isCommandEvidence(
+  record: DependencyEvidenceRecord,
+): record is CommandEvidence {
+  return (
+    record.server === investigationServer && record.tool === commandEvidenceTool
+  );
+}
+
+function commandEvidence(
+  item: Record<string, unknown>,
+): CommandEvidence | undefined {
+  const { command, cwd, exitCode, aggregatedOutput: output } = item;
+  if (
+    item["status"] !== "completed" ||
+    exitCode !== 0 ||
+    typeof command !== "string" ||
+    typeof cwd !== "string" ||
+    (typeof output !== "string" && output !== null)
+  )
+    return;
+  // One receipt binds the output and exit status to the invocation that produced them.
+  const record = {
+    server: investigationServer,
+    tool: commandEvidenceTool,
+    arguments: {},
+    result: { command, cwd, exitCode, output },
+  };
+  return { ...record, sha256: dependencyRecordHash(record) };
 }
 
 /** Use the selected servers with their native Codex connection and tool settings. */
@@ -66,8 +106,13 @@ export function createDependencyEvidenceCapture(
         : event["method"] === "item/completed" && isRecord(event["params"])
           ? event["params"]["item"]
           : undefined;
+    if (!isRecord(item)) return;
     if (
-      !isRecord(item) ||
+      event["method"] === "item/completed" &&
+      item["type"] === "commandExecution"
+    )
+      return commandEvidence(item);
+    if (
       (item["type"] !== "mcp_tool_call" && item["type"] !== "mcpToolCall") ||
       (item["status"] !== "completed" && item["status"] !== "failed")
     )

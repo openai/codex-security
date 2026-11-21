@@ -215,6 +215,8 @@ codex:
 
 Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. Repository checks default to production services, jobs, workers, and the code they deploy or import. Set `exploitability.scope.instructions` to replace that caller scope. Use `exploitability.scope.exclude_paths` for literal checkout-relative files or directories to omit from broad discovery. A nested `SECURITY.md` boundary or an exact source or build lead can bring a path back into the investigation.
 
+A repository investigation can cite a command result to support a scoped claim about source or build inputs, such as whether two files have the same digest. The reviewer checks the inputs, operation and result. When a published claim cites a command, the report includes its working directory, command, exit code and captured output.
+
 Repository checks also accept independent `exploitability.sources` and `exploitability.sinks` lists in the project file. Each endpoint names a `function` and can include its package, symbol, file, and line. Supply a list to describe all endpoints on that side of the scenario, including an empty list when the side has no endpoints. Omit the list to let the investigator discover endpoints. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
 
 The report's `assumptions` records the caller scope, supplied endpoint lists, and paths excluded from broad discovery. A runtime selector's source `line` requires its `location`. The selector retains additional JSON metadata supplied by the evidence source.
