@@ -81,6 +81,18 @@ export async function buildMcpApp({ output, native = "universal" }) {
   // here before it probes for package.json above the share root.
   await writeFile(join(mcpDir, "package.json"), '{"private":true}\n');
 
+  // A plugin-only install can build the MCP server independently. Include the
+  // optional provider when the SDK and its dependencies are installed.
+  const sdk = resolve(root, "../../../sdk/typescript");
+  const validation = join(sdk, "src/plugin-validation.ts");
+  const alias =
+    statSync(validation, { throwIfNoEntry: false })?.isFile() &&
+    statSync(join(sdk, "node_modules"), {
+      throwIfNoEntry: false,
+    })?.isDirectory()
+      ? { "#validation-runtime": validation }
+      : {};
+
   await writeRuntime("server", "main.ts");
   for (const file of nativeFiles) {
     const path = file.slice("mcp/native/".length);
@@ -123,18 +135,6 @@ export async function buildMcpApp({ output, native = "universal" }) {
     platform: "node",
     target: "node20",
   });
-
-  // A plugin-only install can build the MCP server independently. Include the
-  // optional provider when the SDK and its dependencies are installed.
-  const sdk = resolve(root, "../../../sdk/typescript");
-  const validation = join(sdk, "src/plugin-validation.ts");
-  const alias =
-    statSync(validation, { throwIfNoEntry: false })?.isFile() &&
-    statSync(join(sdk, "node_modules"), {
-      throwIfNoEntry: false,
-    })?.isDirectory()
-      ? { "#validation-runtime": validation }
-      : {};
 
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
