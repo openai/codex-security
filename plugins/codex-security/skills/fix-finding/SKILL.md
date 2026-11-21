@@ -19,6 +19,8 @@ Use `standard` verification unless the caller explicitly selects `verificationMo
 
 In static mode, assess source and diff evidence only. Do not install dependencies or run builds, tests, reproducers, or the application, including when validation instructions request them. Repository-reading tools remain available. State that runtime checks were not performed; do not count them as passed or require them for this assessment. Missing runtime tooling alone is not a blocker, but a material gap in the source evidence still requires `blocked`.
 
+For image dependency findings, use [image patch evidence](../../references/image-patch-evidence.md) to compare the baseline and rebuilt artifacts and include the result alongside the patch.
+
 ## Patch Contract
 
 Before editing, inspect the affected implementation, its direct callers, nearby helpers, and relevant existing tests. Establish from repository evidence:
