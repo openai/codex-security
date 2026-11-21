@@ -21,6 +21,8 @@ export function preflightProviderDefinitions(providers) {
   );
 }
 
+export class PermissionProfileFallbackError extends Error {}
+
 export function isPermissionProfileFallbackWarning(message, profileId) {
   if (typeof message !== "string") return false;
   const prefix =
@@ -121,7 +123,7 @@ class ProfileThread {
             this.options.requestedPermissionProfile,
           )
         ) {
-          throw new Error(
+          throw new PermissionProfileFallbackError(
             "Read-only Codex helper stopped because organization policy changed its permission profile. Its results were discarded.\n" +
               item.message,
           );

@@ -12,6 +12,8 @@ import {
 } from "./errors.js";
 import {
   beginCredentialLogin,
+  codexSecurityCredentialHome,
+  codexSecurityStateDirectory,
   executablePathForSpawn,
   expandHome,
   runCodexCommand,
@@ -56,6 +58,39 @@ export function configuredCodexHome(environment: ProcessEnvironment): string {
       environment,
     ),
   );
+}
+
+/** Private stores excluded from read-only model tools. @internal */
+export function codexSecurityPrivatePaths(
+  environment: ProcessEnvironment,
+  workingDirectory: string = process.cwd(),
+): string[] {
+  const stateDatabase = join(
+    codexSecurityStateDirectory(environment),
+    "workbench.sqlite3",
+  );
+  return [
+    codexSecurityCredentialHome(environment),
+    join(homedir(), ".ssh"),
+    join(expandHome("~", environment), ".ssh"),
+    join(homedir(), ".config", "gh"),
+    join(expandHome("~", environment), ".config", "gh"),
+    ...[process.env, environment].flatMap((source) => {
+      const explicit = environmentEntry(source, "GH_CONFIG_DIR");
+      const appData = environmentEntry(source, "AppData");
+      const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
+      return [
+        ...(explicit ? [expandHome(explicit, source)] : []),
+        ...(xdg ? [join(xdg, "gh")] : []),
+        ...(process.platform === "win32" && appData
+          ? [join(appData, "GitHub CLI")]
+          : []),
+      ];
+    }),
+    stateDatabase,
+    `${stateDatabase}-wal`,
+    `${stateDatabase}-shm`,
+  ].map((path) => resolve(workingDirectory, expandHome(path, environment)));
 }
 
 /** @internal */

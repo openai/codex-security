@@ -1,0 +1,37 @@
+{
+  "case_id": null,
+  "repository_cluster_id": null,
+  "advisory_family_id": null,
+  "advisory_ids": [],
+  "split": null,
+  "source_revision": null,
+  "source_digest": null,
+  "input_digest": null,
+  "advisory_digest": null,
+  "scope": null,
+  "reviews": [
+    {
+      "reviewer_id": null,
+      "label": null,
+      "evidence": [],
+      "proof_gaps": [],
+      "reviewed_before_model_output": null
+    },
+    {
+      "reviewer_id": null,
+      "label": null,
+      "evidence": [],
+      "proof_gaps": [],
+      "reviewed_before_model_output": null
+    }
+  ],
+  "adjudicated_label": null,
+  "adjudication_rationale": null,
+  "allowed_labels": ["affected", "not_affected", "unresolved"],
+  "model_evidence_review": {
+    "run_id": null,
+    "supports_decisive_conclusion": null,
+    "unsupported_claims": [],
+    "notes": null
+  }
+}

@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: "SCA synthetic smoke: existing triage prompt and typed-match prototype"
+tags:
+  suite: sca-synthetic-smoke
+
+prompts:
+  - id: file://./prompts/triage-baseline.txt
+    label: existing-triage
+  - id: file://./prompts/sca-wrapper.txt
+    label: typed-match-prototype
+
+providers: "file://{{env.SCA_EVAL_PROVIDER_CONFIG}}"
+
+evaluateOptions:
+  maxConcurrency: 1
+
+extensions:
+  - file://./assertions/sca-metrics.js:afterEach
+
+defaultTest:
+  options:
+    transformVars: file://../scripts/runtime-vars.mts
+  assert:
+    - type: contains-json
+      value: file://../../../plugins/codex-security/schemas/triage-result.schema.json
+      metric: schema_valid
+    - type: javascript
+      value: file://./assertions/sca-evidence.js
+      metric: synthetic_case_correct
+
+derivedMetrics:
+  - name: confirmation_precision
+    value: correctly_confirmed / max(confirmed, 1)
+  - name: affected_confirmation_recall
+    value: correctly_confirmed / max(affected_cases, 1)
+  - name: incorrect_dismissal_rate
+    value: incorrect_dismissals / max(affected_cases, 1)
+  - name: uncertainty_handling
+    value: correctly_unresolved / max(unresolved_cases, 1)
+  - name: decision_coverage
+    value: decisive / max(attempted, 1)
+
+tests: file://./scripts/generate-tests.js:generateTests
