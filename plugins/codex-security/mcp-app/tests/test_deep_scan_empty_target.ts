@@ -1,6 +1,8 @@
 import { fixturePython as python } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
+import { createServer, type AddressInfo } from "node:net";
 import { chmod, mkdir, rm, symlink, watch, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
@@ -100,8 +102,13 @@ test("only registered paths determine whether the target is empty", async () => 
   );
   await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-  // A file counts even when normal source inventory would ignore it.
-  await writeFile(join(right, ".gitignore"), "*");
+  const ignored = "right/generated.py";
+  await writeFile(join(run.targetPath, ".gitignore"), "*.py\n");
+  await writeFile(join(run.targetPath, ignored), "");
+  await assert.rejects(inspect(run), /no security audit/iu);
+
+  await inspect({ ...run, includePaths: [ignored], filePaths: [ignored] });
+  git("add", "-f", "--", ignored);
   await inspect(run);
   run.includePaths.reverse();
   await inspect(run);
@@ -223,6 +230,13 @@ for (const [stop, nested] of [
       if (nested) await mkdir(blockedPath);
       const scripts = join(fixture.pluginRoot, "scripts");
       await mkdir(scripts, { recursive: true });
+      const listener = createServer();
+      t.after(() => {
+        listener.close();
+      });
+      listener.listen(0, "127.0.0.1");
+      await once(listener, "listening");
+      const { port } = listener.address() as AddressInfo;
       const markerDir = join(dirname(run.targetPath), "ready");
       await mkdir(markerDir);
       const scriptName = "check_deep_scan_target.py";
@@ -231,13 +245,14 @@ for (const [stop, nested] of [
       await writeFile(
         join(scripts, scriptName),
         `
-import os, runpy, sys, time
+import os, runpy, subprocess, sys
 from pathlib import Path
 real_scan = os.scandir
 def blocked(path):
     if os.fsdecode(path) == ${JSON.stringify(blockedPath)}:
         Path(${JSON.stringify(markerDir)}, str(os.getpid())).touch()
-        time.sleep(30)
+        child = "import socket; s = socket.create_connection(('127.0.0.1', ${port})); s.recv(1)"
+        subprocess.run([sys.executable, "-I", "-c", child], check=True)
     return real_scan(path)
 os.scandir = blocked
 sys.path.insert(0, ${JSON.stringify(join(pluginRoot, "scripts"))})
@@ -256,11 +271,14 @@ runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_n
         },
       );
       const watcher = watch(markerDir, { signal: t.signal });
-      const ready = watcher.next();
+      const ready = Promise.all([
+        watcher.next(),
+        once(listener, "connection", { signal: t.signal }),
+      ]);
       if (stop === "deadline") t.mock.timers.enable({ apis: ["setTimeout"] });
       coordinator.start();
       try {
-        const marker = await Promise.race([
+        const [marker, [witness]] = await Promise.race([
           ready,
           coordinator
             .settled()
@@ -270,6 +288,9 @@ runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_n
               ),
             ),
         ]);
+        t.after(() => {
+          witness.destroy();
+        });
         assert.ok(!marker.done && marker.value.filename);
         const pid = Number(marker.value.filename);
         assert.ok(Number.isSafeInteger(pid) && pid > 0);
@@ -288,6 +309,7 @@ runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_n
           stop === "deadline" ? "capped" : undefined,
         );
         assert.equal(executor.discoveryCalls, 0);
+        await eventually(() => witness.destroyed);
         await eventually(() => {
           try {
             process.kill(pid, 0);
