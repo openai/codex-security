@@ -676,6 +676,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         now(),
       );
     } catch (error) {
+      if (now().getTime() >= deadline && !context.signal?.aborted) return;
       return this.#assessment(
         finding,
         {

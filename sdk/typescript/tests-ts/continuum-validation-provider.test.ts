@@ -494,6 +494,25 @@ describe("Continuum validation provider", () => {
     expect(result.report).toContain("Continuum has not finished");
   });
 
+  test("a read reaching the shared deadline remains pending with its issue link", async () => {
+    const aws = fakeAws();
+    let elapsed = 0;
+    const result = await new ContinuumValidationProvider({
+      environmentId: "environment-1",
+      waitMinutes: 0.001,
+      now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
+      launcher: async (op, args, signal) => {
+        if (op === "get-code-issue-artifact") {
+          elapsed = 60;
+          throw new Error("read reached the deadline");
+        }
+        return aws.launcher(op, args, signal);
+      },
+    }).validate(finding, { repositoryPath: "/repo" });
+    expect(result.record?.state).toBe("pending");
+    expect(result.record?.issue?.url).toContain("issue-1");
+  });
+
   test("maps sink-first code findings and deterministic submission tokens", () => {
     const code = findingToOcsf(finding, new Date(0));
     expect(code["class_uid"]).toBe(2002);
