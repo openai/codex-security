@@ -1352,6 +1352,25 @@ Include custom provider definitions in the file so the scan
 can use them from its isolated Codex home. An absent file contributes no
 settings. Existing inline `profiles` tables still work.
 
+For API Route, set `API_ROUTE_API_KEY` in the scan environment and use these
+settings in the `review.config.toml` example above. Choose a model available
+to your key that supports [streaming Responses](https://www.api-route.com/openapi.json),
+namespaced tools, and web search when enabled.
+
+```toml
+model = "<model-id>"
+model_provider = "api-route"
+
+[model_providers.api-route]
+name = "API Route"
+base_url = "https://global.api-route.com/v1"
+wire_api = "responses"
+env_key = "API_ROUTE_API_KEY"
+```
+
+The profile was tested against a local Responses endpoint. Hosted scan
+completion remains unverified.
+
 Choose plugins with `--plugin-path`; native plugin and marketplace overrides are
 rejected. New and resumed Deep Scans require the current plugin's direct engine,
 worker provider snapshot, and isolated worker configuration capabilities. Update
