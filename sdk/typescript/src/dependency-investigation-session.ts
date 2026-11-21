@@ -108,6 +108,100 @@ const queryClaims = z.strictObject({
 });
 const pageSize = 4000;
 
+// turn/start accepts at most 1 Mi characters of user text. Page a snapshot
+// scoped to that request so concurrent claim revisions cannot change its input.
+const maxPromptChars = 1_048_576;
+export function dependencyAgentPrompt(
+  instructions: string[],
+  input: Record<string, unknown>,
+): { prompt: string; packet?: DependencyEvidenceRecord } {
+  const prefix = instructions.join("\n\n") + "\n\n";
+  const body = JSON.stringify(input);
+  if (prefix.length + body.length <= maxPromptChars)
+    return { prompt: prefix + body };
+
+  const data = {
+    server: investigationServer,
+    tool: "agent_input",
+    arguments: {},
+    result: JSON.parse(body) as Record<string, unknown>,
+  };
+  const packet = { ...data, sha256: dependencyRecordHash(data) };
+  const guidance =
+    "The JSON below indexes a larger input. Use read_dependency_evidence with id " +
+    packet.sha256 +
+    ' and path to inspect full entries (e.g. path:["approvedClaims",0,"payload"]). ' +
+    "Follow next as offset for further pages. Read the original entries for the decision under review. " +
+    "Cite the original evidence keys inside the packet. The index preserves array order.\n\n";
+  const preview = { ...data.result };
+  // A coverage reviewer needs each prior conclusion and its location up
+  // front. Its full proof, entire source excerpts and decisions are pageable.
+  const approved = preview["approvedClaims"];
+  if (Array.isArray(approved)) {
+    preview["approvedClaims"] = approved.map(
+      ({ payload, decision, ...ref }) => {
+        const finding = payload.use ?? payload.disposition ?? payload;
+        return {
+          ...ref,
+          kind: payload.kind,
+          scope: finding.scope,
+          location: finding.location,
+          locations: finding.locations,
+          verdict: finding.verdict,
+          conclusion: finding.statement ?? finding.reason,
+          sources: (finding.sources ?? finding.evidence ?? []).map(
+            ({ path, startLine, endLine }: Record<string, unknown>) => ({
+              path,
+              startLine,
+              endLine,
+            }),
+          ),
+          evidenceKeys: decision?.evidenceKeys,
+        };
+      },
+    );
+  }
+  const page = (value: unknown) => ({
+    paged: true,
+    ...(Array.isArray(value) && { length: value.length }),
+  });
+  const render = () => prefix + guidance + JSON.stringify(preview);
+  let prompt = render();
+  // Prefer keeping the caller and scope inventories alongside current claims.
+  const discoveries = preview["discoveries"];
+  if (prompt.length > maxPromptChars && Array.isArray(discoveries)) {
+    preview["discoveries"] = discoveries.map((item) => ({
+      ...item,
+      ...Object.fromEntries(
+        [
+          "sourceLeads",
+          "dependencyFiles",
+          "buildFiles",
+          "manifests",
+          "traces",
+          "runtime",
+        ]
+          .filter((key) => item[key]?.length)
+          .map((key) => [key, page(item[key])]),
+      ),
+      coverage: { ...item.coverage, gaps: page(item.coverage.gaps) },
+    }));
+    prompt = render();
+  }
+  if (prompt.length > maxPromptChars) {
+    const fields = Object.keys(preview).map((key) => ({
+      key,
+      length: JSON.stringify(preview[key]).length,
+    }));
+    for (const { key } of fields.sort((a, b) => b.length - a.length)) {
+      preview[key] = page(preview[key]);
+      prompt = render();
+      if (prompt.length <= maxPromptChars) break;
+    }
+  }
+  return { prompt, packet };
+}
+
 /** Keep long original resource responses on the host; return only the requested witness page. */
 export function evidencePage(
   record: DependencyEvidenceRecord,
@@ -391,7 +485,7 @@ export function createInvestigationSession(options: {
     if (!record) throw new Error("Unknown evidence ID: " + id);
     return record;
   }
-  const readers: Tool[] = [
+  const readers = (packet?: DependencyEvidenceRecord): Tool[] => [
     {
       name: "read_dependency_evidence",
       description:
@@ -399,7 +493,11 @@ export function createInvestigationSession(options: {
       inputSchema: z.toJSONSchema(readEvidence),
       run(raw) {
         const args = readEvidence.parse(raw);
-        if (args.id) return evidencePage(resolveRecord(args.id), args);
+        if (args.id)
+          return evidencePage(
+            args.id === packet?.sha256 ? packet : resolveRecord(args.id),
+            args,
+          );
         const { server, tool, offset = 0 } = args;
         const page: ReturnType<typeof receiptMetadata>[] = [];
         const pageLength = 40;
@@ -446,8 +544,11 @@ export function createInvestigationSession(options: {
   });
   return {
     sourceWorkCoverage: sourceWork.coverage,
-    async tools(readOnly: boolean): Promise<InvestigationTools> {
-      const tools = readers.map((tool) =>
+    async tools(
+      readOnly: boolean,
+      packet?: DependencyEvidenceRecord,
+    ): Promise<InvestigationTools> {
+      const tools = readers(packet).map((tool) =>
         readOnly && tool.name === "query_dependency_claims"
           ? {
               ...tool,

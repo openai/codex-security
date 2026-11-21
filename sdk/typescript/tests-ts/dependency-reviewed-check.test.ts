@@ -150,6 +150,94 @@ async function fixture(extraFiles: Record<string, string> = {}) {
   };
 }
 
+test("a large coverage review keeps every approved caller and can page the original source", async () => {
+  const app =
+    'import parse from "fixture-parser";\nparse(request.body); // ' +
+    "x".repeat(360_000) +
+    " end\n";
+  await using f = await fixture({ "app.js": app });
+  const locations = ["reader", "dispatch", "indexer"];
+  let reviewed = false;
+  await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Parser issue",
+      signal,
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        expect(req.prompt.length).toBeLessThanOrEqual(1_048_576);
+        const { call } = await req.investigationTools!();
+        if (req.coordinator) {
+          for (const location of locations) {
+            await call("submit_dependency_assessments", {
+              assessments: [
+                {
+                  id: location,
+                  expectedRevision: 0,
+                  use: { ...f.use, location },
+                },
+              ],
+            });
+            await call("query_dependency_claims", {
+              ids: ["assessment:" + location],
+              wait: true,
+            });
+          }
+          return JSON.stringify({ uses: [], limitations: [] });
+        }
+        const { claims, approvedClaims } = JSON.parse(
+          req.prompt.split("\n\n").at(-1)!,
+        );
+        if (claims[0].payload.kind === "coverage") {
+          reviewed = true;
+          expect(
+            approvedClaims
+              .map((claim: { location: string }) => claim.location)
+              .sort(),
+          ).toEqual([...locations].sort());
+          expect(approvedClaims.at(-1)).toMatchObject({
+            verdict: f.use.verdict,
+            conclusion: f.use.reason,
+            sources: [
+              { path: "app.js", startLine: 1, endLine: 2 },
+              { path: "package-lock.json", startLine: 1, endLine: 1 },
+            ],
+          });
+          const id = /read_dependency_evidence with id ([0-9a-f]{64})/u.exec(
+            req.prompt,
+          )![1];
+          const offset = 360_000;
+          const page = await call("read_dependency_evidence", {
+            id,
+            path: [
+              "approvedClaims",
+              2,
+              "payload",
+              "use",
+              "evidence",
+              0,
+              "excerpt",
+            ],
+            offset,
+          });
+          expect(page).toMatchObject({
+            text: JSON.stringify(app).slice(offset),
+            next: null,
+          });
+          expect(
+            await call("read_dependency_evidence", { tool: "agent_input" }),
+          ).toEqual({ receipts: [], next: null });
+        }
+        return approvedReview(claims);
+      },
+    },
+  );
+  expect(reviewed).toBe(true);
+});
+
 test("binds each argument frame to its reviewed source and pins the published revision", async () => {
   await using f = await fixture();
   const scope = reviewScopes([f.discovery])[0]!;

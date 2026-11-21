@@ -19,6 +19,7 @@ import { createDependencyBlockEvidence } from "./dependency-blocked-evidence.js"
 import { finishOneShotInvestigation } from "./dependency-investigation-correction.js";
 import {
   createInvestigationSession,
+  dependencyAgentPrompt,
   evidencePreviews,
   investigationServer,
 } from "./dependency-investigation-session.js";
@@ -761,7 +762,7 @@ async function investigateIssue(
     let usage: ScanTokenUsage | null = null;
     let lastAccessProgram: string | undefined;
     const run = (
-      prompt: string,
+      { prompt, packet }: ReturnType<typeof dependencyAgentPrompt>,
       coordinator = false,
       onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"],
     ) =>
@@ -772,7 +773,7 @@ async function investigateIssue(
         readOnly: true,
         coordinator,
         ...(onCoordinatorAnswer && { onCoordinatorAnswer }),
-        investigationTools: () => session!.tools(!coordinator),
+        investigationTools: () => session!.tools(!coordinator, packet),
         ...(coordinator &&
           options.onProgress && {
             onAccessProgram(selected: string | undefined) {
@@ -962,10 +963,9 @@ async function investigateIssue(
           ),
         );
         return run(
-          [
-            reviewInstructions,
-            JSON.stringify(z.toJSONSchema(reviewSchema)),
-            JSON.stringify({
+          dependencyAgentPrompt(
+            [reviewInstructions, JSON.stringify(z.toJSONSchema(reviewSchema))],
+            {
               ...input,
               claims: supplied,
               ...(problem && {
@@ -996,8 +996,8 @@ async function investigateIssue(
                 ],
                 previewBytes,
               ),
-            }),
-          ].join("\n\n"),
+            },
+          ),
         );
       };
       options.onProgress?.("review", subject);
@@ -1559,7 +1559,7 @@ async function investigateIssue(
     let finalReport: Awaited<ReturnType<typeof submit>>["report"];
     options.onProgress?.("investigation", subject);
     const raw = await run(
-      [...instructions, JSON.stringify(input)].join("\n\n"),
+      dependencyAgentPrompt(instructions, input),
       true,
       async (answer) => {
         // Only completed submissions enter this callback. A refusal or transport
@@ -1590,16 +1590,13 @@ async function investigateIssue(
       (previousProposal, feedback) => {
         options.onProgress?.("investigation", subject);
         return run(
-          [
-            ...instructions,
-            JSON.stringify({
-              ...input,
-              feedback: { ...feedback, previousProposal },
-              evidence: evidencePreviews(
-                [...records.values()].filter((r) => !isCommandEvidence(r)),
-              ),
-            }),
-          ].join("\n\n"),
+          dependencyAgentPrompt(instructions, {
+            ...input,
+            feedback: { ...feedback, previousProposal },
+            evidence: evidencePreviews(
+              [...records.values()].filter((r) => !isCommandEvidence(r)),
+            ),
+          }),
           true,
         );
       },
