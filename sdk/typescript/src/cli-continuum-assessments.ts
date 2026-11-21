@@ -6,6 +6,7 @@ import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import { readRegularInputFile } from "./prompt-files.js";
 import { writeAtomicJson } from "./publication-state.js";
 import {
+  type ProcessEnvironment,
   canonicalConfigPath,
   createWindowsOutputDirectory,
   prepareScanRegistrationOutput,
@@ -30,6 +31,7 @@ async function assessmentDirectory(
   repository: string,
   scanId: string,
   create: boolean,
+  environment: ProcessEnvironment,
 ) {
   const key = hash("sha256", JSON.stringify([repository, scanId]));
   const directory = join(
@@ -40,7 +42,7 @@ async function assessmentDirectory(
   if (!create) await lstat(directory);
   const roots = [
     repository,
-    ...(await commandGitProtectionRoots(repository, process.env)),
+    ...(await commandGitProtectionRoots(repository, environment)),
   ];
   const check = (path: string) =>
     requireOutputOutsideRepositories(roots, path, "state");
@@ -81,6 +83,7 @@ export async function writeCliSnapshots(
   scanId: string,
   environmentId: string,
   records: readonly { itemId: string }[],
+  environment: ProcessEnvironment,
 ): Promise<void> {
   const repository = await realpath(repositoryPath);
   const directory = await assessmentDirectory(
@@ -88,6 +91,7 @@ export async function writeCliSnapshots(
     repository,
     scanId,
     true,
+    environment,
   );
   for (const record of records) {
     const value = {
@@ -111,7 +115,8 @@ export async function readCliSnapshots(
   repositoryPath: string,
   scanId: string,
   requested: ReadonlySet<string>,
-  environmentId?: string,
+  environmentId: string | undefined,
+  environment: ProcessEnvironment,
 ): Promise<Map<string, SavedRecord[] | null>> {
   const repository = await realpath(repositoryPath);
   const directory = await assessmentDirectory(
@@ -119,6 +124,7 @@ export async function readCliSnapshots(
     repository,
     scanId,
     false,
+    environment,
   );
   const byHash = new Map(
     [...requested].map((item) => [hash("sha256", item), item]),
@@ -128,12 +134,12 @@ export async function readCliSnapshots(
   // Keep the occurrence marked invalid even if another candidate follows it.
   const records = new Map<string, SavedRecord[] | null>();
   for (const name of await readdir(directory)) {
-    const [occurrence, environment] = name.split(".");
+    const [occurrence, environmentHash] = name.split(".");
     const itemId = occurrence && byHash.get(occurrence);
     if (
       !itemId ||
       records.get(itemId) === null ||
-      (destination && environment !== destination) ||
+      (destination && environmentHash !== destination) ||
       !name.endsWith(".json")
     )
       continue;

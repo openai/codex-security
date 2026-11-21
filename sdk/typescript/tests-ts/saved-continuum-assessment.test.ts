@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import * as gitMetadata from "../src/local-git-metadata.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 import { remediationPrompt } from "../src/remediation.js";
 import {
@@ -115,6 +116,28 @@ test.each([
   await save([{ ...conclusion, ...extra }]);
   expect((await read()).size).toBe(0);
 });
+test("protects Git metadata resolved with the caller's environment in both stores", async () => {
+  await saveCli([conclusion]);
+  await save([conclusion]);
+  // Windows drive-relative Git metadata can resolve inside the selected state
+  // path under the caller's environment even if the ambient drive differs.
+  const environment = { CODEX_SECURITY_STATE_DIR: root, "=D:": root };
+  using roots = spyOn(gitMetadata, "commandGitProtectionRoots");
+  roots.mockImplementation(async (_repository, env) =>
+    env["=D:"] === root ? [await filesystem.realpath(root)] : [],
+  );
+  const load = () =>
+    savedContinuumAssessments(environment, "scan", repo, ["occ_a"]);
+  expect((await load()).size).toBe(0);
+  await rm(path);
+  expect((await load()).size).toBe(0);
+  await expect(
+    saveCliContinuumAssessments(environment, repo, "scan", config, [
+      { ...conclusion, severityBefore: "high", severityAfter: "high" },
+    ]),
+  ).rejects.toThrow();
+});
+
 test("rejects a plugin assessment editable through a checkout hard link", async () => {
   await save([conclusion]);
   const alias = join(repo, "alias.json");

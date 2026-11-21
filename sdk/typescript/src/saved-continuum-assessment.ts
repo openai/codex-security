@@ -135,6 +135,7 @@ function project(raw: unknown, environmentId: string, region?: string) {
 }
 
 async function readProtectedJson(
+  environment: ProcessEnvironment,
   repositoryPath: string,
   path: string,
 ): Promise<unknown> {
@@ -143,7 +144,7 @@ async function readProtectedJson(
     const repository = await realpath(repositoryPath);
     const roots = [
       repository,
-      ...(await commandGitProtectionRoots(repository, process.env)),
+      ...(await commandGitProtectionRoots(repository, environment)),
     ];
     const directory = await validatePreparedOutputDir(
       dirname(path),
@@ -202,6 +203,7 @@ export async function saveCliContinuumAssessments(
     scanId,
     environment_id,
     terminal,
+    environment,
   );
 }
 
@@ -264,14 +266,14 @@ export async function savedContinuumAssessments(
     return assessments;
   }
   const base = join(paths.plugin, "validation-providers", scanId + ".json");
-  const config = await readProtectedJson(repositoryPath, base);
+  const config = await readProtectedJson(environment, repositoryPath, base);
   const bound = binding.safeParse(config);
   if (config !== undefined && !bound.success) return assessments;
   const environmentId = bound.data?.continuum.environment_id;
   const region = bound.data?.continuum.aws_region;
   if (environmentId) {
     const parsed = cached.safeParse(
-      await readProtectedJson(repositoryPath, base + ".result"),
+      await readProtectedJson(environment, repositoryPath, base + ".result"),
     );
     if (
       parsed.success &&
@@ -296,6 +298,7 @@ export async function savedContinuumAssessments(
     scanId,
     requested,
     environmentId,
+    environment,
   ).catch(() => undefined);
   if (!snapshots) return assessments;
   for (const [occurrence, items] of snapshots) {
