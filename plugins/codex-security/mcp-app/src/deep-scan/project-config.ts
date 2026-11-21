@@ -5,7 +5,7 @@ import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
 import { DEEP_SCAN_SETTINGS, hoursConflict } from "../deep-scan-settings.js";
 import schema from "./project-config.schema.json";
-import type { ValidationProviderConfiguration } from "../../../../../sdk/typescript/src/validation-provider.js";
+import type { ValidationProviderConfiguration } from "@openai/codex-security/plugin-validation";
 
 let validate: ValidateFunction | undefined;
 export interface DeepScanProjectConfig {
@@ -15,11 +15,10 @@ export interface DeepScanProjectConfig {
 }
 
 /** Read only an explicitly selected file; repository configuration is never discovered. */
-export async function readDeepScanProjectConfig(
-  file: string | undefined,
+export async function readSelectedProjectConfig(
+  file: string,
   canonicalTarget: string,
-): Promise<DeepScanProjectConfig | undefined> {
-  if (file === undefined) return undefined;
+) {
   const spelling =
     process.platform !== "win32" && file.startsWith("~\\")
       ? file.replaceAll("\\", "/")
@@ -67,6 +66,18 @@ export async function readDeepScanProjectConfig(
     };
     [key: string]: unknown;
   };
+  return { path, input };
+}
+
+export async function readDeepScanProjectConfig(
+  file: string | undefined,
+  canonicalTarget: string,
+): Promise<DeepScanProjectConfig | undefined> {
+  if (file === undefined) return undefined;
+  const { path, input } = await readSelectedProjectConfig(
+    file,
+    canonicalTarget,
+  );
   const unsupported = [
     ...Object.keys(input).filter((key) => !["$schema", "scan"].includes(key)),
     ...Object.keys(input.scan ?? {})

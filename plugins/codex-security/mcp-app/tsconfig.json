@@ -9,7 +9,13 @@
     "target": "ES2022",
     "types": ["node"],
     "lib": ["ESNext"],
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@openai/codex-security/plugin-validation": [
+        "../../../sdk/typescript/src/plugin-validation.ts",
+        "./src/standalone-validation.ts"
+      ]
+    }
   },
   "include": ["*.ts", "src", "tests/**/*.ts", "scripts/*.mts"]
 }

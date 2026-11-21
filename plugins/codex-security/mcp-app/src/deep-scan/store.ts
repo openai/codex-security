@@ -4,7 +4,7 @@ import {
   bindValidationProvider,
   bindValidationProviderConfiguration,
 } from "../validation-provider.js";
-import type { ValidationProviderConfiguration } from "../../../../../sdk/typescript/src/validation-provider.js";
+import type { ValidationProviderConfiguration } from "@openai/codex-security/plugin-validation";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
