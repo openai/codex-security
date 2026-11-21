@@ -107,6 +107,11 @@ function knownDependencyFile(path: string) {
   );
 }
 
+const sourcePath =
+  /\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|php|swift|c|cc|cpp|cs)$/iu;
+const buildPath =
+  /^(?:Dockerfile(?:\..+)?|Containerfile(?:\..+)?|.+\.(?:Dockerfile|Containerfile)|(?:docker-)?compose(?:\..+)?\.ya?ml)$/iu;
+
 function sourceReferences(
   path: string,
   text: string,
@@ -201,6 +206,7 @@ export async function discoverDependencyRepository(options: {
     localGit,
   );
   const blobs = new Map<string, string>();
+  const searchPatterns = new Set<string>();
   const policyPaths = new Set<string>();
   for (const record of tree.split("\0")) {
     const policy =
@@ -209,8 +215,34 @@ export async function discoverDependencyRepository(options: {
       );
     if (policy) policyPaths.add(policy[1]!);
     const entry = /^100(?:644|755) blob ([a-f0-9]+)\t([\s\S]+)$/u.exec(record);
-    if (entry && !entry[2]!.split("/").includes("node_modules"))
-      blobs.set(entry[2]!, entry[1]!);
+    if (!entry) continue;
+    const path = entry[2]!;
+    const base = posix.basename(path);
+    const source = sourcePath.test(path);
+    if (
+      !source &&
+      !knownDependencyFile(base) &&
+      !buildPath.test(base) &&
+      base !== "bun.lockb"
+    )
+      continue;
+    if (path.split("/").includes("node_modules")) continue;
+    blobs.set(path, entry[1]!);
+    // Only ask Git to decompress file types used below. Derive the path
+    // patterns from the admitted paths, including their original casing.
+    const suffix = source ? base.slice(base.lastIndexOf(".")) : base;
+    if (source) searchPatterns.add("*" + suffix);
+    else if (/^requirements/iu.test(base))
+      searchPatterns.add(":(icase)*requirements*");
+    else if (buildPath.test(base))
+      searchPatterns.add(
+        /dockerfile/iu.test(base)
+          ? ":(icase)*dockerfile*"
+          : /containerfile/iu.test(base)
+            ? ":(icase)*containerfile*"
+            : ":(icase)*compose*",
+      );
+    else searchPatterns.add("*" + suffix);
   }
   const paths = new Set(blobs.keys());
   const inBoundary = (path: string) =>
@@ -256,6 +288,7 @@ export async function discoverDependencyRepository(options: {
         ]),
         revision,
         "--",
+        ...searchPatterns,
       ],
       signal,
       localGit,
@@ -296,8 +329,10 @@ export async function discoverDependencyRepository(options: {
   const projects = new Map(manifests.map((m) => [m.path, m]));
   const callers: DependencyCaller[] = [];
   const sources: TraceSource[] = [];
-  for (const path of matches.filter((p) =>
-    /\.(?:[cm]?[jt]sx?|py)$/iu.test(p),
+  for (const path of matches.filter(
+    (p) =>
+      (pkg.ecosystem === "PyPI" && p.endsWith(".py")) ||
+      (pkg.ecosystem === "npm" && /\.[cm]?[jt]sx?$/iu.test(p)),
   )) {
     const bytes = await read(path);
     const { lines, bindings } = sourceReferences(
@@ -352,10 +387,7 @@ export async function discoverDependencyRepository(options: {
     );
   const inspected = new Set(sources.map((source) => source.path));
   const sourceLeads = matches.filter(
-    (path) =>
-      /\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|php|swift|c|cc|cpp|cs)$/iu.test(
-        path,
-      ) && !inspected.has(path),
+    (path) => sourcePath.test(path) && !inspected.has(path),
   );
   if (sourceLeads.length)
     gaps.push(
@@ -368,12 +400,8 @@ export async function discoverDependencyRepository(options: {
   ];
   const matchedPaths = new Set(matches);
   const buildFiles = [...paths]
+    .filter((p) => buildPath.test(posix.basename(p)))
     .filter(inBoundary)
-    .filter((p) =>
-      /^(?:Dockerfile(?:\..+)?|Containerfile(?:\..+)?|.+\.(?:Dockerfile|Containerfile)|(?:docker-)?compose(?:\..+)?\.ya?ml)$/iu.test(
-        posix.basename(p),
-      ),
-    )
     .filter((p) => {
       const directory = posix.dirname(p);
       return (
