@@ -48,6 +48,7 @@ from workbench.retained_coverage import _projected_candidate_id
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.retained_records import (
     _finding_content,
+    _finding_identity,
     _finding_key,
     _semantic_identity_key,
     same_raw_value,
@@ -1223,6 +1224,9 @@ def _repair_selected_finding_evidence(
 ) -> set[str]:
     evidence = ("codeEvidence", "rootCause", "attackPath", "validation")
 
+    def without_evidence(finding):
+        return {k: v for k, v in _finding_content(finding).items() if k not in evidence}
+
     def source_key(finding: dict[str, Any]) -> str:
         provenance = finding.get("provenance")
         provenance = provenance if isinstance(provenance, dict) else {}
@@ -1231,8 +1235,7 @@ def _repair_selected_finding_evidence(
             # The same worker/index may have different original content after a retry.
             source_ids = provenance.get("sourceFindingIds") or [row["id"] for row in originals]
             return _digest([finding.get("ruleId"), sorted(source_ids), originals])
-        content = {k: v for k, v in _finding_content(finding).items() if k not in evidence}
-        return _digest([_finding_key(finding), content, provenance])
+        return _digest([_finding_key(finding), without_evidence(finding), provenance])
 
     def add_unique(index, key, finding):
         index[key] = finding if key not in index else None
@@ -1264,16 +1267,26 @@ def _repair_selected_finding_evidence(
         previous = source.get("finding")
         if not isinstance(previous, dict):
             continue
-        # With no original source bodies the reducer returns the prior finding as
-        # previous:N. Only the parent may have added an identity at publication.
+        previous_provenance = previous.get("provenance")
+        if not isinstance(previous_provenance, dict):
+            continue
+        # Complete saved proof may fill gaps, but all other authored content must match.
+        content = without_evidence if finding_evidence_error(previous) is None else _finding_content
         matches = [
             key
             for key, row in legacy.get(repair.get("ruleId"), ())
-            if same_raw_value(previous.get("provenance"), row.get("provenance"))
-            and same_raw_value(_finding_content(previous), _finding_content(row))
+            if same_raw_value(
+                previous_provenance,
+                {
+                    field: value
+                    for field, value in row["provenance"].items()
+                    if field != "preservedIdentity" or field in previous_provenance
+                },
+            )
+            and same_raw_value(content(previous), content(row))
             and (
                 "identity" not in previous
-                or same_raw_value(previous["identity"], row.get("identity"))
+                or same_raw_value(_finding_identity(previous), _finding_identity(row))
             )
         ]
         if len(matches) == 1:

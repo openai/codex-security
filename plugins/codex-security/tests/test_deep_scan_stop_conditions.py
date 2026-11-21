@@ -901,12 +901,21 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
     )
 
 
+@pytest.mark.parametrize(
+    "legacy_match", ["ordinary", "matching", "identity", "provenance", "content", "ambiguous"]
+)
 def test_scoped_evidence_repair_ignores_sparse_outside_findings(
-    workbench_api, workbench_db, publication_scan, monkeypatch
+    workbench_api, workbench_db, publication_scan, monkeypatch, legacy_match
 ):
+    from finalize_scan_contract import ContractError
+
     scan = publication_scan(scope="subdir")
     reducer = scan.add_worker()
     saved = scan.worker_draft(copy.deepcopy(scan.findings))
+    if legacy_match != "ordinary":
+        saved["findings"][0]["provenance"].pop("sourceFindings")
+    if legacy_match == "ambiguous":
+        saved["findings"][0].pop("identity")
     outside = copy.deepcopy(saved["findings"][0])
     outside["identity"] = {"anchor": "excluded-finding"}
     outside["provenance"] = {"source": "local_plugin"}
@@ -917,7 +926,23 @@ def test_scoped_evidence_repair_ignores_sparse_outside_findings(
     original = reducer.read_bytes()
     parent = scan.scan_dir / "findings.json"
     selected = json.loads(parent.read_text())
+    selected["findings"][0] = copy.deepcopy(saved["findings"][0])
     selected["findings"][0].pop("validation")
+    if legacy_match == "identity":
+        selected["findings"][0]["identity"] = {"anchor": "another-authored-identity"}
+    elif legacy_match == "provenance":
+        selected["findings"][0]["provenance"]["candidateId"] = "another-candidate"
+    elif legacy_match == "content":
+        selected["findings"][0]["summary"] = "A different underlying problem."
+    elif legacy_match == "ambiguous":
+        first = selected["findings"][0]
+        first["identity"] = {"anchor": "first-selected-finding"}
+        second = copy.deepcopy(first)
+        second["identity"] = {"anchor": "second-selected-finding"}
+        for row in (first, second):
+            for field in ("findingId", "occurrenceId", "fingerprints"):
+                row.pop(field, None)
+        selected["findings"].append(second)
     selected["findings"].append(outside)
     parent.write_text(json.dumps(selected))
     owner = "scoped-repair-owner"
@@ -965,6 +990,39 @@ def test_scoped_evidence_repair_ignores_sparse_outside_findings(
     publication = stage_publication(
         scan, generation=generation, result_path=reducer, title=scan.findings[0]["title"]
     )
+    if legacy_match != "ordinary":
+        previous = copy.deepcopy(saved["findings"][0])
+        previous["validation"] = scan.findings[0]["validation"]
+        repaired = copy.deepcopy(previous)
+        repaired["provenance"].update(
+            sourceFindingIds=["previous:0"],
+            sourceFindings=[{"id": "previous:0", "finding": previous}],
+        )
+        for filename in (publication.draft_path, publication.checkpoint_path):
+            path = scan.scan_dir / filename
+            document = json.loads(path.read_text())
+            if filename == publication.draft_path:
+                document["findings"]["findings"] = [repaired]
+            else:
+                document["findings"] = [repaired]
+            path.write_text(json.dumps(document))
+    if legacy_match in {"identity", "provenance", "content", "ambiguous"}:
+        canonical = {
+            path: path.read_bytes()
+            for path in scan.scan_dir.rglob("*.json")
+            if "drafts" not in path.parts
+        }
+        with pytest.raises(ContractError, match=r"findings\[0\]\.validation"):
+            workbench_api["saved_results"].write_scan_draft(
+                workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication
+            )
+        assert {
+            path: path.read_bytes()
+            for path in scan.scan_dir.rglob("*.json")
+            if "drafts" not in path.parts
+        } == canonical
+        assert reducer.stat().st_mtime_ns == original_mtime
+        return
     for _ in range(2):
         workbench_api["saved_results"].write_scan_draft(
             workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, publication

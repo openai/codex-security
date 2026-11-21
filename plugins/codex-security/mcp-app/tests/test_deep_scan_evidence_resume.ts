@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
@@ -275,14 +275,53 @@ await buildServer(serverPath, {
   ],
 });
 
-for (const { route, saturated, lateFailure } of [
-  { route: "plugin", saturated: false, lateFailure: false },
-  { route: "cli", saturated: false, lateFailure: false },
-  { route: "headless continuation", saturated: false, lateFailure: false },
-  { route: "plugin", saturated: true, lateFailure: false },
-  { route: "plugin", saturated: true, lateFailure: true },
+for (const { route, saturated, lateFailure, legacyCase } of [
+  {
+    route: "plugin",
+    saturated: false,
+    lateFailure: false,
+    legacyCase: "ordinary",
+  },
+  {
+    route: "cli",
+    saturated: false,
+    lateFailure: false,
+    legacyCase: "ordinary",
+  },
+  {
+    route: "headless continuation",
+    saturated: false,
+    lateFailure: false,
+    legacyCase: "ordinary",
+  },
+  {
+    route: "plugin",
+    saturated: true,
+    lateFailure: false,
+    legacyCase: "ordinary",
+  },
+  {
+    route: "plugin",
+    saturated: true,
+    lateFailure: true,
+    legacyCase: "ordinary",
+  },
+  {
+    route: "plugin",
+    saturated: false,
+    lateFailure: false,
+    legacyCase: "complete legacy proof",
+  },
+  {
+    route: "plugin",
+    saturated: false,
+    lateFailure: false,
+    legacyCase: "disambiguated legacy identities",
+  },
 ] as const) {
-  test(`${route} repairs a selected unsealed aggregate before completion${saturated ? (lateFailure ? " with a late saturation failure" : " with saturation omissions") : ""}`, async (t) => {
+  test(`${route} repairs a selected unsealed aggregate before completion${saturated ? (lateFailure ? " with a late saturation failure" : " with saturation omissions") : legacyCase === "ordinary" ? "" : ` with ${legacyCase}`}`, async (t) => {
+    const savedProof = legacyCase === "complete legacy proof";
+    const disambiguated = legacyCase === "disambiguated legacy identities";
     const root = await temporaryDirectory("selected-evidence-");
     let client: Awaited<ReturnType<typeof startMcpClient>> | undefined;
     t.after(async () => {
@@ -295,6 +334,11 @@ for (const { route, saturated, lateFailure } of [
       path.join(targetPath, "fixture.py"),
       "connection.execute(query)\n",
     );
+    if (disambiguated)
+      await writeFile(
+        path.join(targetPath, "second.py"),
+        "connection.execute(query)\n",
+      );
     const env = Object.fromEntries(
       Object.entries({
         ...process.env,
@@ -331,12 +375,31 @@ for (const { route, saturated, lateFailure } of [
       scanId: run.scanId,
       threadId: owner,
     });
+    const executor = createSeedExecutor();
+    if (disambiguated) {
+      const discover = executor.run.bind(executor);
+      executor.run = async (request) => {
+        const result = await discover(request);
+        const file = path.join(request.artifactContext!.root, "result.json");
+        const draft = await readJson(file);
+        const finding = draft.findings[0];
+        finding.identity = { anchor: "shared-query" };
+        const second = structuredClone(finding);
+        second.title = "Unsafe secondary query";
+        second.locations[0].path = "second.py";
+        second.codeEvidence[0].path = "second.py";
+        second.provenance.candidateId = "second-finding";
+        draft.findings.push(second);
+        await writeJson(file, draft);
+        return result;
+      };
+    }
     const coordinator = new DeepScanCoordinator({
       run: claim.run,
       store,
       pluginRoot,
       threadId: owner,
-      executor: createSeedExecutor(),
+      executor,
       retryDelaysMs: [],
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
@@ -409,7 +472,7 @@ with sqlite3.connect(sys.argv[1]) as db:
     for (const file of [...acceptedPaths, parentFindingsPath]) {
       const draft = await readJson(file);
       for (const finding of draft.findings) {
-        delete finding.validation;
+        if (!savedProof || file !== legacyReducer) delete finding.validation;
         if (
           legacyReducer &&
           (file === legacyReducer || file === parentFindingsPath)
@@ -425,7 +488,12 @@ with sqlite3.connect(sys.argv[1]) as db:
           else assert.equal(finding.provenance.deepScanRepairGroups, undefined);
         }
       }
-      if (file === parentFindingsPath && route === "plugin" && !saturated) {
+      if (
+        file === parentFindingsPath &&
+        route === "plugin" &&
+        !saturated &&
+        !disambiguated
+      ) {
         // Older parents derived anchors from titles and scoped coverage by worker.
         draft.findings[0].identity = { anchor: "unsafe-fixture-query" };
         const surface = manifest.scan.reviewState.surfaces[0];
@@ -443,6 +511,20 @@ with sqlite3.connect(sys.argv[1]) as db:
       env.CODEX_SECURITY_STATE_DIR,
     );
     const originalFindings = (await readJson(parentFindingsPath)).findings;
+    if (disambiguated) {
+      assert.equal(originalFindings.length, 2);
+      const reduced = (await readJson(legacyReducer!)).findings;
+      assert.deepEqual(reduced[0].identity, reduced[1].identity);
+      assert.deepEqual(originalFindings[1].identity, {
+        anchor: "shared-query",
+        instance: "saved-2",
+      });
+      assert.deepEqual(
+        originalFindings[1].provenance.preservedIdentity,
+        reduced[1].identity,
+      );
+      assert.equal(reduced[1].provenance.preservedIdentity, undefined);
+    }
     const original = await readAcceptedArtifacts(acceptedPaths);
     const before = await store.get(run.scanId, owner);
     assert.equal(before.status, "succeeded");
@@ -512,7 +594,7 @@ with sqlite3.connect(sys.argv[1]) as db:
         assert.notEqual(result.isError, true, JSON.stringify(result));
       };
     }
-    if (route === "plugin" && !saturated) {
+    if (route === "plugin" && !saturated && !savedProof) {
       const source = path.join(targetPath, "fixture.py");
       const selectedSource = await readFile(source);
       const selectedManifest = await readFile(manifestPath);
@@ -535,6 +617,11 @@ with sqlite3.connect(sys.argv[1]) as db:
       assert.deepEqual(await readFile(manifestPath), selectedManifest);
       await writeFile(source, selectedSource);
     }
+    if (savedProof)
+      await writeFile(
+        path.join(targetPath, "fixture.py"),
+        "connection.close()\n",
+      );
     await resume(
       route === "headless continuation"
         ? { targetPath }
@@ -573,12 +660,27 @@ with sqlite3.connect(sys.argv[1]) as db:
     assert.ok(before.persistedWorkers);
     assert.equal(
       repaired.persistedWorkers.length,
-      before.persistedWorkers.length + 1,
+      before.persistedWorkers.length + (savedProof ? 0 : 1),
+    );
+    const receipts = await Promise.all(
+      (await readdir(repaired.workerUsageDirectory!)).map((file) =>
+        readJson(repaired.workerUsageDirectory!, file),
+      ),
+    );
+    const evidenceTurns = receipts.filter(
+      (receipt) => receipt.kind === "evidence",
+    );
+    assert.equal(
+      evidenceTurns.length,
+      savedProof ? 0 : originalFindings.length,
+    );
+    assert.ok(
+      evidenceTurns.every((receipt) => receipt.outcome === "succeeded"),
     );
     assert.deepEqual(await readAcceptedArtifacts(acceptedPaths), original);
-    assert.ok(
-      (await readJson(run.scanDir, "findings.json")).findings[0].validation,
-    );
+    for (const finding of (await readJson(run.scanDir, "findings.json"))
+      .findings)
+      assert.ok(finding.validation);
     await assert.rejects(
       runWorkbench([
         "finish-deep-scan",
