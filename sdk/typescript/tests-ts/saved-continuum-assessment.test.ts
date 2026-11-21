@@ -220,7 +220,8 @@ test("keeps CLI storage outside repository control for writes and reloads", asyn
   expect((await read()).size).toBe(0);
   await expect(saveCli([conclusion])).rejects.toThrow();
 });
-test("a changed snapshot invalidates only its own occurrence", async () => {
+test("a changed snapshot invalidates only its own occurrence across caches", async () => {
+  await save([conclusion]);
   const other = { ...conclusion, itemId: "occ_b" };
   await saveCli([conclusion, other]);
   const [storage] = (await readdir(root)).filter((name) =>

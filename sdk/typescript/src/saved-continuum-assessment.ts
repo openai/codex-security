@@ -281,6 +281,10 @@ export async function savedContinuumAssessments(
   ).catch(() => undefined);
   if (!snapshots) return assessments;
   for (const [occurrence, items] of snapshots) {
+    if (items === null) {
+      assessments.delete(occurrence);
+      continue;
+    }
     const candidates: Conclusion[] = [];
     for (const item of items) {
       const record = project(item.record, item.environmentId, region);

@@ -98,7 +98,7 @@ export async function readCliSnapshots(
   scanId: string,
   requested: ReadonlySet<string>,
   environmentId?: string,
-): Promise<Map<string, SavedRecord[]>> {
+): Promise<Map<string, SavedRecord[] | null>> {
   const repository = await realpath(repositoryPath);
   const directory = await assessmentDirectory(
     stateDirectory,
@@ -110,13 +110,15 @@ export async function readCliSnapshots(
     [...requested].map((item) => [hash("sha256", item), item]),
   );
   const destination = environmentId && hash("sha256", environmentId);
-  const records = new Map<string, SavedRecord[]>();
-  const invalid = new Set<string>();
+  // A corrupt snapshot can conflict with both other snapshots and the plugin cache.
+  // Keep the occurrence marked invalid even if another candidate follows it.
+  const records = new Map<string, SavedRecord[] | null>();
   for (const name of await readdir(directory)) {
     const [occurrence, environment] = name.split(".");
     const itemId = occurrence && byHash.get(occurrence);
     if (
       !itemId ||
+      records.get(itemId) === null ||
       (destination && environment !== destination) ||
       !name.endsWith(".json")
     )
@@ -130,7 +132,7 @@ export async function readCliSnapshots(
         saved.record.itemId !== itemId ||
         snapshotName(itemId, saved.environmentId, raw) !== name
       ) {
-        invalid.add(itemId);
+        records.set(itemId, null);
         continue;
       }
       const batch = records.get(itemId) ?? [];
@@ -138,9 +140,8 @@ export async function readCliSnapshots(
       records.set(itemId, batch);
     } catch {
       // An unreadable candidate could conflict with another for this occurrence.
-      invalid.add(itemId);
+      records.set(itemId, null);
     }
   }
-  for (const item of invalid) records.delete(item);
   return records;
 }
