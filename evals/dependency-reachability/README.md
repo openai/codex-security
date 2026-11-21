@@ -2,6 +2,8 @@
 
 Given a CVE and a caller, can `codex-security exploitability check` identify which copy of a dependency the application uses and cite what makes the affected operation reachable or rules it out?
 
+For an experiment on when an investigation should finish, compare the claim reviewer, disabled reviewer and final outcome grader on Backstage and Superset with a synthetic MCP release inventory. [Publication under provider failures](outcomes/README.md)
+
 ## Compare the reviewer on and off
 
 The pinned suite runs the repository command in a fresh Git checkout for every investigation. The CLI looks up the advisory and the investigator traces the caller through the application. By default, an independent model reviews claims and can ask the investigator to correct them. With `--reviewer=disabled`, the host checks the claims and their source references and labels the result unreviewed. To try both modes in your own checkout, use a build with the reviewer option.
