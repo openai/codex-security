@@ -403,9 +403,12 @@ function checkClaims(f: Finding, check: Check) {
       continue;
     }
     refs.push(...claim.dependencies);
-    entries.push(refHtml + para(claim.decision.reason));
+    entries.push(refHtml + (claim.decision ? para(claim.decision.reason) : ""));
   }
-  return group("Claim decisions", list(entries));
+  return group(
+    check.reviewer === "disabled" ? "Unreviewed claims" : "Claim decisions",
+    list(entries),
+  );
 }
 type StackFinding = Extract<Finding, { kind: "stack" }>;
 type SampleScope = StackFinding["assessment"]["scope"];

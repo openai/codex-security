@@ -371,7 +371,7 @@ function receiptKey(ref) {
 
 // Resolve each reviewer-selected receipt against the original captured MCP reply.
 // A selected row proves only its own returned value, even when its siblings look alike.
-function selectedReceipt(table, key) {
+export function selectedReceipt(table, key) {
   const row = table[key];
   assert(row, "original approved receipt");
   const selected = key.startsWith("receipt:");
@@ -430,21 +430,30 @@ function selectedReceipt(table, key) {
   return { ref: { ...ref, selection }, value };
 }
 
-function modernDecision(report, conclusion, supportingClaims) {
+function claimSelection(report, conclusion, supportingClaims, reviewed) {
   const selected = new Set([conclusion]);
   const sources = new Map();
   const receipts = new Map();
   const keyFor = (ref) =>
     "claim:" + JSON.stringify([ref.id, ref.revision, ref.hash]);
   for (const claim of selected) {
-    assert(
-      claim.state === "approved" && claim.decision?.accepted === true,
-      "approved premise",
-    );
+    if (reviewed) {
+      assert(
+        claim.state === "approved" && claim.decision?.accepted === true,
+        "approved premise",
+      );
+    } else {
+      assert.equal(claim.state, "unreviewed", "unreviewed claim");
+      assert.equal(
+        claim.decision,
+        undefined,
+        "unreviewed claim has no decision",
+      );
+    }
     const refs = new Map(
       (claim.dependencies ?? []).map((ref) => [keyFor(ref), ref]),
     );
-    if (supportingClaims !== undefined) {
+    if (!reviewed || supportingClaims !== undefined) {
       const dependencies =
         claim.payload.kind === "use"
           ? claim.payload.use.premises
@@ -452,14 +461,14 @@ function modernDecision(report, conclusion, supportingClaims) {
       assert.deepEqual(
         [...refs.keys()].sort(),
         (dependencies ?? []).map(keyFor).sort(),
-        "premise references belong to the approved payload",
+        "premise references belong to the claim payload",
       );
     }
     const proposed =
       claim.payload?.kind === "use"
         ? claim.payload.use.evidence
         : claim.payload?.sources;
-    assert(Array.isArray(proposed), "approved source evidence");
+    assert(Array.isArray(proposed), "claim source evidence");
     const available = new Map(
       proposed.map((source) => [
         sha256(JSON.stringify(canonical(source))),
@@ -467,17 +476,21 @@ function modernDecision(report, conclusion, supportingClaims) {
       ]),
     );
     for (const [id, source] of available) {
-      assert(
-        claim.evidence.sourceIds.includes(id),
-        "approved source reference",
-      );
+      assert(claim.evidence.sourceIds.includes(id), "claim source reference");
       assert.deepEqual(
         report.claimEvidence.sources[id],
         source,
-        "original approved source",
+        "original claim source",
       );
     }
-    for (const id of claim.decision.evidenceKeys) {
+    const keys = reviewed
+      ? claim.decision.evidenceKeys
+      : [
+          ...available.keys(),
+          ...refs.keys(),
+          ...(claim.evidence.receiptIds ?? []),
+        ];
+    for (const id of keys) {
       if (refs.has(id)) {
         const premise = exactClaim(report.claims, refs.get(id));
         assert.equal(
@@ -492,13 +505,14 @@ function modernDecision(report, conclusion, supportingClaims) {
       } else {
         assert(
           claim.evidence.receiptIds?.includes(id),
-          "approved receipt reference",
+          "claim receipt reference",
         );
         const { ref } = selectedReceipt(report.claimEvidence.receipts, id);
         receipts.set(receiptKey(ref), ref);
       }
     }
   }
+  if (!reviewed && supportingClaims === undefined) supportingClaims = [];
   if (supportingClaims !== undefined) {
     assert(
       Array.isArray(supportingClaims),
@@ -510,33 +524,42 @@ function modernDecision(report, conclusion, supportingClaims) {
         .filter((c) => c !== conclusion)
         .map(keyFor)
         .sort(),
-      "display every reviewer-selected premise",
+      "display every selected premise",
     );
   }
   return { sources, receipts };
 }
 
 export function approvedCitations(report, use, read, sha) {
+  return verifyClaimCitations(report, use, read, sha, true).deciding;
+}
+
+export function verifyClaimCitations(report, use, read, sha, reviewed) {
   const claim = exactClaim(report.claims, use.conclusionClaim);
-  assert(
-    claim.state === "approved" && claim.decision?.accepted === true,
-    "independent approval",
-  );
+  if (reviewed)
+    assert(
+      claim.state === "approved" && claim.decision?.accepted === true,
+      "independent approval",
+    );
   assert.equal(
     claim.payload?.kind,
     "use",
     "conclusion belongs to a dependency use",
   );
   for (const field of ["location", "version", "component", "verdict"])
-    assert.equal(claim.payload.use[field], use[field], "approved " + field);
-  const approvedUse = claim.payload.use;
-  assert(Array.isArray(approvedUse.evidence), "approved source evidence");
-  const legacy = claim.application && legacySources(report, claim);
-  const reviewed = new Map();
+    assert.equal(
+      claim.payload.use[field],
+      use[field],
+      "reported claim " + field,
+    );
+  const submitted = claim.payload.use;
+  assert(Array.isArray(submitted.evidence), "submitted source evidence");
+  const legacy = reviewed && claim.application && legacySources(report, claim);
+  const ranges = new Map();
   const selected =
-    !legacy && modernDecision(report, claim, use.supportingClaims);
-  for (const source of approvedUse.evidence) {
-    let commit = source.commit ?? approvedUse.place?.revision;
+    !legacy && claimSelection(report, claim, use.supportingClaims, reviewed);
+  for (const source of submitted.evidence) {
+    let commit = source.commit ?? submitted.place?.revision;
     if (!commit && legacy) {
       const envelope = legacy.sources.find(
         (record) =>
@@ -549,28 +572,28 @@ export function approvedCitations(report, use, read, sha) {
       read(envelope);
       commit = envelope.commit;
     }
-    reviewed.set(rangeKey(source), { ...source, commit });
+    ranges.set(rangeKey(source), { ...source, commit });
   }
   for (const source of legacy?.premises ?? [])
-    reviewed.set(rangeKey(source), source);
+    ranges.set(rangeKey(source), source);
   if (selected && use.supportingClaims !== undefined) {
-    for (const [key, source] of selected.sources) reviewed.set(key, source);
+    for (const [key, source] of selected.sources) ranges.set(key, source);
   }
   const displayed = use.evidence.map(rangeKey);
   assert.deepEqual(
     [...new Set(displayed)].sort(),
-    [...reviewed.keys()].sort(),
-    "reported ranges match approved source evidence",
+    [...ranges.keys()].sort(),
+    "reported ranges match submitted source evidence",
   );
   const checked = use.evidence.map((citation) => {
-    const source = reviewed.get(rangeKey(citation));
+    const source = ranges.get(rangeKey(citation));
     read(source);
     return read({
       ...citation,
       commit: citation.commit ?? use.place?.revision ?? source.commit,
     });
   });
-  if (legacy) return checked;
+  if (legacy) return { displayed: checked, deciding: checked };
   const deciding = use.decidingEvidence;
   assert(Array.isArray(deciding), "reported deciding evidence");
   const displayedSources = new Set();
@@ -581,13 +604,13 @@ export function approvedCitations(report, use, read, sha) {
       const source = selected.sources.get(key);
       assert(
         source && source.commit === ref.commit,
-        "source selected by the reviewer",
+        "source selected for the claim",
       );
       displayedSources.add(key);
     } else {
       assert.equal(ref.kind, "receipt");
       const key = receiptKey(ref);
-      assert(selected.receipts.has(key), "receipt selected by the reviewer");
+      assert(selected.receipts.has(key), "receipt selected for the claim");
       displayedReceipts.add(key);
     }
   }
@@ -601,16 +624,33 @@ export function approvedCitations(report, use, read, sha) {
     new Set(selected.receipts.keys()),
     "display every selected receipt",
   );
-  return [...selected.sources.values()].map(read);
+  return {
+    displayed: checked,
+    deciding: [...selected.sources.values()].map(read),
+  };
+}
+
+// Earlier saved reports called the independent reviewer the grader.
+export function reviewerMode(report) {
+  return report.reviewer ?? report.grader ?? "enabled";
 }
 
 // Compare report citations with replies recorded by the independent MCP process.
-export function gradeEvidenceSource(report, use, { calls, withAccess }) {
+export function gradeEvidenceSource(report, use, { calls, requestService }) {
   const claim = exactClaim(report.claims, use.conclusionClaim);
-  assert(
-    claim.state === "approved" && claim.decision.accepted === true,
-    "approved runtime observations",
-  );
+  const reviewed = reviewerMode(report) === "enabled";
+  if (reviewed) {
+    assert(
+      claim.state === "approved" && claim.decision?.accepted === true,
+      "approved runtime observations",
+    );
+  } else {
+    assert.equal(claim.state, "unreviewed");
+    assert.equal(claim.decision, undefined);
+  }
+  const keys = reviewed
+    ? claim.decision.evidenceKeys
+    : claim.evidence.receiptIds;
   const records = claim.payload.use.observations;
   const compact = ({ server, record, supports }) => ({
     server,
@@ -626,7 +666,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
         ["running", "access", "affected_copy"].includes(s),
       ),
     })),
-    "runtime citations belong to the independently approved claim",
+    "runtime citations belong to the reported claim",
   );
   const expected = { running: "release_record", access: "request_record" };
   for (const [support, tool] of Object.entries(expected)) {
@@ -634,15 +674,28 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
       (c) => c.tool === tool && c.arguments.service === "notes",
     );
     assert(actual.length, "investigator requested " + tool + " for notes");
-    if (!withAccess && support === "access") {
+    if (requestService !== "notes" && support === "access") {
+      const expected =
+        requestService === "reviews"
+          ? "POST /preview on service reviews at revision "
+          : "No observation for notes.";
       assert(
-        actual.every((c) =>
-          c.result.content[0].text.includes("No observation for notes."),
+        actual.every((c) => c.result.content[0].text.includes(expected)),
+        "expected request record",
+      );
+      assert(
+        !records.some(
+          (ref) =>
+            ref.tool === tool &&
+            ref.supports.some((s) =>
+              ["running", "access", "affected_copy"].includes(s),
+            ),
         ),
+        "unrelated request cannot establish runtime facts about notes",
       );
       assert(
         !use.observations.some((ref) => ref.supports.includes("access")),
-        "missing request record cannot prove access",
+        "missing notes request cannot prove access",
       );
       continue;
     }
@@ -663,7 +716,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
           !receipt ||
           receipt.server !== ref.server ||
           receipt.tool !== tool ||
-          !claim.decision.evidenceKeys.some((key) => {
+          !keys.some((key) => {
             if (!claim.evidence.receiptIds.includes(key)) return false;
             const selected = selectedReceipt(
               report.claimEvidence.receipts,
@@ -687,7 +740,7 @@ export function gradeEvidenceSource(report, use, { calls, withAccess }) {
             c.result.content[0].text.includes(ref.quote),
         );
       }),
-      "approved use cites the actual " + tool + " response",
+      "reported use cites the actual " + tool + " response",
     );
   }
 }
@@ -697,8 +750,10 @@ export function gradeMixed(
   fixture,
   packageCheck = false,
   evidenceSource,
+  reviewer = "enabled",
 ) {
   let report = response;
+  assert.equal(reviewerMode(response), reviewer, "expected reviewer mode");
   if (packageCheck) {
     assert.equal(response.package.name, "linkify-it");
     const checks = response.checks.filter(
@@ -718,13 +773,16 @@ export function gradeMixed(
     assert.equal(report.cve, reviewedCve);
   }
   assert.equal(report.schemaVersion, 2);
+  assert.equal(reviewerMode(report), reviewer, "expected reviewer mode");
   const validate = sourceReader(fixture.repo, fixture.sha);
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];
   for (const [service, verdict] of [
     [
       "notes",
-      evidenceSource?.withAccess ? "exploitable" : "potentially_exploitable",
+      evidenceSource?.requestService === "notes"
+        ? "exploitable"
+        : "potentially_exploitable",
     ],
     ["reviews", "ruled_out"],
   ]) {
@@ -745,7 +803,13 @@ export function gradeMixed(
       gradeEvidenceSource(report, use, evidenceSource);
     }
     assert(use.reason?.trim());
-    const cites = approvedCitations(report, use, validate, fixture.sha);
+    const { deciding: cites } = verifyClaimCitations(
+      report,
+      use,
+      validate,
+      fixture.sha,
+      reviewer === "enabled",
+    );
     const lock = service + "/package-lock.json";
     const lines = git(fixture.repo, "show", fixture.sha + ":" + lock).split(
       "\n",

@@ -1,4 +1,4 @@
-import { excerpts } from "./case-data.mjs";
+import { skillOnly, excerpts } from "./case-data.mjs";
 
 const before = "985238ce5b8f999edccd3c4ba83fba636db51272";
 const after = "29a91ff19585ca3eebd4bf53d275f600a093a73d";
@@ -34,6 +34,20 @@ const stage = [
   },
 ];
 
+const decodeEvidence = [
+  excerpts(
+    "app/thumbnail.py",
+    'Image.open(BytesIO(environ["wsgi.input"].read()))',
+  ),
+  excerpts("app/thumbnail.py", "image.load()"),
+  excerpts(
+    "src/PIL/WebPImagePlugin.py",
+    "_webp.WebPAnimDecoder(self.fp.read())",
+  ),
+  excerpts("src/PIL/WebPImagePlugin.py", "self._decoder.get_next()"),
+  excerpts("src/_webp.c", "WebPAnimDecoderGetNext(decp->dec"),
+];
+
 function rolloutCase(id, portNumber, verdict) {
   const prior = portNumber === 9100;
   const missing = verdict === "unknown";
@@ -43,8 +57,23 @@ function rolloutCase(id, portNumber, verdict) {
   const inode = prior ? "3741" : "8930";
   const pid = prior ? "431" : "692";
   const endpoint = "edge/caddy.json";
+  const listener = [
+    excerpts(endpoint, dial),
+    excerpts(workers, dial),
+    excerpts(workers, `pid=${pid},fd=3`),
+  ];
+  const loadedLibrary = [
+    excerpts(workers, `# /proc/${pid}/maps`),
+    excerpts(workers, `08:01 ${inode} /usr/lib/libwebp.so`),
+  ];
   return {
     id,
+    target: missing
+      ? "thumbnail-unresolved-loaded-copy"
+      : `${id}-captured-worker`,
+    identityEvidence: [...listener, ...loadedLibrary],
+    observedBySource: true,
+    needsDecidingGap: missing,
     cve: "CVE-2023-4863",
     component: "libwebp",
     suite: "pillow",
@@ -90,12 +119,9 @@ function rolloutCase(id, portNumber, verdict) {
       },
     ],
     evidenceGroups: [
-      excerpts(endpoint, dial),
-      excerpts(workers, dial),
-      excerpts(workers, `pid=${pid},fd=3`),
+      ...listener,
       excerpts(workers, `${pid} gunicorn: worker [app.thumbnail:application]`),
-      excerpts(workers, `# /proc/${pid}/maps`),
-      excerpts(workers, `08:01 ${inode} /usr/lib/libwebp.so`),
+      ...loadedLibrary,
       excerpts(
         workers,
         `pillow_webp_version_info{pid="${pid}",version="1.3.1"}`,
@@ -118,21 +144,11 @@ function rolloutCase(id, portNumber, verdict) {
               prior ? "CVE-2023-4863.patch" : "libwebp-$pkgver.tar.gz",
             ),
           ]),
-      ...(verdict !== "ruled_out"
-        ? [
-            excerpts(
-              "app/thumbnail.py",
-              'Image.open(BytesIO(environ["wsgi.input"].read()))',
-            ),
-            excerpts("app/thumbnail.py", "image.load()"),
-            excerpts(
-              "src/PIL/WebPImagePlugin.py",
-              "_webp.WebPAnimDecoder(self.fp.read())",
-            ),
-            excerpts("src/PIL/WebPImagePlugin.py", "self._decoder.get_next()"),
-            excerpts("src/_webp.c", "WebPAnimDecoderGetNext(decp->dec"),
-          ]
-        : []),
+      ...(verdict === "ruled_out"
+        ? []
+        : missing
+          ? [skillOnly(...decodeEvidence)]
+          : decodeEvidence),
       ...(verdict === "ruled_out"
         ? [
             excerpts(
@@ -144,9 +160,11 @@ function rolloutCase(id, portNumber, verdict) {
               "+  if (root_table->curr_segment->curr_table + total_size >=",
             ),
             excerpts(patch, "+    next->size = total_size > segment_size"),
-            excerpts(
-              patch,
-              "+        (HuffmanCode*)WebPSafeMalloc(next->size, sizeof(*next->start));",
+            skillOnly(
+              excerpts(
+                patch,
+                "+        (HuffmanCode*)WebPSafeMalloc(next->size, sizeof(*next->start));",
+              ),
             ),
           ]
         : []),

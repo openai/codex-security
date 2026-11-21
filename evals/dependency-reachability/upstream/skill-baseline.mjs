@@ -64,7 +64,7 @@ export async function runBaseline(runSkill, scenario, repo, sha) {
     }
   }
   if (!citations.length) errors.push("Missing verified source citation");
-  for (const group of scenario.evidenceGroups) {
+  for (const group of scenario.skillEvidenceGroups ?? scenario.evidenceGroups) {
     if (!group.some((anchor) => supported(anchor, citations)))
       errors.push(
         "Missing source evidence at " + group.map((a) => a.path).join(" or "),

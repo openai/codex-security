@@ -169,6 +169,7 @@ interface Group {
 export function createDependencyVerdictProgress(
   subject: string,
   emit: DependencyProgressSink | undefined,
+  state: "reviewed" | "unreviewed" = "reviewed",
 ) {
   // Multiple submitted IDs can name one call and selected place. Keep their
   // latest accepted opinions so withdrawing an alias doesn't erase another.
@@ -185,7 +186,7 @@ export function createDependencyVerdictProgress(
     group?: Group,
     previousVerdict?: Entry["verdict"],
   ) {
-    emit?.("reviewed", subject, {
+    emit?.(state, subject, {
       location: entry.caller,
       locationKind: entry.locationKind,
       ...(entry.scope && { scope: entry.scope }),
@@ -218,7 +219,7 @@ export function createDependencyVerdictProgress(
         count.assessments === group.lastCount?.assessments
       )
         continue;
-      emit?.("reviewed_group", subject, {
+      emit?.(state + "_group", subject, {
         location: first.caller,
         verdict: first.verdict,
         reason: first.reason,

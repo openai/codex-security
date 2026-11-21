@@ -1,4 +1,8 @@
 {
+  "Kludex/starlette@5f8610c386e13de1d80d36efa961e1486a1d2d01": {
+    "url": "https://codeload.github.com/Kludex/starlette/tar.gz/5f8610c386e13de1d80d36efa961e1486a1d2d01",
+    "sha256": "2b105831653271d8443a49228d1adf81275883ea94302f9a8bb5c0b97521ebc0"
+  },
   "python-pillow/Pillow@6e28ed1f36d0eb74053af54e1eddc9c29db698cd": {
     "url": "https://codeload.github.com/python-pillow/Pillow/tar.gz/6e28ed1f36d0eb74053af54e1eddc9c29db698cd",
     "sha256": "30258586b272d999e07e9169d09d0b0ef2546346a93d79877fd498be169ed799"

@@ -387,6 +387,14 @@ export const dependencyClaimEvidenceSchema = z.strictObject({
   receipts: z.record(identity, stackJsonValue),
 });
 
+const dependencyClaimSchema = z.discriminatedUnion("state", [
+  dependencyApprovedClaimSchema,
+  dependencyApprovedClaimSchema.extend({
+    state: z.literal("unreviewed"),
+    decision: z.never().optional(),
+  }),
+]);
+
 const tokens = z.number().int().nonnegative();
 const dependencySearchSchema = z.strictObject({
   source: z.string(),
@@ -420,9 +428,10 @@ export const dependencyReachabilityReportSchema = z
   .strictObject({ limitations: z.array(z.string()) })
   .extend({
     schemaVersion: z.literal(2),
+    reviewer: z.literal("disabled").optional(),
     target: dependencyTargetSchema.optional(),
     uses: z.array(reviewedDependencyUseSchema),
-    claims: z.array(dependencyApprovedClaimSchema).optional(),
+    claims: z.array(dependencyClaimSchema).optional(),
     claimEvidence: dependencyClaimEvidenceSchema.optional(),
     assumptions: z.array(z.string()),
     searches: z.array(dependencySearchSchema),
@@ -453,6 +462,7 @@ export const reviewedDependencyCheckSchema =
 // The CVE form keeps its original result. A package can have zero or more
 // independent issues, so each reviewed verdict belongs to a particular check.
 export const dependencyPackageCheckOutputSchema = z.object({
+  reviewer: z.literal("disabled").optional(),
   target: dependencyTargetSchema.optional(),
   package: z.object({ ecosystem: z.string(), name: z.string() }),
   vulnDescription: z.string().optional(),

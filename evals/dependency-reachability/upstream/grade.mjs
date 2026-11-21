@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { approvedCitations, sourceReader } from "../grade.mjs";
-import { checkoutPlacesV2 } from "./checkout-places-v2.mjs";
+import { reviewerMode, verifyClaimCitations, sourceReader } from "../grade.mjs";
 
 // Each group needs one of its alternatives. A required absence across an entire
 // file may be covered by multiple verified ranges belonging to the same use.
@@ -20,17 +19,17 @@ export function supported(anchor, citations) {
   return last === ranges[0].totalLines;
 }
 
-function groupsFor(scenario) {
-  const expected = checkoutPlacesV2[scenario.id];
-  return {
-    expected,
-    identity: expected.identityEvidence,
-    deciding: scenario.evidenceGroups,
-  };
+function describeGroup(group) {
+  return group
+    .map(({ path, contains, completeFile }) => {
+      if (completeFile) return `${path} (complete file)`;
+      return contains ? `${path} (${contains})` : path;
+    })
+    .join(" or ");
 }
 
 export function validateSnapshot(scenario, repo, commit) {
-  const { identity, deciding } = groupsFor(scenario);
+  const { identityEvidence: identity, evidenceGroups: deciding } = scenario;
   const cache = new Map();
   for (const group of [...identity, ...deciding]) {
     const matches = group.some((anchor) => {
@@ -48,8 +47,7 @@ export function validateSnapshot(scenario, repo, commit) {
     });
     assert(
       matches,
-      "pinned snapshot contains the required evidence in " +
-        group.map((a) => a.path).join(" or "),
+      "Required evidence absent from pinned snapshot: " + describeGroup(group),
     );
   }
   return { identityGroups: identity.length, decidingGroups: deciding.length };
@@ -142,115 +140,195 @@ function namesComponent(label, name) {
   );
 }
 
-export function gradeSnapshot(report, scenario, repo, commit) {
+function missingGroups(groups, citations) {
+  return groups.filter(
+    (group) => !group.some((anchor) => supported(anchor, citations)),
+  );
+}
+
+function gradeUse(use, scenario, report, citations) {
+  const versions = Object.hasOwn(scenario, "commandVersion")
+    ? [scenario.commandVersion].flat()
+    : [scenario.version, ...(scenario.versionAliases ?? [])];
+  const verdictLabelCorrect = use.verdict === scenario.verdict;
+  const versionCorrect = versions.includes(use.version);
+  const { identityEvidence, evidenceGroups, commandCallSite: call } = scenario;
+  const missingIdentity = missingGroups(identityEvidence, citations.displayed);
+  const missingEvidence = missingGroups(evidenceGroups, citations.displayed);
+  const identityCorrect = missingIdentity.length === 0;
+  const evidenceCorrect = missingEvidence.length === 0;
+  const errors = [];
+  if (!use.reason?.trim() || !use.location?.trim())
+    errors.push("Missing reason or location");
+  if (!use.place) errors.push("Missing structured use scope");
+  if (!verdictLabelCorrect) errors.push("Expected verdict " + scenario.verdict);
+  if (!versionCorrect)
+    errors.push("Expected version " + versions.map(String).join(" or "));
+  for (const group of missingIdentity)
+    errors.push("Missing identity citation: " + describeGroup(group));
+  for (const group of missingEvidence)
+    if (!missingIdentity.includes(group))
+      errors.push("Missing deciding citation: " + describeGroup(group));
+
+  if (
+    scenario.needsDecidingGap &&
+    !use.place?.unresolvedQuestions?.some((q) => q.trim())
+  )
+    errors.push("Missing deciding evidence question");
+
+  const includesCall = (ranges) =>
+    !call ||
+    ranges.some(
+      (c) =>
+        c.path === call.path &&
+        c.startLine <= call.line &&
+        call.line <= c.endLine,
+    );
+  if (call) {
+    const actual = use.proof?.sink?.callSite;
+    if (
+      actual?.path !== call.path ||
+      actual.line !== call.line ||
+      !includesCall(citations.displayed)
+    )
+      errors.push("Expected sink call at " + call.path + ":" + call.line);
+  }
+  if (use.place?.deploymentBasis === "observed") {
+    const running = [...use.evidence, ...(use.observations ?? [])].some((ref) =>
+      ref.supports?.includes("running"),
+    );
+    if (
+      !scenario.observedBySource ||
+      use.deployment !== "confirmed" ||
+      !running
+    )
+      errors.push("Unjustified observed deployment");
+  }
+  if (
+    use.place?.deploymentBasis === "assumed_not_deployed" &&
+    (!report.assumptions?.some((s) => s.trim()) ||
+      use.deployment === "confirmed")
+  )
+    errors.push("Explicit assumption required for assumed deployment");
+
+  return {
+    verdictLabelCorrect,
+    versionCorrect,
+    identityCorrect,
+    identityGroupsMatched: identityEvidence.length - missingIdentity.length,
+    evidenceCorrect,
+    evidenceGroupsMatched: evidenceGroups.length - missingEvidence.length,
+    selectedEvidenceCorrect:
+      includesCall(citations.deciding) &&
+      missingGroups(
+        [...identityEvidence, ...evidenceGroups],
+        citations.deciding,
+      ).length === 0,
+    location: use.location,
+    version: use.version,
+    verdict: use.verdict,
+    errors,
+  };
+}
+
+export function gradeSnapshot(
+  report,
+  scenario,
+  repo,
+  commit,
+  reviewer = reviewerMode(report),
+) {
   assert.equal(report.cve, scenario.cve);
   assert.equal(report.schemaVersion, 2);
-  const { expected, identity, deciding } = groupsFor(scenario);
+  assert(
+    !Object.hasOwn(report, "status"),
+    "v2 reports contain per-use verdicts",
+  );
+  assert(["enabled", "disabled"].includes(reviewer), "unknown reviewer mode");
+  assert.equal(reviewerMode(report), reviewer, "unexpected reviewer mode");
+  const reviewed = reviewer === "enabled";
   const read = sourceReader(repo, commit);
-  const allowedVersions = Object.hasOwn(scenario, "commandVersion")
-    ? [scenario.commandVersion].flat()
-    : [scenario.version, ...(scenario.versionAliases || [])];
   const components =
     scenario.component === "glibc"
       ? ["glibc", "gnu c library", "libc6"]
       : [scenario.component];
-  let auditError;
+  const errors = [];
+  let auditCorrect = true;
   try {
     checkSearchAudit(report.searches, components);
   } catch (error) {
-    auditError = error.message;
+    auditCorrect = false;
+    errors.push(error.message);
   }
-  assert(
-    !Object.hasOwn(report, "status"),
-    "reviewed v2 reports contain per-use verdicts",
-  );
   const uses = report.uses.filter((u) =>
     components.some((c) => namesComponent(u.component, c)),
   );
-  assert(uses.length, "target component was assessed");
-  assert(
-    !uses.some((u) => u.verdict === "exploitable"),
-    "snapshot does not prove a confirmed exploitable running use",
-  );
-  // Grade one complete location. Combining two reports' source ranges could
-  // accidentally prove a backported dependency is reachable from another service.
-  const grades = uses.map((use) => {
-    const errors = [];
-    const check = (ok, issue) => {
-      if (!ok) errors.push(issue);
-    };
-    const cites = approvedCitations(report, use, read, commit);
-    check(
-      use.reason?.trim() && use.location?.trim(),
-      "missing reason or location",
-    );
-    check(use.verdict === expected.verdict, "expected " + expected.verdict);
-    check(allowedVersions.includes(use.version), "wrong selected version");
-    check(Boolean(use.place), "missing structured use scope");
-    for (const [name, groups] of [
-      ["identity", identity],
-      ["deciding", deciding],
-    ]) {
-      for (const group of groups)
-        check(
-          group.some((a) => supported(a, cites)),
-          name +
-            " citation missing at " +
-            group.map((a) => a.path).join(" or "),
-        );
+  if (!uses.length)
+    errors.push("Missing target component " + scenario.component);
+  if (
+    scenario.verdict !== "exploitable" &&
+    uses.some((u) => u.verdict === "exploitable")
+  )
+    errors.push("Snapshot does not prove a confirmed exploitable running use");
+  let claimsCorrect = uses.length > 0;
+  for (const claim of report.claims ?? []) {
+    const valid = reviewed
+      ? claim.state === "approved" && claim.decision?.accepted === true
+      : claim.state === "unreviewed" && claim.decision === undefined;
+    if (!valid) {
+      claimsCorrect = false;
+      errors.push("Unexpected review state on claim " + claim.id);
     }
-    if (expected.needsDecidingGap)
-      check(
-        use.place?.unresolvedQuestions?.some((q) => q.trim()),
-        "missing deciding evidence question",
+  }
+  const grades = [];
+  for (const use of uses) {
+    try {
+      const citations = verifyClaimCitations(
+        report,
+        use,
+        read,
+        commit,
+        reviewed,
       );
-    const call = expected.callSite ?? scenario.commandCallSite;
-    if (call) {
-      const actual = use.proof?.sink?.callSite;
-      check(
-        actual?.path === call.path &&
-          actual.line === call.line &&
-          cites.some(
-            (c) =>
-              c.path === call.path &&
-              c.startLine <= call.line &&
-              call.line <= c.endLine,
-          ),
-        "incorrect sink call site",
-      );
+      if (
+        scenario.expectedService &&
+        !namesComponent(use.location, scenario.expectedService)
+      )
+        continue;
+      grades.push(gradeUse(use, scenario, report, citations));
+    } catch (error) {
+      claimsCorrect = false;
+      errors.push(use.location + ": " + error.message);
     }
-    if (use.place?.deploymentBasis === "observed") {
-      check(
-        expected.observedBySource === true &&
-          use.deployment === "confirmed" &&
-          [...use.evidence, ...(use.observations ?? [])].some((ref) =>
-            ref.supports?.includes("running"),
-          ),
-        "unjustified observed deployment",
-      );
-    }
-    if (use.place?.deploymentBasis === "assumed_not_deployed") {
-      check(
-        report.assumptions?.some((s) => s.trim()) &&
-          use.deployment !== "confirmed",
-        "explicit assumption required for assumed deployment",
-      );
-    }
-    if (auditError) errors.push(auditError);
-    return {
-      auditCorrect: !auditError,
-      verdictLabelCorrect: use.verdict === expected.verdict,
-      versionCorrect: allowedVersions.includes(use.version),
-      location: use.location,
-      version: use.version,
-      verdict: use.verdict,
-      errors,
-    };
-  });
-  grades.sort((a, b) => a.errors.length - b.errors.length);
+  }
+  if (scenario.expectedService && !grades.length)
+    errors.push("Missing assessed service " + scenario.expectedService);
+  // Identify the assessed application first. Every dimension refers to this
+  // same entry, even when a sibling reports the expected verdict or version.
+  const best = grades.sort(
+    (a, b) =>
+      b.identityGroupsMatched - a.identityGroupsMatched ||
+      a.errors.length - b.errors.length,
+  )[0];
+  if (best) errors.push(...best.errors);
+  const pass = errors.length === 0;
   return {
-    pass: grades[0].errors.length === 0,
-    ...grades[0],
-    target: expected.id,
+    pass,
+    strictPass:
+      pass &&
+      grades.some((g) => g.errors.length === 0 && g.selectedEvidenceCorrect),
+    target: scenario.target,
+    expectedVerdict: scenario.verdict,
+    auditCorrect,
+    claimsCorrect,
+    verdictLabelCorrect: false,
+    versionCorrect: false,
+    identityCorrect: false,
+    identityGroupsMatched: 0,
+    evidenceCorrect: false,
+    evidenceGroupsMatched: 0,
+    selectedEvidenceCorrect: false,
+    ...best,
+    errors,
   };
 }

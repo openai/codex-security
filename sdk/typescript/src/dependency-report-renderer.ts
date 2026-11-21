@@ -4,6 +4,7 @@ import {
   matchTraceFrame,
   inputFor,
   prepareDependencyReport,
+  useCountLabel,
   type Finding,
   type Report,
   type Section,
@@ -227,7 +228,7 @@ function content(section: Section, e: Entry) {
       const b = section.blocked;
       return `<h2>Investigation blocked</h2>${[b.reason, b.affectedScope, b.scopeImpact, b.unblockCondition].map((x) => (x ? `<p>${prose(x)}</p>` : "")).join("")}`;
     }
-    return `<h2>No findings</h2><p>${section.stack ? "No assessed stacks in this capture." : "No reviewed uses in this investigation."}</p>`;
+    return `<h2>No findings</h2><p>${section.stack ? "No assessed stacks in this capture." : useCountLabel(section, "No") + " in this investigation."}</p>`;
   }
   const path = e.path!;
   const source = path.frames.find((fr) => fr.role === "source");
