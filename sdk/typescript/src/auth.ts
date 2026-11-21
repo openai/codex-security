@@ -60,15 +60,11 @@ export function configuredCodexHome(environment: ProcessEnvironment): string {
   );
 }
 
-/** Private stores excluded from read-only model tools. @internal */
-export function codexSecurityPrivatePaths(
+/** Credential directories excluded from read-only model tools. @internal */
+export function codexSecurityPrivateDirectories(
   environment: ProcessEnvironment,
   workingDirectory: string = process.cwd(),
 ): string[] {
-  const stateDatabase = join(
-    codexSecurityStateDirectory(environment),
-    "workbench.sqlite3",
-  );
   return [
     codexSecurityCredentialHome(environment),
     join(homedir(), ".ssh"),
@@ -87,10 +83,24 @@ export function codexSecurityPrivatePaths(
           : []),
       ];
     }),
-    stateDatabase,
-    `${stateDatabase}-wal`,
-    `${stateDatabase}-shm`,
   ].map((path) => resolve(workingDirectory, expandHome(path, environment)));
+}
+
+/** Private stores excluded from read-only model tools. @internal */
+export function codexSecurityPrivatePaths(
+  environment: ProcessEnvironment,
+  workingDirectory: string = process.cwd(),
+): string[] {
+  const stateDatabase = join(
+    codexSecurityStateDirectory(environment),
+    "workbench.sqlite3",
+  );
+  return [
+    ...codexSecurityPrivateDirectories(environment, workingDirectory),
+    ...[stateDatabase, `${stateDatabase}-wal`, `${stateDatabase}-shm`].map(
+      (path) => resolve(workingDirectory, expandHome(path, environment)),
+    ),
+  ];
 }
 
 /** @internal */

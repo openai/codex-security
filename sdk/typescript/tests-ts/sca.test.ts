@@ -1,4 +1,9 @@
 import { requestMetadata } from "./support/request-metadata.js";
+import {
+  shouldScheduleNativeSandboxTests,
+  waitForWindowsSandboxSetup,
+} from "./support/native-sandbox.js";
+import { nodeCommand } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import * as filesystem from "node:fs/promises";
@@ -7,6 +12,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -25,7 +31,10 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { FIREWORKS_CODEX_PROVIDER, type JsonObject } from "../src/config.js";
 import { codexSecurityPrivatePaths } from "../src/auth.js";
-import { createProfileCodex } from "../src/provider-profile.js";
+import {
+  createProfileCodex,
+  nativeProfileClient,
+} from "../src/provider-profile.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import {
   ScanInterruptedError,
@@ -62,6 +71,27 @@ type DependencyAuthChooser = (
 
 const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
+
+function expectPrivateFile(
+  filesystem: JsonObject,
+  path: string,
+  denied = true,
+): void {
+  if (process.platform !== "win32") {
+    expect(filesystem[path]).toEqual(denied ? { ".": "deny" } : undefined);
+    return;
+  }
+  expect(filesystem[path]).toBeUndefined();
+  expect(
+    Object.entries(filesystem).some(
+      ([pattern, access]) =>
+        access === "deny" &&
+        new Bun.Glob(pattern.replaceAll("\\", "/")).match(
+          path.replaceAll("\\", "/"),
+        ),
+    ),
+  ).toBe(denied);
+}
 
 function scanner(outputDir: string, matched = true): OsvScanResult {
   return {
@@ -230,7 +260,7 @@ async function fixture(
   const root = await temporaryDirectory("codex-security-sca-");
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
-  const ambientHome = join(root, "ambient-codex-home");
+  const ambientHome = join(root, "ambient [codex]{home}");
   const outputDir = options.ambientOutput
     ? join(
         ambientHome,
@@ -284,7 +314,7 @@ process.exit(child.status ?? 1);
   };
   const calls = { runtime: 0, model: 0, scanner: 0 };
   const captured: {
-    codex?: CodexOptions;
+    codex?: CodexOptions & { nativeProfile?: string };
     thread?: ThreadOptions;
     prompt?: string;
     evidence?: ScaResult;
@@ -1123,6 +1153,8 @@ nativeDependencyTest.each([
       join(f.ambientHome, "auth.json"),
       join(f.ambientHome, ".credentials.json"),
       join(f.ambientHome, "config.toml"),
+      join(f.ambientHome, "synthetic_provider.config.toml"),
+      join(f.ambientHome, ".synthetic.config.toml.tmp"),
       join(f.codexHome, "auth.json"),
       ...codexSecurityPrivatePaths(f.environment).filter((path) =>
         path.includes("workbench.sqlite3"),
@@ -1233,6 +1265,124 @@ nativeDependencyTest.each([
   },
 );
 
+test.skipIf(
+  process.platform !== "win32" ||
+    !shouldScheduleNativeSandboxTests(process.platform, process.env),
+)(
+  "dependency tools leave absent Windows credential files absent and deny files created before a later child",
+  async () => {
+    await waitForWindowsSandboxSetup();
+    await using f = await fixture({
+      ambientOutput: true,
+      homeVariable: "HOME",
+    });
+    const temporary = join(dirname(f.repository), "temp");
+    await mkdir(temporary);
+    Object.assign(f.environment, {
+      TEMP: temporary,
+      TMP: temporary,
+      TMPDIR: temporary,
+    });
+    const overrides = {
+      NPM_CONFIG_USERCONFIG: join(f.selectedUserHome, "!!!"),
+      NETRC: join(f.selectedUserHome, "^^^"),
+      AWS_SHARED_CREDENTIALS_FILE: join(
+        f.selectedUserHome,
+        "registry [user]{set},private.json",
+      ),
+    };
+    Object.assign(f.environment, overrides);
+    const privateFiles = [
+      ...Object.values(overrides),
+      join(f.selectedUserHome, ".npmrc"),
+      join(f.selectedUserHome, ".cargo", "credentials.toml"),
+      join(f.ambientHome, ".credentials.json"),
+      join(f.ambientHome, "config.toml"),
+      join(f.ambientHome, "synthetic_provider.config.toml"),
+      join(f.ambientHome, ".synthetic.config.toml.tmp"),
+    ];
+    for (const path of privateFiles)
+      await mkdir(dirname(path), { recursive: true });
+    const publicSibling = `${overrides.AWS_SHARED_CREDENTIALS_FILE}.public`;
+    await writeFile(publicSibling, "synthetic public sibling");
+    expect((await f.scan()).status).toBe("completed");
+    const options = f.captured.codex!;
+    expect(options.nativeProfile).toBeDefined();
+    expect(options.config!["windows"]).toEqual({ sandbox: "elevated" });
+    const client = await nativeProfileClient();
+    const configOverrides = [
+      ...client.profileConfigOverrides(options.config ?? {}),
+      ...options.configOverrides!,
+    ];
+    const sandbox = (profile: string, command: string[]) =>
+      runCodexCommand(
+        resolveCodexCommand(f.environment),
+        [
+          ...configOverrides.flatMap((value: string) => ["--config", value]),
+          "sandbox",
+          "--profile",
+          options.nativeProfile!,
+          "-P",
+          profile,
+          "-C",
+          f.outputDir,
+          ...command,
+        ],
+        options.env!,
+      );
+    const probe = async (denied: string[]) => {
+      const result = await sandbox("codex_security_dependencies", [
+        nodeCommand().command,
+        "-e",
+        `const fs = require('node:fs');
+fs.readFileSync(process.argv[1]);
+fs.readFileSync(process.argv[2]);
+for (const path of process.argv.slice(3)) {
+  let readable = false;
+  try { fs.readFileSync(path); readable = true; } catch {}
+  if (readable) throw new Error('readable private fixture: ' + path);
+}
+console.log(JSON.stringify({ denied: process.argv.length - 3 }));`,
+        join(f.outputDir, "sca-result.json"),
+        publicSibling,
+        ...denied,
+      ]);
+      expect(result.success, result.stderr).toBe(true);
+      expect(result.stdout.trim()).toBe(
+        JSON.stringify({ denied: denied.length }),
+      );
+    };
+    try {
+      // Scan workspace grants are synchronous; finish the background read ACLs
+      // before probing the read-only profile, as in the native config tests.
+      const setup = await sandbox("codex_security_scan", [
+        join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "cmd.exe"),
+        "/d",
+        "/c",
+        "exit",
+        "0",
+      ]);
+      expect(setup.success, setup.stderr).toBe(true);
+      await waitForWindowsSandboxSetup();
+      await probe([]);
+      await waitForWindowsSandboxSetup();
+      for (const path of privateFiles) {
+        await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+        await writeFile(path, "# synthetic private credential\n");
+      }
+      await probe([]);
+      await waitForWindowsSandboxSetup();
+      await probe(privateFiles);
+      for (const path of privateFiles)
+        expect(await readFile(path, "utf8")).toBe(
+          "# synthetic private credential\n",
+        );
+    } finally {
+      await waitForWindowsSandboxSetup();
+    }
+  },
+);
+
 test.each(["absolute", "relative"] as const)(
   "dependency triage isolates %s credential-store overrides across concurrent scans",
   async (pathKind) => {
@@ -1312,9 +1462,9 @@ test.each(["absolute", "relative"] as const)(
           "filesystem"
         ] as JsonObject;
         for (const path of expected[index]!)
-          expect(filesystem[path]).toEqual({ ".": "deny" });
+          expectPrivateFile(filesystem, path);
         for (const path of expected[1 - index]!)
-          expect(filesystem[path]).toBeUndefined();
+          expectPrivateFile(filesystem, path, false);
         for (const path of [
           ".netrc",
           "_netrc",
@@ -1329,9 +1479,7 @@ test.each(["absolute", "relative"] as const)(
           ".nuget/NuGet/NuGet.Config",
           ".config/NuGet/NuGet.Config",
         ]) {
-          expect(filesystem[join(f.selectedUserHome, path)]).toEqual({
-            ".": "deny",
-          });
+          expectPrivateFile(filesystem, join(f.selectedUserHome, path));
         }
       }),
     );
@@ -1400,8 +1548,8 @@ test.each([
       const filesystem = permissions["codex_security_dependencies"]![
         "filesystem"
       ] as JsonObject;
-      expect(filesystem[expected[index]!]).toEqual({ ".": "deny" });
-      expect(filesystem[expected[1 - index]!]).toBeUndefined();
+      expectPrivateFile(filesystem, expected[index]!);
+      expectPrivateFile(filesystem, expected[1 - index]!, false);
       if (shape === "relative-home") {
         for (const suffix of [".ssh", ".config/gh"]) {
           expect(
@@ -1439,11 +1587,9 @@ test("dependency triage distinguishes npm's home from a USERPROFILE override on 
     "filesystem"
   ] as JsonObject;
   const npmHome = process.platform === "win32" ? f.selectedUserHome : homedir();
-  expect(filesystem[join(npmHome, "registry.npmrc")]).toEqual({ ".": "deny" });
-  expect(filesystem[join(f.selectedUserHome, ".npmrc")]).toEqual({
-    ".": "deny",
-  });
-  expect(filesystem[join(homedir(), ".npmrc")]).toEqual({ ".": "deny" });
+  expectPrivateFile(filesystem, join(npmHome, "registry.npmrc"));
+  expectPrivateFile(filesystem, join(f.selectedUserHome, ".npmrc"));
+  expectPrivateFile(filesystem, join(homedir(), ".npmrc"));
 });
 
 test("dependency triage disables inherited MCP servers and keeps the linked native launcher", async () => {
