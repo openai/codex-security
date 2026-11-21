@@ -372,6 +372,7 @@ export {
 } from "./stored-findings-publication.js";
 export { readTenableFindings } from "./tenable-findings.js";
 export { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
+export { readPromptfooFindings } from "./promptfoo-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,

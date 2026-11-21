@@ -72,11 +72,13 @@ For a saved export, say which checkout and report to use. For an upstream read, 
 
 For the fresh-scan examples above, check the manifest path and installed version for Trivy and the rule ID and source line for Semgrep. For a CI artifact, edit the affected source file after the scan and check that the preview retains the line recorded in the report.
 
+For a Promptfoo red-team run, use its native JSON export and the local `promptfoo` reader. Compare the target outputs and grading reasons for a vulnerable assistant and a protected control. The [Promptfoo walkthrough](promptfoo.md) includes a reproducible example.
+
 ## Import an unfamiliar format
 
 > Import this AcmeScanner JSON for acme/payments. Use its occurrence keys and show me any rows you skip.
 
-For an unfamiliar format, Codex inspects sample records and writes a parser. It emits `{ read, findings, excluded }` with a stable string `source_finding_id` and evidence for each finding. It passes the result to `prepareNormalizedLocalImport(data, { provider, sourceKey, repository, sourceRepositoryUrl })`, inspects `.preview`, then calls `.import()` for the requested write. A nonempty import records its membership, including findings already stored at the same version. Tenable and custom provider names can be used locally. [SDK import contract](../../sdk/typescript/docs/sdk.md#import-external-findings)
+For an unfamiliar format, Codex inspects sample records and writes a parser. It emits `{ read, findings, excluded }` with a stable string `source_finding_id` and evidence for each finding. It passes the result to `prepareNormalizedLocalImport(data, { provider, sourceKey, repository, sourceRepositoryUrl })`, inspects `.preview`, then calls `.import()` for the requested write. A nonempty import records its membership, including findings already stored at the same version. Promptfoo, CrowdStrike, Tenable and custom provider names support local storage. [SDK import contract](../../sdk/typescript/docs/sdk.md#import-external-findings)
 
 ## Publish in a later session
 
@@ -113,7 +115,7 @@ Run these from the repository root after installing the pinned SDK/plugin depend
 
 **Publish and resume.** Import Trivy and Guardian, delete the files, and preview a subset across both sources. Drop the response after the server accepts the second source. Resume using that group's original approval. Check that the first group was sent once, the second receives its receipt, and the unselected row has none. Change the destination or remote version and check that the old approval is rejected before any upload.
 
-For each Cloud-supported reader, preview a native file with `prepareExternalPublication`, then import the same file locally. Delete the file and preview the import ID with `prepareStoredFindingsPublication` using the same Cloud repository and source key. Compare the destination, occurrence IDs, evidence, report metadata and exclusions. Publish to a disposable destination and verify a receipt for each accepted local version. For Tenable and a custom provider, check the exclusion reason and zero uploads.
+For each Cloud-supported reader, preview a native file with `prepareExternalPublication`, then import the same file locally. Delete the file and preview the import ID with `prepareStoredFindingsPublication` using the same Cloud repository and source key. Compare the destination, occurrence IDs, evidence, report metadata and exclusions. Publish to a disposable destination and verify a receipt for each accepted local version. For a local-only provider such as Promptfoo, check that Cloud preview gives the exclusion reason and produces zero upload groups.
 
 ```sh
 (cd sdk/typescript && bun test --timeout 60000 tests-ts/external-findings-publish.test.ts tests-ts/stored-finding-projection.test.ts tests-ts/stored-native-private-report.test.ts tests-ts/sonar-import.test.ts)
