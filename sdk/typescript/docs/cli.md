@@ -176,6 +176,25 @@ cs exploitability check npm:example-parser --vuln-description "Suspected failure
 
 With `--reviewer=disabled`, the investigator submits its own assessment. The host checks claim revisions, source citations and evidence references, then publishes the submitted evidence without calling the independent reviewer. The JSON identifies the mode with `reviewer: "disabled"`. Each claim has `state: "unreviewed"` and omits the reviewer’s `decision`. Progress events label provisional verdicts `unreviewed` or `unreviewed_group`. To compare reports, run a check in each mode at the same commit with the same model and configuration. Captured stack checks with `--sources`, `--sinks` and `--stacks` require the reviewer.
 
+For an experimental report-level review, add a nonempty list of criteria to the project file. The investigator sees the same criteria in each reviewer mode. Each criterion describes something a reader should be able to verify in the completed report. A project with a deployment inventory could require both a source assessment and a deployment record.
+
+```yaml
+exploitability:
+  outcomes:
+    - Identify the selected dependency version and cite its application callers.
+    - Identify the deployed artifact with a matching inventory record for the service and revision.
+```
+
+```sh
+cs exploitability check CVE-2019-10744 --config project.yaml --reviewer=outcome --json --report-file report.json
+```
+
+In outcome mode the host validates claim revisions and evidence, then sends the assembled report for each advisory to a fresh grader. The grader can inspect the pinned checkout and read original receipts, including failed lookups. If a rate limit leaves a required fact open, the investigator receives feedback on that criterion and can retry or find another source. An `unknown` can satisfy a criterion asking for the last established fact and the remaining gap. A criterion requiring the deployed artifact needs evidence of the artifact.
+
+Publication requires a satisfied grade for every criterion. The JSON identifies `reviewer: "outcome"`, keeps individual claims `unreviewed`, and records a per-advisory `outcomeReview` with the attempt, report digest, decisions, report paths and receipt IDs. The digest covers the per-advisory JSON with `usage` and `outcomeReview` omitted. The host validates the digest and references. The grader judges whether the cited evidence meets each criterion. Progress events `outcome_review` and `outcome_decision` record each attempt.
+
+After at most three grades, an unmet criterion blocks publication with `blockReason: "outcomes_unsatisfied"`. A grader failure yields `blockReason: "outcome_grader_error"`. Both return exit code 2 and skip publishing the report file. The investigator can also end a check early when the host verifies widespread loss of required evidence. Inspect the blocked check in the JSON for the reason.
+
 Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed report atomically to a new file and preserves any existing destination.
 
 The investigator can delegate source searches while an independent reviewer evaluates proposed uses and the claims they rely on. Investigators share evidence collected during the check. The reviewer selects the citations that support each approved claim. A deciding MCP citation can identify a single JSON value. Its `receiptId` identifies the captured response, `originalPayloadSha256` identifies its contents, and `selection.record` gives the key and index path. A null `selection.textBlock` selects structured content. A numeric value selects a JSON text block by index. Whole-response citations omit `selection`. Open a use in the JSON report to see its component, version, verdict, and deciding evidence. The progress stream includes provisional verdicts that can change during review.
