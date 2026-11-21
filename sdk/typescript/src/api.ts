@@ -147,6 +147,7 @@ import {
   type ScanAuthMode,
   type ScanSettings,
   type ScanPromptSettings,
+  type ValidationProviderSettings,
 } from "./scan-settings.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import { prepareFindingPrompt } from "./finding-prompt.js";
@@ -156,6 +157,12 @@ import {
   scanTimeBudget,
 } from "./scan-time-budget.js";
 import { standaloneValidationPrompt } from "./standalone-validation-prompt.js";
+import { validationProviderFromConfiguration } from "./validation-providers.js";
+import {
+  unavailableAssessment,
+  type ValidationProvider,
+  type ValidationItemRecord,
+} from "./validation-provider.js";
 export { SCAN_AUTH_MODES } from "./scan-settings.js";
 export type { DeepScanOptions, ScanAuthMode } from "./scan-settings.js";
 import {
@@ -495,7 +502,17 @@ export interface ValidationOptions extends Pick<
   scanId?: string;
   /** @internal Reuse completed CLI validation assessments on workflow retries. */
   workflowId?: string;
+  /** Run supplemental validation in the host process. Omit for the unchanged Codex validator. */
+  validationProvider?: ValidationProviderSettings | ValidationProvider;
 }
+
+const validationProvenanceSchema = z.strictObject({
+  provider: z.string(),
+  providerVersion: z.string(),
+  referenceId: z.string().optional(),
+  referenceUrl: z.string().optional(),
+  validatedAt: z.string(),
+});
 
 const validationResponseSchema = z.strictObject({
   disposition: z.enum([
@@ -505,6 +522,8 @@ const validationResponseSchema = z.strictObject({
     "deferred",
   ]),
   report: z.string().trim().min(1),
+  provenance: validationProvenanceSchema.optional(),
+  unavailable: z.string().optional(),
 });
 
 export interface ValidationResult extends z.infer<
@@ -512,6 +531,7 @@ export interface ValidationResult extends z.infer<
 > {
   outputDir: string;
   threadId: string | null;
+  record?: ValidationItemRecord;
 }
 
 const validationResultSchema = validationResponseSchema.extend({
@@ -1026,6 +1046,27 @@ export class CodexSecurity {
       this.#abortController.signal,
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
+    if (options.validationProvider !== undefined) {
+      const configured = options.validationProvider;
+      const provider: ValidationProvider =
+        typeof (configured as { validate?: unknown }).validate === "function"
+          ? (configured as ValidationProvider)
+          : validationProviderFromConfiguration(
+              configured as ValidationProviderSettings,
+            );
+      const assessment = await provider
+        .validate(
+          typeof options.finding === "string"
+            ? options.finding
+            : (options.finding as Record<string, unknown>),
+          {
+            repositoryPath: options.repositoryPath,
+            signal,
+          },
+        )
+        .catch((error: unknown) => unavailableAssessment(provider, error));
+      return { ...assessment, outputDir: "", threadId: null };
+    }
     let outputDir = "";
     let tracker: ScanCostTracker | null = null;
     let finalUsage: unknown;
@@ -4645,7 +4686,7 @@ export class CodexSecurity {
     telemetry?: {
       command: OperationTelemetryEvent["command"];
       repository: string;
-      options: ScanOptions;
+      options: Omit<ScanOptions, "validationProvider">;
       mode?: ScanMode;
     },
   ): Promise<T> {
@@ -5738,7 +5779,7 @@ export class CodexSecurity {
 
   async #prepareLocalInputs(
     repository: string,
-    options: ScanOptions,
+    options: Omit<ScanOptions, "validationProvider">,
     signal?: AbortSignal,
     protectedRoots?: readonly string[],
     allowExistingOutput = false,

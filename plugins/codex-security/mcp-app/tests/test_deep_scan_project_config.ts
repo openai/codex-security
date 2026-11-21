@@ -59,6 +59,26 @@ await test("explicit YAML and JSON selection use the CLI project format and minu
   }
 });
 
+await test("Deep Scan project reader retains the explicit validation provider", async () => {
+  const root = await temporaryDirectory("deep-project-validation-");
+  try {
+    const validation = {
+      provider: "continuum",
+      continuum: { environment_id: "synthetic-environment" },
+    };
+    await writeFile(
+      join(root, "selected.json"),
+      JSON.stringify({ scan: { validation } }),
+    );
+    assert.deepEqual(
+      (await readDeepScanProjectConfig("selected.json", root))?.validation,
+      validation,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 await test("unsupported settings and contradictory time aliases fail before launch", async () => {
   const root = await temporaryDirectory("deep-project-rejections-");
   try {

@@ -122,8 +122,11 @@ built-in defaults. The per-user file remains
 change that file or unrelated scans. No repository configuration is discovered or
 activated automatically.
 
-This integration supports `scan.mode: deep`, `scan.max_time_minutes`, and all
-`scan.deep` fields listed below. Other configured fields, including `codex`,
+Plugin scans run the configured validation provider on the host after sealing
+when the project file is explicitly selected.
+
+This integration supports `scan.mode: deep`, `scan.max_time_minutes`,
+`scan.validation`, and all `scan.deep` fields listed below. Other configured fields, including `codex`,
 `auth`, scope, context files, cost limits, output, and exit policy, are rejected
 with their names before model work starts. Use CLI/SDK configuration for those
 settings. If both minute and hour limits are present, they must agree.
@@ -158,6 +161,7 @@ load the same config also use that setting. The usual config file is
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |
 | `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
+| `scan.validation.provider`     | Host-side follow-up provider; `--validate=NAME` can override its name                | Static Codex validation            |
 | `scan.owner_suggestions`       | Generate an owner-suggestions report after a committed Git scan                      | `false`                            |
 | `scan.deep`                    | Deep discovery settings shown below                                                  | Existing deep defaults             |
 | `codex`                        | Native Codex settings and profiles                                                   | Existing isolated configuration    |
@@ -170,6 +174,38 @@ supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
 plugin or Python selection remain explicit CLI/SDK inputs.
+
+### Validation provider settings
+
+Select a host-side provider in the trusted project file, then use
+`codex-security scan . --validate -c codex-security.yaml`:
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: example
+      aws_region: us-east-1
+      aws_profile: my-profile
+      wait_minutes: 45
+```
+
+All keys below belong to `scan.validation.continuum`. Schema validation does not
+insert defaults; the adapter and AWS CLI apply them at runtime.
+
+| Key                | Meaning                                                | Default                                         |
+| ------------------ | ------------------------------------------------------ | ----------------------------------------------- |
+| `environment_id`   | Continuum environment containing the matching source   | Required                                        |
+| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                         |
+| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                        |
+| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                              |
+| `console_base_url` | Base URL used to construct issue links                 | `https://console.aws.amazon.com/continuum/home` |
+
+`--validate=NAME` overrides the provider name, not its settings. Without a
+configured provider, bare `--validate` keeps the existing Codex validation.
+The inference provider selected by `--provider` is separate. See
+[validation providers](validation-providers.md) for requirements and outputs.
 
 ## SDK and CLI contract
 
@@ -190,6 +226,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
 | `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
 | `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
+| `scan.validation`                         | `validationProvider`                  | `--validate=NAME` overrides the provider name        |
 | `scan.owner_suggestions`                  | `ownerSuggestions`                    | `--owner-suggestions`                                |
 | `scan.deep.workers`                       | `workers`                             | `--workers`                                          |
 | `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                                        |

@@ -961,6 +961,48 @@ findings or the `--fail-on-severity` decision. Validation failures exit with
 cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
 configured scan cost limit), `--dry-run`, or `--mock`.
 
+#### Host-side validation providers
+
+`scan.validation.provider` selects an optional host-side provider for the
+post-seal follow-up. Select the project file with `-c FILE` or
+`CODEX_SECURITY_PROJECT_CONFIG`. A bare `--validate` uses that selection;
+`--validate=NAME` overrides the name, retaining the project-file options.
+Without a provider, the existing Codex validator is unchanged. This setting
+does not change the inference provider selected with `--provider`.
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: example
+      aws_region: us-east-1
+      wait_minutes: 45
+```
+
+```sh
+codex-security scan . --validate -c codex-security.yaml
+```
+
+In Codex CLI, explicitly select the same project file when requesting a plugin
+scan. Standard, diff and Deep Scan completion runs the configured provider on
+the MCP host after sealing, and includes its supplemental report and paths in
+the existing completion result. No provider means no additional work.
+
+AWS Continuum is the first built-in adapter. It submits reported code findings
+before waiting in parallel under one deadline. Per-item rejections and timeouts
+remain visible without failing the completed scan. The existing trusted AWS
+launcher uses an optional `aws_profile` or the ordinary credential chain.
+
+Provider reports add conclusions-only `validation.json` beside `validation.md`,
+with matching suffixes on repeated runs and `validation.recordsPath` in CLI JSON.
+The versioned document contains each item's verdict, before and after severity,
+provider severity, reason bases, claim match, issue URL and evidence freshness.
+Related flaws retain Codex severity. Sealed findings and `--fail-on-severity` do
+not change. Local-tree drift and provider source identity are not compared.
+See [validation providers](../../../docs/validation-providers.md)
+for configuration, permissions and limits.
+
 ### Understand scan scope and follow-up work
 
 A completed scan means the requested workflow finished. It does not mean every

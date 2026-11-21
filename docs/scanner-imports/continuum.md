@@ -4,6 +4,8 @@ Import Continuum issues to create one Codex Security record per issue ARN. The
 issue provides exploitability and severity analysis, supporting details, and an
 initial patch when available.
 
+For follow-up validation of Codex Security scans, see [validation providers](../validation-providers.md).
+
 ## Quick start
 
 Open the matching checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which

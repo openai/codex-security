@@ -1,0 +1,203 @@
+{
+  "_comment": "shape recorded from a Continuum Prod-IAD response, values anonymised",
+  "environmentId": "00000000000000000000000000000001",
+  "issueId": "00000000000000000000000000000002",
+  "issue": {
+    "issueId": "00000000000000000000000000000002",
+    "issueArn": "arn:aws:continuum:us-east-1:123456789012:environments/00000000000000000000000000000001/code-issues/00000000000000000000000000000002",
+    "name": "Template injection in a request-supplied template",
+    "synopsis": "A request-supplied template is evaluated without sandboxing.",
+    "severity": "CRITICAL",
+    "severityReasoning": "likelihood=High x impact=High -> severity=CRITICAL",
+    "summary": "A request-supplied template is evaluated without sandboxing.",
+    "findingIds": ["00000000000000000000000000000003"],
+    "status": "COMPLETED",
+    "statusUpdatedAt": "2026-11-06T15:47:33.052360+00:00",
+    "createdAt": "2026-11-06T15:18:34.237063+00:00",
+    "updatedAt": "2026-11-06T15:47:33.052360+00:00",
+    "evidenceAvailability": "AVAILABLE"
+  },
+  "artifactLists": {
+    "EVIDENCE": {
+      "items": [
+        {
+          "artifactId": "00000000000000000000000000000004",
+          "artifactType": "EVIDENCE",
+          "mediaType": "application/json",
+          "producer": {
+            "agent": "validation-service"
+          },
+          "contentSizeBytes": 21415,
+          "createdAt": "2026-11-06T15:42:53.583052+00:00"
+        }
+      ]
+    },
+    "VALIDATION_EVIDENCE": {
+      "items": [
+        {
+          "artifactId": "00000000000000000000000000000005",
+          "artifactType": "VALIDATION_EVIDENCE",
+          "mediaType": "application/json",
+          "producer": {
+            "agent": "validation-service"
+          },
+          "contentSizeBytes": 41353,
+          "createdAt": "2026-11-06T15:40:18.536990+00:00"
+        }
+      ]
+    }
+  },
+  "artifacts": {
+    "00000000000000000000000000000004": {
+      "artifactId": "00000000000000000000000000000004",
+      "artifactType": "EVIDENCE",
+      "mediaType": "application/json",
+      "body": {
+        "prevalidationSignals": {
+          "producedBy": "anonymised",
+          "signals": [
+            {
+              "subjectRef": "00000000000000000000000000000002",
+              "dimension": "EXPLOITABILITY",
+              "signalStrength": "STRONG",
+              "conclusion": "The recorded assessment returned this dimension with the stated computed bands.",
+              "producerId": "anonymised",
+              "producerVersion": "anonymised",
+              "confidence": 0.75,
+              "confidenceReasoning": {
+                "summary": "A request-supplied template is evaluated without sandboxing.",
+                "factors": ["anonymised", "anonymised", "anonymised"]
+              },
+              "exploitability": {
+                "verdict": "EXPLOITABLE",
+                "reachedCrownJewels": true,
+                "highestLayerReached": 1,
+                "confidenceTier": "BUILD_PROVEN",
+                "scriptable": false,
+                "sourceValidationArtifactId": "00000000000000000000000000000005"
+              }
+            },
+            {
+              "subjectRef": "00000000000000000000000000000002",
+              "dimension": "LIKELIHOOD_ASSESSMENT",
+              "signalStrength": "STRONG",
+              "conclusion": "The recorded assessment returned this dimension with the stated computed bands.",
+              "producerId": "anonymised",
+              "producerVersion": "anonymised",
+              "confidence": 0.8,
+              "confidenceReasoning": {
+                "summary": "A request-supplied template is evaluated without sandboxing."
+              },
+              "computed": {
+                "likelihoodBand": "HIGH",
+                "barriers": 0
+              },
+              "preconditions": {
+                "reachableFromAttacker": {
+                  "value": true,
+                  "basis": "GRAPH",
+                  "reason": "EXPOSED via internet-facing ALB (0.0.0.0/0, HTTPS/443) routing to deployment example in namespace example. Path: internet to ALB to deployment to pod."
+                },
+                "configurationNeeded": {
+                  "value": false,
+                  "basis": "FINDING",
+                  "reason": "The recorded assessment returned this precondition with the stated basis.",
+                  "missingInfo": "anonymised"
+                },
+                "accessLevel": {
+                  "value": "ANY_AUTHENTICATED",
+                  "basis": "GRAPH",
+                  "reason": "The recorded assessment returned this precondition with the stated basis.",
+                  "missingInfo": "anonymised"
+                },
+                "userInteractionRequired": {
+                  "value": false,
+                  "basis": "FINDING",
+                  "reason": "The recorded assessment returned this precondition with the stated basis."
+                }
+              }
+            },
+            {
+              "subjectRef": "00000000000000000000000000000002",
+              "dimension": "IMPACT_ASSESSMENT",
+              "signalStrength": "STRONG",
+              "conclusion": "The recorded assessment returned this dimension with the stated computed bands.",
+              "producerId": "anonymised",
+              "producerVersion": "anonymised",
+              "confidence": 0.75,
+              "confidenceReasoning": {
+                "summary": "A request-supplied template is evaluated without sandboxing."
+              },
+              "computed": {
+                "impactBand": "HIGH"
+              },
+              "impactDimensions": {
+                "attackerGains": {
+                  "value": "EXECUTE",
+                  "basis": "FINDING",
+                  "reason": "The recorded assessment returned this precondition with the stated basis.",
+                  "missingInfo": "anonymised"
+                },
+                "blastRadius": {
+                  "value": "CROSS_TENANT",
+                  "basis": "FINDING",
+                  "reason": "The recorded assessment returned this precondition with the stated basis.",
+                  "missingInfo": "anonymised"
+                },
+                "targetValue": {
+                  "value": "HIGH",
+                  "basis": "FINDING",
+                  "reason": "The recorded assessment returned this precondition with the stated basis.",
+                  "missingInfo": "anonymised"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "producer": {
+        "agent": "validation-service"
+      },
+      "createdAt": "2026-11-06T15:42:53.583052+00:00"
+    },
+    "00000000000000000000000000000005": {
+      "artifactId": "00000000000000000000000000000005",
+      "artifactType": "VALIDATION_EVIDENCE",
+      "mediaType": "application/json",
+      "body": {
+        "validationEvidence": {
+          "exploitable": "EXPLOITABLE",
+          "terminalStatus": "COMPLETED"
+        }
+      },
+      "producer": {
+        "agent": "validation-service"
+      },
+      "createdAt": "2026-11-06T15:40:18.536990+00:00"
+    }
+  },
+  "findings": {
+    "00000000000000000000000000000003": {
+      "type": "CONTINUUM_CODE_VULN",
+      "title": "Template injection in a request-supplied template",
+      "severity": "HIGH",
+      "summary": "A request-supplied template is evaluated without sandboxing.",
+      "category": "CWE-399: Resource Management Errors",
+      "subCategory": "CWE-920: Improper Restriction of Power Consumption",
+      "filePath": "src/templates.py",
+      "lineNumber": 23,
+      "findingId": "00000000000000000000000000000003",
+      "findingArn": "arn:aws:continuum:us-east-1:123456789012:environments/00000000000000000000000000000001/code-findings/00000000000000000000000000000003",
+      "environmentId": "00000000000000000000000000000001",
+      "source": "continuum_scanner",
+      "sourceFindingId": "00000000000000000000000000000003",
+      "reportedAt": "2026-11-06T15:15:23.662000+00:00",
+      "status": "CONFIRMED",
+      "statusUpdatedAt": "2026-11-06T15:19:06.500473+00:00",
+      "createdAt": "2026-11-06T15:15:23.662925+00:00",
+      "scanRunId": "00000000000000000000000000000006",
+      "createdIssueId": "00000000000000000000000000000002",
+      "completedAt": "2026-11-06T15:19:06.500473+00:00"
+    }
+  }
+}

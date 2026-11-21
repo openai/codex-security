@@ -1,5 +1,10 @@
 import { workbenchArgs } from "../workbench-arguments.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
+import {
+  bindValidationProvider,
+  bindValidationProviderConfiguration,
+} from "../validation-provider.js";
+import type { ValidationProviderConfiguration } from "../../../../../sdk/typescript/src/validation-provider.js";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
@@ -185,6 +190,20 @@ export class WorkbenchDeepScanStore {
     if (startDisposition !== "created" && startDisposition !== "joined") {
       throw new Error(
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
+      );
+    }
+    if (result.validationProviderConfiguration !== undefined) {
+      await bindValidationProviderConfiguration(
+        run.scanId,
+        result.validationProviderConfiguration as ValidationProviderConfiguration,
+        startDisposition === "created",
+      );
+    } else {
+      await bindValidationProvider(
+        run.scanId,
+        run.targetPath,
+        input.projectConfigPath,
+        startDisposition === "created",
       );
     }
     return run;
