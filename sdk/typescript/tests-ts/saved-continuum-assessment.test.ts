@@ -1,5 +1,8 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import * as filesystem from "node:fs/promises";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -10,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 import { remediationPrompt } from "../src/remediation.js";
 import {
@@ -181,6 +184,53 @@ test("loads only the requested occurrences from concurrent partial CLI batches",
     (await savedContinuumAssessments(env, "scan", root, ["occ_a"])).size,
   ).toBe(0);
 });
+
+test("a writer can populate the assessment directory after another observes it empty", async () => {
+  const list = filesystem.readdir;
+  using listing = spyOn(filesystem, "readdir");
+  listing.mockImplementation(async (...args) => {
+    const entries = await Reflect.apply(list, filesystem, args);
+    const directory = String(args[0]);
+    if (
+      entries.length === 0 &&
+      basename(directory).startsWith("cli-continuum-")
+    ) {
+      // Interleave another writer's temporary file with any emptiness check.
+      await writeFile(join(directory, "concurrent.tmp"), "");
+    }
+    return entries;
+  });
+  await saveCli([conclusion]);
+  expect((await read()).get("occ_a")).toEqual(conclusion);
+});
+
+test.skipIf(process.platform === "win32")(
+  "keeps a new assessment directory traversable under a restrictive owner umask",
+  async () => {
+    const previous = process.umask(0o100);
+    try {
+      await saveCli([conclusion]);
+    } finally {
+      process.umask(previous);
+    }
+    expect((await read()).get("occ_a")).toEqual(conclusion);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "rejects a shared assessment directory on reads and writes without changing its permissions",
+  async () => {
+    await saveCli([conclusion]);
+    const [storage] = (await readdir(root)).filter((name) =>
+      name.startsWith("cli-continuum-"),
+    );
+    const directory = join(root, storage!);
+    await chmod(directory, 0o770);
+    expect((await read()).size).toBe(0);
+    await expect(saveCli([conclusion])).rejects.toThrow();
+    expect((await lstat(directory)).mode & 0o777).toBe(0o770);
+  },
+);
 
 test("plugin binding restricts an ambiguous CLI selection to its destination", async () => {
   const other = {

@@ -7,8 +7,12 @@ import { readRegularInputFile } from "./prompt-files.js";
 import { writeAtomicJson } from "./publication-state.js";
 import {
   canonicalConfigPath,
+  createWindowsOutputDirectory,
   prepareScanRegistrationOutput,
+  requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
+  requirePrivateOutputDirectory,
+  requireWindowsOutputPath,
   validatePreparedOutputDir,
 } from "./runtime.js";
 
@@ -41,15 +45,25 @@ async function assessmentDirectory(
   const check = (path: string) =>
     requireOutputOutsideRepositories(roots, path, "state");
   check(directory);
-  if (create)
-    return prepareScanRegistrationOutput(
-      directory,
-      key,
-      undefined,
-      check,
-      true,
-    );
-  return validatePreparedOutputDir(directory, check, true);
+  if (process.platform === "win32") {
+    // Other writers can populate this store during setup. Check the writable
+    // leaf ACL without requiring the directory to stay empty.
+    requireModelSafeOutputDir(directory);
+    if (create) await createWindowsOutputDirectory(directory, true);
+    else await requireWindowsOutputPath(directory, true);
+    return validatePreparedOutputDir(directory, check, true);
+  }
+  const prepared = create
+    ? await prepareScanRegistrationOutput(
+        directory,
+        key,
+        undefined,
+        check,
+        true,
+      )
+    : await validatePreparedOutputDir(directory, check, true);
+  requirePrivateOutputDirectory(await lstat(prepared), prepared);
+  return prepared;
 }
 
 function snapshotName(itemId: string, environmentId: string, raw: string) {
