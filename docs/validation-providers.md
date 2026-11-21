@@ -90,8 +90,9 @@ saves individual results under `cli-continuum-*` in its private state directory.
 Validating a subset leaves the workbench's queue and report intact. For a
 timed-out workbench finding, only a retry of the same AWS submission can supply
 its result. For competing results on the same submission and issue, the latest
-AWS validation artifact wins. Missing or ambiguous evidence leaves the original
-finding available for remediation.
+AWS validation artifact wins. An invalid workbench result prevents a CLI
+result from a different submission taking its place. Missing or ambiguous
+evidence leaves the original finding available for remediation.
 
 Import is optional. To collect full AWS evidence or available patches, pass
 the returned `findingId` to

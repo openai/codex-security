@@ -1,6 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { isRecord } from "./record.js";
 import { assessmentStore } from "./continuum-assessment-store.js";
 import { compareTimestamps } from "./timestamps.js";
 import type { ProcessEnvironment } from "./runtime.js";
@@ -68,7 +67,7 @@ const cached = z.object({
   result: z.object({ provider: z.literal("continuum") }),
   records: z.object({
     schemaVersion: z.literal(1),
-    items: z.array(z.unknown()),
+    items: z.array(z.looseObject({ itemId: text.min(1) })),
   }),
   // The retry field distinguishes caches supporting terminal status from legacy results.
   retry: z.array(z.unknown()).nullable(),
@@ -197,31 +196,27 @@ export async function savedContinuumAssessments(
   if (config !== undefined && !bound.success) return assessments;
   const destination = bound.data?.continuum;
   const requested = new Set(occurrenceIds);
-  if (destination) {
-    const saved = cached.safeParse(await store.readPluginResult()).data;
+  const result = destination && (await store.readPluginResult());
+  if (destination && result !== undefined) {
+    const saved = cached.safeParse(result).data;
+    // A damaged bound result can hide the original AWS finding ID. Do not
+    // substitute a CLI result for a potentially different submission.
     if (
-      saved?.repositoryPath === repositoryPath &&
-      JSON.stringify(config) === JSON.stringify(saved.configuration)
-    ) {
-      for (const raw of saved.records.items) {
-        if (
-          !isRecord(raw) ||
-          typeof raw["itemId"] !== "string" ||
-          !requested.has(raw["itemId"])
-        )
-          continue;
-        const record = project(
-          raw,
-          destination.environment_id,
-          destination.aws_region,
-        );
-        if (!record) continue;
-        if (assessments.has(record.itemId)) {
-          // A duplicate in the bound scan is ambiguous even if the CLI has a match.
-          requested.delete(record.itemId);
-          assessments.delete(record.itemId);
-        } else assessments.set(record.itemId, record);
-      }
+      saved?.repositoryPath !== repositoryPath ||
+      JSON.stringify(config) !== JSON.stringify(saved.configuration)
+    )
+      return assessments;
+    for (const raw of saved.records.items) {
+      if (!requested.has(raw.itemId)) continue;
+      const record = project(
+        raw,
+        destination.environment_id,
+        destination.aws_region,
+      );
+      if (!record || assessments.has(raw.itemId)) {
+        requested.delete(raw.itemId);
+        assessments.delete(raw.itemId);
+      } else assessments.set(raw.itemId, record);
     }
   }
   const snapshots = await store.readSnapshots(

@@ -100,10 +100,21 @@ test.each([
   { configuration: { ...config, extra: true } },
   { repositoryPath: "elsewhere" },
   { retry: undefined },
-])("rejects a mismatched or legacy result %j", async (extra) => {
-  await save([conclusion], extra);
-  expect((await read()).size).toBe(0);
-});
+  { records: { schemaVersion: 1, items: [null] } },
+])(
+  "an invalid bound result cannot release the submission pin %j",
+  async (extra) => {
+    const other = {
+      ...conclusion,
+      findingId: "other",
+      findingArn: prefix + "/code-findings/other",
+    };
+    await saveCli([other]);
+    expect((await read()).get("occ_a")).toEqual(other);
+    await save([conclusion], extra);
+    expect((await read()).size).toBe(0);
+  },
+);
 test.each([
   { issueId: "other" },
   { findingId: "other" },
@@ -113,6 +124,7 @@ test.each([
     issueArn: conclusion.issueArn.replace("/env/", "/other/"),
   },
 ])("rejects inconsistent external identity %j", async (extra) => {
+  await saveCli([conclusion]);
   await save([{ ...conclusion, ...extra }]);
   expect((await read()).size).toBe(0);
 });
