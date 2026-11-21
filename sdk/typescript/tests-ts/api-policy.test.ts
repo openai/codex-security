@@ -9,6 +9,7 @@ import {
   readdir,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -369,6 +370,7 @@ describe("CodexSecurity policy API", () => {
         ),
       );
       for (const { f, sandbox } of sessions) {
+        expect((await stat(f.runtime.configPath!)).isFile()).toBe(true);
         const configuration = f.configuration()!;
         expect(configuration.config?.["windows"]).toEqual({ sandbox });
         const overrides = parseToml(configuration.configOverrides!.join("\n"));

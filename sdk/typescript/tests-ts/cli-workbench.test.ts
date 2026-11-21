@@ -1786,6 +1786,7 @@ describe("CLI workbench", () => {
                 excludePaths: ["src/examples"],
                 mode: "deep",
                 pluginVersion: "1.2.3",
+                requestedCyberAccessProgram: "standard",
                 failOnSeverity: "high",
                 knowledgeBasePaths: [knowledgeBasePath],
                 deepScan: {
@@ -1803,6 +1804,7 @@ describe("CLI workbench", () => {
       ).toBe(0);
       expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
       expect(onTurn.mock.lastCall?.[0]).toBe(repository);
+      expect(onTurn.mock.lastCall?.[1]?.cyberAccessProgram).toBeUndefined();
       expect(onTurn.mock.lastCall?.[1]).toMatchObject({
         target: ["src", "packages/core"],
         excludePaths: ["src/examples"],

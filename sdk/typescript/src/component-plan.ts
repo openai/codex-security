@@ -4,8 +4,9 @@ import { isAbsolute, join, posix } from "node:path";
 import { z } from "zod";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
-  runReadOnlyCodex,
+  withReadOnlyCodex,
   type ReadOnlyCodexOptions,
+  type StartReadOnlyThread,
 } from "./scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
@@ -76,24 +77,39 @@ export async function planComponents(
   const files = await inventoryFiles(repository, options.signal);
   if (files.length === 0)
     throw new Error("No files found to divide into components.");
+  return withReadOnlyCodex(
+    {
+      ...options,
+      config: options.config ?? {},
+      componentRepository: repository,
+      workingDirectory: tmpdir(),
+    },
+    {
+      surface: options.surface ?? "sdk",
+      command: "scan-components",
+      threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
+    },
+    z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
+    (startThread) =>
+      planBatches(repository, files, options.signal, startThread),
+  );
+}
+
+async function planBatches(
+  repository: string,
+  files: string[],
+  signal: AbortSignal | undefined,
+  startThread: StartReadOnlyThread,
+): Promise<ComponentPlan> {
   const counts = directoryCounts(files);
   const plan: ComponentPlan = { components: [] };
-  for (const batch of componentPlanningBatches(files, options.signal)) {
-    options.signal?.throwIfAborted();
-    const response = await runReadOnlyCodex(
-      batch.prompt,
-      z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
-      { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
-      {
-        surface: options.surface ?? "sdk",
-        command: "scan-components",
-        threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
-      },
-    );
+  for (const batch of componentPlanningBatches(files, signal)) {
+    signal?.throwIfAborted();
+    const response = await startThread().run(batch.prompt);
     const proposed = await normalizeComponentPlan(
       repository,
       JSON.parse(response),
-      options.signal,
+      signal,
     );
     const batchCounts = directoryCounts(batch.files);
     const batchFiles = new Set(batch.files);
@@ -133,7 +149,7 @@ export async function planComponents(
       });
     }
   }
-  return await normalizeComponentPlan(repository, plan, options.signal);
+  return await normalizeComponentPlan(repository, plan, signal);
 }
 
 // Codex turn/start rejects text inputs above this character limit.
