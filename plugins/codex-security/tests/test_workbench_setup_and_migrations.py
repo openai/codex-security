@@ -120,6 +120,7 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (81, "retain native investigation time allowances"),
 ]
 
 
@@ -1461,6 +1462,7 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
     assert after == [
         {
             **row,
+            "investigation_policy": None,
             "target_id": target_id,
             "log_completed_at": None,
             "windows_resume_output_identity": None,
@@ -1626,25 +1628,6 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
-
-
-@pytest.mark.cross_platform
-def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
-    db, migrate = create_historical_database(63)
-    with closing(db):
-        timestamp = "2026-01-01T00:00:00Z"
-        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
-        record_migration(db, 63, "retain native investigation time allowances", timestamp)
-        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
-        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
-        migrate(db)
-        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
-        receipt = db.execute(query).fetchone()
-        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
-        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
-        migrate(db)
-        assert db.execute(query).fetchone() == receipt
-        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
@@ -2414,8 +2397,7 @@ def test_legacy_delivered_scan_waits_for_its_thread(
     assert "awaiting its owning Codex thread" in previous["stderr"]
 
     mark_deep_coordinator_succeeded(state_dir, scan_id, Path(begun["deepScan"]["scanDir"]))
-    replacement = run_workbench(
-        state_dir,
+    replacement_args = (
         "begin-deep-scan",
         "--target-path",
         str(target),
@@ -2427,6 +2409,12 @@ def test_legacy_delivered_scan_waits_for_its_thread(
         begun["deepScan"]["userContext"],
         "--workflow-version",
         "fixture",
+    )
+    pending = run_workbench(state_dir, *replacement_args)
+    assert pending["confirmationRequired"] is True
+    assert [scan["scanId"] for scan in pending["otherRunningDeepScans"]] == [scan_id]
+    replacement = run_workbench(
+        state_dir, *replacement_args, "--confirmed-concurrent-scan-id", scan_id
     )
     assert replacement["startDisposition"] == "created"
     assert replacement["deepScan"]["scanId"] != scan_id

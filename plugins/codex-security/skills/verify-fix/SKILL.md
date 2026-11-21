@@ -17,33 +17,19 @@ Determine whether each supplied security finding has been fixed in the current c
 
 Use `../../references/static-finding-assessment.md` to identify the original attacker-controlled source, security control, sensitive sink, reachable path, trust boundary, counterevidence, and proof gaps. If the caller already supplied that reference in the prompt, use the supplied contents without reading it again.
 
-Use `standard` verification unless the caller explicitly selects `verificationMode: static`. In static mode, assess the current source and diff, the original exploit path and plausible bypasses, and legitimate behavior through callers and existing tests read as source. Do not install dependencies or run builds, tests, reproducers, or the application, including when validation instructions request them. Repository-reading tools remain available. State in the evidence that this is a static assessment and runtime checks were not performed; do not count them as passed or require them for this assessment. Missing runtime tooling alone does not make the result inconclusive, but a material gap in the source evidence does.
+Use the bundled verification method included in the request. When its contents are not supplied, read [standard verification](references/verification-standard.md) unless the caller explicitly selects [static verification](../../references/verification-static.md).
 
 ## Verification Workflow
 
 1. Establish the original vulnerability, its preconditions, affected security boundary, and legitimate behavior that must continue to work.
 2. Confirm the current checkout contains the affected component. Follow moved or refactored code rather than treating a missing file, removed line, or changed function name as proof of remediation.
 3. Trace the original exploit path through the current implementation and check the nearest relevant control, equivalent paths, and plausible bypasses.
-4. In standard mode, run the original reproducer, focused regression checks, or legitimate-behavior checks only when they can run without modifying the repository. Preserve exact static evidence when runtime checks are unavailable.
+4. Complete the checks required by the selected verification method and record exact evidence.
 5. Return one result per supplied finding, in the requested order. Treat closed tickets, unrelated passing tests, and the absence of a new scan finding as insufficient proof.
 
 ## Result Contract
 
-For interactive conversations, use readable Markdown unless the caller requests another format. Give a verdict for each finding, explain the supporting evidence with source references, and identify relevant checks and remaining proof gaps.
-
-When the caller requests JSON or supplies an automated result contract, return exactly one JSON object in this shape. CLI verification workflows explicitly request this contract. Use the same verdicts and evidence requirements in either format.
-
-```json
-{
-  "results": [
-    {
-      "id": "finding-or-issue-id",
-      "status": "fixed|still_vulnerable|inconclusive",
-      "evidence": "specific current source, exploit, test, or proof-gap evidence"
-    }
-  ]
-}
-```
+Use the caller's supplied output contract. For a direct JSON request, use [the JSON result contract](references/json-result.md). By default, give a readable Markdown verdict for each finding with source references, the relevant checks, and any remaining proof gaps.
 
 - Use `fixed` only when evidence proves the original security boundary is closed and legitimate behavior remains intact.
 - Use `still_vulnerable` only when evidence proves the original vulnerable path remains reachable.

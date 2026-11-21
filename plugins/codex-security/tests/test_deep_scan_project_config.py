@@ -89,7 +89,14 @@ def test_headless_project_limits_are_isolated_from_unrelated_scans(tmp_path, mon
         "newScanTarget": str(target.resolve())
     }
     second = begin_deep_scan(
-        state, "other-owner", "--target-path", str(target), "--scan-root", str(tmp_path / "scans")
+        state,
+        "other-owner",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        "--confirmed-concurrent-scan-id",
+        first["scanId"],
     )["deepScan"]
     assert first["config"]["workers"] == 2
     assert first["config"]["maxTimeHours"] == 0.5

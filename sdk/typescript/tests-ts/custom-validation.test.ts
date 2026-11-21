@@ -1294,13 +1294,16 @@ describe("custom validation", () => {
     expect(standard).not.toContain("validate-scan-findings.md");
     expect(standard).not.toContain("security-scan/SKILL.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
+    expect(diff).toContain(
+      "<plugin_dir>/skills/security-diff-scan/references/compact-phases.md",
+    );
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
     );
     expect(diff).toContain("Run `$finding-discovery`");
     expect(diff).toContain(
-      "Immediately save a `complete: false` semantic draft",
+      "Immediately checkpoint the model and empty findings",
     );
     expect(diff).toContain('"format": "markdown", "content": "<model text>"');
     expect(diff).not.toContain("run `$validation` once");

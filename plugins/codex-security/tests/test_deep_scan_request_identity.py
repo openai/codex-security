@@ -43,6 +43,7 @@ def test_target_request_does_not_reuse_different_user_context(
         scan_root,
         thread_id="thread-new-request",
         user_context=next_context,
+        confirmed_concurrent_scans=(first_scan_id,),
     )
 
     assert requested["startDisposition"] == "created"
@@ -97,6 +98,7 @@ def test_terminal_reuse_matches_discovery_context_after_edit(
             scan_root,
             thread_id="thread-new-request",
             user_context=context,
+            confirmed_concurrent_scans=(scan_id,) if disposition == "created" else (),
         )
         assert requested["startDisposition"] == disposition
         assert (requested["deepScan"]["scanId"] == scan_id) == (disposition == "joined")
@@ -185,6 +187,7 @@ def test_begin_and_resume_after_recorded_deep_scan_tables_are_repaired(
             scan_root,
             thread_id=thread_id,
             user_context=expected_context,
+            confirmed_concurrent_scans=(str(first["scanId"]),),
         )
     scan_id = str(started["deepScan"]["scanId"])
     assert started["startDisposition"] == "created"
@@ -243,6 +246,7 @@ def test_upgrade_keeps_unknown_discovery_context_resumable_but_not_reusable(
         scan_root,
         thread_id="thread-new-request",
         user_context=current_context,
+        confirmed_concurrent_scans=(scan_id,),
     )
     assert requested["startDisposition"] == "created"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:

@@ -248,7 +248,7 @@ function validateExpectation(
   }
 }
 
-function expectedCoverageMode(
+export function expectedCoverageMode(
   target: NormalizedTarget,
   mode: ScanMode,
 ): CoverageDocument["mode"] {

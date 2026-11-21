@@ -11,7 +11,7 @@ import {
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
 } from "./errors.js";
-import { renderDiscoveryPrompt } from "./templates.js";
+import { renderDiscoveryPrompt, reviewInstructions } from "./templates.js";
 import {
   writeWorkerUsageReceipt,
   type WorkerUsageReceipt,
@@ -131,6 +131,7 @@ export class DeepScanWorkerRunner {
       promptPath,
       promptRoot,
       artifactDir,
+      feedbackPath: feedback,
       validate: async () => {
         discoveryResult = await validateDiscoveryArtifacts(
           artifacts,
@@ -219,6 +220,7 @@ export class DeepScanWorkerRunner {
     promptPath: string;
     promptRoot: string;
     artifactDir: string;
+    feedbackPath?: string;
     validate: () => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
@@ -358,9 +360,14 @@ export class DeepScanWorkerRunner {
           },
           resumeThreadId: resumableThreadId,
           continuationPrompt:
-            resumePrompt && run.severityRubric
-              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
-              : resumePrompt,
+            resumePrompt &&
+            [
+              resumePrompt,
+              reviewInstructions(run.severityRubric, input.feedbackPath),
+              ...(run.severityRubric
+                ? [JSON.stringify({ severityRubric: run.severityRubric })]
+                : []),
+            ].join("\n"),
           artifactContext: {
             root: input.artifactDir,
             layout: "worker",

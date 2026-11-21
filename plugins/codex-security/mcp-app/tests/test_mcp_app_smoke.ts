@@ -545,6 +545,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(result.scan.model, "gpt-5.6-sol");
     assert.equal(result.scan.reasoningEffort, "high");
     assert.equal(result.scan.userContext, headlessContext);
+    assert.equal(result.investigationPolicy, undefined);
 
     const joined = await headlessServer.callTool(4, {
       name: "start_codex_security_standard_scan",
@@ -555,6 +556,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(joined);
+    for (const empty of [started.result, joined.result]) {
+      assert.equal(
+        Object.hasOwn(empty.structuredContent, "reviewerFeedbackPath"),
+        false,
+      );
+      assert.doesNotMatch(
+        empty.content[0].text,
+        /false_positive_feedback\.json/u,
+      );
+    }
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
     assert.match(
@@ -604,6 +615,17 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       /only available for Deep or diff scans/,
     );
 
+    const allowance = await headlessServer.callSuccessfulTool(80, {
+      name: "update_codex_security_scan_context",
+      arguments: {
+        scanId: result.scanId,
+        handoffClaimToken: result.handoffClaimToken,
+        maxTimeMinutes: 3,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    const policy = allowance.structuredContent.investigationPolicy;
+    assert.equal(typeof policy, "string");
     await headlessServer.callSuccessfulTool(81, {
       name: "update_codex_security_scan_progress",
       arguments: {
@@ -630,20 +652,55 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       "discovery",
     );
 
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.scanId,
+      result.scanId,
+    );
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.handoffClaimToken,
+      result.handoffClaimToken,
+    );
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.investigationPolicy,
+      policy,
+    );
+    assert.ok(rejoinedAfterPreflight.content[0].text.includes(policy));
+
     for (const threadSource of [undefined, "security_scan"]) {
       let scan = result;
       if (threadSource) {
-        const usageScan = await headlessServer.callSuccessfulTool(83, {
+        const launch = {
           name: "start_codex_security_standard_scan",
           arguments: {
             targetPath: target,
             userContext: "Check completion usage.",
           },
           _meta: { "openai/threadId": ownerThread },
-        });
+        };
+        const usageScan = await headlessServer.callSuccessfulTool(83, launch);
         scan = usageScan.structuredContent;
         assert.equal(scan.startDisposition, "created");
         assert.notEqual(scan.scanId, result.scanId);
+        const rejoined = await headlessServer.callSuccessfulTool(85, launch);
+        assert.equal(rejoined.structuredContent.startDisposition, "joined");
+        assert.equal(rejoined.structuredContent.scanId, scan.scanId);
+        const feedbackPath = path.join(
+          scan.scanDir,
+          "artifacts",
+          "01_context",
+          "false_positive_feedback.json",
+        );
+        for (const response of [usageScan, rejoined]) {
+          assert.equal(
+            response.structuredContent.reviewerFeedbackPath,
+            feedbackPath,
+          );
+          assert.ok(response.content[0].text.includes(feedbackPath));
+        }
+        assert.equal(
+          (await readJson(feedbackPath))[0].sourceScanId,
+          result.scanId,
+        );
       }
       await writeCompletedContract(
         scan.scanDir,
@@ -700,6 +757,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
           completed.structuredContent.scan.usage.completion,
           undefined,
         );
+        await headlessServer.callSuccessfulTool(84, {
+          name: "set_codex_security_finding_triage",
+          arguments: {
+            occurrenceId:
+              completed.structuredContent.scan.findings[0].occurrenceId,
+            status: "closed",
+            closeReason: "false_positive",
+            note: "The fixture checks the path before the write.",
+          },
+        });
       }
     }
   } finally {
@@ -2396,6 +2463,21 @@ try {
     longUserContext,
   );
 
+  const budget = await testServer.callSuccessfulTool(92012, {
+    name: "update_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId, maxTimeMinutes: 2.5 },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.equal(budget.structuredContent.scan.userContext, longUserContext);
+  const policy = budget.structuredContent.investigationPolicy;
+  assert.ok(typeof policy === "string" && policy.includes("2.5"));
+  const resumedBudget = await testServer.callSuccessfulTool(92019, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.ok(resumedBudget.content[0].text.includes(policy));
+
   const appUserContext = "Focus on account recovery. ".repeat(120).trim();
   const appUpdatedContext = await testServer.callSuccessfulTool(92011, {
     name: "update_codex_security_scan_context_from_app",
@@ -2496,6 +2578,11 @@ try {
     name: "complete_codex_security_scan",
     arguments: { handoffClaimToken, scanId },
   });
+  const historical = await testServer.callSuccessfulTool(92029, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+  });
+  assert.equal(historical.structuredContent.investigationPolicy, undefined);
   assert.deepEqual(completed.structuredContent.scan.warnings, [
     "Directory contents changed while the scan was running; results were saved for the original snapshot.",
   ]);

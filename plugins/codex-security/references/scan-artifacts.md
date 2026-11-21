@@ -11,15 +11,13 @@ Follow `artifact-storage.md` for storage selection, file authoring and shared th
 - `scan_id=<scanId returned by the MCP scan context, or CODEX_SECURITY_SCAN_ID when provided>`
 - `scan_dir=<scanDir returned by the MCP scan context>`; when `CODEX_SECURITY_SCAN_DIR` is provided, use that existing SDK-owned directory. Never derive a scan directory from a repository name, revision, timestamp or temporary-directory formula.
 - For a standalone phase, use the `directory` returned by `save_codex_security_artifact` for the selected `targetPath` and `storage`, as described in `artifact-storage.md`.
-- `target_paths_file=<CODEX_SECURITY_TARGET_PATHS_FILE>` for SDK scoped-path scans; reference it as `"$CODEX_SECURITY_TARGET_PATHS_FILE"` in POSIX shells or `"$env:CODEX_SECURITY_TARGET_PATHS_FILE"` in PowerShell. This read-only scope file lives outside the scan directory. Pass it unchanged as `--scopes-file` to the SDK's primary inventory command and to `bind-repo-scopes` before finalization. For `make-hosted-repo-scope-input`, review the inventory at the path it reports. Use the supplied scan-directory recovery command only if a later shell cannot read that file. Do not print, evaluate, modify, or treat the scope file as shell syntax.
+- `target_paths_file=<CODEX_SECURITY_TARGET_PATHS_FILE>` for SDK scoped-path scans. This read-only scope file lives outside the scan directory. Pass it unchanged as `--scopes-file` to the SDK's primary inventory command and to `bind-repo-scopes` before finalization. For `make-hosted-repo-scope-input`, review the inventory at the path it reports. Use the supplied scan-directory recovery command only if a later shell cannot read that file. Do not print, evaluate, modify, or treat the scope file as shell syntax.
 - `artifacts_dir=<scan_dir>/artifacts`
 - `context_dir=<artifacts_dir>/01_context`
 - `discovery_dir=<artifacts_dir>/02_discovery`
 - `coverage_dir=<artifacts_dir>/03_coverage`
 - `reconciliation_dir=<artifacts_dir>/04_reconciliation`
 - `findings_dir=<artifacts_dir>/05_findings`
-
-Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
 
 ## Threat Model (Phase 1) Paths
 
@@ -38,15 +36,9 @@ Deep Scan runs Standard audits. Each worker saves findings and pending review wo
 
 After each batch the host compares the repairs described in the reports. It checks disputed pairs that share an assigned repair, or cite overlapping code when a repair could not be assigned. It merges such a pair only when one narrow edit covers both reports in full and each supplies supporting code. A finding with an additional faulty operation or insufficient evidence stays separate. Each original finding and its citations stay in the saved union. The host records comparison failures and keeps unresolved reports. It writes the parent’s unsealed `scan-manifest.json` and `findings.json` with the accepted results and their review state. If the deadline arrives before a worker finishes, the parent retains the reason and any saved findings or pending review. See `scan-contract.md` for field definitions.
 
-- A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })` and reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
-  - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.
-  - After normalization, compact validation adds exactly one `validation` object to every row with `disposition` (`reportable`, `suppressed`, `not_applicable`, or `deferred`), `method`, `confidence` (`high`, `medium`, or `low`), `confidence_rationale`, concise `rubric` and `evidence`, `counterevidence_or_proof_gap`, `remaining_uncertainty`, and optional `artifact_paths`. Add `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from the discovery fields.
-  - Compact attack-path analysis adds exactly one `attack_path` object to each validation row marked `reportable` or `deferred`, with `decision` (`reportable`, `ignore`, or `deferred`), `dataflow`, `reachability`, `counterevidence`, `impact` and `likelihood` (`high`, `medium`, `low`, `ignore`, or `unknown`), `severity` (`critical`, `high`, `medium`, `low`, `ignore`, or `unknown`), `severity_rationale`, `change_conditions`, and `proof_gap` when deferred. A `reportable` decision requires severity `critical`, `high`, `medium`, or `low`; `ignore` requires severity `ignore`; `deferred` uses a provisional reportable severity or `unknown`.
-  - Record all validations through `record_codex_security_candidate_validations` and all eligible attack-path decisions through `record_candidate_attack_paths`. The tools atomically preserve all discovery fields and candidate order.
-- Optional compact validation evidence: `<discovery_dir>/validation_artifacts/<candidate_id>/`
-  - Create this directory only for actual PoCs, crafted inputs, or logs and reference those paths from the row's `validation` object. Do not create placeholder per-candidate directories or narrative reports.
+The [compact diff phase contracts](../skills/security-diff-scan/references/compact-phases.md) describe the candidate batch tools. The tools maintain one shared `<discovery_dir>/candidate_ledger.jsonl`. Retain optional validation PoCs, crafted inputs, or logs under `<discovery_dir>/validation_artifacts/<candidate_id>/` and reference them from the validation record.
 
-The worklist, per-finding receipt, and phase-report paths below apply only to standalone or legacy Diff workflows. Compact Workbench Diff scans use one shared `<discovery_dir>/candidate_ledger.jsonl`, written by `record_codex_security_discovery_candidates` and updated by the bound batch tools `record_codex_security_candidate_validations` and `record_candidate_attack_paths`; they do not create per-finding ledgers, reports, or receipts. Standard and Deep scans assemble validated findings directly without persisted source inventories or candidate ledgers.
+The changed-file worklist, per-finding receipts and phase reports below serve standalone or legacy workflows. Standard and Deep scans assemble validated findings directly.
 
 ### Diff Discovery And Coverage
 
@@ -82,12 +74,18 @@ Standard scans and Deep Standard scan workers include validation directly in the
 - Per-finding validation report: `<findings_dir>/<candidate_id>/validation_report.md`
 - Per-finding validation artifacts: `<findings_dir>/<candidate_id>/validation_artifacts/`
 
+For each candidate in a retained phase workflow, save its validation report and record its method, evidence or exact proof gap, disposition, and report or evidence reference in its phase receipt. Use the storage policy for retained files. Include the caller's supplied reviewer feedback as evidence.
+
+For repository-wide or scoped-path retained phases, preserve a closure table with the candidate/ledger row ID, instance key, source reference and seed anchor when supplied, root-control location, entrypoint/source, sink/control, disposition, counterevidence or proof gap, and `survives: yes|no|uncertain`.
+
 ## Attack-Path Analysis (Phase 4) Paths
 
 Standard scans and Deep Standard scan workers include attack-path analysis directly in their final finding semantics. Compact workbench-backed diff scans record attack-path decisions in each candidate's nested `attack_path` record through their bound batch tool. Standalone or legacy diff workflows may use these paths:
 
 - Scan-level attack-path analysis report: `<findings_dir>/attack_path_analysis_report.md` if applicable
 - Per-finding attack-path analysis report: `<findings_dir>/<candidate_id>/attack_path_analysis_report.md`
+
+For retained phase reports, give every entering candidate a decision and a receipt with its ID, facts or exact proof gap, and report reference. Record ignored candidates before excluding them from the surviving set. For repository-wide or scoped-path retained phases, include validation closure rows marked `reportable` or `survives: yes`, including rows without finding numbers. Preserve the affected entrypoint/wrapper, root-control, sink, and concrete-implementation locations from validation.
 
 ## Final Report Paths
 

@@ -517,7 +517,12 @@ def test_get_scan_includes_desktop_deep_worker_threads_without_continuation(tmp_
         state_dir, codex_home, repository, tmp_path / "results", thread_id="desktop-owner"
     )["deepScan"]
     other = begin_target_scan(
-        state_dir, codex_home, other_repository, tmp_path / "results", thread_id="other-owner"
+        state_dir,
+        codex_home,
+        other_repository,
+        tmp_path / "results",
+        thread_id="other-owner",
+        confirmed_concurrent_scans=(scan["scanId"],),
     )["deepScan"]
     workers = [
         (scan["scanId"], "setup", "succeeded", "setup-worker"),
@@ -1106,9 +1111,10 @@ def copy_history_state(database: Path, tmp_path: Path) -> Path:
     [
         (("2026-08-01T00:00:00Z", "2026-08-01T01:00:00+02:00"), (1, 0)),
         (("2026-08-01T00:00:00.000200Z", "2026-08-01T01:00:00.000100+01:00"), (1, 0)),
+        (("2026-08-01T00:00:00Z", "2026-08-01T00:00:00.125000Z"), (0, 1)),
         (("2026-08-01T01:00:00+01:00", "2026-08-01T00:00:00Z"), (0, 1)),
     ],
-    ids=["mixed-offsets", "microseconds", "equal-instants"],
+    ids=["mixed-offsets", "microseconds", "mixed-precision", "equal-instants"],
 )
 def test_finding_occurrence_history_uses_start_instants(
     tmp_path: Path, recurring_history, timestamps: tuple[str, str], expected_order: tuple[int, int]
@@ -1140,7 +1146,9 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
-        known_since = connection.execute("SELECT MIN(started_at) FROM scans").fetchone()[0]
+        known_since = connection.execute(
+            "SELECT started_at FROM scans WHERE id = ?", (before["scanId"],)
+        ).fetchone()[0]
 
     before_finding, after_finding = (
         get_scan(state_dir, scan["scanId"])["scan"]["findings"][0] for scan in (before, after)
@@ -1521,8 +1529,7 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     assert after_finding["matches"][0]["occurrenceId"] == previous["occurrenceId"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         known_since = connection.execute(
-            "SELECT MIN(started_at) FROM scans WHERE id IN (?, ?)",
-            (before["scanId"], after["scanId"]),
+            "SELECT started_at FROM scans WHERE id = ?", (before["scanId"],)
         ).fetchone()[0]
     assert before_finding["knownSince"] == known_since
     assert after_finding["knownSince"] == known_since
