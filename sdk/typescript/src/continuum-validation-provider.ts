@@ -185,25 +185,21 @@ function severityId(level: string): number {
   );
 }
 
-/**
- * Convert a code finding to sink-first OCSF 2002. Opt in only after reviewing
- * validation.method and validation.summary for transfer. Continuum stores the
- * submitted document verbatim, including any sensitive text in those fields.
- */
+/** Convert a code finding to sink-first OCSF 2002. */
 export function findingToOcsf(
   finding: AnyFinding,
   now = new Date(),
-  options: Pick<ContinuumValidationOptions, "includeLocalValidation"> = {},
+  includeLocalValidation = false,
 ): Record<string, unknown> {
   const id = occurrence(finding);
   const title = text(finding["title"]) ?? id;
   const originalSummary = text(finding["summary"]) ?? title;
   let summary = originalSummary;
-  if (options.includeLocalValidation === true) {
+  if (includeLocalValidation === true) {
     const validation = object(finding["validation"]);
     for (const field of ["method", "summary"]) {
       const value = validation[field];
-      if (typeof value === "string" && value.trim())
+      if (typeof value === "string" && /\S/u.test(value))
         summary += `\n\nCodex local validation ${field}\n${value}`;
     }
   }
@@ -249,11 +245,11 @@ export function findingToOcsf(
     vulnerabilities: [vulnerability],
   };
   if (summary !== originalSummary) {
-    if (Array.from(summary).length > 65_536)
+    if (/^.{65537}/su.test(summary))
       throw new Error(
         "Continuum descriptions are limited to 65,536 characters.",
       );
-    if (Buffer.byteLength(JSON.stringify(document), "utf8") > 256 * 1024)
+    if (Buffer.byteLength(JSON.stringify(document)) > 256 * 1024)
       throw new Error("Continuum OCSF document exceeds 256 KiB.");
   }
   return document;
@@ -569,7 +565,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
             );
           const time = now();
           submissions[index] = await submit(
-            findingToOcsf(item, time, this.#options),
+            findingToOcsf(item, time, this.#options.includeLocalValidation),
             time,
           );
         } catch (error) {

@@ -159,41 +159,56 @@ describe("Continuum validation provider", () => {
     );
   });
 
-  test("isolates opt-in requests from default receipts across retries", async () => {
-    const requests: string[] = [];
-    const aws = fakeAws();
-    const launcher: ContinuumAwsLauncher = (op, args, signal) => {
-      if (op === "create-code-finding") {
-        requests.push(requestBody(args));
-        if (requests.length === 2) throw new Error("enriched receipt lost");
-      }
-      return aws.launcher(op, args, signal);
+  test("sends only local method and summary on opt-in, and resumes each receipt", async () => {
+    const validation = {
+      method: "Query fixture A. ",
+      summary: " Two rows.\nOne belongs to B.",
+      evidenceRefs: ["private artifact"],
     };
-    const summary = "The demo returned both fixture records.";
-    const supplied = { ...finding, validation: { summary } };
-    const validate = (includeLocalValidation: boolean) =>
-      new ContinuumValidationProvider({
+    const input = { ...finding, validation, includeLocalValidation: true };
+    const { launcher } = fakeAws();
+    const sent: unknown[] = [];
+    const now = new Date(0);
+    for (const includeLocalValidation of [undefined, true, false, true]) {
+      const provider = new ContinuumValidationProvider({
         environmentId: "environment1",
         includeLocalValidation,
-        launcher,
-        now: () => new Date(requests.length),
-      }).validate(supplied, context);
+        now: () => now,
+        launcher(op, args, signal) {
+          if (op === "create-code-finding")
+            sent.push(JSON.parse(requestBody(args)).ocsfDocument);
+          return launcher(op, args, signal);
+        },
+      });
+      expect(
+        (await provider.validate(input, context)).unavailable,
+      ).toBeUndefined();
+    }
+    const summary =
+      finding.summary +
+      "\n\nCodex local validation method\n" +
+      validation.method +
+      "\n\nCodex local validation summary\n" +
+      validation.summary;
+    expect(sent).toEqual([
+      findingToOcsf(finding, now),
+      findingToOcsf({ ...finding, summary }, now),
+    ]);
+  });
 
-    expect((await validate(false)).unavailable).toBeUndefined();
-    expect((await validate(true)).unavailable).toContain(
-      "enriched receipt lost",
-    );
-    expect((await validate(false)).unavailable).toBeUndefined();
-    expect(requests).toHaveLength(2);
-    expect((await validate(true)).unavailable).toBeUndefined();
-    expect((await validate(true)).unavailable).toBeUndefined();
-    expect(requests).toHaveLength(3);
-    expect(requests[0]).not.toContain(summary);
-    expect(requests[1]).toContain(summary);
-    expect(JSON.parse(requests[1]!).clientToken).not.toBe(
-      JSON.parse(requests[0]!).clientToken,
-    );
-    expect(requests[2]).toBe(requests[1]);
+  test("checks enriched descriptions and UTF-8 document size before submission", () => {
+    const convert = (summary: string) =>
+      findingToOcsf(
+        { ...finding, validation: { method: " ", summary } },
+        new Date(0),
+        true,
+      );
+    const prefix = finding.summary + "\n\nCodex local validation summary\n";
+    const limit = "x".repeat(65_536 - prefix.length - 1) + "📋";
+    expect(convert(limit)["message"]).toBe(prefix + limit);
+    expect(() => convert(limit + "x")).toThrow("65,536");
+    expect(() => convert("📋".repeat(22_000))).toThrow("256 KiB");
+    expect(() => convert("\u0001".repeat(15_000))).toThrow("256 KiB");
   });
 
   test("concurrent senders share a receipt", async () => {

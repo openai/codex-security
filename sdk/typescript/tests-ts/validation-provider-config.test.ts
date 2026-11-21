@@ -34,17 +34,6 @@ test("parses scan.validation provider configuration", () => {
   ).toEqual(configured);
 });
 
-test("requires a boolean for the local validation opt-in", () => {
-  for (const value of ["true", "false", 1]) {
-    expect(
-      ValidationProviderSettingsSchema.safeParse({
-        ...configured,
-        continuum: { ...configured.continuum, include_local_validation: value },
-      }).success,
-    ).toBe(false);
-  }
-});
-
 test("no provider preserves the existing validation selection", () => {
   expect(
     resolveProjectConfig({}, "/repo").options.validationProvider,

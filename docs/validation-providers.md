@@ -66,11 +66,9 @@ provider directly. Output goes to stdout. JSON contains `scanId` and one
 unavailable assessment. Check the individual records for accepted submissions.
 
 Continuum receives each selected finding's identifier, title, summary, severity,
-CWE when available, file paths and line ranges. To include the local validation
-method and summary, review those fields and set
-`scan.validation.continuum.include_local_validation: true` in the selected
-project file. AWS stores the submitted text verbatim. See
-[validation provider settings](project-configuration.md#validation-provider-settings).
+CWE when available, file paths and line ranges. Sending the local validation
+method and summary also requires an explicit opt-in for the selected findings.
+[Validation provider settings](project-configuration.md#validation-provider-settings)
 
 Before calling
 `CreateCodeFinding`, the host saves the exact request and token in its private
