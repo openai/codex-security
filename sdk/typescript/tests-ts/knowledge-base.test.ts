@@ -517,6 +517,14 @@ describe("scan knowledge bases", () => {
       docx("X", "Frame-Options", "<w:noBreakHyphen/>"),
     );
     await writeFile(
+      join(root, "positional-tab.docx"),
+      docx(
+        "Owner",
+        "security@example.com",
+        '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/>',
+      ),
+    );
+    await writeFile(
       join(root, "tracked-change.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
@@ -564,6 +572,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
     expect(documents).toContain("X-Frame-Options\n");
+    expect(documents).toContain("Owner\tsecurity@example.com\n");
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
