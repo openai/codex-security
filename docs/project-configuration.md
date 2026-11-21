@@ -136,8 +136,8 @@ limits, and aggregation and reporting can continue afterward.
 
 ### Worker speed
 
-When the Codex host supplies the launching turn’s speed, Deep Scan uses it for
-Standard scan workers, resumed workers, and finding comparisons. Selecting
+If the host supplies the launching turn’s speed at scan creation, Deep Scan
+saves it for discovery workers and finding comparisons across resumes. Selecting
 Default overrides a faster tier in the worker’s Codex config. On hosts that omit the
 turn’s speed, each worker uses the Codex configuration it loads. To keep a scan
 at Default on those hosts, leave `service_tier = "default"` in the worker’s
