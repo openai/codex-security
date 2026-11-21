@@ -2,6 +2,6 @@
   "name": "notes",
   "private": true,
   "dependencies": {
-    "linkify-it": "5.0.0"
+    "linkify-it": "5.0.2"
   }
 }
