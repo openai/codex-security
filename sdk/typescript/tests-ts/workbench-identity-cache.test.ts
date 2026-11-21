@@ -178,7 +178,8 @@ def add_finding(scan_id, finding_id, closed=False):
     )
     if closed:
         connection.execute(
-            "INSERT INTO finding_triage VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
             (occurrence, "closed", "false_positive", "Synthetic review", timestamp),
         )
     return occurrence

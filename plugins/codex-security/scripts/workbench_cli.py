@@ -392,6 +392,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_finding_triage = add_command("set-finding-triage", "--occurrence-id")
     set_finding_triage.add_argument("--status", choices=FINDING_STATUSES, required=True)
     set_finding_triage.add_argument("--close-reason", choices=FINDING_CLOSE_REASONS)
+    set_finding_triage.add_argument("--fixed-revision")
     set_finding_triage.add_argument("--note")
 
     add_command("request-finding-remediation", "--occurrence-id", "--request-id", "--action-token")

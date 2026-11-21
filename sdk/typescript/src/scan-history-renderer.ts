@@ -151,6 +151,16 @@ export function renderScanHistory(
       entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
+    for (const decision of (entry["beforeTriage"] as
+      JsonObject[] | undefined) ?? []) {
+      const revision = decision["fixedRevision"];
+      const reason = clean(decision["closeReason"]).replaceAll("_", " ");
+      wrap(
+        `Earlier finding closed as ${reason}${revision ? ` at ${clean(revision)}` : ""}.`,
+        14,
+      );
+      if (decision["note"]) wrap(clean(decision["note"]), 16);
+    }
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
     if (matches?.length && showLinkedFindings) {
       lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
@@ -461,6 +471,9 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
+    if (result["afterRevision"]) {
+      wrap(`Later scan revision: ${clean(result["afterRevision"])}`, 2);
+    }
     const groups = Map.groupBy(result["findings"] as JsonObject[], (entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===

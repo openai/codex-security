@@ -79,7 +79,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      workbenchMigrations[version - 1].name,
+      workbenchMigrations.find((item) => item.version === version)!.name,
     );
 }
 
@@ -1051,7 +1051,10 @@ test("recorded additive migrations restore missing columns and configured error 
   for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60, 61])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
-      .run(version, workbenchMigrations[version - 1].name);
+      .run(
+        version,
+        workbenchMigrations.find((item) => item.version === version)!.name,
+      );
   applyMigrations(database);
   const launch = database
     .prepare(
@@ -1488,7 +1491,7 @@ test("Node initialization leaves repository migration semantics to the Python co
       pythonMigrations(controlPath);
       await databaseInfo(directory);
       const initialized = new DatabaseSync(databasePath);
-      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60, 72);
+      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60, 72, 80);
       assert.deepEqual(
         initialized.prepare("SELECT * FROM external_source_reports").all(),
         originalReports,
