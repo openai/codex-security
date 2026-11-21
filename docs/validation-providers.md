@@ -184,35 +184,27 @@ combined severity.
 A provider can prove a related flaw without validating the submitted claim.
 Continuum labels that case “Not validated: Continuum proved a related flaw” and
 retains Codex severity (`claimMatch: different_flaw`). An `unknown` match also
-retains Codex severity. For a conclusive verdict, the heuristic compares concepts
-in the finding with those in the executed proof code. If the code or observed
-effect is missing, it uses the source analysis summary. It requires a citation
-to the first submitted source location with the exact repository-relative path
-and a starting line within the submitted range. Abbreviated paths, bare filenames and citations found only in the issue
-caption or console output leave the match unknown. Flaws at the same location
-can share vocabulary. Check the selected artifact for the specific behavior.
+retains Codex severity. Matching requires an independent source analysis or
+an executed program with an observed effect. The adapter checks for related
+security terms and a citation to the exact repository path and line range
+of the first submitted location. An abbreviated path, an HTTP payload or a
+bundle verdict alone leaves the match unknown. Distinct flaws can share both
+a location and vocabulary. Consult the selected artifact for the details.
 
-The adapter checks the AWS finding ARN, any echoed source ID, and the ID and
-type of each requested artifact. For a matching result, the supplemental
-severity can change if the issue has one member, all scoring signals identify
-that issue, and a single exploitability signal identifies the selected
-validation artifact and its verdict. The submission, validation, scoring and
-issue update timestamps must establish that order. If these scoring checks
-fail, the assessment explains the limitation and omits the scorer's
-reachability, factors and preconditions. The adapter selects the newest eligible
-linked scorer from the issue history. If another scorer might be newer, the
-linked scorer supplies its own evidence, while `severityAfter` retains the
-original severity. The current issue severity is available in `providerSeverity`.
+The newest eligible scorer supplies reachability and other scoring evidence.
+Its signals must identify the issue by ID or ARN, with a single exploitability
+signal referencing the selected proof and verdict. Timestamps must establish
+submission, validation, scoring and issue update in that order. To apply the
+issue severity to the finding, the proof must match, the issue must have one
+member and the linked scorer must be the newest on the issue. The issue
+severity is reported separately in `providerSeverity`.
 
-Legacy artifacts with an explicit conclusive verdict can qualify for matching
-and scoring when AWS omits the run status. The JSON record includes
-`proofObservation` when a matched validation has an explicit `COMPLETED`
-status, eligible linked scoring and an effect or source conclusion from AWS. An `execution` observation carries AWS’s observed `effect`.
-A `source_analysis` observation can include its inferred `effect` and
-`summary`. Each text field has whitespace normalized and is limited to
-320 characters. An effect such as `BEHAVIOR_CHANGED` gives the category
-of the observed result. Consult the identified artifact for the details
-of the execution. The original finding supplies the remediation criteria.
+A matched result with linked scoring and an explicit `COMPLETED` status can
+include a `proofObservation`. Its kind distinguishes an observed execution
+effect from a source analysis summary and inferred effect. Text fields are
+limited to 320 characters. The adapter reports the selected verdict for a
+bundle member. Source analyses and executed programs apply to the bundle as
+a whole, so its members have an unknown claim match and no observation.
 
 ### Findings that share an issue
 

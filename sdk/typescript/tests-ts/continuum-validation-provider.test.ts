@@ -91,8 +91,7 @@ function fakeAws(link = "createdIssueId") {
                 verdict: "EXPLOITABLE",
                 terminalStatus: "COMPLETED",
                 executedProof: {
-                  observedEffect: "cross-user authorization changed",
-                  path: "src/store.ts",
+                  observedEffect: "BEHAVIOR_CHANGED",
                   code: {
                     proofCode: [
                       {
@@ -703,49 +702,39 @@ describe("Continuum validation provider", () => {
   });
 });
 
-describe("claim matching", () => {
-  test.each([
-    [
-      { effect: "authorization cross-user", path: "src/store.ts:40" },
-      "on_target",
-    ],
-    [
-      {
-        effect: "authorization cross-user credential exposure",
-        path: "src/store.ts:40",
-      },
-      "on_target_escalated",
-    ],
-    [
-      { effect: "resource exhaustion and denial", path: "src/store.ts:40" },
-      "different_flaw",
-    ],
-    [{}, "unknown"],
-  ] as const)(
-    "compares demonstrated concepts, not just a shared file: %j",
-    (proof, expected) => {
-      expect(assessClaimMatch(proof, finding)).toBe(expected);
-    },
-  );
-});
-
 test.each([
-  ["src/store.ts:40–42", "on_target"],
-  ["./src/store.ts#L42", "on_target"],
-  ["src/store.ts:12", "unknown"],
-  ["src/store.ts:400", "unknown"],
-  ["src/store.ts:40-3", "unknown"],
-  ["src/store.ts:1-1000", "unknown"],
-  ["src/store.ts", "unknown"],
-  ["store.ts:40", "unknown"],
-  ["lib/src/store.ts:40", "unknown"],
-  ["src/Store.ts:40", "unknown"],
-  ["src/route.ts:11", "unknown"],
+  ["authorization at src/store.ts:40–42", "on_target"],
+  ["authorization at ./src/store.ts#L42", "on_target"],
+  [
+    "authorization and credential exposure at src/store.ts:40",
+    "on_target_escalated",
+  ],
+  ["resource exhaustion and denial at src/store.ts:40", "different_flaw"],
+  ["authorization at src/store.ts:12", "unknown"],
+  ["authorization at src/store.ts:400", "unknown"],
+  ["authorization at src/store.ts:40-3", "unknown"],
+  ["authorization at src/store.ts:1-1000", "unknown"],
+  ["authorization at src/store.ts", "unknown"],
+  ["authorization at store.ts:40", "unknown"],
+  ["authorization at lib/src/store.ts:40", "unknown"],
+  ["authorization at src/Store.ts:40", "unknown"],
+  ["authorization at src/route.ts:11", "unknown"],
 ] as const)(
-  "checks the primary submitted location against %s",
-  (citation, match) => {
-    expect(
-      assessClaimMatch("Cross-user authorization in " + citation, finding),
-    ).toBe(match);
+  "compares the proof with the primary source location: %s",
+  (evidence, match) => {
+    expect(assessClaimMatch(evidence, finding)).toBe(match);
   },
 );
+
+test("recognizes exhaustion as resource consumption", () => {
+  const claim = {
+    title: "Uncontrolled resource consumption",
+    location: "src/store.ts:40",
+  };
+  expect(assessClaimMatch("src/store.ts:40 can exhaust memory.", claim)).toBe(
+    "on_target",
+  );
+  expect(assessClaimMatch("src/store.ts:40 loads a resource.", claim)).toBe(
+    "unknown",
+  );
+});
