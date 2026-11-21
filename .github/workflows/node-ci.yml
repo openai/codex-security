@@ -323,8 +323,7 @@ jobs:
         uses: ./.github/actions/setup-tools
         with:
           cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
-      - name: Install dependencies
-        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - *install-dependencies
       - name: Install ripgrep
         run: .github/scripts/install-ripgrep.sh
       - *download-package-for-this-commit

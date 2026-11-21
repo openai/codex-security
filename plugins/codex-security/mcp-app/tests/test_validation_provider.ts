@@ -11,9 +11,20 @@ import {
 import { delimiter } from "node:path";
 import { join } from "node:path";
 import { test } from "node:test";
-import { importSource } from "./import-module.ts";
+import { importSource as bundle } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type * as Host from "../src/validation-provider.js";
+
+function importSource(path: string) {
+  return bundle(path, {
+    alias: {
+      "#validation-runtime": join(
+        import.meta.dirname,
+        "../../../../sdk/typescript/src/plugin-validation.ts",
+      ),
+    },
+  });
+}
 
 const {
   bindValidationProvider,

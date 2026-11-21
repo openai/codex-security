@@ -1,5 +1,5 @@
 // Source-only builds resolve this module. Full builds bundle the SDK
-// implementation using the first path in tsconfig.json.
+// implementation through build_mcp_app.mjs.
 export type ValidationProviderConfiguration = {
   provider: string;
   [key: string]: unknown;

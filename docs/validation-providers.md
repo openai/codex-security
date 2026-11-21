@@ -22,7 +22,7 @@ name. Without a configured provider, bare `--validate` keeps the existing Codex
 validation. This is separate from `--provider`, which selects inference.
 Project files are not discovered automatically.
 
-For automatic validation at plugin scan completion, install the packaged plugin or build the plugin alongside the SDK from a full checkout. With a standalone plugin source checkout, use the CLI on the saved scan as described below.
+For automatic validation at plugin scan completion, install the packaged plugin or build the plugin in a full checkout after installing the SDK dependencies. With a standalone plugin source checkout, use the CLI on the saved scan as described below.
 
 For a plugin scan, include the project file in the request:
 
