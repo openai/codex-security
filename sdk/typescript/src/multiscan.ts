@@ -804,12 +804,27 @@ async function runCampaign(
                       : { telemetryContext: { operationId } }),
                   });
                   if (result !== undefined) {
+                    if (!result.alreadyCompleted) {
+                      cost = result.cost;
+                      reservation?.record(cost);
+                      savedUsage = result.usage;
+                    }
                     const accepted = await loadRegistered();
-                    result =
+                    if (
                       accepted !== undefined &&
                       (await campaignReport(scanDir))?.isFile()
-                        ? { ...result, ...accepted.contract }
-                        : undefined;
+                    ) {
+                      result = { ...result, ...accepted.contract };
+                    } else if (result.alreadyCompleted) {
+                      result = undefined;
+                    } else {
+                      // Recovery consumed this attempt. Replacement
+                      // work must obtain the next retry's budget reservation.
+                      attemptedResume = false;
+                      throw new Error(
+                        "Recovered scan output could not be verified.",
+                      );
+                    }
                   }
                 }
               }
@@ -2065,10 +2080,23 @@ async function verifiedCampaignCheckout(
   let expectedPaths: readonly unknown[] = ["."];
   if (requestedPaths !== undefined) {
     const metadata = await lstat(matchedRoot).catch(undefinedIfMissingFile);
+    if (
+      metadata !== undefined &&
+      (!metadata.isDirectory() ||
+        relative(await realpath(matchedRoot), matchedRoot) !== "")
+    )
+      return undefined;
     const target = authority.recipe["target"];
-    if (metadata === undefined && target !== undefined) {
-      // Normal completion removes the checkout. Registration preserves the
-      // canonical paths resolved from the authenticated scan request.
+    const cleanupKind =
+      matchedRoot === checkout ? "checkout" : "recovery-checkout";
+    if (
+      target !== undefined &&
+      (metadata === undefined ||
+        restorePaths === undefined ||
+        receipt?.cleanupPending === cleanupKind)
+    ) {
+      // Cleanup may remove all or part of a completed checkout. Registration
+      // preserves the canonical paths from the authenticated scan request.
       if (
         !isRecord(target) ||
         target["kind"] !== "paths" ||
@@ -2081,11 +2109,6 @@ async function verifiedCampaignCheckout(
         // Older registrations may need the pinned checkout to resolve a scope.
         if (restorePaths === undefined) return undefined;
         await restorePaths(matchedRoot, requestedPaths);
-      } else if (
-        !metadata.isDirectory() ||
-        relative(await realpath(matchedRoot), matchedRoot) !== ""
-      ) {
-        return undefined;
       }
       const paths =
         task.scope === undefined
@@ -2106,13 +2129,14 @@ async function verifiedCampaignCheckout(
           await normalizeTarget(matchedRoot, paths, options.signal)
         ).paths;
       }
-      if (
-        receipt?.scope !== undefined &&
-        receipt.resolvedScope === undefined &&
-        expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/u, "")
-      )
-        return undefined;
     }
+    if (
+      metadata !== undefined &&
+      receipt?.scope !== undefined &&
+      receipt.resolvedScope === undefined &&
+      expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/u, "")
+    )
+      return undefined;
   }
   const actualPaths = new Set(scope.includePaths);
   if (

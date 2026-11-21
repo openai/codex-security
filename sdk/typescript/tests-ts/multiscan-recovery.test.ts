@@ -81,6 +81,112 @@ function receiptCost(onSerialized: () => void) {
 }
 
 describe("multiscan", () => {
+  test("reuses completed scoped output after checkout cleanup partially succeeds", async () => {
+    const { paths, source } = await repositoryFixture("partial-cleanup");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\npartial-cleanup,${source.path},${source.revision},src\n`,
+    );
+    const run = mock(completeRun);
+    const configured = options(paths, client(run), { maxAttempts: 1 });
+    const checkout = join(paths.output, "checkouts", "partial-cleanup");
+    const originalRm = filesystem.rm;
+    const removeSpy = spyOn(filesystem, "rm").mockImplementation(
+      async (...args) => {
+        if (String(args[0]) === checkout) {
+          await originalRm(join(checkout, "src"), { recursive: true });
+          throw new Error("Another checkout file is busy");
+        }
+        return originalRm(...args);
+      },
+    );
+    try {
+      expect(await runMultiscan(configured)).toMatchObject({ completed: 1 });
+    } finally {
+      removeSpy.mockRestore();
+    }
+    expect((await lstat(checkout)).isDirectory()).toBe(true);
+    await expect(lstat(join(checkout, "src"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const ledger = join(paths.output, "results.jsonl");
+    const before = await readFile(ledger);
+    expect(await results(ledger)).toMatchObject([
+      { cleanupPending: "checkout" },
+    ]);
+
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+      failed: 0,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(await readFile(ledger)).toEqual(before);
+    await expect(lstat(checkout)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.each([1, 2])(
+    "counts rejected billed recovery against %i allowed attempts and the total budget",
+    async (maxAttempts) => {
+      const { paths, source } = await repositoryFixture("rejected-resume");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,mode\nrejected-resume,${source.path},${source.revision},deep\n`,
+      );
+      await runMultiscan(
+        options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+      );
+      const ledger = join(paths.output, "results.jsonl");
+      const [receipt] = await results(ledger);
+      await mkdir(receipt!["outputDir"] as string, {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(
+        ledger,
+        JSON.stringify({ ...receipt, resolvedScope: "incorrect" }) + "\n",
+      );
+      const cost = {
+        model: "synthetic-model",
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 1,
+        estimatedUsd: maxAttempts === 1 ? 4 : 3,
+      };
+      const freshLimits: (number | undefined)[] = [];
+      const recoveredLimits: (number | undefined)[] = [];
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_checkout, scan = {}) => {
+            freshLimits.push(scan.maxCostUsd);
+            return completedScan(scan.outputDir!);
+          }),
+          {
+            maxAttempts,
+            maxTotalCostUsd: 4,
+            recoverScan: async (scanDir, recovery) => {
+              recoveredLimits.push(recovery.maxTotalCostShareUsd);
+              return { ...(await completedScan(scanDir)), cost };
+            },
+          },
+        ),
+      );
+      expect(recoveredLimits).toEqual([4 / maxAttempts]);
+      expect(freshLimits).toEqual(maxAttempts === 1 ? [] : [1]);
+      expect(summary).toMatchObject({
+        completed: maxAttempts === 1 ? 0 : 1,
+        failed: maxAttempts === 1 ? 1 : 0,
+      });
+      expect((await results(ledger))[1]).toMatchObject({
+        attempt: 1,
+        status: "failed",
+        cost,
+      });
+    },
+  );
+
   test.each(["ordinary", "recovery"] as const)(
     "preserves a replacement checkout when a completed %s attempt is skipped",
     async (kind) => {
@@ -2333,15 +2439,19 @@ describe("multiscan", () => {
   );
 
   test.each([
-    ["recorded", false, 1],
-    ["orphan", false, 2],
-    ["orphan", true, 1],
+    ["recorded", false, 1, false],
+    ["orphan", false, 2, false],
+    ["orphan", true, 1, false],
+    ["recorded", false, 1, true],
+    ["orphan", false, 2, true],
   ] as const)(
-    "recovers %s output with a missing report when the callback writes it=%p (attempt %i)",
-    async (history, writesReport, attempt) => {
+    "recovers %s output with a missing report when the callback writes it=%p (attempt %i, already completed=%p)",
+    async (history, writesReport, attempt, alreadyCompleted) => {
       const { paths } = await repositoryFixture("missing-report");
       const run = mock(completeRun);
-      const campaign = options(paths, client(run));
+      const campaign = options(paths, client(run), {
+        maxAttempts: alreadyCompleted ? 1 : 2,
+      });
       const { resultsPath } = await runMultiscan(campaign);
       const [receipt] = await results(resultsPath);
       const report = join(receipt!["outputDir"] as string, "report.md");
@@ -2352,6 +2462,7 @@ describe("multiscan", () => {
         return {
           ...(await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT })),
           cost: null,
+          alreadyCompleted,
         };
       });
       const resume = () => runMultiscan({ ...campaign, recoverScan });
@@ -2359,8 +2470,21 @@ describe("multiscan", () => {
       expect(await resume()).toMatchObject({ completed: 1, failed: 0 });
       const receipts = await results(resultsPath);
       const last = receipts.at(-1)!;
-      expect(last).toMatchObject({ status: "completed", attempt });
-      expect(receipts).toHaveLength(history === "orphan" ? 1 : attempt);
+      expect(
+        receipts.map(({ status, attempt }) => ({ status, attempt })),
+      ).toEqual([
+        ...(history === "recorded"
+          ? [{ status: "completed", attempt: 1 }]
+          : []),
+        ...(history === "recorded"
+          ? []
+          : [
+              ...(writesReport || alreadyCompleted
+                ? []
+                : [{ status: "failed", attempt: 1 }]),
+              { status: "completed", attempt },
+            ]),
+      ]);
       expect(
         (await lstat(join(last["outputDir"] as string, "report.md"))).isFile(),
       ).toBe(true);
