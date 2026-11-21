@@ -958,6 +958,8 @@ async function writeCompletedContract(
       {
         ruleId: "path-traversal.archive-extraction",
         identity: { anchor: "archive-entry-write-without-containment" },
+        // A model-authored field cannot stand in for protected host state.
+        continuumAssessment: { verdict: "EXPLOITABLE", provider: "continuum" },
         title: "Fixture finding",
         summary: "An attacker-controlled path reaches a filesystem write.",
         severity: { level: "high" },
@@ -2638,6 +2640,7 @@ try {
   assertNoError(stage);
   assert.deepEqual(Object.keys(stage.result.structuredContent), ["scan"]);
   const scopedScan = stage.result.structuredContent.scan;
+  assert.equal(scopedScan.findings[0].continuumAssessment, undefined);
   assert.deepEqual(Object.keys(scopedScan).sort(), [
     "findings",
     "scanDir",
