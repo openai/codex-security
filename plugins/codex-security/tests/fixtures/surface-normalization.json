@@ -1,0 +1,374 @@
+[
+  {
+    "case": "absent_receipts",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found"
+      }
+    ],
+    "ids": [
+      "surface-3cefd686cc392d8b"
+    ]
+  },
+  {
+    "case": "empty_receipts",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "receiptRefs": []
+      }
+    ],
+    "ids": [
+      "surface-ee3c59c06af22dba"
+    ]
+  },
+  {
+    "case": "schema_order",
+    "surfaces": [
+      {
+        "notes": "synthetic notes",
+        "extra": {
+          "tail": true
+        },
+        "receiptRefs": [],
+        "disposition": "no_issue_found",
+        "label": "Synthetic anonymous review",
+        "riskArea": "synthetic risk"
+      }
+    ],
+    "ids": [
+      "surface-5d944884eace65db"
+    ]
+  },
+  {
+    "case": "nested_key_order",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "10": 10,
+          "4294967294": "index",
+          "z": 1,
+          "4294967295": "ordinary",
+          "01": "ordinary",
+          "a": [
+            {
+              "b": 2,
+              "a": 1
+            }
+          ],
+          "123456789012345678901234567890": true
+        }
+      }
+    ],
+    "ids": [
+      "surface-57e57124b10ea439"
+    ]
+  },
+  {
+    "case": "unicode_controls",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "notes": "\u00e9\u4e2d\ud83d\udca9\u2028\u2029\n\t\u0000\\\""
+      }
+    ],
+    "ids": [
+      "surface-58d7152a90cc2f34"
+    ]
+  },
+  {
+    "case": "surrogate_pair",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": "\ud83d\udca9"
+      }
+    ],
+    "ids": [
+      "surface-01580048a6953286"
+    ]
+  },
+  {
+    "case": "proto_outer",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "__proto__": {
+          "synthetic": true
+        },
+        "constructor": "synthetic constructor",
+        "prototype": {
+          "value": 1
+        }
+      }
+    ],
+    "ids": [
+      "surface-1022e758b5498953"
+    ]
+  },
+  {
+    "case": "proto_nested",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "__proto__": {
+            "synthetic": true
+          },
+          "constructor": "synthetic constructor"
+        }
+      }
+    ],
+    "ids": [
+      "surface-1dfd05371032c812"
+    ]
+  },
+  {
+    "case": "named_reserved",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "id": "api"
+      },
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "id": "api"
+      },
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "id": "api-2"
+      },
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "id": "api",
+        "candidateId": "api-3"
+      }
+    ],
+    "ids": [
+      "api",
+      "api-4",
+      "api-2",
+      "api-5"
+    ]
+  },
+  {
+    "case": "hash_collision",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "receiptRefs": []
+      },
+      {
+        "id": "surface-ee3c59c06af22dba",
+        "label": "First named review",
+        "disposition": "no_issue_found",
+        "receiptRefs": []
+      },
+      {
+        "id": "surface-ee3c59c06af22dba",
+        "label": "Second named review",
+        "disposition": "no_issue_found",
+        "receiptRefs": []
+      }
+    ],
+    "ids": [
+      "surface-ee3c59c06af22dba-2",
+      "surface-ee3c59c06af22dba",
+      "surface-ee3c59c06af22dba-3"
+    ]
+  },
+  {
+    "case": "proto_hash_collision",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "__proto__": {
+          "synthetic": true
+        }
+      },
+      {
+        "id": "surface-3cefd686cc392d8b",
+        "label": "First named review",
+        "disposition": "no_issue_found",
+        "receiptRefs": []
+      },
+      {
+        "id": "surface-3cefd686cc392d8b",
+        "label": "Second named review",
+        "disposition": "no_issue_found",
+        "receiptRefs": []
+      }
+    ],
+    "ids": [
+      "surface-3cefd686cc392d8b-2",
+      "surface-3cefd686cc392d8b",
+      "surface-3cefd686cc392d8b-3"
+    ]
+  },
+  {
+    "case": "number_0",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": -0.0
+        }
+      }
+    ],
+    "ids": [
+      "surface-ec3ac2356c0af3a1"
+    ]
+  },
+  {
+    "case": "number_1",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 5e-324
+        }
+      }
+    ],
+    "ids": [
+      "surface-022a67ba71d3bbee"
+    ]
+  },
+  {
+    "case": "number_2",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 2.2250738585072014e-308
+        }
+      }
+    ],
+    "ids": [
+      "surface-87cdc9230400d4e3"
+    ]
+  },
+  {
+    "case": "number_3",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 1e-07
+        }
+      }
+    ],
+    "ids": [
+      "surface-d0551a035449cc98"
+    ]
+  },
+  {
+    "case": "number_4",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 9.999999999999997e-07
+        }
+      }
+    ],
+    "ids": [
+      "surface-bb8ed442973b0cee"
+    ]
+  },
+  {
+    "case": "number_5",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 1e-06
+        }
+      }
+    ],
+    "ids": [
+      "surface-bfb5f7ced02c7148"
+    ]
+  },
+  {
+    "case": "number_6",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 1.0000000000000002e-06
+        }
+      }
+    ],
+    "ids": [
+      "surface-bb6c124a4182f476"
+    ]
+  },
+  {
+    "case": "number_11",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 9007199254740991
+        }
+      }
+    ],
+    "ids": [
+      "surface-a523b8d4be9f9538"
+    ]
+  },
+  {
+    "case": "number_16",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": 1.2345678901234567
+        }
+      }
+    ],
+    "ids": [
+      "surface-47c3b109c18c7ac9"
+    ]
+  },
+  {
+    "case": "number_17",
+    "surfaces": [
+      {
+        "label": "Synthetic anonymous review",
+        "disposition": "no_issue_found",
+        "extra": {
+          "value": -1.2345678901234567
+        }
+      }
+    ],
+    "ids": [
+      "surface-39ca260545d97f54"
+    ]
+  }
+]
