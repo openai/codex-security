@@ -97575,7 +97575,7 @@ function resultTitle(result, inputs) {
   return "Scan completed. No findings meet the failure threshold.";
 }
 function resultSummary(result, inputs, target, artifactUrl) {
-  const esc = (value, limit = 4e3) => html(plain(value, limit));
+  const esc = (value, limit2 = 4e3) => html(plain(value, limit2));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(" \xB7 ") : "unavailable";
   const usage = result.usage;
   const tokens = usage ? `${usage.input_tokens.toLocaleString("en-US")} input (${usage.cached_input_tokens.toLocaleString("en-US")} cached) \xB7 ${usage.output_tokens.toLocaleString("en-US")} output` : "unavailable";
@@ -97593,23 +97593,60 @@ function resultSummary(result, inputs, target, artifactUrl) {
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
-  if (result.scopeLimitations?.length) {
-    parts.push("**Scope limitations**\n\n" + result.scopeLimitations.map((note) => `- ${esc(note)}`).join("\n"));
-  }
-  if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
-  for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
-  for (const finding of result.findings.slice(0, 30)) {
-    parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
+  const statusNotes = [];
+  if (result.reportStatus === "partial") statusNotes.push("SARIF report is unavailable; scan results and other reports are still available.");
+  if (result.scanStatus !== "completed") statusNotes.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
+  const footer = "Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.";
+  const omittedFindings = (count) => `${count} additional ${count === 1 ? "finding is" : "findings are"} available in the JSON/SARIF reports.`;
+  const findingCount = result.findings.length;
+  const limit = 58e3 - Buffer.byteLength([...statusNotes, footer].join("\n\n"));
+  const renderBody = (budget) => {
+    let remaining = budget;
+    let summary2 = "";
+    const append = (block, separator = "\n\n") => {
+      const bytes = Buffer.byteLength(block) + separator.length;
+      if (bytes > remaining) return false;
+      remaining -= bytes;
+      summary2 += summary2 ? separator + block : block;
+      return true;
+    };
+    for (const part of parts) append(part);
+    for (const [index, note] of (result.scopeLimitations ?? []).entries()) {
+      const line = `- ${esc(note)}`;
+      if (!append(index === 0 ? `**Scope limitations**
+
+${line}` : line, index === 0 ? "\n\n" : "\n")) break;
+    }
+    for (const note of statusNotes) summary2 += `
+
+${note}`;
+    for (const error2 of result.errors.slice(0, 10)) {
+      if (!append(`<pre>${esc(error2)}</pre>`)) break;
+    }
+    let displayed = 0;
+    for (const finding of result.findings.slice(0, 30)) {
+      const block = `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
 
 <code>${esc(finding.path ?? "No source location")}:${finding.startLine ?? "?"}</code>
 
-<pre>${esc(finding.summary, 1200)}</pre>`);
+<pre>${esc(finding.summary, 1200)}</pre>`;
+      if (!append(block)) break;
+      displayed += 1;
+    }
+    return { summary: summary2, displayed, remaining };
+  };
+  let body2 = renderBody(limit);
+  const omitted = findingCount - body2.displayed;
+  if (omitted > 0 && Buffer.byteLength(omittedFindings(omitted)) + 2 > body2.remaining) {
+    body2 = renderBody(limit - Buffer.byteLength(omittedFindings(findingCount)) - 2);
   }
-  const additional = result.findings.length - 30;
-  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? "finding is" : "findings are"} available in the JSON/SARIF reports.`);
-  parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
-  return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
+  const additional = findingCount - body2.displayed;
+  const notice2 = additional > 0 ? `
+
+${omittedFindings(additional)}` : "";
+  return `${body2.summary}${notice2}
+
+${footer}`;
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {
