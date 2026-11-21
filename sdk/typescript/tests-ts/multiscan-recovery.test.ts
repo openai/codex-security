@@ -2494,7 +2494,7 @@ describe("multiscan", () => {
         skipped: 1,
       });
       expect(await results(resultsPath)).toEqual(receipts);
-      expect(recoverScan).toHaveBeenCalledTimes(1);
+      expect(recoverScan).toHaveBeenCalledTimes(history === "recorded" ? 0 : 1);
       expect(run).toHaveBeenCalledTimes(attempt);
     },
   );

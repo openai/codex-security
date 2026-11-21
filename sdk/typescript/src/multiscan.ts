@@ -1918,20 +1918,6 @@ async function loadResumableScan(
       signal,
     );
     const reportMissing = (await campaignReport(scanDir)) === undefined;
-    if (reportMissing && recoverScan !== undefined) {
-      if ((await recoverScan(scanDir, options)) === undefined) return undefined;
-      const recovered = await loadRegisteredCampaignScan(
-        await readCampaignContract(scanDir, pluginRoot, signal),
-        attempt,
-      );
-      if (recovered instanceof Error) throw recovered;
-      if (
-        recovered === undefined ||
-        recovered.authority.seal_manifest_digest !==
-          accepted.authority.seal_manifest_digest
-      )
-        return undefined;
-    }
     if (
       reportMissing &&
       receipt.scanId === undefined &&
@@ -2123,15 +2109,15 @@ async function verifiedCampaignCheckout(
         return undefined;
       expectedPaths = target["paths"];
     } else {
-      if (metadata === undefined) {
-        // Older registrations may need the pinned checkout to resolve a scope.
-        if (restorePaths === undefined) return undefined;
-        await restorePaths(matchedRoot, requestedPaths);
-      }
       const paths =
         task.scope === undefined
           ? requestedPaths
           : [resolve(matchedRoot, task.scope)];
+      if (metadata === undefined) {
+        // Older registrations may need the pinned checkout to resolve a scope.
+        if (restorePaths === undefined) return undefined;
+        await restorePaths(matchedRoot, paths);
+      }
       try {
         expectedPaths = (
           await normalizeTarget(matchedRoot, paths, options.signal)
@@ -2142,7 +2128,7 @@ async function verifiedCampaignCheckout(
         if (!error.message.startsWith("Path target does not exist:"))
           throw error;
         // An interrupted checkout can be missing individual tracked paths.
-        await restorePaths(matchedRoot, requestedPaths);
+        await restorePaths(matchedRoot, paths);
         expectedPaths = (
           await normalizeTarget(matchedRoot, paths, options.signal)
         ).paths;

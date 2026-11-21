@@ -2812,6 +2812,23 @@ for (const nested of [false, true, "chain"] as const) {
   );
 }
 
+test("retained scope recovery restores a literal tilde CSV path", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "literal-tilde-source");
+  await mkdir(join(source.path, "~", "src"), { recursive: true });
+  await writeFile(join(source.path, "~", "src", "app.ts"), "export {};\n");
+  await pinRecoveryTask(paths, source, "Track literal tilde scope", "~/src");
+  const campaign = await completedCampaign(paths);
+  const checkout = cloneRetained(paths, source);
+  await rm(join(checkout, "~", "src"), { recursive: true });
+
+  await campaign.expectReused();
+
+  expect(await readFile(join(checkout, "~", "src", "app.ts"), "utf8")).toBe(
+    "export {};\n",
+  );
+});
+
 test("followup recovery restores deleted paths above the default subprocess buffer", async () => {
   const paths = await fixture();
   const source = await repository(paths.root, "large-path-list-source");
@@ -3085,6 +3102,85 @@ for (const [entry, removeHead] of [
     expect(await readdir(outside)).toEqual([]);
   });
 }
+
+testPosix(
+  "CLI recovery repairs a completed report with a missing selected interpreter alias",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "selected-python-source");
+    await symlink(await realpath(PYTHON), join(source.path, "python-alias"));
+    await pinRecoveryTask(paths, source, "Track selected interpreter");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfirst,${source.path},${git(source.path, "rev-parse", "HEAD")}\nsecond,${source.path},${git(source.path, "rev-parse", "HEAD")}\n`,
+    );
+    const alias = join(paths.output, "checkouts", "first", "python-alias");
+    const environment = {
+      ...options(paths, client(completeRun)).environment,
+      PYTHON: alias,
+    };
+    const run = mock(registeredCampaignResult);
+    const deps = dependencies({
+      currentDirectory: paths.root,
+      environment,
+      onWorkbench: async (args, input, signal) =>
+        runtime.runWorkbench(
+          {
+            python: await runtime.resolvePluginPython({ environment }),
+            pluginRoot: PLUGIN_ROOT,
+            environment,
+            signal,
+          },
+          args,
+          input,
+        ),
+    });
+    const cliDependencies: Parameters<typeof main>[3] = {
+      ...deps,
+      createSecurity: (config) => ({
+        ...deps.createSecurity(config),
+        run: (checkout, scan) =>
+          run(
+            { ...environment, PYTHON },
+            config,
+            checkout,
+            scan!,
+            basename(checkout) === "first" ? "findings" : "sealed",
+          ),
+      }),
+    };
+    const args = [
+      "bulk-scan",
+      paths.input,
+      "--output-dir",
+      paths.output,
+      "--workers",
+      "1",
+      "--json",
+    ];
+    const initial = createCliTest(main);
+    expect(await initial.runCli(args, cliDependencies)).toBe(0);
+    const { resultsPath } = JSON.parse(initial.stdout.text());
+    const ledger = await readFile(resultsPath);
+    const [receipt] = await results(resultsPath);
+    const report = join(receipt!["outputDir"] as string, "report.md");
+    await rm(report);
+    await expect(lstat(alias)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const recovered = createCliTest(main);
+    expect(
+      await recovered.runCli([...args, "--recover"], cliDependencies),
+    ).toBe(0);
+    expect(JSON.parse(recovered.stdout.text())).toMatchObject({
+      completed: 2,
+      failed: 0,
+      skipped: 2,
+    });
+    expect(await readFile(report, "utf8")).toContain("#");
+    expect(await readFile(resultsPath)).toEqual(ledger);
+    expect(run).toHaveBeenCalledTimes(2);
+  },
+);
 
 test("retained scope recovery rejects mismatched artifacts without resurrecting unrelated files", async () => {
   const paths = await fixture();
