@@ -355,6 +355,12 @@
           },
           "additionalProperties": false
         },
+        "outcomes": {
+          "description": "Report criteria shown to the investigator. --reviewer=outcome checks each criterion before publishing each advisory.",
+          "minItems": 1,
+          "type": "array",
+          "items": { "type": "string", "pattern": "\\S" }
+        },
         "evidence_sources": {
           "description": "MCP servers the investigator can query during a reviewed dependency check.",
           "type": "array",

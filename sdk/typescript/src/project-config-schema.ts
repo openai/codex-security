@@ -1,3 +1,4 @@
+import { dependencyOutcomesSchema } from "./dependency-outcome-schema.js";
 import { z } from "zod";
 import { dependencyBoundarySchema } from "./dependency-caller-scope.js";
 import {
@@ -77,6 +78,11 @@ export const ProjectConfigInputSchema = z.strictObject({
   exploitability: z
     .strictObject({
       ...dependencyBoundarySchema.shape,
+      outcomes: dependencyOutcomesSchema
+        .optional()
+        .describe(
+          "Report criteria shown to the investigator. --reviewer=outcome checks each criterion before publishing each advisory.",
+        ),
       evidence_sources: z
         .array(
           z.strictObject({

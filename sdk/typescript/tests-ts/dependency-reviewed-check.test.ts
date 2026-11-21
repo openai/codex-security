@@ -1155,7 +1155,7 @@ test("host feedback repairs a bad citation and an independent rejection requires
 test("the reviewer switch preserves the investigator prompt, host checks and queued evidence", async () => {
   await using f = await fixture();
   const prompts: string[] = [];
-  for (const reviewer of ["enabled", "disabled"] as const) {
+  for (const reviewer of ["enabled", "disabled", "outcome"] as const) {
     const reviewed = reviewer === "enabled";
     const state = reviewed ? "approved" : "unreviewed";
     const events: string[] = [];
@@ -1165,6 +1165,7 @@ test("the reviewer switch preserves the investigator prompt, host checks and que
         subject: "npm:fixture-parser",
         vulnDescription: "Untrusted input reaches the parser.",
         reviewer,
+        outcomes: ["Report the import."],
         onProgress: (type) => events.push(type),
         signal,
       },
@@ -1172,6 +1173,24 @@ test("the reviewer switch preserves the investigator prompt, host checks and que
         discover: async () => f.discovery,
         async runAgent(req) {
           if (!req.coordinator) {
+            if (reviewer === "outcome") {
+              const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+              expect(packet).not.toHaveProperty("claims");
+              expect(packet.outcomes).toEqual(["Report the import."]);
+              expect(packet.report.claims[0].payload.kind).toBe("premise");
+              return JSON.stringify({
+                reportHash: packet.reportHash,
+                criteria: [
+                  {
+                    index: 0,
+                    status: "satisfied",
+                    reason: "The premise cites the import.",
+                    reportPaths: [["claims", 0]],
+                    receiptIds: [],
+                  },
+                ],
+              });
+            }
             expect(reviewed).toBe(true);
             return approvedReview(
               JSON.parse(req.prompt.split("\n\n").at(-1)!).claims,
@@ -1219,8 +1238,18 @@ test("the reviewer switch preserves the investigator prompt, host checks and que
     );
     if (!("checks" in result)) throw Error("Missing package result");
     const check = result.checks[0]!;
-    expect(check.reviewer).toBe(reviewed ? undefined : "disabled");
+    expect(check.reviewer).toBe(reviewed ? undefined : reviewer);
     expect(events).toContain("proposed_sink");
+    const { usage, outcomeReview, ...draft } = check;
+    if (reviewer === "outcome") {
+      expect(outcomeReview).toMatchObject({
+        status: "satisfied",
+        attempt: 1,
+        reportHash: dependencyRecordHash(draft),
+      });
+      expect(events.filter((e) => e === "outcome_review")).toHaveLength(1);
+      expect(dependencyCheckOutputSchema.safeParse(result).success).toBe(true);
+    } else expect(outcomeReview).toBeUndefined();
     expect(events.includes("review")).toBe(reviewed);
     expect(events.includes("reviewed")).toBe(reviewed);
     expect(events.includes("unreviewed")).toBe(!reviewed);
@@ -1244,8 +1273,321 @@ test("the reviewer switch preserves the investigator prompt, host checks and que
       endLine: 1,
     });
   }
-  expect(prompts).toHaveLength(2);
-  expect(prompts[0]).toBe(prompts[1]);
+  expect(prompts).toHaveLength(3);
+  expect(new Set(prompts).size).toBe(1);
+});
+
+test.each(["recovers", "persists"] as const)(
+  "a required inventory lookup that %s controls publication for the same investigator",
+  async (mode) => {
+    await using f = await fixture();
+    const call = {
+      server: "inventory",
+      tool: "release",
+      arguments: { revision: f.revision },
+    };
+    const record = {
+      ...call,
+      result: { structuredContent: { artifact: "build-17" } },
+    };
+    const receipt = { ...record, sha256: dependencyRecordHash(record) };
+    const reason = "Find the selected artifact for the pinned revision.";
+    const reportFile = join(f.path, "report.json");
+    let starts = 0;
+    let grades = 0;
+    const outcomes = [
+      "Name the artifact selected for this revision from the inventory.",
+    ];
+    const pending = withDependencyCheckOutput(
+      { subject: "example", signal, reportFile, warn() {} },
+      () =>
+        runReviewedDependencyCheck(
+          {
+            directory: f.path,
+            subject: "npm:fixture-parser",
+            vulnDescription: "Parser inputs",
+            reviewer: "outcome",
+            outcomes,
+            evidenceSources: [
+              {
+                server: "inventory",
+                instructions: "Check published inventory.",
+              },
+            ],
+            signal,
+          },
+          {
+            discover: async () => f.discovery,
+            async runAgent(req) {
+              const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+              expect(input.outcomes).toEqual(outcomes);
+              if (req.coordinator) {
+                starts++;
+                for (let turn = 0; turn < 3; turn++) {
+                  const available = mode === "recovers" && turn > 0;
+                  if (available) req.onEvidence!(receipt);
+                  else
+                    req.onEvidenceFailure!(call, {
+                      structuredContent: { message: "Rate limited" },
+                    });
+                  const answer = JSON.stringify({
+                    uses: [
+                      {
+                        ...f.use,
+                        reason: available
+                          ? "Inventory reports build-17."
+                          : "Artifact unknown.",
+                      },
+                    ],
+                    limitations: available ? [] : ["Rate limited"],
+                  });
+                  const next = await req.onCoordinatorAnswer!(answer);
+                  if (next === undefined) return answer;
+                  expect(
+                    JSON.parse(next).feedback.outcomeReview.criteria[0].reason,
+                  ).toBe(reason);
+                }
+                throw Error("Unexpected fourth turn");
+              }
+
+              grades++;
+              const receipts = input.report.claimEvidence.receipts;
+              const success = receipts[receipt.sha256] !== undefined;
+              const failed = Object.keys(receipts).find(
+                (id) => receipts[id].hostStatus === "failed",
+              );
+              expect(failed).toBeDefined();
+              const tools = await req.investigationTools!();
+              expect(
+                await tools.call("read_dependency_evidence", { id: failed }),
+              ).toMatchObject({
+                text: expect.stringContaining("Rate limited"),
+              });
+              expect(input.report.uses[0].reason).toBe(
+                success ? "Inventory reports build-17." : "Artifact unknown.",
+              );
+              return JSON.stringify({
+                reportHash: input.reportHash,
+                criteria: [
+                  {
+                    index: 0,
+                    status: success ? "satisfied" : "needs_revision",
+                    reason: success
+                      ? "Selected artifact matches the requested revision."
+                      : reason,
+                    reportPaths: [["uses", 0, "reason"]],
+                    receiptIds: success ? [receipt.sha256] : [failed],
+                  },
+                ],
+              });
+            },
+          },
+        ),
+    );
+    if (mode === "recovers") {
+      await pending;
+      const report = JSON.parse(await readFile(reportFile, "utf8"));
+      const { usage, outcomeReview, ...draft } = report.checks[0];
+      expect(outcomeReview).toMatchObject({
+        attempt: 2,
+        status: "satisfied",
+        reportHash: dependencyRecordHash(draft),
+      });
+      expect(outcomeReview.criteria[0].receiptIds).toEqual([receipt.sha256]);
+      expect(grades).toBe(2);
+    } else {
+      await expect(pending).rejects.toMatchObject({
+        outcome: {
+          status: "blocked",
+          checks: [
+            {
+              blockReason: "outcomes_unsatisfied",
+              outcomeReview: { attempt: 3, status: "needs_revision" },
+            },
+          ],
+        },
+      });
+      await expect(readFile(reportFile)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(grades).toBe(3);
+    }
+    expect(starts).toBe(1);
+  },
+);
+
+test.each([
+  "different draft",
+  "duplicate outcome",
+  "unknown path",
+  "unknown receipt",
+  "failed receipt",
+  "provider error",
+] as const)(
+  "an invalid outcome grade (%s) fails without revising the investigation",
+  async (mode) => {
+    await using f = await fixture();
+    let investigations = 0;
+    const pending = runReviewedDependencyCheck(
+      {
+        directory: f.path,
+        subject: "npm:fixture-parser",
+        vulnDescription: "Parser issue",
+        outcomes: ["Identify the caller.", "Check the inventory."],
+        evidenceSources: [
+          { server: "inventory", instructions: "Check release inventory." },
+        ],
+        reviewer: "outcome",
+        signal,
+      },
+      {
+        discover: async () => f.discovery,
+        async runAgent(req) {
+          if (req.coordinator) {
+            investigations++;
+            req.onEvidenceFailure!({
+              server: "inventory",
+              tool: "lookup",
+              arguments: {},
+            });
+            return JSON.stringify({ uses: [f.use], limitations: [] });
+          }
+          if (mode === "provider error") throw Error("Provider unavailable");
+          const { report, reportHash } = JSON.parse(
+            req.prompt.split("\n\n").at(-1)!,
+          );
+          const receiptIds =
+            mode === "failed receipt"
+              ? Object.keys(report.claimEvidence.receipts)
+              : mode === "unknown receipt"
+                ? ["missing"]
+                : [];
+          if (mode === "failed receipt") expect(receiptIds.length).toBe(1);
+          const criterion = {
+            index: 0,
+            status: "satisfied",
+            reason: "Checked.",
+            reportPaths: [["uses", mode === "unknown path" ? 1 : 0]],
+            receiptIds,
+          };
+          return JSON.stringify({
+            reportHash: mode === "different draft" ? "stale" : reportHash,
+            criteria: [
+              criterion,
+              { ...criterion, index: mode === "duplicate outcome" ? 0 : 1 },
+            ],
+          });
+        },
+      },
+    );
+    await expect(pending).rejects.toMatchObject({
+      outcome: { blockReason: "outcome_grader_error" },
+    });
+    expect(investigations).toBe(1);
+  },
+);
+
+test("outcome mode requires a rubric and at least one advisory to grade", async () => {
+  const options = {
+    reviewer: "outcome",
+    subject: "npm:fixture-parser",
+    directory: tmpdir(),
+    signal,
+  } as const;
+  const dependencies = {
+    async lookupPackage() {
+      return [];
+    },
+    async runAgent() {
+      throw new Error("Unexpected agent invocation");
+    },
+  };
+  await expect(
+    runReviewedDependencyCheck(options, dependencies),
+  ).rejects.toThrow("exploitability.outcomes");
+  await expect(
+    runReviewedDependencyCheck(
+      { ...options, outcomes: ["Identify the caller."] },
+      dependencies,
+    ),
+  ).rejects.toMatchObject({
+    outcome: { blockReason: "outcomes_unsatisfied", checks: [] },
+  });
+});
+
+test("the outcome grader can inspect the exact report and receipt beyond the turn input limit", async () => {
+  await using f = await fixture();
+  const data = {
+    server: "inventory",
+    tool: "release",
+    arguments: { revision: f.revision },
+    result: {
+      structuredContent: { notes: "x".repeat(1_048_576), artifact: "build-17" },
+    },
+  };
+  const receipt = { ...data, sha256: dependencyRecordHash(data) };
+  const result = await runReviewedDependencyCheck(
+    {
+      directory: f.path,
+      subject: "npm:fixture-parser",
+      vulnDescription: "Parser release",
+      signal,
+      evidenceSources: [
+        { server: "inventory", instructions: "Read release inventory." },
+      ],
+      reviewer: "outcome",
+      outcomes: ["Verify the release artifact."],
+    },
+    {
+      discover: async () => f.discovery,
+      async runAgent(req) {
+        if (req.coordinator) {
+          req.onEvidence!(receipt);
+          return JSON.stringify({
+            uses: [{ ...f.use, reason: "The inventory selected build-17." }],
+            limitations: [],
+          });
+        }
+        expect(req.prompt.length).toBeLessThanOrEqual(1_048_576);
+        const id = /read_dependency_evidence with id ([a-f0-9]{64})/u.exec(
+          req.prompt,
+        )?.[1];
+        expect(id).toBeDefined();
+        const tools = await req.investigationTools!();
+        const path = ["uses", 0, "reason"];
+        expect(
+          await tools.call("read_dependency_evidence", {
+            id,
+            path: ["report", ...path],
+          }),
+        ).toMatchObject({
+          text: JSON.stringify("The inventory selected build-17."),
+        });
+        expect(
+          await tools.call("read_dependency_evidence", {
+            id: receipt.sha256,
+            path: ["structuredContent", "artifact"],
+          }),
+        ).toMatchObject({ text: JSON.stringify("build-17") });
+        const { reportHash } = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        return JSON.stringify({
+          reportHash,
+          criteria: [
+            {
+              index: 0,
+              status: "satisfied",
+              reason: "The inventory and report agree.",
+              reportPaths: [path],
+              receiptIds: [receipt.sha256],
+            },
+          ],
+        });
+      },
+    },
+  );
+  if (!("checks" in result)) throw Error("Expected package check");
+  const { usage, outcomeReview, ...draft } = result.checks[0]!;
+  expect(outcomeReview?.reportHash).toBe(dependencyRecordHash(draft));
 });
 
 test.each(["corrected", "exhausted"] as const)(

@@ -1,3 +1,7 @@
+import {
+  dependencyOutcomeReviewSchema,
+  dependencyReportReviewerSchema,
+} from "./dependency-outcome-schema.js";
 import { z } from "zod";
 import { dependencyClaimReferenceSchema } from "./dependency-stack-claims.js";
 import {
@@ -428,7 +432,8 @@ export const dependencyReachabilityReportSchema = z
   .strictObject({ limitations: z.array(z.string()) })
   .extend({
     schemaVersion: z.literal(2),
-    reviewer: z.literal("disabled").optional(),
+    reviewer: dependencyReportReviewerSchema.optional(),
+    outcomeReview: dependencyOutcomeReviewSchema.optional(),
     target: dependencyTargetSchema.optional(),
     uses: z.array(reviewedDependencyUseSchema),
     claims: z.array(dependencyClaimSchema).optional(),
@@ -462,7 +467,7 @@ export const reviewedDependencyCheckSchema =
 // The CVE form keeps its original result. A package can have zero or more
 // independent issues, so each reviewed verdict belongs to a particular check.
 export const dependencyPackageCheckOutputSchema = z.object({
-  reviewer: z.literal("disabled").optional(),
+  reviewer: dependencyReportReviewerSchema.optional(),
   target: dependencyTargetSchema.optional(),
   package: z.object({ ecosystem: z.string(), name: z.string() }),
   vulnDescription: z.string().optional(),

@@ -31,7 +31,7 @@ test("command schema exposes complete and blocked reports as direct output alter
   const schema = JSON.parse(stdout.text());
   expect(schema.options.properties.reviewer).toMatchObject({
     default: "enabled",
-    enum: ["enabled", "disabled"],
+    enum: ["enabled", "disabled", "outcome"],
   });
   const { anyOf } = schema.output;
   const variant = (...required: string[]) =>

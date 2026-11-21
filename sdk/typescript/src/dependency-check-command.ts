@@ -1,3 +1,4 @@
+import { dependencyReviewerSchema } from "./dependency-outcome-schema.js";
 import { Cli, z } from "incur";
 import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
@@ -121,11 +122,10 @@ export function registerDependencyCheck(
         .describe("Path to the observed stacks and target revision."),
       model: text.optional().describe("Investigator model."),
       effort: text.optional().describe("Investigator reasoning effort."),
-      reviewer: z
-        .enum(["enabled", "disabled"])
+      reviewer: dependencyReviewerSchema
         .default("enabled")
         .describe(
-          "Independent model review for repository and package checks.",
+          "Independent review of individual claims (enabled), host checks only (disabled), or experimental review of configured report outcomes (outcome).",
         ),
       config: text
         .optional()
@@ -160,9 +160,11 @@ export function registerDependencyCheck(
         throw new CodexSecurityError(
           "Supply --sources, --sinks and --stacks together for one CVE.",
         );
-      if (captured && options.reviewer === "disabled")
+      if (captured && options.reviewer !== "enabled")
         throw new CodexSecurityError(
-          "--reviewer=disabled applies to repository investigations. Captured stack investigations require independent review.",
+          "--reviewer=" +
+            options.reviewer +
+            " applies to repository investigations. Captured stack investigations require independent review.",
         );
       if (
         captured &&
@@ -245,6 +247,7 @@ export function registerDependencyCheck(
                   directory: repository,
                   subject: args.subject,
                   reviewer: options.reviewer,
+                  outcomes: project?.input.exploitability?.outcomes,
                   vulnDescription: options.vulnDescription,
                   scope: scope?.instructions,
                   excludePaths: scope?.exclude_paths,

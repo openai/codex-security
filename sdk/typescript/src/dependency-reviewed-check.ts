@@ -1,4 +1,13 @@
 import {
+  createDependencyOutcomeGrader,
+  DependencyOutcomeGraderError,
+} from "./dependency-outcome-review.js";
+import {
+  dependencyOutcomeGradeSchema,
+  dependencyOutcomesSchema,
+  type DependencyReviewer,
+} from "./dependency-outcome-schema.js";
+import {
   dependencyGraphCandidates,
   observedDependencyCandidates,
   type DependencyGraphCandidate,
@@ -128,7 +137,8 @@ type Dependencies = {
 };
 
 export type ReviewedCheckOptions = AgentSettings & {
-  reviewer?: "enabled" | "disabled";
+  reviewer?: DependencyReviewer;
+  outcomes?: readonly string[];
   directory: string;
   subject: string;
   vulnDescription?: string;
@@ -570,7 +580,7 @@ async function investigateIssue(
   dependencies: Dependencies,
   temporary: string,
   activity: ReturnType<typeof createActivityProgress>,
-  pinnedRevision?: string,
+  target?: Awaited<ReturnType<typeof readDependencyTarget>>,
 ) {
   const controller = new AbortController();
   const signal = AbortSignal.any([options.signal, controller.signal]);
@@ -618,10 +628,11 @@ async function investigateIssue(
     }
   }
   for (const name of symbols) proposedSink(name, "advisory_record");
+  const reviewer = options.reviewer ?? "enabled";
   const verdictProgress = createDependencyVerdictProgress(
     subject,
     options.onProgress,
-    options.reviewer === "disabled" ? "unreviewed" : "reviewed",
+    reviewer === "enabled" ? "reviewed" : "unreviewed",
   );
   const discover = dependencies.discover ?? discoverDependencyRepository;
   const callerBoundary = {
@@ -629,7 +640,7 @@ async function investigateIssue(
     excludePaths: dependencyExclusions(options.excludePaths),
   };
   const discoveries: RepositoryDiscovery[] = [];
-  let revision = pinnedRevision;
+  let revision = target?.sha;
   for (const component of issuePackages(issue, pkg)) {
     signal.throwIfAborted();
     const finished = activity(subject, "dependency_discovery", {
@@ -656,6 +667,7 @@ async function investigateIssue(
   const scopes = reviewScopes(discoveries);
   const input = {
     issue,
+    ...(options.outcomes && { outcomes: options.outcomes }),
     callerScope: options.scope ?? defaultDependencyCallerScope,
     ...(options.sources !== undefined && { sources: options.sources }),
     ...(options.sinks !== undefined && { sinks: options.sinks }),
@@ -775,6 +787,7 @@ async function investigateIssue(
       prompt: string,
       coordinator = false,
       onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"],
+      packet?: DependencyEvidenceRecord,
     ) =>
       dependencies.runAgent({
         directory,
@@ -783,7 +796,7 @@ async function investigateIssue(
         readOnly: true,
         coordinator,
         ...(onCoordinatorAnswer && { onCoordinatorAnswer }),
-        investigationTools: () => session!.tools(!coordinator),
+        investigationTools: () => session!.tools(!coordinator, packet),
         ...(coordinator &&
           options.onProgress && {
             onAccessProgram(selected: string | undefined) {
@@ -1026,7 +1039,7 @@ async function investigateIssue(
         }
       }
       try {
-        if (options.reviewer === "disabled") {
+        if (reviewer !== "enabled") {
           // The host has checked the original evidence and still enforces claim
           // revisions, prerequisites, and coverage. Keep all submitted evidence.
           applyDecisions(
@@ -1035,7 +1048,7 @@ async function investigateIssue(
               ...reference(claim),
               approved: null,
               reason:
-                "Host checks passed. Independent review disabled. Use this claim wherever an approved claim is requested.",
+                "Host checks passed. Independent claim review disabled. Use this claim wherever an approved claim is requested.",
               evidenceKeys: [...availableEvidenceKeys(claimInputs(claim))],
             })),
           );
@@ -1327,6 +1340,27 @@ async function investigateIssue(
         session!.sourceWorkCoverage.generation()
       );
     }
+    const gradeOutcome =
+      reviewer === "outcome"
+        ? createDependencyOutcomeGrader(
+            input,
+            options.outcomes!,
+            async ({ prompt, packet }) =>
+              decode(
+                await run(prompt, false, undefined, packet),
+                dependencyOutcomeGradeSchema,
+              ),
+            { signal, onProgress: options.onProgress },
+            subject,
+          )
+        : undefined;
+    function checkGeneration(generation: number) {
+      signal.throwIfAborted();
+      if (coverageGeneration() !== generation)
+        throw new DependencyReviewRejection(
+          "The investigation changed during final review. Check the latest assessments, evidence and outstanding callers before submitting again.",
+        );
+    }
     const reviewQueue = queue;
     async function submit(raw: string, canCorrect: boolean) {
       signal.throwIfAborted();
@@ -1395,11 +1429,7 @@ async function investigateIssue(
       ]);
       try {
         await review(claims);
-        signal.throwIfAborted();
-        if (coverageGeneration() !== generation)
-          throw new DependencyReviewRejection(
-            "The investigation changed during final review. Check the latest assessments, evidence and outstanding callers before submitting again.",
-          );
+        checkGeneration(generation);
         const premises = reviewQueue.approved(
           claims.flatMap((c) => claimInputs(c).dependencies),
         );
@@ -1414,9 +1444,7 @@ async function investigateIssue(
           });
           return {
             schemaVersion: 2 as const,
-            ...(options.reviewer === "disabled" && {
-              reviewer: options.reviewer,
-            }),
+            ...(reviewer !== "enabled" && { reviewer }),
             uses: approved.flatMap((claim) => {
               if (claim.value.kind !== "use") return [];
               const selected = selectedPremises(
@@ -1550,7 +1578,39 @@ async function investigateIssue(
             usage: usage as ScanTokenUsage | null,
           };
         });
-        return { report };
+        const outcomeReview =
+          gradeOutcome &&
+          (await gradeOutcome(
+            {
+              ...report,
+              ...(pkg
+                ? { advisoryId: issue.id }
+                : { cve: issue.id, ...(target && { target }) }),
+            },
+            canCorrect,
+          ));
+        if (outcomeReview) {
+          checkGeneration(generation);
+          if (outcomeReview.status === "needs_revision") {
+            return {
+              feedback: {
+                ...feedback(
+                  "The proposed report has unmet outcomes. Investigate each gap before resubmitting.",
+                ),
+                outcomeReview,
+              },
+            };
+          }
+        }
+        return {
+          report: {
+            ...report,
+            ...(outcomeReview && {
+              outcomeReview,
+              usage: usage as ScanTokenUsage | null,
+            }),
+          },
+        };
       } catch (error) {
         if (!(error instanceof DependencyReviewRejection) || !canCorrect)
           throw error;
@@ -1558,6 +1618,11 @@ async function investigateIssue(
       }
     }
     const instructions = [
+      ...(options.outcomes
+        ? [
+            "Address every operator-supplied outcome in outcomes in the final report. For missing evidence, seek an equivalent source or retry a recoverable lookup. Preserve independent findings and accurately state remaining gaps.",
+          ]
+        : []),
       investigateInstructions + "\n" + coordinationInstructions,
       ...(options.evidenceSources?.length
         ? [externalEvidenceInstructions]
@@ -1630,6 +1695,15 @@ export async function runReviewedDependencyCheck(
 ) {
   const { signal } = options;
   signal.throwIfAborted();
+  if (options.reviewer === "outcome" && !options.outcomes?.length)
+    throw new CodexSecurityError(
+      "--reviewer=outcome requires exploitability.outcomes in the project config.",
+    );
+  if (options.outcomes)
+    options = {
+      ...options,
+      outcomes: dependencyOutcomesSchema.parse(options.outcomes),
+    };
   const subject = options.subject.trim();
   const cve = /^CVE-\d{4}-\d{4,}$/iu.test(subject)
     ? subject.toUpperCase()
@@ -1642,7 +1716,8 @@ export async function runReviewedDependencyCheck(
   const target = await readDependencyTarget(options.directory, signal);
   const identity = {
     ...(target && { target }),
-    ...(options.reviewer === "disabled" && { reviewer: options.reviewer }),
+    ...(options.reviewer &&
+      options.reviewer !== "enabled" && { reviewer: options.reviewer }),
   };
   const activity = createActivityProgress(
     options.directory,
@@ -1677,6 +1752,21 @@ export async function runReviewedDependencyCheck(
     options.onProgress?.("advisories_loaded", cve ?? subject, {
       count: cve ? issues[0]!.advisories.length : issues.length,
     });
+  if (options.reviewer === "outcome" && !issues.length) {
+    throw new DependencyInvestigationBlockedError(
+      {
+        ...identity,
+        package: pkg,
+        checks: [],
+        status: "blocked",
+        code: "INVESTIGATION_BLOCKED",
+        blockReason: "outcomes_unsatisfied",
+        reason:
+          "No advisory was available to investigate against the requested outcomes.",
+      },
+      undefined,
+    );
+  }
   const temporary = await mkdtemp(join(tmpdir(), "dependency-review-"));
   try {
     type AdvisoryCheck =
@@ -1692,7 +1782,7 @@ export async function runReviewedDependencyCheck(
           dependencies,
           temporary,
           activity,
-          target?.sha,
+          target,
         );
         options.onProgress?.("assessment_finished", issue.id ?? subject, {
           uses: report.uses.length,
@@ -1708,6 +1798,9 @@ export async function runReviewedDependencyCheck(
                 status: "blocked",
                 code: "INVESTIGATION_BLOCKED",
                 reason: errorMessage(error),
+                ...(error instanceof DependencyOutcomeGraderError && {
+                  blockReason: "outcome_grader_error" as const,
+                }),
               };
         if (cve)
           throw new DependencyInvestigationBlockedError(

@@ -387,7 +387,7 @@ export function createInvestigationSession(options: {
     if (!record) throw new Error("Unknown evidence ID: " + id);
     return record;
   }
-  const readers: Tool[] = [
+  const readers = (packet?: DependencyEvidenceRecord): Tool[] => [
     {
       name: "read_dependency_evidence",
       description:
@@ -395,7 +395,11 @@ export function createInvestigationSession(options: {
       inputSchema: z.toJSONSchema(readEvidence),
       run(raw) {
         const args = readEvidence.parse(raw);
-        if (args.id) return evidencePage(resolveRecord(args.id), args);
+        if (args.id)
+          return evidencePage(
+            args.id === packet?.sha256 ? packet : resolveRecord(args.id),
+            args,
+          );
         const { server, tool, offset = 0 } = args;
         const page: ReturnType<typeof receiptMetadata>[] = [];
         const pageLength = 40;
@@ -441,8 +445,11 @@ export function createInvestigationSession(options: {
   });
   return {
     sourceWorkCoverage: sourceWork.coverage,
-    async tools(readOnly: boolean): Promise<InvestigationTools> {
-      const tools = readers.map((tool) =>
+    async tools(
+      readOnly: boolean,
+      packet?: DependencyEvidenceRecord,
+    ): Promise<InvestigationTools> {
+      const tools = readers(packet).map((tool) =>
         readOnly && tool.name === "query_dependency_claims"
           ? {
               ...tool,

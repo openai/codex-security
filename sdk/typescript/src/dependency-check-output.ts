@@ -1,3 +1,4 @@
+import type { DependencyOutcomeReview } from "./dependency-outcome-schema.js";
 import { closeSync, fstatSync, openSync, writeFileSync } from "node:fs";
 import {
   link,
@@ -18,6 +19,8 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
 
 export type BlockedCheck = {
+  blockReason?: "outcomes_unsatisfied" | "outcome_grader_error";
+  outcomeReview?: DependencyOutcomeReview;
   target?: DependencyTarget;
   status: "blocked";
   code: "INVESTIGATION_BLOCKED";
@@ -150,7 +153,10 @@ function progressLine(type: string, fields: Record<string, unknown>) {
       const state = type === "reviewed_group" ? "reviewed" : "unreviewed";
       return `${verdictNames[String(fields["verdict"])]} · ${fields["callsites"]} ${state} calls · ${fields["location"]}`;
     }
+    case "outcome_review":
+      return "Checking required outcomes · attempt " + fields["attempt"];
     case "report_ready": {
+      const graded = fields["reviewer"] === "outcome";
       const unreviewed = fields["reviewer"] === "disabled";
       const counts = Object.entries(
         isRecord(fields["verdicts"]) ? fields["verdicts"] : {},
@@ -158,8 +164,9 @@ function progressLine(type: string, fields: Record<string, unknown>) {
       return [
         "Investigation summary",
         unreviewed && "Independent review disabled",
+        graded && "Report outcomes satisfied",
         ...counts.map(([key, n]) => `${n} ${verdictNames[key]}`),
-        !counts.length && (unreviewed ? "0 uses" : "0 reviewed uses"),
+        !counts.length && (unreviewed || graded ? "0 uses" : "0 reviewed uses"),
         fields["limitations"] && `${fields["limitations"]} limitations`,
         fields["path"] && `Report saved · ${fields["path"]}`,
       ]
@@ -202,7 +209,9 @@ function reportSummary(report: unknown) {
     verdicts,
     limitations,
     ...(isRecord(report) &&
-      report["reviewer"] === "disabled" && { reviewer: "disabled" }),
+      typeof report["reviewer"] === "string" && {
+        reviewer: report["reviewer"],
+      }),
   };
 }
 
