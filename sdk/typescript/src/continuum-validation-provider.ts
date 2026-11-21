@@ -361,7 +361,13 @@ function scoreLimitation(
   ))
     return "The timestamps do not establish a current issue score for this validation.";
   const rows = evidenceRows(score);
-  if (rows.some((row) => row["subjectRef"] !== issue["issueId"]))
+  if (
+    rows.some(
+      ({ subjectRef }) =>
+        typeof subjectRef !== "string" ||
+        (subjectRef !== issue["issueId"] && subjectRef !== issue["issueArn"]),
+    )
+  )
     return "The scorer does not identify the selected issue on every signal.";
   const signals = rows.filter((row) => row["dimension"] === "EXPLOITABILITY");
   const reference = object(signals[0]?.["exploitability"]);

@@ -219,17 +219,26 @@ describe("explicitly fake outcome variations", () => {
     expect(finding.severity.level).toBe("high");
   });
 
-  test("applies the score from a current artifact referencing the independent proof", async () => {
-    const fake = withObservation();
-    const result = await provider(transport(fake)).validate(finding, context);
-    expect(result.record).toMatchObject({
-      validationArtifactId:
-        fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId,
-      scoringArtifactId: fake.artifactLists.EVIDENCE.items[0].artifactId,
-      severityAfter: "critical",
-      claimMatch: "on_target",
-    });
-  });
+  test.each(["issueId", "issueArn"])(
+    "applies linked scoring signals identified by %s",
+    async (key) => {
+      const fake = withObservation();
+      const score =
+        fake.artifacts[fake.artifactLists.EVIDENCE.items[0].artifactId];
+      for (const signal of score.body.prevalidationSignals.signals)
+        signal.subjectRef = fake.issue[key];
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        validationArtifactId:
+          fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId,
+        scoringArtifactId: fake.artifactLists.EVIDENCE.items[0].artifactId,
+        reachableFromAttacker: true,
+        proofObservation: { kind: "source_analysis" },
+        severityAfter: "critical",
+        claimMatch: "on_target",
+      });
+    },
+  );
 
   test("retains matching and scoring for a conclusive legacy verdict without run status", async () => {
     const fake = withObservation();
@@ -360,6 +369,7 @@ describe("explicitly fake outcome variations", () => {
     "other proof reference",
     "absent proof reference",
     "other issue subject",
+    "issue ARN from a different environment",
     "other scorer verdict",
     "missing subject",
     "shared issue score",
@@ -406,6 +416,12 @@ describe("explicitly fake outcome variations", () => {
         break;
       case "other issue subject":
         signal.subjectRef = "other-issue";
+        break;
+      case "issue ARN from a different environment":
+        signal.subjectRef = fake.issue.issueArn.replace(
+          fake.environmentId,
+          "another-environment",
+        );
         break;
       case "other scorer verdict":
         signal.exploitability.verdict = "NOT_EXPLOITABLE";
