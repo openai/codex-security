@@ -33,6 +33,7 @@ const USAGE_LIMIT_MESSAGES = new Set([
   "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
   "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
   "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+  "Your workspace inference hook blocked this request.",
 ]);
 
 // Classify only terminal turn failures; diagnostics can contain arbitrary output.

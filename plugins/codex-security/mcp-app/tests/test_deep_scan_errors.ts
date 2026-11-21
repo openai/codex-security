@@ -82,6 +82,7 @@ test(function testNativeTurnFailureClassification() {
     "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
     "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
     "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
+    "Your workspace inference hook blocked this request.",
     "You’ve hit your usage limit. Try again later.",
     "You’ve hit your usage limit for the selected model. Switch to another model to continue.",
     "Error running remote compact task: You’ve hit your usage limit. Try again later.",
