@@ -369,7 +369,7 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
-    new Set(tasks.map((task) => task.id.toLowerCase())),
+    new Map(tasks.map((task) => [task.id.toLowerCase(), task.id])),
     options.recoverScan !== undefined,
   );
   const pending: MultiscanTask[] = [];
@@ -1252,7 +1252,7 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
-  campaignIds: ReadonlySet<string>,
+  campaignIds: ReadonlyMap<string, string>,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
   let contents: Buffer;
@@ -1270,20 +1270,59 @@ async function readReceipts(
     let saved;
     try {
       saved = JSON.parse(line);
-      if (typeof saved?.id !== "string")
-        throw new Error("Expected a receipt with a string id");
-      if (!campaignIds.has(saved.id.toLowerCase()))
+      if (!isValidTaskId(saved?.id))
+        throw new Error("Expected a receipt with a valid task id");
+      const taskId = campaignIds.get(saved.id.toLowerCase());
+      if (taskId === undefined)
         throw new Error("Receipt task id is absent from the campaign manifest");
       if (!Number.isSafeInteger(saved.attempt) || saved.attempt < 1)
         throw new Error("Expected a positive integer receipt attempt");
+      if (saved.status === "completed_with_incomplete_coverage")
+        saved.status = "completed";
+      if (saved.status !== "completed" && saved.status !== "failed")
+        throw new Error("Expected a completed or failed receipt status");
+      const attemptPath = join("artifacts", taskId, `attempt-${saved.attempt}`);
+      if (
+        typeof saved.outputDir !== "string" ||
+        !isAbsolute(saved.outputDir) ||
+        saved.outputDir.includes("\0") ||
+        !saved.outputDir.endsWith(sep + attemptPath)
+      )
+        throw new Error(
+          "Expected outputDir to match the receipt task and attempt",
+        );
+      if (
+        saved.cleanupPending !== undefined &&
+        saved.cleanupPending !== "checkout" &&
+        saved.cleanupPending !== "recovery-checkout"
+      )
+        throw new Error(
+          "Expected cleanupPending to be checkout or recovery-checkout",
+        );
+      for (const flag of [
+        "knowledgeBaseFailure",
+        "checkoutOccupied",
+        "policyFailed",
+      ]) {
+        if (saved[flag] !== undefined && typeof saved[flag] !== "boolean")
+          throw new Error(`Expected a boolean ${flag}`);
+      }
+      if (
+        (saved.knowledgeBaseFailure || saved.checkoutOccupied) &&
+        (saved.status !== "failed" || saved.policyFailed !== undefined)
+      )
+        throw new Error(
+          "A pre-scan failure requires failed status and no policyFailed verdict",
+        );
     } catch (cause) {
       throw new Error(
         `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
         { cause },
       );
     }
-    if (saved.status === "completed_with_incomplete_coverage")
-      saved.status = "completed";
+    saved.warnings = Array.isArray(saved.warnings)
+      ? saved.warnings.filter((warning: unknown) => typeof warning === "string")
+      : undefined;
     const receipt = saved as MultiscanReceipt;
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
@@ -1337,6 +1376,15 @@ async function hasCompletedContract(
   }
 }
 
+function isValidTaskId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) &&
+    !id.endsWith(".") &&
+    !WINDOWS_DEVICE_PATH_NAME.test(id)
+  );
+}
+
 function parseInventory(
   source: string,
   directory: string,
@@ -1369,11 +1417,7 @@ function parseInventory(
     const get = (name: string): string =>
       fields[headers.indexOf(name)]?.trim() ?? "";
     const id = get("id");
-    if (
-      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
-      id.endsWith(".") ||
-      WINDOWS_DEVICE_PATH_NAME.test(id)
-    ) {
+    if (!isValidTaskId(id)) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
     if (seen.has(id.toLowerCase()))

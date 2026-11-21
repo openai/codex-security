@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { loadContract } from "../src/contract.js";
@@ -604,21 +604,42 @@ describe("multiscan", () => {
     ]);
   });
 
+  const taskDir = join("artifacts", "receipt");
   test.each([
     ["malformed middle record", "{", true],
     ["malformed final record", "{", false],
     ["non-object", "null", false],
-    ["missing ID", "{}", false],
-    ["non-string ID", '{"id":42}', false],
+    ["missing ID", { id: undefined }, false],
+    ["non-string ID", { id: 42 }, false],
+    ["unknown task ID", { id: "other-task" }, true],
+    ["missing attempt", { attempt: undefined }, false],
+    ["string attempt", { attempt: "1" }, false],
+    ["zero attempt", { attempt: 0 }, false],
+    ["fractional attempt", { attempt: 1.5 }, true],
+    ["blank ID", { id: " " }, false],
+    ["padded ID", { id: " receipt " }, false],
+    ["ID ending in a period", { id: "receipt." }, false],
+    ["reserved device ID", { id: "CON" }, false],
+    ["unknown status", { status: "pending" }, true],
+    ["missing output directory", { outputDir: undefined }, false],
+    ["wrong attempt", { outputDir: resolve(taskDir, "attempt-999") }, false],
+    ["wrong task", { outputDir: resolve("artifacts/other/attempt-1") }, false],
+    ["relative path", { outputDir: join(taskDir, "attempt-1") }, false],
+    ["NUL in path", { outputDir: resolve("\0", taskDir, "attempt-1") }, false],
+    ["non-boolean knowledge failure", { knowledgeBaseFailure: "false" }, false],
+    ["invalid pending checkout cleanup", { cleanupPending: "recover" }, false],
+    ["non-boolean checkout flag", { checkoutOccupied: "false" }, false],
+    ["non-boolean policy outcome", { policyFailed: "true" }, false],
     [
-      "unknown task ID",
-      '{"id":"other-task","attempt":2,"status":"failed","outputDir":"artifacts/other-task/attempt-2"}',
+      "policy verdict on a knowledge base failure",
+      { policyFailed: true, knowledgeBaseFailure: true, status: "failed" },
       true,
     ],
-    ["missing attempt", '{"id":"receipt"}', false],
-    ["string attempt", '{"id":"receipt","attempt":"1"}', false],
-    ["zero attempt", '{"id":"receipt","attempt":0}', false],
-    ["fractional attempt", '{"id":"receipt","attempt":1.5}', true],
+    [
+      "completed status on an occupied checkout",
+      { status: "completed", checkoutOccupied: true },
+      true,
+    ],
   ] as const)(
     "CLI identifies the %s and preserves committed history",
     async (_name, bad, middle) => {
@@ -632,15 +653,22 @@ describe("multiscan", () => {
       ];
       const deps = dependencies();
       const run = mock(completeRun);
+      const runWorkbench = mock(deps.runWorkbench);
       const configured: Parameters<typeof main>[3] = {
         ...deps,
+        runWorkbench,
         createSecurity: (config) => ({ ...deps.createSecurity(config), run }),
       };
       expect(await createCliTest(main).runCli(args, configured)).toBe(0);
       const ledger = join(paths.output, "results.jsonl");
       const valid = await readFile(ledger, "utf8");
+      const receipt = JSON.parse(valid);
+      const report = join(receipt.outputDir, "report.md");
+      const originalReport = await readFile(report);
+      const record =
+        typeof bad === "string" ? bad : JSON.stringify({ ...receipt, ...bad });
       const damaged = Buffer.concat([
-        Buffer.from(`${valid}\n${bad}\n`),
+        Buffer.from(`${valid}\n${record}\n`),
         ...(middle ? [Buffer.from(valid), Buffer.from([0xe2, 0x82])] : []),
       ]);
       await writeFile(ledger, damaged);
@@ -648,9 +676,12 @@ describe("multiscan", () => {
         const cli = createCliTest(main);
         expect(await cli.runCli([...args, ...flags], configured)).toBe(2);
         expect(cli.stderr.text()).toContain(`${ledger}:3:`);
+        if (typeof bad !== "string")
+          expect(cli.stderr.text()).toContain(Object.keys(bad)[0]!);
         expect(cli.stderr.text()).toContain("Restore a complete");
         expect(cli.stderr.text()).toContain("new --output-dir");
         expect(await readFile(ledger)).toEqual(damaged);
+        expect(await readFile(report)).toEqual(originalReport);
         expect(
           (await readdir(paths.output)).filter((name) =>
             name.startsWith("results.jsonl.interrupted-"),
@@ -658,6 +689,9 @@ describe("multiscan", () => {
         ).toEqual([]);
       }
       expect(run).toHaveBeenCalledTimes(1);
+      expect(
+        runWorkbench.mock.calls.some(([args]) => args.includes("list-scans")),
+      ).toBe(false);
     },
   );
 
@@ -1351,7 +1385,7 @@ describe("multiscan", () => {
         `legacy-${completeness}`,
         "legacy",
       );
-      const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
+      const outputDir = join(paths.output, "artifacts", "legacy", "attempt-2");
       await completedScan(outputDir, completeness);
       const cost = {
         model: "gpt-5.6-sol",
@@ -1362,20 +1396,25 @@ describe("multiscan", () => {
         estimatedUsd: 231.73,
       };
       const receipt = {
-        id: "legacy",
+        id: "LEGACY",
         repository: source.path,
         revision: source.revision,
         mode: "standard",
         status,
-        attempt: 1,
+        attempt: 2,
         outputDir,
+        warnings: { length: 1 },
         cost,
         error: "Multiscan repository coverage is incomplete.",
       };
-      await writeFile(
-        join(paths.output, "results.jsonl"),
-        `${JSON.stringify(receipt)}\n`,
-      );
+      const prior = {
+        id: "legacy",
+        status: "failed",
+        attempt: 1,
+        outputDir: join(paths.root, "previous/artifacts/legacy/attempt-1"),
+      };
+      const history = `${JSON.stringify(prior)}\n${JSON.stringify(receipt)}\n`;
+      await writeFile(join(paths.output, "results.jsonl"), history);
       const progress: Parameters<
         NonNullable<MultiscanOptions["onProgress"]>
       >[0][] = [];
@@ -1396,11 +1435,12 @@ describe("multiscan", () => {
       });
       expect(security.run.mock.calls.length).toBe(0);
       expect(progress).toEqual([]);
-      expect(await results(summary.resultsPath)).toEqual([receipt]);
+      expect(summary).not.toHaveProperty("warnings");
+      expect(await readFile(summary.resultsPath, "utf8")).toBe(history);
 
       await runMultiscan(options(paths, security, { maxAttempts: 3 }));
       expect(security.run.mock.calls.length).toBe(0);
-      expect(await results(summary.resultsPath)).toEqual([receipt]);
+      expect(await readFile(summary.resultsPath, "utf8")).toBe(history);
     },
   );
 
