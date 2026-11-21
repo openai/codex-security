@@ -69,6 +69,28 @@ Accepted findings resume at `GetCodeFinding`. A new finding, changed submitted
 content, another destination or loss of the host state can create a fresh
 submission. You can also use this command after a plugin scan times out.
 
+### Match an imported issue to local findings
+
+A local Continuum import stores one external record per AWS issue. Its
+`sourceFindingId` is the issue ARN. The raw export also has a `sourceFindingId`
+on each contributing finding if AWS returns it. For a finding submitted from a
+Codex scan, that value is the occurrence ID. [Continuum import guide](scanner-imports/continuum.md)
+
+To match contributors using local records, set `issue_arn` to the imported
+issue ARN, `import_json` to the JSON output file from
+`publish findings --to local --format json`, and `assessment` to the scan's
+`validation.json` or saved `validate --scan` JSON output. This prints a row
+with the AWS finding ARN and local occurrence ID for each match in that scan.
+
+```sh
+jq -r --arg issue "$issue_arn" --slurpfile validation "$assessment" '
+  .findings[] | select(.sourceFindingId == $issue)
+  | (.evidence.source_data.findings[]?.findingArn // empty) as $arn
+  | $validation[0].items[] | select(.findingArn == $arn)
+  | [.findingArn, .itemId] | @tsv
+' "$import_json"
+```
+
 ## Read the supplemental results
 
 CLI and plugin scans save two files beside the sealed scan report:
