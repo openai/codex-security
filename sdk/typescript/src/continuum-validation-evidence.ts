@@ -19,7 +19,16 @@ export function singleFindingValidationIssue(
   return { issueArn: arn, issueId, findingIds: [finding.id] };
 }
 
-/** Project a bundled proof to the submitted finding, never another finding's proof. */
+function readVerdict(value: unknown) {
+  if (
+    value === "EXPLOITABLE" ||
+    value === "NOT_EXPLOITABLE" ||
+    value === "UNCERTAIN"
+  )
+    return value;
+}
+
+/** Project a bundle to the finding's result or the issue verdict alone. */
 export function selectFindingValidationArtifact(
   artifact: Record<string, unknown>,
   findingId: unknown,
@@ -28,10 +37,11 @@ export function selectFindingValidationArtifact(
   const body = artifact["body"];
   if (!isRecord(body)) return;
   const validation = body["validationEvidence"];
-  if (!isRecord(validation) && typeof body["raw"] !== "string") return;
-  const results = isRecord(validation)
-    ? validation["perFindingResults"]
-    : undefined;
+  if (!isRecord(validation))
+    return typeof body["raw"] === "string"
+      ? { scope: "issue", artifact }
+      : undefined;
+  const results = validation["perFindingResults"];
   if (results === undefined) return { scope: "issue", artifact };
   if (!Array.isArray(results))
     throw new Error("Continuum per-finding results must be an array.");
@@ -42,14 +52,19 @@ export function selectFindingValidationArtifact(
       return value;
     })
     .filter((result) => result["findingId"] === findingId);
-  if (matches.length === 0) return;
+  if (matches.length === 0 || typeof findingId !== "string" || !findingId)
+    return;
+  const findingVerdict =
+    matches.length === 1 ? readVerdict(matches[0]!["exploitable"]) : undefined;
+  const verdict = findingVerdict ?? readVerdict(validation["exploitable"]);
+  if (!verdict) return;
   const artifactId = artifact["artifactId"];
   if (typeof artifactId !== "string" || !artifactId.trim())
     throw new Error(
       "Continuum evidence artifact ID must be a non-empty string.",
     );
   return {
-    scope: "finding",
+    scope: findingVerdict ? "finding" : "issue",
     artifact: {
       artifactId: artifactId.trim(),
       artifactType: artifact["artifactType"],
@@ -62,11 +77,8 @@ export function selectFindingValidationArtifact(
       ...(artifact["producer"] != null && { producer: artifact["producer"] }),
       body: {
         validationEvidence: {
-          ...(matches.length === 1 &&
-            "exploitable" in matches[0]! && {
-              exploitable: matches[0]!["exploitable"],
-            }),
-          perFindingResults: matches,
+          exploitable: verdict,
+          ...(findingVerdict && { perFindingResults: matches }),
         },
       },
     },

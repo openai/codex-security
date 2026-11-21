@@ -7,10 +7,7 @@ import { repositoryFilePath } from "./scanner-import.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prepareContinuumAws } from "./continuum-aws.js";
-import {
-  selectFindingValidationArtifact,
-  singleFindingValidationIssue,
-} from "./continuum-validation-evidence.js";
+import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
 import {
   type ValidationProvider,
@@ -617,7 +614,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     let issue: Record<string, unknown> = {};
     let validationArtifact: Record<string, unknown> | undefined;
     let likelihoodArtifact: Record<string, unknown> | undefined;
-    let resultScope: ValidationResultScope = "finding";
+    let resultScope: ValidationResultScope = "issue";
     let issueFindingCount: number | undefined;
     let status = "SUBMITTED";
     try {
@@ -682,7 +679,6 @@ export class ContinuumValidationProvider implements ValidationProvider {
           if (!Array.isArray(ids) || !ids.includes(findingId)) return;
           issueFindingCount = new Set(ids).size;
           let issueFallback: Record<string, unknown> | undefined;
-          let soleFindingFallback: Record<string, unknown> | undefined;
           for (const kind of ["EVIDENCE", "VALIDATION_EVIDENCE"] as const) {
             const listed = await request("list-code-issue-artifacts", [
               "--environment-id",
@@ -721,17 +717,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
               );
               if (selected?.scope === "finding") {
                 validationArtifact = selected.artifact;
+                resultScope = "finding";
                 break;
-              }
-              if (
-                selected?.scope === "issue" &&
-                singleFindingValidationIssue(issue, issueId, {
-                  scope,
-                  id: findingId,
-                })
-              ) {
-                soleFindingFallback ??= selected.artifact;
-                continue;
               }
               // Keep issue proof separate. Search all histories first: an older
               // explicit result for this finding must beat this fallback.
@@ -743,32 +730,15 @@ export class ContinuumValidationProvider implements ValidationProvider {
                 issueFallback = artifact;
             }
           }
-          validationArtifact ??= soleFindingFallback;
-          if (!validationArtifact && issueFallback) {
-            validationArtifact = issueFallback;
-            resultScope = "issue";
-          }
+          validationArtifact ??= issueFallback;
         }
       }
       if (!validationArtifact || !likelihoodArtifact || !issueId) return;
       const verdict = verdictFrom(validationArtifact);
-      const body = object(validationArtifact["body"]);
-      const validationBody = object(body["validationEvidence"] ?? body);
-      // A retained issue caption must not override proof of a different flaw.
-      const claimEvidence =
-        validationBody["perFindingResults"] !== undefined ||
-        validationBody["executedProof"] !== undefined ||
-        validationBody["sourceAnalysis"] !== undefined
-          ? validationArtifact
-          : {
-              validation: validationArtifact,
-              name: issue["name"],
-              synopsis: issue["synopsis"],
-            };
       const match =
-        resultScope === "issue"
-          ? "unknown"
-          : proofClaimMatch(claimEvidence, finding);
+        resultScope === "finding"
+          ? proofClaimMatch(validationArtifact, finding)
+          : "unknown";
       const validatedAt = new Date(
         text(validationArtifact["createdAt"]) ?? now(),
       );
@@ -864,7 +834,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const signalBasis = basisLabel(/^Basis: (.*?) —/u.exec(signal)?.[1]);
     const scopeDescription =
       resultScope === "issue"
-        ? `Continuum grouped this finding with ${(issueFindingCount ?? 1) - 1} other findings into this issue. This is an issue-level result, not an individual validation of this finding. Codex severity is retained.${joinedValidatedIssue ? " This finding joined an issue Continuum had already validated; the issue proof predates this submission." : ""}`
+        ? `Continuum returned an issue-level result. The issue currently lists ${issueFindingCount} ${issueFindingCount === 1 ? "finding" : "findings"}. Codex severity is retained.${joinedValidatedIssue ? " This finding joined an issue Continuum had already validated. The issue proof predates this submission." : ""}`
         : "Continuum result for this finding.";
     const report = [
       `**Result scope:** ${scopeDescription}`,

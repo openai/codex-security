@@ -221,14 +221,28 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   report="$out/continuum.json"
 ```
 
-When AWS supplies `perFindingResults`, the capture retains the selected finding's
-result, including its verdict and any flow or HTTP proof. Without that breakdown,
-the collector can attach the whole validation artifact when the selected finding
-is the issue's sole contributor. The capture records the issue ARN, issue ID,
-and its `findingIds` in `validationIssue` so a saved import can verify that
-association. Evidence shared by several findings without an identified subject
-is omitted. If no artifacts match, the collector saves the
-native finding detail. If an AWS read fails, retry the export before import.
+The collector verifies the finding ARN and reads artifacts under the issue
+linked by that finding. When AWS supplies `perFindingResults`, it looks for
+exactly one entry matching the selected `findingId` with a verdict of `EXPLOITABLE`,
+`NOT_EXPLOITABLE` or `UNCERTAIN`. It retains that entry, including any flow
+or HTTP proof. If the breakdown omits the selected ID, the collector skips
+the artifact. If the ID occurs multiple times or its verdict is unrecognized,
+the collector can retain just the overall verdict and artifact descriptor
+when the verdict is recognized and the verified issue lists the selected
+finding as its sole contributor.
+
+For a multi-finding issue, the individual capture keeps only an explicit
+result for the selected finding from a validation artifact. This keeps
+sibling IDs and proof out of the individual import. To retain the overall
+verdict and evidence for the group, [export the issue](#export-issues-for-one-repository).
+
+Without a per-finding breakdown, the collector can retain the issue artifact
+when the selected finding is the issue’s sole contributor. Its verdict describes
+the AWS issue. The capture records the issue ARN, issue ID and `findingIds` in
+`validationIssue` so a saved import can verify the association. The imported
+record keeps this identity in `evidence.source_data.validation_issue`. If no
+artifacts match, the collector saves the native finding detail. If an AWS read
+fails, retry the export before import.
 
 Publish this report with `publish findings --provider continuum` and the verified
 `--source-repository-url`. The record is identified by the finding ARN.

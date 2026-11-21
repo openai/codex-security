@@ -113,8 +113,8 @@ Each structured item uses these fields:
 | `verdict`                 | Provider verdict, or `UNAVAILABLE`                                                     |
 | `severityBefore`          | Original Codex severity                                                                |
 | `severityAfter`           | Supplemental finding severity; original retained for issue scope or an unmatched claim |
-| `providerSeverity`        | Provider's severity, when returned; issue severity for issue scope                     |
-| `resultScope`             | `finding` or `issue`: scope of the verdict and provider severity, when reported        |
+| `providerSeverity`        | Provider's severity, when returned. Continuum reports the issue's severity.            |
+| `resultScope`             | Scope of the provider verdict (`finding` or `issue`)                                   |
 | `issueFindingCount`       | Number of distinct findings in the associated issue, when known                        |
 | `joinedValidatedIssue`    | Issue-scoped proof predates this finding's submission                                  |
 | `reasons`                 | Entries with `basis` and `reason`                                                      |
@@ -123,8 +123,8 @@ Each structured item uses these fields:
 | `freshness`               | Optional `validatedAt` timestamp, `stale` flag, and `reasons`                          |
 | `unavailable`             | Per-finding failure explanation, when present                                          |
 
-`reachableFromAttacker`, when returned, is a structured boolean at `resultScope`;
-absence means unknown. Reason prose is never used to infer it.
+Continuum reports `reachableFromAttacker` as a structured boolean from the
+issue's scoring evidence. Its absence means reachability is unknown.
 
 Reports contain conclusions, not raw proof bodies or validation console output.
 Custom SDK providers can omit `record`; their text assessment is still reported,
@@ -156,19 +156,23 @@ service-certified identity.
 
 Continuum can group several findings into one issue. If validation and scoring
 artifacts exist but the validation cannot be attributed to this finding alone,
-the adapter returns promptly with an **issue-level result**, not an individual
-validation. It says how many other findings share the issue and reports that
-issue's verdict, severity and structured reachability with its reason basis.
-Codex's finding severity is retained; Continuum's issue severity is separate.
+the adapter returns promptly with an **issue-level result**. It gives the
+current number of findings and reports the issue's verdict, severity and
+structured reachability with its reason basis. Codex retains its finding severity.
 JSON records use `resultScope: "issue"`, `issueFindingCount`, and
-`claimMatch: "unknown"`. An issue with one member can also have an issue-scoped
-result if its artifact cannot be attributed individually.
+`claimMatch: "unknown"`. This applies even when the issue currently lists
+only the submitted finding. Membership can change after evidence collection.
 
-An explicit matching `perFindingResults` entry takes precedence, even in an older
-artifact; another finding's proof is never presented as this finding's proof.
-Issue-wide proof can be treated as finding-scoped only when the checked issue
-identity and sole contributor match this finding. Missing validation or scoring
-artifacts still keep the finding pending under the shared deadline.
+Before reading artifacts, the adapter verifies the associated issue ARN and
+checks that the issue still lists the submitted AWS finding ID. This ties
+current severity and reachability to the issue associated with the submission.
+An artifact supports a finding verdict only when exactly one `perFindingResults`
+entry matches the submitted AWS finding ID and carries a recognized
+`exploitable` verdict. That entry takes precedence even in an older artifact.
+The claim comparison uses the projected finding evidence. If all artifacts
+lack a unique valid result for the finding, the adapter uses the newest
+overall verdict for the issue. Missing validation or scoring artifacts keep
+the finding pending under the shared deadline.
 
 If issue proof predates submission, the report says the finding joined an issue
 Continuum had already validated (`joinedValidatedIssue: true`). Validation,

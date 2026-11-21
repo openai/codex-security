@@ -242,7 +242,7 @@ for (const reachable of [true, false, undefined])
       );
       const completion = validationCompletionText(result);
       assert.match(completion, /Codex severity high retained/);
-      assert.match(completion, /with 1 other findings/);
+      assert.match(completion, /Findings in issue: 2\./);
       assert.match(
         completion,
         /Issue-level verdict: EXPLOITABLE; issue severity: critical/,
