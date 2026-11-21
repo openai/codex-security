@@ -16,6 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
+import { startResponsesCompatProxy } from "./responses-compat-proxy.js";
 import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
@@ -33,6 +34,83 @@ export interface ProviderProfile {
   name: string;
   path: string;
   cleanup(): Promise<void>;
+}
+
+const AZURE_BASE_URL_MARKERS = [
+  "openai.azure.",
+  "cognitiveservices.azure.",
+  "aoai.azure.",
+  "azure-api.",
+  "azurefd.",
+  "windows.net/openai",
+];
+
+/** OpenAI and Azure serve the `namespace` tool type natively. */
+function isOpenAiResponsesProvider(id: string, baseUrl: string): boolean {
+  if (id.toLowerCase() === "azure") return true;
+  let hostname = "";
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname === "api.openai.com") return true;
+  const lower = baseUrl.toLowerCase();
+  return AZURE_BASE_URL_MARKERS.some((marker) => lower.includes(marker));
+}
+
+/**
+ * A provider needs the Responses compatibility proxy when it speaks the
+ * Responses API to a non-OpenAI host: those endpoints reject the `namespace`
+ * tool type, so delegation and the scan-completion tool fail before the first
+ * turn. A missing `wire_api` counts as `responses`. Loopback endpoints are
+ * adapted too: a local gateway that already translates namespaces receives
+ * already-flat tools (a no-op for it), and the `huggingface` provider has
+ * its own adapter in open PR #2648.
+ */
+export function needsResponsesCompatProxy(
+  id: string,
+  definition: unknown,
+): boolean {
+  if (!isRecord(definition)) return false;
+  if (id === "huggingface") return false;
+  const wireApi = definition["wire_api"];
+  if (wireApi !== undefined && wireApi !== "responses") return false;
+  const baseUrl = definition["base_url"];
+  if (typeof baseUrl !== "string" || baseUrl.length === 0) return false;
+  return !isOpenAiResponsesProvider(id, baseUrl);
+}
+
+/**
+ * Rewrite compatible Responses providers through a loopback proxy, keeping
+ * every other provider field unchanged. The returned cleanup closes every
+ * started proxy; a failed start closes the proxies already started.
+ */
+export async function adaptResponsesCompatProviders(providers: JsonObject) {
+  const adapted: JsonObject = { ...providers };
+  const cleanups: Array<() => Promise<void>> = [];
+  try {
+    for (const [id, definition] of Object.entries(providers)) {
+      if (!needsResponsesCompatProxy(id, definition)) continue;
+      const adapter = await startResponsesCompatProxy(
+        (definition as JsonObject)["base_url"] as string,
+      );
+      cleanups.push(adapter.close);
+      adapted[id] = {
+        ...(definition as JsonObject),
+        base_url: adapter.baseUrl,
+      };
+    }
+  } catch (error) {
+    for (const close of cleanups) await close();
+    throw error;
+  }
+  return {
+    providers: adapted,
+    cleanup: async () => {
+      for (const close of cleanups) await close();
+    },
+  };
 }
 
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
@@ -116,9 +194,25 @@ export async function createProviderProfile(
     await writePrivateConfig(path, JSON.stringify(config));
   } else {
     const providers = resolveCodexProfile(config)["model_providers"];
-    await writeCodexConfig(path, {
-      model_providers: isRecord(providers) ? providers : {},
-    });
+    const adapted = await adaptResponsesCompatProviders(
+      isRecord(providers) ? providers : {},
+    );
+    let closeAdapter: (() => Promise<void>) | undefined;
+    try {
+      await writeCodexConfig(path, { model_providers: adapted.providers });
+      closeAdapter = adapted.cleanup;
+    } catch (error) {
+      await adapted.cleanup();
+      throw error;
+    }
+    return {
+      name,
+      path,
+      cleanup: async () => {
+        await closeAdapter?.();
+        await rm(path, { force: true });
+      },
+    };
   }
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }

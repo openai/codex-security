@@ -641,7 +641,15 @@ test.each([
                   const actual = (
                     nativeConfig["model_providers"] as JsonObject
                   )[providerId] as JsonObject;
-                  expect(actual).toMatchObject(provider);
+                  // The live profile routes the provider through its own
+                  // compat proxy; credentials and other fields are unchanged.
+                  expect({
+                    ...actual,
+                    base_url: provider.base_url,
+                  }).toMatchObject(provider);
+                  expect(actual["base_url"]).toMatch(
+                    /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
+                  );
                   expect(actual["http_headers"] ?? {}).toEqual(
                     provider.http_headers ?? {},
                   );
@@ -892,14 +900,21 @@ for (const mode of ["standard", "deep"] as const) {
                   if (mode === "deep") {
                     const settings = await workerRuntimeSettings(environment);
                     expect(settings.environment).toEqual(workerEnvironment);
-                    expect(
-                      await effectiveProvider(
-                        environment,
-                        repository,
-                        profileConfigOverrides(settings.config),
-                        settings.nativeProfile,
-                      ),
-                    ).toMatchObject(provider);
+                    const effective = (await effectiveProvider(
+                      environment,
+                      repository,
+                      profileConfigOverrides(settings.config),
+                      settings.nativeProfile,
+                    )) as JsonObject;
+                    // The live profile routes the provider through the
+                    // compat proxy; authentication is otherwise unchanged.
+                    expect({
+                      ...effective,
+                      base_url: provider.base_url,
+                    }).toMatchObject(provider);
+                    expect(effective["base_url"]).toMatch(
+                      /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
+                    );
                     const status = await nativeRequest(
                       environment,
                       repository,
@@ -1229,10 +1244,35 @@ test.each([
                     profile,
                   )
                 : {};
-            expect({ ...options.config, ...providerConfig }).toMatchObject(
-              routing,
-            );
-            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
+            const merged = { ...options.config, ...providerConfig };
+            const mergedRuntime = { ...runtime, ...providerConfig };
+            if (provider === "openrouter") {
+              // Deep workers inherit the provider through the Responses
+              // compat proxy, which forwards to the configured endpoint.
+              const inherited = (merged["model_providers"] as JsonObject)[
+                "openrouter"
+              ] as JsonObject;
+              expect(inherited["base_url"]).toMatch(
+                /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
+              );
+              const unproxied = {
+                ...merged,
+                model_providers: {
+                  openrouter: { ...inherited, base_url: endpoint },
+                },
+              };
+              expect(unproxied).toMatchObject(routing);
+              expect(
+                (
+                  (mergedRuntime["model_providers"] as JsonObject)[
+                    "openrouter"
+                  ] as JsonObject
+                )["base_url"],
+              ).toBe(inherited["base_url"]);
+            } else {
+              expect(merged).toMatchObject(routing);
+              expect(mergedRuntime).toMatchObject(routing);
+            }
             throw new Error("synthetic endpoint inherited");
           })(),
       },
