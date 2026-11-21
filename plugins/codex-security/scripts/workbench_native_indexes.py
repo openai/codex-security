@@ -1,6 +1,7 @@
 """Read-only native findings and repository indexes for the Security workbench."""
 
 import argparse
+import hashlib
 import os
 import sqlite3
 import sys
@@ -48,7 +49,12 @@ def list_global_findings(
             requested = identities.for_row(target)
     findings = (
         row
-        for row in _indexed_findings(connection, identities=identities, scan_scope=scan_scope)
+        for row in _indexed_findings(
+            connection,
+            identities=identities,
+            scan_scope=scan_scope,
+            finding_id_sha256=getattr(args, "finding_id_sha256", None),
+        )
         if (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
@@ -118,6 +124,7 @@ def _legacy_generations(
 def _indexed_findings(
     connection: sqlite3.Connection,
     *,
+    finding_id_sha256: str | None = None,
     identities: RepositoryIdentityCache | None = None,
     scan_scope: RepositoryScanScope | None = None,
     legacy_generations: dict[str, str] | None = None,
@@ -296,6 +303,10 @@ def _indexed_findings(
             occurrences,
             key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),
         )
+        if finding_id_sha256 is not None:
+            digest = hashlib.sha256(latest["finding_id"].encode()).hexdigest()
+            if digest != finding_id_sha256:
+                continue
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
             key=lambda row: (timestamp_key(row["decision_updated_at"]), row["occurrence_id"]),

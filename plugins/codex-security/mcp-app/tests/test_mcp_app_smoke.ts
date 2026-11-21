@@ -3262,6 +3262,22 @@ with sqlite3.connect(sys.argv[1]) as connection:
   assert.equal(globalFindingsNext.structuredContent.limit, 20);
   assert.equal(globalFindingsNext.structuredContent.offset, 1);
   assert.equal(globalFindingsNext.structuredContent.nextOffset, null);
+  const [laterFinding] = globalFindingsNext.structuredContent.findings;
+  const byDigest = await testServer.callSuccessfulTool(22151, {
+    name: "list_codex_security_global_findings",
+    arguments: {
+      findingIdSha256: hash("sha256", laterFinding.findingId),
+      limit: 1,
+    },
+  });
+  assert.deepEqual(byDigest.structuredContent.findings, [laterFinding]);
+  assert.equal(byDigest.structuredContent.nextOffset, null);
+  const missingFinding = await testServer.callSuccessfulTool(22152, {
+    name: "list_codex_security_global_findings",
+    arguments: { findingIdSha256: hash("sha256", "missing-finding") },
+  });
+  assert.deepEqual(missingFinding.structuredContent.findings, []);
+  assert.equal(missingFinding.structuredContent.nextOffset, null);
   const filteredGlobalFindings = await testServer.callSuccessfulTool(94002, {
     name: "list_codex_security_global_findings",
     arguments: {

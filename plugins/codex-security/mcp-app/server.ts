@@ -483,6 +483,11 @@ const findingsPageSchema = {
 };
 const globalFindingsPageSchema = {
   ...findingCollectionFiltersSchema,
+  findingIdSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .describe("Match the SHA-256 digest of the returned UTF-8 findingId.")
+    .optional(),
   limit: positiveInteger.max(20).optional(),
   offset: nonnegativeInteger.optional(),
   targetId: requiredText.max(256).optional(),
@@ -1308,9 +1313,18 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async ({ limit, offset, query, severity, status, targetId }) =>
+    async ({
+      findingIdSha256,
+      limit,
+      offset,
+      query,
+      severity,
+      status,
+      targetId,
+    }) =>
       scanActionResult(
         await workbench("list-global-findings", {
+          findingIdSha256,
           query,
           severity,
           status,
