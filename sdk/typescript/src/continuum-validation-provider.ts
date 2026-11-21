@@ -260,48 +260,38 @@ function citesPrimaryLocation(details: string, finding: AnyFinding) {
   return false;
 }
 
-function proofClaimMatch(
-  proof: unknown,
+const concepts = [
+  /\binjection\b/iu,
+  /\b(authorization|cross-user|ownership|idor)\b/iu,
+  /\b(disclosure|exposure|secrets?|credentials?)\b/iu,
+  /\b(availability|exhaustion|denial)\b/iu,
+];
+
+export function assessClaimMatch(
+  evidence: string,
   finding: AnyFinding,
 ): ValidationClaimMatch {
-  const raw = typeof proof === "string" ? proof : JSON.stringify(proof);
-  if (!citesPrimaryLocation(raw, finding)) return "unknown";
-  const semantic = locations(finding).reduce(
-    (value, { path }) => value.replaceAll(path.toLowerCase(), ""),
-    raw.toLowerCase(),
+  if (!citesPrimaryLocation(evidence, finding)) return "unknown";
+  const details = locations(finding).reduce(
+    (value, { path }) => value.replaceAll(path, ""),
+    evidence,
   );
   const title = [
     finding["title"],
     finding["summary"],
     object(finding["taxonomy"])["category"],
   ]
-    .map((value) => text(value)?.toLowerCase() ?? "")
+    .map(text)
     .join(" ");
-  const concepts: Record<string, readonly string[]> = {
-    injection: ["injection", "query", "template", "interpreter"],
-    authorization: ["authorization", "cross-user", "ownership", "idor"],
-    exposure: ["disclosure", "exposure", "secret", "credential"],
-    availability: ["availability", "resource", "exhaust", "latency", "denial"],
-  };
-  const claim = new Set(
-    Object.entries(concepts)
-      .filter(([, words]) => words.some((word) => title.includes(word)))
-      .map(([name]) => name),
-  );
-  const demonstrated = new Set(
-    Object.entries(concepts)
-      .filter(([, words]) => words.some((word) => semantic.includes(word)))
-      .map(([name]) => name),
-  );
-  const overlaps = [...claim].some((value) => demonstrated.has(value));
-  if (claim.size === 0 || demonstrated.size === 0) return "unknown";
-  if (!overlaps) return "different_flaw";
-  return [...demonstrated].some((value) => !claim.has(value))
-    ? "on_target_escalated"
-    : "on_target";
+  const claim = concepts.filter((concept) => concept.test(title));
+  const demonstrated = concepts.filter((concept) => concept.test(details));
+  if (!claim.length || !demonstrated.length) return "unknown";
+  if (!claim.some((concept) => demonstrated.includes(concept)))
+    return "different_flaw";
+  return demonstrated.every((concept) => claim.includes(concept))
+    ? "on_target"
+    : "on_target_escalated";
 }
-
-export const assessClaimMatch = proofClaimMatch;
 
 function evidenceRows(artifact: Record<string, unknown>) {
   const body = object(artifact["body"]);
@@ -310,26 +300,18 @@ function evidenceRows(artifact: Record<string, unknown>) {
 }
 
 function proofDetails(validation: Record<string, unknown>) {
-  // The selector removes results for siblings. Require one result for this ID.
-  const results = validation["perFindingResults"];
-  if (Array.isArray(results) && results.length !== 1) return;
-  const proof = Array.isArray(results) ? object(results[0]) : validation;
-  const executed = object(proof["executedProof"]);
+  // These fields are mutually exclusive and belong to the entire artifact.
+  // The selector omits them when projecting a result from a bundle.
+  const executed = object(validation["executedProof"]);
   const observed = text(executed["observedEffect"]);
-  const code = object(executed["code"])["proofCode"];
-  if (observed && Array.isArray(code)) {
-    const evidence = code
-      .map((row) => text(object(row)["content"]))
-      .join("\n")
-      .trim();
-    if (evidence)
-      return {
-        evidence,
-        description: "executed proof",
-        observation: { kind: "execution" as const, effect: safeText(observed) },
-      };
-  }
-  const analysis = object(proof["sourceAnalysis"]);
+  const files = object(executed["code"])["proofCode"];
+  if (observed && Array.isArray(files))
+    return {
+      evidence: files.map((file) => text(object(file)["content"])).join("\n"),
+      description: "executed proof",
+      observation: { kind: "execution" as const, effect: safeText(observed) },
+    };
+  const analysis = object(validation["sourceAnalysis"]);
   const inferred = text(analysis["inferredEffect"]);
   const summary = text(analysis["summary"]);
   if (summary)
@@ -344,15 +326,24 @@ function proofDetails(validation: Record<string, unknown>) {
     };
 }
 
+interface Scoring {
+  artifact: Record<string, unknown>;
+  latest: boolean;
+  rejection?: string;
+}
+
+function createdAt(artifact: Record<string, unknown>) {
+  return Date.parse(text(artifact["createdAt"]) ?? "");
+}
+
 function scoreLimitation(
   submittedAt: Date,
   issue: Record<string, unknown>,
   proof: Record<string, unknown>,
   score: Record<string, unknown>,
-  verdict: string,
 ): string | undefined {
-  const validated = Date.parse(text(proof["createdAt"]) ?? "");
-  const scored = Date.parse(text(score["createdAt"]) ?? "");
+  const validated = createdAt(proof);
+  const scored = createdAt(score);
   const updated = Date.parse(text(issue["updatedAt"]) ?? "");
   if (!(
     submittedAt.getTime() <= validated &&
@@ -374,7 +365,7 @@ function scoreLimitation(
   if (
     signals.length !== 1 ||
     reference["sourceValidationArtifactId"] !== proof["artifactId"] ||
-    reference["verdict"] !== verdict
+    reference["verdict"] !== validationOutcome(proof).verdict
   )
     return "The scorer does not identify the selected validation artifact and its verdict.";
 }
@@ -743,8 +734,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     let issueId: string | undefined;
     let issue: Record<string, unknown> = {};
     let validationArtifact: Record<string, unknown> | undefined;
-    let likelihoodArtifact: Record<string, unknown> | undefined;
-    let latestScore = false;
+    let scoring: Scoring | undefined;
     let resultScope: ValidationResultScope = "finding";
     let issueFindingCount: number | undefined;
     try {
@@ -818,9 +808,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
             const items = Array.isArray(listed["items"])
               ? listed["items"].map(object)
               : [];
-            const timestamp = (item: Record<string, unknown>) =>
-              Date.parse(text(item["createdAt"]) ?? "");
-            items.sort((a, b) => (timestamp(b) || 0) - (timestamp(a) || 0));
+            items.sort((a, b) => (createdAt(b) || 0) - (createdAt(a) || 0));
             for (const candidate of items) {
               const artifactId = text(candidate["artifactId"]);
               if (!artifactId) continue;
@@ -840,33 +828,37 @@ export class ContinuumValidationProvider implements ValidationProvider {
                   "Continuum returned a different artifact while polling.",
                 );
               if (kind === "EVIDENCE") {
-                // Keep the newest for diagnostics if no linked score exists.
-                likelihoodArtifact ??= artifact;
+                if (!validationArtifact) return;
+                const shared =
+                  resultScope === "finding" && issueFindingCount !== 1;
+                const rejection = shared
+                  ? "The severity applies to a shared issue."
+                  : scoreLimitation(
+                      submittedAt,
+                      issue,
+                      validationArtifact,
+                      artifact,
+                    );
+                // Prefer the newest linked score. The newest rejection explains
+                // why scoring is unavailable if none of the artifacts qualify.
+                if (!scoring || !rejection)
+                  scoring = {
+                    artifact,
+                    rejection,
+                    latest: items.every(
+                      (item) =>
+                        item === candidate ||
+                        createdAt(item) < createdAt(artifact),
+                    ),
+                  };
                 if (
-                  !validationArtifact ||
-                  (resultScope === "finding" && issueFindingCount !== 1)
+                  shared ||
+                  !rejection ||
+                  validationOutcome(validationArtifact).disposition !==
+                    "reportable"
                 )
                   break;
-                const outcome = validationOutcome(validationArtifact);
-                if (
-                  scoreLimitation(
-                    submittedAt,
-                    issue,
-                    validationArtifact,
-                    artifact,
-                    outcome.verdict,
-                  )
-                ) {
-                  if (outcome.disposition !== "reportable") break;
-                  continue;
-                }
-                likelihoodArtifact = artifact;
-                // The issue severity can only be attached to its newest score.
-                latestScore = items.every(
-                  (item) =>
-                    item === candidate || timestamp(item) < timestamp(artifact),
-                );
-                break;
+                continue;
               }
               const selected = selectFindingValidationArtifact(
                 artifact,
@@ -909,12 +901,11 @@ export class ContinuumValidationProvider implements ValidationProvider {
       }
       if (!validationArtifact || !issueId) return;
       const outcome = validationOutcome(validationArtifact);
-      if (!likelihoodArtifact && outcome.disposition === "reportable") return;
+      if (!scoring && outcome.disposition === "reportable") return;
       return this.#report(finding, submittedAt, outcome, {
         issue,
         validationArtifact,
-        likelihoodArtifact,
-        latestScore,
+        scoring,
         resultScope,
         issueFindingCount,
       });
@@ -936,15 +927,13 @@ export class ContinuumValidationProvider implements ValidationProvider {
     {
       issue = {},
       validationArtifact = {},
-      likelihoodArtifact = {},
-      latestScore = false,
+      scoring,
       resultScope = "finding",
       issueFindingCount,
     }: {
       issue?: Record<string, unknown>;
       validationArtifact?: Record<string, unknown>;
-      likelihoodArtifact?: Record<string, unknown>;
-      latestScore?: boolean;
+      scoring?: Scoring;
       resultScope?: ValidationResultScope;
       issueFindingCount?: number;
     } = {},
@@ -954,12 +943,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const proof = proofDetails(validation);
     const match =
       conclusive && resultScope === "finding" && proof
-        ? proofClaimMatch(proof.evidence, finding)
+        ? assessClaimMatch(proof.evidence, finding)
         : "unknown";
 
-    const artifactTime = Date.parse(
-      text(validationArtifact["createdAt"]) ?? "",
-    );
+    const artifactTime = createdAt(validationArtifact);
     const evidenceCreatedAt = Number.isFinite(artifactTime)
       ? new Date(artifactTime).toISOString()
       : undefined;
@@ -969,7 +956,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       olderArtifact ||
       [
         issue["updatedAt"] ?? issue["createdAt"],
-        likelihoodArtifact["createdAt"],
+        scoring?.artifact["createdAt"],
       ].some((time) => Date.parse(text(time) ?? "") < submittedAt.getTime());
     const joinedValidatedIssue =
       conclusive && resultScope === "issue" && olderArtifact;
@@ -982,25 +969,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const providerSeverity = text(issue["severity"])?.toLowerCase();
     const severityBefore = severityLevel(finding);
     const matched = match === "on_target" || match === "on_target_escalated";
-    const hasScore = !!text(likelihoodArtifact["artifactId"]);
-    const rejected = !hasScore
-      ? undefined
-      : resultScope === "finding" && issueFindingCount !== 1
-        ? "The severity applies to a shared issue."
-        : scoreLimitation(
-            submittedAt,
-            issue,
-            validationArtifact,
-            likelihoodArtifact,
-            verdict,
-          );
-    const score = hasScore && !rejected ? likelihoodArtifact : undefined;
+    const score = scoring?.rejection ? undefined : scoring?.artifact;
     const limitation =
-      score && !latestScore
+      scoring?.rejection ??
+      (scoring && !scoring.latest
         ? "The linked scoring artifact is not established as the latest issue score. Codex severity is retained."
-        : rejected;
-    const regrade =
-      matched && score && latestScore && providerSeverity !== undefined;
+        : undefined);
+    const current = score && scoring?.latest;
+    const regrade = matched && current && providerSeverity !== undefined;
     const observation =
       matched && score && terminalStatus === "COMPLETED"
         ? proof?.observation
@@ -1008,7 +984,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const severityAfter = regrade ? providerSeverity : severityBefore;
     const severityBasis = "INFERRED";
     const factors = severityFactors(
-      score && latestScore && issue["severityReasoning"],
+      current && issue["severityReasoning"],
       score,
     );
     const signal = evidenceSignal(score ?? {});
@@ -1078,7 +1054,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         verdict,
         ...(terminalStatus && { terminalStatus }),
         validationArtifactId: text(validationArtifact["artifactId"]),
-        scoringArtifactId: text(likelihoodArtifact["artifactId"]),
+        scoringArtifactId: text(scoring?.artifact["artifactId"]),
         ...(observation && { proofObservation: observation }),
         ...(statusMessage && { statusMessage }),
         ...(unavailable && { unavailable }),
