@@ -219,6 +219,7 @@ export interface ExternalPublicationPreview extends ExternalFindings {
   privateImport?: {
     format: PrivateImportFormat;
     contextVersion: string;
+    sourceCheckpoint?: string;
     sha256: string;
     bytes: number;
     retryOfJobId?: string;
@@ -1408,11 +1409,13 @@ async function preparePublicationInput(
   const usePrivateImport =
     !saved && (canStartJob || privateSaved !== undefined);
   async function preparePrivateAttempt() {
-    const context = await privateClient.context();
     if (source.source_key.trim() !== source.source_key)
       throw new CodexSecurityError(
         "A private source key cannot have leading or trailing whitespace.",
       );
+    const context = await privateClient.context(
+      source.provider === "continuum" ? source : undefined,
+    );
     const report = selectPrivateReport(
       parsed.findings,
       source.provider,
@@ -1722,9 +1725,13 @@ async function preparePublicationInput(
     }
     checkRepositories(parsed, resumed);
     requireAccess(context, previous);
+    const sourceCheckpoint = privateApproval
+      ? privateApproval.sourceCheckpoint
+      : context.source_checkpoint;
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
+      ...(sourceCheckpoint && { sourceCheckpoint }),
       sha256: report.digest,
       bytes: Buffer.byteLength(report.bytes),
       ...(retryOfJobId ? { retryOfJobId } : {}),
@@ -1757,6 +1764,10 @@ async function preparePublicationInput(
           const retrying =
             retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
           const active = retrying ? undefined : stored;
+          if (active && active.sourceCheckpoint !== sourceCheckpoint)
+            throw new CodexSecurityError(
+              "The saved source checkpoint changed. Preview this report again to resume.",
+            );
           requireAccess(current, active);
           if (await readPending())
             throw new CodexSecurityError(
@@ -1764,6 +1775,7 @@ async function preparePublicationInput(
             );
           const checkpoint = active ?? {
             ...binding,
+            sourceCheckpoint,
             approvedRepositoryUrl: destination.url,
             approvedRepositoryPlatform:
               hostedSource?.github === false ? ("other" as const) : undefined,
@@ -1834,6 +1846,7 @@ async function preparePublicationInput(
                 fileId: checkpoint.fileId,
                 format: report.format,
                 source,
+                sourceCheckpoint: checkpoint.sourceCheckpoint,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
                 jobApiVersion: checkpoint.jobApiVersion,
