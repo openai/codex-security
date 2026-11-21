@@ -56,6 +56,86 @@ test("no provider preserves standalone validation output", async () => {
   expect(stderr.text()).toBe("");
 });
 
+test("validates only the requested saved occurrence and reports its receipt on failure", async () => {
+  const root = await temporaryDirectory("saved-validation-");
+  const method = spyOn(ContinuumValidationProvider.prototype, "validateBatch");
+  try {
+    const config = join(root, "config.json");
+    await writeFile(
+      config,
+      JSON.stringify({ scan: { validation: configured } }),
+    );
+    const findings = fakeResult(["high", "high"]).findings.findings.map(
+      (f, i) => ({
+        ...f,
+        findingId: "csf_" + i,
+        occurrenceId: "occ_" + i,
+      }),
+    );
+    const record = {
+      itemId: "occ_1",
+      provider: "continuum",
+      findingId: "accepted",
+      verdict: "UNAVAILABLE",
+      severityBefore: "high",
+      severityAfter: "high",
+      claimMatch: "unknown" as const,
+      freshness: { stale: false, reasons: [] },
+      reasons: [],
+      unavailable: "pending",
+    };
+    method.mockResolvedValue([
+      {
+        record,
+        report: "pending",
+        unavailable: "pending",
+        disposition: "deferred",
+        provenance: {
+          provider: "continuum",
+          providerVersion: "1",
+          validatedAt: "now",
+        },
+      },
+    ]);
+    const deps = dependencies({
+      currentDirectory: root,
+      onWorkbench: () => ({
+        scan: {
+          scanId: "scan",
+          targetPath: root,
+          findings: findings.map(({ occurrenceId, findingId }) => ({
+            occurrenceId,
+            findingId,
+          })),
+        },
+      }),
+      readSavedFindings: async () => findings,
+    });
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        [
+          "validate",
+          "--scan",
+          "scan",
+          "-c",
+          config,
+          "occ_1",
+          "--format",
+          "json",
+        ],
+        deps,
+      ),
+      cli.stderr.text(),
+    ).toBe(1);
+    expect(method.mock.calls[0]?.[0]).toEqual([findings[1]!]);
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({ items: [record] });
+  } finally {
+    method.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SDK accepts a provider implementation and contains provider failures", async () => {
   const client = new CodexSecurity();
   const provider = {

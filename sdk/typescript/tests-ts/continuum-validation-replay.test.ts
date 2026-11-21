@@ -1,3 +1,9 @@
+import {
+  continuumTestRepository,
+  registeredSource,
+  creation,
+  requestBody,
+} from "./support/continuum-validation-fixtures.js";
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -12,6 +18,8 @@ const recorded = JSON.parse(
     "utf8",
   ),
 );
+const context = continuumTestRepository();
+
 const finding: Record<string, unknown> & { severity: { level: string } } = {
   ...(Object.values(recorded.findings)[0] as Record<string, unknown>),
   severity: { level: "high" },
@@ -21,10 +29,13 @@ const finding: Record<string, unknown> & { severity: { level: string } } = {
 /** Only the AWS transport is faked. Admission is synthetic, responses have recorded shape. */
 function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
   return async (operation, args) => {
+    const setup = registeredSource(operation, recorded.environmentId);
+    if (setup) return setup;
     if (operation === "create-code-finding")
-      return {
-        findingId: (Object.values(fixture.findings)[0] as any).findingId,
-      };
+      return creation(
+        (Object.values(fixture.findings)[0] as any).findingId,
+        recorded.environmentId,
+      );
     if (operation === "get-code-finding")
       return { ...(Object.values(fixture.findings)[0] as object) };
     if (operation === "get-code-issue") return structuredClone(fixture.issue);
@@ -57,9 +68,7 @@ function reachability(fixture: typeof recorded) {
 
 describe("recorded shape, anonymised replay", () => {
   test("projects the real nested GRAPH exposure and critical severity through the adapter", async () => {
-    const result = await provider().validate(finding, {
-      repositoryPath: "/not-used",
-    });
+    const result = await provider().validate(finding, context);
     expect(result.report).toContain(
       "Codex: high, exposure unknown → Continuum: critical, reachable from attacker (basis GRAPH)",
     );
@@ -106,9 +115,7 @@ describe("explicitly fake outcome variations", () => {
       basis: "GRAPH",
       reason: "NOT_EXPOSED: the observed deployment has no public ingress.",
     });
-    const result = await provider(transport(fake)).validate(finding, {
-      repositoryPath: "/not-used",
-    });
+    const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record?.severityAfter).toBe("low");
     expect(result.report).toContain(
       "not reachable from attacker (basis GRAPH)",
@@ -133,9 +140,7 @@ describe("explicitly fake outcome variations", () => {
             };
           }
       }
-      const result = await provider(transport(fake)).validate(finding, {
-        repositoryPath: "/not-used",
-      });
+      const result = await provider(transport(fake)).validate(finding, context);
       expect(result.record).toMatchObject({
         claimMatch: "different_flaw",
         severityAfter: "high",
@@ -159,9 +164,7 @@ describe("explicitly fake outcome variations", () => {
       basis: "INFERRED",
       reason,
     });
-    const result = await provider(transport(fake)).validate(finding, {
-      repositoryPath: "/not-used",
-    });
+    const result = await provider(transport(fake)).validate(finding, context);
     expect(result.report).toContain("exposure unknown (basis INFERRED)");
     expect(result.report).not.toContain("lower priority");
   });
@@ -171,9 +174,7 @@ describe("explicitly fake outcome variations", () => {
     for (const a of Object.values(fake.artifacts) as any[])
       if (a.artifactType === "VALIDATION_EVIDENCE")
         a.body.validationEvidence.exploitable = "NOT_EXPLOITABLE";
-    const result = await provider(transport(fake)).validate(finding, {
-      repositoryPath: "/not-used",
-    });
+    const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
     expect(result.record?.claimMatch).toBe("on_target");
     expect(finding.severity.level).toBe("high");
@@ -183,20 +184,24 @@ describe("explicitly fake outcome variations", () => {
     let milliseconds = Date.parse("2026-11-06T15:20:00Z");
     const p = new ContinuumValidationProvider({
       environmentId: recorded.environmentId,
-      waitMinutes: 0.001,
+      waitMinutes: 1,
       launcher: async (op, args, signal) => {
         if (op === "create-code-finding") {
-          const id = JSON.parse(args[1]!).ocsfDocument.finding_info.uid;
+          const id = JSON.parse(requestBody(args)).ocsfDocument.finding_info
+            .uid;
           if (id === "rejected") throw new Error("Fake submission rejected");
-          return {
-            findingId:
-              id === finding["occurrenceId"]
-                ? (Object.values(recorded.findings)[0] as any).findingId
-                : id,
-          };
+          return creation(
+            id === finding["occurrenceId"]
+              ? (Object.values(recorded.findings)[0] as any).findingId
+              : id,
+            recorded.environmentId,
+          );
         }
         if (op === "get-code-finding" && args.at(-1) === "waiting")
-          return { status: "SUBMITTED" };
+          return {
+            status: "SUBMITTED",
+            ...creation("waiting", recorded.environmentId),
+          };
         return transport()(op, args, signal);
       },
       now: () => new Date(milliseconds),
@@ -211,7 +216,7 @@ describe("explicitly fake outcome variations", () => {
         { ...finding, occurrenceId: "rejected" },
         { ...finding, occurrenceId: "waiting" },
       ],
-      { repositoryPath: "/not-used" },
+      context,
     );
     expect(results[0]?.record?.verdict).toBe("EXPLOITABLE");
     expect(results[1]?.record?.unavailable).toContain("rejected");
@@ -227,7 +232,7 @@ describe("explicitly fake outcome variations", () => {
     let milliseconds = 0;
     const p = new ContinuumValidationProvider({
       environmentId: recorded.environmentId,
-      waitMinutes: 0.001,
+      waitMinutes: 1,
       launcher: async (op, args, signal) =>
         op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE"
           ? { items: [] }
@@ -237,8 +242,8 @@ describe("explicitly fake outcome variations", () => {
         milliseconds += ms;
       },
     });
-    expect(
-      (await p.validate(finding, { repositoryPath: "/not-used" })).unavailable,
-    ).toContain("timed out");
+    expect((await p.validate(finding, context)).unavailable).toContain(
+      "timed out",
+    );
   });
 });

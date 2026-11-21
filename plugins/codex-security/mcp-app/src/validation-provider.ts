@@ -2,15 +2,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { replaceArtifactText } from "./artifact-io.js";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { readProjectConfig } from "../../../../sdk/typescript/src/project-config.js";
-import { validationProviderFromConfiguration } from "../../../../sdk/typescript/src/validation-providers.js";
+import { readSelectedProjectConfig } from "./deep-scan/project-config.js";
 import {
-  unavailableAssessment,
-  type ValidationProvider,
-  type ValidationProviderAssessment,
+  validationProviderFromConfiguration,
+  assessPluginFindings,
   type ValidationProviderConfiguration,
-  type ValidationItemRecord,
-} from "../../../../sdk/typescript/src/validation-provider.js";
+} from "#validation-runtime";
 import type { JsonObject } from "./types.js";
 import { protectedHostPathResolver } from "./helpers/inventory-git.js";
 
@@ -20,27 +17,6 @@ export function validationCompletionText(
 ): string {
   if (!validation) return "";
   return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}`;
-}
-
-function itemConclusion(record: ValidationItemRecord): string {
-  const bases = [...new Set(record.reasons.map((reason) => reason.basis))];
-  if (record.resultScope === "issue") {
-    const others =
-      record.issueFindingCount === undefined
-        ? "other findings"
-        : `${record.issueFindingCount - 1} other findings`;
-    const reachability = record.reasons.find((reason) =>
-      reason.reason.startsWith("Basis:"),
-    );
-    const exposure =
-      record.reachableFromAttacker === true
-        ? "reachable from attacker"
-        : record.reachableFromAttacker === false
-          ? "not reachable from attacker"
-          : "unknown";
-    return `Item ${record.itemId}: Codex severity ${record.severityBefore} retained. Continuum grouped this finding with ${others} into an issue. Issue-level verdict: ${record.verdict}; issue severity: ${record.providerSeverity ?? "not returned"}. Not individually validated. Issue reachability: ${exposure}.${reachability ? ` Context: ${reachability.reason}` : ""}${record.joinedValidatedIssue ? " This finding joined an issue Continuum had already validated." : ""}${bases.length ? ` Reason bases: ${bases.join(", ")}.` : ""}${record.freshness.stale ? " Evidence predates this submission." : ""}`;
-  }
-  return `Item ${record.itemId}: ${record.severityBefore} → ${record.severityAfter}. Verdict: ${record.verdict}.${record.providerSeverity ? ` Provider severity: ${record.providerSeverity}.` : ""}${bases.length ? ` Reason bases: ${bases.join(", ")}.` : ""} Claim match: ${record.claimMatch}.${record.freshness.stale ? " Evidence predates this submission." : ""}${record.unavailable ? ` Unavailable: ${record.unavailable}` : ""}`;
 }
 
 function configurationPath(scanId: string): string {
@@ -60,7 +36,10 @@ export async function bindValidationProvider(
   created: boolean,
 ): Promise<void> {
   if (!created || projectConfigPath === undefined) return;
-  const project = await readProjectConfig(projectConfigPath, repositoryPath);
+  const project = await readSelectedProjectConfig(
+    projectConfigPath,
+    repositoryPath,
+  );
   const configuration = project.input.scan?.validation;
   await bindValidationProviderConfiguration(scanId, configuration, created);
 }
@@ -125,7 +104,6 @@ export async function validateCompletedScan(
       );
       return { ...cached.result, reportPath, recordsPath };
     }
-    const provider: ValidationProvider = resolveProvider(configuration);
     const { findings }: { findings: Record<string, unknown>[] } = JSON.parse(
       await readFile(join(scanDir, "findings.json"), "utf8"),
     );
@@ -133,45 +111,16 @@ export async function validateCompletedScan(
       repositoryPath,
       resolveHostPaths: protectedHostPathResolver,
     };
-    const assessments: ValidationProviderAssessment[] = provider.validateBatch
-      ? await provider
-          .validateBatch(findings, context)
-          .catch((error: unknown) =>
-            findings.map(() => unavailableAssessment(provider, error)),
-          )
-      : await Promise.all(
-          findings.map(async (finding: Record<string, unknown>) => {
-            try {
-              return await provider.validate(finding, context);
-            } catch (error) {
-              return unavailableAssessment(provider, error);
-            }
-          }),
-        );
-    const summary = assessments
-      .map((assessment) =>
-        assessment.record
-          ? itemConclusion(assessment.record)
-          : assessment.report,
-      )
-      .join("\n");
-    const report = assessments
-      .map(
-        (assessment, index) =>
-          `## ${findings[index].occurrenceId ?? findings[index].id ?? `item-${index + 1}`}\n\nDisposition: ${assessment.disposition}\n\n${assessment.report}\n`,
-      )
-      .join("\n---\n\n");
-    const records = {
-      schemaVersion: 1,
-      findings: findings.length,
-      summary,
-      items: assessments.flatMap((assessment) =>
-        assessment.record ? [assessment.record] : [],
-      ),
-    };
+    const { providerName, summary, report, records } =
+      await assessPluginFindings(
+        configuration,
+        findings,
+        context,
+        resolveProvider,
+      );
     const result = {
       status: "complete",
-      provider: provider.name,
+      provider: providerName,
       findings: findings.length,
       reportPath,
       recordsPath,

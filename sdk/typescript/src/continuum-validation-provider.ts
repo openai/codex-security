@@ -1,4 +1,9 @@
-import { createHash } from "node:crypto";
+import {
+  prepareContinuumSubmissions,
+  type ContinuumReceipt,
+  type ContinuumRequest,
+} from "./continuum-submissions.js";
+import { repositoryFilePath } from "./scanner-import.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prepareContinuumAws } from "./continuum-aws.js";
@@ -19,7 +24,19 @@ import {
 
 const execFileAsync = promisify(execFile);
 const TERMINAL_WITHOUT_ISSUE = new Set(["DISCARDED", "NOT_PURSUED"]);
-const MAX_CONCURRENT_POLLS = 4;
+// Bound both creation and polling: each request can launch an AWS CLI process.
+async function forEachPending(
+  indices: number[],
+  operation: (index: number) => Promise<void>,
+) {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(4, indices.length) }, async () => {
+      while (next < indices.length) await operation(indices[next++]!);
+    }),
+  );
+}
+type Submission = ContinuumReceipt & { issueId?: string; issueArn?: string };
 
 export type ContinuumAwsLauncher = (
   operation: string,
@@ -118,7 +135,8 @@ function locations(finding: AnyFinding) {
   return [...detailed, ...broad, ...fallback]
     .map((raw, index) => {
       const row = object(raw);
-      const path = text(row["path"]) ?? text(row["filePath"]);
+      const path =
+        repositoryFilePath(row["path"]) ?? repositoryFilePath(row["filePath"]);
       const role = (text(row["role"]) ?? "").toLowerCase();
       return {
         path,
@@ -201,22 +219,6 @@ export function findingToOcsf(
     type_uid: 200201,
     vulnerabilities: [vulnerability],
   };
-}
-
-export function deterministicClientToken(
-  environmentId: string,
-  finding: AnyFinding,
-): string {
-  const sink = locations(finding)[0];
-  const identity = JSON.stringify([
-    "ocsf-v2",
-    environmentId,
-    occurrence(finding),
-    sink?.path,
-    sink?.start,
-    sink?.end,
-  ]);
-  return `codex-${createHash("sha256").update(identity).digest("hex").slice(0, 40)}`;
 }
 
 function proofClaimMatch(
@@ -451,7 +453,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       ];
       const { stdout } = await execFileAsync(aws.executable, common, {
         cwd: aws.cwd,
-        env: aws.environment,
+        env: { ...aws.environment, AWS_CLI_FILE_ENCODING: "UTF-8" },
         signal,
         maxBuffer: Number.POSITIVE_INFINITY,
         windowsHide: true,
@@ -472,103 +474,59 @@ export class ContinuumValidationProvider implements ValidationProvider {
     context: ValidationProviderContext,
   ): Promise<ValidationProviderAssessment[]> {
     const now = this.#options.now ?? (() => new Date());
-    const deadline =
-      now().getTime() + (this.#options.waitMinutes ?? 45) * 60_000;
+    const wait = Math.ceil((this.#options.waitMinutes ?? 45) * 60_000);
+    const deadline = now().getTime() + wait;
     const delay = this.#options.delay ?? defaultDelay;
-    let launch: ContinuumAwsLauncher;
-    try {
-      launch = await this.#launcher(context);
-    } catch (error) {
-      launch = async () => {
-        throw error;
-      };
-    }
-    const submittedAt = now();
-    const submissions = await Promise.all(
-      supplied.map(async (item) => {
-        if (typeof item === "string") {
-          return {
-            assessment: unavailableAssessment(
-              this,
-              "not submittable: no structured item or code location",
-            ),
-          };
-        }
-        try {
-          const ocsf = findingToOcsf(item, submittedAt);
-          const token = deterministicClientToken(
-            this.#options.environmentId,
-            item,
-          );
-          const created = await this.#call(
-            launch,
-            "create-code-finding",
-            [
-              "--cli-input-json",
-              JSON.stringify({
-                environmentId: this.#options.environmentId,
-                clientToken: token,
-                ocsfDocument: ocsf,
-              }),
-            ],
-            context,
-            deadline,
-            delay,
-            now,
-          );
-          const findingId = text(created["findingId"]);
-          if (!findingId)
-            throw new Error("CreateCodeFinding returned no findingId");
-          return { item, findingId, created };
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          return {
-            assessment: unavailableAssessment(
-              this,
-              /no code location/iu.test(reason)
-                ? `not submittable: ${reason}`
-                : safeText(reason, 240),
-            ),
-          };
-        }
-      }),
-    );
-
+    const signal = AbortSignal.timeout(wait);
+    context = {
+      ...context,
+      signal: context.signal
+        ? AbortSignal.any([context.signal, signal])
+        : signal,
+    };
     const results: ValidationProviderAssessment[] = new Array(supplied.length);
-    let pending = submissions.flatMap((submission, index) => {
-      if (submission.assessment) {
-        results[index] = submission.assessment;
-        return [];
-      }
-      return [index];
-    });
-    while (pending.length > 0 && now().getTime() < deadline) {
-      let next = 0;
-      // Rotate a single polling round across all items before waiting again.
-      await Promise.all(
-        Array.from(
-          { length: Math.min(MAX_CONCURRENT_POLLS, pending.length) },
-          async () => {
-            for (;;) {
-              const index = pending[next++];
-              if (index === undefined) return;
-              const submission = submissions[index]!;
-              const assessment = await this.#poll(
-                submission.item!,
-                submission.findingId!,
-                submission.created!,
-                context,
-                launch,
-                deadline,
-                delay,
-                now,
-                submittedAt,
-              );
-              if (assessment) results[index] = assessment;
-            }
-          },
-        ),
+    const submissions: (Submission | undefined)[] = new Array(supplied.length);
+    let pending = supplied.map((_, index) => index);
+    let request: ContinuumRequest;
+    try {
+      const launch = await this.#launcher(context);
+      request = (operation, args) =>
+        this.#call(launch, operation, args, context, deadline, delay, now);
+      const submit = await prepareContinuumSubmissions(
+        request,
+        this.#options.environmentId,
+        context.repositoryPath,
+        context.signal,
       );
+      await forEachPending(pending, async (index) => {
+        try {
+          const item = supplied[index]!;
+          if (typeof item === "string")
+            throw new Error(
+              "not submittable: no structured item or code location",
+            );
+          const time = now();
+          submissions[index] = await submit(findingToOcsf(item, time), time);
+        } catch (error) {
+          results[index] = unavailableAssessment(this, error);
+        }
+      });
+      pending = pending.filter((index) => !results[index]);
+    } catch (error) {
+      for (const index of pending)
+        results[index] = unavailableAssessment(this, error);
+      pending = [];
+    }
+    while (pending.length > 0 && now().getTime() < deadline) {
+      await forEachPending(pending, async (index) => {
+        const assessment = await this.#poll(
+          supplied[index] as AnyFinding,
+          submissions[index]!,
+          request,
+          now,
+        );
+        if (assessment) results[index] = assessment;
+      });
       pending = pending.filter((index) => !results[index]);
       if (pending.length > 0 && now().getTime() < deadline) {
         try {
@@ -603,7 +561,18 @@ export class ContinuumValidationProvider implements ValidationProvider {
         freshness: { stale: false, reasons: [] },
         unavailable: assessment.unavailable,
       };
-      return { ...assessment, record };
+      const submission = submissions[index];
+      if (!submission) return { ...assessment, record };
+      const { submittedAt, ...ids } = submission;
+      return {
+        ...assessment,
+        report:
+          assessment.report +
+          "\n\nAWS finding: " +
+          ids.findingArn +
+          (ids.issueArn ? "\nAWS issue: " + ids.issueArn : ""),
+        record: { ...record, ...ids, submittedAt: submittedAt.toISOString() },
+      };
     });
   }
 
@@ -620,14 +589,9 @@ export class ContinuumValidationProvider implements ValidationProvider {
     for (;;) {
       if (now().getTime() >= deadline)
         throw new Error("Continuum validation deadline reached");
-      const timeout = AbortSignal.timeout(
-        Math.max(1, Math.ceil(deadline - now().getTime())),
-      );
-      const signal = context.signal
-        ? AbortSignal.any([context.signal, timeout])
-        : timeout;
+      context.signal?.throwIfAborted();
       try {
-        return await launch(operation, args, signal);
+        return await launch(operation, args, context.signal);
       } catch (error) {
         if (
           !/throttl|rate exceeded|too many requests/iu.test(
@@ -644,15 +608,11 @@ export class ContinuumValidationProvider implements ValidationProvider {
 
   async #poll(
     finding: AnyFinding,
-    findingId: string,
-    created: Record<string, unknown>,
-    context: ValidationProviderContext,
-    launch: ContinuumAwsLauncher,
-    deadline: number,
-    delay: (milliseconds: number, signal?: AbortSignal) => Promise<void>,
+    submission: Submission,
+    request: ContinuumRequest,
     now: () => Date,
-    submittedAt: Date,
   ): Promise<ValidationProviderAssessment | undefined> {
+    const { findingId, findingArn, submittedAt } = submission;
     let issueId: string | undefined;
     let issue: Record<string, unknown> = {};
     let validationArtifact: Record<string, unknown> | undefined;
@@ -662,20 +622,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
     let status = "SUBMITTED";
     try {
       {
-        const current = await this.#call(
-          launch,
-          "get-code-finding",
-          [
-            "--environment-id",
-            this.#options.environmentId,
-            "--finding-id",
-            findingId,
-          ],
-          context,
-          deadline,
-          delay,
-          now,
-        );
+        const current = await request("get-code-finding", [
+          "--environment-id",
+          this.#options.environmentId,
+          "--finding-id",
+          findingId,
+        ]);
+        if (current["findingArn"] !== findingArn)
+          throw new Error("Continuum returned another finding while polling.");
         status = text(current["status"]) ?? status;
         if (TERMINAL_WITHOUT_ISSUE.has(status)) {
           const reason = safeText(
@@ -698,61 +652,46 @@ export class ContinuumValidationProvider implements ValidationProvider {
             false,
           );
         }
+        // CreateCodeFinding returns the finding identity before any issue is linked.
+        // GetCodeFinding supplies the issue association as processing progresses.
         issueId =
-          text(current["duplicateOfIssueId"]) ??
-          text(current["createdIssueId"]) ??
           text(current["mergedIntoIssueId"]) ??
-          text(created["duplicateOfIssueId"]) ??
-          text(created["createdIssueId"]);
+          text(current["duplicateOfIssueId"]) ??
+          text(current["createdIssueId"]);
+        delete submission.issueId;
+        delete submission.issueArn;
         if (issueId) {
-          issue = await this.#call(
-            launch,
-            "get-code-issue",
-            [
+          issue = await request("get-code-issue", [
+            "--environment-id",
+            this.#options.environmentId,
+            "--issue-id",
+            issueId,
+          ]);
+          const scope = findingArn.slice(
+            0,
+            -("/code-findings/" + findingId).length,
+          );
+          const issueArn = scope + "/code-issues/" + issueId;
+          if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
+            throw new Error(
+              "Continuum returned a different issue while polling.",
+            );
+          submission.issueId = issueId;
+          submission.issueArn = issueArn;
+          const ids = issue["findingIds"];
+          if (!Array.isArray(ids) || !ids.includes(findingId)) return;
+          issueFindingCount = new Set(ids).size;
+          let issueFallback: Record<string, unknown> | undefined;
+          let soleFindingFallback: Record<string, unknown> | undefined;
+          for (const kind of ["EVIDENCE", "VALIDATION_EVIDENCE"] as const) {
+            const listed = await request("list-code-issue-artifacts", [
               "--environment-id",
               this.#options.environmentId,
               "--issue-id",
               issueId,
-            ],
-            context,
-            deadline,
-            delay,
-            now,
-          );
-          const arn = text(current["findingArn"]);
-          const suffix = `/code-findings/${findingId}`;
-          const scope = arn?.endsWith(suffix)
-            ? arn.slice(0, -suffix.length)
-            : undefined;
-          const ids = issue["findingIds"];
-          const associatedIssue =
-            scope?.endsWith(`:environments/${this.#options.environmentId}`) &&
-            issue["issueArn"] === `${scope}/code-issues/${issueId}` &&
-            issue["issueId"] === issueId &&
-            Array.isArray(ids) &&
-            ids.every((id) => typeof id === "string") &&
-            ids.includes(findingId);
-          if (associatedIssue)
-            issueFindingCount = new Set(ids as string[]).size;
-          let issueFallback: Record<string, unknown> | undefined;
-          let soleFindingFallback: Record<string, unknown> | undefined;
-          for (const kind of ["EVIDENCE", "VALIDATION_EVIDENCE"] as const) {
-            const listed = await this.#call(
-              launch,
-              "list-code-issue-artifacts",
-              [
-                "--environment-id",
-                this.#options.environmentId,
-                "--issue-id",
-                issueId,
-                "--artifact-type",
-                kind,
-              ],
-              context,
-              deadline,
-              delay,
-              now,
-            );
+              "--artifact-type",
+              kind,
+            ]);
             const items = Array.isArray(listed["items"])
               ? listed["items"].map(object)
               : [];
@@ -764,22 +703,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
             for (const candidate of items) {
               const artifactId = text(candidate["artifactId"]);
               if (!artifactId) continue;
-              const artifact = await this.#call(
-                launch,
-                "get-code-issue-artifact",
-                [
-                  "--environment-id",
-                  this.#options.environmentId,
-                  "--issue-id",
-                  issueId,
-                  "--artifact-id",
-                  artifactId,
-                ],
-                context,
-                deadline,
-                delay,
-                now,
-              );
+              const artifact = await request("get-code-issue-artifact", [
+                "--environment-id",
+                this.#options.environmentId,
+                "--issue-id",
+                issueId,
+                "--artifact-id",
+                artifactId,
+              ]);
               if (kind === "EVIDENCE") {
                 likelihoodArtifact = artifact;
                 break;
@@ -794,9 +725,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
               }
               if (
                 selected?.scope === "issue" &&
-                associatedIssue &&
                 singleFindingValidationIssue(issue, issueId, {
-                  scope: scope!,
+                  scope,
                   id: findingId,
                 })
               ) {
@@ -807,7 +737,6 @@ export class ContinuumValidationProvider implements ValidationProvider {
               // explicit result for this finding must beat this fallback.
               if (
                 !issueFallback &&
-                associatedIssue &&
                 artifact["artifactType"] === "VALIDATION_EVIDENCE" &&
                 verdictFrom(artifact) !== "not returned"
               )

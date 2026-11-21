@@ -18,6 +18,12 @@ export type ValidationClaimMatch =
 /** Conclusions only. Proof bodies and console output are not report fields. */
 export interface ValidationItemRecord {
   itemId: string;
+  /** External identities for an accepted submission, including while validation is pending. */
+  findingId?: string;
+  findingArn?: string;
+  issueId?: string;
+  issueArn?: string;
+  submittedAt?: string;
   provider: string;
   verdict: string;
   severityBefore: string;
