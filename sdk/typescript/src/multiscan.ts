@@ -253,7 +253,7 @@ export async function runMultiscan(
   }
   const output = await ensureOutputDirectory(requestedOutput, "artifacts");
   if (process.platform !== "win32") await requireSecureOutputAncestry(output);
-  const unlock = await acquireLock(output);
+  const lock = await acquireLock(output);
   let pluginWorkspace: string | undefined;
   let pluginRoot: Promise<string> | undefined;
   const resumePluginRoot = (): Promise<string> =>
@@ -277,6 +277,7 @@ export async function runMultiscan(
           output,
           resumePluginRoot,
           documentRoots,
+          lock.requireOwner,
         ),
     );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
@@ -284,7 +285,7 @@ export async function runMultiscan(
       : result;
   } finally {
     await Promise.all([
-      unlock(),
+      lock.release(),
       pluginWorkspace === undefined
         ? undefined
         : rm(pluginWorkspace, { recursive: true, force: true }),
@@ -336,6 +337,7 @@ async function runCampaign(
   output: string,
   resumePluginRoot: () => Promise<string>,
   documentRoots: () => Promise<DocumentRoots>,
+  requireLockOwner: () => Promise<void>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
@@ -802,9 +804,11 @@ async function runCampaign(
           policyFailed: attemptPolicyFailed,
         };
         const receiptLine = `${JSON.stringify(receipt)}\n`;
-        receiptTail = receiptTail.then(() =>
-          appendReceipt(ledger, receiptLine),
-        );
+        receiptTail = receiptTail.then(async () => {
+          // A supervisor that lost an expired lease must not extend the ledger.
+          await requireLockOwner();
+          await appendReceipt(ledger, receiptLine);
+        });
         await receiptTail;
         options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
@@ -971,7 +975,12 @@ async function appendReceipt(path: string, receipt: string): Promise<void> {
   }
 }
 
-async function acquireLock(output: string): Promise<() => Promise<void>> {
+interface SupervisorLock {
+  release(): Promise<void>;
+  requireOwner(): Promise<void>;
+}
+
+async function acquireLock(output: string): Promise<SupervisorLock> {
   const path = join(output, ".lock");
   const ownerPath = join(path, "owner.json");
   try {
@@ -1032,13 +1041,25 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   }, LOCK_HEARTBEAT_MS);
   timer.unref();
 
-  return async () => {
-    clearInterval(timer);
-    await heartbeat;
-    const current = await readFile(ownerPath, "utf8").catch(
-      undefinedIfMissingFile,
-    );
-    if (current === owner) await rm(path, { recursive: true });
+  return {
+    async release() {
+      clearInterval(timer);
+      await heartbeat;
+      const current = await readFile(ownerPath, "utf8").catch(
+        undefinedIfMissingFile,
+      );
+      if (current === owner) await rm(path, { recursive: true });
+    },
+    async requireOwner() {
+      const current = await readFile(ownerPath, "utf8").catch(
+        undefinedIfMissingFile,
+      );
+      if (current !== owner) {
+        throw new Error(
+          "This multiscan supervisor no longer holds the output lock.",
+        );
+      }
+    },
   };
 }
 

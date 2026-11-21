@@ -809,6 +809,35 @@ describe("multiscan", () => {
     });
   }
 
+  test("does not record results after another supervisor takes over the lock", async () => {
+    const { paths } = await repositoryFixture("lost-lease", "lost");
+    const ownerPath = join(paths.output, ".lock", "owner.json");
+    const takeover = JSON.stringify({
+      pid: process.pid,
+      ownerId: "replacement-supervisor",
+      hostname: hostname(),
+      processStartedAt: performance.timeOrigin,
+    });
+
+    await expect(
+      runMultiscan(
+        options(
+          paths,
+          client(async (repository, scanOptions) => {
+            await writeFile(ownerPath, takeover);
+            return completeRun(repository, scanOptions);
+          }),
+          { maxAttempts: 1 },
+        ),
+      ),
+    ).rejects.toThrow("no longer holds the output lock");
+
+    await expect(
+      readFile(join(paths.output, "results.jsonl"), "utf8"),
+    ).resolves.toBe("");
+    expect(await readFile(ownerPath, "utf8")).toBe(takeover);
+  });
+
   test("does not reclaim a live supervisor in another container", async () => {
     const { paths } = await repositoryFixture("remote-supervisor", "remote");
     const lock = join(paths.output, ".lock");
