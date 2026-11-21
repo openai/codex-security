@@ -112,13 +112,15 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
     const record = {
       itemId: "fake-item",
       provider: "continuum",
-      verdict: "EXPLOITABLE",
-      severityBefore: "high",
-      severityAfter: "critical",
+      state: "validated" as const,
+      codexSeverity: "high",
       reasons: [{ basis: "GRAPH" as const, reason: "Fake exposed deployment" }],
-      claimMatch: "on_target" as const,
-      issueUrl: "https://example.invalid/issue",
-      freshness: { stale: false, reasons: [] },
+      issue: {
+        id: "issue-1",
+        url: "https://example.invalid/issue",
+        severity: "critical",
+        verdict: "EXPLOITABLE",
+      },
     };
     const batch = spyOn(
       ContinuumValidationProvider.prototype,
@@ -168,9 +170,9 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       });
       expect(
         JSON.parse(await readFile(join(scanDir, "validation.json"), "utf8")),
-      ).toEqual({ schemaVersion: 1, items: [record] });
+      ).toEqual({ schemaVersion: 2, items: [record] });
       expect(await readFile(join(scanDir, "validation.md"), "utf8")).toContain(
-        "Fake supplemental report",
+        "Continuum: exploitable, Critical",
       );
       expect(JSON.parse(cli.stdout.text()).validation.recordsPath).toBe(
         join(scanDir, "validation.json"),

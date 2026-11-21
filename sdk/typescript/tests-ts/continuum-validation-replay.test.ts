@@ -61,20 +61,18 @@ describe("recorded shape, anonymised replay", () => {
       repositoryPath: "/not-used",
     });
     expect(result.report).toContain(
-      "Codex: high, exposure unknown → Continuum: critical, reachable from attacker (basis GRAPH)",
-    );
-    expect(result.report).toContain("likelihood HIGH × impact HIGH");
-    expect(result.report).toContain(
-      "Deployment source identity is not compared",
+      "Continuum: exploitable, Critical, reachable from an attacker.",
     );
     expect(result.record).toMatchObject({
-      verdict: "EXPLOITABLE",
-      severityBefore: "high",
-      severityAfter: "critical",
-      claimMatch: "on_target",
-      freshness: { stale: false },
+      state: "validated",
+      codexSeverity: "high",
+      issue: {
+        verdict: "EXPLOITABLE",
+        severity: "critical",
+        validationBeforeSubmission: false,
+      },
     });
-    expect(result.record?.issueUrl).toContain(recorded.issueId);
+    expect(result.record?.issue?.url).toContain(recorded.issueId);
     expect(result.record?.reasons).toContainEqual(
       expect.objectContaining({
         basis: "GRAPH",
@@ -109,44 +107,11 @@ describe("explicitly fake outcome variations", () => {
     const result = await provider(transport(fake)).validate(finding, {
       repositoryPath: "/not-used",
     });
-    expect(result.record?.severityAfter).toBe("low");
-    expect(result.report).toContain(
-      "not reachable from attacker (basis GRAPH)",
-    );
-    expect(result.report).toContain("lower priority");
+    expect(result.record?.issue?.severity).toBe("low");
+    expect(result.record?.codexSeverity).toBe("high");
+    expect(result.report).toContain("not reachable from an attacker");
     expect(finding.severity.level).toBe("high");
   });
-
-  test.each(["related caption", "proof contradicts caption"])(
-    "a related flaw keeps Codex severity with %s, including in the same file",
-    async (scenario) => {
-      const fake = structuredClone(recorded);
-      if (scenario === "related caption") {
-        fake.issue.name = "Resource exhaustion and denial";
-        fake.issue.synopsis = "Resource exhaustion in src/templates.py";
-      } else {
-        for (const a of Object.values(fake.artifacts) as any[])
-          if (a.artifactType === "VALIDATION_EVIDENCE") {
-            a.body.validationEvidence.executedProof = {
-              observedEffect: "Fake resource exhaustion and denial",
-              path: "src/templates.py",
-            };
-          }
-      }
-      const result = await provider(transport(fake)).validate(finding, {
-        repositoryPath: "/not-used",
-      });
-      expect(result.record).toMatchObject({
-        claimMatch: "different_flaw",
-        severityAfter: "high",
-        providerSeverity: "critical",
-      });
-      expect(result.report).toContain(
-        "Not validated: Continuum proved a related flaw",
-      );
-      expect(result.report).not.toContain("findings false-positive");
-    },
-  );
 
   test.each([
     "No complete deployment reachability answer was returned.",
@@ -162,7 +127,7 @@ describe("explicitly fake outcome variations", () => {
     const result = await provider(transport(fake)).validate(finding, {
       repositoryPath: "/not-used",
     });
-    expect(result.report).toContain("exposure unknown (basis INFERRED)");
+    expect(result.report).toContain("reachability unknown");
     expect(result.report).not.toContain("lower priority");
   });
 
@@ -174,8 +139,7 @@ describe("explicitly fake outcome variations", () => {
     const result = await provider(transport(fake)).validate(finding, {
       repositoryPath: "/not-used",
     });
-    expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
-    expect(result.record?.claimMatch).toBe("on_target");
+    expect(result.record?.issue?.verdict).toBe("NOT_EXPLOITABLE");
     expect(finding.severity.level).toBe("high");
   });
 
@@ -213,9 +177,9 @@ describe("explicitly fake outcome variations", () => {
       ],
       { repositoryPath: "/not-used" },
     );
-    expect(results[0]?.record?.verdict).toBe("EXPLOITABLE");
+    expect(results[0]?.record?.issue?.verdict).toBe("EXPLOITABLE");
     expect(results[1]?.record?.unavailable).toContain("rejected");
-    expect(results[2]?.record?.unavailable).toMatch(/timed out|deadline/u);
+    expect(results[2]?.record?.unavailable).toMatch(/waiting period/u);
     expect(results.map((r) => r.record?.itemId)).toEqual([
       "recorded-shape-item",
       "rejected",
@@ -239,6 +203,6 @@ describe("explicitly fake outcome variations", () => {
     });
     expect(
       (await p.validate(finding, { repositoryPath: "/not-used" })).unavailable,
-    ).toContain("timed out");
+    ).toContain("waiting period");
   });
 });

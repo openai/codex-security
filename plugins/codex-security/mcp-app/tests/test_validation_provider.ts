@@ -81,7 +81,7 @@ await test("configured plugin completion returns supplemental results and preser
           throw new Error("transport unavailable");
         return {
           disposition: "reportable" as const,
-          report: "High → Critical, internet-exposed (GRAPH)",
+          report: "Synthetic provider assessment",
           provenance: {
             provider: "fake",
             providerVersion: "1",
@@ -90,17 +90,22 @@ await test("configured plugin completion returns supplemental results and preser
           record: {
             itemId: "item-1",
             provider: "fake",
-            verdict: "EXPLOITABLE",
-            severityBefore: "high",
-            severityAfter: "critical",
+            state: "validated" as const,
+            codexSeverity: "high",
+            issue: {
+              id: "issue-1",
+              url: "https://example.com/issue-1",
+              verdict: "EXPLOITABLE",
+              severity: "critical",
+              reachableFromAttacker: true,
+              reachabilityBasis: "GRAPH" as const,
+            },
             reasons: [
               {
                 basis: "GRAPH" as const,
                 reason: "Detailed synthetic context.",
               },
             ],
-            claimMatch: "on_target" as const,
-            freshness: { stale: false, reasons: [] },
           },
         };
       },
@@ -108,9 +113,9 @@ await test("configured plugin completion returns supplemental results and preser
     const result = await validateCompletedScan(scan, resolveProvider);
     assert.equal(result?.status, "complete");
     assert.equal(submitted, 2);
-    assert.match(String(result?.report), /High → Critical/);
-    assert.match(validationCompletionText(result), /high → critical/i);
-    assert.match(validationCompletionText(result), /GRAPH/);
+    assert.match(String(result?.report), /Continuum: exploitable, Critical/);
+    assert.match(validationCompletionText(result), /Codex rated it High/i);
+    assert.match(String(result?.report), /GRAPH/);
     assert.match(validationCompletionText(result), /transport unavailable/);
     assert.match(validationCompletionText(result), /validation\.md/);
     assert.match(String(result?.report), /transport unavailable/);
@@ -153,7 +158,7 @@ await test("configured plugin completion returns supplemental results and preser
     assert.doesNotMatch(validationCompletionText(cached), /Fabricated/);
     assert.match(
       await readFile(join(scanDir, "validation.md"), "utf8"),
-      /High → Critical/,
+      /Continuum: exploitable, Critical/,
     );
   } finally {
     if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
@@ -203,55 +208,55 @@ for (const reachable of [true, false, undefined])
               record: {
                 itemId: "item-1",
                 provider: "fake",
-                verdict: "EXPLOITABLE",
-                severityBefore: "high",
-                severityAfter: "high",
-                providerSeverity: "critical",
-                resultScope: "issue" as const,
-                issueFindingCount: 2,
-                joinedValidatedIssue: true,
-                reachableFromAttacker: reachable,
-                claimMatch: "unknown" as const,
+                state: "validated" as const,
+                codexSeverity: "high",
+                issue: {
+                  id: "issue-1",
+                  url: "https://example.com/issue-1",
+                  verdict: "EXPLOITABLE",
+                  severity: "critical",
+                  findingCount: 2,
+                  validationBeforeSubmission: true,
+                  reachableFromAttacker: reachable,
+                  reachabilityBasis: "FINDING" as const,
+                  reachabilityReason: "Reported public route",
+                  validatedAt: "2026-01-01T00:00:00Z",
+                },
                 reasons: [
                   {
                     basis: "FINDING" as const,
-                    reason:
-                      "Basis: FINDING — reachableFromAttacker: true (Reported public route).",
+                    reason: "Reported public route",
                   },
                 ],
-                freshness: {
-                  stale: true,
-                  reasons: ["Evidence predates submission."],
-                },
               },
             };
           },
         }),
       );
       const completion = validationCompletionText(result);
-      assert.match(completion, /Codex severity high retained/);
-      assert.match(completion, /with 1 other findings/);
-      assert.match(
-        completion,
-        /Issue-level verdict: EXPLOITABLE; issue severity: critical/,
-      );
-      assert.match(completion, /Not individually validated/);
+      assert.match(completion, /Codex rated it High/);
+      assert.match(completion, /Continuum: exploitable, Critical/);
       assert.ok(
         completion.includes(
-          `Issue reachability: ${reachable === true ? "reachable from attacker" : reachable === false ? "not reachable from attacker" : "unknown"}.`,
+          reachable === true
+            ? "reachable from an attacker"
+            : reachable === false
+              ? "not reachable from an attacker"
+              : "reachability unknown",
         ),
       );
-      assert.match(completion, /Context: Basis: FINDING/);
+      assert.match(String(result?.report), /not individual finding validation/);
+      assert.match(String(result?.report), /issue holds 2 findings/);
       assert.match(
-        completion,
-        /joined an issue Continuum had already validated/,
+        String(result?.report),
+        /stated in the finding, not independently checked/,
       );
-      assert.doesNotMatch(completion, /high → critical/);
+      assert.match(String(result?.report), /before this submission/);
       const saved = JSON.parse(
         await readFile(join(scanDir, "validation.json"), "utf8"),
       );
-      assert.equal(saved.items[0].resultScope, "issue");
-      assert.equal(saved.items[0].issueFindingCount, 2);
+      assert.equal(saved.schemaVersion, 2);
+      assert.equal(saved.items[0].issue.findingCount, 2);
     } finally {
       if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
       else process.env.CODEX_SECURITY_STATE_DIR = oldState;
@@ -522,7 +527,7 @@ esac
         scanDir: root,
       });
       assert.equal(result?.status, "complete");
-      assert.match(String(result?.report), /DISCARDED/);
+      assert.match(String(result?.report), /declined/);
       assert.match(String(result?.report), /fixture rejection/);
     } finally {
       if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
