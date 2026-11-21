@@ -48,6 +48,10 @@ const turnFailures = {
     message: "Request blocked.",
     codexErrorInfo: "cyberPolicy",
   },
+  "policy-bio-code": {
+    message: "Request blocked.",
+    codexErrorInfo: "bioPolicy",
+  },
   "policy-turn": {
     message: "Request flagged for possible cybersecurity risk.",
     codexErrorInfo: "other",

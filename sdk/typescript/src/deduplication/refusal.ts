@@ -5,6 +5,7 @@ export function isReviewRefusal(
 ): boolean {
   if (
     codexErrorInfo === "cyberPolicy" ||
+    codexErrorInfo === "bioPolicy" ||
     codexErrorInfo === "misalignmentPolicyViolation"
   )
     return true;
