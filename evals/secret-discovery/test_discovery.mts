@@ -11,7 +11,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { parse } from "../../sdk/typescript/node_modules/smol-toml/dist/index.js";
-import { createFixture } from "./fixtures.mts";
+import {
+  createFixture,
+  expectedFindings,
+  sourceEvidence,
+} from "./fixtures.mts";
 import type {
   CodeEvidence,
   SourceLocation,
@@ -28,26 +32,6 @@ import {
   threadSettings,
 } from "./harness.mts";
 import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./runtime.mts";
-
-function sourceEvidence(
-  fixture: ReturnType<typeof createFixture>,
-  path: string,
-  startLine: number,
-  endLine = startLine,
-) {
-  const source = fixture.files[path]
-    .split("\n")
-    .slice(startLine - 1, endLine)
-    .join("\n");
-  return {
-    id: `${path}:${startLine}`,
-    label: "Source context",
-    path,
-    startLine,
-    code: source,
-    explanation: "Source-backed credential declaration.",
-  };
-}
 
 interface TestFinding extends Finding {
   title?: string;
@@ -66,19 +50,12 @@ interface TestResult extends Result {
   resolved_questions?: TestFinding[];
 }
 const fixture = createFixture();
+const positiveIndex = (id: string) =>
+  fixture.positives.findIndex((entry) => entry.id === id);
 
 function retainedResult(source = fixture): TestResult {
   return {
-    findings: source.positives.map((expected) => ({
-      title: "Embedded credential",
-      taxonomy: { category: "hardcoded-credentials", cwe: [expected.cwes[0]] },
-      locations: [
-        { path: expected.path, startLine: expected.line, role: "root_control" },
-      ],
-      codeEvidence: [
-        sourceEvidence(source, expected.path, expected.line, expected.endLine),
-      ],
-    })),
+    findings: expectedFindings(source),
     coverage: {
       surfaces: [],
       explicitExclusions: [],
@@ -101,7 +78,41 @@ test("counts every retained secret location, including unused and integration so
       "dotenv-url",
       "account-config",
       "private-key",
+      "provider-token",
+      "runtime-disclosure",
     ],
+  );
+});
+
+test("delegating API token literals preserves the contextual password and independent response leak", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "external-token-scanner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const prepared = await prepareEval(root, { externalTokenScanner: true });
+  const delegated = prepared.fixture;
+  const policy = (
+    await readFile(join(prepared.repo, "SECURITY.md"), "utf8")
+  ).trim();
+  assert.ok(policy.length > 0);
+  assert.equal(prepared.prompt.includes(policy), false);
+  for (const value of delegated.secretValues)
+    assert.equal(prepared.prompt.includes(value), false);
+
+  // Grade findings for all eight cases against the exact source being scanned.
+  const all = retainedResult({ ...delegated, positives: fixture.positives });
+  const duplicate = gradeResult(all, delegated);
+  assert.equal(duplicate.passed, false);
+  assert.deepEqual(
+    duplicate.falsePositives.map((entry) => entry.unexpectedLocations),
+    [["config/release.env"]],
+  );
+  all.findings.splice(duplicate.falsePositives[0].index, 1);
+  const report = gradeResult(all, delegated);
+  assert.equal(report.passed, true);
+  assert.deepEqual(
+    report.cases.map(({ id }) => id),
+    fixture.positives
+      .filter(({ id }) => id !== "provider-token")
+      .map(({ id }) => id),
   );
 });
 
@@ -168,6 +179,7 @@ for (const category of [
   "not-a-private-key",
   "non-hardcoded-credential",
   "non-sensitive-data-exposure",
+  "no sensitive information disclosure",
   "not-a-password-exposure",
   "non-token-exposure",
   "non-api-key-exposure",
@@ -228,6 +240,66 @@ test("accepts a secret's valid source range and sensitive-data category", () => 
   result.findings[0].locations[0].endLine = fixture.positives[0].line + 1;
   result.findings[0].taxonomy.category = "sensitive-data-exposure";
   assert.equal(gradeResult(result, fixture).passed, true);
+});
+
+test("sensitive information disclosure requires a credential-specific CWE for source literals", () => {
+  const result = retainedResult();
+  for (const cwe of ["CWE-798", "CWE-200", "CWE-540"]) {
+    result.findings[0].taxonomy = {
+      category: "Sensitive information disclosure",
+      cwe: [cwe],
+    };
+    assert.equal(gradeResult(result, fixture).passed, cwe === "CWE-798", cwe);
+  }
+});
+
+test("response-specific categories identify the runtime leak with CWE-201", () => {
+  const result = retainedResult();
+  const index = positiveIndex("runtime-disclosure");
+  const runtime = result.findings[index];
+  for (const category of [
+    "Sensitive information in response",
+    "Insertion of Sensitive Information Into Sent Data",
+    "sensitive-information-in-response",
+  ]) {
+    runtime.taxonomy = { category, cwe: ["CWE-201"] };
+    assert.equal(gradeResult(result, fixture).passed, true, category);
+    runtime.taxonomy.cwe = ["CWE-200"];
+    assert.equal(gradeResult(result, fixture).passed, false, category);
+  }
+  runtime.taxonomy = { category: "Response", cwe: ["CWE-201"] };
+  assert.equal(gradeResult(result, fixture).passed, false);
+  runtime.taxonomy.category = "Sensitive information in response";
+  result.findings[0].taxonomy.category = runtime.taxonomy.category;
+  assert.equal(gradeResult(result, fixture).cases[0].found, false);
+});
+
+test("runtime taxonomy distinguishes denied leaks from missing protections", () => {
+  const result = retainedResult();
+  const index = positiveIndex("runtime-disclosure");
+  for (const [category, cwe, found] of [
+    ["not a data leak", "CWE-200", false],
+    ["not an exposure", "CWE-200", false],
+    ["not exposed", "CWE-200", false],
+    ["non_disclosure", "CWE-200", false],
+    ["deny information disclosure", "CWE-200", false],
+    ["no sensitive data leakage", "CWE-200", false],
+    ["data-leak-free", "CWE-200", false],
+    ["information disclosure with no secret in source", "CWE-200", true],
+    ["missing authentication", "CWE-306", true],
+    ["no authentication", "CWE-306", true],
+    ["insufficient access control", "CWE-862", true],
+    ["Insufficiently Protected Credentials", "CWE-522", true],
+    ["insufficientlyProtectedCredentials", "CWE-522", true],
+    ["Insufficiently Protected Credentials", "CWE-200", false],
+    ["hardcoded credentials", "CWE-522", false],
+    ["credential management", "CWE-522", false],
+  ] as const) {
+    result.findings[index].taxonomy = { category, cwe: [cwe] };
+    const report = gradeResult(result, fixture);
+    assert.equal(report.cases[index].found, found, `${category} (${cwe})`);
+    assert.equal(report.passed, found, `${category} (${cwe})`);
+  }
 });
 
 for (const category of [
@@ -314,9 +386,7 @@ test("matches path casing only on Windows while preserving citation checks", () 
 for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
   test(`accepts ${cwe} for the password in the database configuration`, () => {
     const result = retainedResult();
-    const databaseIndex = fixture.positives.findIndex(
-      (entry) => entry.id === "dotenv-url",
-    );
+    const databaseIndex = positiveIndex("dotenv-url");
     result.findings[databaseIndex].taxonomy.cwe = [cwe];
     result.findings[databaseIndex].taxonomy.category =
       "password-in-configuration";
@@ -327,7 +397,9 @@ for (const cwe of ["CWE-256", "CWE-259", "CWE-260"]) {
 for (const cwe of ["CWE-312", "CWE-313"]) {
   test(`accepts ${cwe} for credentials stored in source and configuration files`, () => {
     const result = retainedResult();
-    for (const finding of result.findings) finding.taxonomy.cwe = [cwe];
+    for (const { taxonomy } of result.findings) {
+      if (taxonomy.category === "hardcoded-credentials") taxonomy.cwe = [cwe];
+    }
     assert.equal(gradeResult(result, fixture).passed, true);
 
     result.findings[0].taxonomy.category = "sql-injection";
@@ -336,6 +408,23 @@ for (const cwe of ["CWE-312", "CWE-313"]) {
     assert.equal(report.cases[0].found, false);
   });
 }
+
+test("accepts cryptographic-key categories only for a matching CWE-321 exposure", () => {
+  const index = positiveIndex("private-key");
+  for (const [category, cwe, passes] of [
+    ["Embedded cryptographic key", "CWE-321", true],
+    ["cryptographic_keys", "CWE-321", true],
+    ["Embedded public cryptographic key", "CWE-321", false],
+    ["Not an embedded cryptographic key", "CWE-321", false],
+    ["Weak cryptographic key", "CWE-321", false],
+    ["Embedded cryptographic key", "CWE-200", false],
+    ["Embedded cryptographic key", "CWE-798", false],
+  ] as const) {
+    const result = retainedResult();
+    result.findings[index].taxonomy = { category, cwe: [cwe] };
+    assert.equal(gradeResult(result, fixture).passed, passes, category);
+  }
+});
 
 test("keeps password and cryptographic-key CWEs specific to those exposures", () => {
   for (const [index, expected] of fixture.positives.entries()) {
@@ -358,7 +447,9 @@ test("keeps password and cryptographic-key CWEs specific to those exposures", ()
 for (const cwe of ["CWE-200", "CWE-540"]) {
   test(`accepts ${cwe} for specifically categorized credential exposure`, () => {
     const result = retainedResult();
-    for (const finding of result.findings) finding.taxonomy.cwe = [cwe];
+    for (const { taxonomy } of result.findings) {
+      if (taxonomy.category === "hardcoded-credentials") taxonomy.cwe = [cwe];
+    }
     assert.equal(gradeResult(result, fixture).passed, true);
 
     result.findings[0].taxonomy.category = "sensitive-data-exposure";
@@ -368,7 +459,7 @@ for (const cwe of ["CWE-200", "CWE-540"]) {
   });
 }
 
-for (const negativeIndex of [0, 1, 2, 3]) {
+for (const negativeIndex of fixture.negatives.keys()) {
   test(`rejects a finding against negative control ${negativeIndex}`, () => {
     const result = retainedResult();
     result.findings.push({
@@ -563,7 +654,7 @@ test("consumer evidence and sinks must cover credential use, not function framin
     ["private-key", 5],
     ["private-key", 7],
   ] as const) {
-    const index = fixture.positives.findIndex((expected) => expected.id === id);
+    const index = positiveIndex(id);
     const expected = fixture.positives[index];
     const result = retainedResult();
     result.findings[index].codeEvidence = [
@@ -624,9 +715,7 @@ test("multiple expected exposures can share a finding", () => {
 
 test("grouped exposures retain their applicable CWE classifications", () => {
   const result = retainedResult();
-  const indices = ["dotenv-url", "private-key"].map((id) =>
-    fixture.positives.findIndex((expected) => expected.id === id),
-  );
+  const indices = ["dotenv-url", "private-key"].map(positiveIndex);
   const grouped = indices.map((index) => result.findings[index]);
   const finding = {
     ...grouped[0],
@@ -664,30 +753,31 @@ for (const role of ["supporting", "expected_control"]) {
   });
 }
 
-test("accepts real credential-use sinks without treating them as separate exposures", () => {
+test("accepts a credential-use location only alongside its matched exposure", () => {
   const result = retainedResult();
   for (const [index, expected] of fixture.positives.entries()) {
     if (expected.consumerLine === null) continue;
-    const sink = {
+    const use: SourceLocation = {
       path: expected.path,
       startLine: expected.consumerLine,
       endLine: expected.lineCount,
-      role: "sink",
     };
-    result.findings[index].locations.push(sink);
+    if (expected.id === "private-key") use.role = "Signing operation";
+    result.findings[index].locations.push(use);
     const onlyConsumer = retainedResult();
-    onlyConsumer.findings[index].locations = [sink];
+    onlyConsumer.findings[index].locations = [use];
     assert.equal(gradeResult(onlyConsumer, fixture).cases[index].found, false);
   }
   assert.equal(gradeResult(result, fixture).passed, true);
 
-  for (const location of [
-    { path: "README.md", startLine: 1 },
-    { path: "src/absent.py", startLine: 5 },
-    { path: "src/client.py", startLine: 1 },
-  ]) {
+  for (const [path, startLine, role] of [
+    ["README.md", 1, "sink"],
+    ["src/absent.py", 5, "sink"],
+    ["src/client.py", 1, "credential-use sink"],
+    ["src/client.py", 6, "Authentication use"],
+  ] as const) {
     const invalid = retainedResult();
-    invalid.findings[0].locations.push({ ...location, role: "sink" });
+    invalid.findings[0].locations.push({ path, startLine, role });
     assert.equal(gradeResult(invalid, fixture).falsePositiveCount, 1);
   }
 });
@@ -738,9 +828,7 @@ test("path normalization does not make unrelated or unsafe source locations vali
 
 test("accepts the private-key body and rejects reversed source ranges", () => {
   const result = retainedResult();
-  const keyIndex = fixture.positives.findIndex(
-    (entry) => entry.id === "private-key",
-  );
+  const keyIndex = positiveIndex("private-key");
   result.findings[keyIndex].locations[0].startLine++;
   assert.equal(gradeResult(result, fixture).passed, true);
   result.findings[keyIndex].locations[0].endLine =
@@ -751,9 +839,7 @@ test("accepts the private-key body and rejects reversed source ranges", () => {
 for (const footerLocation of [true, false]) {
   test(`rejects footer-only private-key evidence with ${footerLocation ? "footer" : "declaration"} location`, () => {
     const result = retainedResult();
-    const keyIndex = fixture.positives.findIndex(
-      (entry) => entry.id === "private-key",
-    );
+    const keyIndex = positiveIndex("private-key");
     const path = fixture.positives[keyIndex].path;
     const footerLine =
       fixture.files[path]

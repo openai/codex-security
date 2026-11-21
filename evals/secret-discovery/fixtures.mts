@@ -3,13 +3,14 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 /** All values are generated locally and have never authenticated to a service. */
-export function createFixture() {
+export function createFixture(externalTokenScanner = false) {
   const token = () => randomBytes(24).toString("base64url");
   const values = {
     active: token(),
     unused: token(),
     integration: token(),
-    database: token(),
+    database: `NightDispatch-${randomBytes(2).toString("hex")}!`,
+    provider: `glpat-${randomBytes(10).toString("hex")}`,
     account: token(),
   };
   const { privateKey, publicKey } = generateKeyPairSync("ed25519", {
@@ -63,6 +64,25 @@ export function signMessage(message) {
   return sign(null, Buffer.from(message), signingKey);
 }
 `,
+    "config/release.env": `GITLAB_URL=https://gitlab.example.test
+GITLAB_TOKEN=${values.provider}
+`,
+    "src/status.py": `import os
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+
+@app.get("/public/status")
+def public_status():
+    return jsonify(status="ready", registry_access=os.environ["REGISTRY_API_TOKEN"])
+`,
+    "tests/test_import.py": `from secrets import token_hex
+
+def test_personal_token_format(parser):
+    # Generated here and consumed only by the local parser.
+    sample = "glpat-" + token_hex(10)
+    assert parser.kind(sample) == "personal_access_token"
+`,
     "src/runtime_config.py": `import os
 
 SERVICE_TOKEN = os.environ["SERVICE_TOKEN"]
@@ -76,6 +96,10 @@ DATABASE_PASSWORD=<replace-with-secret>
 CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 `,
   };
+  if (externalTokenScanner) {
+    files["SECURITY.md"] =
+      "Skip standalone findings for known-format API keys and tokens.\n";
+  }
   const positive = (
     id: string,
     path: string,
@@ -87,6 +111,7 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
     const lines = files[path].split("\n");
     return {
       id,
+      category: "hardcoded-credentials",
       path,
       line: lines.findIndex((line) => line.includes(marker)) + 1,
       endLine: lines.findIndex((line) => line.includes(endMarker)) + 1,
@@ -131,12 +156,27 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
         ["CWE-321", "CWE-798", "CWE-312", "CWE-313"],
         privateKey.trim().split("\n").at(-2),
       ),
+      ...(externalTokenScanner
+        ? []
+        : [positive("provider-token", "config/release.env", "GITLAB_TOKEN=")]),
+      {
+        ...positive(
+          "runtime-disclosure",
+          "src/status.py",
+          "return jsonify",
+          undefined,
+          ["CWE-200", "CWE-201", "CWE-306", "CWE-497", "CWE-522", "CWE-862"],
+        ),
+        category: "sensitive-data-exposure",
+      },
     ],
     negatives: [
       "src/runtime_config.py",
       "examples/settings.env.example",
       "config/public.pem",
       "src/constants.py",
+      "tests/test_import.py",
+      ...(externalTokenScanner ? ["config/release.env"] : []),
     ],
     secretValues: [
       ...Object.values(values),
@@ -148,6 +188,39 @@ CONTENT_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
         .map((line) => line.slice(22)),
     ],
   };
+}
+
+export function sourceEvidence(
+  fixture: ReturnType<typeof createFixture>,
+  path: string,
+  startLine: number,
+  endLine = startLine,
+) {
+  const source = fixture.files[path]
+    .split("\n")
+    .slice(startLine - 1, endLine)
+    .join("\n");
+  return {
+    id: `${path}:${startLine}`,
+    label: "Source context",
+    path,
+    startLine,
+    code: source,
+    explanation: "Source-backed credential declaration.",
+  };
+}
+
+export function expectedFindings(source: ReturnType<typeof createFixture>) {
+  return source.positives.map((expected) => ({
+    title: "Embedded credential",
+    taxonomy: { category: expected.category, cwe: [expected.cwes[0]] },
+    locations: [
+      { path: expected.path, startLine: expected.line, role: "root_control" },
+    ],
+    codeEvidence: [
+      sourceEvidence(source, expected.path, expected.line, expected.endLine),
+    ],
+  }));
 }
 
 /** Stage source only. Gold labels and secret-value lookup stay in the harness. */

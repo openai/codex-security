@@ -9,10 +9,24 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, sep, win32 } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  posix,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
 import { windowsFileSystem } from "../../../native/windows-files.mjs";
+import { decodeGitPath, git } from "./inventory-git";
+import {
+  ancestors,
+  inside as relativeScope,
+  sameFile,
+} from "./inventory-paths";
 import {
   decodePosixBytes,
   encodePosixPath,
@@ -306,15 +320,84 @@ function listSecurityMd(repo: string, posixHome: string | undefined): string[] {
   return policies.sort();
 }
 
-function readPolicy(path: Buffer, displayedPath: Buffer): string {
-  const buffer = windows ? windowsFiles().readFile(path) : readFileSync(path);
+function policySection(
+  source: string,
+  bytes: Buffer,
+  displayedPath = source,
+): string[] {
+  let content: string;
   try {
-    return decodeUtf8(buffer);
+    content = decodeUtf8(bytes);
   } catch {
-    throw new Error(
-      `SECURITY.md is not valid UTF-8: ${decodePath(displayedPath)}`,
+    throw new Error(`SECURITY.md is not valid UTF-8: ${displayedPath}`);
+  }
+  // Match Python's whitespace-only guidance without discarding a UTF-8 BOM.
+  if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(content)) return [];
+  const section = `## SECURITY.md source: ${asciiJson(source)}\n\n${content}`;
+  return [section.endsWith("\n") ? section : section + "\n"];
+}
+
+function revisionPolicyPaths(root: string, scope: string) {
+  if (isAbsolute(scope)) {
+    // Find the checkout through its physical or aliased spelling. Below it,
+    // use the requested path even if HEAD deleted it or replaced it with a link.
+    const prefix = [...ancestors(scope)]
+      .reverse()
+      .find((dir) => sameFile(root, dir));
+    if (!prefix) throw new Error(`Scope must be inside repo: ${scope}`);
+    scope = "." + sep + scope.slice(prefix.length);
+  }
+  const path = relativeScope(root, resolve(root, scope));
+  return [...ancestors(path)]
+    .reverse()
+    .map((dir) => posix.join(dir, "SECURITY.md"));
+}
+
+async function revisionGuidance(
+  repo: string,
+  revision: string,
+  scope: string | undefined,
+  posixHome: string | undefined,
+): Promise<string> {
+  const root = decodePath(resolveRoot(repo, posixHome));
+  const paths =
+    scope === undefined
+      ? []
+      : revisionPolicyPaths(root, expandHome(scope, posixHome));
+  async function readGit(args: string[]) {
+    const result = await git(root, ["--no-replace-objects", ...args]);
+    if (result.status !== 0)
+      throw new Error(
+        `could not read SECURITY.md at ${revision}: ${result.stderr.trim() || "Git unavailable"}`,
+      );
+    return result.stdout;
+  }
+  const commit = revision.toLowerCase();
+  if (
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit) ||
+    (await readGit(["rev-parse", "--verify", commit + "^{commit}"]))
+      .toString("ascii")
+      .trim() !== commit
+  )
+    throw new Error("the policy revision must be a full Git commit ID");
+  const tree = await readGit(["ls-tree", "-rz", commit, "--", ...paths]);
+  const blobs = new Map<string, string>();
+  for (const record of decodeGitPath(tree).split("\0")) {
+    const match = /^100(?:644|755) blob ([0-9a-f]+)\t([\s\S]+)$/u.exec(record);
+    if (match && posix.basename(match[2]!) === "SECURITY.md")
+      blobs.set(match[2]!, match[1]!);
+  }
+  if (scope === undefined)
+    return `[${[...blobs.keys()].sort().map(asciiJson).join(", ")}]\n`;
+  const sections = [];
+  for (const path of paths) {
+    const oid = blobs.get(path);
+    if (oid === undefined) continue;
+    sections.push(
+      ...policySection(path, await readGit(["cat-file", "blob", oid])),
     );
   }
+  return sections.join("\n");
 }
 
 export function resolveSecurityMd(
@@ -382,28 +465,27 @@ export function resolveSecurityMd(
     if (!metadata?.isFile()) continue;
     const resolvedPolicy = resolvedPath(policy);
     inside(resolvedPolicy, root, "SECURITY.md");
-    const content = readPolicy(resolvedPolicy, policy);
-    // Match Python's whitespace-only guidance without discarding a UTF-8 BOM.
-    if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(content)) continue;
+    const bytes = windows
+      ? windowsFiles().readFile(resolvedPolicy)
+      : readFileSync(resolvedPolicy);
     const source = decodePath(inside(policy, root, "SECURITY.md"))
       .split(sep)
       .join("/");
-    let section = `## SECURITY.md source: ${asciiJson(source)}\n\n${content}`;
-    if (!section.endsWith("\n")) section += "\n";
-    sections.push(section);
+    sections.push(...policySection(source, bytes, decodePath(policy)));
   }
   return sections.join("\n");
 }
 
-export function resolveSecurityMdCommand(
+export async function resolveSecurityMdCommand(
   args: string[],
   posixHome = process.env.HOME,
-): number {
+): Promise<number> {
   try {
     const { values } = parseArgs({
       args,
       options: {
         repo: { type: "string" },
+        revision: { type: "string" },
         list: { type: "boolean" },
         scope: { type: "string" },
         out: { type: "string", default: "-" },
@@ -413,7 +495,7 @@ export function resolveSecurityMdCommand(
     if (values.help) {
       console.log(
         "Concatenate the SECURITY.md files that apply to a scan path.\n\n" +
-          "Usage: launch_codex_security_mcp[.cmd] --helper resolve-security-md --repo PATH [--list | --scope PATH] [--out PATH]\n\n" +
+          "Usage: launch_codex_security_mcp[.cmd] --helper resolve-security-md --repo PATH [--revision COMMIT] [--list | --scope PATH] [--out PATH]\n\n" +
           "--out PATH  output path, or - for stdout (default: -)",
       );
       return 0;
@@ -426,9 +508,18 @@ export function resolveSecurityMdCommand(
       throw new Error("--scope is required unless --list is specified");
     }
     const repo = parsedPath(values.repo);
-    const guidance = values.list
-      ? `[${listSecurityMd(repo, posixHome).map(asciiJson).join(", ")}]\n`
-      : resolveSecurityMd(repo, parsedPath(values.scope!), posixHome);
+    const revision = process.env.CODEX_SECURITY_POLICY_BASE ?? values.revision;
+    if (
+      values.revision !== undefined &&
+      values.revision.toLowerCase() !== revision?.toLowerCase()
+    )
+      throw new Error("policy revision differs from the scan's bound base");
+    const guidance =
+      revision !== undefined
+        ? await revisionGuidance(repo, revision, values.scope, posixHome)
+        : values.list
+          ? `[${listSecurityMd(repo, posixHome).map(asciiJson).join(", ")}]\n`
+          : resolveSecurityMd(repo, parsedPath(values.scope!), posixHome);
     const outputPath = parsedPath(values.out);
     if (outputPath === "-") {
       process.stdout.write(Buffer.from(guidance, "utf8"));

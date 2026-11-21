@@ -1086,7 +1086,7 @@ describe("scan and patch workflow", () => {
     const remote = join(directory, "remote.git");
     const url = "https://github.example.test/example/repository/pull/17";
     const expectedBody = [
-      "Applies a security fix generated for SEC-123.",
+      "Applies the repository changes generated for SEC-123.",
       "",
       "## Patch risk assessment",
       "",
@@ -1199,7 +1199,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-SEC-123",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedBody,
       ]);
@@ -1629,7 +1629,7 @@ describe("scan and patch workflow", () => {
       const detail = "Diagnostic detail: token=SYNTHETIC_RISK_VALUE";
       const summary = `${patchRiskSummary()}\n\n${detail}`;
       const expectedPullRequestBody = [
-        "Applies verified security fixes from a completed scan.",
+        "Applies verified code changes for findings from a completed scan.",
         "",
         "## Patch risk assessment",
         "",
@@ -1818,7 +1818,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-scan",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedPullRequestBody,
       ]);
@@ -2140,50 +2140,59 @@ describe("scan and patch workflow", () => {
   );
 
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
-    for (const status of ["blocked", "no_change", "outside"] as const) {
-      const fixtures = await publicationFixtures();
+    const reason = "Revoke the exposed token with its issuer.";
+    const scan = ["scan", "--patch"];
+    const saved = ["patch", "--scan", "scan-1"];
+    for (const [args, status, files, exitCode] of [
+      [saved, "blocked", ["src/finding-1.ts"], 1],
+      [scan, "blocked", ["src/finding-1.ts"], 1],
+      [scan, "no_change", [], 0],
+      [scan, "verified", ["../outside.ts"], 2],
+    ] as const) {
+      const patch = {
+        occurrenceId: "occ_1",
+        status,
+        files,
+        ...(status === "blocked"
+          ? { reason }
+          : { verification: "Focused checks pass." }),
+      };
+      const fixtures = await publicationFixtures({
+        "src/finding-1.ts": "const token = 'synthetic-fixture';\n",
+      });
       let commandStarted = false;
-      const outcome = await runWorkflow(
-        ["scan", "--patch", "--create-pr", "--json"],
-        {
-          ...fixtures,
-          onCodex: async (_args, output) => {
-            if (status === "outside")
-              await writeFile(
-                join(fixtures.currentDirectory, "src", "finding-1.ts"),
-                "fixed\n",
-              );
-            output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: status === "outside" ? "verified" : status,
-                    files: status === "outside" ? ["../outside.ts"] : [],
-                    ...(status === "blocked"
-                      ? { reason: "A required service is unavailable." }
-                      : { verification: "Focused checks pass." }),
-                  },
-                ],
-              }),
+      const outcome = await runWorkflow([...args, "--create-pr", "--json"], {
+        ...fixtures,
+        onCodex: async (_args, output) => {
+          if (files.length > 0)
+            await writeFile(
+              join(fixtures.currentDirectory, "src", "finding-1.ts"),
+              "fixed\n",
             );
-            return 0;
-          },
-          onRepositoryCommand: (command, args, cwd, options) => {
-            commandStarted ||=
-              command !== "git" ||
-              ["switch", "commit", "push"].includes(args[0]!);
-            return runGitRepositoryCommand(command, args, cwd, options);
-          },
+          output?.stdout.write(JSON.stringify({ patches: [patch] }));
+          return 0;
         },
-      );
+        onRepositoryCommand: (command, args, cwd, options) => {
+          commandStarted ||=
+            command !== "git" ||
+            ["checkout", "switch", "commit", "push"].includes(args[0]!);
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+      });
 
       expect(commandStarted).toBe(false);
-      expect(outcome.exitCode).toBe(
-        status === "blocked" ? 1 : status === "outside" ? 2 : 0,
-      );
-      expect(JSON.parse(outcome.stdout)).not.toHaveProperty("pullRequest");
-      if (status === "outside") {
+      expect(outcome.exitCode).toBe(exitCode);
+      const response = JSON.parse(outcome.stdout);
+      expect(response).not.toHaveProperty("pullRequest");
+      expect(response.patches).toEqual(status === "verified" ? [] : [patch]);
+      if (args === saved)
+        expect(response).toMatchObject({ applied: true, files });
+      if (status === "blocked") {
+        expect(outcome.stderr).toContain(reason);
+        expect(fixtures.git("diff", "--name-only")).toBe(files[0]);
+        expect(fixtures.git("branch", "--show-current")).toBe("main");
+      }
+      if (status === "verified") {
         expect(outcome.stderr).toContain(
           "Patch files must remain inside the scanned repository.",
         );
@@ -2699,9 +2708,9 @@ describe("scan and patch workflow", () => {
             "--source-branch",
             "codex-security/patch-scan-1",
             "--title",
-            "fix: patch verified security findings",
+            "fix: apply security patch",
             "--description",
-            ">>>\nApplies verified security fixes from a completed scan.",
+            ">>>\nApplies verified code changes for findings from a completed scan.",
             "--yes",
             "--repo",
             selector,
