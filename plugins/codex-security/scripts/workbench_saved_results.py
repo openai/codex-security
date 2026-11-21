@@ -30,6 +30,7 @@ from finalize_scan_contract import (
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
+    _validate_existing_seal,
     _write_prepared_scan_finalization,
     finalize_scan,
     manifest_is_sealed,
@@ -685,6 +686,16 @@ def preserve_scan_results_locked(
             existing_sources = existing_scan.get("preservedSources")
             existing_heads = existing_scan.get("preservedCheckpointHeads")
             if frozen_source_digests is None:
+                if (
+                    existing_sources is None
+                    and not pending_recovery
+                    and scan["seal_manifest_digest"] is not None
+                    and deep_run is not None
+                    and deep_run["status"] == "succeeded"
+                ):
+                    # A cost stop can directly seal the authoritative parent draft.
+                    # This verified result has no worker source projection to refresh.
+                    return True
                 frozen_source_digests = _source_digests(
                     existing_sources, "Stopped scan source digests could not be frozen."
                 )
@@ -1300,6 +1311,15 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        if scan["status"] == "running" and budget_stop_receipt(db, scan_id).exists():
+            connection.commit()
+            return db.complete_scan_locked(
+                connection,
+                scan_id,
+                args.claim_token,
+                cost_json,
+                model_thread_id=getattr(args, "model_thread_id", None),
+            )
         if scan["status"] == "failed":
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
@@ -1350,6 +1370,8 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         require_cancel_owner(db, connection, scan, thread_id)
+        if scan["status"] == "running" and budget_stop_receipt(db, scan_id).exists():
+            raise SystemExit("This scan already stopped at its cost limit.")
         if scan["canceled_at"] is not None:
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
@@ -1437,6 +1459,58 @@ def preserve_stopped_results_after_transition(db: Any, connection: Any, scan_id:
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+def budget_stop_receipt(db: Any, scan_id: str) -> Path:
+    return db.state_dir() / "completion-locks" / f"{scan_id}.budget-stop.json"
+
+
+def record_budget_stop(
+    db: Any, scan_id: str, draft_digest: str, cost: str, warning: str, seal: bytes, checkpoint: str
+) -> None:
+    # The host records the exact transition before replacing the last canonical output.
+    receipt = budget_stop_receipt(db, scan_id)
+    write_scan_local_bytes(
+        receipt.parent,
+        receipt.name,
+        _encoded(
+            {
+                "draftDigest": draft_digest,
+                "seal": seal.decode("utf-8"),
+                "checkpoint": checkpoint,
+                "cost": cost,
+                "warning": warning,
+            }
+        ),
+        owner_read_write=True,
+    )
+
+
+def pending_budget_stop(
+    db: Any, scan: sqlite3.Row, scan_dir: Path, *, restore: bool = False
+) -> dict[str, Any] | None:
+    receipt = budget_stop_receipt(db, scan["id"])
+    if scan["status"] != "running" or not receipt.exists():
+        return None
+    intent = db.read_json_object(receipt)
+    seal = intent["seal"].encode("utf-8")
+    seal_digest = "sha256:" + hashlib.sha256(seal).hexdigest()
+    current = db.scan_local_file_digest(scan_dir, "scan-manifest.json")
+    if current not in (seal_digest, intent["draftDigest"]):
+        raise SystemExit("The pending cost-stop manifest changed after preparation.")
+    checkpoint = intent["checkpoint"]
+    head = _read_scan_local_json(scan_dir, "checkpoint-head.json", "Budget-stop checkpoint head")
+    if head.get("checkpoint") != checkpoint or db.scan_local_file_digest(
+        scan_dir, "checkpoints/" + checkpoint
+    ) != "sha256:" + checkpoint.removesuffix(".json"):
+        raise SystemExit("The pending cost-stop checkpoint changed after preparation.")
+    if current == intent["draftDigest"]:
+        # The host stopped between publishing the receipt and replacing the manifest.
+        # Reuse the prepared seal only if its canonical artifacts still match.
+        _validate_existing_seal(scan_dir, json.loads(seal)["scan"])
+        if restore:
+            write_scan_local_bytes(scan_dir, "scan-manifest.json", seal)
+    return dict(intent, manifestDigest=seal_digest)
 
 
 def budget_exhausted_draft(
@@ -1581,6 +1655,7 @@ def budget_exhausted_draft(
             }
         )
     coverage.pop("completeness", None)
+    manifest["scan"].pop("complete", None)
     manifest["scan"].pop("coverageRef", None)
     manifest["scan"]["mode"] = db.expected_coverage_mode(scan)
     manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)

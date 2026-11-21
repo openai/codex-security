@@ -572,7 +572,7 @@ describe("deep scan workbench ownership", () => {
         progress: { status: string };
         warnings: string[];
       };
-      expect(scan.progress.status).toBe("complete");
+      expect(scan.progress.status).toBe("failed");
       expect(scan.warnings).toContain(warning);
       const findings = JSON.parse(
         await readFile(join(scanDir, "findings.json"), "utf8"),
@@ -659,7 +659,7 @@ describe("deep scan workbench ownership", () => {
         ]),
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-      expect(report).toContain("No findings were reported.");
+      expect(report).toContain("No vulnerability conclusion can be drawn.");
     },
   );
 
