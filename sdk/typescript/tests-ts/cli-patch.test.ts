@@ -1380,6 +1380,8 @@ describe("scan and patch workflow", () => {
           "--codex",
           'profiles.quiet.model_provider="amazon-bedrock"',
           "--codex",
+          'profiles.quiet.model="synthetic-bedrock-model"',
+          "--codex",
           'responses_api_metadata={ "team.tag"="root", caller="preserved" }',
           "--codex",
           'profiles.quiet.responses_api_metadata={ "team.tag"="selected", codex_security_integration="github_action" }',
@@ -1399,6 +1401,8 @@ describe("scan and patch workflow", () => {
       );
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(childArgs).toContain('model="synthetic-bedrock-model"');
+      expect(childArgs).toContain('model_provider="amazon-bedrock"');
       expect(childArgs).toContain(`analytics.enabled=${profileAnalytics}`);
       expect(requestMetadata(childArgs)).toMatchObject({
         "team.tag": "selected",

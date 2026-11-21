@@ -717,6 +717,8 @@ describe("CLI authentication", () => {
             "scan",
             "--codex",
             'model_provider="amazon-bedrock"',
+            "--model",
+            "synthetic-bedrock-model",
             "--json",
             "--verbose",
             "--full-output",
@@ -730,7 +732,7 @@ describe("CLI authentication", () => {
       expect(JSON.parse(stdout.text()).error.message).toContain(detail);
       expect(JSON.parse(stdout.text()).error.message).toContain(expected);
       expect(stderr.text()).toContain("AWS_BEARER_TOKEN_BEDROCK");
-      expect(stderr.text()).not.toContain("synthetic-");
+      expect(stderr.text()).not.toContain("synthetic-bedrock-bearer");
       expect(stderr.text()).not.toContain("--auth chatgpt");
     },
   );
@@ -753,7 +755,13 @@ describe("CLI authentication", () => {
       });
     expect(
       await stderr.run(
-        ["scan", "--codex", 'model_provider="amazon-bedrock"'],
+        [
+          "scan",
+          "--codex",
+          'model_provider="amazon-bedrock"',
+          "--model",
+          "synthetic-bedrock-model",
+        ],
         deps,
       ),
     ).toBe(2);
@@ -811,6 +819,8 @@ describe("CLI authentication", () => {
             'model_provider="amazon-bedrock"',
             "--codex",
             'model_providers.amazon-bedrock.auth={command="synthetic-auth"}',
+            "--model",
+            "synthetic-bedrock-model",
             "--json",
             "--verbose",
             "--full-output",
@@ -971,6 +981,7 @@ describe("CLI authentication", () => {
   test("never prompts during automation, explicit selection, or unavailable credentials", async () => {
     const repository = "/original/repository";
     for (const scenario of [
+      { argv: ["scan", "--headless"], terminal: true, stored: true, key: true },
       { argv: ["scan", "--json"], terminal: true, stored: true, key: true },
       {
         argv: ["scan", "--format", "jsonl"],
@@ -1083,6 +1094,9 @@ describe("CLI authentication", () => {
 
       expect(await runCli(scenario.argv, deps)).toBe(0);
       expect(prompts).toBe(0);
+      if (scenario.argv.includes("--headless")) {
+        expect(hasStoredChatGPTSignIn).toHaveBeenCalledTimes(0);
+      }
       if (scenario.argv.includes("--json") || scenario.argv.includes("jsonl")) {
         expect(hasStoredChatGPTSignIn).toHaveBeenCalledTimes(0);
         expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
@@ -1679,6 +1693,7 @@ describe("skill authentication", () => {
         command,
         auth,
         overrides: [
+          'model="synthetic-provider-model"',
           `model_provider=${JSON.stringify(provider)}`,
           `model_providers.${provider}.name="Synthetic gateway"`,
           `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
@@ -2088,6 +2103,7 @@ describe("skill authentication", () => {
       const result = await runProviderSkill(stateDirectory, {
         auth,
         overrides: [
+          'model="synthetic-provider-model"',
           `model_provider=${JSON.stringify(provider)}`,
           `model_providers.${provider}.name="Synthetic gateway"`,
           `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
