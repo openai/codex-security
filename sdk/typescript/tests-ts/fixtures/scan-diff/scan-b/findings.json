@@ -1,0 +1,57 @@
+{
+  "documentType": "codex-security.findings",
+  "schemaVersion": "1.0",
+  "scanId": "scan_diff_fixture_b",
+  "findings": [
+    {
+      "findingId": "csf_852f90d6e1177502ff113d4a",
+      "occurrenceId": "occ_cccccccccccccccccccccccc",
+      "ruleId": "path-traversal.archive-extraction",
+      "identity": {
+        "anchor": "archive-entry-write-without-containment"
+      },
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:990a4a6a2ec18440dd47eac4d7256c0ee2c02db1b43104720cab3cbe9db706ca"
+      },
+      "title": "Archive extraction writes outside the output directory",
+      "summary": "The extractor still joins the output directory with the archive entry name.",
+      "severity": {
+        "level": "high"
+      },
+      "locations": [
+        {
+          "path": "src/caller.py",
+          "startLine": 7,
+          "role": "source"
+        },
+        {
+          "path": "src/extract.py",
+          "startLine": 48,
+          "endLine": 51,
+          "role": "root_control"
+        }
+      ]
+    },
+    {
+      "findingId": "csf_222222222222222222222222",
+      "occurrenceId": "occ_dddddddddddddddddddddddd",
+      "ruleId": "xss.template-unescaped",
+      "identity": {
+        "anchor": "comment-body-rendered-unescaped"
+      },
+      "title": "Comment bodies are rendered without escaping",
+      "summary": "The template inserts stored comment HTML into the page.",
+      "severity": {
+        "level": "medium"
+      },
+      "locations": [
+        {
+          "path": "src/comments.py",
+          "startLine": 88,
+          "role": "sink"
+        }
+      ]
+    }
+  ]
+}
