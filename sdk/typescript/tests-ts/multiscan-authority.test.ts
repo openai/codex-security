@@ -601,7 +601,13 @@ test.each([
   expect(await readFile(join(scanDir, "findings.json"))).toEqual(before);
 });
 
-test.each(["local", "include", "worktree", "host"] as const)(
+test.each([
+  "local",
+  "include",
+  "worktree",
+  "host",
+  "conditional-host",
+] as const)(
   "retained restoration isolates %s configuration while preserving trusted host filters",
   async (kind) => {
     const value = await fixture();
@@ -620,8 +626,9 @@ test.each(["local", "include", "worktree", "host"] as const)(
     );
     const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
     const filter = `${quote(process.execPath)} ${quote(script)}`;
+    const host = kind === "host" || kind === "conditional-host";
     const configured =
-      kind === "host" || kind === "include"
+      host || kind === "include"
         ? join(value.root, "synthetic.gitconfig")
         : join(
             checkout,
@@ -643,7 +650,19 @@ test.each(["local", "include", "worktree", "host"] as const)(
     const configuredBytes = await readFile(configured);
     await rm(join(checkout, "src/app.ts"));
     const hostConfig = process.env["GIT_CONFIG_GLOBAL"];
-    if (kind === "host") process.env["GIT_CONFIG_GLOBAL"] = configured;
+    if (host) process.env["GIT_CONFIG_GLOBAL"] = configured;
+    if (kind === "conditional-host") {
+      const conditional = join(value.root, "conditional.gitconfig");
+      git(
+        checkout,
+        "config",
+        "--file",
+        conditional,
+        `includeIf.gitdir:${join(checkout, ".git")}.path`,
+        configured,
+      );
+      process.env["GIT_CONFIG_GLOBAL"] = conditional;
+    }
     try {
       expect(await runMultiscan(value.options)).toMatchObject({
         completed: 1,
@@ -653,8 +672,7 @@ test.each(["local", "include", "worktree", "host"] as const)(
       expect(await readFile(join(checkout, "src/app.ts"), "utf8")).toBe(
         "export const value = 1;\n",
       );
-      if (kind === "host")
-        expect(await readFile(marker, "utf8")).toBe("called");
+      if (host) expect(await readFile(marker, "utf8")).toBe("called");
       else await expect(readFile(marker)).rejects.toThrow();
       expect(await readFile(join(checkout, ".git/config"))).toEqual(
         originalConfig,

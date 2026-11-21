@@ -2439,6 +2439,7 @@ async function checkoutRevision(
         ? [join(canonicalGit, "config.worktree")]
         : []),
     ];
+    await git("init", "--quiet", "--template=");
     for (const file of layers) {
       const worktree = await configured(file, "core.worktree", "path");
       if (
@@ -2452,10 +2453,9 @@ async function checkoutRevision(
         );
       for (const key of ["core.ignorecase", "core.filemode", "core.symlinks"]) {
         const value = await configured(file, key, "bool");
-        if (value !== undefined) gitOptions.push("-c", key + "=" + value);
+        if (value !== undefined) await git("config", "--local", key, value);
       }
     }
-    await git("init", "--quiet", "--template=");
     if (retainedHead)
       await writeFile(join(repairDirectory, "HEAD"), retainedHead + "\n");
     const shallow = await readFile(join(canonicalGit, "shallow")).catch(
@@ -2465,268 +2465,319 @@ async function checkoutRevision(
   } else {
     await git("init", "--quiet");
   }
-  let locallyPinned = false;
-  let incompleteObjects = false;
-  if (restore) {
-    try {
-      await git(
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        `${task.revision}^{commit}`,
+  let createdHead = false;
+  try {
+    if (repairDirectory) {
+      // Git discovers the original directory before applying GIT_COMMON_DIR.
+      // Reconstruct a missing pinned HEAD now and remove it if repair fails.
+      const head = await open(join(gitDirectory, "HEAD"), "wx").catch(
+        (error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === "EEXIST")
+            return undefined;
+          throw error;
+        },
       );
-      const reachable = await git(
-        "rev-list",
-        "--objects",
-        "--missing=print",
-        "--no-walk",
+      if (head) {
+        createdHead = true;
+        try {
+          await head.writeFile(task.revision + "\n");
+        } finally {
+          await head.close();
+        }
+      }
+      // Keep conditional host configuration in the checkout's context while
+      // private common metadata and an explicit index exclude retained config.
+      gitOptions.push("--git-dir", gitDirectory);
+      gitEnvironment["GIT_COMMON_DIR"] = repairDirectory;
+      gitEnvironment["GIT_INDEX_FILE"] = join(repairDirectory, "index");
+    }
+    let locallyPinned = false;
+    let incompleteObjects = false;
+    if (restore) {
+      try {
+        await git(
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          `${task.revision}^{commit}`,
+        );
+        const reachable = await git(
+          "rev-list",
+          "--objects",
+          "--missing=print",
+          "--no-walk",
+          task.revision,
+        );
+        incompleteObjects = reachable
+          .split("\n")
+          .some((line) => line.startsWith("?"));
+        locallyPinned = !incompleteObjects;
+      } catch (error) {
+        if ((error as { code?: number }).code !== 1) throw error;
+      }
+    }
+    if (!locallyPinned) {
+      await git(
+        ...(incompleteObjects ? ["-c", "fetch.negotiationAlgorithm=noop"] : []),
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        ...(!repairDirectory || incompleteObjects ? ["--depth=1"] : []),
+        ...(repairDirectory ? ["--no-write-fetch-head"] : []),
+        "--no-auto-gc",
+        "--no-write-commit-graph",
+        "--",
+        task.repository,
         task.revision,
       );
-      incompleteObjects = reachable
-        .split("\n")
-        .some((line) => line.startsWith("?"));
-      locallyPinned = !incompleteObjects;
-    } catch (error) {
-      if ((error as { code?: number }).code !== 1) throw error;
+      if (
+        repairDirectory &&
+        !incompleteObjects &&
+        (await lstat(join(repairDirectory, "shallow")).catch(
+          undefinedIfMissingFile,
+        ))
+      )
+        await rename(
+          join(repairDirectory, "shallow"),
+          join(gitDirectory, "shallow"),
+        );
     }
-  }
-  if (!locallyPinned) {
-    await git(
-      ...(incompleteObjects ? ["-c", "fetch.negotiationAlgorithm=noop"] : []),
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--depth=1",
-      "--no-auto-gc",
-      "--no-write-commit-graph",
-      "--",
-      task.repository,
-      task.revision,
-    );
     if (
       repairDirectory &&
-      (await lstat(join(repairDirectory, "shallow")).catch(
-        undefinedIfMissingFile,
-      ))
-    )
-      await rename(
-        join(repairDirectory, "shallow"),
-        join(gitDirectory, "shallow"),
-      );
-  }
-  if (
-    repairDirectory &&
-    !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
-  ) {
-    // Rebuild the lost index without restoring unrelated deleted worktree files.
-    gitEnvironment["GIT_INDEX_FILE"] = join(gitDirectory, "index");
-    await git("read-tree", retainedHead || task.revision);
-    delete gitEnvironment["GIT_INDEX_FILE"];
-  }
-  if (!restore) {
-    await git("checkout", "--quiet", "--detach", task.revision);
-  } else {
-    if (!retainedHead)
-      await git("update-ref", "--no-deref", "HEAD", task.revision);
-    // A full pinned index in the private (or freshly initialized) Git directory
-    // inventories selected paths even when the retained index omits them.
-    await git("read-tree", "--no-sparse-checkout", task.revision);
-    const ignoreCase =
-      (await git("config", "--bool", "core.ignorecase").catch(allowMissing)) ===
-      "true";
-    const comparisonPath = (name: string) =>
-      ignoreCase ? name.toLowerCase() : name;
-    const unicodeCandidates = (names: Iterable<string>) => {
-      const candidates = new Map<string, string[]>();
-      for (const name of names) {
-        const key = comparisonPath(name).normalize("NFC");
-        const matches = candidates.get(key);
-        if (matches) matches.push(name);
-        else candidates.set(key, [name]);
-      }
-      return candidates;
-    };
-    const pathAliases = new Map<string, Promise<boolean>>();
-    const sameFilesystemPath = (tracked: string, requested: string) => {
-      const key = JSON.stringify([tracked, requested]);
-      let result = pathAliases.get(key);
-      if (result === undefined) {
-        result = retainedPathAliases(path, tracked, requested, ignoreCase);
-        pathAliases.set(key, result);
-      }
-      return result;
-    };
-    const tree = await gitOutput(["ls-tree", "-r", "-z", task.revision]);
-    const links = new Map<string, string>();
-    const unicodeLinkNames: string[] = [];
-    for (const row of tree.toString("latin1").split("\0")) {
-      if (!row.startsWith("120000 ")) continue;
-      const bytes = Buffer.from(row.slice(row.indexOf("\t") + 1), "latin1");
-      const name = bytes.toString("utf8");
-      const key = comparisonPath(name);
-      if (!links.has(key)) links.set(key, name);
-      if (Buffer.from(name).equals(bytes)) unicodeLinkNames.push(name);
+      !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
+    ) {
+      // Rebuild the lost index without restoring unrelated deleted worktree files.
+      gitEnvironment["GIT_INDEX_FILE"] = join(gitDirectory, "index");
+      await git("read-tree", retainedHead || task.revision);
+      gitEnvironment["GIT_INDEX_FILE"] = join(repairDirectory, "index");
     }
-    const unicodeLinks = unicodeCandidates(unicodeLinkNames);
-    const aliases = new Set<string>();
-    const requiredDirectories = new Set<string>();
-    const canonicalTrackedPath = async (
-      requested: string,
-      visited: Set<string>,
-    ): Promise<string> => {
-      // Resolve the directory before each POSIX "..", including a tracked link
-      // that is currently missing. Only then is it safe to compare Git paths.
-      const parts = requested.split(sep);
-      const parent = parts.lastIndexOf("..");
-      if (sep === "/" && parent !== -1) {
-        const directory = await canonicalTrackedPath(
-          parts.slice(0, parent).join(sep) || sep,
-          visited,
+    if (!restore) {
+      await git("checkout", "--quiet", "--detach", task.revision);
+    } else {
+      if (!retainedHead)
+        await git(
+          ...(repairDirectory ? ["--git-dir", repairDirectory] : []),
+          "update-ref",
+          "--no-deref",
+          "HEAD",
+          task.revision,
         );
-        // Looking up "." requires a directory even on systems where realpath
-        // collapses "file/..". Reject an obstruction before Git restores paths.
-        const entry = await lstat(`${directory}${sep}.`).catch(
-          undefinedIfMissingFile,
-        );
-        if (
-          entry === undefined &&
-          !relativePathIsOutside(relative(path, directory))
-        )
-          requiredDirectories.add(directory);
-        return canonicalTrackedPath(
-          join(dirname(directory), ...parts.slice(parent + 1)),
-          visited,
-        );
-      }
-      for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
-        const canonical = await realpath(ancestor).catch(
-          undefinedIfMissingFile,
-        );
-        if (canonical !== undefined) {
-          if (ancestor === requested) return canonical;
-          const candidate = resolve(canonical, relative(ancestor, requested));
-          // A live directory link may lead to another missing tracked link.
-          return canonical === ancestor
-            ? candidate
-            : canonicalTrackedPath(candidate, visited);
+      // A full pinned index in the private (or freshly initialized) Git directory
+      // inventories selected paths even when the retained index omits them.
+      await git("read-tree", "--no-sparse-checkout", task.revision);
+      const ignoreCase =
+        (await git("config", "--bool", "core.ignorecase").catch(
+          allowMissing,
+        )) === "true";
+      const symlinks =
+        (await git("config", "--bool", "core.symlinks").catch(allowMissing)) !==
+        "false";
+      const comparisonPath = (name: string) =>
+        ignoreCase ? name.toLowerCase() : name;
+      const unicodeCandidates = (names: Iterable<string>) => {
+        const candidates = new Map<string, string[]>();
+        for (const name of names) {
+          const key = comparisonPath(name).normalize("NFC");
+          const matches = candidates.get(key);
+          if (matches) matches.push(name);
+          else candidates.set(key, [name]);
         }
-        const requestedName = relative(path, ancestor).split(sep).join("/");
-        const key = comparisonPath(requestedName);
-        let name = links.get(key);
-        if (name === undefined) {
-          for (const candidate of unicodeLinks.get(key.normalize("NFC")) ??
-            []) {
-            if (await sameFilesystemPath(candidate, requestedName)) {
-              name = candidate;
-              break;
+        return candidates;
+      };
+      const pathAliases = new Map<string, Promise<boolean>>();
+      const sameFilesystemPath = (tracked: string, requested: string) => {
+        const key = JSON.stringify([tracked, requested]);
+        let result = pathAliases.get(key);
+        if (result === undefined) {
+          result = retainedPathAliases(path, tracked, requested, ignoreCase);
+          pathAliases.set(key, result);
+        }
+        return result;
+      };
+      const tree = await gitOutput(["ls-tree", "-r", "-z", task.revision]);
+      const links = new Map<string, string>();
+      const unicodeLinkNames: string[] = [];
+      for (const row of tree.toString("latin1").split("\0")) {
+        if (!symlinks || !row.startsWith("120000 ")) continue;
+        const bytes = Buffer.from(row.slice(row.indexOf("\t") + 1), "latin1");
+        const name = bytes.toString("utf8");
+        const key = comparisonPath(name);
+        if (!links.has(key)) links.set(key, name);
+        if (Buffer.from(name).equals(bytes)) unicodeLinkNames.push(name);
+      }
+      const unicodeLinks = unicodeCandidates(unicodeLinkNames);
+      const aliases = new Set<string>();
+      const requiredDirectories = new Set<string>();
+      const canonicalTrackedPath = async (
+        requested: string,
+        visited: Set<string>,
+      ): Promise<string> => {
+        // Resolve the directory before each POSIX "..", including a tracked link
+        // that is currently missing. Only then is it safe to compare Git paths.
+        const parts = requested.split(sep);
+        const parent = parts.lastIndexOf("..");
+        if (sep === "/" && parent !== -1) {
+          const directory = await canonicalTrackedPath(
+            parts.slice(0, parent).join(sep) || sep,
+            visited,
+          );
+          // Looking up "." requires a directory even on systems where realpath
+          // collapses "file/..". Reject an obstruction before Git restores paths.
+          const entry = await lstat(`${directory}${sep}.`).catch(
+            undefinedIfMissingFile,
+          );
+          if (
+            entry === undefined &&
+            !relativePathIsOutside(relative(path, directory))
+          )
+            requiredDirectories.add(directory);
+          return canonicalTrackedPath(
+            join(dirname(directory), ...parts.slice(parent + 1)),
+            visited,
+          );
+        }
+        for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
+          const canonical = await realpath(ancestor).catch(
+            undefinedIfMissingFile,
+          );
+          if (canonical !== undefined) {
+            if (ancestor === requested) return canonical;
+            const candidate = resolve(canonical, relative(ancestor, requested));
+            // A live directory link may lead to another missing tracked link.
+            return canonical === ancestor
+              ? candidate
+              : canonicalTrackedPath(candidate, visited);
+          }
+          const requestedName = relative(path, ancestor).split(sep).join("/");
+          const key = comparisonPath(requestedName);
+          let name = links.get(key);
+          if (name === undefined) {
+            for (const candidate of unicodeLinks.get(key.normalize("NFC")) ??
+              []) {
+              if (await sameFilesystemPath(candidate, requestedName)) {
+                name = candidate;
+                break;
+              }
             }
           }
-        }
-        if (name !== undefined) {
-          if (visited.has(name))
-            throw new Error("Symbolic link cycle in retained checkout target.");
-          aliases.add(name);
-          const target = (
-            await gitOutput(["show", `${task.revision}:${name}`])
-          ).toString("utf8");
-          const directory = await canonicalTrackedPath(
-            resolveTargetPath(target, join(path, dirname(name))),
-            new Set(visited).add(name),
-          );
-          // A later component can traverse the same link again.
-          return ancestor === requested
-            ? directory
-            : canonicalTrackedPath(
-                directory + requested.slice(ancestor.length),
-                visited,
+          if (name !== undefined) {
+            if (visited.has(name))
+              throw new Error(
+                "Symbolic link cycle in retained checkout target.",
               );
+            aliases.add(name);
+            const target = (
+              await gitOutput(["show", `${task.revision}:${name}`])
+            ).toString("utf8");
+            const directory = await canonicalTrackedPath(
+              resolveTargetPath(target, join(path, dirname(name))),
+              new Set(visited).add(name),
+            );
+            // A later component can traverse the same link again.
+            return ancestor === requested
+              ? directory
+              : canonicalTrackedPath(
+                  directory + requested.slice(ancestor.length),
+                  visited,
+                );
+          }
+          if (dirname(ancestor) === ancestor)
+            return canonicalCreationPath(requested);
         }
-        if (dirname(ancestor) === ancestor)
-          return canonicalCreationPath(requested);
+      };
+      const selectedPaths = new Set<string>();
+      for (const requested of restore.paths) {
+        const selected = relative(
+          path,
+          await canonicalTrackedPath(
+            resolveRepositoryPath(requested, path),
+            new Set(),
+          ),
+        );
+        if (!relativePathIsOutside(selected))
+          selectedPaths.add(selected.split(sep).join("/") || ".");
       }
-    };
-    const selectedPaths = new Set<string>();
-    for (const requested of restore.paths) {
-      const selected = relative(
-        path,
-        await canonicalTrackedPath(
-          resolveRepositoryPath(requested, path),
-          new Set(),
+      const restoreAll = selectedPaths.has(".");
+      // Latin-1 gives each raw Git byte a distinct key on case-sensitive filesystems.
+      const scopeKey = (bytes: Buffer) =>
+        ignoreCase
+          ? bytes.toString("utf8").toLowerCase()
+          : bytes.toString("latin1");
+      const scopes = new Set(
+        [...selectedPaths, ...aliases].map((name) =>
+          scopeKey(Buffer.from(name)),
         ),
       );
-      if (!relativePathIsOutside(selected))
-        selectedPaths.add(selected.split(sep).join("/") || ".");
-    }
-    const restoreAll = selectedPaths.has(".");
-    // Latin-1 gives each raw Git byte a distinct key on case-sensitive filesystems.
-    const scopeKey = (bytes: Buffer) =>
-      ignoreCase
-        ? bytes.toString("utf8").toLowerCase()
-        : bytes.toString("latin1");
-    const scopes = new Set(
-      [...selectedPaths, ...aliases].map((name) => scopeKey(Buffer.from(name))),
-    );
-    const unicodeScopes = unicodeCandidates([...selectedPaths, ...aliases]);
-    const selectedForRestore = async (name: Buffer) => {
-      if (restoreAll) return true;
-      for (
-        let end = name.length;
-        end !== -1;
-        end = name.lastIndexOf(47, end - 1)
-      ) {
-        const prefix = name.subarray(0, end);
-        if (scopes.has(scopeKey(prefix))) return true;
-        const decoded = prefix.toString("utf8");
-        if (!Buffer.from(decoded).equals(prefix)) continue;
-        const key = comparisonPath(decoded).normalize("NFC");
-        for (const candidate of unicodeScopes.get(key) ?? []) {
-          if (await sameFilesystemPath(decoded, candidate)) return true;
+      const unicodeScopes = unicodeCandidates([...selectedPaths, ...aliases]);
+      const selectedForRestore = async (name: Buffer) => {
+        if (restoreAll) return true;
+        for (
+          let end = name.length;
+          end !== -1;
+          end = name.lastIndexOf(47, end - 1)
+        ) {
+          const prefix = name.subarray(0, end);
+          if (scopes.has(scopeKey(prefix))) return true;
+          const decoded = prefix.toString("utf8");
+          if (!Buffer.from(decoded).equals(prefix)) continue;
+          const key = comparisonPath(decoded).normalize("NFC");
+          for (const candidate of unicodeScopes.get(key) ?? []) {
+            if (await sameFilesystemPath(decoded, candidate)) return true;
+          }
         }
+        return false;
+      };
+      const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
+      const selectedDeleted: Buffer[] = [];
+      let start = 0;
+      for (
+        let end = deletedPaths.indexOf(0);
+        end !== -1;
+        end = deletedPaths.indexOf(0, start)
+      ) {
+        const name = deletedPaths.subarray(start, end);
+        if (
+          (await selectedForRestore(name)) &&
+          (await canRestoreDeletedPath(path, name))
+        )
+          selectedDeleted.push(deletedPaths.subarray(start, end + 1));
+        start = end + 1;
       }
-      return false;
-    };
-    const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
-    const selectedDeleted: Buffer[] = [];
-    let start = 0;
-    for (
-      let end = deletedPaths.indexOf(0);
-      end !== -1;
-      end = deletedPaths.indexOf(0, start)
+      const deleted = Buffer.concat(selectedDeleted);
+      if (deleted.length !== 0) {
+        await gitOutput(
+          [
+            "--literal-pathspecs",
+            "restore",
+            `--source=${task.revision}`,
+            "--worktree",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+          ],
+          deleted,
+        );
+      }
+      for (const directory of requiredDirectories)
+        await mkdir(directory, { recursive: true });
+    }
+    if (
+      (
+        await git(
+          ...(repairDirectory ? ["--git-dir", repairDirectory] : []),
+          "rev-parse",
+          "HEAD",
+        )
+      ).toLowerCase() !== (retainedHead || task.revision)
     ) {
-      const name = deletedPaths.subarray(start, end);
-      if (
-        (await selectedForRestore(name)) &&
-        (await canRestoreDeletedPath(path, name))
-      )
-        selectedDeleted.push(deletedPaths.subarray(start, end + 1));
-      start = end + 1;
+      throw new Error("Git checkout revision did not match the pinned SHA.");
     }
-    const deleted = Buffer.concat(selectedDeleted);
-    if (deleted.length !== 0) {
-      await gitOutput(
-        [
-          "--literal-pathspecs",
-          "restore",
-          `--source=${task.revision}`,
-          "--worktree",
-          "--pathspec-from-file=-",
-          "--pathspec-file-nul",
-        ],
-        deleted,
-      );
+    if (repairDirectory && !retainedHead) {
+      // Replace the reconstructed HEAD only after the worktree is ready.
+      await rename(join(repairDirectory, "HEAD"), join(gitDirectory, "HEAD"));
     }
-    for (const directory of requiredDirectories)
-      await mkdir(directory, { recursive: true });
-  }
-  if (
-    (await git("rev-parse", "HEAD")).toLowerCase() !==
-    (retainedHead || task.revision)
-  ) {
-    throw new Error("Git checkout revision did not match the pinned SHA.");
-  }
-  if (repairDirectory && !retainedHead) {
-    // Publish the recovered detached HEAD only after the worktree is ready.
-    await rename(join(repairDirectory, "HEAD"), join(gitDirectory, "HEAD"));
+  } catch (error) {
+    if (createdHead) await rm(join(gitDirectory, "HEAD"), { force: true });
+    throw error;
   }
 }
 

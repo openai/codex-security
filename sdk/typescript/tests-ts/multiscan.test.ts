@@ -4469,3 +4469,276 @@ test.each([
     }
   },
 );
+
+for (const retainedConfiguration of [false, true]) {
+  const name = `retained Git recovery respects a disabled symlink checkout retained=${retainedConfiguration}`;
+  test(name, async () => {
+    const count = Number(process.env["GIT_CONFIG_COUNT"] ?? "0");
+    if (
+      runTestInSubprocess(import.meta.path, name, {
+        ...process.env,
+        GIT_CONFIG_COUNT: String(count + 1),
+        [`GIT_CONFIG_KEY_${count}`]: "core.symlinks",
+        [`GIT_CONFIG_VALUE_${count}`]: "false",
+      })
+    )
+      return;
+    const paths = await fixture();
+    const source = await repository(paths.root, "plain-link-source");
+    await writeFile(join(source.path, "alias"), "src");
+    const blob = git(source.path, "hash-object", "-w", "alias");
+    git(
+      source.path,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      "120000",
+      blob,
+      "alias",
+    );
+    commitFixture(source.path, "Pinned link represented as a file");
+    await writeRecoveryTask(
+      paths,
+      source,
+      "alias",
+      git(source.path, "rev-parse", "HEAD"),
+    );
+    const campaign = await completedCampaign(paths);
+    const checkout = cloneRetained(paths, source);
+    expect((await lstat(join(checkout, "alias"))).isFile()).toBe(true);
+    if (retainedConfiguration) git(checkout, "config", "core.symlinks", "true");
+    await rm(join(checkout, "alias"));
+    await rm(join(checkout, "src"), { recursive: true });
+    await campaign.expectReused();
+    expect(await readFile(join(checkout, "alias"), "utf8")).toBe("src");
+    expect((await lstat(join(checkout, "alias"))).isFile()).toBe(true);
+    await expect(lstat(join(checkout, "src"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+}
+
+for (const shallow of [false, true]) {
+  test(`retained Git recovery preserves fetched history shallow=${shallow}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "retained-history-source");
+    for (let revision = 0; revision < 2; revision++) {
+      await writeFile(
+        join(source.path, "history.txt"),
+        `Synthetic revision ${revision}.\n`,
+      );
+      git(source.path, "add", ".");
+      commitFixture(source.path, "Synthetic retained history");
+    }
+    await writeRecoveryTask(
+      paths,
+      source,
+      "src",
+      git(source.path, "rev-parse", "HEAD"),
+    );
+    const campaign = await completedCampaign(paths);
+    const checkout = await cloneWithoutScope(paths, source);
+    const shallowPath = join(checkout, ".git", "shallow");
+    if (shallow)
+      await writeFile(shallowPath, git(checkout, "rev-parse", "HEAD^") + "\n");
+    const boundary = shallow ? await readFile(shallowPath) : undefined;
+    const history = git(checkout, "rev-list", "HEAD");
+    expect(history.split("\n")).toHaveLength(shallow ? 2 : 3);
+    const blob = git(checkout, "rev-parse", "HEAD:src/app.ts");
+    await rm(
+      join(checkout, ".git", "objects", blob.slice(0, 2), blob.slice(2)),
+    );
+    await campaign.expectReused();
+    expect(git(checkout, "rev-list", "HEAD")).toBe(history);
+    expect(git(checkout, "rev-parse", "--is-shallow-repository")).toBe(
+      String(shallow),
+    );
+    if (shallow) expect(await readFile(shallowPath)).toEqual(boundary!);
+    else
+      await expect(lstat(shallowPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+  });
+}
+
+for (const missingHead of [false, true]) {
+  test(`retained Git recovery fetches a new revision from a shallow source missingHead=${missingHead}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "shallow-history-source");
+    await writeFile(join(source.path, "history.txt"), "Retained history.\n");
+    git(source.path, "add", ".");
+    commitFixture(source.path, "Retained full history");
+    const retained = join(paths.root, "retained-checkout");
+    git(paths.root, "clone", "--quiet", source.path, retained);
+    const originalHead = git(retained, "rev-parse", "HEAD");
+    const originalHistory = git(retained, "rev-list", "HEAD");
+    expect(originalHistory.split("\n")).toHaveLength(2);
+    await writeFile(
+      join(source.path, "src", "later.ts"),
+      "New pinned content.\n",
+    );
+    const revision = await pinRecoveryTask(
+      paths,
+      source,
+      "New pinned revision",
+      "src",
+    );
+    await writeFile(join(source.path, ".git", "shallow"), originalHead + "\n");
+    const campaign = await completedCampaign(paths);
+    const checkout = join(paths.output, "checkouts", "repo");
+    await rename(retained, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    if (missingHead) await rm(join(checkout, ".git", "HEAD"));
+    await campaign.expectReused();
+    expect(await readFile(join(checkout, "src", "later.ts"), "utf8")).toBe(
+      "New pinned content.\n",
+    );
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(
+      missingHead ? revision : originalHead,
+    );
+    if (!missingHead) {
+      expect(git(checkout, "rev-list", "HEAD")).toBe(originalHistory);
+      expect(git(checkout, "rev-parse", "--is-shallow-repository")).toBe(
+        "false",
+      );
+    } else {
+      expect(git(checkout, "rev-list", "HEAD").split("\n")).toContain(
+        originalHead,
+      );
+    }
+  });
+}
+
+for (const head of ["retained", "missing", "failure", "canceled"] as const) {
+  const name = `retained Git recovery keeps conditional host credentials for fetch head=${head}`;
+  testPosix(name, async () => {
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const paths = await fixture();
+    const source = await repository(
+      paths.root,
+      "conditional-credentials-source",
+    );
+    await writeRecoveryTask(paths, source, "src");
+    const checkout = join(paths.output, "checkouts", "repo");
+    const globalConfig = join(paths.root, "host.gitconfig");
+    const includedConfig = join(paths.root, "included.gitconfig");
+    git(
+      paths.root,
+      "config",
+      "--file",
+      globalConfig,
+      `includeIf.gitdir:${join(checkout, ".git")}.path`,
+      includedConfig,
+    );
+    git(
+      paths.root,
+      "config",
+      "--file",
+      includedConfig,
+      "credential.helper",
+      "!f() { printf 'username=fixture\\npassword=fixture\\n'; }; f",
+    );
+    const original = await resolveTrustedExecutable(
+      "git",
+      process.env,
+      process.cwd(),
+    );
+    expect(original).not.toBeNull();
+    const fetchMode = join(paths.root, "repair-fetch-mode");
+    const controller = new AbortController();
+    const cancel = () =>
+      controller.abort(new Error("Synthetic retained fetch cancellation"));
+    process.on("SIGUSR2", cancel);
+    const tools = join(paths.root, "synthetic-tools");
+    await mkdir(tools);
+    await writeFile(
+      join(tools, "git"),
+      `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const { existsSync, readFileSync } = require("node:fs");
+const fetchMode = ${JSON.stringify(fetchMode)};
+let cancel = false;
+const git = ${JSON.stringify(original!.executable)};
+const args = process.argv.slice(2);
+const fetch = args.indexOf("fetch");
+if (fetch !== -1) {
+  const credential = spawnSync(git, [...args.slice(0, fetch), "credential", "fill"], {
+    input: "protocol=https\\nhost=example.invalid\\n\\n", encoding: "utf8",
+  });
+  if (credential.error) throw credential.error;
+  if (credential.status !== 0) {
+    process.stderr.write(credential.stderr);
+    process.exit(credential.status ?? 1);
+  }
+  if (!credential.stdout.includes("username=fixture\\n") ||
+      !credential.stdout.includes("password=fixture\\n"))
+    throw new Error("Synthetic host credential helper was not selected");
+  const mode = existsSync(fetchMode) ? readFileSync(fetchMode, "utf8") : "";
+  if (mode === "failure") {
+    process.stderr.write("Synthetic retained fetch failure\\n");
+    process.exit(31);
+  }
+  cancel = mode === "canceled";
+}
+if (cancel) {
+  process.kill(${process.pid}, "SIGUSR2");
+  setInterval(() => {}, 1000);
+} else {
+  const result = spawnSync(git, args, { stdio: "inherit" });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
+`,
+      { mode: 0o700 },
+    );
+    const previousPath = process.env["PATH"];
+    const previousGlobal = process.env["GIT_CONFIG_GLOBAL"];
+    process.env["PATH"] = tools + delimiter + (previousPath ?? "");
+    process.env["GIT_CONFIG_GLOBAL"] = globalConfig;
+    try {
+      const campaign = await completedCampaign(paths, {
+        signal: controller.signal,
+      });
+      await cloneWithoutScope(paths, source);
+      const blob = git(checkout, "rev-parse", "HEAD:src/app.ts");
+      await rm(
+        join(checkout, ".git", "objects", blob.slice(0, 2), blob.slice(2)),
+      );
+      const headPath = join(checkout, ".git", "HEAD");
+      const originalHead = await readFile(headPath);
+      const index = await readFile(join(checkout, ".git", "index"));
+      const fetchHead = join(checkout, ".git", "FETCH_HEAD");
+      await writeFile(fetchHead, "Preserve retained fetch metadata.\n");
+      if (head !== "retained") await rm(headPath);
+      await writeFile(fetchMode, head);
+      const config = await readFile(join(checkout, ".git", "config"));
+      const host = await readFile(globalConfig);
+      const included = await readFile(includedConfig);
+      if (head === "failure" || head === "canceled") {
+        await campaign.expectRejected(
+          head === "failure" ? "Synthetic retained fetch failure" : Error,
+        );
+        await expect(lstat(headPath)).rejects.toMatchObject({ code: "ENOENT" });
+        if (head === "canceled") expect(controller.signal.aborted).toBe(true);
+      } else {
+        await campaign.expectReused();
+        if (head === "retained")
+          expect(await readFile(headPath)).toEqual(originalHead);
+        else expect(git(checkout, "rev-parse", "HEAD")).toBe(source.revision);
+      }
+      expect(await readFile(join(checkout, ".git", "index"))).toEqual(index);
+      expect(await readFile(fetchHead, "utf8")).toBe(
+        "Preserve retained fetch metadata.\n",
+      );
+      expect(await readFile(join(checkout, ".git", "config"))).toEqual(config);
+      expect(await readFile(globalConfig)).toEqual(host);
+      expect(await readFile(includedConfig)).toEqual(included);
+    } finally {
+      process.off("SIGUSR2", cancel);
+      if (previousPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previousPath;
+      if (previousGlobal === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
+      else process.env["GIT_CONFIG_GLOBAL"] = previousGlobal;
+    }
+  });
+}
