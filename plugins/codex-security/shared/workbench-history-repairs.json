@@ -1,5 +1,53 @@
 [
   [
+    "-- Move saved finding history previews before repairing the main history.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    "), moves AS (",
+    "    SELECT version, destination, name FROM schema_migrations JOIN history USING (name)",
+    "    WHERE (destination = 73 AND version IN (67, 42, 43, 48, 50, 53, 54, 61, 63, 64))",
+    "        OR (destination = 74 AND version IN (68, 43, 44, 49, 51, 54, 55, 62, 64, 65))",
+    "        OR (destination = 75 AND version IN (69, 56, 63, 65, 66))",
+    "), displaced AS (",
+    "    -- A stopped-phase reader may already own 74 while the binding receipt is still at its preview number.",
+    "    SELECT version FROM moves WHERE destination = 74 AND name = 'bind new finding decisions to admitted scans'",
+    "        AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 74",
+    "            AND name = 'retain the last observed phase of stopped Standard scans')",
+    ")",
+    "SELECT 0 AS position, 0 AS version, 'sql' AS operation,",
+    "    'CREATE TABLE IF NOT EXISTS schema_migration_archive (version INTEGER NOT NULL, name TEXT NOT NULL,",
+    "        applied_at TEXT NOT NULL, PRIMARY KEY (version, name, applied_at)) WITHOUT ROWID' AS value",
+    "    WHERE EXISTS (SELECT 1 FROM displaced)",
+    "UNION ALL",
+    "SELECT 1, version, 'sql', 'INSERT INTO schema_migration_archive (version, name, applied_at)",
+    "    SELECT version, name, applied_at FROM schema_migrations WHERE version = ' || version FROM displaced",
+    "UNION ALL",
+    "SELECT 2, moves.version, 'sql', CASE WHEN displaced.version IS NULL",
+    "    THEN 'UPDATE schema_migrations SET version = ' || destination ELSE 'DELETE FROM schema_migrations' END",
+    "    || ' WHERE version = ' || moves.version FROM moves LEFT JOIN displaced USING (version)",
+    "ORDER BY position, version DESC;"
+  ],
+  [
+    "-- A released reader can add its columns while a finding history preview still owns the version.",
+    "WITH released(version, table_name, column_name) AS (",
+    "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",
+    "        (55, 'deep_scan_runs', 'pending_target_project_path'),",
+    "        (58, 'deep_scan_runs', 'terminal_reviewed_surface_count'),",
+    "        (59, 'deep_scan_runs', 'service_tier'),",
+    "        (61, 'scans', 'launch_surface'),",
+    "        (69, 'workspaces', 'target_path_unvalidated')",
+    ")",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (' ||",
+    "        released.version || ', ' || quote(json_extract(history.value, '$.name')) || ', ?)' AS value",
+    "FROM released JOIN json_each(:history) AS history",
+    "    ON json_extract(history.value, '$.version') = released.version",
+    "WHERE EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'preserve finding decision append chronology')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = released.version)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info(released.table_name) WHERE name = released.column_name);"
+  ],
+  [
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",
@@ -307,5 +355,24 @@
     "        quote((SELECT name FROM history WHERE version = 2)) || ', ?)'",
     "    FROM legacy WHERE present",
     "ORDER BY position;"
+  ],
+  [
+    "-- Keep the stopped-phase receipt and its data when adding the finding decision column.",
+    "SELECT 'column' AS operation, json_extract(migration.value, '$.statements[0]') AS value",
+    "FROM schema_migrations AS receipt JOIN json_each(:history) AS migration",
+    "    ON receipt.version = json_extract(migration.value, '$.version')",
+    "WHERE receipt.version = 74 AND receipt.name = 'retain the last observed phase of stopped Standard scans'",
+    "    AND json_extract(migration.value, '$.name') = 'bind new finding decisions to admitted scans';"
+  ],
+  [
+    "-- Refuse unknown receipts for either version of the finding-history preview.",
+    "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
+    "    json_extract(value, '$.name') AS name FROM json_each(:history))",
+    "SELECT 'error' AS operation, 'Unsupported finding history migration receipt.' AS value",
+    "FROM schema_migrations AS receipt JOIN history USING (version)",
+    "WHERE receipt.version BETWEEN 63 AND 75 AND receipt.name != history.name",
+    "    AND NOT (receipt.version = 74 AND receipt.name = 'retain the last observed phase of stopped Standard scans'",
+    "        AND history.name = 'bind new finding decisions to admitted scans')",
+    "LIMIT 1;"
   ]
 ]

@@ -588,5 +588,31 @@
       "CREATE INDEX external_finding_members_by_version\nON external_finding_import_members (finding_id, version);",
       "CREATE TABLE external_finding_publications (\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    cloud_api_url TEXT NOT NULL,\n    account_id TEXT NOT NULL,\n    destination_id TEXT NOT NULL,\n    receipt_id TEXT NOT NULL,\n    outcome TEXT NOT NULL,\n    cloud_finding_id TEXT,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (finding_id, version, cloud_api_url, account_id, destination_id, receipt_id)\n) WITHOUT ROWID;"
     ]
+  },
+  {
+    "version": 73,
+    "name": "preserve finding decision append chronology",
+    "statements": [
+      "ALTER TABLE finding_decisions\n        ADD COLUMN decision_sequence INTEGER NOT NULL DEFAULT 0;",
+      "WITH ordered AS (\n            SELECT id, ROW_NUMBER() OVER (\n                ORDER BY\n                    CASE WHEN id = 'legacy_' || occurrence_id THEN 0 ELSE 1 END,\n                    CASE WHEN id = 'legacy_' || occurrence_id THEN created_at ELSE '' END,\n                    CASE WHEN id = 'legacy_' || occurrence_id THEN id ELSE '' END,\n                    rowid\n            ) AS sequence\n            FROM finding_decisions\n        )\n        UPDATE finding_decisions\n        SET decision_sequence = (SELECT sequence FROM ordered WHERE ordered.id = finding_decisions.id);"
+    ]
+  },
+  {
+    "version": 74,
+    "name": "bind new finding decisions to admitted scans",
+    "statements": [
+      "ALTER TABLE finding_decisions\n        ADD COLUMN scan_sequence INTEGER;"
+    ]
+  },
+  {
+    "version": 75,
+    "name": "record first scan result admission order",
+    "statements": [
+      "CREATE TABLE scan_admissions (\n    sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL UNIQUE REFERENCES scans(id) ON DELETE CASCADE\n);",
+      "ALTER TABLE finding_decisions ADD COLUMN admission_sequence INTEGER;",
+      "INSERT INTO scan_admissions (scan_id)\nSELECT id FROM scans\nWHERE status = 'complete' OR (status = 'failed' AND seal_manifest_digest IS NOT NULL)\nORDER BY rowid;",
+      "CREATE TRIGGER record_scan_admission_insert\nAFTER INSERT ON scans\nWHEN NEW.status = 'complete' OR (NEW.status = 'failed' AND NEW.seal_manifest_digest IS NOT NULL)\nBEGIN\n    INSERT OR IGNORE INTO scan_admissions (scan_id) VALUES (NEW.id);\nEND;",
+      "CREATE TRIGGER record_scan_admission_update\nAFTER UPDATE OF status, seal_manifest_digest ON scans\nWHEN NEW.status = 'complete' OR (NEW.status = 'failed' AND NEW.seal_manifest_digest IS NOT NULL)\nBEGIN\n    INSERT OR IGNORE INTO scan_admissions (scan_id) VALUES (NEW.id);\nEND;"
+    ]
   }
 ]

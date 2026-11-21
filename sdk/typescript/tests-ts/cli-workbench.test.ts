@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
@@ -5,6 +6,8 @@ import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { resolvePluginPython } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
   matchScanFindings,
@@ -73,9 +76,19 @@ describe("CLI workbench", () => {
         ),
       ).toBe(0);
       expect(calls).toEqual([
-        ["list-global-findings", "--repository", displayed, "--status", "open"],
+        [
+          "list-global-findings",
+          "--repository",
+          displayed,
+          "--status",
+          "open",
+          "--offset",
+          "0",
+          "--limit",
+          "20",
+        ],
       ]);
-      expect(JSON.parse(stdout.text())).toEqual({
+      expect(JSON.parse(stdout.text())).toMatchObject({
         repository: displayed,
         findings: [{ title: "Saved finding" }],
       });
@@ -126,6 +139,7 @@ describe("CLI workbench", () => {
             expect(JSON.parse(cli.stdout.text())).toEqual({
               repository: requested,
               findings: [finding],
+              nextOffset: null,
             });
           } else {
             expect(cli.stdout.text()).toContain(basename(requested));
@@ -166,9 +180,19 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(calls).toEqual([
-      ["list-global-findings", "--repository", alias, "--status", "open"],
+      [
+        "list-global-findings",
+        "--repository",
+        alias,
+        "--status",
+        "open",
+        "--offset",
+        "0",
+        "--limit",
+        "20",
+      ],
     ]);
-    expect(JSON.parse(stdout.text())).toEqual({
+    expect(JSON.parse(stdout.text())).toMatchObject({
       repository: alias,
       findings: [{ title: "Saved finding" }],
     });
@@ -196,7 +220,10 @@ describe("CLI workbench", () => {
       );
       const json = captureCli(main, "stdout");
       expect(await json.run(["findings", "list", "--json"], deps)).toBe(0);
-      expect(JSON.parse(json.text())).toEqual({ repository, findings: [] });
+      expect(JSON.parse(json.text())).toMatchObject({
+        repository,
+        findings: [],
+      });
       expect(historyQueries).toEqual([
         ["list-scans", "--repository", repository, "--limit", "1"],
       ]);
@@ -204,15 +231,21 @@ describe("CLI workbench", () => {
   );
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
-    const stdout = captureCli(main, "stdout");
+    const stdout = captureCli(main, "stdout", true);
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
-      { findings: [{ title: "Finding 1" }], nextOffset: 1 },
-      { findings: [{ title: "Finding 2" }], nextOffset: null },
+      {
+        findings: [{ title: "Finding 1", severity: { level: "high" } }],
+        nextOffset: 1,
+      },
+      {
+        findings: [{ title: "Finding 2", severity: { level: "high" } }],
+        nextOffset: null,
+      },
     ];
     expect(
       await stdout.run(
-        ["findings", "list", "--json"],
+        ["findings", "list"],
         dependencies({
           onWorkbench: (args) => responses[calls.push(args) - 1]!,
         }),
@@ -226,17 +259,8 @@ describe("CLI workbench", () => {
       "open",
     ]);
     expect(calls[1]).toEqual([...calls[0]!, "--offset", "1"]);
-    expect(JSON.parse(stdout.text())).toEqual({
-      repository,
-      findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
-    });
-    expect(
-      await runCapturedCli(
-        main,
-        ["findings", "--json"],
-        dependencies({ onWorkbench: () => ({ findings: [] }) }),
-      ),
-    ).toBe(0);
+    expect(stdout.text()).toContain("Finding 1");
+    expect(stdout.text()).toContain("Finding 2");
     for (const confirmed of [[true, false], []]) {
       const result = fakeResult(["high"]);
       Object.assign(result, {
@@ -252,6 +276,60 @@ describe("CLI workbench", () => {
           ? "FINDINGS  2 (1 confirmed in latest repository scan; 1 previously found; 2 high)"
           : "FINDINGS  0\n",
       );
+    }
+  });
+
+  test("preserves dash-prefixed finding queries through Python argparse", async () => {
+    const python = await resolvePluginPython();
+    const program = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv.pop(1))",
+      "from workbench_cli import parse_args",
+      "args = parse_args('Synthetic history query')",
+      "print(json.dumps({'query': args.query}))",
+    ].join("\n");
+    for (const options of [
+      [],
+      ["--all-repositories"],
+      ["--scan", "synthetic-scan"],
+    ]) {
+      for (const query of ["ordinary", "--unsafe"]) {
+        const parsed: string[] = [];
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            [
+              "findings",
+              "list",
+              ...options,
+              `--query=${query}`,
+              "--format=json",
+            ],
+            dependencies({
+              onWorkbench: (args) => {
+                const result = spawnSync(
+                  python,
+                  [
+                    "-I",
+                    "-B",
+                    "-c",
+                    program,
+                    join(PLUGIN_ROOT, "scripts"),
+                    ...args,
+                  ],
+                  { encoding: "utf8" },
+                );
+                expect(result.status, result.stderr).toBe(0);
+                parsed.push(
+                  (JSON.parse(result.stdout) as { query: string }).query,
+                );
+                return { findings: [], nextOffset: null };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(parsed).toEqual([query]);
+      }
     }
   });
 
@@ -291,9 +369,19 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(calls).toEqual([
-      ["list-global-findings", "--repository", repository, "--status", "open"],
+      [
+        "list-global-findings",
+        "--repository",
+        repository,
+        "--status",
+        "open",
+        "--offset",
+        "0",
+        "--limit",
+        "20",
+      ],
     ]);
-    expect(JSON.parse(stdout.text())).toEqual({ repository, findings });
+    expect(JSON.parse(stdout.text())).toMatchObject({ repository, findings });
   });
 
   test("returns no findings when no related repository has been scanned", async () => {
@@ -318,14 +406,27 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(calls).toEqual([
-      ["list-global-findings", "--repository", repository, "--status", "open"],
+      [
+        "list-global-findings",
+        "--repository",
+        repository,
+        "--status",
+        "open",
+        "--offset",
+        "0",
+        "--limit",
+        "20",
+      ],
     ]);
-    expect(JSON.parse(stdout.text())).toEqual({ repository, findings: [] });
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      repository,
+      findings: [],
+    });
   });
 
   test("reports unavailable findings on any page instead of claiming an empty repository", async () => {
     for (const laterPage of [false, true]) {
-      for (const json of [false, true]) {
+      for (const json of laterPage ? [false] : [false, true]) {
         const stdout = capture(!json);
         const stderr = capture();
         const responses: JsonObject[] = [
@@ -721,7 +822,9 @@ describe("CLI workbench", () => {
       const save = calls.find((args) => args[0] === "save-scan-comparison")!;
       expect(save.at(-1)).toBe("--matches-json-stdin");
       expect(JSON.parse(comparisonInput!)).toEqual(matching);
-      expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        summary: { persisting: 1 },
+      });
     }
   });
 

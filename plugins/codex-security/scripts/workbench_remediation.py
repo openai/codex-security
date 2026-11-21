@@ -50,6 +50,53 @@ COMMANDS = {
 SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
 
 
+def finding_remediation_result(
+    connection: sqlite3.Connection,
+    occurrence_id: str,
+    *,
+    open_scan_file: Callable[[Path, str], AbstractContextManager[BinaryIO]],
+) -> dict[str, Any]:
+    row = connection.execute(
+        """
+        SELECT remediation.request_id, remediation.state, remediation.version,
+            remediation.base_revision, remediation.pending_action,
+            remediation.pending_action_claimed_at, remediation.pending_action_claim_token,
+            remediation.pending_action_delivered_at,
+            remediation.patch_path, remediation.patch_digest, remediation.summary,
+            remediation.verification_summary, remediation.updated_at, scans.scan_dir
+        FROM finding_remediation_attempts AS remediation
+        JOIN finding_occurrences AS occurrences ON occurrences.id = remediation.occurrence_id
+        JOIN scans ON scans.id = occurrences.scan_id
+        WHERE remediation.occurrence_id = ?
+        ORDER BY remediation.created_at DESC, remediation.rowid DESC
+        LIMIT 1
+        """,
+        (occurrence_id,),
+    ).fetchone()
+    if row is None:
+        return {"state": "idle"}
+    patch, patch_stats = patch_artifact_preview(
+        Path(row["scan_dir"]), row["patch_path"], row["patch_digest"], open_scan_file
+    )
+    return {
+        "baseRevision": row["base_revision"],
+        "actionClaimedAt": row["pending_action_claimed_at"],
+        "actionClaimToken": row["pending_action_claim_token"],
+        "actionDeliveredAt": row["pending_action_delivered_at"],
+        "pendingAction": row["pending_action"],
+        "patchDigest": row["patch_digest"],
+        "patchPath": row["patch_path"],
+        "patch": patch,
+        "patchStats": patch_stats,
+        "requestId": row["request_id"],
+        "state": row["state"],
+        "summary": row["summary"],
+        "updatedAt": row["updated_at"],
+        "verificationSummary": row["verification_summary"],
+        "version": row["version"],
+    }
+
+
 def patch_artifact_preview(
     scan_dir: Path,
     relative_path: str | None,

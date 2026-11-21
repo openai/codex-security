@@ -61,7 +61,7 @@ export async function resolveCompletedScan(
     scanId = latest["scanId"];
   }
   const context = await dependencies.runWorkbench(
-    workbenchArgs("get-scan", { scanId }),
+    workbenchArgs("get-scan", { scanId, metadataOnly: true }),
   );
   const scan = context["scan"];
   if (!isJsonObject(scan) || typeof scan["scanId"] !== "string") {

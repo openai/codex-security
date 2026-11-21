@@ -992,6 +992,7 @@ test.each(["latest", "scan_prefix"])(
       "get-scan",
       "--scan-id",
       selector === "latest" ? scanId : selector,
+      "--metadata-only",
     ]);
     await expect(
       classifyScanDirectorySeverity(scanDirectory, {

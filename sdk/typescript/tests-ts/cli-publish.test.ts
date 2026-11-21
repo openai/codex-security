@@ -988,7 +988,12 @@ describe("publish scan", () => {
       const scanDir = await publicationDirectory();
       const deps = dependencies({
         onWorkbench: (args) => {
-          expect(args).toEqual(["get-scan", "--scan-id", "scan-123"]);
+          expect(args).toEqual([
+            "get-scan",
+            "--scan-id",
+            "scan-123",
+            "--metadata-only",
+          ]);
           return {
             scan: {
               scanId: "scan-123",

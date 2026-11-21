@@ -25,6 +25,7 @@ interface WorkbenchScanRecord {
 
 interface CancelResponseFixture {
   registry: {
+    get(scanId: string): undefined;
     cancelAndWait(
       scanId: string,
       reason: string,
@@ -66,6 +67,9 @@ let persisted: PromiseWithResolvers<void>;
 let release: PromiseWithResolvers<void>;
 const fixture: CancelResponseFixture = {
   registry: {
+    get() {
+      return undefined;
+    },
     async cancelAndWait(_scanId, _reason, persist) {
       if (!joining) {
         joining = true;

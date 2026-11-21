@@ -48,6 +48,7 @@ async function fixture() {
             scanId: document.scanId,
             scanDir,
             targetPath: repository,
+            checkoutAvailable: true,
             progress: { status: "complete" },
           },
         }
