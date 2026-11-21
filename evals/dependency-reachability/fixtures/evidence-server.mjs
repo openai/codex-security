@@ -2,7 +2,7 @@
 // writes its actual replies to the external grader's transcript.
 import { randomUUID } from "node:crypto";
 import { appendFile, readFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
+import { serveRecordTools } from "./serve-record-tools.mjs";
 
 const [recordsFile, transcript] = process.argv.slice(2);
 const records = JSON.parse(await readFile(recordsFile, "utf8"));
@@ -24,18 +24,7 @@ const tools = [
   annotations: { readOnlyHint: true },
 }));
 
-async function dispatch({ method, params }) {
-  if (method === "initialize")
-    return {
-      protocolVersion: params.protocolVersion,
-      serverInfo: { name: "service-records", version: "1.0.0" },
-      capabilities: { tools: {} },
-    };
-  if (method === "ping") return {};
-  if (method === "tools/list") return { tools };
-  if (method !== "tools/call")
-    throw { code: -32601, message: "Method not found" };
-  const { name: tool, arguments: args } = params;
+await serveRecordTools(tools, async ({ name: tool, arguments: args }) => {
   if (
     !tools.some(({ name }) => name === tool) ||
     !["notes", "reviews"].includes(args?.service)
@@ -51,17 +40,4 @@ async function dispatch({ method, params }) {
     { mode: 0o600 },
   );
   return result;
-}
-
-for await (const line of createInterface({ input: process.stdin })) {
-  const request = JSON.parse(line);
-  if (request.id === undefined) continue;
-  const reply = { jsonrpc: "2.0", id: request.id };
-  try {
-    reply.result = await dispatch(request);
-  } catch (error) {
-    if (typeof error.code !== "number") throw error;
-    reply.error = error;
-  }
-  process.stdout.write(JSON.stringify(reply) + "\n");
-}
+});
