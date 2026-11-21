@@ -43,94 +43,63 @@ discovery is not supported.
 
 CLI and plugin scans save two files beside the sealed scan report:
 
-- `validation.md`: one section per finding, with disposition, verdict, original
-  and supplemental severity, reasons and their bases, claim match, freshness,
-  and an issue link when available. CLI sections also include provider provenance.
-- `validation.json`: `schemaVersion: 1` and `items`, containing structured
-  conclusions. Plugin completion also writes a `findings` count and `summary`.
+- `validation.md`: one section per Continuum issue. The headline gives Continuum's
+  verdict, issue severity and structured reachability, then Codex's original severity.
+  Each section names Continuum's issue, explains the reachability reason and its basis,
+  says how and when the issue was checked, and lists the scan's occurrences with locations.
+- `validation.json`: `schemaVersion: 2` and `items`, containing typed conclusions for
+  each submitted finding. Plugin completion also writes a `findings` count and `summary`.
 
-Each structured item uses these fields:
+Each structured item has `itemId`, `provider`, `state`, `codexSeverity` and `reasons`.
+`state` is `validated`, `declined`, `pending` or `unavailable`. Codex severity never
+changes. Reasons have `basis` and `reason`; failures may include `unavailable`.
 
-| Field                  | Meaning                                                                                |
-| ---------------------- | -------------------------------------------------------------------------------------- |
-| `itemId`               | Codex finding identifier                                                               |
-| `provider`             | Validation provider name                                                               |
-| `verdict`              | Provider verdict, or `UNAVAILABLE`                                                     |
-| `severityBefore`       | Original Codex severity                                                                |
-| `severityAfter`        | Supplemental finding severity; original retained for issue scope or an unmatched claim |
-| `providerSeverity`     | Provider's severity, when returned; issue severity for issue scope                     |
-| `resultScope`          | `finding` or `issue`: scope of the verdict and provider severity, when reported        |
-| `issueFindingCount`    | Number of distinct findings in the associated issue, when known                        |
-| `joinedValidatedIssue` | Issue-scoped proof predates this finding's submission                                  |
-| `reasons`              | Entries with `basis` and `reason`                                                      |
-| `claimMatch`           | `on_target`, `on_target_escalated`, `different_flaw`, or `unknown`                     |
-| `issueUrl`             | Provider issue link, when available                                                    |
-| `freshness`            | Optional `validatedAt` timestamp, `stale` flag, and `reasons`                          |
-| `unavailable`          | Per-finding failure explanation, when present                                          |
+The optional `issue` object contains `id`, `url`, `title`, `severity`, `verdict`,
+`findingCount`, `checkedBy`, `validatedAt`, `validationBeforeSubmission`, `scoredAt`
+and `scoringBeforeSubmission`. Reachability is carried in `reachableFromAttacker`
+(a boolean; absence means unknown), `reachabilityBasis` and `reachabilityReason`.
+Reason prose never establishes reachability. The two before-submission booleans
+are absent when their timestamps are missing.
 
-`reachableFromAttacker`, when returned, is a structured boolean at `resultScope`;
-absence means unknown. Reason prose is never used to infer it.
+The optional `findingResult` contains only the `verdict` explicitly naming that
+submitted finding in the newest validation artifact. It is displayed separately;
+a negative finding result never becomes an exploitable finding simply because the
+issue has an exploitable result.
 
-Reports contain conclusions, not raw proof bodies or validation console output.
-Custom SDK providers can omit `record`; their text assessment is still reported,
-but they then contribute no entry to JSON `items`.
+Reports contain conclusions, not raw proof bodies, payloads, commands or validation
+console output. Custom SDK providers can omit `record`; their text is still reported,
+but they contribute no entry to JSON `items`.
 
-### Reason bases and claim matching
+### Reason bases
 
 A basis describes where a reason came from, not its severity or certainty:
 
 - `GRAPH`: deployment graph evidence, such as live reachability.
-- `CODE`: source or validation evidence about the code.
-- `FINDING`: stated in the finding or its supplied validation context, without
-  independent confirmation by the scorer in code or the deployment graph. It is
-  not a finding-specific proof or a deployment observation.
+- `CODE`: source evidence.
+- `FINDING`: stated in the finding or supplied validation context, not independently
+  checked by the scorer in code or the deployment graph.
 - `INFERRED`: an inference rather than a directly established fact.
 
-Unknown future basis values are preserved as reported, not renamed to `INFERRED`.
-Missing bases use `INFERRED`; aggregate severity factors are also labelled
-`INFERRED` because the adapter does not receive one provenance basis for the
-combined severity.
+Unknown future basis values are preserved as reported. Missing bases use `INFERRED`.
 
-A provider can prove a related flaw without validating the submitted claim.
-Continuum labels that case “Not validated: Continuum proved a related flaw” and
-retains Codex severity (`claimMatch: different_flaw`). An `unknown` match also
-retains Codex severity. Claim matching is a small text-and-path heuristic, not a
-service-certified identity.
+### One issue-level answer
 
-### Findings that share an issue
+For every submitted finding, Continuum reports the issue it filed that finding
+under. This is not individual finding validation, even if the issue has one member.
+The adapter does not compare claims, attribute issue proof to a finding, search
+older artifacts for matching findings, or rewrite Codex severity.
 
-Continuum can group several findings into one issue. If validation and scoring
-artifacts exist but the validation cannot be attributed to this finding alone,
-the adapter returns promptly with an **issue-level result**, not an individual
-validation. It says how many other findings share the issue and reports that
-issue's verdict, severity and structured reachability with its reason basis.
-Codex's finding severity is retained; Continuum's issue severity is separate.
-JSON records use `resultScope: "issue"`, `issueFindingCount`, and
-`claimMatch: "unknown"`. An issue with one member can also have an issue-scoped
-result if its artifact cannot be attributed individually.
+All findings are submitted before polling. `SUBMITTED` and `VALIDATING` stay pending.
+`DISCARDED` and `NOT_PURSUED` are definite declined answers, with the service's reason.
+For an associated issue, the adapter reads only the newest `VALIDATION_EVIDENCE`
+and newest scoring `EVIDENCE`. Both must exist before reporting a validated result.
+At the shared deadline, unfinished results remain pending with the issue link when
+known. One finding's failure does not affect the others.
 
-An explicit matching `perFindingResults` entry takes precedence, even in an older
-artifact; another finding's proof is never presented as this finding's proof.
-Issue-wide proof can be treated as finding-scoped only when the checked issue
-identity and sole contributor match this finding. Missing validation or scoring
-artifacts still keep the finding pending under the shared deadline.
-
-If issue proof predates submission, the report says the finding joined an issue
-Continuum had already validated (`joinedValidatedIssue: true`). Validation,
-scoring and issue timestamps all participate in stale checking. Reachability
-comes only from the structured boolean value; missing or `UNKNOWN` stays unknown.
-
-### Unavailable or stale evidence
-
-Submission rejections, missing code locations, read errors, and polling deadlines
-produce unavailable assessments per finding. Other findings keep their results,
-and supplemental provider failures do not fail the sealed scan. Continuum records
-`verdict: UNAVAILABLE`, retained severity, and an `unavailable` explanation;
-the assessment disposition is `deferred`.
-
-Evidence older than the submission is marked stale in `freshness` and Markdown.
-Current-at-submission evidence does not prove that the deployment runs the scanned
-code: deployment source identity and local-tree drift are not checked.
+If validation or scoring was written before submission, the report says so.
+Reused issue evidence is not a new validation of the submitted finding. Neither
+new nor reused evidence proves that the deployment runs the scanned source:
+deployment source identity and local-tree drift are not compared.
 
 ## AWS Continuum requirements
 

@@ -870,7 +870,7 @@ launcher uses an optional `aws_profile` or the ordinary credential chain.
 Provider reports add conclusions-only `validation.json` beside `validation.md`,
 with matching suffixes on repeated runs and `validation.recordsPath` in CLI JSON.
 The versioned document contains each item's verdict, before and after severity,
-provider severity, reason bases, claim match, issue URL and evidence freshness.
+issue severity alongside Codex severity, reason bases, issue URL and validation time.
 Related flaws retain Codex severity. Sealed findings and `--fail-on-severity` do
 not change. Local-tree drift and provider source identity are not compared.
 See [validation providers](../../../docs/validation-providers.md)
