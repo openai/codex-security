@@ -70,7 +70,7 @@ test("a named negative finding result remains visible beside an exploitable issu
 test("shortens prose at boundaries without splitting a URL or ARN", () => {
   expect(
     validationText("One sentence. Another long sentence follows here.", 28),
-  ).toBe("One sentence.…");
+  ).toBe("One sentence…");
   expect(
     validationText(
       "See https://example.com/very/long/resource/name for details.",
@@ -92,6 +92,16 @@ test("an unavailable occurrence does not hide another occurrence's ready issue r
   expect(result.summary).toContain("Continuum: exploitable, Critical");
   expect(result.report).toContain(
     "Occurrence first:** Continuum is unavailable",
+  );
+});
+
+test("resource names and public graph reasons are readable without deriving reachability", () => {
+  expect(
+    validationText(
+      "query_network_reachability on the pod returned EXPOSED via arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/demo-app/opaque-id",
+    ),
+  ).toBe(
+    "A network reachability check on the pod found public access through demo-app",
   );
 });
 

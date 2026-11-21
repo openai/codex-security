@@ -7,10 +7,17 @@ import type {
 export function validationText(value: unknown, limit = 320): string {
   let text =
     typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
-  text = text.replace(
-    /arn:[^\s)]+/gu,
-    (arn) => arn.split("/").at(-1) ?? "AWS resource",
-  );
+  text = text.replace(/arn:[^\s)]+/gu, (arn) => {
+    const parts = arn.split("/");
+    return arn.includes(":loadbalancer/")
+      ? (parts.at(-2) ?? "load balancer")
+      : (parts.at(-1) ?? "AWS resource");
+  });
+  text = text
+    .replace(/\bquery_network_reachability\b/gu, "A network reachability check")
+    .replace(/returned EXPOSED via/gu, "found public access through")
+    .replaceAll("network://aws/internet", "the internet")
+    .replaceAll(" -> ", " → ");
   if (text.length <= limit) return text;
   const tokens = text.split(" ");
   let shortened = "";
@@ -19,7 +26,7 @@ export function validationText(value: unknown, limit = 320): string {
     shortened = (shortened + " " + token).trim();
   }
   const sentence = shortened.match(/^(.+[.!?])\s/u)?.[1];
-  return `${sentence ?? (shortened || "Details omitted")}…`;
+  return `${(sentence ?? (shortened || "Details omitted")).replace(/[.!?]$/u, "")}…`;
 }
 
 function severity(value?: string): string {
@@ -86,7 +93,7 @@ export function validationBody(
   const issue = first.issue;
   const headline = validationHeadline(records);
   const split = headline.indexOf(" Codex");
-  const lines = [`**${headline.slice(0, split)}**${headline.slice(split)}`, ""];
+  const lines = [`**${headline.slice(0, split)}**${headline.slice(split)}`];
   if (first.state !== "validated") {
     lines.push(
       `**Why:** ${validationText(first.unavailable ?? first.reasons[0]?.reason) || "No answer was returned."}`,
