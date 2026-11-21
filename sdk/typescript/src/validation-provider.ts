@@ -11,33 +11,37 @@ export interface ValidationProvenance {
 /** Known provenance categories, or a future category preserved as reported. */
 export type ValidationBasis =
   "GRAPH" | "CODE" | "FINDING" | "INFERRED" | (string & {});
-export type ValidationResultScope = "finding" | "issue";
-export type ValidationClaimMatch =
-  "on_target" | "on_target_escalated" | "different_flaw" | "unknown";
-
-/** Conclusions only. Proof bodies and console output are not report fields. */
+export type ValidationState =
+  "validated" | "declined" | "pending" | "unavailable";
+export interface ValidationReason {
+  basis: ValidationBasis;
+  reason: string;
+}
+export interface ValidationIssueResult {
+  id: string;
+  url: string;
+  title?: string;
+  severity?: string;
+  verdict?: string;
+  reachableFromAttacker?: boolean;
+  reachabilityBasis?: ValidationBasis;
+  reachabilityReason?: string;
+  findingCount?: number;
+  checkedBy?: "executed proof" | "source analysis" | "validation evidence";
+  validatedAt?: string;
+  validationBeforeSubmission?: boolean;
+  scoredAt?: string;
+  scoringBeforeSubmission?: boolean;
+}
+/** Conclusions only. Proof bodies, payloads and console output are not fields. */
 export interface ValidationItemRecord {
   itemId: string;
   provider: string;
-  verdict: string;
-  severityBefore: string;
-  severityAfter: string;
-  providerSeverity?: string;
-  /** Scope of the verdict and provider severity, not the sealed Codex finding. */
-  resultScope?: ValidationResultScope;
-  issueFindingCount?: number;
-  /** Structured attacker reachability at resultScope; absent means unknown. */
-  reachableFromAttacker?: boolean;
-  /** Issue validation evidence existed before this finding was submitted. */
-  joinedValidatedIssue?: boolean;
-  reasons: Array<{ basis: ValidationBasis; reason: string }>;
-  claimMatch: ValidationClaimMatch;
-  issueUrl?: string;
-  freshness: {
-    validatedAt?: string;
-    stale: boolean;
-    reasons: string[];
-  };
+  state: ValidationState;
+  codexSeverity: string;
+  issue?: ValidationIssueResult;
+  findingResult?: { verdict: string };
+  reasons: ValidationReason[];
   unavailable?: string;
 }
 

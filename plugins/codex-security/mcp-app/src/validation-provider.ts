@@ -9,8 +9,8 @@ import {
   type ValidationProvider,
   type ValidationProviderAssessment,
   type ValidationProviderConfiguration,
-  type ValidationItemRecord,
 } from "../../../../sdk/typescript/src/validation-provider.js";
+import { validationReport } from "../../../../sdk/typescript/src/validation-provider-report.js";
 import type { JsonObject } from "./types.js";
 import { protectedHostPathResolver } from "./helpers/inventory-git.js";
 
@@ -19,28 +19,7 @@ export function validationCompletionText(
   validation: JsonObject | undefined,
 ): string {
   if (!validation) return "";
-  return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}`;
-}
-
-function itemConclusion(record: ValidationItemRecord): string {
-  const bases = [...new Set(record.reasons.map((reason) => reason.basis))];
-  if (record.resultScope === "issue") {
-    const others =
-      record.issueFindingCount === undefined
-        ? "other findings"
-        : `${record.issueFindingCount - 1} other findings`;
-    const reachability = record.reasons.find((reason) =>
-      reason.reason.startsWith("Basis:"),
-    );
-    const exposure =
-      record.reachableFromAttacker === true
-        ? "reachable from attacker"
-        : record.reachableFromAttacker === false
-          ? "not reachable from attacker"
-          : "unknown";
-    return `Item ${record.itemId}: Codex severity ${record.severityBefore} retained. Continuum grouped this finding with ${others} into an issue. Issue-level verdict: ${record.verdict}; issue severity: ${record.providerSeverity ?? "not returned"}. Not individually validated. Issue reachability: ${exposure}.${reachability ? ` Context: ${reachability.reason}` : ""}${record.joinedValidatedIssue ? " This finding joined an issue Continuum had already validated." : ""}${bases.length ? ` Reason bases: ${bases.join(", ")}.` : ""}${record.freshness.stale ? " Evidence predates this submission." : ""}`;
-  }
-  return `Item ${record.itemId}: ${record.severityBefore} → ${record.severityAfter}. Verdict: ${record.verdict}.${record.providerSeverity ? ` Provider severity: ${record.providerSeverity}.` : ""}${bases.length ? ` Reason bases: ${bases.join(", ")}.` : ""} Claim match: ${record.claimMatch}.${record.freshness.stale ? " Evidence predates this submission." : ""}${record.unavailable ? ` Unavailable: ${record.unavailable}` : ""}`;
+  return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.report ?? validation.summary ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}`;
 }
 
 function configurationPath(scanId: string): string {
@@ -148,26 +127,12 @@ export async function validateCompletedScan(
             }
           }),
         );
-    const summary = assessments
-      .map((assessment) =>
-        assessment.record
-          ? itemConclusion(assessment.record)
-          : assessment.report,
-      )
-      .join("\n");
-    const report = assessments
-      .map(
-        (assessment, index) =>
-          `## ${findings[index].occurrenceId ?? findings[index].id ?? `item-${index + 1}`}\n\nDisposition: ${assessment.disposition}\n\n${assessment.report}\n`,
-      )
-      .join("\n---\n\n");
+    const { report, summary, items } = validationReport(findings, assessments);
     const records = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       findings: findings.length,
       summary,
-      items: assessments.flatMap((assessment) =>
-        assessment.record ? [assessment.record] : [],
-      ),
+      items,
     };
     const result = {
       status: "complete",

@@ -465,7 +465,9 @@ import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
   unavailableAssessment,
   type ValidationItemRecord,
+  type ValidationProviderAssessment,
 } from "./validation-provider.js";
+import { validationReport } from "./validation-provider-report.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -12627,6 +12629,7 @@ async function executeScan(
             validation = { status: "failed", findings: 0, reportPath };
             let completed = 0;
             const records: ValidationItemRecord[] = [];
+            const supplemental: ValidationProviderAssessment[] = [];
             try {
               const providerAssessments =
                 validationProvider?.validateBatch === undefined
@@ -12668,11 +12671,26 @@ async function executeScan(
                     finding["id"] ??
                     `item-${index + 1}`,
                 );
-                await report.writeFile(
-                  `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}; validated ${provenance.validatedAt}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
-                );
+                if (validationProvider && provenance)
+                  supplemental.push({ ...assessment, provenance });
+                else
+                  await report.writeFile(
+                    `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}; validated ${provenance.validatedAt}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
+                  );
                 completed += 1;
                 validation = { ...validation, findings: completed };
+              }
+              if (validationProvider) {
+                const rendered = validationReport(
+                  validationInputs,
+                  supplemental,
+                );
+                await report.writeFile(rendered.report);
+                for (const headline of rendered.summary.split("\n")) {
+                  try {
+                    if (headline) progress?.stage(headline);
+                  } catch {}
+                }
               }
             } finally {
               await report.close();
@@ -12683,7 +12701,7 @@ async function executeScan(
             if (recordsPath)
               await writeFile(
                 recordsPath,
-                JSON.stringify({ schemaVersion: 1, items: records }, null, 2) +
+                JSON.stringify({ schemaVersion: 2, items: records }, null, 2) +
                   "\n",
                 { flag: "wx", mode: 0o600 },
               );

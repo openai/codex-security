@@ -103,9 +103,10 @@ export type {
   ValidationProviderContext,
   ValidationProvenance,
   ValidationItemRecord,
-  ValidationResultScope,
+  ValidationState,
+  ValidationReason,
+  ValidationIssueResult,
   ValidationBasis,
-  ValidationClaimMatch,
 } from "./validation-provider.js";
 export { ContinuumValidationProvider } from "./continuum-validation-provider.js";
 export type { ContinuumValidationOptions } from "./continuum-validation-provider.js";
