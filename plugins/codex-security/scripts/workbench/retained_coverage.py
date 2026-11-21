@@ -79,6 +79,7 @@ from workbench.saved_sources import (
     _unselected_root_order,
     _worker_outputs,
 )
+from workbench.storage import worker_contract_relative_path
 from workbench_coverage_receipts import (
     _deferred_candidate_id,
     _generic_surface_updates,
@@ -261,12 +262,15 @@ def merge_saved_results(
     paths: dict[str, str | None] = {}
     reducer_paths: set[str] = set()
     current_results: set[str] = set()
+    registered_results: set[tuple[str, str]] = set()
     reducer_outputs: list[tuple[Any, str, list[str], int]] = []
     reducer = _latest_iteration(workers)
     latest_reducer: str | None = None
     if reducer is not None:
         try:
-            latest_reducer = Path(reducer["result_manifest_path"]).relative_to(scan_dir).as_posix()
+            latest_reducer = worker_contract_relative_path(
+                Path(reducer["result_manifest_path"]), scan_dir
+            ).as_posix()
             paths[latest_reducer] = None
             reducer_paths.add(latest_reducer)
         except ValueError:
@@ -312,9 +316,13 @@ def merge_saved_results(
         checkpoints(f"{output}/checkpoints", worker["id"], attempt)
         if worker["result_manifest_path"]:
             try:
-                current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
+                current_path = worker_contract_relative_path(
+                    Path(worker["result_manifest_path"]), scan_dir
+                ).as_posix()
                 paths[current_path] = worker["id"]
                 current_results.add(current_path)
+                if worker["status"] == "succeeded":
+                    registered_results.add((worker["id"], current_path))
             except ValueError:
                 warnings.append("Skipped a worker result outside the scan directory.")
 
@@ -739,10 +747,7 @@ def merge_saved_results(
     accepted_sources = {
         (worker_id, relative): draft
         for relative, draft, worker_id in sources
-        if (worker := workers_by_id.get(worker_id)) is not None
-        and worker["status"] == "succeeded"
-        and worker["result_manifest_path"] == str(scan_dir / relative)
-        and draft.get("complete") is not False
+        if (worker_id, relative) in registered_results and draft.get("complete") is not False
     }
     project_worker_coverage, legacy_surface_links = prepare_saved_coverage_projection(
         sources,

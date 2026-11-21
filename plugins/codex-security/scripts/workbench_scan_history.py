@@ -25,6 +25,7 @@ from finalize_scan_contract import (
 )
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
+from windows_scan_local_files import workbench_sqlite_paths
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
@@ -49,6 +50,7 @@ def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
         args.command == "get-scan" and not (args.request_id or args.action_token)
     ):
         return False
+    path, _ = workbench_sqlite_paths(path)
     try:
         path.lstat()
     except FileNotFoundError:
