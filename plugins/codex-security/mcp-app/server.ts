@@ -1313,25 +1313,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async ({
-      findingIdSha256,
-      limit,
-      offset,
-      query,
-      severity,
-      status,
-      targetId,
-    }) =>
+    async (filters) =>
       scanActionResult(
-        await workbench("list-global-findings", {
-          findingIdSha256,
-          query,
-          severity,
-          status,
-          targetId,
-          offset,
-          limit,
-        }),
+        await workbench("list-global-findings", filters),
         "Loaded Codex Security global findings.",
       ),
   );
