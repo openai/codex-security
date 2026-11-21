@@ -2,7 +2,7 @@
 
 Scan a repository, selected paths, or Git changes for vulnerabilities. The CLI
 and TypeScript SDK can validate findings, generate patches, verify fixes, and
-export results as SARIF, JSON, or CSV. The package includes the Codex runtime
+export results as SARIF, JSON, CSV, or HTML. The package includes the Codex runtime
 and security plugin.
 
 ## Install

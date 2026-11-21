@@ -9,7 +9,7 @@ security plugin, and TypeScript declarations. It uses ES modules.
 - Validate findings, generate patches, and verify existing fixes.
 - Draft security policies and retain threat models.
 - Review saved findings, identify duplicates, classify severity, and suggest owners.
-- Import GitHub code scanning alerts, export SARIF, JSON, or CSV, and publish
+- Import GitHub code scanning alerts, export SARIF, JSON, CSV, or HTML, and publish
   findings to Linear or a findings service.
 - Import saved scanner reports locally or publish them to Codex Security Cloud.
   See the [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) for supported vendors and formats.
