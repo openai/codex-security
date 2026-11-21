@@ -502,7 +502,9 @@ def insert_running_scan(
     return scan_id
 
 
-def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
+def parse_scan_recipe(
+    value: str, repository: Path, *, validate_current_target: bool = True
+) -> dict[str, Any]:
     try:
         recipe = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -512,7 +514,12 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     requested_repository = recipe.get("repository")
     if (
         not isinstance(requested_repository, str)
-        or require_target(requested_repository) != repository
+        or (
+            require_target(requested_repository)
+            if validate_current_target
+            else Path(requested_repository)
+        )
+        != repository
     ):
         raise SystemExit("Scan launch recipe repository must match the scanned repository.")
     if recipe.get("mode") not in {"standard", "deep"}:
@@ -541,8 +548,13 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
             or candidate.is_absolute()
             or ".." in candidate.parts
             or "\\" in path
-            or not (repository / candidate).exists()
-            or not (repository / candidate).resolve().is_relative_to(repository)
+            or (
+                validate_current_target
+                and (
+                    not (repository / candidate).exists()
+                    or not (repository / candidate).resolve().is_relative_to(repository)
+                )
+            )
         ):
             raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
     exclusions = recipe.get("excludePaths", [])

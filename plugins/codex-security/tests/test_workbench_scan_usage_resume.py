@@ -1,25 +1,24 @@
 """Account for interrupted and resumed turns of a Standard scan."""
 
-from datetime import datetime
 from pathlib import Path
 
 import pytest
 from test_workbench_scan_usage import (
     _event,
-    _measure_rollout,
     _response_event,
-    _rollout,
+    _start_scan,
     _token_event,
 )
-from workbench_test_support import usage_counts as _counts
 
 
 @pytest.mark.parametrize("cumulative_input", [30, 31, None])
 def test_resumed_owner_reconciles_crash_and_failed_reconnect_only_with_matching_thread_usage(
-    workbench_api, tmp_path: Path, cumulative_input: int | None
+    tmp_path: Path, cumulative_input: int | None
 ) -> None:
-    at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    fixture = _start_scan(tmp_path, dedicated=True)
+    at = fixture.started_at
     thread_id = "scan-parent"
+    fixture.command("set-scan-thread", "--thread-id", thread_id)
     resumed = _response_event(at, thread_id, "second", 10, 2, turn_id="resumed")
     if cumulative_input is None:
         del resumed["payload"]["thread_token_usage"]
@@ -44,9 +43,10 @@ def test_resumed_owner_reconciles_crash_and_failed_reconnect_only_with_matching_
         resumed,
         _event(at, "event_msg", {"type": "task_complete", "turn_id": "resumed"}),
     ]
-    rollout = _rollout(tmp_path, thread_id, events)
-    usage = _measure_rollout(workbench_api["scan_usage"], rollout, at, at, resume_owner=True)
-    assert usage.tokens == _counts(30, 0, 5)
-    assert usage.warnings == (
+    fixture.write_parent_rollout(events)
+    usage = fixture.command("read-scan-usage", "--thread-id", thread_id)
+    assert (usage["inputTokens"], usage["outputTokens"], usage["totalTokens"]) == (30, 5, 35)
+    assert usage["coverage"] == ("complete" if cumulative_input == 30 else "partial")
+    assert set(usage.get("warnings", [])) == (
         set() if cumulative_input == 30 else {"token_record_missing", "turn_in_progress"}
     )

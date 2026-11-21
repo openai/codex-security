@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -20,10 +21,15 @@ const testDirectory = join(output, "policy-proof");
 const helper = join(testDirectory, "helpers.cjs");
 if (process.argv[2] === "build") {
   const mcpApp = join(root, "../mcp-app");
+  const mcpModules = join(mcpApp, "node_modules");
+  const esbuild = "esbuild/bin/esbuild";
+  const modules = existsSync(join(mcpModules, esbuild))
+    ? mcpModules
+    : join(root, "../../../sdk/typescript/node_modules");
   execFileSync(
     process.execPath,
     [
-      join(mcpApp, "node_modules/esbuild/bin/esbuild"),
+      join(modules, esbuild),
       join(mcpApp, "helpers-main.ts"),
       "--bundle",
       "--platform=node",
@@ -32,7 +38,7 @@ if (process.argv[2] === "build") {
       "--define:import.meta.url=__filename",
       `--outfile=${helper}`,
     ],
-    { stdio: "inherit" },
+    { stdio: "inherit", env: { ...process.env, NODE_PATH: modules } },
   );
   const nativeDirectory = join(testDirectory, "native", nativeTarget);
   mkdirSync(nativeDirectory, { recursive: true });

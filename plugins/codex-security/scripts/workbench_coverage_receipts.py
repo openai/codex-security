@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import os
 from collections.abc import Callable, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from finalize_scan_contract import (
@@ -14,8 +14,8 @@ from finalize_scan_contract import (
     _require_portable_relative_path,
     _require_str,
     _validate_schema_node,
+    finding_in_scope,
     open_scan_local_file_descriptor,
-    path_within_scope,
 )
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
 
@@ -54,11 +54,20 @@ def receipt_checkpoints(
     return added
 
 
+def clear_scan_receipt_refs(draft: dict[str, Any]) -> None:
+    coverage = draft.get("reviewState", draft.get("coverage"))
+    surfaces = coverage.get("surfaces") if isinstance(coverage, dict) else None
+    for surface in surfaces if isinstance(surfaces, list) else []:
+        if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
+            surface["provenance"].pop("scanReceiptRefs", None)
+
+
 def retain_recorded_receipt_ownership(
     sources: list[tuple[str, dict[str, Any], str | None]],
     digest: Callable[[Any], str],
     include_paths: Sequence[str],
     finding_scope: Sequence[tuple[str, bool]] | None = None,
+    exclusions: Sequence[str] = (),
 ) -> None:
     # Checkpoints are written by the host tool; direct result files can be authored
     # without it. Compare the entire payload within the same worker attempt.
@@ -74,24 +83,12 @@ def retain_recorded_receipt_ownership(
         if worker_id is not None and directory.name == "checkpoints":
             payloads = recorded.setdefault(directory.parent, set())
             payloads.add(payload_digest(draft))
-            if "." not in include_paths:
+            if "." not in include_paths or exclusions:
                 # Legacy writers saved the checkpoint before filtering inherited findings.
                 scoped = [
                     finding
                     for finding in draft["findings"]
-                    if isinstance(finding, dict)
-                    and isinstance(finding.get("locations"), list)
-                    and any(
-                        isinstance(location, dict)
-                        and isinstance(location.get("path"), str)
-                        and any(
-                            PurePosixPath(location["path"]) == PurePosixPath(path)
-                            if is_file
-                            else path_within_scope(location["path"], path)
-                            for path, is_file in scope
-                        )
-                        for location in finding["locations"]
-                    )
+                    if isinstance(finding, dict) and finding_in_scope(finding, scope, exclusions)
                 ]
                 payloads.add(payload_digest({**draft, "findings": scoped}))
     for relative, draft, worker_id in sources:
@@ -100,10 +97,7 @@ def retain_recorded_receipt_ownership(
             continue
         if payload_digest(draft) in recorded.get(directory, set()):
             continue
-        surfaces = draft["reviewState"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
-            if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
-                surface["provenance"].pop("scanReceiptRefs", None)
+        clear_scan_receipt_refs(draft)
 
 
 def resolve_coverage_receipts(

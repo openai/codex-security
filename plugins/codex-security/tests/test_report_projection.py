@@ -1006,7 +1006,22 @@ def test_projection_separates_deferred_work_from_open_questions() -> None:
     assert "Parser review incomplete." not in optional_section
 
 
-def test_projection_includes_surface_evidence_receipts() -> None:
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"notes": "Reviewed parser entrypoints."}, "Reviewed parser entrypoints."),
+        ({"reason": "Caller policy is unknown."}, "Caller policy is unknown."),
+        (
+            {"notes": "Reviewed parser entrypoints.", "reason": "Caller policy is unknown."},
+            "Reviewed parser entrypoints. Caller policy is unknown.",
+        ),
+        ({"notes": "Policy checked.", "reason": "Policy checked."}, "Policy checked."),
+        ({"notes": ""}, ""),
+        ({"notes": " \t "}, ""),
+        ({}, "No additional canonical notes were recorded."),
+    ],
+)
+def test_projection_includes_surface_evidence_receipts(details: dict, expected: str) -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["surfaces"] = [
         {
@@ -1014,13 +1029,16 @@ def test_projection_includes_surface_evidence_receipts() -> None:
             "label": "Parser",
             "disposition": "no_issue_found",
             "receiptRefs": ["artifacts/receipts/parser.jsonl"],
-            "notes": "Reviewed parser entrypoints.",
+            **details,
         }
     ]
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
-    assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
+    row = next(line for line in markdown.splitlines() if "artifacts/receipts/parser.jsonl" in line)
+    assert row.endswith(
+        f"| {expected + ' ' if expected else ''}Evidence: artifacts/receipts/parser.jsonl |"
+    )
 
 
 @pytest.mark.parametrize(

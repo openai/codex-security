@@ -92,21 +92,40 @@ for (const ordering of [
             : "max_time_hours = 1e-12\n"),
         { mode: 0o600 },
       );
-      const runWorkbench = async (args: string[]) => {
-        const { stdout } = await execFileAsync(
-          fixturePython,
-          [join(pluginRoot, "scripts", "workbench_db.py"), ...args],
-          { cwd: pluginRoot, env: environment },
-        );
+      const runWorkbench = async (
+        args: string[],
+        input?: string,
+        selectFinalization = false,
+      ) => {
+        const script = join(pluginRoot, "scripts", "workbench_db.py");
+        const pythonArgs = selectFinalization
+          ? [
+              "-c",
+              "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
+              script,
+              ...args,
+            ]
+          : [script, ...args];
+        const execution = execFileAsync(fixturePython, pythonArgs, {
+          cwd: pluginRoot,
+          env: environment,
+        });
+        if (input !== undefined) execution.child.stdin?.end(input);
+        const { stdout } = await execution;
         return JSON.parse(stdout);
       };
-      const workbench = async (args: string[]) => {
+      const workbench = async (
+        args: string[],
+        input?: string,
+        selectFinalization = false,
+      ) => {
         if (args[0] === "cancel-scan" && !canceledBeforeFailure) {
           await cancelPersistence.pause();
         }
-        const result = await runWorkbench(args);
+        const result = await runWorkbench(args, input, selectFinalization);
         if (
           args[0] === "finish-deep-scan" &&
+          !selectFinalization &&
           canceledBeforeAdmission &&
           !activeBeforeAdmission
         ) {

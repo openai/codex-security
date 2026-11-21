@@ -40,7 +40,7 @@ if (
 ) {
   throw new Error("Expected a shard number and count");
 }
-const files = globSync("tests/test_*.ts");
+const files = globSync(["tests/test_*.ts", "tests/test_*.mjs"]);
 const timings = Object.fromEntries(
   files.map((file) => [
     file,

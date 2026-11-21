@@ -68,6 +68,21 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
 path_within_scope = finalizer.path_within_scope
 
 
+def validate_completed_scan_artifacts(db: Any, scan: sqlite3.Row) -> None:
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    try:
+        manifest = db._prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+        ).manifest
+    except db.ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    db.verify_manifest_binding(scan, manifest)
+    db.published_manifest_digest(scan_dir, manifest)
+
+
 def require_close_note(close_reason: str | None, note: str | None) -> None:
     """Require a note when closing a finding as a false positive or when declining a fix."""
     if note is None and close_reason == "false_positive":
@@ -155,6 +170,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         "threadCount",
         "missingThreadCount",
         "warnings",
+        "modelUsage",
         "completion",
         "byRole",
         "window",
@@ -181,6 +197,27 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         and type(usage["cacheWriteInputTokensReported"]) is not bool
     ):
         return False
+    if "modelUsage" in usage:
+        parts = usage["modelUsage"]
+        if not isinstance(parts, list) or not parts:
+            return False
+        for part in parts:
+            if (
+                not isinstance(part, dict)
+                or part.keys() - {"cacheWriteInputTokensReported"}
+                != {"model", *SCAN_USAGE_TOKEN_KEYS}
+                or type(part.get("cacheWriteInputTokensReported", True)) is not bool
+            ):
+                return False
+            if part["model"] is not None and not isinstance(part["model"], str):
+                return False
+            if (
+                not all(type(part[key]) is int and part[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+                or part["cachedInputTokens"] + part["cacheWriteInputTokens"] > part["inputTokens"]
+            ):
+                return False
+        if any(sum(part[key] for part in parts) != usage[key] for key in SCAN_USAGE_TOKEN_KEYS):
+            return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
         return False
@@ -220,7 +257,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     return True
 
 
-def parse_scan_cost(value: str | None) -> str | None:
+def parse_scan_cost(value: str | None, *, allow_lower_bound: bool = False) -> str | None:
     """Return compact JSON for valid measured usage or a legacy cost estimate.
 
     None means cost data was omitted. Invalid JSON, nonfinite numbers, or an
@@ -232,7 +269,10 @@ def parse_scan_cost(value: str | None) -> str | None:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:
         raise SystemExit("Scan cost must be a valid JSON object.") from exc
-    if isinstance(cost, dict) and "usage" in cost:
+    if allow_lower_bound and isinstance(cost, dict) and set(cost) == {"lowerBound"}:
+        if not _valid_legacy_scan_cost(cost["lowerBound"]):
+            raise SystemExit("Scan cost lower bound must be a valid measured cost.")
+    elif isinstance(cost, dict) and "usage" in cost:
         if (
             not set(cost).issubset({"usage", "cost"})
             or not _valid_measured_scan_usage(cost["usage"])

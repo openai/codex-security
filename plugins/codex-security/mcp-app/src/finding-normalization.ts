@@ -1,15 +1,18 @@
-import { isRecord as isObject } from "./record.js";
+import {
+  isNonEmptyString as isNonBlankString,
+  isRecord as isObject,
+} from "./record.js";
 import { hasRequiredFindingText } from "./contract-values.js";
 
 type JsonObject = Record<string, unknown>;
 
-/** Compatibility for historical report reads; never use this to admit new writes. */
+/** Compatibility for historical finding reads; never use this to admit new writes. */
 export function normalizePersistedFindingDetails(
   finding: JsonObject,
-  profile: "sdk" | "tracking" = "sdk",
+  profile: "sdk" | "tracking" | "accepted-discovery" = "sdk",
 ): void {
   const evidenceIds = new Set<string>();
-  if (profile === "tracking" && Array.isArray(finding["codeEvidence"])) {
+  if (profile !== "sdk" && Array.isArray(finding["codeEvidence"])) {
     for (const evidence of finding["codeEvidence"]) {
       if (isObject(evidence) && isNonEmptyString(evidence["id"]))
         evidenceIds.add(evidence["id"]);
@@ -19,21 +22,16 @@ export function normalizePersistedFindingDetails(
     finding["code_evidence"] = finding["code_evidence"].filter((evidence) => {
       if (
         !isObject(evidence) ||
-        !isNonEmptyString(evidence["id"]) ||
-        !isNonEmptyString(evidence["code"])
+        !acceptsListItem(evidence["id"]) ||
+        !acceptsListItem(evidence["code"])
       )
         return false;
       if (profile === "sdk") return true;
-      if (
-        !hasRequiredFindingText(evidence["id"]) ||
-        !hasRequiredFindingText(evidence["code"]) ||
-        evidenceIds.has(evidence["id"])
-      )
-        return false;
+      if (evidenceIds.has(evidence["id"])) return false;
       evidenceIds.add(evidence["id"]);
       return true;
     });
-  } else if (profile === "tracking" || finding["code_evidence"] !== null) {
+  } else if (profile !== "sdk" || finding["code_evidence"] !== null) {
     delete finding["code_evidence"];
   }
 
@@ -70,6 +68,11 @@ export function normalizePersistedFindingDetails(
     normalizePersistedStringLists(section, listFields);
   }
 
+  const rootCause = finding["rootCause"];
+  if (profile === "accepted-discovery" && isObject(rootCause)) {
+    if (!isNonEmptyString(rootCause["summary"])) delete finding["rootCause"];
+    else removeUnsupportedPersistedStrings(rootCause, ["code", "language"]);
+  }
   const legacyRootCause = finding["root_cause"];
   if (isObject(legacyRootCause)) {
     removeUnsupportedPersistedStrings(legacyRootCause, [
@@ -77,12 +80,12 @@ export function normalizePersistedFindingDetails(
       "code",
       "language",
     ]);
-  } else if (
-    legacyRootCause !== null &&
-    (typeof legacyRootCause !== "string" ||
-      (profile === "tracking" && legacyRootCause === ""))
-  ) {
-    delete finding["root_cause"];
+  } else {
+    const keepNull =
+      legacyRootCause === null && profile !== "accepted-discovery";
+    const keepEmpty = legacyRootCause === "" && profile === "sdk";
+    if (!keepNull && !keepEmpty && !isNonEmptyString(legacyRootCause))
+      delete finding["root_cause"];
   }
 
   const validation = finding["validation"];
@@ -91,7 +94,7 @@ export function normalizePersistedFindingDetails(
       validation,
       ["method", "status", "summary", "disposition", "result"].filter(
         (field) =>
-          profile === "tracking" ||
+          profile !== "sdk" ||
           !["status", "disposition", "result"].includes(field) ||
           validation[field] !== null,
       ),
@@ -140,19 +143,15 @@ export function normalizePersistedFindingDetails(
   ): void {
     for (const field of fields) {
       const value = section[field];
-      const accepted = (value: unknown): value is string =>
-        isNonEmptyString(value) &&
-        (profile === "sdk" || hasRequiredFindingText(value));
-      if (accepted(value)) {
-        if (profile === "tracking" || field !== "evidence")
-          section[field] = [value];
+      if (acceptsListItem(value)) {
+        if (profile !== "sdk" || field !== "evidence") section[field] = [value];
       } else if (Array.isArray(value)) {
-        const items = value.filter(accepted);
-        if (profile === "tracking" && items.length === 0) delete section[field];
+        const items = value.filter(acceptsListItem);
+        if (profile !== "sdk" && items.length === 0) delete section[field];
         else section[field] = items;
       } else delete section[field];
       if (
-        profile === "tracking" &&
+        profile !== "sdk" &&
         (field === "evidenceRefs" || field === "evidence_refs") &&
         Array.isArray(section[field])
       ) {
@@ -173,6 +172,14 @@ export function normalizePersistedFindingDetails(
   }
 
   function isNonEmptyString(value: unknown): value is string {
+    if (profile === "accepted-discovery") return isNonBlankString(value);
     return typeof value === "string" && value.length > 0;
+  }
+
+  function acceptsListItem(value: unknown): value is string {
+    return (
+      isNonEmptyString(value) &&
+      (profile !== "tracking" || hasRequiredFindingText(value))
+    );
   }
 }

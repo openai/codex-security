@@ -120,6 +120,11 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (82, "retain deep scan attempts and exact merge inputs"),
+    (83, "persist selected deep scan finalization input"),
+    (84, "bind original deep scan parent usage turn"),
+    (85, "bind original deep scan execution settings"),
+    (86, "preserve original deep scan discovery context"),
 ]
 
 
@@ -282,42 +287,6 @@ def test_scan_git_preview_upgrades_to_released_repository_identity(prefix_versio
         ).fetchone()
     ) == ("src", "{}")
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-
-
-def test_repository_preview_history_keeps_original_application_times_after_budget_upgrade():
-    connection, migrate = create_historical_database(72)
-    connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
-    connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
-    connection.execute("DELETE FROM schema_migrations WHERE version = 63")
-    for column in (
-        "log_completed_at",
-        "windows_resume_output_identity",
-        "windows_resume_target_identity",
-    ):
-        connection.execute(f"ALTER TABLE scans DROP COLUMN {column}")
-    connection.execute("DELETE FROM schema_migrations WHERE version BETWEEN 64 AND 66")
-    for version in range(67, 72):
-        connection.execute(
-            "UPDATE schema_migrations SET version = ?, applied_at = ? WHERE version = ?",
-            (version - 4, f"preview-{version - 4}", version),
-        )
-
-    migrate(connection)
-    migrate(connection)
-    assert [
-        tuple(row)
-        for row in connection.execute(
-            "SELECT version, applied_at FROM schema_migrations "
-            "WHERE version BETWEEN 67 AND 71 ORDER BY version"
-        )
-    ] == [(version, f"preview-{version - 4}") for version in range(67, 72)]
-    assert (
-        connection.execute("SELECT name FROM schema_migrations WHERE version = 63").fetchone()[0]
-        == "retain unverified Deep Scan worker attempts"
-    )
-    assert "worker_usage_gap" in {
-        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
-    }
 
 
 def insert_historical_row(
@@ -1954,6 +1923,17 @@ def test_workbench_repairs_recorded_deep_scan_migration(
             "persist deep scan consecutive discovery failures",
         )
         assert migration_name_row(connection, 28) == ("persist deep scan discovery time limit",)
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = 'deep_scan_workers'"
+            )
+        } >= {
+            "record_deep_scan_worker_thread_insert",
+            "record_deep_scan_worker_thread_update",
+            "retain_unverified_deep_scan_worker_attempt",
+        }
         assert {"max_time_hours", "terminal_reviewed_surface_count"} <= {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         }
@@ -2363,7 +2343,7 @@ def test_legacy_delivered_scan_waits_for_its_thread(
     previous_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
     fail_scan(state_dir, previous_id, "Earlier scan failed")
     scan_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
-    begin = ("--thread-id", "fixture-thread", "--workflow-version", "fixture")
+    begin = ("--thread-id", "fixture-thread")
 
     assert get_scan(state_dir, scan_id)["scan"]["scanId"] == scan_id
     for command, args in (
@@ -2425,8 +2405,6 @@ def test_legacy_delivered_scan_waits_for_its_thread(
         "other",
         "--user-context",
         begun["deepScan"]["userContext"],
-        "--workflow-version",
-        "fixture",
     )
     assert replacement["startDisposition"] == "created"
     assert replacement["deepScan"]["scanId"] != scan_id

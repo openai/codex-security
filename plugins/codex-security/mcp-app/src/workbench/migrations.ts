@@ -14,10 +14,9 @@ export interface Migration {
   statements: readonly string[];
 }
 
-// Python owns the repository-dependent migrations 67–71. Migration 72 only uses
-// the external source tables that both workbench runtimes already maintain.
+// Python owns the repository-dependent migrations 67–71.
 export const migrations: readonly Migration[] = history.filter(
-  (item) => item.version <= 66 || item.version === 72,
+  (item) => item.version <= 66 || item.version >= 72,
 );
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;
@@ -45,7 +44,7 @@ function applyRepairStatement(database: DatabaseSync, statement: string): void {
   else
     database.exec(
       statement.replace(
-        /^CREATE (UNIQUE INDEX|INDEX|TABLE) /u,
+        /^CREATE (UNIQUE INDEX|INDEX|TABLE|TRIGGER) /u,
         "CREATE $1 IF NOT EXISTS ",
       ),
     );
@@ -229,14 +228,33 @@ export function applyMigrations(
         for (const statement of migration(6).statements)
           applyRepairStatement(database, statement.replaceAll("\n", " "));
       } else if (item.version === 16) backfill = repairStableTargets(database);
+      // Earlier readers created these objects under other previews’ receipts.
+      else if (item.version >= 82 && item.version <= 85)
+        repairSchema(database, item.version);
       else if (applied.has(item.version)) {
         if (
           [
-            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61,
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 57, 58, 59, 60, 61,
           ].includes(item.version)
         )
           repairSchema(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
+        else if (
+          item.version === 51 ||
+          item.version === 63 ||
+          item.version === 86
+        ) {
+          // Restore recorded extensions when the base Deep tables were recreated.
+          // Data updates from an already applied migration must not run again.
+          for (const statement of item.statements) {
+            if (
+              statement.startsWith("ALTER TABLE ") ||
+              statement.startsWith("CREATE TABLE ") ||
+              statement.startsWith("CREATE TRIGGER ")
+            )
+              applyRepairStatement(database, statement);
+          }
+        }
       } else {
         database.exec(item.statements.join("\n"));
         if (item.version === 38) migrateWorkflowResults(database);

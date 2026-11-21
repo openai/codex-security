@@ -7,6 +7,10 @@ import { createFakeCodexFixture } from "./support/fake-codex-fixture.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 export const {
+  WorkbenchDeepScanStore,
+  captureDeepScanExecutionSettings,
+  loadDeepScanExecutionSettings,
+  restoredDeepScanWorkerSettings,
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
