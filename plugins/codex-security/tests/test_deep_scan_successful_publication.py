@@ -758,7 +758,7 @@ def test_deep_publication_write_failure_keeps_original_terminal_cause(
 @pytest.mark.parametrize("resumed", [False, True])
 @pytest.mark.parametrize("scope", ["subdir", "./subdir/", "subdir/extract.py"])
 def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_sources(
-    workbench_db, publication_scan, resumed, scope
+    workbench_api, workbench_db, publication_scan, resumed, scope
 ):
     scan = publication_scan(paths=[scope, "background jobs"])
     findings = []
@@ -769,6 +769,10 @@ def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_source
         finding["identity"]["anchor"] = f"scope-{index}"
         finding["title"] = f"Scope finding {directory}"
         finding["locations"] = [{"path": f"{directory}/extract.py", "startLine": 1}]
+        if directory == "unrelated" or (
+            scope == "subdir/extract.py" and directory == "subdir/extract.py"
+        ):
+            finding.pop("validation")
         for key in ("findingId", "occurrenceId", "fingerprints"):
             finding.pop(key, None)
         findings.append(finding)
@@ -785,6 +789,8 @@ def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_source
                     (kind, str(result)),
                 )
             accepted.append((result, result.read_bytes()))
+    run = workbench_api["deep_scan"].deep_scan_result(workbench_db, scan.scan_id)
+    assert not run["deepScan"].get("evidenceRepairRequired", False)
     completed = scan.complete()
     assert completed["progress"]["status"] == "complete"
     paths = [

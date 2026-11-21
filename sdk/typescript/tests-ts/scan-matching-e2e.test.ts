@@ -18,7 +18,7 @@ import {
   type ScanMatchingBatch,
 } from "../src/scan-comparison.js";
 import { dependencies } from "./cli-fixtures.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { fail } from "./support/errors.js";
@@ -89,7 +89,7 @@ test("matches sealed scan history end to end without merging related findings", 
         }),
       ]);
       const scanId = String(registered["scanId"]);
-      await copyCompletedScanFixture(scanDir);
+      await copyScanForResealing(scanDir);
       const manifest = await readJson<ScanManifest>(
         join(scanDir, "scan-manifest.json"),
       );

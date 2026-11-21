@@ -1,6 +1,6 @@
 {
   "name": "codex-security-mcp-app",
-  "version": "0.1.161",
+  "version": "0.1.162",
   "type": "module",
   "private": true,
   "scripts": {

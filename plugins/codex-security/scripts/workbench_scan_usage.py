@@ -490,7 +490,7 @@ def _worker_usage_receipts(
                 or receipt.get("source") != "codex_sdk"
                 or receipt.get("usageScope") != "thread_cumulative"
                 or receipt.get("scanId") != scan["id"]
-                or receipt.get("kind") not in ("discovery", "dedup", "compare")
+                or receipt.get("kind") not in ("discovery", "dedup", "compare", "evidence")
                 or receipt.get("attemptId") != path.stem
             ):
                 raise ValueError("Worker usage receipt identity is invalid.")

@@ -21,7 +21,7 @@ export interface WorkerUsageReceipt {
   usageScope: "thread_cumulative";
   scanId: string;
   workerId: string;
-  kind: DeepScanWorkerKind | "compare";
+  kind: DeepScanWorkerKind | "compare" | "evidence";
   attemptId: string;
   attempt: number;
   resumed: boolean;

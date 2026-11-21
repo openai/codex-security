@@ -38,7 +38,7 @@ import {
   type ScanProgress,
 } from "../src/index.js";
 import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { runWorkbench } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
@@ -58,7 +58,7 @@ async function save(path: string, value: unknown) {
 }
 
 async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
-  await copyCompletedScanFixture(scanDir);
+  await copyScanForResealing(scanDir);
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
   );
@@ -435,9 +435,14 @@ describe("custom validation", () => {
     expect(findings.findings[0]).toMatchObject({
       identity: f.findings.findings[0]!.identity,
       locations: f.findings.findings[0]!.locations,
+      codeEvidence: f.findings.findings[0]!.codeEvidence,
+      rootCause: f.findings.findings[0]!.rootCause,
       severity: output.validations[0]!.severity,
       confidence: { level: "medium" },
-      attackPath: { impact: output.validations[0]!.impact },
+      attackPath: {
+        dataflow: f.findings.findings[0]!.attackPath!.dataflow,
+        impact: output.validations[0]!.impact,
+      },
       validation: {
         disposition: "reportable",
         counterEvidence: [counterEvidence],

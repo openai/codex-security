@@ -1227,8 +1227,8 @@ test("repair assignment includes validated attack paths and a shared range retai
     ...first,
     title: "Alias",
     locations: [{ ...first.locations[0], role: "root_control" }],
-    validation: { summary: "Verified dispatch." },
-    attackPath: { steps: ["Dispatch calls the helper."] },
+    validation: { ...first.validation, summary: "Verified dispatch." },
+    attackPath: { ...first.attackPath, steps: ["Dispatch calls the helper."] },
   };
   const { draft } = await scanLoop([[first, second]], {
     maxDiscoveryRuns: 1,

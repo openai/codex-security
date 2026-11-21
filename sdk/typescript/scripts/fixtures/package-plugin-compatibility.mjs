@@ -108,13 +108,19 @@ const client = new CodexSecurity(
                     };
                     for (const name of ["findings.json", "coverage.json"]) {
                       const file = join(scanDir, name);
-                      const document = JSON.parse(await readFile(file, "utf8"));
+                      // Complete a new finding while exercising the legacy coverage layout.
+                      const source =
+                        name === "findings.json"
+                          ? join(plugin, "examples", "completed-scan", name)
+                          : file;
+                      const document = JSON.parse(
+                        await readFile(source, "utf8"),
+                      );
                       document.scanId = manifest.scan.id;
                       for (const finding of document.findings ?? []) {
                         delete finding.findingId;
                         delete finding.occurrenceId;
                         delete finding.fingerprints;
-                        finding.locations[0].role = "sink";
                       }
                       if (name === "coverage.json") {
                         document.openQuestions = [
