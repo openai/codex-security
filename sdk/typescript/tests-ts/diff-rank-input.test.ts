@@ -33,6 +33,7 @@ test("diff previews stay inside the selected repository", () => {
   mkdirSync(nested, { recursive: true });
   git(repository, "init", "-q");
   git(repository, "config", "--local", "core.autocrlf", "false");
+  git(repository, "config", "--local", "core.symlinks", "true");
   writeFileSync(join(repository, "src", "handler.py"), "value = 1\n");
   writeFileSync(join(repository, "src", "deleted.py"), "removed = True\n");
   writeFileSync(join(repository, "src", "entry.py"), "handler.py");

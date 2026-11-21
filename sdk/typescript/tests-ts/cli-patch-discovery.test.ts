@@ -1,0 +1,1004 @@
+import { expect, test } from "bun:test";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  readlink,
+  readdir,
+  lstat,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+  realpath,
+} from "node:fs/promises";
+import { dirname, join, resolve, delimiter, relative, sep } from "node:path";
+import { capturePatchGitControls } from "../src/patch-git-controls.js";
+import {
+  patchRiskAssessment,
+  repositoryGit,
+  runGitRepositoryCommand,
+  runWorkflow,
+  patchDirectories,
+  initializePatchGit,
+  runIssuePatch,
+  observeIssuePatch,
+  runPublicationWorkflow,
+} from "./cli-patch-fixtures.js";
+
+const fixtures = patchDirectories();
+
+async function expectOnlyAppPatched(
+  root: string,
+  beforeEdit?: () => Promise<void>,
+) {
+  const { outcome, launches } = await observeIssuePatch(root, async () => {
+    if (beforeEdit) await beforeEdit();
+    await writeFile(join(root, "app.ts"), "after\n");
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(launches).toBe(1);
+  expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+  expect(await readFile(join(root, "app.ts"), "utf8")).toBe("after\n");
+}
+
+async function repository(prefix: string) {
+  const root = await fixtures.create(prefix);
+  const git = initializePatchGit(root);
+  await mkdir(join(root, "source", "deep"), { recursive: true });
+  await writeFile(join(root, "app.ts"), "before\n");
+  await writeFile(join(root, "source", "deep", "input.ts"), "fixture source\n");
+  git("add", ".");
+  git("commit", "-m", "Synthetic discovery baseline");
+  return { root, git };
+}
+
+async function configurePromisorHelper(root: string, support: string) {
+  const git = repositoryGit(root);
+  const marker = join(support, "ran");
+  const helper = join(root, "promisor.cjs");
+  await writeFile(
+    helper,
+    `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "executed"); process.exit(1);`,
+  );
+  git("config", "extensions.partialClone", "local-helper");
+  git("config", "remote.local-helper.promisor", "true");
+  git("config", "protocol.ext.allow", "always");
+  const word = (value: string) =>
+    value.replaceAll("\\", "/").replaceAll("%", "%%").replaceAll(" ", "% ");
+  git(
+    "config",
+    "remote.local-helper.url",
+    `ext::${word(process.execPath)} ${word(helper)}`,
+  );
+  return marker;
+}
+
+test("patch cannot run a promisor remote while capturing Git controls", async () => {
+  const { root, git } = await repository("patch-promisor-");
+  const support = await fixtures.create("patch-promisor-control-");
+  const marker = await configurePromisorHelper(root, support);
+  const tree = git("rev-parse", "HEAD^{tree}");
+  await rm(join(root, ".git", "objects", tree.slice(0, 2), tree.slice(2)));
+  const environment = { GIT_ALLOW_PROTOCOL: "ext", GIT_NO_LAZY_FETCH: "0" };
+  // Verify that this Git and fixture really execute the checkout-selected helper.
+  const probe = spawnSync("git", ["read-tree", "HEAD"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      ...environment,
+      GIT_INDEX_FILE: join(support, "probe-index"),
+    },
+    stdio: "ignore",
+  });
+  expect(probe.status).not.toBe(0);
+  expect(await readFile(marker, "utf8")).toBe("executed");
+  await rm(marker);
+  let launches = 0;
+  const outcome = await runIssuePatch(root, {
+    environment,
+    onRepositoryCommand(command, args, cwd, options) {
+      return runGitRepositoryCommand(command, args, cwd, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      });
+    },
+    onCodex: async () => {
+      launches++;
+      return 0;
+    },
+  });
+  expect(outcome.exitCode).toBe(2);
+  expect(launches).toBe(0);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test.each(["snapshot", "copy detection"])(
+  "publication %s cannot fetch a missing unchanged blob",
+  async (stage) => {
+    const { root, git } = await repository("patch-promisor-copy-");
+    const support = await fixtures.create("patch-promisor-copy-control-");
+    const origin = join(support, "origin.git");
+    git("init", "--bare", origin);
+    git("remote", "add", "origin", origin);
+    const marker = await configurePromisorHelper(root, support);
+    const original = Array.from(
+      { length: 80 },
+      (_, i) => `unchanged line ${i}\n`,
+    ).join("");
+    await mkdir(join(root, "excluded"));
+    await writeFile(join(root, "excluded/source.txt"), original);
+    git("add", ".");
+    git("commit", "-m", "Synthetic copy candidate");
+    git("sparse-checkout", "set", "--no-cone", "/*", "!/excluded/");
+    const blob = git("rev-parse", "HEAD:excluded/source.txt");
+    const looseObject = join(
+      root,
+      ".git",
+      "objects",
+      blob.slice(0, 2),
+      blob.slice(2),
+    );
+    const before = git("rev-parse", "HEAD");
+    const environment = {
+      GIT_ALLOW_PROTOCOL: "file:ext",
+      GIT_NO_LAZY_FETCH: "0",
+    };
+    if (stage === "snapshot") await rm(looseObject);
+    let copyDiff: readonly string[] | undefined;
+    const outcome = await runPublicationWorkflow("issue", {
+      currentDirectory: root,
+      environment,
+      onCodex: async (_args, output) => {
+        await writeFile(join(root, "copy.txt"), original + "new line\n");
+        output?.stdout.write("Fixed and verified.");
+        return 0;
+      },
+      async onRepositoryCommand(command, args, cwd, options) {
+        if (command !== "git") return args[1] === "list" ? "[]" : "";
+        if (args.includes("--find-copies-harder")) {
+          copyDiff = [...args];
+          // Inject object loss exactly after both snapshot trees have been captured.
+          if (stage === "copy detection") await rm(looseObject);
+        }
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    });
+    if (stage === "copy detection")
+      expect(copyDiff, outcome.stderr).toBeDefined();
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(git("rev-parse", "HEAD")).toBe(before);
+    expect(git("ls-remote", origin)).toBe("");
+    // Without the CLI policy these reads really execute the checkout helper.
+    spawnSync("git", copyDiff ?? ["cat-file", "-p", blob], {
+      cwd: root,
+      env: { ...process.env, ...environment },
+      stdio: "ignore",
+    });
+    expect(await readFile(marker, "utf8")).toBe("executed");
+  },
+);
+
+test.each([true, false])(
+  "patch checks a nested worktree's reciprocal registration (matches: %p)",
+  async (matches) => {
+    const selected = await repository("patch-worktree-");
+    const owner = await repository("patch-worktree-owner-");
+    const nested = join(selected.root, "nested");
+    const registered = matches ? nested : join(owner.root, "other");
+    owner.git("worktree", "add", "--detach", registered);
+    if (!matches) {
+      await mkdir(nested);
+      await writeFile(
+        join(nested, ".git"),
+        await readFile(join(registered, ".git")),
+      );
+    }
+    selected.git("add", "nested");
+    selected.git("commit", "-m", "Synthetic linked worktree");
+    const outcome = await runIssuePatch(selected.root, {
+      onCodex: async () => {
+        await writeFile(join(selected.root, "app.ts"), "after\n");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(matches ? 0 : 2);
+    if (matches) expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+    else {
+      expect(outcome.stderr).toContain("Nested Git administration is outside");
+      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+        "before\n",
+      );
+    }
+  },
+);
+
+test("patch rejects an external object store selected by a checkout symlink before snapshot writes", async () => {
+  const selected = await repository("patch-object-store-");
+  const outside = await fixtures.create("patch-object-store-target-");
+  const objects = join(selected.root, ".git", "objects");
+  const storage = join(outside, "objects");
+  await rename(objects, storage);
+  await symlink(
+    storage,
+    objects,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await writeFile(join(selected.root, "app.ts"), "new snapshot content\n");
+  const blob = selected.git("hash-object", "app.ts");
+  let snapshots = 0;
+  let turns = 0;
+  const outcome = await runIssuePatch(selected.root, {
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (options?.patchSnapshot) snapshots++;
+      return runGitRepositoryCommand(command, args, cwd, options);
+    },
+    onCodex: async () => {
+      turns++;
+      return 0;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  expect(outcome.stderr).toContain("Git object storage resolves outside");
+  expect(turns).toBe(0);
+  expect(snapshots).toBe(0);
+  expect(() => selected.git("cat-file", "-e", blob)).toThrow();
+});
+
+for (const raw of [false, true]) {
+  test.skipIf(raw && process.platform !== "linux")(
+    `patch discovery does not traverse symlinked ancestors of ordinary tracked files${raw ? " with raw bytes" : ""}`,
+    async () => {
+      const selected = await repository("patch-discovery-selected-");
+      const foreign = await repository("patch-discovery-foreign-");
+      // A deeper checkout detects traversals that skip only the final symlink itself.
+      const nestedPath = join(foreign.root, "deep");
+      await mkdir(nestedPath);
+      const nested = initializePatchGit(nestedPath);
+      await writeFile(join(nestedPath, "input.ts"), "foreign source\n");
+      nested("add", ".");
+      nested("commit", "-m", "Synthetic nested foreign baseline");
+      const foreignHead = foreign.git("rev-parse", "HEAD");
+      const foreignIndex = await readFile(join(foreign.root, ".git", "index"));
+      const nestedHead = nested("rev-parse", "HEAD");
+      const nestedIndex = await readFile(join(nestedPath, ".git", "index"));
+      const link = raw
+        ? Buffer.concat([
+            Buffer.from(`${selected.root}/source-`),
+            Buffer.from([0xff]),
+          ])
+        : join(selected.root, "source");
+      if (raw) {
+        await rename(join(selected.root, "source"), link);
+        selected.git("add", "--all");
+        selected.git("commit", "-m", "Synthetic raw directory baseline");
+      }
+      const selectedIndex = await readFile(
+        join(selected.root, ".git", "index"),
+      );
+      const removed = await fixtures.create("patch-discovery-removed-");
+      await rename(link, join(removed, "source"));
+      await symlink(
+        foreign.root,
+        link,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const originalLink = await readlink(link);
+      await expectOnlyAppPatched(selected.root);
+      expect(await readlink(link)).toBe(originalLink);
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        selectedIndex,
+      );
+      expect(foreign.git("rev-parse", "HEAD")).toBe(foreignHead);
+      expect(await readFile(join(foreign.root, ".git", "index"))).toEqual(
+        foreignIndex,
+      );
+      expect(nested("rev-parse", "HEAD")).toBe(nestedHead);
+      expect(await readFile(join(nestedPath, ".git", "index"))).toEqual(
+        nestedIndex,
+      );
+      expect(await readFile(join(nestedPath, "input.ts"), "utf8")).toBe(
+        "foreign source\n",
+      );
+    },
+  );
+}
+
+test.each([
+  {
+    name: "malformed marker",
+    contents: "synthetic fixture data\n",
+    target: undefined,
+  },
+  {
+    name: "missing target",
+    contents: "gitdir: ../absent-administration\n",
+    target: undefined,
+  },
+  {
+    name: "non-repository directory target",
+    contents: "gitdir: ../non-repository-target\n",
+    target: "directory",
+  },
+  {
+    name: "ordinary file target",
+    contents: "gitdir: ../non-repository-target\n",
+    target: "file",
+  },
+])(
+  "patch discovery keeps $name fixture data usable",
+  async ({ contents, target }) => {
+    const selected = await repository("patch-discovery-marker-");
+    const marker = join(selected.root, "source", ".git");
+    if (target === "directory")
+      await mkdir(join(selected.root, "non-repository-target"));
+    if (target === "file")
+      await writeFile(
+        join(selected.root, "non-repository-target"),
+        "ordinary fixture data\n",
+      );
+    await writeFile(marker, contents);
+    const index = await readFile(join(selected.root, ".git", "index"));
+    await expectOnlyAppPatched(selected.root);
+    expect(await readFile(marker, "utf8")).toBe(contents);
+    expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
+  },
+);
+
+for (const [kind, contents] of [
+  ["empty directory", null],
+  ["missing target", "gitdir: ../absent-administration\n"],
+  ["empty target", "gitdir: "],
+  ["empty target with newline", "gitdir: \n"],
+] as const) {
+  test.skipIf(process.platform !== "linux")(
+    `patch discovery keeps a raw-byte source directory with ${kind} Git placeholder data usable`,
+    async () => {
+      const selected = await repository("patch-discovery-raw-placeholder-");
+      const source = Buffer.concat([
+        Buffer.from(`${selected.root}/source-`),
+        Buffer.from([0xff]),
+      ]);
+      const marker = Buffer.concat([source, Buffer.from("/.git")]);
+      await rename(join(selected.root, "source"), source);
+      selected.git("add", "--all");
+      selected.git("commit", "-m", "Synthetic raw source baseline");
+      if (contents === null) await mkdir(marker);
+      else await writeFile(marker, contents);
+      const index = await readFile(join(selected.root, ".git", "index"));
+      await expectOnlyAppPatched(selected.root);
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        index,
+      );
+
+      expect(
+        await readFile(
+          Buffer.concat([source, Buffer.from("/deep/input.ts")]),
+          "utf8",
+        ),
+      ).toBe("fixture source\n");
+      if (contents === null) expect(await readdir(marker)).toEqual([]);
+      else expect(await readFile(marker, "utf8")).toBe(contents);
+    },
+  );
+}
+
+test.skipIf(process.platform !== "linux")(
+  "patch discovery keeps a missing raw-byte gitfile target as ordinary fixture data",
+  async () => {
+    const selected = await repository("patch-discovery-raw-missing-target-");
+    const marker = join(selected.root, "source", ".git");
+    const contents = Buffer.concat([
+      Buffer.from("gitdir: ../absent-administration-"),
+      Buffer.from([0xff]),
+      Buffer.from("\n"),
+    ]);
+    await writeFile(marker, contents);
+    const index = await readFile(join(selected.root, ".git", "index"));
+    await expectOnlyAppPatched(selected.root);
+    expect(await readFile(marker)).toEqual(contents);
+    expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
+  },
+);
+
+test.each([false, true])(
+  "patch discovery rejects newly selected foreign Git administration before bookkeeping (invalid ancestor: %p)",
+  async (invalidAncestor) => {
+    const selected = await repository("patch-discovery-guard-");
+    const foreign = await repository("patch-discovery-unselected-");
+    foreign.git("config", "core.worktree", foreign.root);
+    const selectedHead = selected.git("rev-parse", "HEAD");
+    const selectedIndex = await readFile(join(selected.root, ".git", "index"));
+    const foreignHead = foreign.git("rev-parse", "HEAD");
+    const foreignIndex = await readFile(join(foreign.root, ".git", "index"));
+    if (invalidAncestor)
+      await writeFile(
+        join(selected.root, "source", ".git"),
+        "synthetic fixture data\n",
+      );
+    const marker = join(
+      selected.root,
+      "source",
+      ...(invalidAncestor ? ["deep"] : []),
+      "newrepo",
+      ".git",
+    );
+    await mkdir(dirname(marker), { recursive: true });
+    const contents = `gitdir: ${join(foreign.root, ".git")}\n`;
+    let launches = 0;
+    const bookkeeping: string[][] = [];
+    const outcome = await runIssuePatch(selected.root, {
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (
+          launches > 0 &&
+          !args.includes("core.hooksPath=/dev/null") &&
+          args.some((value) =>
+            ["add", "read-tree", "update-index", "write-tree"].includes(value),
+          )
+        )
+          bookkeeping.push([...args]);
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+      onCodex: async (_args, output) => {
+        launches++;
+        await writeFile(join(selected.root, "app.ts"), "after\n");
+        await writeFile(marker, contents);
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(outcome.stderr).toContain(
+      "Git metadata outside the pre-patch administration directories",
+    );
+    expect(launches).toBe(1);
+    expect(bookkeeping).toEqual([]);
+    expect(selected.git("rev-parse", "HEAD")).toBe(selectedHead);
+    expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+      selectedIndex,
+    );
+    expect(foreign.git("rev-parse", "HEAD")).toBe(foreignHead);
+    expect(await readFile(join(foreign.root, ".git", "index"))).toEqual(
+      foreignIndex,
+    );
+    expect(await readFile(marker, "utf8")).toBe(contents);
+    expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+      "after\n",
+    );
+  },
+);
+
+for (const hostileConfig of ["malformed", "hook"] as const) {
+  test.skipIf(hostileConfig === "hook" && process.platform === "win32")(
+    `patch discovery checks new foreign administration without loading its ${hostileConfig} configuration`,
+    async () => {
+      const selected = await repository("patch-discovery-probe-selected-");
+      const foreign = await repository("patch-discovery-probe-foreign-");
+      const marker = join(selected.root, "source", "newrepo", ".git");
+      await mkdir(dirname(marker), { recursive: true });
+      const foreignAdmin = join(foreign.root, ".git");
+      const effect = join(foreign.root, "hook-effect");
+      const selectedIndex = await readFile(
+        join(selected.root, ".git", "index"),
+      );
+      const foreignIndex = await readFile(join(foreignAdmin, "index"));
+      const foreignHead = await readFile(join(foreignAdmin, "HEAD"));
+      if (hostileConfig === "malformed") {
+        await writeFile(
+          join(foreignAdmin, "config"),
+          "[invalid synthetic configuration\n",
+        );
+      } else {
+        const hook = join(foreignAdmin, "hooks", "synthetic-fsmonitor");
+        await writeFile(
+          hook,
+          "#!/bin/sh\nprintf 'effect' > hook-effect\nprintf '\\0'\n",
+        );
+        await chmod(hook, 0o755);
+        foreign.git("config", "core.fsmonitor", hook);
+      }
+      let launches = 0;
+      const probes: { cwd: string; args: string[] }[] = [];
+      const outcome = await runIssuePatch(selected.root, {
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (args.includes("--resolve-git-dir"))
+            probes.push({ cwd, args: [...args] });
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+        onCodex: async (_args, output) => {
+          launches++;
+          await writeFile(join(selected.root, "app.ts"), "after\n");
+          await writeFile(marker, `gitdir: ${foreignAdmin}\n`);
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      });
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        "Git metadata outside the pre-patch administration directories",
+      );
+      expect(launches).toBe(1);
+      expect(
+        probes.some(
+          ({ cwd, args }) =>
+            cwd === selected.root && resolve(args.at(-1)!) === marker,
+        ),
+      ).toBe(true);
+      expect(
+        await readFile(effect, "utf8").catch(() => undefined),
+      ).toBeUndefined();
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        selectedIndex,
+      );
+      expect(await readFile(join(foreignAdmin, "index"))).toEqual(foreignIndex);
+      expect(await readFile(join(foreignAdmin, "HEAD"))).toEqual(foreignHead);
+      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+        "after\n",
+      );
+      if (hostileConfig === "malformed") {
+        expect(() => foreign.git("status", "--porcelain")).toThrow(
+          "bad config",
+        );
+      } else {
+        foreign.git("status", "--porcelain");
+        expect(await readFile(effect, "utf8")).toBe("effect");
+      }
+    },
+  );
+}
+
+test.each([false, true])(
+  "patch discovery permits an empty Git marker directory present before the turn: %p",
+  async (existing) => {
+    const selected = await repository("patch-discovery-empty-marker-");
+    const marker = join(selected.root, "source", ".git");
+    if (existing) await mkdir(marker);
+    const index = await readFile(join(selected.root, ".git", "index"));
+    await expectOnlyAppPatched(selected.root, async () => {
+      if (!existing) await mkdir(marker);
+    });
+    expect(await readdir(marker)).toEqual([]);
+    expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
+  },
+);
+
+for (const linked of [false, true]) {
+  test.skipIf(process.platform === "win32")(
+    `patch discovery ignores a ${linked ? "symlinked " : ""}FIFO marker without opening it`,
+    async () => {
+      const selected = await repository("patch-discovery-fifo-");
+      const marker = join(selected.root, "source", ".git");
+      const support = await fixtures.create("patch-discovery-fifo-probe-");
+      const fifo = linked ? join(support, "marker-fifo") : marker;
+      execFileSync("mkfifo", [fifo]);
+      if (linked) await symlink(fifo, marker);
+      const originalLink = linked ? await readlink(marker) : undefined;
+      const index = await readFile(join(selected.root, ".git", "index"));
+      const source = `
+import { writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { runGitRepositoryCommand, runWorkflow } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
+const root = ${JSON.stringify(selected.root)};
+let launches = 0;
+process.stdout.write("PROBE_READY\\n");
+const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+  currentDirectory: root,
+  onRepositoryCommand: runGitRepositoryCommand,
+  onCodex: async (_args, output) => {
+    launches++;
+    await writeFile(join(root, "app.ts"), "after\\n");
+    output?.stdout.write("Synthetic patch complete.\\n");
+    return 0;
+  },
+});
+process.stdout.write(JSON.stringify({ launches, ...outcome }));
+`;
+      const script = join(support, "probe.mts");
+      await writeFile(script, source);
+      // Keep a regression in marker probing from hanging the test runner itself.
+      const result = spawnSync(process.execPath, [script], {
+        cwd: selected.root,
+        encoding: "utf8",
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+      });
+      expect(result.stdout).toStartWith("PROBE_READY\n");
+      expect(result.error, result.stderr).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      const outcome: Awaited<ReturnType<typeof runWorkflow>> & {
+        launches: number;
+      } = JSON.parse(result.stdout.slice("PROBE_READY\n".length));
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(outcome.launches).toBe(1);
+      expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      expect((await lstat(fifo)).isFIFO()).toBe(true);
+      if (linked) expect(await readlink(marker)).toBe(originalLink!);
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        index,
+      );
+      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+        "after\n",
+      );
+    },
+    15_000,
+  );
+}
+
+async function captureControls(directory: string) {
+  return capturePatchGitControls(
+    directory,
+    async (_root, checkout, args, options) =>
+      runGitRepositoryCommand("git", args, checkout, {
+        ...options,
+        environment: {
+          ...options?.environment,
+          ...(options?.indexFile === undefined
+            ? {}
+            : { GIT_INDEX_FILE: options.indexFile }),
+        },
+      }),
+  );
+}
+
+test.each(
+  [false, true].flatMap((assess) =>
+    [false, true].map((nestedRepository) => ({ assess, nestedRepository })),
+  ),
+)(
+  "publication checks tracked-file directory replacements (nested repository: $nestedRepository, assessment: $assess)",
+  async ({ assess, nestedRepository }) => {
+    const selected = await repository("patch-tracked-file-replacement-");
+    const replacement = join(selected.root, "vendor");
+    await writeFile(replacement, "tracked file\n");
+    selected.git("add", "vendor");
+    selected.git("commit", "-m", "Synthetic tracked file baseline");
+    const remote = await fixtures.create("patch-tracked-file-remote-");
+    selected.git("init", "--bare", remote);
+    selected.git("remote", "add", "origin", remote);
+    const head = selected.git("rev-parse", "HEAD");
+    const index = await readFile(join(selected.root, ".git", "index"));
+    const nestedCommands: string[][] = [];
+    let nestedIndex: Buffer<ArrayBuffer> | undefined;
+    let creates = 0;
+    let modelCalls = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "Synthetic issue",
+        "--create-pr",
+        "--json",
+        ...(assess ? ["--assess-patch-risk"] : []),
+      ],
+      {
+        currentDirectory: selected.root,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command !== "git") {
+            if (args[1] === "list") return "[]";
+            if (args[1] === "create") creates++;
+            return "https://github.example.test/example/repository/pull/1";
+          }
+          if (cwd === replacement || args.includes(replacement))
+            nestedCommands.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+        onCodex: async (_args, output) => {
+          if (modelCalls++ > 0) {
+            output?.stdout.write(JSON.stringify(patchRiskAssessment()));
+            return 0;
+          }
+          await rm(replacement);
+          await mkdir(replacement);
+          await writeFile(join(replacement, "input.ts"), "replacement\n");
+          if (nestedRepository) {
+            const git = initializePatchGit(replacement);
+            git("add", ".");
+            git("commit", "-m", "Synthetic nested baseline");
+            nestedIndex = await readFile(join(replacement, ".git", "index"));
+          }
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, JSON.stringify({ outcome, nestedCommands })).toBe(
+      nestedRepository ? 2 : 0,
+    );
+    if (nestedRepository) {
+      expect(outcome.stderr).toContain(
+        "Git metadata outside the pre-patch administration directories",
+      );
+      expect(nestedCommands).toEqual([]);
+      expect(creates).toBe(0);
+      expect(modelCalls).toBe(1);
+      expect(selected.git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        index,
+      );
+      expect(await readFile(join(replacement, ".git", "index"))).toEqual(
+        nestedIndex!,
+      );
+    } else {
+      expect(creates).toBe(1);
+      expect(
+        repositoryGit(remote)(
+          "show",
+          `${selected.git("rev-parse", "HEAD")}:vendor/input.ts`,
+        ),
+      ).toBe("replacement");
+    }
+    expect(await readFile(join(replacement, "input.ts"), "utf8")).toBe(
+      "replacement\n",
+    );
+  },
+);
+
+test("rejects replacement of tracked directories with new Git administration", async () => {
+  const selected = await repository("patch-tracked-replacement-");
+  const controls = await captureControls(selected.root);
+  const nested = join(selected.root, "source");
+  await rm(join(nested, "deep"), { recursive: true });
+  const git = initializePatchGit(nested);
+  await writeFile(join(nested, "replacement.ts"), "replacement\n");
+  git("add", ".");
+  git("commit", "-m", "Synthetic replacement baseline");
+  const index = await readFile(join(nested, ".git", "index"));
+  await expect(controls!.validate()).rejects.toThrow(
+    "Git metadata outside the pre-patch administration directories",
+  );
+  expect(await readFile(join(nested, ".git", "index"))).toEqual(index);
+});
+
+test.each(["parent", "sibling"])(
+  "rejects retargeting a captured nested marker to %s administration",
+  async (target) => {
+    const selected = await repository("patch-nested-marker-binding-");
+    for (const name of ["first", "second"]) {
+      const checkout = join(selected.root, name);
+      const metadata = join(selected.root, ".git", "modules", name);
+      await mkdir(metadata, { recursive: true });
+      selected.git(
+        "init",
+        "--initial-branch=main",
+        `--separate-git-dir=${metadata}`,
+        checkout,
+      );
+      const git = repositoryGit(checkout);
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(checkout, "app.ts"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic nested baseline");
+      selected.git("add", name);
+    }
+    selected.git("commit", "-m", "Synthetic nested registrations");
+    const controls = await captureControls(selected.root);
+    const replacement =
+      target === "parent"
+        ? join(selected.root, ".git")
+        : join(selected.root, ".git", "modules", "second");
+    await writeFile(
+      join(selected.root, "first", ".git"),
+      `gitdir: ${replacement}\n`,
+    );
+    await expect(controls!.validate()).rejects.toThrow(
+      "Nested Git administration changed during the patch",
+    );
+  },
+);
+
+function quoted(path: string): string {
+  return `"${[...Buffer.from(path)]
+    .map((byte) =>
+      byte >= 32 && byte < 127 && byte !== 34 && byte !== 92
+        ? String.fromCharCode(byte)
+        : `\\${byte.toString(8).padStart(3, "0")}`,
+    )
+    .join("")}"`;
+}
+
+async function alternateRepository() {
+  const root = await fixtures.create("patch-alternate-");
+  const support = await fixtures.create("patch-alternate-support-");
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_DIR: undefined,
+    GIT_WORK_TREE: undefined,
+    GIT_OBJECT_DIRECTORY: undefined,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+    GIT_CONFIG_GLOBAL: "",
+    GIT_CONFIG_SYSTEM: "",
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  const git = (args: string[], cwd = root, overrides = {}) =>
+    execFileSync("git", args, {
+      cwd,
+      env: { ...environment, ...overrides },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  git(["init", "--initial-branch=main"]);
+  git(["config", "user.name", "Synthetic User"]);
+  git(["config", "user.email", "synthetic@example.test"]);
+  git(["config", "commit.gpgsign", "false"]);
+  await writeFile(join(root, "app.ts"), "before\n");
+  git(["add", "."]);
+  git(["commit", "-m", "Synthetic alternate baseline"]);
+  const pool = join(support, "pool");
+  await mkdir(pool);
+  const payload = join(support, "payload");
+  await writeFile(payload, "Synthetic alternate-only object\n");
+  const object = git(["hash-object", "-w", payload], root, {
+    GIT_OBJECT_DIRECTORY: pool,
+  });
+  return { root, support, pool, environment, git, object };
+}
+
+async function patch(
+  fixture: Awaited<ReturnType<typeof alternateRepository>>,
+  cwd = fixture.root,
+  worktree = fixture.root,
+) {
+  const { root, environment, git, object } = fixture;
+  const beforeEnvironment = { ...environment };
+  const ambient = process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"];
+  const index = await readFile(join(root, ".git", "index"));
+  expect(git(["cat-file", "-p", object], cwd)).toBe(
+    "Synthetic alternate-only object",
+  );
+  const nativeAlternates = git(
+    ["-c", "core.quotePath=false", "count-objects", "-v"],
+    cwd,
+  )
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith("alternate: "))
+    .map((line) => line.slice("alternate: ".length));
+  let controls: readonly string[] = [];
+  let launches = 0;
+  const outcome = await runIssuePatch(cwd, {
+    environment,
+    onRepositoryCommand: (command, args, directory, options) =>
+      runGitRepositoryCommand(command, args, directory, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      }),
+    onCodex: async (_args, output, childEnvironment) => {
+      launches++;
+      controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+      expect(childEnvironment?.["GIT_ALTERNATE_OBJECT_DIRECTORIES"]).toBe(
+        environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
+      );
+      await writeFile(join(worktree, "app.ts"), "after\n");
+      output?.stdout.write("Synthetic patch complete.\n");
+      return 0;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(launches).toBe(1);
+  expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+  expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+  expect(environment).toEqual(beforeEnvironment);
+  expect(process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"]).toBe(ambient);
+  return {
+    controls: controls.map((path) => path.replaceAll("\\", "/")),
+    nativeAlternates,
+  };
+}
+
+test.each([
+  "quoted multiple pools",
+  "relative from discovered subdirectory",
+  "relative with explicit Git directory",
+  "directory link parent traversal",
+  "absolute native drive spelling",
+  "ignored and C-quoted entries",
+  "repository-authored indirect pools",
+])("patch grants caller-selected alternate objects: %s", async (mode) => {
+  const fixture = await alternateRepository();
+  const { root, support, environment } = fixture;
+  let pool = fixture.pool;
+  let cwd = root;
+  let worktree = root;
+  let value = quoted(pool);
+  const expected: string[] = [];
+  const excluded: string[] = [];
+  if (mode === "quoted multiple pools") {
+    pool = join(support, `pool${delimiter}é`);
+    await rename(fixture.pool, pool);
+    const second = join(support, "second ü pool");
+    await mkdir(second);
+    value = [quoted(pool), quoted(second)].join(delimiter);
+    expected.push(second);
+  } else if (mode.startsWith("relative")) {
+    cwd = join(root, "component");
+    await mkdir(cwd);
+    const explicit = mode === "relative with explicit Git directory";
+    if (explicit) {
+      environment["GIT_DIR"] = join(root, ".git");
+      worktree = cwd;
+      await writeFile(join(worktree, "app.ts"), "before\n");
+    }
+    value = relative(explicit ? cwd : root, pool);
+  } else if (mode === "directory link parent traversal") {
+    const physical = join(support, "physical");
+    await mkdir(join(physical, "child"), { recursive: true });
+    const physicalPool = join(physical, "pool");
+    if (process.platform === "win32") {
+      await mkdir(physicalPool);
+      excluded.push(physicalPool);
+    } else {
+      pool = physicalPool;
+      await rename(fixture.pool, pool);
+      await mkdir(fixture.pool);
+      excluded.push(fixture.pool);
+    }
+    const link = join(support, "alias");
+    await symlink(
+      join(physical, "child"),
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    value = quoted(`${link}${sep}..${sep}pool`);
+  } else if (mode === "absolute native drive spelling") {
+    value = quoted(pool.replaceAll("\\", "/"));
+  } else if (mode === "ignored and C-quoted entries") {
+    const notDirectory = join(support, "not-directory");
+    await writeFile(notDirectory, "Synthetic ordinary file\n");
+    value = [
+      `${quoted(pool).slice(0, -1)}\\000ignored"`,
+      "#ignored",
+      "",
+      quoted(join(support, "missing")),
+      quoted(notDirectory),
+      `${quoted(support).slice(0, -1)}/invalid-\\377"`,
+      '"unterminated',
+    ].join(delimiter);
+  } else if (mode === "repository-authored indirect pools") {
+    for (const owner of [join(root, ".git", "objects"), pool]) {
+      const indirect = join(support, `indirect-${excluded.length}`);
+      await mkdir(indirect);
+      await mkdir(join(owner, "info"), { recursive: true });
+      await writeFile(
+        join(owner, "info", "alternates"),
+        `${quoted(indirect)}\n`,
+      );
+      excluded.push(indirect);
+    }
+  }
+  environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = value;
+  expected.push(pool);
+  const { controls, nativeAlternates } = await patch(fixture, cwd, worktree);
+  for (const path of expected) {
+    const canonical = (await realpath(path)).replaceAll("\\", "/");
+    expect(nativeAlternates).toContain(canonical);
+    expect(controls).toContain(canonical);
+  }
+  for (const path of excluded) {
+    const canonical = (await realpath(path)).replaceAll("\\", "/");
+    expect(controls).not.toContain(canonical);
+    if (mode === "repository-authored indirect pools")
+      expect(nativeAlternates).toContain(canonical);
+  }
+});
+
+test("concurrent patches retain separate caller-selected alternate pools", async () => {
+  const pair = await Promise.all([
+    alternateRepository(),
+    alternateRepository(),
+  ]);
+  for (const fixture of pair)
+    fixture.environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = quoted(
+      fixture.pool,
+    );
+  const results = await Promise.all(pair.map((fixture) => patch(fixture)));
+  for (const [index, result] of results.entries()) {
+    expect(result.controls).toContain(pair[index]!.pool.replaceAll("\\", "/"));
+    expect(result.controls).not.toContain(
+      pair[1 - index]!.pool.replaceAll("\\", "/"),
+    );
+  }
+});

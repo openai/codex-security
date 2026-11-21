@@ -65,13 +65,13 @@ function expandVariables(path: string, environment: NodeJS.ProcessEnv): string {
   });
 }
 
-function expandedSetting(
+export function expandCredentialPath(
   name: string,
   value: string,
   home: string,
-  environment: NodeJS.ProcessEnv,
+  environment?: NodeJS.ProcessEnv,
 ): string {
-  const path = expandVariables(value, environment);
+  const path = environment ? expandVariables(value, environment) : value;
   if (
     path === "~" ||
     path.startsWith("~/") ||
@@ -81,6 +81,36 @@ function expandedSetting(
   if (path.startsWith("~"))
     throw new CodexSecurityError(`Use a fully expanded file path for ${name}.`);
   return path;
+}
+
+/** @internal Account home used for the standard AWS profile files. */
+export function awsAccountHome(environment: NodeJS.ProcessEnv): string {
+  const homePath = environmentEntry(environment, "HOMEPATH");
+  const configured = windows
+    ? (environmentEntry(environment, "USERPROFILE") ??
+      (homePath
+        ? (environmentEntry(environment, "HOMEDRIVE") ?? "") + homePath
+        : undefined))
+    : environmentEntry(environment, "HOME");
+  return configured ?? homedir();
+}
+
+/** @internal Both shared files can supply credentials for the active AWS profile. */
+export function awsProfileFiles(home: string, environment: NodeJS.ProcessEnv) {
+  return (
+    [
+      ["AWS_CONFIG_FILE", "config"],
+      ["AWS_SHARED_CREDENTIALS_FILE", "credentials"],
+    ] as const
+  ).map(([name, filename]) => {
+    const value = environmentEntry(environment, name);
+    const defaultPath = join(home, ".aws", filename);
+    const path =
+      value === undefined
+        ? defaultPath
+        : expandCredentialPath(name, value, home, environment);
+    return { name, value, defaultPath, path };
+  });
 }
 
 function pinSetting(
@@ -207,29 +237,15 @@ export async function prepareContinuumAws(
     if (path)
       child[name] = trustedSetting(path, `an account ${name} directory`);
   }
-  const configuredHome = windows
-    ? (child["USERPROFILE"] ??
-      (child["HOMEPATH"]
-        ? (child["HOMEDRIVE"] ?? "") + child["HOMEPATH"]
-        : undefined))
-    : child["HOME"];
   const home = trustedSetting(
-    configuredHome ?? homedir(),
+    awsAccountHome(child),
     "an account home directory",
   );
   child[windows ? "USERPROFILE" : "HOME"] = home;
 
   // AWS can run credential helpers from profiles and commands from aliases.
   const awsDirectory = join(home, ".aws");
-  for (const [name, filename] of [
-    ["AWS_CONFIG_FILE", "config"],
-    ["AWS_SHARED_CREDENTIALS_FILE", "credentials"],
-  ] as const) {
-    const value = child[name];
-    const path =
-      value === undefined
-        ? join(awsDirectory, filename)
-        : expandedSetting(name, value, home, environment);
+  for (const { name, value, path } of awsProfileFiles(home, environment)) {
     const safe = trustedSetting(path, `an ${name} file`);
     if (value !== undefined) child[name] = pinSetting(name, safe, child);
   }
@@ -243,7 +259,12 @@ export async function prepareContinuumAws(
   if (child["AWS_DATA_PATH"] !== undefined) {
     const paths: string[] = [];
     for (const entry of child["AWS_DATA_PATH"].split(delimiter)) {
-      const path = expandedSetting("AWS_DATA_PATH", entry, home, environment);
+      const path = expandCredentialPath(
+        "AWS_DATA_PATH",
+        entry,
+        home,
+        environment,
+      );
       if (!path) continue;
       const safe = await checkModelPath(path, resolvePath, roots, signal);
       paths.push(pinSetting("AWS_DATA_PATH", safe, child));

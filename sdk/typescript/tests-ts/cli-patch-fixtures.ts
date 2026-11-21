@@ -1,0 +1,608 @@
+import { expect, beforeEach, afterEach } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { isAbsolute, join, resolve, win32 } from "node:path";
+import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
+import { main } from "../src/cli.js";
+import { dependencies, fakeResult, type OnCodex } from "./cli-fixtures.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { createCliTest } from "./support/cli-run.js";
+
+export let CURRENT_REPOSITORY: string;
+export let SAVED_REPOSITORY: string;
+
+export function setupPatchWorkflowFixtures() {
+  const workflowDirectories = patchDirectories();
+  beforeEach(async () => {
+    const root = await workflowDirectories.create("patch-workflow-");
+    CURRENT_REPOSITORY = join(root, "current", "repository");
+    SAVED_REPOSITORY = join(root, "saved", "repository");
+    await Promise.all(
+      [
+        CURRENT_REPOSITORY,
+        SAVED_REPOSITORY,
+        resolve(CURRENT_REPOSITORY, "../other/repository"),
+      ].map(async (directory) => {
+        await mkdir(directory, { recursive: true });
+        repositoryGit(directory)("init", "--initial-branch=main");
+      }),
+    );
+  });
+  return workflowDirectories;
+}
+
+export const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
+
+export async function readAppliedText(path: string) {
+  return (await readFile(path, "utf8")).replaceAll("\r\n", "\n");
+}
+
+export function resultWithFindings(severities: readonly SeverityLevel[]) {
+  const result = fakeResult(severities);
+  result.findings.findings.forEach((finding, index) => {
+    Object.assign(finding, {
+      findingId: `csf_${index + 1}`,
+      occurrenceId: `occ_${index + 1}`,
+      title: `Finding ${index + 1}`,
+      summary: `Summary ${index + 1}`,
+      locations: [
+        { path: `src/finding-${index + 1}.ts`, startLine: index + 1 },
+      ],
+    });
+  });
+  return result;
+}
+
+export function savedScan(
+  result: ReturnType<typeof resultWithFindings>,
+  scanId = "scan-1",
+  targetPath = SAVED_REPOSITORY,
+): JsonObject {
+  return {
+    scan: {
+      scanId,
+      targetPath,
+      findings: result.findings.findings as unknown as JsonObject[],
+    },
+  };
+}
+
+function verifiedPatch(
+  occurrenceId: Finding["occurrenceId"],
+  files: readonly string[],
+  verification = "The exploit fails and focused tests pass.",
+) {
+  return { occurrenceId, status: "verified", files, verification };
+}
+
+export function verifiedPatchResponse(
+  files: readonly string[],
+  verification: string,
+  occurrenceId = "occ_1",
+) {
+  return JSON.stringify({
+    patches: [verifiedPatch(occurrenceId, files, verification)],
+  });
+}
+
+export function completePatches(
+  args: readonly string[],
+  output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
+  status: "verified" | "blocked" = "verified",
+  reportedFiles?: readonly string[],
+): Finding[] {
+  const prompt = output?.appServer?.prompt ?? args.at(-1)!;
+  const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
+  output?.stdout.write(
+    JSON.stringify({
+      patches: findings.map((finding) =>
+        status === "verified"
+          ? verifiedPatch(
+              finding.occurrenceId,
+              reportedFiles ?? [finding.locations[0]!.path],
+            )
+          : {
+              occurrenceId: finding.occurrenceId,
+              status,
+              files: [],
+              reason: "The required service is unavailable.",
+            },
+      ),
+    }),
+  );
+  return findings;
+}
+
+export function patchArtifactFromPrompt(prompt: string): {
+  path: string;
+  sourceType: string;
+  base: string;
+  changedFiles: string[];
+  sha256: string;
+} {
+  return JSON.parse(
+    prompt.split("\n").find((line) => line.startsWith('{"path":'))!,
+  );
+}
+
+export function patchRiskSummary() {
+  return [
+    "### Recommendation: human review required",
+    "",
+    "The patch has moderate impact and low regression likelihood.",
+    "",
+    "- Protection: focused tests passed",
+    "- Recovery: revert the patch commit",
+  ].join("\n");
+}
+
+export function patchRiskAssessment(summary = patchRiskSummary()) {
+  return {
+    report: [
+      "<!-- codex-security:patch-risk-summary:start -->",
+      summary,
+      "<!-- codex-security:patch-risk-summary:end -->",
+      "",
+      "```json",
+      '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
+      "```",
+    ].join("\n"),
+  };
+}
+
+export function patchRiskReport(summary = patchRiskSummary()) {
+  return [
+    summary,
+    "",
+    "```json",
+    '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
+    "```",
+  ].join("\n");
+}
+
+export function patchDependencies(
+  options: Parameters<typeof dependencies>[0] = {},
+) {
+  return dependencies({
+    ...options,
+    environment: {
+      GH_CONFIG_DIR: resolve("/synthetic/gh"),
+      ...options.environment,
+    },
+    onRepositoryCommand: async (command, args, repository, commandOptions) => {
+      const output = await options.onRepositoryCommand?.(
+        command,
+        args,
+        repository,
+        commandOptions,
+      );
+      if (command !== "git" || output) return output;
+      const inspectSearchPath = args[1]?.startsWith(
+        "alias.codex-security-transport-path-",
+      );
+      const resolveGitPath =
+        output === undefined &&
+        args.includes("rev-parse") &&
+        args.some((argument) =>
+          [
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "--git-dir",
+            "--git-path",
+            "--resolve-git-dir",
+          ].includes(argument),
+        );
+      if (!inspectSearchPath && !resolveGitPath) return output;
+      return runGitRepositoryCommand(command, args, repository, commandOptions);
+    },
+  });
+}
+
+export async function runWorkflow(
+  arguments_: string[],
+  fixtures: Parameters<typeof dependencies>[0] = {},
+  options: {
+    interactive?: boolean;
+    review?: boolean;
+    localHosting?: boolean;
+    hostingOrigin?: string;
+    configure?: (value: ReturnType<typeof dependencies>) => void;
+  } = {},
+) {
+  const { stdout, stderr, runCli } = createCliTest(main, {
+    stderr: options.interactive,
+  });
+
+  const savedFindings = new Map<string, readonly Finding[]>();
+  const current = patchDependencies({
+    currentDirectory: CURRENT_REPOSITORY,
+    onCodex: (args, output) => {
+      completePatches(args, output);
+      return 0;
+    },
+    ...fixtures,
+    onWorkbench: async (...args) => {
+      const response = await fixtures.onWorkbench?.(...args);
+      const scan = response?.["scan"] as JsonObject | undefined;
+      if (
+        typeof scan?.["scanId"] === "string" &&
+        Array.isArray(scan["findings"])
+      ) {
+        savedFindings.set(
+          scan["scanId"],
+          scan["findings"] as unknown as Finding[],
+        );
+      }
+      return response ?? { scans: [] };
+    },
+    readSavedFindings:
+      fixtures.readSavedFindings ??
+      (async (scanId) =>
+        fixtures.result?.findings.findings ?? savedFindings.get(scanId) ?? []),
+  });
+  // Publication fixtures use real local bare repositories behind a synthetic
+  // hosting transport. Hosting tests disable this adapter to inspect real URLs.
+  if (options.localHosting !== false) {
+    const run = current.runRepositoryCommand;
+    const localRemotes = new Map<string, string>();
+    let hostedRemote = "https://github.example.test/example/repository.git";
+    current.runRepositoryCommand = async (
+      command,
+      args,
+      cwd,
+      commandOptions,
+    ) => {
+      if (command === "gh" && args[0] === "repo" && args[1] === "view") {
+        if (localRemotes.size && args.at(-1) === ".id")
+          return "synthetic-origin-id";
+        if (args.at(-1) === ".url") return hostedRemote.replace(/\.git$/u, "");
+        if (args.at(-1) === ".nameWithOwner")
+          return args[2]!.slice(args[2]!.indexOf("/") + 1);
+      }
+      const environment = { ...commandOptions?.environment };
+      // The local transport adapter owns the synthetic hosted destinations.
+      if (localRemotes.size && args.at(-1) === "^remote\\.origin\\.pushurl$")
+        return [...localRemotes.keys()]
+          .map(
+            (url) => `command\0command line:\0remote.origin.pushurl\n${url}\0`,
+          )
+          .join("");
+      for (const [key, value] of Object.entries(environment)) {
+        if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
+        for (const [hosted, local] of localRemotes)
+          if (value === `url.${hosted}.insteadOf`)
+            environment[key] = `url.${local}.insteadOf`;
+      }
+      const bound = { ...commandOptions, environment };
+      const output = await run(
+        command,
+        args,
+        cwd,
+        localRemotes.size && commandOptions?.patchTransport
+          ? localHostingOptions(bound)
+          : bound,
+      );
+      if (command !== "git" || args[0] !== "remote" || args[1] !== "get-url")
+        return output;
+      if (!output.trim()) return hostedRemote;
+      const remotes = output.split("\n").map((remote) => {
+        if (
+          !isAbsolute(remote) &&
+          !win32.isAbsolute(remote) &&
+          !remote.startsWith("file://")
+        )
+          return remote;
+        let hosted = [...localRemotes].find(
+          ([, local]) => local === remote,
+        )?.[0];
+        if (!hosted) {
+          hosted =
+            options.hostingOrigin ??
+            `https://github.example.test/example/repository-${localRemotes.size}.git`;
+          localRemotes.set(hosted, remote);
+        }
+        return hosted;
+      });
+      if (args.includes("--push") && remotes[0]?.includes("://"))
+        hostedRemote = remotes[0];
+      return remotes.join("\n");
+    };
+  }
+  if (options.interactive) {
+    current.confirmPatchReview = async (question) => {
+      stderr.stream.write(`\n${question} (y/N)\n`);
+      return options.review ?? true;
+    };
+  }
+  options.configure?.(current);
+  return {
+    exitCode: await runCli(arguments_, current),
+    stdout: stdout.text(),
+    stderr: stderr.text(),
+  };
+}
+
+export const directoryLinkType =
+  process.platform === "win32" ? "junction" : "dir";
+
+export function patchDirectories() {
+  const fixtures = createTemporaryDirectories(true);
+  afterEach(fixtures.cleanup);
+  return fixtures;
+}
+
+export function initializePatchGit(directory: string) {
+  const git = repositoryGit(directory);
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  return git;
+}
+
+export function runIssuePatch(
+  directory: string,
+  fixtures: Parameters<typeof runWorkflow>[1],
+  options?: Parameters<typeof runWorkflow>[2],
+) {
+  return runWorkflow(
+    ["patch", "Synthetic issue", "--json"],
+    {
+      currentDirectory: directory,
+      onRepositoryCommand: runGitRepositoryCommand,
+      ...fixtures,
+    },
+    options,
+  );
+}
+
+export async function observeIssuePatch(
+  directory: string,
+  edit: (output: Parameters<OnCodex>[1]) => Promise<void>,
+  environment?: NodeJS.ProcessEnv,
+) {
+  const runGit = environment
+    ? gitWithEnvironment(environment)
+    : runGitRepositoryCommand;
+  let launches = 0;
+  const afterTurn: string[][] = [];
+  let controls: readonly string[] = [];
+  const outcome = await runIssuePatch(directory, {
+    ...(environment && { environment }),
+    onRepositoryCommand: (command, args, cwd, options) => {
+      if (launches > 0) afterTurn.push([...args]);
+      return runGit(command, args, cwd, options);
+    },
+    onCodex: async (_args, output) => {
+      launches++;
+      controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
+      await edit(output);
+      output?.stdout.write("Synthetic patch complete.\n");
+      return 0;
+    },
+  });
+  return { outcome, launches, controls, afterTurn };
+}
+
+export function runPublicationWorkflow(
+  target: "issue" | "scan",
+  fixtures: Parameters<typeof runWorkflow>[1],
+  options?: Parameters<typeof runWorkflow>[2],
+) {
+  const selection =
+    target === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
+  return runWorkflow(
+    ["patch", ...selection, "--create-pr", "--json"],
+    fixtures,
+    options,
+  );
+}
+
+export function runSavedPublication(
+  directory: string,
+  fixtures: Parameters<typeof runWorkflow>[1],
+  {
+    resumeBranch,
+    ...options
+  }: Parameters<typeof runWorkflow>[2] & {
+    resumeBranch?: string | undefined;
+  } = {},
+) {
+  const saved = {
+    currentDirectory: directory,
+    onWorkbench: () =>
+      savedScan(resultWithFindings(["high"]), "scan-1", directory),
+    ...fixtures,
+  };
+  return resumeBranch === undefined
+    ? runPublicationWorkflow("scan", saved, options)
+    : runWorkflow(
+        ["patch", "--resume-pr", resumeBranch, "--json"],
+        saved,
+        options,
+      );
+}
+
+export function fixSavedFinding(
+  directory: string,
+  before?: () => void | Promise<void>,
+): OnCodex {
+  return async (args, output) => {
+    if (before) await before();
+    await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+    completePatches(args, output);
+    return 0;
+  };
+}
+
+export function createSavedPatchBranch(
+  git: ReturnType<typeof repositoryGit>,
+  branch: string,
+  commit?: string,
+) {
+  git("branch", branch);
+  git(
+    "config",
+    `branch.${branch}.codexSecurityPatchCommit`,
+    commit ?? git("rev-parse", "HEAD"),
+  );
+}
+
+export function gitWithEnvironment(
+  environment: NodeJS.ProcessEnv,
+): typeof runGitRepositoryCommand {
+  return (command, args, cwd, options) =>
+    runGitRepositoryCommand(command, args, cwd, {
+      ...options,
+      environment: { ...environment, ...options?.environment },
+    });
+}
+
+export function repositoryGit(
+  repository: string,
+  environment?: NodeJS.ProcessEnv,
+) {
+  return (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: repository,
+      ...(environment && { env: { ...process.env, ...environment } }),
+      encoding: "utf8",
+      maxBuffer: Infinity,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+}
+
+export const runGitRepositoryCommand: (
+  ...args: Parameters<ReturnType<typeof dependencies>["runRepositoryCommand"]>
+) => string | Promise<string> = (command, args, workingDirectory, options) => {
+  expect(command).toBe("git");
+  const result = execFileSync("git", args, {
+    encoding:
+      options?.encoding === "base64" || options?.onStdout !== undefined
+        ? "buffer"
+        : "utf8",
+    cwd: workingDirectory,
+    env: { ...process.env, ...options?.environment },
+    maxBuffer: options?.maxBuffer,
+    input: options?.input,
+    stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+  });
+  if (options?.onStdout !== undefined) {
+    options.onStdout(Buffer.isBuffer(result) ? result : Buffer.from(result));
+    return "";
+  }
+  const output = Buffer.isBuffer(result)
+    ? result.toString(options?.encoding ?? "utf8")
+    : result;
+  return options?.trim === false ? output : output.trim();
+};
+
+// These fixtures explicitly route a simulated network destination to a local bare receiver.
+function localHostingOptions(
+  options: Parameters<typeof runGitRepositoryCommand>[3],
+) {
+  const environment = { ...options?.environment };
+  for (const [key, value] of Object.entries(environment))
+    if (key.startsWith("GIT_CONFIG_KEY_") && value === "protocol.file.allow")
+      environment[key.replace("_KEY_", "_VALUE_")] = "always";
+  if (environment["GIT_ALLOW_PROTOCOL"] !== undefined)
+    environment["GIT_ALLOW_PROTOCOL"] = [
+      ...environment["GIT_ALLOW_PROTOCOL"].split(":"),
+      "file",
+    ].join(":");
+  return { ...options, environment };
+}
+
+export const runLocalHostingTransport: typeof runGitRepositoryCommand = (
+  command,
+  args,
+  cwd,
+  options,
+) => runGitRepositoryCommand(command, args, cwd, localHostingOptions(options));
+
+export function runHostedGit(
+  remote: string,
+  args: readonly string[],
+  cwd: string,
+  options?: Parameters<typeof runGitRepositoryCommand>[3],
+) {
+  if (args.includes("ls-remote"))
+    return runLocalHostingTransport(
+      "git",
+      ["ls-remote", "--heads", "--", remote],
+      cwd,
+      options,
+    );
+  if (args[0] === "push")
+    return runLocalHostingTransport(
+      "git",
+      args.map((arg) => (arg === "origin" ? remote : arg)),
+      cwd,
+      options,
+    );
+  return runGitRepositoryCommand("git", args, cwd, options);
+}
+
+export async function addPublicationOrigin(
+  fixtures: ReturnType<typeof createTemporaryDirectories>,
+  git: ReturnType<typeof repositoryGit>,
+  format: readonly string[] = [],
+) {
+  const remote = await fixtures.create("patch-destination-origin-");
+  git("init", ...format, "--bare", remote);
+  git("remote", "add", "origin", remote);
+  return remote;
+}
+
+export async function publicationRepository(
+  fixtures: ReturnType<typeof createTemporaryDirectories>,
+  objectFormat?: "sha1" | "sha256",
+) {
+  const directory = await fixtures.create("patch-destination-");
+  const git = repositoryGit(directory);
+  const format = objectFormat ? [`--object-format=${objectFormat}`] : [];
+  git("init", ...format, "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  await mkdir(join(directory, "src"));
+  await writeFile(join(directory, "src/finding-1.ts"), "original\n");
+  git("add", ".");
+  git("commit", "-m", "Synthetic baseline");
+  const remote = await addPublicationOrigin(fixtures, git, format);
+  return { directory, git, remote };
+}
+
+export const runPublicationCommand: typeof runGitRepositoryCommand = (
+  command,
+  args,
+  cwd,
+  options,
+) =>
+  command === "git"
+    ? runGitRepositoryCommand(command, args, cwd, options)
+    : args[1] === "list"
+      ? "[]"
+      : "https://github.example.test/example/repository/pull/1";
+
+// A saved-finding turn reports its verified paths. Supplied issues reply in prose.
+export function runPublication(
+  directory: string,
+  target: "issue" | readonly string[],
+  edit: () => void | Promise<void>,
+) {
+  return runPublicationWorkflow(target === "issue" ? "issue" : "scan", {
+    currentDirectory: directory,
+    onWorkbench:
+      target === "issue"
+        ? undefined
+        : () => savedScan(resultWithFindings(["high"]), "scan-1", directory),
+    onRepositoryCommand: runPublicationCommand,
+    onCodex: async (args, output) => {
+      await edit();
+      if (target === "issue")
+        output!.stdout.write("Synthetic patch complete.\n");
+      else completePatches(args, output, "verified", target);
+      return 0;
+    },
+  });
+}

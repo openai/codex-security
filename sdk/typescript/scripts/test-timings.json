@@ -274,10 +274,26 @@
     "darwin": 1.3,
     "win32": 3.9
   },
+  "cli-patch-context-sequencing.test.ts": {
+    "darwin": 308.3,
+    "win32": 1183.8
+  },
+  "cli-patch-hosting.test.ts": {
+    "darwin": 192.2,
+    "win32": 927.8
+  },
+  "cli-patch-nested.test.ts": {
+    "darwin": 190.9,
+    "win32": 958.8
+  },
   "cli-patch-results.test.ts": {
     "linux": 3.5,
     "darwin": 8,
     "win32": 73.9
+  },
+  "cli-patch-snapshot-context.test.ts": {
+    "darwin": 190.3,
+    "win32": 998.6
   },
   "cli-patch-trust.test.ts": {
     "linux": 1,
@@ -286,8 +302,8 @@
   },
   "cli-patch.test.ts": {
     "linux": 3.5,
-    "darwin": 6.9,
-    "win32": 23.8
+    "darwin": 367.6,
+    "win32": 1316.8
   },
   "cli-policy.test.ts": {
     "linux": 5.2,
@@ -788,11 +804,6 @@
     "linux": 22.1,
     "darwin": 34.5,
     "win32": 103.9
-  },
-  "patch-publication.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 0.7
   },
   "patch-risk-contract.test.ts": {
     "linux": 22.2,

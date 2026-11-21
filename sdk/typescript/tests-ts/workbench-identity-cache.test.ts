@@ -1237,6 +1237,7 @@ with ExitStack() as stack:
             add_target(name, stored, live, relative="service" if name == "scope" else ".")
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
         missing.add(paths["removed"])
+        Path(paths["requested"]).mkdir()
         scan_dir = root / "scan-output"
         original_iterdir = Path.iterdir
         stack.enter_context(patch.object(Path, "iterdir", lambda path: iter(()) if path == scan_dir else original_iterdir(path)))
