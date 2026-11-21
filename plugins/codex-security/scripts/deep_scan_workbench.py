@@ -23,6 +23,7 @@ from workbench.storage import (
     worker_usage_directory,
 )
 from workbench_constants import PHASES
+from workbench_finding_updates import record_deep_iteration_updates
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_target_state import require_scan_checkout_owner
@@ -1460,6 +1461,9 @@ def record_deep_scan_iteration(
         connection.execute(
             "UPDATE scan_progress SET deep_review_pass = COALESCE(deep_review_pass, 0) + 1, updated_at = ? WHERE scan_id = ?",
             (now, scan_id),
+        )
+        record_deep_iteration_updates(
+            connection, scan, run, result, dependencies().requested_finding_scope
         )
     return deep_scan_result(connection, scan_id)
 

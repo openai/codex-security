@@ -16,6 +16,7 @@ import {
   writeJsonAtomic,
 } from "./artifacts.js";
 import {
+  allocatePublicationIdentities,
   persistedScanUnion,
   parseScanUnion,
   addScanCoverage,
@@ -370,7 +371,10 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) return;
       this.abortController.signal.throwIfAborted();
       const draft = loopResult.result
-        ? scanUnionToDraft(loopResult.result)
+        ? scanUnionToDraft({
+            ...loopResult.result,
+            findings: this.scopedFindings(loopResult.result),
+          })
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
@@ -386,13 +390,6 @@ export class DeepScanCoordinator {
           "Deep Scan aggregate does not match its authoritative scan identity.",
         );
       }
-      // Publish the current scope without rewriting accepted source artifacts.
-      draft.findings = findingsWithinScope(
-        draft.findings,
-        this.state.includePaths ?? [this.state.scope],
-        this.state.filePaths,
-        this.state.excludePaths,
-      );
       await this.options.onComplete?.(
         draft,
         this.publicationAbortController.signal,
@@ -711,6 +708,15 @@ export class DeepScanCoordinator {
     return true;
   }
 
+  private scopedFindings(result: ScanUnion) {
+    return findingsWithinScope(
+      result.findings,
+      this.state.includePaths ?? [this.state.scope],
+      this.state.filePaths,
+      this.state.excludePaths,
+    );
+  }
+
   private async runIterations(): Promise<LoopResult> {
     const { scanId, config } = this.state;
     const signal = this.abortController.signal;
@@ -739,6 +745,7 @@ export class DeepScanCoordinator {
       resultPath,
       accepted.filter((w) => merged.has(w.id)),
     );
+    allocatePublicationIdentities(this.scopedFindings(result));
     const scanLabel = await nextWorkerLabel(
       this.artifacts.workersRoot,
       "discovery",
@@ -813,6 +820,7 @@ export class DeepScanCoordinator {
           "output",
           "result.json",
         );
+        allocatePublicationIdentities(this.scopedFindings(result));
         await writeJsonAtomic(resultPath, persistedScanUnion(result));
         const iterationId = randomUUID();
         const saved = await this.options.store.recordIteration({

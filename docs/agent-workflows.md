@@ -146,6 +146,29 @@ for command discovery and output formats.
 | A skill is visible but its scan tools are unavailable    | Check the plugin server’s setup error and resolve it before starting a scan.                                                                            |
 | Authentication fails on a headless machine               | Use [device or SSH login](../sdk/typescript/docs/cli.md#authentication), or configured API credentials for CI.                                          |
 
+## Follow reviewed findings during a scan
+
+In a host with the Codex Security plugin, call
+`list_codex_security_finding_updates` with the local scan's `scanId`.
+Standard and Diff scans publish findings from accepted review checkpoints.
+Deep publishes findings after the coordinator commits a merged batch of
+completed passes. Individual workers can finish before that batch appears.
+The first page starts at the beginning. Pass its `nextCursor` as
+`afterCursor` on the next call. Drain pages while `hasMore` is true. While
+the scan is running, poll again from the last cursor, even after an empty
+page. Keep a separate cursor for each scan and save it after processing the
+page to resume after a disconnect.
+
+Use `findingId` to follow an item through review. A `reviewed` update
+introduces a finding, `updated` carries its revised assessment,
+`withdrawn` removes it from the current view, and `finalized` gives the
+version in the completed result. A finding can first appear at finalization.
+For an `updated` event, `changedFields` names the revised fields, including
+changes to evidence outside the event's abbreviated preview.
+Deferred leads and candidates awaiting custom validation stay out of the
+reviewed feed. A stopped scan can contain reviewed updates without a final
+verdict. Check the scan status as well as the last page.
+
 ## Recover an interrupted task
 
 If Codex stops waiting for a Deep Scan in chat, ask it to continue the same

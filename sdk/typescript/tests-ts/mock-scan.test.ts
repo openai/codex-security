@@ -74,6 +74,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
   const registrations: Array<
     Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0]
   > = [];
+  const onFindingUpdate = mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
   const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
   onLifecycle.mockImplementationOnce(rejecting("observer unavailable"));
   const onObserverError = mock<NonNullable<ScanOptions["onObserverError"]>>();
@@ -85,6 +86,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       failureSeverity: "informational",
       onAuthentication: () => callbacks.push("authentication"),
       onLifecycle,
+      onFindingUpdate,
       onObserverError,
       onScanRegistered: (scan) => {
         callbacks.push("registered");
@@ -127,6 +129,19 @@ test("mock scans seal real artifacts and index shared and unique findings withou
         scanDir: first.scanDir,
       },
     ]);
+    expect(
+      onFindingUpdate.mock.calls
+        .map(([update]) => update)
+        .filter(
+          (update) =>
+            update.scanId === first.manifest.scan.id &&
+            update.kind === "finalized",
+        )
+        .map((update) => update.findingId)
+        .sort(),
+    ).toEqual(
+      first.findings.findings.map((finding) => finding.findingId).sort(),
+    );
     expect(first.findings.findings).toHaveLength(12);
     expect(first.review).not.toHaveProperty("status");
     expect(first.manifest.scan.status).toBe("completed");
@@ -365,10 +380,12 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
     );
     await git("commit", "-am", "Update synthetic fixture");
     const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
+    const onFindingUpdate = mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
     const diff = await client.run(repository, {
       mock: true,
       target: DiffTarget.refs({ base: "HEAD~1" }),
       onLifecycle,
+      onFindingUpdate,
     });
     expect(
       onLifecycle.mock.calls.map(([{ mode, status }]) => [mode, status]),
@@ -385,9 +402,21 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
     const workingTree = await client.run(repository, {
       mock: true,
       target: DiffTarget.workingTree({}),
+      onFindingUpdate,
     });
     expect(workingTree.manifest.scan.target.kind).toBe("git_diff");
     expect(workingTree.manifest.scan.mode).toBe("working_tree");
+    for (const result of [diff, workingTree]) {
+      const finalized = onFindingUpdate.mock.calls
+        .map(([update]) => update)
+        .filter((update) => update.scanId === result.manifest.scan.id);
+      expect(finalized.every((update) => update.kind === "finalized")).toBe(
+        true,
+      );
+      expect(finalized.map((update) => update.findingId).sort()).toEqual(
+        result.findings.findings.map((finding) => finding.findingId).sort(),
+      );
+    }
   } finally {
     await client.close();
   }

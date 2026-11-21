@@ -588,5 +588,13 @@
       "CREATE INDEX external_finding_members_by_version\nON external_finding_import_members (finding_id, version);",
       "CREATE TABLE external_finding_publications (\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    cloud_api_url TEXT NOT NULL,\n    account_id TEXT NOT NULL,\n    destination_id TEXT NOT NULL,\n    receipt_id TEXT NOT NULL,\n    outcome TEXT NOT NULL,\n    cloud_finding_id TEXT,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (finding_id, version, cloud_api_url, account_id, destination_id, receipt_id)\n) WITHOUT ROWID;"
     ]
+  },
+  {
+    "version": 87,
+    "name": "Standard scan reviewed finding updates",
+    "statements": [
+      "CREATE TABLE scan_finding_updates (\n    scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,\n    cursor INTEGER NOT NULL,\n    finding_id TEXT NOT NULL,\n    candidate_id TEXT,\n    kind TEXT NOT NULL,\n    preview_json TEXT NOT NULL,\n    fields_json TEXT NOT NULL,\n    changed_json TEXT,\n    PRIMARY KEY (scan_id, cursor)\n) WITHOUT ROWID;",
+      "CREATE INDEX scan_finding_updates_by_finding ON scan_finding_updates (scan_id, finding_id, cursor DESC);"
+    ]
   }
 ]

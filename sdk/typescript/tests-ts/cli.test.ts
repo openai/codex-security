@@ -3123,6 +3123,82 @@ describe("CLI", () => {
     expect(text).toContain("unavailable (model pricing or usage missing)");
   });
 
+  test.each([
+    [[], false],
+    [[], true],
+    [["--diff", "HEAD^"], false],
+    [["--working-tree"], true],
+    [["--mode", "deep"], false],
+    [["--mode", "deep"], true],
+  ] as const)(
+    "shows finding revisions and their final disposition (scope=%j, dashboard=%p)",
+    async (scope, dashboard) => {
+      const { stdout, stderr, runCli } = createCliTest(main, {
+        stderr: dashboard,
+      });
+      const result = fakeResult();
+      const deps = dependencies({
+        environment: { NO_COLOR: "1" },
+        onTurn: (_repository, options) => {
+          const finding = {
+            scanId: "scan",
+            findingId: "review-1",
+            title: "Review\nexample",
+            summary: "Changed evidence",
+            validation: "confirmed",
+            severity: "high",
+            locations: [{ file: "src/app.ts", line: 7 }],
+          };
+          expect(options.onFindingUpdate).toBeFunction();
+          for (const [index, kind] of (
+            ["reviewed", "updated", "withdrawn"] as const
+          ).entries()) {
+            options.onFindingUpdate?.({
+              ...finding,
+              cursor: index + 1,
+              kind,
+              severity: kind === "reviewed" ? "high" : "medium",
+              changedFields:
+                kind === "updated" ? ["severity", "codeEvidence"] : undefined,
+            });
+          }
+          options.onFindingUpdate?.({
+            ...finding,
+            cursor: 4,
+            findingId: "review-2",
+            kind: "finalized",
+          });
+        },
+        result,
+      });
+      expect(
+        await runCli(
+          ["scan", ".", ...scope, ...(dashboard ? [] : ["--json"])],
+          deps,
+        ),
+      ).toBe(0);
+      if (!dashboard)
+        expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+      // For an interactive session, verify the record visible after leaving the alternate screen.
+      const output = stripVTControlCharacters(
+        dashboard
+          ? stderr.text().split("\u001b[?1049l").at(-1)!
+          : stderr.text(),
+      );
+      for (const [kind, severity] of [
+        ["reviewed", "high"],
+        ["updated", "medium"],
+        ["withdrawn", "medium"],
+      ]) {
+        expect(output).toContain(
+          `Finding ${kind} · review-1 · [${severity}] Review example · src/app.ts:7`,
+        );
+      }
+      expect(output).toContain("Finding finalized · review-2");
+      expect(output).toContain("Changed: severity, codeEvidence");
+    },
+  );
+
   test.each([false, true])(
     "shows durable Deep progress without changing stdout or TUI layout (interactive=%p)",
     async (interactive) => {

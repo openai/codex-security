@@ -52,7 +52,9 @@ Run your first scan from the repository directory:
 cs scan .
 ```
 
-When the scan completes, open the Markdown file at the **REPORT** path in the
+During a local Standard, Diff, or Deep scan, the CLI displays reviewed findings
+and changes to their assessments. When the scan completes, open the
+Markdown file at the **REPORT** path in the
 terminal. Run `cs scans show` from the same repository to find its latest
 completed scan again. See [scan scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
 for how to interpret exclusions in the report.

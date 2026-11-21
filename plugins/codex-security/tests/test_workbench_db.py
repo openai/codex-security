@@ -97,6 +97,7 @@ EXPECTED_TABLES = {
     "scan_artifacts",
     "scan_comparison_matches",
     "scan_comparisons",
+    "scan_finding_updates",
     "scan_progress",
     "scans",
     "schema_migrations",
