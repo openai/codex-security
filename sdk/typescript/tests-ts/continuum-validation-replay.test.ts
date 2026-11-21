@@ -231,6 +231,81 @@ describe("explicitly fake outcome variations", () => {
     });
   });
 
+  test("retains matching and scoring for a conclusive legacy verdict without run status", async () => {
+    const fake = withObservation();
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    delete fake.artifacts[id].body.validationEvidence.terminalStatus;
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.disposition).toBe("reportable");
+    expect(result.record).toMatchObject({
+      verdict: "EXPLOITABLE",
+      claimMatch: "on_target",
+      severityAfter: "critical",
+    });
+    expect(result.record?.terminalStatus).toBeUndefined();
+    expect(result.record?.proofObservation).toBeUndefined();
+  });
+
+  test.each([
+    { code: { proofCode: [{ content: "incomplete execution" }] } },
+    { observedEffect: "BEHAVIOR_CHANGED" },
+    { observedEffect: "BEHAVIOR_CHANGED", code: { proofCode: [] } },
+  ])(
+    "uses the source analysis when execution is incomplete: %j",
+    async (execution) => {
+      const fake = withObservation();
+      const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+      const validation = fake.artifacts[id].body.validationEvidence;
+      validation.executedProof = execution;
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record?.severityAfter).toBe("critical");
+      expect(result.record?.proofObservation).toEqual({
+        kind: "source_analysis",
+        summary: validation.sourceAnalysis.summary,
+      });
+      expect(result.report).toContain("using source analysis");
+    },
+  );
+
+  test("an older linked scorer cannot establish the current issue severity", async () => {
+    const fake = withObservation();
+    const history = fake.artifactLists.EVIDENCE.items;
+    const latest = {
+      artifactId: "new-score",
+      createdAt: fake.issue.updatedAt,
+    };
+    const score = {
+      ...structuredClone(fake.artifacts[history[0].artifactId]),
+      ...latest,
+    };
+    score.body.prevalidationSignals.signals[0].exploitability.sourceValidationArtifactId =
+      "another-proof";
+    fake.artifacts[latest.artifactId] = score;
+    history.push(latest);
+    const linked = fake.artifacts[history[0].artifactId];
+    const newestLinked = {
+      artifactId: "newest-linked",
+      createdAt: "2026-11-06T15:44:00Z",
+    };
+    const candidate = { ...structuredClone(linked), ...newestLinked };
+    for (const signal of candidate.body.prevalidationSignals.signals)
+      delete signal.computed;
+    fake.artifacts[newestLinked.artifactId] = candidate;
+    history.push(newestLinked);
+    fake.issue.severityReasoning = "UNRELATED_FACTORS";
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record).toMatchObject({
+      claimMatch: "on_target",
+      scoringArtifactId: newestLinked.artifactId,
+      severityAfter: "high",
+      providerSeverity: "critical",
+    });
+    expect(result.record?.proofObservation?.kind).toBe("source_analysis");
+    expect(result.record?.reachableFromAttacker).toBe(true);
+    expect(result.report).toContain("latest issue score");
+    expect(JSON.stringify(result)).not.toContain("UNRELATED_FACTORS");
+  });
+
   test("returns the executed effect without copying the proof body", async () => {
     const fake = structuredClone(recorded);
     const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;

@@ -314,15 +314,20 @@ function proofDetails(validation: Record<string, unknown>) {
   const results = validation["perFindingResults"];
   if (Array.isArray(results) && results.length !== 1) return;
   const proof = Array.isArray(results) ? object(results[0]) : validation;
-  if (proof["executedProof"] !== undefined) {
-    const executed = object(proof["executedProof"]);
-    const observed = text(executed["observedEffect"]);
-    const code = object(executed["code"])["proofCode"];
-    if (!observed || !Array.isArray(code)) return;
-    return {
-      evidence: code.map((row) => text(object(row)["content"])).join("\n"),
-      observation: { kind: "execution" as const, effect: safeText(observed) },
-    };
+  const executed = object(proof["executedProof"]);
+  const observed = text(executed["observedEffect"]);
+  const code = object(executed["code"])["proofCode"];
+  if (observed && Array.isArray(code)) {
+    const evidence = code
+      .map((row) => text(object(row)["content"]))
+      .join("\n")
+      .trim();
+    if (evidence)
+      return {
+        evidence,
+        description: "executed proof",
+        observation: { kind: "execution" as const, effect: safeText(observed) },
+      };
   }
   const analysis = object(proof["sourceAnalysis"]);
   const inferred = text(analysis["inferredEffect"]);
@@ -330,6 +335,7 @@ function proofDetails(validation: Record<string, unknown>) {
   if (summary)
     return {
       evidence: summary,
+      description: "source analysis",
       observation: {
         kind: "source_analysis" as const,
         ...(inferred && { effect: safeText(inferred) }),
@@ -500,16 +506,6 @@ function validationOutcome(
       unavailable: `Continuum validation ended with ${terminalStatus}.`,
     }),
   };
-}
-
-function proofType(artifact: Record<string, unknown>): string {
-  const validation = validationBody(artifact);
-  const proof = object(validation["executedProof"]);
-  if (Object.keys(proof).length === 0)
-    return Object.keys(validation).length > 0
-      ? "validation evidence"
-      : "no validation evidence returned";
-  return proof["code"] !== undefined ? "executed proof" : "validation evidence";
 }
 
 function defaultDelay(
@@ -742,6 +738,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     let issue: Record<string, unknown> = {};
     let validationArtifact: Record<string, unknown> | undefined;
     let likelihoodArtifact: Record<string, unknown> | undefined;
+    let latestScore = false;
     let resultScope: ValidationResultScope = "finding";
     let issueFindingCount: number | undefined;
     try {
@@ -803,7 +800,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
           issueFindingCount = new Set(ids).size;
           let issueFallback: Record<string, unknown> | undefined;
           let soleFindingFallback: Record<string, unknown> | undefined;
-          for (const kind of ["EVIDENCE", "VALIDATION_EVIDENCE"] as const) {
+          for (const kind of ["VALIDATION_EVIDENCE", "EVIDENCE"] as const) {
             const listed = await request("list-code-issue-artifacts", [
               "--environment-id",
               this.#options.environmentId,
@@ -815,11 +812,9 @@ export class ContinuumValidationProvider implements ValidationProvider {
             const items = Array.isArray(listed["items"])
               ? listed["items"].map(object)
               : [];
-            items.sort((a, b) =>
-              String(b["createdAt"] ?? "").localeCompare(
-                String(a["createdAt"] ?? ""),
-              ),
-            );
+            const timestamp = (item: Record<string, unknown>) =>
+              Date.parse(text(item["createdAt"]) ?? "");
+            items.sort((a, b) => (timestamp(b) || 0) - (timestamp(a) || 0));
             for (const candidate of items) {
               const artifactId = text(candidate["artifactId"]);
               if (!artifactId) continue;
@@ -839,7 +834,32 @@ export class ContinuumValidationProvider implements ValidationProvider {
                   "Continuum returned a different artifact while polling.",
                 );
               if (kind === "EVIDENCE") {
+                // Keep the newest for diagnostics if no linked score exists.
+                likelihoodArtifact ??= artifact;
+                if (
+                  !validationArtifact ||
+                  (resultScope === "finding" && issueFindingCount !== 1)
+                )
+                  break;
+                const outcome = validationOutcome(validationArtifact);
+                if (
+                  scoreLimitation(
+                    submittedAt,
+                    issue,
+                    validationArtifact,
+                    artifact,
+                    outcome.verdict,
+                  )
+                ) {
+                  if (outcome.disposition !== "reportable") break;
+                  continue;
+                }
                 likelihoodArtifact = artifact;
+                // The issue severity can only be attached to its newest score.
+                latestScore = items.every(
+                  (item) =>
+                    item === candidate || timestamp(item) < timestamp(artifact),
+                );
                 break;
               }
               const selected = selectFindingValidationArtifact(
@@ -870,11 +890,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
               )
                 issueFallback = artifact;
             }
-          }
-          validationArtifact ??= soleFindingFallback;
-          if (!validationArtifact && issueFallback) {
-            validationArtifact = issueFallback;
-            resultScope = "issue";
+            if (kind === "VALIDATION_EVIDENCE") {
+              validationArtifact ??= soleFindingFallback;
+              if (!validationArtifact && issueFallback) {
+                validationArtifact = issueFallback;
+                resultScope = "issue";
+              }
+              if (!validationArtifact) return;
+            }
           }
         }
       }
@@ -885,6 +908,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         issue,
         validationArtifact,
         likelihoodArtifact,
+        latestScore,
         resultScope,
         issueFindingCount,
       });
@@ -907,12 +931,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
       issue = {},
       validationArtifact = {},
       likelihoodArtifact = {},
+      latestScore = false,
       resultScope = "finding",
       issueFindingCount,
     }: {
       issue?: Record<string, unknown>;
       validationArtifact?: Record<string, unknown>;
       likelihoodArtifact?: Record<string, unknown>;
+      latestScore?: boolean;
       resultScope?: ValidationResultScope;
       issueFindingCount?: number;
     } = {},
@@ -921,10 +947,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const validation = validationBody(validationArtifact);
     const proof = proofDetails(validation);
     const match =
-      conclusive &&
-      terminalStatus === "COMPLETED" &&
-      resultScope === "finding" &&
-      proof
+      conclusive && resultScope === "finding" && proof
         ? proofClaimMatch(proof.evidence, finding)
         : "unknown";
 
@@ -944,16 +967,17 @@ export class ContinuumValidationProvider implements ValidationProvider {
       ].some((time) => Date.parse(text(time) ?? "") < submittedAt.getTime());
     const joinedValidatedIssue =
       conclusive && resultScope === "issue" && olderArtifact;
+    const proofType = proof?.description ?? "validation evidence";
     const reason = !conclusive
       ? (statusMessage ?? "The finding still needs validation.")
       : resultScope === "issue"
-        ? `Continuum returned ${verdict} for the issue using ${proofType(validationArtifact)}. This is not proof for the submitted finding individually. Raw proof code, payloads, commands, and console output are intentionally omitted.`
-        : `Basis: CODE — Continuum returned ${verdict} using ${proofType(validationArtifact)}. Basis: INFERRED — The proof-to-claim comparison was ${match}. Raw proof code, payloads, commands, and console output are intentionally omitted.`;
+        ? `Continuum returned ${verdict} for the issue using ${proofType}. This is not proof for the submitted finding individually. Raw proof code, payloads, commands, and console output are intentionally omitted.`
+        : `Basis: CODE — Continuum returned ${verdict} using ${proofType}. Basis: INFERRED — The proof-to-claim comparison was ${match}. Raw proof code, payloads, commands, and console output are intentionally omitted.`;
     const providerSeverity = text(issue["severity"])?.toLowerCase();
     const severityBefore = severityLevel(finding);
     const matched = match === "on_target" || match === "on_target_escalated";
     const hasScore = !!text(likelihoodArtifact["artifactId"]);
-    const limitation = !hasScore
+    const rejected = !hasScore
       ? undefined
       : resultScope === "finding" && issueFindingCount !== 1
         ? "The severity applies to a shared issue."
@@ -964,12 +988,23 @@ export class ContinuumValidationProvider implements ValidationProvider {
             likelihoodArtifact,
             verdict,
           );
-    const score = hasScore && !limitation ? likelihoodArtifact : undefined;
-    const regrade = matched && score && providerSeverity !== undefined;
-    const observation = matched && score ? proof?.observation : undefined;
+    const score = hasScore && !rejected ? likelihoodArtifact : undefined;
+    const limitation =
+      score && !latestScore
+        ? "The linked scoring artifact is not established as the latest issue score. Codex severity is retained."
+        : rejected;
+    const regrade =
+      matched && score && latestScore && providerSeverity !== undefined;
+    const observation =
+      matched && score && terminalStatus === "COMPLETED"
+        ? proof?.observation
+        : undefined;
     const severityAfter = regrade ? providerSeverity : severityBefore;
     const severityBasis = "INFERRED";
-    const factors = severityFactors(score && issue["severityReasoning"], score);
+    const factors = severityFactors(
+      score && latestScore && issue["severityReasoning"],
+      score,
+    );
     const signal = evidenceSignal(score ?? {});
     const reachableFromAttacker = score && attackerReachability(score);
     const preconditions = evidenceRows(score ?? {}).flatMap((row) =>
