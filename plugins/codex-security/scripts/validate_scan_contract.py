@@ -13,6 +13,15 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as FINALIZER
 
+_PUBLIC_LOCATIONS = {
+    "coverage.json",
+    "findings.json",
+    "report.md",
+    "scan-manifest.json",
+    "manifest.scan.completedAt",
+    "manifest.scan.sealedAt",
+}
+
 
 def validate_contract(scan_dir: Path) -> dict[str, Any]:
     """Validate the sealed artifacts and return the manifest, original findings, and review summary.
@@ -66,10 +75,22 @@ def main(argv: list[str] | None = None) -> int:
     """Print the validation receipt on success or report a validation error to stderr and return 2."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan-dir", required=True, type=Path)
+    parser.add_argument(
+        "--json-errors",
+        action="store_true",
+        help="also write a machine-readable rejection receipt to stdout on validation failure",
+    )
     args = parser.parse_args(argv)
     try:
         validated = validate_contract(args.scan_dir)
     except (OSError, ValueError, RecursionError) as exc:
+        if args.json_errors:
+            rejection = {"status": "invalid", "reason": "validation_failed"}
+            if isinstance(exc, FINALIZER.ContractError):
+                rejection["reason"] = exc.reason
+                if exc.location is not None and exc.location in _PUBLIC_LOCATIONS:
+                    rejection["location"] = exc.location
+            print(json.dumps(rejection, sort_keys=True))
         print(f"scan contract validation failed: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(receipt(validated), sort_keys=True))

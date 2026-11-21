@@ -8,7 +8,7 @@ const promptfooDist = path.resolve(
   "../node_modules/promptfoo/dist/src",
 );
 
-// Pinned Promptfoo 0.124.1 bundles separate native classes for the CLI, viewer,
+// Promptfoo bundles separate native classes for the CLI, viewer,
 // and public API. Initialize every ESM copy before providers are constructed,
 // including viewer replay, which does not run saved extension hooks.
 for (const filename of readdirSync(promptfooDist)) {

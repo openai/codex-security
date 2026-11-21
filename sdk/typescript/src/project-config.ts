@@ -49,6 +49,7 @@ export interface ProjectConfigSource {
 }
 
 export interface ResolvedProjectConfig {
+  exploitability?: ProjectConfigInput["exploitability"];
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
@@ -471,6 +472,9 @@ export function resolveScanSettings(
     config: { codexOverrides },
     options: settings,
     sources: resolvedSources,
+    ...(file?.exploitability === undefined
+      ? {}
+      : { exploitability: structuredClone(file.exploitability) }),
     ...(project?.path === undefined
       ? {}
       : { projectConfig: { path: project.path, sources: resolvedSources } }),

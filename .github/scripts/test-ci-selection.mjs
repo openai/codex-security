@@ -243,9 +243,14 @@ test("Action-only changes require Action CI and integration against the built pa
   });
 });
 
-test("Standard and triage eval changes require all deterministic eval contracts", () => {
+test("Dependency, Standard and triage eval changes require deterministic eval contracts", () => {
   const expected = { ...docs, "eval-contracts": "true" };
   for (const paths of [
+    [
+      "evals/dependency-reachability/grade.mjs",
+      "evals/dependency-reachability/fixtures/mixed-services/notes/package-lock.json",
+    ],
+    ["evals/package-application-mapping/run.mjs"],
     [
       "evals/standard-time-budget/fixtures.mts",
       "evals/standard-time-budget/test_production.mts",
