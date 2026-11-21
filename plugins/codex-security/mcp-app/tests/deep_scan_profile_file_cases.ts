@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -63,7 +69,7 @@ export async function testWorkerSelectedProfileFiles({
       true,
     ],
     [
-      'model_reasoning_summary = "concise"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
+      'model_reasoning_summary = "concise"\ndeveloper_instructions = "Inline instructions"\nmodel_instructions_file = "profile-instructions.md"\nmodel_catalog_json = "profile-catalog.json"\nexperimental_compact_prompt_file = "profile-compact.md"\nmodel_verbosity = "high"\nweb_search = "disabled"\n',
       "concise",
     ],
     [
@@ -204,6 +210,15 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
       const relative = configuration.includes("relative-instructions.md");
       const modelFiles = configuration.includes("model_catalog_json");
       const codeMode = configuration.includes("[features.code_mode]");
+      const compactPath = (index: number) =>
+        process.platform === "win32"
+          ? path.join(fixture.root, `compact-${index}.md`)
+          : `${fixture.root}/alias/../compact-${index}.md`;
+      if (modelFiles && process.platform !== "win32") {
+        const child = path.join(fixture.root, "selected", "child");
+        await mkdir(child, { recursive: true });
+        await symlink(child, path.join(fixture.root, "alias"));
+      }
       const scanRoot = path.join(fixture.root, "parent-scan");
       const workerDirectory = path.join(scanRoot, "artifacts");
       await mkdir(workerDirectory, { recursive: true });
@@ -224,6 +239,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           if (modelFiles && index % 2 === 0) {
             // A replayed SDK profile omits file settings that the caller cleared.
             const config = parseToml(workerConfig);
+            delete config.developer_instructions;
             delete config.model_instructions_file;
             delete config.model_catalog_json;
             delete config.experimental_compact_prompt_file;
@@ -249,8 +265,12 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                 ),
               )
               .replace(
+                '"Inline instructions"',
+                `"Inline instructions ${index}"`,
+              )
+              .replace(
                 '"profile-compact.md"',
-                JSON.stringify(path.join(fixture.root, `compact-${index}.md`)),
+                JSON.stringify(compactPath(index)),
               )
               .replace(
                 '["synthetic_tools"]',
@@ -382,14 +402,16 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
           const clearedFiles = modelFiles && index % 2 === 0;
           assertConfigOverrides(invocation.argv, {
             model_reasoning_summary: expected,
+            developer_instructions:
+              modelFiles && !clearedFiles
+                ? `Inline instructions ${index}`
+                : undefined,
             model_catalog_json:
               modelFiles && !clearedFiles
                 ? path.join(fixture.root, `catalog-${index}.json`)
                 : undefined,
             experimental_compact_prompt_file:
-              modelFiles && !clearedFiles
-                ? path.join(fixture.root, `compact-${index}.md`)
-                : undefined,
+              modelFiles && !clearedFiles ? compactPath(index) : undefined,
             model_instructions_file:
               instructions && !clearedFiles
                 ? path.join(fixture.root, `instructions-${index}.md`)

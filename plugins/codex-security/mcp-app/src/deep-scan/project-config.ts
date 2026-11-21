@@ -9,7 +9,22 @@ import schema from "./project-config.schema.json";
 let validate: ValidateFunction | undefined;
 export interface DeepScanProjectConfig {
   path: string;
+  selectedPath?: string;
   settings: Partial<Record<(typeof DEEP_SCAN_SETTINGS)[number][0], number>>;
+}
+
+/** Keep POSIX symlink traversal before a subsequent "..". */
+export function selectedProjectConfigPath(
+  file: string,
+  target: string,
+): string {
+  const spelling =
+    process.platform !== "win32" && file.startsWith("~\\")
+      ? file.replaceAll("\\", "/")
+      : file;
+  const selected = spelling.replace(/^~(?=$|[/\\])/, () => homedir());
+  if (process.platform === "win32") return resolve(target, selected);
+  return isAbsolute(selected) ? selected : `${target}/${selected}`;
 }
 
 /** Read only an explicitly selected file; repository configuration is never discovered. */
@@ -18,22 +33,13 @@ export async function readDeepScanProjectConfig(
   canonicalTarget: string,
 ): Promise<DeepScanProjectConfig | undefined> {
   if (file === undefined) return undefined;
-  const spelling =
-    process.platform !== "win32" && file.startsWith("~\\")
-      ? file.replaceAll("\\", "/")
-      : file;
-  const selected = spelling.replace(/^~(?=$|[/\\])/, () => homedir());
-  const extension = extname(selected).toLowerCase();
+  const requested = selectedProjectConfigPath(file, canonicalTarget);
+  const extension = extname(requested).toLowerCase();
   if (![".json", ".yaml", ".yml"].includes(extension)) {
     throw new Error(
       "Project configuration must be a .yaml, .yml, or .json file.",
     );
   }
-  let requested = selected;
-  if (process.platform === "win32")
-    requested = resolve(canonicalTarget, selected);
-  // Preserve POSIX symlink traversal before a subsequent "..".
-  else if (!isAbsolute(selected)) requested = `${canonicalTarget}/${selected}`;
   const path = await realpath(requested);
   const text = await readFile(path, "utf8");
   let value: unknown;
@@ -99,5 +105,9 @@ export async function readDeepScanProjectConfig(
     }
     settings.maxTimeHours = hours;
   }
-  return { path, settings };
+  return {
+    path,
+    ...(requested === path ? {} : { selectedPath: requested }),
+    settings,
+  };
 }

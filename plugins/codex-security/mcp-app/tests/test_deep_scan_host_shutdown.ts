@@ -48,7 +48,13 @@ const { createCodexSecurityServer } = await importModule({
     {
       name: "synthetic-worker",
       setup(build) {
-        build.onLoad({ filter: /[/\\]deep-scan[/\\]executor\.ts$/ }, () => ({
+        // Replace only the engine's worker constructor. The store also imports
+        // the real executor module to read selected model inputs.
+        build.onResolve({ filter: /^\.\/executor\.js$/ }, ({ importer }) => {
+          if (/[/\\]deep-scan[/\\]engine\.ts$/.test(importer))
+            return { path: "worker", namespace: "synthetic-worker" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "synthetic-worker" }, () => ({
           contents: `export class CodexSdkWorkerExecutor { constructor() { return ${fixtureAccess}.executor; } }`,
           loader: "ts",
         }));

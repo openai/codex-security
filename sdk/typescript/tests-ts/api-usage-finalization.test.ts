@@ -17,7 +17,14 @@ import { writeSession } from "./support/usage-rollout.js";
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each(["pending", "finalized", "unavailable", "standard"] as const)(
+test.each([
+  "pending",
+  "finalized",
+  "unavailable",
+  "standard",
+  "lost-reply",
+  "uncommitted",
+] as const)(
   "finalizes saved completion-turn usage when accounting is %s",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -33,12 +40,41 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
     const accountingFailure = "Synthetic usage storage failure: token=fixture";
     const completionWarning = "Synthetic saved scan warning";
     let turnFinished = false;
+    let committed = false;
+    const writeFailure = new Error("Host completion did not commit");
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       canRunDirectDeepScan: () => false,
-      runWorkbench: async (_options, args, input) => {
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args);
+        if (scenario === "lost-reply" && args[0] === "get-scan" && committed) {
+          return {
+            scan: {
+              scanId: "scan_example_001",
+              progress: { status: "complete" },
+            },
+          };
+        }
+        if (scenario === "uncommitted" && args[0] === "get-scan")
+          return {
+            scan: {
+              scanId: "scan_example_001",
+              progress: { status: "running" },
+            },
+          };
         if (args[0] === "complete-scan") {
+          if (scenario === "uncommitted") throw writeFailure;
+          if (scenario === "lost-reply") {
+            if (!committed) {
+              committed = true;
+              throw new Error("Lost completion acknowledgement");
+            }
+            expect(args).toEqual([
+              "complete-scan",
+              "--scan-id",
+              "scan_example_001",
+            ]);
+          }
           return {
             scan: {
               warnings: [completionWarning],
@@ -86,7 +122,7 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
       }),
     });
     try {
-      const result = await client.run(repository, {
+      const pending = client.run(repository, {
         mode: scenario === "standard" ? "standard" : "deep",
         onWarning: (warning) => {
           warnings.push(warning);
@@ -95,11 +131,23 @@ test.each(["pending", "finalized", "unavailable", "standard"] as const)(
         },
         onObserverError: (observer) => observerErrors.push(observer),
       });
+      if (scenario === "uncommitted") {
+        await expect(pending).rejects.toBe(writeFailure);
+        expect(
+          commands.filter(([command]) => command === "complete-scan"),
+        ).toHaveLength(1);
+        return;
+      }
+      const result = await pending;
       expect(result).toMatchObject({ scanDir, threadId: "thread-1" });
       const finalization = commands.filter(
         (args) => args[0] === "finalize-scan-usage",
       );
-      if (scenario === "pending" || scenario === "unavailable") {
+      if (
+        scenario === "pending" ||
+        scenario === "unavailable" ||
+        scenario === "lost-reply"
+      ) {
         expect(finalization).toEqual([
           [
             "finalize-scan-usage",

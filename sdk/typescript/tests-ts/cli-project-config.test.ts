@@ -1,4 +1,10 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
@@ -27,6 +33,7 @@ import {
   createCliTest,
   captureCli,
   runCapturedCli,
+  selectionPrompt,
 } from "./support/cli-run.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -57,6 +64,28 @@ async function fixture(input: ProjectConfigInput | string) {
   );
   return { root, repository, configDirectory, config };
 }
+
+test("interactive Deep sign-in checks the project source before running Codex", async () => {
+  const input = await fixture({ scan: { mode: "deep" } });
+  const command = join(input.configDirectory, "codex.exe");
+  await writeFile(command, "inert fixture", { mode: 0o700 });
+  const deps = dependencies({
+    currentDirectory: input.repository,
+    environment: {
+      CODEX_CLI_PATH: command,
+      OPENAI_API_KEY: "sk-proj-SYNTHETIC_AUTH_FIXTURE",
+    },
+  });
+  const accountLookup = mock(async () => true);
+  deps.hasStoredChatGPTSignIn = accountLookup;
+  deps.scanAuthenticationPrompt = selectionPrompt(
+    throwing("No prompt expected"),
+  );
+  const stderr = captureCli(main, "stderr", true);
+  expect(await stderr.run(["scan", "--config", input.config], deps)).toBe(2);
+  expect(stderr.text()).toContain("protected configuration checkout");
+  expect(accountLookup).not.toHaveBeenCalled();
+});
 
 async function bulkInventory(
   input: Awaited<ReturnType<typeof fixture>>,
@@ -514,11 +543,13 @@ test.each([
     });
     const csv = await bulkInventory(input, rowModes);
     const selected: ScanOptions[] = [];
+    const onConfig = mock<(config: CodexSecurityConfig) => void>();
     const { runCli, stderr } = createCliTest(main);
     const result = await runCli(
       ["bulk-scan", csv, "-c", input.config, "--json"],
       dependencies({
         currentDirectory: input.root,
+        onConfig,
         onTurn: (_repository, options) => selected.push(options),
       }),
     );
@@ -527,6 +558,9 @@ test.each([
       expect(stderr.text()).toContain(message);
       expect(selected).toEqual([]);
     } else {
+      expect(onConfig.mock.lastCall?.[0].executableSourcePaths).toContain(
+        input.config,
+      );
       expect(selected).toHaveLength(1);
       expect(selected[0]).toMatchObject({
         mode: "standard",
@@ -586,6 +620,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   );
   const selected: ScanOptions[] = [];
   const deps = dependencies({ currentDirectory: input.root });
+  const prompt = await realpath(join(promptDirectory, "instructions.md"));
   deps.createSecurity = (native) => {
     expect(native.codexOverrides?.["model"]).toBe("gpt-5.6-terra");
     return fakeSecurity(async (_repository, options = {}) => {
@@ -632,6 +667,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
     selected.find((options) => options.mode === "standard")?.workers,
   ).toBeUndefined();
   expect(selected.find((options) => options.mode === "deep")).toMatchObject({
+    documentSourcePaths: expect.arrayContaining([csv, prompt]),
     target: ["src"],
     workers: 2,
     subagents: 0,
@@ -714,6 +750,9 @@ test.each(["standard", "deep"] as const)(
       mode,
       target: [join(input.repository, "lib")],
       scanPrompt: "Review synthetic boundaries.",
+      documentSourcePaths: expect.arrayContaining([
+        join(input.configDirectory, "instructions.md"),
+      ]),
       failureSeverity: "high",
       maxCostUsd: 7,
     });
@@ -793,6 +832,7 @@ test("CLI values override matching file values, including native objects and lis
       mode: "deep",
       scope: { paths: ["src"] },
       knowledge_base: ["file-context.md"],
+      instructions_file: "unused.md",
       deep: { workers: 8, subagents_per_worker: 3 },
     },
     limits: { max_cost_usd_per_scan: 7 },
@@ -802,6 +842,8 @@ test("CLI values override matching file values, including native objects and lis
       synthetic_setting: { enabled: true, names: ["first"] },
     },
   });
+  const prompt = join(input.repository, "instructions.md");
+  await writeFile(prompt, "Review synthetic boundaries.");
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   const onConfig = mock<(config: CodexSecurityConfig) => void>();
   expect(
@@ -817,6 +859,8 @@ test("CLI values override matching file values, including native objects and lis
         "lib",
         "--knowledge-base",
         "cli-context.md",
+        "--scan-prompt-file",
+        "instructions.md",
         "--subagents",
         "0",
         "--workers",
@@ -856,6 +900,10 @@ test("CLI values override matching file values, including native objects and lis
     model: "gpt-5.6-terra",
     synthetic_setting: { enabled: false, names: [] },
   });
+  expect(selected?.documentSourcePaths).toContain(prompt);
+  expect(selected?.documentSourcePaths).not.toContain(
+    join(input.configDirectory, "unused.md"),
+  );
 });
 
 test("rerun accepts replacement scan and validation files relative to the invocation directory", async () => {

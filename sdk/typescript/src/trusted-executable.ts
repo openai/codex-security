@@ -68,6 +68,11 @@ async function campaignPathHelper() {
   return project;
 }
 
+/** @internal The additional checkout boundaries used by the current campaign. */
+export function campaignProtectedRoots(): readonly string[] {
+  return campaignScope.getStore()?.roots ?? [];
+}
+
 /** Include every selected source when a campaign launches tools from a new checkout. */
 export async function withProtectedExecutableRoots<T>(
   roots: readonly string[],

@@ -20,6 +20,7 @@ import { expandHome } from "./runtime.js";
 import {
   documentSourceRoot,
   gitMarkerRoot,
+  gitProtectionRoots,
   isGitMetadataDirectory,
   nullIfMissingFile,
 } from "./targets.js";
@@ -68,6 +69,7 @@ export async function readKnowledgeBaseSnapshot(
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
+    const aliasRoots = new Set<string>();
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())
@@ -90,6 +92,8 @@ export async function readKnowledgeBaseSnapshot(
         if (typeof roots === "string")
           roots = [await documentSourceRoot(roots, signal)];
         await checkDocumentPath(path, source, roots, signal);
+        for (const root of await gitProtectionRoots(path, signal))
+          aliasRoots.add(root);
       }
       const selected = metadata.isDirectory()
         ? (await discover(source, signal)).sort()
@@ -141,7 +145,12 @@ export async function readKnowledgeBaseSnapshot(
     };
     return {
       ...snapshot,
-      protectedRoots: await knowledgeBaseProtectedRoots(snapshot, signal),
+      protectedRoots: [
+        ...new Set([
+          ...(await knowledgeBaseProtectedRoots(snapshot, signal)),
+          ...aliasRoots,
+        ]),
+      ],
     };
   } catch (error) {
     if (signal?.aborted || error instanceof ConfigurationError) throw error;

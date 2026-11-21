@@ -124,6 +124,44 @@ test.skipIf(process.platform !== "win32")(byteLimitTest, async () => {
   expect(opened).toEqual([ordinary]);
 });
 
+test.skipIf(process.platform !== "win32")(
+  "saved model input roots survive a case-only Windows output directory rename",
+  async () => {
+    const state = await temporaryDirectory();
+    const scanDir = join(state, "résumé");
+    const savedScanDir = join(state, "RÉSUMÉ");
+    const inputRoot = join(state, "model-inputs");
+    await mkdir(scanDir);
+    await mkdir(inputRoot);
+    const database = new Database(join(state, "workbench.sqlite3"), {
+      create: true,
+    });
+    try {
+      database.exec(
+        "CREATE TABLE scans (id, target_path, scan_dir, recipe_json)",
+      );
+      database.query("INSERT INTO scans VALUES (?, ?, ?, ?)").run(
+        "synthetic",
+        state,
+        savedScanDir,
+        JSON.stringify({
+          config: {
+            model_instructions_file: join(inputRoot, "instructions.md"),
+          },
+        }),
+      );
+    } finally {
+      database.close();
+    }
+
+    const boundaries = await savedCheckoutBoundaries(
+      { CODEX_SECURITY_STATE_DIR: state },
+      { scanDir },
+    );
+    expect(boundaries?.inputRoots).toContain(inputRoot);
+  },
+);
+
 function writePythonProbe(path: string) {
   return writeFile(
     path,
@@ -1558,6 +1596,27 @@ for (const version of [1, 15]) {
     }
   });
 }
+
+test("latest excludes completed discovery passes from historical scan databases", async () => {
+  const f = await fixture();
+  const database = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    database
+      .query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?")
+      .run("2099-01-01T00:00:00Z", f.second.scanId);
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+
+    database.exec("ALTER TABLE scans ADD COLUMN parent_scan_role TEXT");
+    database
+      .query("UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?")
+      .run(f.second.scanId);
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.first.scanId);
+  } finally {
+    database.close();
+  }
+});
 
 test("latest orders uncanceled scans by update, start time, and ID", async () => {
   const older = "2026-08-01T03:00:00.000001+02:00";

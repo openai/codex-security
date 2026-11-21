@@ -1,9 +1,10 @@
+import { executableSourceRoots, scanConfigSourcePaths } from "./deep-config.js";
 import { isRecord } from "./record.js";
-import type { JsonValue } from "./config.js";
+import type { JsonObject, JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -12,11 +13,13 @@ import {
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
+  canonicalConfigPath,
   codexSecurityStateDirectory,
   resolvePluginPython,
   runWorkbench,
   sameFile,
   workbenchEnvironment,
+  type PluginPythonOptions,
   type ProcessEnvironment,
   sqliteDatabaseOpener,
   type RuntimeDatabase,
@@ -25,6 +28,10 @@ import {
 interface ScanTarget {
   id: string;
   target_path: string;
+  executableSourcePaths?: string[];
+  sourceRoots?: string[];
+  pythonDiscoveryRoots?: string[];
+  excludeCheckoutPython?: PluginPythonOptions["excludeCheckoutPython"];
   repository_generation?: string | null;
   originFallback?: boolean;
   protectPython?: boolean;
@@ -38,7 +45,9 @@ interface SavedCheckout {
 interface SavedBoundaries {
   byTarget: Map<string, string | null>;
   roots: string[];
+  pythonDiscoveryRoots: string[];
   complete: boolean;
+  excludeCheckoutPython: PluginPythonOptions["excludeCheckoutPython"];
 }
 
 export interface SavedToolDiscovery {
@@ -52,6 +61,8 @@ export async function savedScanWorkbench(
   options: {
     environment: ProcessEnvironment;
     pluginRoot: string;
+    configuredPython?: string;
+    executableSourcePaths?: readonly string[];
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -81,10 +92,6 @@ export async function savedScanWorkbench(
           ? "No completed saved scan was found for this repository."
           : "Codex Security scan not found.",
     );
-  if (!latest && targets.length > 1)
-    throw new CodexSecurityError(
-      `Scan ID prefix "${requestedId}" matches multiple scans; use a longer prefix.`,
-    );
   if (
     targets.some(
       (target) =>
@@ -103,7 +110,13 @@ export async function savedScanWorkbench(
   const liveTargets = targets.filter(
     (target) => target.protectPython !== false,
   );
+  const inputRoots = await savedInputRoots(
+    targets,
+    options.executableSourcePaths ?? [],
+    options.signal,
+  );
   const protectedRoots = [
+    ...inputRoots,
     ...callerRoots,
     ...liveTargets.flatMap((row) => {
       const root = checkouts.byTarget.get(row.target_path);
@@ -120,7 +133,11 @@ export async function savedScanWorkbench(
   ];
   const discoveryProtectedRoots = await savedDiscoveryRoots(
     checkouts,
-    [options.currentDirectory, ...targets.map((row) => row.target_path)],
+    [
+      options.currentDirectory,
+      ...inputRoots,
+      ...targets.map((row) => row.target_path),
+    ],
     options.signal,
   );
   let python: string | undefined;
@@ -144,10 +161,12 @@ export async function savedScanWorkbench(
       );
     // Pin one interpreter; ambient discovery also excludes historical candidate paths.
     python ??= await resolvePluginPython({
+      configuredPath: options.configuredPython,
       environment,
       protectedRoot: protectedRoots,
       discoveryProtectedRoots,
       allowPathLookup: checkouts.complete,
+      excludeCheckoutPython: checkouts.excludeCheckoutPython,
       currentDirectory: options.currentDirectory,
       signal,
     });
@@ -254,7 +273,11 @@ async function readTargets(
         const targets = latest
           ? completedScans(database)
           : exactTargets(database, requestedId);
-        const checkouts = savedCheckouts(database);
+        const checkouts = savedCheckouts(
+          database,
+          targets.length === 1 ? targets : [],
+          environment,
+        );
         return { targets, checkouts };
       },
     );
@@ -277,6 +300,92 @@ async function readTargets(
   }
 }
 
+function loadRecipeSources(
+  database: RuntimeDatabase,
+  target: ScanTarget,
+  environment: ProcessEnvironment,
+): void {
+  const columns = tableColumns(database, "scans");
+  if (!columns.has("recipe_json")) return;
+  const scanDir = columns.has("scan_dir") ? "scan_dir" : "NULL AS scan_dir";
+  const [row] = readRows<{
+    recipe_json: string | null;
+    scan_dir: string | null;
+  }>(
+    database,
+    `SELECT recipe_json, ${scanDir} FROM scans WHERE id = ?`,
+    target.id,
+  );
+  if (!row?.recipe_json) return;
+  const recipe: unknown = JSON.parse(row.recipe_json);
+  const invalidPaths = "Invalid executable source paths in saved scan history.";
+  if (!isRecord(recipe)) throw new CodexSecurityError(invalidPaths);
+  const paths = (key: string): string[] => {
+    const value = recipe[key];
+    if (value === undefined) return [];
+    if (
+      Array.isArray(value) &&
+      value.every(
+        (path): path is string => typeof path === "string" && isAbsolute(path),
+      )
+    )
+      return value;
+    throw new CodexSecurityError(invalidPaths);
+  };
+  target.executableSourcePaths = paths("executableSourcePaths");
+  target.sourceRoots = [
+    ...paths("executableSourceRoots"),
+    ...paths("knowledgeBasePaths"),
+    ...paths("knowledgeBaseProtectedRoots"),
+  ];
+  // Older Deep Scan recipes kept document contents without their source paths.
+  if (recipe["mode"] === "deep" && recipe["pythonDiscoveryRoots"] === undefined)
+    target.excludeCheckoutPython = "discovery";
+  // Older recipes recorded some file inputs only in the selected configuration.
+  const config = recipe["config"];
+  if (isRecord(config)) {
+    const configPaths = scanConfigSourcePaths(
+      config as JsonObject,
+      row.scan_dir ?? undefined,
+      environment,
+    );
+    target.executableSourcePaths.push(...configPaths.model);
+    target.sourceRoots.push(...configPaths.nested);
+    const profile = config["profile"];
+    const profiles = config["profiles"];
+    const nativeProfile =
+      typeof profile === "string" &&
+      !(isRecord(profiles) && isRecord(profiles[profile]));
+    // Even receipts with model file identities could omit inherited skills.
+    // Reading today's profile cannot recover the original source checkouts.
+    if (
+      recipe["mode"] === "deep" &&
+      nativeProfile &&
+      !Array.isArray(recipe["executableSourceRoots"])
+    )
+      target.excludeCheckoutPython = true;
+  }
+  target.pythonDiscoveryRoots = paths("pythonDiscoveryRoots");
+}
+
+async function savedInputRoots(
+  targets: ScanTarget[],
+  additionalPaths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const configPaths = new Set([
+    ...additionalPaths,
+    ...targets.flatMap((target) => target.executableSourcePaths ?? []),
+  ]);
+  const configRoots = await Promise.all(
+    Array.from(configPaths, (path) => executableSourceRoots(path, signal)),
+  );
+  return [
+    ...configRoots.flat(),
+    ...targets.flatMap((target) => target.sourceRoots ?? []),
+  ];
+}
+
 function workbenchDatabasePath(environment: ProcessEnvironment): string {
   return join(codexSecurityStateDirectory(environment), "workbench.sqlite3");
 }
@@ -284,7 +393,9 @@ function workbenchDatabasePath(environment: ProcessEnvironment): string {
 /** @internal Read executable exclusions before launching an ordinary history command. */
 export async function savedCheckoutBoundaries(
   environment: ProcessEnvironment,
-): Promise<SavedBoundaries | undefined> {
+  scan?: string | { scanDir: string },
+  signal?: AbortSignal,
+): Promise<(SavedBoundaries & { inputRoots: string[] }) | undefined> {
   const path = workbenchDatabasePath(environment);
   try {
     await access(path);
@@ -292,7 +403,25 @@ export async function savedCheckoutBoundaries(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  return readSnapshot(path, (database) => savedCheckouts(database));
+  const selected =
+    typeof scan === "object"
+      ? { scanDir: await canonicalConfigPath(scan.scanDir) }
+      : scan;
+  const { checkouts, targets } = readSnapshot(path, (database) => {
+    const targets =
+      selected !== undefined &&
+      tableColumns(database, "scans").has("recipe_json")
+        ? exactTargets(database, selected)
+        : [];
+    return {
+      checkouts: savedCheckouts(database, targets, environment),
+      targets,
+    };
+  });
+  return {
+    ...checkouts,
+    inputRoots: await savedInputRoots(targets, [], signal),
+  };
 }
 
 /** @internal Exclude both recorded checkout roots and the currently visible checkouts. */
@@ -301,7 +430,13 @@ export async function savedDiscoveryRoots(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const targets = [...new Set([...paths, ...(checkouts?.roots ?? [])])];
+  const targets = [
+    ...new Set([
+      ...paths,
+      ...(checkouts?.roots ?? []),
+      ...(checkouts?.pythonDiscoveryRoots ?? []),
+    ]),
+  ];
   const currentRoots = await Promise.all(
     targets.map((path) => gitProtectionRoots(path, signal)),
   );
@@ -345,9 +480,26 @@ function readSnapshot<T>(
 
 function exactTargets(
   database: RuntimeDatabase,
-  requestedId: string | { workflowId: string },
+  requestedId: string | { workflowId: string } | { scanDir: string },
 ): ScanTarget[] {
   if (typeof requestedId !== "string") {
+    if ("scanDir" in requestedId) {
+      // Bulk recovery selects the scan registered at this exact output directory.
+      if (!tableColumns(database, "scans").has("scan_dir")) return [];
+      const targets = readRows<ScanTarget>(
+        database,
+        "SELECT id, target_path FROM scans WHERE scan_dir = ?",
+        requestedId.scanDir,
+      );
+      if (targets.length || process.platform !== "win32") return targets;
+      // Match the workbench's Windows path key even when Bun's path.relative
+      // only folds ASCII case. A receipt can predate a case-only rename.
+      const scanDir = requestedId.scanDir.toLowerCase();
+      return readRows<ScanTarget & { scan_dir: string }>(
+        database,
+        "SELECT id, target_path, scan_dir FROM scans",
+      ).filter((row) => relative(row.scan_dir.toLowerCase(), scanDir) === "");
+    }
     const scanId = tableColumns(database, "finding_workflows").has("scan_id")
       ? "workflow.scan_id"
       : "json_extract(workflow.state_json, '$.scanId')";
@@ -378,12 +530,17 @@ function exactTargets(
     throw new CodexSecurityError(
       "Scan ID prefixes must be at least eight characters.",
     );
-  return readRows<ScanTarget>(
+  const matches = readRows<ScanTarget>(
     database,
     "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
     requestedId.length,
     requestedId.toLowerCase(),
   );
+  if (matches.length > 1)
+    throw new CodexSecurityError(
+      `Scan ID prefix "${requestedId}" matches multiple scans; use a longer prefix.`,
+    );
+  return matches;
 }
 
 function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
@@ -395,7 +552,13 @@ function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
 }
 
 /** Read registered boundaries without assuming an unversioned scan was outside Git. */
-function savedCheckouts(database: RuntimeDatabase): SavedBoundaries {
+function savedCheckouts(
+  database: RuntimeDatabase,
+  targets: ScanTarget[],
+  environment: ProcessEnvironment,
+): SavedBoundaries {
+  for (const target of targets)
+    loadRecipeSources(database, target, environment);
   const scan = tableColumns(database, "scans");
   const registry = tableColumns(database, "security_targets");
   const workspace = tableColumns(database, "workspaces");
@@ -434,10 +597,17 @@ function savedCheckouts(database: RuntimeDatabase): SavedBoundaries {
       ).map((row) => row.root)
     : [];
   const roots = [...rows.map((row) => row.checkout_root), ...rejected];
+  const exclusions = targets.map((target) => target.excludeCheckoutPython);
   return {
     byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
     roots: roots.filter((root): root is string => root !== null),
+    pythonDiscoveryRoots: targets.flatMap(
+      (target) => target.pythonDiscoveryRoots ?? [],
+    ),
     complete: !roots.includes(null),
+    excludeCheckoutPython: exclusions.includes(true)
+      ? true
+      : exclusions.find((exclusion) => exclusion === "discovery"),
   };
 }
 
@@ -470,7 +640,8 @@ function completedScans(database: RuntimeDatabase): ScanTarget[] {
         progress.updated_at AS progress_updated_at,
         ${columns.has("repository_generation") ? "scans.repository_generation" : "NULL"} AS repository_generation
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
-      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}`,
+      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
+        ${columns.has("parent_scan_role") ? "AND scans.parent_scan_role IS NOT 'deep_pass'" : ""}`,
   )
     .map((scan) => {
       const updated = timestampOrderKey(scan.updated_at);

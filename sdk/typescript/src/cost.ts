@@ -43,16 +43,10 @@ import {
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
-export async function readScanBudgetUsage(
-  workbench: (args: readonly string[]) => Promise<JsonObject>,
-  scanId: string,
-  threadId: string,
-  validationThreadId?: string,
-  requireWorkerUsage = false,
-) {
-  const result = await workbench(
-    workbenchArgs("read-scan-usage", { scanId, threadId, validationThreadId }),
-  );
+/** Token counts emitted by the workbench, without inferring a price or missing counters. */
+export function workbenchTokenUsage(
+  result: Readonly<Record<string, unknown>>,
+): ScanTokenUsage | null {
   const counts = {
     input_tokens: result["inputTokens"],
     cached_input_tokens: result["cachedInputTokens"],
@@ -63,6 +57,23 @@ export async function readScanBudgetUsage(
   const usage = Object.values(counts).every(Number.isSafeInteger)
     ? tokenUsage(counts)
     : null;
+  if (usage === null) return null;
+  return result["cacheWriteInputTokensReported"] === true
+    ? usage
+    : { ...usage, cache_write_input_tokens_reported: false };
+}
+
+export async function readScanBudgetUsage(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanId: string,
+  threadId: string,
+  validationThreadId?: string,
+  requireWorkerUsage = false,
+) {
+  const result = await workbench(
+    workbenchArgs("read-scan-usage", { scanId, threadId, validationThreadId }),
+  );
+  const usage = workbenchTokenUsage(result);
   const scope = result["coverageScope"];
   const warnings = result["warnings"];
   const ownership = {
@@ -98,11 +109,7 @@ export async function readScanBudgetUsage(
     workers["threadCount"] > 0;
   return {
     ...ownership,
-    // Older workbenches sum cache writes without tracking omitted counters.
-    usage:
-      result["cacheWriteInputTokensReported"] === true
-        ? usage
-        : { ...usage, cache_write_input_tokens_reported: false },
+    usage,
     complete: coverage === "complete" && (!requireWorkerUsage || hasWorkers),
     ...(requireWorkerUsage && !hasWorkers
       ? { missingThreadCount: Math.max(1, ownership.missingThreadCount ?? 0) }

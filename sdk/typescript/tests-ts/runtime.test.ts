@@ -7281,6 +7281,69 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test("legacy recovery probes managed Python only outside a checkout", async () => {
+    const root = await temporaryDirectory();
+    const installation = join(root, "installation");
+    execNodePython(
+      pythonWithLauncher()!,
+      [
+        "-m",
+        "venv",
+        "--copies",
+        "--without-pip",
+        "--system-site-packages",
+        installation,
+      ],
+      process.env,
+    );
+    const windows = process.platform === "win32";
+    const bin = join(installation, windows ? "Scripts" : "bin");
+    const python = join(bin, windows ? "python.exe" : "python3");
+    const library = execNodePython(
+      python,
+      ["-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+      process.env,
+    ).trimEnd();
+    const marker = join(root, "probed");
+    await writeFile(
+      join(library, "probe.pth"),
+      `import pathlib; pathlib.Path(${JSON.stringify(marker)}).touch()\n`,
+    );
+    const managed = join(root, "managed");
+    const linkedBin = join(
+      managed,
+      "dependencies",
+      "python",
+      ...(windows ? [] : ["bin"]),
+    );
+    await mkdir(dirname(linkedBin), { recursive: true });
+    await symlink(bin, linkedBin, "junction");
+    const options = {
+      environment: { PATH: "", SystemRoot: process.env["SystemRoot"] },
+      managedRuntimeRoots: [managed],
+      excludeCheckoutPython: true,
+    };
+    expect(await realpath(await resolvePluginPython(options))).toBe(
+      await realpath(python),
+    );
+    expect(existsSync(marker)).toBe(true);
+    await rm(marker);
+    await mkdir(join(installation, ".git"));
+    for (const excludeCheckoutPython of [true, "discovery"] as const) {
+      await expect(
+        resolvePluginPython({ ...options, excludeCheckoutPython }),
+      ).rejects.toBeInstanceOf(PluginPythonUnavailableError);
+      expect(existsSync(marker)).toBe(false);
+    }
+    const explicit = await resolvePluginPython({
+      ...options,
+      configuredPath: python,
+      excludeCheckoutPython: "discovery",
+    });
+    expect(await realpath(explicit)).toBe(await realpath(python));
+    expect(existsSync(marker)).toBe(true);
+  });
+
   test("uses XDG_CACHE_HOME for Windows managed Python", async () => {
     const root = await temporaryDirectory();
     const cache = join(root, "Custom Cache");

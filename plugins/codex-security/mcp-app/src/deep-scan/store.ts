@@ -1,4 +1,5 @@
 import { workbenchArgs } from "../workbench-arguments.js";
+import { currentModelFileInputs } from "./executor.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -156,29 +157,34 @@ export class WorkbenchDeepScanStore {
       scanRoot: input.scanRoot,
       workflowVersion: WORKFLOW_VERSION,
     };
-    let result = await this.enqueueWrite(
-      workbenchArgs("begin-deep-scan", {
-        ...args,
-        joinOnly: input.projectConfigPath !== undefined,
-      }),
-      userContext,
-    );
-    if (
-      input.projectConfigPath !== undefined &&
-      typeof result.newScanTarget === "string"
-    ) {
-      const project = await readDeepScanProjectConfig(
-        input.projectConfigPath,
-        result.newScanTarget,
-      );
-      result = await this.enqueueWrite(
-        workbenchArgs("begin-deep-scan", {
-          ...args,
-          targetPath: result.newScanTarget,
-          deepScanProjectJson: JSON.stringify(project),
-        }),
+    const begin = (options: Record<string, string | boolean>) =>
+      this.enqueueWrite(
+        workbenchArgs("begin-deep-scan", { ...args, ...options }),
         userContext,
       );
+    let result = await begin({ probeModelFileInputs: true });
+    if (typeof result.newScanTarget === "string") {
+      const modelFileInputsJson = JSON.stringify(
+        await currentModelFileInputs(),
+      );
+      result = await begin({
+        joinOnly: input.projectConfigPath !== undefined,
+        modelFileInputsJson,
+      });
+      if (
+        input.projectConfigPath !== undefined &&
+        typeof result.newScanTarget === "string"
+      ) {
+        const project = await readDeepScanProjectConfig(
+          input.projectConfigPath,
+          result.newScanTarget,
+        );
+        result = await begin({
+          targetPath: result.newScanTarget,
+          deepScanProjectJson: JSON.stringify(project),
+          modelFileInputsJson,
+        });
+      }
     }
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;

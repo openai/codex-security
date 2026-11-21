@@ -1,9 +1,16 @@
+import { Database } from "bun:sqlite";
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
-import { readJson, readJsonLines, writeJson } from "./support/json.js";
+import {
+  jsonLines,
+  readJson,
+  readJsonLines,
+  writeJson,
+} from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -18,7 +25,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { strToU8, zipSync } from "fflate";
@@ -30,6 +37,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { resolvePluginSource, runWorkbench } from "../src/runtime.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { workflowDigest } from "../src/finding-workflow.js";
@@ -60,9 +68,15 @@ afterEach(cleanup);
 async function interruptedScan(
   mode: "deep" | "standard" = "deep",
   bulk = false,
-  settings: Pick<
+  {
+    recipeRepositoryAlias = false,
+    registrationFiles,
+    sqliteHome,
+    ...settings
+  }: Pick<
     ScanOptions,
     | "safetyIdentifier"
+    | "excludePaths"
     | "maxCostUsd"
     | "maxTimeMinutes"
     | "ownerSuggestions"
@@ -71,7 +85,23 @@ async function interruptedScan(
     | "knowledgeBasePaths"
     | "cyberAccessProgram"
     | "severityRubric"
-  > & { config?: JsonObject; providerProfile?: JsonObject } = {},
+  > & {
+    config?: JsonObject;
+    providerProfile?: JsonObject;
+    recipeRepositoryAlias?: boolean;
+    registrationFiles?: Pick<
+      ScanOptions,
+      "scanPromptFile" | "postScanPromptFile" | "rubricPath"
+    > & { codexOverrides?: JsonObject };
+    sqliteHome?: string;
+    executableSourcePaths?: string[];
+    executableSourceRoots?: string[];
+    pythonDiscoveryRoots?: string[];
+    target?: { kind: "paths"; paths: string[] };
+    sealedPricing?: JsonObject;
+    knowledgeBaseProtectedRoots?: string[];
+    scanInputs?: JsonObject;
+  } = {},
   resolvedDeep = false,
   modelProvider?: string,
   knowledgeState: "saved" | "legacy" = "saved",
@@ -161,6 +191,7 @@ async function interruptedScan(
     TMP: process.env["TMP"],
     CODEX_HOME: codexHome,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    ...(sqliteHome ? { CODEX_SQLITE_HOME: sqliteHome } : {}),
     ...(modelProvider === "amazon-bedrock"
       ? { AWS_PROFILE: "synthetic-bedrock" }
       : {}),
@@ -173,8 +204,13 @@ async function interruptedScan(
     !bulk && knowledgeState === "saved" && settings.knowledgeBasePaths?.length
       ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
       : undefined;
+  const savedRepository = recipeRepositoryAlias
+    ? join(root, "saved-repository-alias")
+    : repository;
+  if (recipeRepositoryAlias)
+    await symlink(repository, savedRepository, "junction");
   const recipe = {
-    repository,
+    repository: savedRepository,
     target: { kind: "repository", paths: [] },
     mode,
     config: {
@@ -184,7 +220,16 @@ async function interruptedScan(
     },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
+    pythonDiscoveryRoots: [],
     ...settings,
+    ...(sqliteHome
+      ? {
+          sealedUsagePaths: {
+            CODEX_HOME: codexHome,
+            CODEX_SQLITE_HOME: sqliteHome,
+          },
+        }
+      : {}),
     ...(knowledgeSnapshot === undefined
       ? {}
       : {
@@ -211,7 +256,34 @@ async function interruptedScan(
         }
       : {}),
   };
-  const registration = await command(
+  let registration: JsonObject | undefined;
+  if (registrationFiles) {
+    const stop = "Synthetic interruption after registration";
+    const { codexOverrides, ...files } = registrationFiles;
+    await using client = new TestClient(
+      { pythonPath: python, ...(codexOverrides && { codexOverrides }) },
+      {
+        environment,
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        runWorkbench: async (options, args, input) => {
+          const result = await runWorkbench(options, args, input);
+          if (args[0] === "register-cli-scan") {
+            registration = result;
+            throw new Error(stop);
+          }
+          return result;
+        },
+      },
+    );
+    await expect(
+      client.run(repository, {
+        mode,
+        outputDir: scanDir,
+        ...files,
+      }),
+    ).rejects.toThrow(stop);
+  }
+  registration ??= await command(
     [
       "register-cli-scan",
       "--repository",
@@ -291,6 +363,7 @@ async function interruptedScan(
     scanId,
     threadId,
     registration,
+    resumeOptions: { mode, outputDir: scanDir, resumeScanId: scanId },
     sessionPath,
     checkpoint,
     input,
@@ -1157,7 +1230,7 @@ function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
   createCodex: NonNullable<
     ConstructorParameters<typeof TestClient>[1]["createCodex"]
-  >,
+  > = () => fail("Unexpected model launch"),
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
   createOperationTelemetry?: ConstructorParameters<
     typeof TestClient
@@ -1223,7 +1296,8 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
       doc.scanId = f.scanId;
       if (name === "findings.json") doc.findings = [];
       else {
-        doc.mode = "deep_repository";
+        doc.mode =
+          f.recipe.target.kind === "paths" ? "scoped_path" : "deep_repository";
         doc.completeness = "partial";
         doc.surfaces = [];
         doc.deferred = [{ id: "time_cap", reason: "Synthetic time cap" }];
@@ -1241,6 +1315,33 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     join(f.scanDir, "scan-manifest.json"),
   ]);
 }
+
+test("bulk recovery passes saved executable source paths to SDK startup", async () => {
+  const projectPath = join(await temporaryDirectory(), "codex-security.yaml");
+  await writeFile(projectPath, "version: 1\n");
+  const f = await interruptedScan("deep", true, {
+    executableSourcePaths: [projectPath],
+  });
+  await rm(join(f.root, "results.jsonl"));
+  const deps = resumeDependencies(f);
+  const { runCli, stderr, stdout } = createCliTest(main);
+  const startupPaths: Array<readonly string[] | undefined> = [];
+  await runCli(
+    ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+    {
+      ...deps,
+      createSecurity(config) {
+        const security = deps.createSecurity(config);
+        security.run = async () => {
+          startupPaths.push(config.executableSourcePaths);
+          throw new Error("Stopped before model launch");
+        };
+        return security;
+      },
+    },
+  );
+  expect(startupPaths, stderr.text() + stdout.text()).toEqual([[projectPath]]);
+});
 
 test.each(["completed", "failed"] as const)(
   "bulk recovery retains original correlation and unpriced usage after %s without a ledger",
@@ -1558,8 +1659,632 @@ test.each([
   },
 );
 
+async function sealWithOriginalPlugin(
+  f: Awaited<ReturnType<typeof interruptedScan>>,
+) {
+  await finishDiscovery(f);
+  const oldPlugin = join(f.root, "old-plugin");
+  for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
+    await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
+      recursive: true,
+    });
+  }
+  const pluginManifest = join(oldPlugin, ".codex-plugin", "plugin.json");
+  const plugin = JSON.parse(await readFile(pluginManifest, "utf8"));
+  plugin.version = f.recipe.pluginVersion;
+  await writeFile(pluginManifest, JSON.stringify(plugin));
+  await runWorkbench(
+    { python: f.python, pluginRoot: oldPlugin, environment: f.environment },
+    ["prepare-scan-completion", "--scan-id", f.scanId],
+  );
+}
+
+test.each([false, true])(
+  "CLI external-provider recovery skips model authentication only for sealed results (sealed: %p)",
+  async (sealed) => {
+    const f = await interruptedScan("deep", false, {
+      auth: "api-key",
+      config: { model_provider: "openrouter" },
+    });
+    if (sealed) await sealWithOriginalPlugin(f);
+    const { stderr, runCli } = createCliTest(main);
+    const deps = resumeDependencies(f);
+    deps.environment = {
+      ...deps.environment,
+      OPENROUTER_API_KEY: sealed ? "synthetic-provider-key" : undefined,
+      OPENAI_API_KEY: undefined,
+      CODEX_API_KEY: undefined,
+    };
+    const code = await runCli(["scans", "resume", f.scanId, "--json"], deps);
+    expect(code, stderr.text()).toBe(sealed ? 0 : 2);
+    if (!sealed) expect(stderr.text()).toContain("Set OPENROUTER_API_KEY");
+    const saved = await f.command(["get-scan", "--scan-id", f.scanId]);
+    expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+      status: sealed ? "complete" : "running",
+    });
+  },
+);
+
+test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
+  "sealed SDK resume reconciles %s usage and cost before the completion receipt",
+  async (scenario) => {
+    const model =
+      scenario === "unpriced" ? "synthetic-unpriced-model" : "gpt-5.6-sol";
+    const sqliteHome =
+      scenario === "configured SQLite" ? await temporaryDirectory() : undefined;
+    const f = await interruptedScan(
+      "deep",
+      false,
+      scenario === "complete"
+        ? {
+            config: { profile: "review" },
+            sealedPricing: { model },
+            executableSourceRoots: [],
+            scanInputs: {
+              ...scanInputIdentity("Keep the original scan instructions."),
+              modelFileInputs: { model_instructions_file: null },
+            },
+          }
+        : { config: { model }, sqliteHome },
+    );
+    const worker = randomUUID();
+    const timestamp = new Date().toISOString();
+    const counters = {
+      input_tokens: 1000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 1000,
+    };
+    const event = (payload: JsonObject) => ({
+      timestamp,
+      type: "event_msg",
+      payload,
+    });
+    const counter = event({
+      type: "token_count",
+      info: { total_token_usage: counters },
+    });
+    const workerPath = join(f.codexHome, "sessions", `rollout-${worker}.jsonl`);
+    await writeFile(
+      workerPath,
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: {
+            id: worker,
+            source: {
+              subagent: { thread_spawn: { parent_thread_id: f.threadId } },
+            },
+          },
+        },
+        event({ type: "task_started", turn_id: "worker-turn" }),
+        counter,
+        event({ type: "task_complete" }),
+      ]) + "\n",
+    );
+    if (scenario !== "partial")
+      await appendFile(f.sessionPath, JSON.stringify(counter) + "\n");
+    const database = new Database(
+      join(sqliteHome ?? f.codexHome, "state_5.sqlite"),
+    );
+    try {
+      database.exec(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)",
+      );
+      database.exec(
+        "CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)",
+      );
+      const insert = database.query(
+        "INSERT INTO threads (id, rollout_path) VALUES (?, ?)",
+      );
+      insert.run(f.threadId, f.sessionPath);
+      insert.run(worker, workerPath);
+      database
+        .query("INSERT INTO thread_spawn_edges VALUES (?, ?)")
+        .run(f.threadId, worker);
+    } finally {
+      database.close();
+    }
+    await sealWithOriginalPlugin(f);
+    const ambient = join(f.root, "ambient-home");
+    const environment = {
+      ...f.environment,
+      CODEX_HOME: ambient,
+      ...(sqliteHome
+        ? {
+            CODEX_SQLITE_HOME: ambient,
+            CODEX_STATE_DB: join(ambient, "state_5.sqlite"),
+          }
+        : {}),
+    };
+    const deps = resumeDependencies({ ...f, environment });
+    await using client = deps.createSecurity({});
+    const options = f.resumeOptions;
+    const total = scenario === "partial" ? 1000 : 2000;
+    const coverage = scenario === "partial" ? "partial" : "complete";
+    expect(
+      await f.command([
+        "read-scan-usage",
+        "--scan-id",
+        f.scanId,
+        "--thread-id",
+        f.threadId,
+      ]),
+    ).toMatchObject({ coverage, totalTokens: total });
+    if (scenario === "partial")
+      await expect(
+        client.run(f.repository, { ...options, maxCostUsd: 1 }),
+      ).rejects.toThrow("usage is incomplete");
+    if (scenario === "complete" || scenario === "configured SQLite")
+      await expect(
+        client.run(f.repository, { ...options, maxCostUsd: 0.001 }),
+      ).rejects.toMatchObject({ name: "ScanCostLimitExceededError" });
+    const result = await client.run(f.repository, options);
+    expect(result.turnResult.usage).toMatchObject({ total_tokens: total });
+    const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+      "scan"
+    ] as JsonObject;
+    expect(saved["usage"]).toMatchObject({ coverage, totalTokens: total });
+    if (scenario === "unpriced") {
+      expect(result.cost).toBeNull();
+      expect(saved["cost"]).toBeUndefined();
+    } else {
+      expect(result.cost).toMatchObject({
+        model,
+        inputTokens: total,
+        estimatedUsd: total * 0.000004,
+      });
+      expect(saved["cost"]).toEqual(result.cost);
+    }
+  },
+);
+
+async function expectUnprobed(executable: string) {
+  await expect(readFile(executable + ".ran", "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+}
+
+async function modelInputCheckout(filename = "instructions.md") {
+  const checkout = await temporaryDirectory();
+  gitText(["-C", checkout, "init", "-q"]);
+  const source = join(checkout, "settings", filename);
+  const bin = join(checkout, "tools");
+  await mkdir(dirname(source));
+  await mkdir(bin);
+  await writeFile(source, "# synthetic model settings\n");
+  const python = join(bin, "python3");
+  await writeFile(python, '#!/bin/sh\nprintf probed > "$0.ran"\nexit 23\n', {
+    mode: 0o700,
+  });
+  return { checkout, source, bin, python };
+}
+
+test
+  .skipIf(process.platform === "win32")
+  .each([
+    "config",
+    "resupplied",
+    "knowledge",
+    "legacy-knowledge",
+    "legacy-model-instructions",
+    "legacy-skill",
+    "legacy-profile-skill",
+    "legacy-home-skill",
+    "skill-without-marker",
+  ] as const)(
+  "sealed SDK recovery excludes the %s checkout before Python discovery",
+  async (sourceKind) => {
+    const { checkout, source, bin, python } = await modelInputCheckout(
+      sourceKind.includes("skill") ? "SKILL.md" : undefined,
+    );
+    const configuredSources = { executableSourcePaths: [source] };
+    const skills = { config: [{ path: source, enabled: true }] };
+    const recipes = {
+      config: configuredSources,
+      resupplied: configuredSources,
+      knowledge: {
+        knowledgeBasePaths: [source],
+        knowledgeBaseProtectedRoots: [checkout],
+      },
+      "legacy-knowledge": { knowledgeBasePaths: [source] },
+      "legacy-skill": { config: { skills } },
+      "legacy-home-skill": {
+        config: {
+          skills: {
+            config: [
+              {
+                path: join("~", basename(checkout), "settings", "SKILL.md"),
+                enabled: true,
+              },
+            ],
+          },
+        },
+      },
+      "legacy-profile-skill": {
+        config: { profile: "selected", profiles: { selected: { skills } } },
+      },
+      "skill-without-marker": {
+        executableSourcePaths: [source],
+        executableSourceRoots: [checkout],
+      },
+      "legacy-model-instructions": {
+        config: { model_instructions_file: source },
+      },
+    };
+    const f = await interruptedScan("deep", false, recipes[sourceKind]);
+    await sealWithOriginalPlugin(f);
+    await rm(f.repository, { recursive: true });
+    if (sourceKind === "skill-without-marker")
+      await rm(join(checkout, ".git"), { recursive: true });
+    const environment = {
+      ...f.environment,
+      HOME: dirname(checkout),
+      PATH: bin,
+    };
+    const deps = resumeDependencies({ ...f, environment });
+    await using client = deps.createSecurity({
+      pythonPath: "python3",
+      ...(sourceKind === "resupplied"
+        ? { executableSourcePaths: [source] }
+        : {}),
+    });
+    await expect(
+      client.run(f.repository, {
+        ...f.resumeOptions,
+        requireSealedResume: true,
+      }),
+    ).rejects.toThrow("interpreter is unavailable or unusable");
+    await expectUnprobed(python);
+  },
+);
+
+function telemetryOverrides(certificate: string): JsonObject {
+  return {
+    otel: {
+      trace_exporter: {
+        "otlp-grpc": {
+          endpoint: "https://example.test",
+          tls: { "ca-certificate": certificate },
+        },
+      },
+    },
+  };
+}
+
+test.skipIf(process.platform === "win32").each([
+  ["scanPromptFile", "before sealing"],
+  ["scanPromptFile", "after sealing"],
+  ["rubricPath", "after sealing"],
+  ["telemetry certificate", "after sealing"],
+  ["postScanPromptFile", "with post-scan work"],
+] as const)(
+  "SDK recovery excludes the original %s checkout %s",
+  async (file, stage) => {
+    const { checkout, source, bin, python } = await modelInputCheckout();
+    const f = await interruptedScan("deep", false, {
+      registrationFiles:
+        file === "telemetry certificate"
+          ? { codexOverrides: telemetryOverrides(source) }
+          : { [file]: source },
+    });
+    if (stage !== "before sealing") await sealWithOriginalPlugin(f);
+    if (stage === "after sealing") await rm(f.repository, { recursive: true });
+    await rm(join(checkout, ".git"), { recursive: true });
+    const launcher = join(bin, "example-scan-python");
+    await rename(python, launcher);
+    await using client = new TestClient(
+      { pythonPath: basename(launcher) },
+      {
+        environment: {
+          ...f.environment,
+          PATH: [bin, f.environment.PATH].join(delimiter),
+        },
+        prepareRuntime: async () => preparedRuntime(f.codexHome),
+        runWorkbench,
+      },
+    );
+    await expect(
+      client.run(f.repository, {
+        ...f.resumeOptions,
+        requireSealedResume: stage === "after sealing",
+        ...(stage === "with post-scan work"
+          ? { postScanPrompt: await readFile(source, "utf8") }
+          : {}),
+      }),
+    ).rejects.toThrow("interpreter is unavailable or unusable");
+    await expectUnprobed(launcher);
+  },
+);
+
+async function trustedRecoveryPython(python: string): Promise<string> {
+  // The host interpreter may itself be installed in a checkout (e.g. Homebrew).
+  const venv = await temporaryDirectory();
+  const created = runPython(python, [
+    "-m",
+    "venv",
+    "--copies",
+    "--without-pip",
+    "--system-site-packages",
+    venv,
+  ]);
+  expect(created.exitCode, created.stderr.toString()).toBe(0);
+  return join(venv, "bin", "python3");
+}
+
+test.skipIf(process.platform === "win32")(
+  "sealed SDK recovery skips the original campaign checkout and finds Python beside a standalone prompt and certificate",
+  async () => {
+    const { checkout, bin, python } = await modelInputCheckout();
+    const trusted = await trustedRecoveryPython(pythonOnPath()!);
+    const scanPromptFile = join(dirname(dirname(trusted)), "instructions.md");
+    const certificate = join(dirname(scanPromptFile), "ca.pem");
+    await writeFile(scanPromptFile, "Review input handling.");
+    await writeFile(certificate, "synthetic fixture");
+    const f = await withProtectedExecutableRoots([checkout], () =>
+      interruptedScan("deep", false, {
+        registrationFiles: {
+          scanPromptFile,
+          codexOverrides: telemetryOverrides(certificate),
+        },
+      }),
+    );
+    await sealWithOriginalPlugin(f);
+    await rm(join(checkout, ".git"), { recursive: true });
+    f.environment.PATH = [bin, dirname(trusted)].join(delimiter);
+    await using client = resumeDependencies(f).createSecurity({
+      pythonPath: "python3",
+    });
+    const result = await client.run(f.repository, {
+      ...f.resumeOptions,
+      requireSealedResume: true,
+    });
+    expect(result.manifest.scan.id).toBe(f.scanId);
+    await expectUnprobed(python);
+  },
+);
+
+function legacyNativeProfileRecipe(): {
+  config: JsonObject;
+  scanInputs: JsonObject;
+  executableSourceRoots?: string[];
+} {
+  return {
+    config: { profile: "review", approval_policy: "never" },
+    scanInputs: {
+      ...scanInputIdentity("Keep the original scan instructions."),
+      modelFileInputs: { model_instructions_file: null },
+    },
+  };
+}
+
+test
+  .skipIf(process.platform === "win32")
+  .each(["legacy native", "recorded native", "selected inline"] as const)(
+  "sealed SDK recovery chooses Python for a %s profile",
+  async (kind) => {
+    const { bin, python } = await modelInputCheckout();
+    const recipe = legacyNativeProfileRecipe();
+    if (kind === "recorded native") recipe.executableSourceRoots = [];
+    if (kind === "selected inline")
+      recipe.config["profiles"] = { review: { model: "gpt-5.6-sol" } };
+    const f = await interruptedScan("deep", false, recipe);
+    await sealWithOriginalPlugin(f);
+    await rm(f.repository, { recursive: true });
+    const clients = resumeDependencies(f);
+    const options = {
+      ...f.resumeOptions,
+      requireSealedResume: true,
+    };
+    if (kind === "legacy native") {
+      // A model-only receipt omits skills inherited from the missing profile.
+      f.environment.PATH = [bin, f.environment.PATH].join(delimiter);
+      await using named = clients.createSecurity({ pythonPath: "python3" });
+      await expect(named.run(f.repository, options)).rejects.toThrow(
+        /absolute trusted interpreter/i,
+      );
+      await expectUnprobed(python);
+    }
+    await using client = clients.createSecurity({
+      pythonPath:
+        kind === "legacy native"
+          ? await trustedRecoveryPython(f.python)
+          : "python3",
+    });
+    const result = await client.run(f.repository, options);
+    expect(result.manifest.scan.id).toBe(f.scanId);
+  },
+);
+
+test.skipIf(process.platform === "win32").each([
+  ["single", "config", "named"],
+  ["single", "skill", "named"],
+  ["bulk", "config", "named"],
+  ["bulk", "config", "absolute"],
+  ["single", "legacy prompt", "named"],
+  ["bulk", "legacy prompt", "ambient"],
+  ["single", "legacy native profile", "named"],
+  ["single", "legacy native profile", "trusted absolute"],
+  ["bulk", "legacy native profile", "ambient"],
+  ["bulk", "legacy native profile", "checkout symlink"],
+] as const)(
+  "CLI %s sealed recovery with %s and %s Python excludes the instruction checkout",
+  async (command, source, selection) => {
+    const {
+      source: instructions,
+      bin,
+      python,
+    } = await modelInputCheckout(source === "skill" ? "SKILL.md" : undefined);
+    const bulk = command === "bulk";
+    const legacyProfile = source === "legacy native profile";
+    const recipes = {
+      "legacy prompt": { pythonDiscoveryRoots: undefined },
+      "legacy native profile": legacyNativeProfileRecipe(),
+      config: { config: { model_instructions_file: instructions } },
+      skill: {
+        config: { skills: { config: [{ path: instructions, enabled: true }] } },
+      },
+    };
+    const f = await interruptedScan("deep", bulk, recipes[source]);
+    await sealWithOriginalPlugin(f);
+    if (bulk) await rm(join(f.root, "results.jsonl"));
+    else await rm(f.repository, { recursive: true });
+    const args = bulk
+      ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover"]
+      : ["scans", "resume", f.scanId];
+    const alias = join(f.root, "linked-tools");
+    if (selection === "checkout symlink") await symlink(bin, alias, "dir");
+    const configuredPython =
+      selection === "trusted absolute"
+        ? await trustedRecoveryPython(f.python)
+        : {
+            named: "python3",
+            absolute: python,
+            ambient: undefined,
+            "checkout symlink": join(alias, "python3"),
+          }[selection];
+    const cli = join(import.meta.dirname, "../src/cli.ts");
+    const fallback =
+      source === "legacy prompt"
+        ? [dirname(await trustedRecoveryPython(f.python))]
+        : [];
+    const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], {
+      cwd: f.root,
+      env: {
+        ...f.environment,
+        HOME: f.root,
+        TMPDIR: f.root,
+        XDG_CACHE_HOME: join(f.root, "cache"),
+        PATH: [bin, ...fallback, f.environment.PATH].join(delimiter),
+        PYTHON: configuredPython,
+        CODEX_CLI_PATH: join(f.root, "absent-codex"),
+      },
+    });
+    await expectUnprobed(python);
+    const refused =
+      selection === "absolute" ||
+      (legacyProfile && selection !== "trusted absolute");
+    expect(result.exitCode, result.stderr.toString()).toBe(refused ? 2 : 0);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      progress: { status: refused ? "running" : "complete" },
+    });
+  },
+);
+
+test("sealed SDK resumes the registered path scope after the checkout is removed", async () => {
+  const f = await interruptedScan("deep", false, {
+    target: { kind: "paths", paths: ["source.py"] },
+    excludePaths: ["generated"],
+  });
+  await sealWithOriginalPlugin(f);
+  await rm(f.repository, { recursive: true });
+  const other = await temporaryDirectory();
+  Object.assign(f.environment, { HOME: other });
+  await using client = resumeDependencies(f).createSecurity({});
+  const options = f.resumeOptions;
+  await expect(
+    client.run(f.repository, { ...options, target: ["other"] }),
+  ).rejects.toThrow("requested target differs");
+  await expect(
+    client.run(f.repository, { ...options, excludePaths: [] }),
+  ).rejects.toThrow("requested exclusions differ");
+  if (process.platform !== "win32") {
+    const name = basename(f.scanDir);
+    const foreignOutput = join(other, name);
+    await mkdir(foreignOutput, { mode: 0o700 });
+    const foreignManifest = join(foreignOutput, "scan-manifest.json");
+    await cp(join(f.scanDir, "scan-manifest.json"), foreignManifest);
+    const foreignLink = join(f.root, "foreign-output");
+    await symlink(foreignOutput, foreignLink);
+    const foreign = `${relative(process.cwd(), foreignLink)}/../${name}`;
+    await expect(
+      client.run(f.repository, { ...options, outputDir: foreign }),
+    ).rejects.toThrow("mismatched scan resume context");
+    await rm(foreignLink);
+    await expect(
+      client.run(f.repository, { ...options, outputDir: foreign }),
+    ).rejects.toThrow();
+
+    const savedLink = join(other, "saved-output");
+    await symlink(f.scanDir, savedLink);
+    await expect(
+      client.run(f.repository, { ...options, outputDir: savedLink }),
+    ).rejects.toThrow("non-symlink directory");
+    options.outputDir = `~/saved-output/../${name}`;
+  }
+  const result = await client.run(f.repository, {
+    ...options,
+    target: ["./source.py"],
+  });
+  expect(result.manifest.scan.id).toBe(f.scanId);
+  expect(result.manifest.scan.scope.excludePaths).toEqual(["generated"]);
+});
+
+test("sealed SDK resume accepts the canonical target of a saved repository alias", async () => {
+  const f = await interruptedScan("deep", false, {
+    recipeRepositoryAlias: true,
+  });
+  await sealWithOriginalPlugin(f);
+  await using client = resumeDependencies(f).createSecurity({});
+  const upperOutput = join(f.root, basename(f.scanDir).toUpperCase());
+  const caseInsensitive = existsSync(upperOutput);
+  let outputDir = caseInsensitive ? upperOutput : f.scanDir;
+  if (process.platform !== "win32") {
+    const parentAlias = join(
+      await temporaryDirectory(),
+      "original-output-parent",
+    );
+    await symlink(f.root, parentAlias);
+    outputDir = join(parentAlias, basename(outputDir));
+  }
+  const options = { ...f.resumeOptions, outputDir };
+  const unrelatedOutput = caseInsensitive
+    ? join(f.root, "unrelated-output")
+    : upperOutput;
+  await mkdir(unrelatedOutput, { mode: 0o700 });
+  await cp(
+    join(f.scanDir, "scan-manifest.json"),
+    join(unrelatedOutput, "scan-manifest.json"),
+  );
+  await expect(
+    client.run(f.repository, { ...options, outputDir: unrelatedOutput }),
+  ).rejects.toThrow("mismatched scan resume context");
+  await expect(client.run(f.root, options)).rejects.toThrow(
+    "mismatched scan resume context",
+  );
+  let repository = f.repository;
+  if (process.platform !== "win32") {
+    const other = await temporaryDirectory();
+    const otherRepository = join(other, basename(f.repository));
+    await mkdir(otherRepository);
+    const foreignLink = join(f.root, "foreign-link");
+    await symlink(otherRepository, foreignLink);
+    const foreign = `${foreignLink}/../${basename(f.repository)}`;
+    await expect(client.run(foreign, options)).rejects.toThrow(
+      "mismatched scan resume context",
+    );
+    await rm(foreignLink);
+    await expect(client.run(foreign, options)).rejects.toThrow(
+      "mismatched scan resume context",
+    );
+
+    const savedLink = join(other, "saved-link");
+    await symlink(f.scanDir, savedLink);
+    repository = `${savedLink}/../${basename(f.repository)}`;
+  }
+  const result = await client.run(repository, options);
+  expect(result.manifest.scan.id).toBe(f.scanId);
+  expect(result.threadId).toBe(f.threadId);
+});
+
 test.each([
   "single",
+  "source-removed",
+  ...(process.platform === "win32" ? [] : ["source-replaced", "source-loop"]),
   "bulk",
   "unsupported-schema",
   "wrong-producer",
@@ -1568,21 +2293,7 @@ test.each([
   "resume preserves sealed artifacts across a plugin upgrade (%s)",
   async (scenario) => {
     const f = await interruptedScan("deep", scenario === "bulk");
-    await finishDiscovery(f);
-    const oldPlugin = join(f.root, "old-plugin");
-    for (const path of ["scripts", "schemas", "shared", ".codex-plugin"]) {
-      await cp(join(PLUGIN_ROOT, path), join(oldPlugin, path), {
-        recursive: true,
-      });
-    }
-    const pluginManifest = join(oldPlugin, ".codex-plugin", "plugin.json");
-    const plugin = JSON.parse(await readFile(pluginManifest, "utf8"));
-    plugin.version = f.recipe.pluginVersion;
-    await writeFile(pluginManifest, JSON.stringify(plugin));
-    await runWorkbench(
-      { python: f.python, pluginRoot: oldPlugin, environment: f.environment },
-      ["prepare-scan-completion", "--scan-id", f.scanId],
-    );
+    await sealWithOriginalPlugin(f);
     const manifestPath = join(f.scanDir, "scan-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     expect(manifest.scan.producer.version).toBe(f.recipe.pluginVersion);
@@ -1601,7 +2312,25 @@ test.each([
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
     const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-    const rejected = !["single", "bulk"].includes(scenario);
+    const rejected = ![
+      "single",
+      "bulk",
+      "source-removed",
+      "source-replaced",
+      "source-loop",
+    ].includes(scenario);
+    if (scenario.startsWith("source-")) {
+      await rm(f.repository, { recursive: true });
+      if (scenario === "source-replaced") {
+        const replacement = join(f.root, "unrelated-checkout");
+        await mkdir(replacement);
+        await symlink(replacement, f.repository);
+      } else if (scenario === "source-loop") {
+        await symlink(f.repository, f.repository);
+      }
+    }
+    if (scenario === "bulk" || scenario === "source-removed")
+      await rm(f.sessionPath);
     let turns = 0;
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -1630,9 +2359,9 @@ test.each([
       ),
     ).toEqual(artifacts);
     const after = await f.command(["get-scan", "--scan-id", f.scanId]);
+    expect(turns).toBe(0);
     if (rejected) {
       expect(stderr.text()).toContain("Cannot resume sealed scan");
-      expect(turns).toBe(0);
       expect(after).toEqual(before);
     } else {
       expect(after["scan"], stderr.text()).toMatchObject({

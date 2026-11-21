@@ -184,6 +184,13 @@ async function run() {
         complete: true,
       });
     }
+    if (
+      complete &&
+      process.env.PACKAGE_DEEP_CHANGE_INPUT &&
+      basename(join(root, "..")) === "discovery-0001"
+    ) {
+      await writeFile(process.env.PACKAGE_DEEP_CHANGE_INPUT, "Changed input.");
+    }
     await trace({
       phase: layout,
       complete,

@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { constants, open, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
+import { isRecord } from "./record.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { KnowledgeBaseSnapshot } from "./knowledge-base.js";
@@ -39,6 +41,107 @@ export function scanInputIdentity(
             ),
           },
   };
+}
+
+const modelFileSettings = ["model_instructions_file"] as const;
+const legacyModelFileDigests = {
+  model_instructions_file: "modelInstructionsFileSha256",
+} as const;
+
+function inlineInstructions(config: JsonObject) {
+  const value = config["developer_instructions"];
+  return typeof value === "string" ? { sha256: textDigest(value) } : null;
+}
+
+async function modelFileInput(
+  config: JsonObject,
+  setting: (typeof modelFileSettings)[number],
+  signal?: AbortSignal,
+) {
+  const path = config[setting];
+  if (typeof path !== "string" || !path) return null;
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!(await file.stat()).isFile())
+      throw new CodexSecurityError(
+        `Expected a regular file for ${setting}: ${path}`,
+      );
+    return {
+      path,
+      sha256: createHash("sha256")
+        .update(await file.readFile({ signal }))
+        .digest("hex"),
+    };
+  } finally {
+    await file.close();
+  }
+}
+
+export async function deepModelFileInputs(
+  config: JsonObject,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
+  const inputs: JsonObject = {
+    developer_instructions: inlineInstructions(config),
+  };
+  for (const setting of modelFileSettings)
+    inputs[setting] = await modelFileInput(config, setting, signal);
+  return inputs;
+}
+
+export async function validateDeepModelFileInputs(
+  original: unknown,
+  config: JsonObject,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!isRecord(original)) return;
+  const inputs = original["modelFileInputs"];
+  if (inputs !== undefined && !isRecord(inputs))
+    throw new CodexSecurityError(
+      "Invalid model-file input receipt for the saved Deep Scan.",
+    );
+  const instructions = inputs?.["developer_instructions"];
+  if (
+    instructions !== undefined &&
+    !isDeepStrictEqual(instructions, inlineInstructions(config))
+  )
+    throw new CodexSecurityError(
+      "The saved Deep Scan's developer_instructions changed. Restore the original input and resume the scan, or start a new scan.",
+    );
+  for (const setting of modelFileSettings) {
+    const saved = inputs?.[setting];
+    const priorDigest = original[legacyModelFileDigests[setting]];
+    if (saved === undefined && priorDigest === undefined) continue;
+    if (
+      saved !== undefined &&
+      saved !== null &&
+      (!isRecord(saved) ||
+        typeof saved["path"] !== "string" ||
+        typeof saved["sha256"] !== "string")
+    )
+      throw new CodexSecurityError(
+        `Invalid saved Deep Scan input for ${setting}.`,
+      );
+    let current;
+    try {
+      current = await modelFileInput(config, setting, signal);
+    } catch (cause) {
+      signal?.throwIfAborted();
+      throw new CodexSecurityError(
+        `Could not read the saved Deep Scan's ${setting}: ${errorMessage(cause)}. Restore the original file and resume the scan.`,
+        { cause },
+      );
+    }
+    const expected =
+      saved === undefined ? priorDigest : (saved?.["sha256"] ?? null);
+    if (
+      (current?.sha256 ?? null) !== expected ||
+      (isRecord(saved) && current?.path !== saved["path"])
+    )
+      throw new CodexSecurityError(
+        `The saved Deep Scan's ${setting} changed. Restore the original input and resume the scan, or start a new scan.`,
+      );
+  }
 }
 
 export async function saveScanKnowledge(
