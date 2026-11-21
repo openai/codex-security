@@ -2,7 +2,7 @@ import { build } from 'esbuild';
 import './apply-patches.mjs';
 import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { resolve, relative } from 'node:path';
+import { resolve, relative, sep } from 'node:path';
 
 const check = process.argv.includes('--check');
 const root = resolve(import.meta.dirname, '..');
@@ -13,7 +13,9 @@ const bundle = await build({
   outExtension: {'.js': '.cjs'}, platform: 'node', target: 'node24', format: 'cjs',
   bundle: true, write: false, sourcemap: false, legalComments: 'eof', metafile: true,
 });
-const generated = new Map(bundle.outputFiles.map(file => [relative(root, file.path), Buffer.from(file.contents)]));
+const generated = new Map(bundle.outputFiles.map(file => [
+  relative(root, file.path).split(sep).join('/'), Buffer.from(file.contents),
+]));
 const actionVersion = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')).version;
 const lock = JSON.parse(await readFile(resolve(root, 'package-lock.json'), 'utf8'));
 const runtimeManifest = JSON.parse(await readFile(resolve(root, 'runtime/package.json'), 'utf8'));
