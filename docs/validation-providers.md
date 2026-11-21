@@ -77,24 +77,21 @@ content, another destination or loss of the host state can create a fresh
 submission. If a finding stays `SUBMITTED`, check the scan activity in the
 Continuum environment. The finding may be waiting for the next build.
 
-After `validate --scan` or `scan --validate`, the CLI saves terminal Continuum
-assessments in private host state. When you patch or verify a saved occurrence
-on that host, the CLI includes its assessment in the model input. The workbench
-also loads it for the assigned Generate and Verify actions. Apply uses the
-recorded patch unchanged. These reads make no AWS requests.
+### Patch and verify a saved occurrence
 
-The assessment includes AWS finding and issue identifiers, available artifact
-IDs, status, scope, freshness and any eligible proof observation. Treat the
-stored text and identifiers as sensitive. The host keeps CLI snapshots under
-`cli-continuum-*` in the CLI state directory. Both interfaces can also read
-assessments from the plugin's provider cache. Missing state leaves the
-original finding available for remediation. The reviewer checks the candidate
-against the original remediation tests and reports the AWS result separately.
+After validation, reopen the original occurrence on the same host. CLI patch
+and verify-fix and workbench Generate and Verify can read its saved assessment
+without AWS access. The model receives sensitive provider identifiers, status,
+scope, freshness and any eligible observation. It checks the candidate against
+the original remediation tests. Apply uses the recorded patch unchanged.
 
-For a scan bound to a Continuum environment, a CLI retry can finish the
-workbench's timed-out submission. When multiple terminal results describe the
-same submission and issue, the reviewer receives the latest assessment by
-validation artifact creation time. Ambiguous results are omitted.
+The workbench owns the whole scan's validation report and retries. The CLI
+saves individual results under `cli-continuum-*` in its private state directory.
+Validating a subset leaves the workbench's queue and report intact. For a
+timed-out workbench finding, only a retry of the same AWS submission can supply
+its result. For competing results on the same submission and issue, the latest
+AWS validation artifact wins. Missing or ambiguous evidence leaves the original
+finding available for remediation.
 
 Import is optional. To collect full AWS evidence or available patches, pass
 the returned `findingId` to

@@ -34,37 +34,35 @@ function configurationPath(scanId: string): string {
   );
 }
 
-/** Enrich the single occurrence returned by the workbench after authorizing its stage token. */
+/** Called after get-scan authorizes the caller's remediation claim. */
 export async function withAssignedAssessment(
   context: JsonObject,
 ): Promise<JsonObject> {
   const scan = asRecord(context.scan);
-  const findings = scan?.findings;
-  const finding =
-    Array.isArray(findings) && findings.length === 1
-      ? asRecord(findings[0])
-      : undefined;
+  if (!Array.isArray(scan?.findings)) return context;
+  // Only a protected host record can supply this field.
+  const findings = scan.findings.map(
+    ({ continuumAssessment: _ignored, ...finding }: JsonObject) => finding,
+  );
+  const finding = findings[0];
   const action = asRecord(finding?.remediationState)?.pendingAction;
   if (
-    (action !== "generate" && action !== "verify") ||
-    typeof scan?.scanId !== "string" ||
-    typeof scan.targetPath !== "string" ||
-    typeof finding?.occurrenceId !== "string"
+    findings.length === 1 &&
+    (action === "generate" || action === "verify") &&
+    typeof scan.scanId === "string" &&
+    typeof scan.targetPath === "string" &&
+    typeof finding?.occurrenceId === "string"
   ) {
-    return context;
+    const saved = await savedContinuumAssessments(
+      process.env,
+      scan.scanId,
+      scan.targetPath,
+      [finding.occurrenceId],
+    );
+    const assessment = saved.get(finding.occurrenceId);
+    if (assessment) finding.continuumAssessment = assessment;
   }
-  const saved = await savedContinuumAssessments(
-    process.env,
-    scan.scanId,
-    scan.targetPath,
-    [finding.occurrenceId],
-  );
-  const continuumAssessment = saved.get(finding.occurrenceId);
-  if (!continuumAssessment) return context;
-  return {
-    ...context,
-    scan: { ...scan, findings: [{ ...finding, continuumAssessment }] },
-  };
+  return { ...context, scan: { ...scan, findings } };
 }
 
 /** Bind explicitly selected host configuration, never repository-discovered settings. */
