@@ -4172,6 +4172,104 @@ for (const imported of [false, true]) {
   );
 }
 
+for (const [kind, prefix, ignoreCase, readOnlyRoot] of [
+  ["directory", "", false, false],
+  ["link", "", false, false],
+  ["directory", "\u0130".repeat(90), true, false],
+  ["directory", "", false, true],
+] as const) {
+  const runTest = readOnlyRoot
+    ? test.skipIf(process.platform === "win32" || process.getuid?.() === 0)
+    : kind === "link"
+      ? testPosix
+      : test;
+  runTest(
+    `retained selected restoration respects filesystem Unicode aliases for a ${kind}${ignoreCase ? " with case folding" : ""}${readOnlyRoot ? " under a read-only root" : ""}`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "unicode-scope-source");
+      const composed = `${prefix}caf\u00e9`;
+      const requested = `${prefix}cafe\u0301`;
+      await mkdir(join(source.path, "other"));
+      await writeFile(
+        join(source.path, "other", "app.ts"),
+        "export const other = true;\n",
+      );
+      if (kind === "link") {
+        await symlink("src", join(source.path, composed), "dir");
+      } else {
+        await cp(join(source.path, "src"), join(source.path, composed), {
+          recursive: true,
+        });
+      }
+      const first = await lstat(join(source.path, composed));
+      const second = await lstat(join(source.path, requested)).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      const equivalent = second?.dev === first.dev && second?.ino === first.ino;
+      if (!equivalent) {
+        if (kind === "link") {
+          await symlink("other", join(source.path, requested), "dir");
+        } else {
+          await cp(join(source.path, "other"), join(source.path, requested), {
+            recursive: true,
+          });
+        }
+      }
+      const expected = await readFile(join(source.path, requested, "app.ts"));
+      await pinRecoveryTask(
+        paths,
+        source,
+        "Track Unicode scope aliases",
+        `${requested}/app.ts`,
+      );
+      const campaign = await completedCampaign(paths);
+      const checkout = cloneRetained(paths, source);
+      if (ignoreCase) git(checkout, "config", "core.ignorecase", "true");
+      for (const name of [composed, requested]) {
+        await rm(
+          readOnlyRoot ? join(checkout, name, "app.ts") : join(checkout, name),
+          { recursive: true, force: true },
+        );
+      }
+      if (kind === "link") {
+        await rm(join(checkout, "src"), { recursive: true });
+        await rm(join(checkout, "other"), { recursive: true });
+      }
+
+      if (readOnlyRoot) await chmod(checkout, 0o555);
+      try {
+        await campaign.expectReused();
+      } finally {
+        if (readOnlyRoot) await chmod(checkout, 0o755);
+      }
+
+      expect(await readFile(join(checkout, requested, "app.ts"))).toEqual(
+        expected,
+      );
+      if (!equivalent) {
+        await expect(
+          lstat(
+            readOnlyRoot
+              ? join(checkout, composed, "app.ts")
+              : join(checkout, composed),
+          ),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      if (kind === "link") {
+        await expect(
+          lstat(join(checkout, equivalent ? "other" : "src", "app.ts")),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    },
+  );
+}
+
 for (const ignoreCase of [false, true]) {
   test(`retained selected restoration respects explicit core.ignorecase=${ignoreCase}`, async () => {
     const paths = await fixture();

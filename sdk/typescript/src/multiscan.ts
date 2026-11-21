@@ -2536,14 +2536,38 @@ async function checkoutRevision(
       "true";
     const comparisonPath = (name: string) =>
       ignoreCase ? name.toLowerCase() : name;
+    const unicodeCandidates = (names: Iterable<string>) => {
+      const candidates = new Map<string, string[]>();
+      for (const name of names) {
+        const key = comparisonPath(name).normalize("NFC");
+        const matches = candidates.get(key);
+        if (matches) matches.push(name);
+        else candidates.set(key, [name]);
+      }
+      return candidates;
+    };
+    const pathAliases = new Map<string, Promise<boolean>>();
+    const sameFilesystemPath = (tracked: string, requested: string) => {
+      const key = JSON.stringify([tracked, requested]);
+      let result = pathAliases.get(key);
+      if (result === undefined) {
+        result = retainedPathAliases(path, tracked, requested, ignoreCase);
+        pathAliases.set(key, result);
+      }
+      return result;
+    };
     const tree = await gitOutput(["ls-tree", "-r", "-z", task.revision]);
     const links = new Map<string, string>();
-    for (const row of tree.toString("utf8").split("\0")) {
+    const unicodeLinkNames: string[] = [];
+    for (const row of tree.toString("latin1").split("\0")) {
       if (!row.startsWith("120000 ")) continue;
-      const name = row.slice(row.indexOf("\t") + 1);
+      const bytes = Buffer.from(row.slice(row.indexOf("\t") + 1), "latin1");
+      const name = bytes.toString("utf8");
       const key = comparisonPath(name);
       if (!links.has(key)) links.set(key, name);
+      if (Buffer.from(name).equals(bytes)) unicodeLinkNames.push(name);
     }
+    const unicodeLinks = unicodeCandidates(unicodeLinkNames);
     const aliases = new Set<string>();
     const requiredDirectories = new Set<string>();
     const canonicalTrackedPath = async (
@@ -2586,9 +2610,18 @@ async function checkoutRevision(
             ? candidate
             : canonicalTrackedPath(candidate, visited);
         }
-        const name = links.get(
-          comparisonPath(relative(path, ancestor).split(sep).join("/")),
-        );
+        const requestedName = relative(path, ancestor).split(sep).join("/");
+        const key = comparisonPath(requestedName);
+        let name = links.get(key);
+        if (name === undefined) {
+          for (const candidate of unicodeLinks.get(key.normalize("NFC")) ??
+            []) {
+            if (await sameFilesystemPath(candidate, requestedName)) {
+              name = candidate;
+              break;
+            }
+          }
+        }
         if (name !== undefined) {
           if (visited.has(name))
             throw new Error("Symbolic link cycle in retained checkout target.");
@@ -2633,15 +2666,24 @@ async function checkoutRevision(
     const scopes = new Set(
       [...selectedPaths, ...aliases].map((name) => scopeKey(Buffer.from(name))),
     );
-    const selectedForRestore = (name: Buffer) => {
+    const unicodeScopes = unicodeCandidates([...selectedPaths, ...aliases]);
+    const selectedForRestore = async (name: Buffer) => {
       if (restoreAll) return true;
-      let key = scopeKey(name);
-      for (;;) {
-        if (scopes.has(key)) return true;
-        const slash = key.lastIndexOf("/");
-        if (slash === -1) return false;
-        key = key.slice(0, slash);
+      for (
+        let end = name.length;
+        end !== -1;
+        end = name.lastIndexOf(47, end - 1)
+      ) {
+        const prefix = name.subarray(0, end);
+        if (scopes.has(scopeKey(prefix))) return true;
+        const decoded = prefix.toString("utf8");
+        if (!Buffer.from(decoded).equals(prefix)) continue;
+        const key = comparisonPath(decoded).normalize("NFC");
+        for (const candidate of unicodeScopes.get(key) ?? []) {
+          if (await sameFilesystemPath(decoded, candidate)) return true;
+        }
       }
+      return false;
     };
     const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
     const selectedDeleted: Buffer[] = [];
@@ -2652,7 +2694,10 @@ async function checkoutRevision(
       end = deletedPaths.indexOf(0, start)
     ) {
       const name = deletedPaths.subarray(start, end);
-      if (selectedForRestore(name) && (await canRestoreDeletedPath(path, name)))
+      if (
+        (await selectedForRestore(name)) &&
+        (await canRestoreDeletedPath(path, name))
+      )
         selectedDeleted.push(deletedPaths.subarray(start, end + 1));
       start = end + 1;
     }
@@ -2683,6 +2728,84 @@ async function checkoutRevision(
     // Publish the recovered detached HEAD only after the worktree is ready.
     await rename(join(repairDirectory, "HEAD"), join(gitDirectory, "HEAD"));
   }
+}
+
+async function retainedPathAliases(
+  root: string,
+  tracked: string,
+  requested: string,
+  ignoreCase: boolean,
+): Promise<boolean> {
+  if (
+    [tracked, requested].some((name) =>
+      relativePathIsOutside(relative(root, resolve(root, name))),
+    )
+  )
+    return false;
+  const names = tracked.split("/");
+  const aliases = requested.split("/");
+  if (names.length !== aliases.length) return false;
+  let parent = root;
+  let missingParent = false;
+  for (let index = 0; index < names.length; index++) {
+    const name = names[index]!;
+    const alias = aliases[index]!;
+    const left = ignoreCase ? name.toLowerCase() : name;
+    const right = ignoreCase ? alias.toLowerCase() : alias;
+    if (left !== right) {
+      // Normalization only finds a candidate. The actual filename pair must
+      // refer to one inode on the filesystem where Git will restore it.
+      if (left.normalize("NFC") !== right.normalize("NFC")) return false;
+      const originalPath = join(root, ...names.slice(0, index + 1));
+      const alternativePath = join(root, ...aliases.slice(0, index + 1));
+      const original = await lstat(originalPath).catch(undefinedIfMissingFile);
+      const alternative = await lstat(alternativePath).catch(
+        undefinedIfMissingFile,
+      );
+      if (original !== undefined || alternative !== undefined) {
+        if (
+          original === undefined ||
+          alternative === undefined ||
+          original.dev !== alternative.dev ||
+          original.ino !== alternative.ino
+        )
+          return false;
+      }
+      if (original?.isDirectory() && alternative?.isDirectory()) {
+        // Existing directories establish the spelling without requiring write
+        // permission in their parent. Distinct mountpoints remain distinct.
+        if (
+          (await realpath(originalPath)) !== (await realpath(alternativePath))
+        )
+          return false;
+      } else {
+        const probe = await mkdtemp(join(parent, ".repair-name-"));
+        try {
+          await writeFile(join(probe, name), "", { flag: "wx" });
+          const original = await lstat(join(probe, name));
+          const alternative = await lstat(join(probe, alias)).catch(
+            undefinedIfMissingFile,
+          );
+          if (
+            alternative === undefined ||
+            original.dev !== alternative.dev ||
+            original.ino !== alternative.ino
+          )
+            return false;
+        } finally {
+          await rm(probe, { recursive: true, force: true });
+        }
+      }
+    }
+    if (!missingParent && index < names.length - 1) {
+      const child = join(parent, name);
+      const entry = await lstat(child).catch(undefinedIfMissingFile);
+      if (entry === undefined) missingParent = true;
+      else if (!entry.isDirectory()) return false;
+      else parent = child;
+    }
+  }
+  return true;
 }
 
 // Git names are raw bytes. Restore missing entries only through real directories.
