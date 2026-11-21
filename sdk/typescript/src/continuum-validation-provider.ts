@@ -4,6 +4,7 @@ import {
   type ContinuumRequest,
 } from "./continuum-submissions.js";
 import { repositoryFilePath } from "./scanner-import.js";
+import { compareTimestamps } from "./timestamps.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { prepareContinuumAws } from "./continuum-aws.js";
@@ -264,7 +265,7 @@ const concepts = [
   /\binjection\b/iu,
   /\b(authorization|cross-user|ownership|idor)\b/iu,
   /\b(disclosure|exposure|secrets?|credentials?)\b/iu,
-  /\b(availability|exhaustion|denial)\b/iu,
+  /\b(availability|exhaust(?:ion|s|ed|ing)?|resource consumption|denial)\b/iu,
 ];
 
 export function assessClaimMatch(
@@ -333,7 +334,8 @@ interface Scoring {
 }
 
 function createdAt(artifact: Record<string, unknown>) {
-  return Date.parse(text(artifact["createdAt"]) ?? "");
+  const time = text(artifact["createdAt"]) ?? "";
+  return Number.isFinite(Date.parse(time)) ? time : "";
 }
 
 function scoreLimitation(
@@ -344,11 +346,11 @@ function scoreLimitation(
 ): string | undefined {
   const validated = createdAt(proof);
   const scored = createdAt(score);
-  const updated = Date.parse(text(issue["updatedAt"]) ?? "");
+  const updated = text(issue["updatedAt"]) ?? "";
   if (!(
-    submittedAt.getTime() <= validated &&
-    validated <= scored &&
-    scored <= updated
+    compareTimestamps(submittedAt.toISOString(), validated) <= 0 &&
+    compareTimestamps(validated, scored) <= 0 &&
+    compareTimestamps(scored, updated) <= 0
   ))
     return "The timestamps do not establish a current issue score for this validation.";
   const rows = evidenceRows(score);
@@ -808,7 +810,13 @@ export class ContinuumValidationProvider implements ValidationProvider {
             const items = Array.isArray(listed["items"])
               ? listed["items"].map(object)
               : [];
-            items.sort((a, b) => (createdAt(b) || 0) - (createdAt(a) || 0));
+            items.sort((a, b) => {
+              const left = createdAt(a);
+              const right = createdAt(b);
+              if (!left) return right ? 1 : 0;
+              if (!right) return -1;
+              return compareTimestamps(right, left);
+            });
             for (const candidate of items) {
               const artifactId = text(candidate["artifactId"]);
               if (!artifactId) continue;
@@ -848,7 +856,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
                     latest: items.every(
                       (item) =>
                         item === candidate ||
-                        createdAt(item) < createdAt(artifact),
+                        compareTimestamps(
+                          createdAt(item),
+                          createdAt(artifact),
+                        ) < 0,
                     ),
                   };
                 if (
@@ -946,18 +957,20 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ? assessClaimMatch(proof.evidence, finding)
         : "unknown";
 
-    const artifactTime = createdAt(validationArtifact);
+    const artifactTime = Date.parse(createdAt(validationArtifact));
     const evidenceCreatedAt = Number.isFinite(artifactTime)
       ? new Date(artifactTime).toISOString()
       : undefined;
     const validatedAt = conclusive ? evidenceCreatedAt : undefined;
-    const olderArtifact = artifactTime < submittedAt.getTime();
+    const submitted = submittedAt.toISOString();
+    const olderArtifact =
+      compareTimestamps(createdAt(validationArtifact), submitted) < 0;
     const stale =
       olderArtifact ||
       [
         issue["updatedAt"] ?? issue["createdAt"],
         scoring?.artifact["createdAt"],
-      ].some((time) => Date.parse(text(time) ?? "") < submittedAt.getTime());
+      ].some((time) => compareTimestamps(text(time) ?? "", submitted) < 0);
     const joinedValidatedIssue =
       conclusive && resultScope === "issue" && olderArtifact;
     const proofType = proof?.description ?? "validation evidence";

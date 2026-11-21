@@ -725,3 +725,16 @@ test.each([
     expect(assessClaimMatch(evidence, finding)).toBe(match);
   },
 );
+
+test("recognizes exhaustion as resource consumption", () => {
+  const claim = {
+    title: "Uncontrolled resource consumption",
+    location: "src/store.ts:40",
+  };
+  expect(assessClaimMatch("src/store.ts:40 can exhaust memory.", claim)).toBe(
+    "on_target",
+  );
+  expect(assessClaimMatch("src/store.ts:40 loads a resource.", claim)).toBe(
+    "unknown",
+  );
+});

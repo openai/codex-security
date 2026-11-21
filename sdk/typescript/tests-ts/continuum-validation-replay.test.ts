@@ -263,6 +263,38 @@ describe("explicitly fake outcome variations", () => {
     expect(result.record?.proofObservation).toBeUndefined();
   });
 
+  test.each([
+    [
+      "2026-11-06T16:40:18.536989+01:00",
+      "2026-11-06T10:42:53.583051-05:00",
+      "critical",
+    ],
+    ["invalid", "invalid", "high"],
+  ])(
+    "selects the newest dated proof and score with competing times %s and %s",
+    async (proofTime, scoreTime, severityAfter) => {
+      const { fake, proof, score } = withObservation();
+      for (const [artifact, createdAt] of [
+        [proof, proofTime],
+        [score, scoreTime],
+      ]) {
+        const artifactId = "older-" + artifact.artifactId;
+        fake.artifacts[artifactId] = { ...artifact, artifactId, createdAt };
+        fake.artifactLists[artifact.artifactType].items.unshift({
+          artifactId,
+          createdAt,
+        });
+      }
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        validationArtifactId: proofId,
+        scoringArtifactId: scoreId,
+        severityAfter,
+        freshness: { evidenceCreatedAt: "2026-11-06T15:40:18.536Z" },
+      });
+    },
+  );
+
   test("uses the newest linked evidence while retaining severity if a newer issue score is unrelated", async () => {
     const { fake, score } = withObservation();
     for (const [artifactId, createdAt] of [
@@ -358,6 +390,8 @@ describe("explicitly fake outcome variations", () => {
     ["proof", "createdAt", "2026-11-01T00:00:00Z"],
     ["proof", "createdAt", "invalid"],
     ["score", "createdAt", undefined],
+    ["score", "createdAt", "2026-11-06T16:40:18.536989+01:00"],
+    ["issue", "updatedAt", "2026-11-06T10:42:53.583051-05:00"],
     ["issue", "updatedAt", recorded.artifacts[proofId].createdAt],
     ["exploitability", "sourceValidationArtifactId", "other-proof"],
     ["exploitability", "sourceValidationArtifactId", undefined],
