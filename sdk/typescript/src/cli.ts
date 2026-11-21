@@ -798,6 +798,26 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
   return value;
 }
 
+function importedPackageAdvisory({
+  provider,
+  evidence,
+}: StoredExternalFinding): string | null {
+  if (
+    (provider !== "trivy" && provider !== "grype") ||
+    !evidence.packages?.length
+  )
+    return null;
+  const ids = evidence.advisory_ids ?? [];
+  if (ids.length < 2) return ids[0] ?? null;
+  // A normalized import may reorder aliases. Use the scanner's primary ID.
+  const data = evidence.source_data;
+  const match = provider === "grype" ? asRecord(data?.["match"]) : undefined;
+  const vulnerability = asRecord((match ?? data)?.["vulnerability"]);
+  const primary =
+    vulnerability?.[provider === "grype" ? "id" : "VulnerabilityID"];
+  return ids.find((id) => id === primary) ?? null;
+}
+
 function renderImportedFindings(
   repository: string,
   findings: readonly StoredExternalFinding[],
@@ -806,7 +826,10 @@ function renderImportedFindings(
   const lines = [
     `${formatItemCount(findings.length, "imported finding")} in ${diagnosticValue(repository)}`,
   ];
-  for (const { provider, sourceKey, sourceFindingId, evidence } of findings) {
+  function appendFinding(
+    { provider, sourceKey, sourceFindingId, evidence }: StoredExternalFinding,
+    showGuidance: boolean,
+  ) {
     lines.push("", `[${evidence.severity}] ${diagnosticValue(evidence.title)}`);
     if (evidence.title === evidence.details?.rule?.id) {
       const message = evidence.description?.trim().split(/[\r\n]/u, 1)[0];
@@ -822,8 +845,7 @@ function renderImportedFindings(
       `  Source: ${diagnosticValue(provider)} (${diagnosticValue(sourceKey)})  Finding ID: ${diagnosticValue(sourceFindingId)}`,
     );
 
-    const pkg = evidence.packages?.[0];
-    if (pkg) {
+    for (const pkg of evidence.packages ?? []) {
       const parts = [`  Package: ${diagnosticValue(pkg.name)}`];
       if (pkg.installed_version)
         parts.push(`Installed: ${diagnosticValue(pkg.installed_version)}`);
@@ -834,6 +856,15 @@ function renderImportedFindings(
       if (pkg.fixed_versions?.length)
         parts.push(`Fixed: ${diagnosticValue(pkg.fixed_versions.join(", "))}`);
       lines.push(parts.join("  "));
+      if (!showGuidance) continue;
+      lines.push(
+        pkg.manifest_path
+          ? `  Source to confirm: ${diagnosticValue(pkg.manifest_path)}`
+          : "  Next: Identify the consuming repository and build input.",
+        pkg.fixed_versions?.length
+          ? "  Once confirmed: Generate a patch for the reported upgrade and test it."
+          : "  Once confirmed: Investigate exposure and check for a vendor fix.",
+      );
     }
     const location = evidence.locations?.[0];
     if (location)
@@ -845,6 +876,19 @@ function renderImportedFindings(
     const fileUrl = evidence.details?.file_url;
     if (fileUrl && fileUrl !== evidence.url)
       lines.push(`  File: ${diagnosticValue(fileUrl)}`);
+  }
+
+  const groups = Map.groupBy(findings, importedPackageAdvisory);
+  for (const [advisory, occurrences] of groups) {
+    if (advisory === null && groups.size > 1)
+      lines.push("", "Other imported findings");
+    if (advisory !== null)
+      lines.push(
+        "",
+        `${diagnosticValue(advisory)} · ${formatItemCount(occurrences.length, "package finding")}`,
+      );
+    for (const finding of occurrences)
+      appendFinding(finding, advisory !== null);
   }
   if (findings.length)
     lines.push(

@@ -489,7 +489,7 @@ test.each(["SIGINT", "SIGTERM"] as const)(
 );
 
 test.each([true, false])(
-  "imported readback summarizes only reported package versions on a terminal (installed version: %s)",
+  "terminal readback groups primary advisories and summarizes reported versions (installed version: %s)",
   async (hasInstalledVersion) => {
     const repository = resolve("workspace", "project");
     const deps = dependencies({ currentDirectory: repository });
@@ -497,46 +497,64 @@ test.each([true, false])(
       name: "example-package",
       vulnerable_version_range: "<2.0.0",
       ...(hasInstalledVersion
-        ? { installed_version: "1.5.0", fixed_versions: ["2.0.0", "2.1.0"] }
+        ? {
+            installed_version: "1.5.0",
+            fixed_versions: ["2.0.0", "2.1.0"],
+            manifest_path: "package.json",
+          }
         : {}),
     };
     const reference = "https://example.test/alerts/42";
     const fileUrl = hasInstalledVersion
       ? "https://example.test/project/blob/test-fixture/src/app.ts"
       : reference;
+    const advisory = "CVE-2099-1000";
     deps.readLocalExternalFindings = async () => ({
       repository,
-      findings: [
-        {
+      findings: ["github", "trivy", "grype"].map((provider) => {
+        const source =
+          provider === "grype"
+            ? { match: { vulnerability: { id: advisory } } }
+            : { vulnerability: { VulnerabilityID: advisory } };
+        return {
           repository,
-          id: "external-1",
+          id: provider,
           version: 1,
-          provider: "github",
+          provider,
           sourceKey: "example/project",
-          sourceFindingId: "42",
+          sourceFindingId: provider,
           createdAt: "2026-01-01T00:00:00Z",
           updatedAt: "2026-01-01T00:00:00Z",
           assessment: { state: "not_assessed" },
           evidence: {
             title: "Dependency\nissue",
             severity: "high",
-            packages: [pkg],
+            advisory_ids: ["alias", advisory],
+            packages: provider === "grype" ? [pkg, { name: "other" }] : [pkg],
             locations: hasInstalledVersion
               ? [{ path: "src/app.ts", line: 12 }]
               : [],
             url: reference,
             details: { kind: "advisory", file_url: fileUrl },
-            source_data: { vendorField: "raw details" },
+            source_data: { ...source, vendorField: "raw details" },
           },
-        },
-      ],
+        };
+      }),
     });
     const args = ["findings", "imported"];
     const interactive = createCliTest(main, { stdout: true });
     expect(await interactive.runCli(args, deps)).toBe(0);
     const text = interactive.stdout.text();
     expect(text).toContain("[high] Dependency issue");
-    expect(text).toContain("github (example/project)  Finding ID: 42");
+    expect(text).toContain(`${advisory} · 2 package findings`);
+    expect(text).toContain("Other imported findings");
+    for (const provider of ["github", "trivy", "grype"])
+      expect(text).toContain(
+        `${provider} (example/project)  Finding ID: ${provider}`,
+      );
+    expect(text).toContain("Package: other");
+    expect(text).toContain("Identify the consuming repository");
+    expect(text).toContain("Investigate exposure");
     const packageLine = text
       .split("\n")
       .find((line) => line.includes("Package:"));
@@ -547,6 +565,8 @@ test.each([true, false])(
     );
     expect(text).toContain(`Reference: ${reference}`);
     if (hasInstalledVersion) {
+      expect(text).toContain("Source to confirm: package.json");
+      expect(text).toContain("Generate a patch");
       expect(text).toContain("Location: src/app.ts:12");
       expect(text).toContain(`File: ${fileUrl}`);
     } else {
