@@ -90,6 +90,35 @@ async function finalizeParentFindings({
   return (await readJson(root, "findings.json")).findings;
 }
 
+test("Standard file declarations reach the workbench only in the submitted checkpoint", async (t) => {
+  const scan = await fixture(t, "standard");
+  await scan.checkpoint(scan.draft({ reviewedFiles: ["previous.py"] }));
+  const paths = ["-source.py", "src/auth check.py"];
+  for (const reviewedFiles of [paths, undefined]) {
+    const input = scan.draft(
+      reviewedFiles === undefined ? {} : { reviewedFiles },
+    );
+    await recordCodexSecurityScanDraftViaWorkbench(
+      scan.context,
+      input,
+      async (args: string[]) => {
+        const staged = await readJson(args[args.indexOf("--draft-path") + 1]);
+        const submitted = await readJson(
+          args[args.indexOf("--checkpoint-path") + 1],
+        );
+        assert.deepEqual(submitted.reviewState.reviewedFiles, reviewedFiles);
+        assert.equal(Object.hasOwn(staged.reviewState, "reviewedFiles"), false);
+        return {};
+      },
+    );
+  }
+  assert.equal(
+    draftApi.scanDraftInputSchema.safeParse(scan.draft({ reviewedFiles: [1] }))
+      .success,
+    false,
+  );
+});
+
 // Finding reconciliation is shared by failed and canceled scans. Exercise both
 // terminal bindings without repeating every identity case for each status.
 for (const [layout, status] of [

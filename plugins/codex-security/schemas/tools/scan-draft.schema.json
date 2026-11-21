@@ -625,6 +625,11 @@
         "excludePaths": false,
         "receiptRefs": false,
         "inventoryStrategy": false,
+        "reviewedFiles": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "For a Standard parent draft, list the exact repository-relative inventory paths whose current contents have been fully reviewed in this batch."
+        },
         "surfaces": {
           "type": "array",
           "items": {
