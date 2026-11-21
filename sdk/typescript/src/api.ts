@@ -7971,7 +7971,9 @@ function dependencyPermissions(
 }
 
 function escapePermissionGlobPath(path: string): string {
-  return path.replace(/[*?[\]{}]/gu, "[$&]");
+  return process.platform === "win32"
+    ? path.replace(/[*?[\]{}]/gu, "[$&]")
+    : path.replace(/[\\*?[\]{}]/gu, "\\$&");
 }
 
 function windowsCredentialFileGlob(path: string): string {

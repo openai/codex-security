@@ -260,7 +260,12 @@ async function fixture(
   const root = await temporaryDirectory("codex-security-sca-");
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
-  const ambientHome = join(root, "ambient [codex]{home}");
+  const ambientHome = join(
+    root,
+    process.platform === "win32"
+      ? "ambient [codex]{home}"
+      : "ambient [codex]{home}\\literal",
+  );
   const outputDir = options.ambientOutput
     ? join(
         ambientHome,
