@@ -76,6 +76,8 @@ test(function testNativeTurnFailureClassification() {
     "This request has been flagged for possible cybersecurity risk.",
     "This request has been flagged for potentially high-risk cyber activity.",
     "This request was blocked due to a misalignment policy violation.",
+    "The requested access program is not enabled.",
+    "The requested access program cannot be used with this model.",
     "Quota exceeded. Check your plan and billing details.",
     "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
     "Your workspace is out of credits. Add credits to continue.",
