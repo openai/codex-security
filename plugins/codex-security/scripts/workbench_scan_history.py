@@ -934,7 +934,7 @@ def compare_scans(
             and "deferred" in after_coverage
             and all(
                 any(
-                    path == record["path"]
+                    PurePosixPath(path) == PurePosixPath(record["path"])
                     if record["kind"] == "file"
                     else _path_within(path, record["path"])
                     for record in bound_scopes

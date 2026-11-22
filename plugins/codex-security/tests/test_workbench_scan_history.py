@@ -1166,7 +1166,7 @@ def test_verified_revision_applies_only_to_covered_committed_contents(
         ]
 
 
-@pytest.mark.parametrize("affected_path", ["generated/handler.py", "README.md"])
+@pytest.mark.parametrize("affected_path", ["generated/handler.py", "README.md", "./README.md"])
 def test_resolution_requires_committed_affected_scopes(tmp_path: Path, affected_path: str) -> None:
     state, root, repo = tmp_path / "state", tmp_path / "results", tmp_path / "repository"
     initialize_git_repository(repo)

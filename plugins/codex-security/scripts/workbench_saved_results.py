@@ -430,7 +430,7 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
                 artifact
                 for artifact in sealed_scan["artifacts"]
                 if artifact["mediaType"] == "application/json"
-                and re.fullmatch(r"checkpoints/[0-9a-f]{64}\.json", artifact["path"])
+                and re.fullmatch(r"artifacts/checkpoints/[0-9a-f]{64}\.json", artifact["path"])
             ]
             if len(checkpoints) == 1:
                 artifact = checkpoints[0]

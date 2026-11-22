@@ -3321,7 +3321,7 @@ def _prepare_scan_finalization(
             checkpoint_path, checkpoint_bytes = _final_review_checkpoint(scan, findings, coverage)
             scan["artifacts"].append(
                 {
-                    "path": checkpoint_path,
+                    "path": "artifacts/" + checkpoint_path,
                     "mediaType": "application/json",
                     "sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
                 }
@@ -3377,9 +3377,11 @@ def _write_prepared_scan_finalization(
             checkpoint_path, contents = _final_review_checkpoint(
                 scan, prepared.findings, prepared.coverage
             )
-            if not (scan_dir / checkpoint_path).exists():
-                write_scan_local_bytes(scan_dir, checkpoint_path, contents)
+            artifact_path = "artifacts/" + checkpoint_path
+            if not (scan_dir / artifact_path).exists():
+                write_scan_local_bytes(scan_dir, artifact_path, contents)
             if "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+                write_scan_local_bytes(scan_dir, checkpoint_path, contents)
                 _write_scan_local_json(
                     scan_dir, "checkpoint-head.json", {"checkpoint": Path(checkpoint_path).name}
                 )

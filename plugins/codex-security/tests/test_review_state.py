@@ -86,7 +86,7 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool, prior_r
     checkpoint_artifact = next(
         artifact
         for artifact in result["manifest"]["scan"]["artifacts"]
-        if artifact["path"].startswith("checkpoints/")
+        if artifact["path"].startswith("artifacts/checkpoints/")
     )
     checkpoint_path = scan_dir / checkpoint_artifact["path"]
     checkpoint_bytes = checkpoint_path.read_bytes()
