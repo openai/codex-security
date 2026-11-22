@@ -102,6 +102,14 @@ export async function readPromptfooFindings(
           return false;
         if (text(assertion["type"])?.startsWith("promptfoo:redteam:"))
           return true;
+        // Promptfoo can append a moderation grader to its native attack assertion.
+        if (assertion["type"] === "moderation")
+          return (
+            plugin.startsWith("harmful:") &&
+            generated?.["type"] === `promptfoo:redteam:${plugin}` &&
+            Array.isArray(declared) &&
+            isDeepStrictEqual(declared[generatedIndex + 1], assertion)
+          );
         const metric = text(assertion["metric"]);
         if (!metric || generated?.["metric"] !== metric) return false;
         // Later transforms can change strategyId and append metric segments
@@ -113,14 +121,6 @@ export async function readPromptfooFindings(
                 "promptfoo:redteam:best-of-n") &&
             /\/BestOfN(?:\/|$)/.test(metric) &&
             generated["type"] === "is-refusal"
-          );
-        // Promptfoo can append a moderation grader to its native attack assertion.
-        if (assertion["type"] === "moderation")
-          return (
-            plugin.startsWith("harmful:") &&
-            generated["type"] === `promptfoo:redteam:${plugin}` &&
-            Array.isArray(declared) &&
-            isDeepStrictEqual(declared[generatedIndex + 1], assertion)
           );
         return (
           (plugin.startsWith("file://") ||

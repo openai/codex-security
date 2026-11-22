@@ -309,6 +309,48 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
   expect(selection.excluded.map((item) => item.position)).toEqual([3, 4, 5, 6]);
 });
 
+test.each([
+  ["multilingual", "hate/Multilingual-FR"],
+  ["audio", "hate/Audio-Encoded"],
+  ["image", "hate/Image-Encoded"],
+  ["video", "hate/Video-Encoded"],
+])(
+  "imports moderation failures after the %s strategy",
+  async (strategyId, metric) => {
+    await using fixture = await checkout();
+    const native = { type: "promptfoo:redteam:harmful:hate", metric };
+    const moderation = { type: "moderation", metric: "Hate" };
+    await fixture.writeJson(
+      report([
+        {
+          ...leak,
+          testCase: {
+            metadata: { pluginId: "harmful:hate", strategyId },
+            assert: [native, moderation],
+          },
+          gradingResult: {
+            pass: false,
+            componentResults: [
+              { pass: true, score: 1, assertion: native },
+              {
+                ...failed,
+                assertion: moderation,
+                reason: "Synthetic moderation failure.",
+              },
+            ],
+          },
+        },
+      ]),
+    );
+    const selection = await readPromptfooFindings(fixture.file);
+    expect(selection.findings).toHaveLength(1);
+    expect(selection.findings[0]!.evidence.description).toBe(
+      "Synthetic moderation failure.",
+    );
+    expect(selection.excluded).toEqual([]);
+  },
+);
+
 test("preserves independent failed security assertions alongside grader errors", async () => {
   await using fixture = await checkout();
   const unavailable = {
