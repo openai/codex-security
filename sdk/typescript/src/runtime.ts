@@ -1953,18 +1953,22 @@ export function requireOutputOutsideRepositories(
 export async function checkScanStorage(
   stateDirectory: string,
   defaultOutputRepository?: string,
+  category: "scans" | "policies" = "scans",
 ): Promise<void> {
+  const policy = category === "policies";
   try {
     let root = await canonicalConfigPath(stateDirectory);
     await requireWritableDirectoryOrParent(root);
     if (defaultOutputRepository === undefined) return;
 
-    for (const name of ["scans", safePrefix(defaultOutputRepository)]) {
+    for (const name of [category, safePrefix(defaultOutputRepository)]) {
       root = join(root, name);
       const metadata = await lstat(root).catch(nullIfMissingFileError);
       if (metadata !== null && !metadata.isDirectory()) {
         throw new OutputDirectoryError(
-          `Persistent scan output must use real directories: ${root}`,
+          policy
+            ? `Persistent policy output must use real directories: ${root}`
+            : `Persistent scan output must use real directories: ${root}`,
         );
       }
     }
@@ -1975,7 +1979,7 @@ export async function checkScanStorage(
     );
   } catch (error) {
     throw new OutputDirectoryError(
-      `Cannot use scan state directory ${stateDirectory}. Check CODEX_SECURITY_STATE_DIR: ${errorMessage(error)}`,
+      `Cannot use ${policy ? "policy" : "scan"} state directory ${stateDirectory}. Check CODEX_SECURITY_STATE_DIR: ${errorMessage(error)}`,
       { cause: error },
     );
   }

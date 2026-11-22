@@ -82,6 +82,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   executablePathForSpawn,
+  checkScanStorage,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isLocalWindowsCredentialVolume,
@@ -5992,6 +5993,31 @@ describe("runtime directories and plugin Python boundary", () => {
         "linked repository",
       ),
     ).toBe(join(root, "state", "scans", "linked-repository"));
+  });
+
+  test("reports the output category each preflight will create", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const external = join(root, "external");
+    await mkdir(external);
+    for (const category of ["scans", "policies"] as const) {
+      await mkdir(join(state, category), { recursive: true });
+      await symlink(
+        external,
+        join(state, category, "repository"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+
+    // Both categories are unusable here. Each preflight must report the
+    // subtree it creates, so a scan check cannot describe policy output.
+    await expect(
+      checkScanStorage(state, "repository", "scans"),
+    ).rejects.toThrow("Persistent scan output must use real directories");
+    await expect(
+      checkScanStorage(state, "repository", "policies"),
+    ).rejects.toThrow("Persistent policy output must use real directories");
+    expect(await readdir(external)).toEqual([]);
   });
 
   test("rejects symbolic children beneath persistent scan state", async () => {
