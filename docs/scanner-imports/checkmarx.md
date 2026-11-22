@@ -73,6 +73,8 @@ create a new occurrence. [Checkmarx similarity IDs](https://docs.checkmarx.com/e
 
 The finding title is the Checkmarx query name. The scan ID, severity, rule,
 CWE (when supplied) and Checkmarx triage state appear in the imported evidence.
+CxSAST result state IDs use the Checkmarx One names, such as `TO_VERIFY`;
+custom state IDs stay numeric.
 To trace a Checkmarx One result, read `evidence.source_data.row.data.nodes`.
 For CxSAST, read `evidence.source_data.nodes` in order. If you use the
 original `DeepLink` under `evidence.source_data.result`, check its server
