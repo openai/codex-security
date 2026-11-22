@@ -1364,7 +1364,7 @@ export class CodexSecurity {
           ? (providers[provider] ?? null)
           : null;
         const assessmentConfig = policyCodexConfig(session.sessionConfig);
-        const instructionFile = async (key: string) => {
+        const configurationFile = async (key: string) => {
           const configuredPath = resolvedConfig[key];
           if (typeof configuredPath !== "string") return null;
           // Runtime path overrides are relative to the assessment cwd.
@@ -1379,6 +1379,7 @@ export class CodexSecurity {
           return { path, contents: (await readFile(path, "utf8")).trim() };
         };
         const compactPrompt = resolvedConfig["compact_prompt"];
+        const modelCatalog = await configurationFile("model_catalog_json");
         const configuration = {
           model,
           reasoningEffort,
@@ -1390,16 +1391,17 @@ export class CodexSecurity {
                 key !== "model_instructions_file",
             ),
           ),
+          ...(modelCatalog === null ? {} : { modelCatalog }),
           instructions: {
             developer: resolvedConfig["developer_instructions"] ?? null,
             model:
-              (await instructionFile("model_instructions_file")) ??
+              (await configurationFile("model_instructions_file")) ??
               resolvedConfig["instructions"] ??
               null,
             compact:
               typeof compactPrompt === "string" && compactPrompt.trim()
                 ? compactPrompt.trim()
-                : await instructionFile("experimental_compact_prompt_file"),
+                : await configurationFile("experimental_compact_prompt_file"),
           },
           provider,
           providerConfiguration: assessmentProviderSettings(
@@ -1419,7 +1421,6 @@ export class CodexSecurity {
           skill: contract.skillDigest,
           workflow: "focused-dependency-assessment-v1",
         };
-        const configurationDigest = workflowDigest(configuration);
         const previousCost =
           continuing && !result.model.costPending
             ? (result.model.cost ?? null)
@@ -1430,38 +1431,7 @@ export class CodexSecurity {
           (result.model.costPending === true ||
             result.model.threadId !== null ||
             result.assessments.some((item) => item.threadId !== undefined));
-        if (continuing) {
-          const savedDigest = result.assessmentContext!.configurationDigest;
-          // Migrate earlier checkpoints when their full provider settings still match.
-          if (
-            savedDigest !== null &&
-            savedDigest !== configurationDigest &&
-            savedDigest !==
-              workflowDigest({ ...configuration, providerConfiguration })
-          )
-            throw new CodexSecurityError(
-              "Dependency assessment model, effort, provider, instructions, or skill changed. Use the original settings or start a new run.",
-            );
-          requireContinuationBudget(
-            previousCost,
-            previousUsageUnknown,
-            options.maxCostUsd,
-            outputDir,
-          );
-          canSave = true;
-          recordPreviousAttempt(result, previousUsageUnknown);
-          for (const assessment of result.assessments)
-            if (assessment.status !== "completed") {
-              assessment.status = "not_started";
-              assessment.error = null;
-              delete assessment.threadId;
-            }
-          for (const assessment of missing) result.assessments.push(assessment);
-          notifyObserver(options, "onOutputDirReady")(outputDir);
-        }
-        result.model.skillDigest = contract.skillDigest;
-        result.assessmentContext!.configurationDigest = configurationDigest;
-        await saveDependencyScan(result);
+        const assessmentResult = result;
         const command = this.#codexCommand();
         const mcpServers = await disabledMcpServers(
           await providerPreflightCommand(command, session.effectiveConfig),
@@ -1474,7 +1444,62 @@ export class CodexSecurity {
         );
         const { codex } = await this.#createSessionCodex(
           session,
-          { command: "dependencies" },
+          {
+            command: "dependencies",
+            beforeCreate: async (environment) => {
+              const providerEnvironment = assessmentProviderEnvironment(
+                providerConfiguration,
+                environment,
+              );
+              const checkpointConfiguration = {
+                ...configuration,
+                ...(Object.keys(providerEnvironment).length
+                  ? { providerEnvironment }
+                  : {}),
+              };
+              const configurationDigest = workflowDigest(
+                checkpointConfiguration,
+              );
+              if (continuing) {
+                const savedDigest =
+                  assessmentResult.assessmentContext!.configurationDigest;
+                // Migrate earlier checkpoints when their full provider settings still match.
+                if (
+                  savedDigest !== null &&
+                  savedDigest !== configurationDigest &&
+                  savedDigest !==
+                    workflowDigest({
+                      ...checkpointConfiguration,
+                      providerConfiguration,
+                    })
+                )
+                  throw new CodexSecurityError(
+                    "Dependency assessment model, effort, provider, instructions, or skill changed. Use the original settings or start a new run.",
+                  );
+                requireContinuationBudget(
+                  previousCost,
+                  previousUsageUnknown,
+                  options.maxCostUsd,
+                  outputDir,
+                );
+                canSave = true;
+                recordPreviousAttempt(assessmentResult, previousUsageUnknown);
+                for (const assessment of assessmentResult.assessments)
+                  if (assessment.status !== "completed") {
+                    assessment.status = "not_started";
+                    assessment.error = null;
+                    delete assessment.threadId;
+                  }
+                for (const assessment of missing)
+                  assessmentResult.assessments.push(assessment);
+                notifyObserver(options, "onOutputDirReady")(outputDir);
+              }
+              assessmentResult.model.skillDigest = contract.skillDigest;
+              assessmentResult.assessmentContext!.configurationDigest =
+                configurationDigest;
+              await saveDependencyScan(assessmentResult);
+            },
+          },
           {
             CODEX_SECURITY_REPOSITORY: inputs.repository,
             CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -5547,10 +5572,14 @@ export class CodexSecurity {
       command,
       mode,
       pluginReadRoot,
+      beforeCreate,
     }: {
       command: string;
       mode?: ScanMode;
       pluginReadRoot?: string;
+      beforeCreate?: (
+        environment: Readonly<ProcessEnvironment>,
+      ) => Promise<void>;
     },
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
@@ -5596,6 +5625,7 @@ export class CodexSecurity {
         ...environmentWithGit(session.runtime.environment, git),
         ...pluginPaths,
       });
+      if (beforeCreate !== undefined) await beforeCreate(environment);
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -5817,6 +5847,13 @@ export class CodexSecurity {
       env: sdkEnvironment,
       config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
     };
+    if (beforeCreate !== undefined)
+      await beforeCreate({
+        ...sdkEnvironment,
+        ...(codexOptions.apiKey === undefined
+          ? {}
+          : { CODEX_API_KEY: codexOptions.apiKey }),
+      });
     if (readOnlyProfile !== undefined) {
       const verified = await preflightReadOnlyProfileCodex(
         codexOptions,
@@ -8193,6 +8230,28 @@ function assessmentProviderSettings(provider: unknown) {
     else delete settings[field];
   }
   return settings;
+}
+
+function assessmentProviderEnvironment(
+  provider: unknown,
+  environment: Readonly<ProcessEnvironment>,
+) {
+  if (!isRecord(provider) || !isRecord(provider["env_http_headers"])) return {};
+  return Object.fromEntries(
+    Object.entries(provider["env_http_headers"]).flatMap(([header, name]) =>
+      typeof name === "string" &&
+      !providerCredentialNames.http_headers.has(header.toLowerCase())
+        ? [
+            [
+              header,
+              (process.platform === "win32"
+                ? environmentValue(environment, name)
+                : environment[name]) ?? null,
+            ],
+          ]
+        : [],
+    ),
+  );
 }
 
 function dependencyPermissions(

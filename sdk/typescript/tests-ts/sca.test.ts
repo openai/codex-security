@@ -3128,19 +3128,25 @@ test("continuation reuses completed assessments after a provider credential rota
     customProvider({
       experimental_bearer_token: token,
       http_headers: { Authorization: `Bearer ${token}`, "X-API-Key": token },
+      env_http_headers: { Authorization: "SYNTHETIC_AUTH_HEADER" },
       query_params: { access_token: token },
     });
   await using f = await fixture({
     turns: ["completed", "unauthorized"],
     codexOverrides: credentials("synthetic-expired"),
   });
+  Object.assign(f.environment, { SYNTHETIC_AUTH_HEADER: "synthetic-expired" });
   const initial = await f.scan();
   expect(initial.assessments[1]!.error).toContain("401 Unauthorized");
   Object.assign(
     f.client.config.codexOverrides!,
     credentials("synthetic-rotated"),
   );
+  Object.assign(f.environment, { SYNTHETIC_AUTH_HEADER: "synthetic-rotated" });
   const resumed = await f.scan();
+  expect(f.captured.codex?.env?.["SYNTHETIC_AUTH_HEADER"]).toBe(
+    "synthetic-rotated",
+  );
   expect(resumed.status, resumed.diagnostics.join("\n")).toBe("completed");
   expect(resumed.assessmentContext?.configurationDigest).toBe(
     initial.assessmentContext?.configurationDigest,
@@ -3149,6 +3155,86 @@ test("continuation reuses completed assessments after a provider credential rota
   expect(f.calls.scanner).toBe(1);
   expect(f.turns).toHaveLength(3);
 });
+
+test("continuation uses the launch value of provider environment headers", async () => {
+  await using f = await fixture({
+    turns: ["completed", "malformed"],
+    codexOverrides: {
+      model_provider: "fireworks",
+      model_providers: {
+        fireworks: {
+          name: "Synthetic provider",
+          base_url: "https://provider.example.invalid/v1",
+          wire_api: "responses",
+          env_key: "SYNTHETIC_PROVIDER_KEY",
+          env_http_headers: { "OpenAI-Project": "SYNTHETIC_PROVIDER_KEY" },
+        },
+      },
+    },
+  });
+  Object.assign(f.environment, {
+    SYNTHETIC_PROVIDER_KEY: " synthetic-project ",
+  });
+  const initial = await f.scan();
+  expect(f.captured.codex?.env?.["SYNTHETIC_PROVIDER_KEY"]).toBe(
+    "synthetic-project",
+  );
+  Object.assign(f.environment, { SYNTHETIC_PROVIDER_KEY: "synthetic-project" });
+  const resumed = await f.scan();
+  expect(resumed.status).toBe("completed");
+  expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(resumed.assessmentContext?.configurationDigest).toBe(
+    initial.assessmentContext?.configurationDigest,
+  );
+});
+
+test.each(["changed", "removed", "SDK API key"] as const)(
+  "continuation binds %s noncredential provider environment headers",
+  async (change) => {
+    await using f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides: customProvider({
+        env_http_headers: {
+          "OpenAI-Project":
+            change === "SDK API key" ? "CODEX_API_KEY" : "SYNTHETIC_PROJECT",
+        },
+      }),
+    });
+    const key =
+      change === "SDK API key"
+        ? "OPENAI_API_KEY"
+        : process.platform === "win32"
+          ? "synthetic_project"
+          : "SYNTHETIC_PROJECT";
+    Object.assign(f.environment, { [key]: "synthetic-original" });
+    const initial = await f.scan();
+    expect(initial.assessments[0]!.status).toBe("completed");
+    expect(
+      change === "SDK API key"
+        ? f.captured.codex?.apiKey
+        : f.captured.codex?.env?.[key],
+    ).toBe("synthetic-original");
+    const checkpoint = await readFile(f.resultPath, "utf8");
+    if (change !== "removed")
+      Object.assign(f.environment, { [key]: "synthetic-changed" });
+    else delete (f.environment as Record<string, string | undefined>)[key];
+    await expect(f.scan()).rejects.toThrow(
+      "provider, instructions, or skill changed",
+    );
+    expect(await readFile(f.resultPath, "utf8")).toBe(checkpoint);
+    expect(f.turns).toHaveLength(2);
+    expect(f.calls.model).toBe(1);
+    Object.assign(f.environment, { [key]: "synthetic-original" });
+    const resumed = await f.scan();
+    expect(resumed.status).toBe("completed");
+    expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+    expect(resumed.assessmentContext?.configurationDigest).toBe(
+      initial.assessmentContext?.configurationDigest,
+    );
+    expect(f.turns).toHaveLength(3);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
 
 test.each([
   "source",
@@ -4172,6 +4258,9 @@ test.each([
   ["experimental_compact_prompt_file", "path", "relative"],
   ["experimental_compact_prompt_file", "contents", "home"],
   ["experimental_compact_prompt_file", "missing", "absolute"],
+  ["model_catalog_json", "path", "relative"],
+  ["model_catalog_json", "contents", "absolute"],
+  ["model_catalog_json", "missing", "home"],
 ] as const)(
   "%s binds %s changes with %s paths before continuing",
   async (key, change, pathKind) => {
@@ -4186,7 +4275,18 @@ test.each([
     await mkdir(f.selectedUserHome, { recursive: true });
     const original = join(f.selectedUserHome, "original instructions.md");
     const changed = join(f.selectedUserHome, "changed instructions.md");
-    const contents = "Synthetic original assessment instructions.";
+    const contents =
+      key === "model_catalog_json"
+        ? (
+            await readFile(
+              new URL(
+                "./fixtures/native-skill-model-catalog.json",
+                import.meta.url,
+              ),
+              "utf8",
+            )
+          ).replace("gpt-test", "gpt-5.6-sol")
+        : "Synthetic original assessment instructions.";
     await writeFile(original, contents);
     await writeFile(changed, contents);
     const configuredPath = (path: string) =>
@@ -4213,7 +4313,15 @@ test.each([
     const checkpoint = await readFile(checkpointPath, "utf8");
     if (change === "path") profile[key] = configuredPath(changed);
     else if (change === "contents")
-      await writeFile(original, "Synthetic changed assessment instructions.");
+      await writeFile(
+        original,
+        key === "model_catalog_json"
+          ? contents.replace(
+              "Synthetic instructions",
+              "Synthetic changed instructions",
+            )
+          : "Synthetic changed assessment instructions.",
+      );
     else await rm(original);
     await expect(f.scan()).rejects.toThrow(
       change === "missing" ? "ENOENT" : "instructions, or skill changed",
