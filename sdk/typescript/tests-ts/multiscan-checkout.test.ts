@@ -345,6 +345,7 @@ describe("multiscan", () => {
       "recovery-checkouts",
       "stubborn",
       "attempt-2",
+      "stubborn",
     );
     const originalRm = filesystem.rm;
     const originalOpen = filesystem.open;
@@ -456,6 +457,7 @@ describe("multiscan", () => {
       "recovery-checkouts",
       "done",
       "attempt-2",
+      "done",
     );
     const ledger = join(paths.output, "results.jsonl");
     const originalRm = filesystem.rm;

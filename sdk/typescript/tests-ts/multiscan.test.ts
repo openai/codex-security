@@ -2041,9 +2041,9 @@ for (const section of ["rootCause", "validation", "attackPath"] as const) {
     });
   }
 }
-testPosix(
-  "resume compatibility retains a tracked scope alias anchored to its checkout basename",
-  async () => {
+testPosix.each(["initial scan", "ordinary retry", "recovery retry"] as const)(
+  "%s retains a tracked scope alias anchored to its checkout basename",
+  async (kind) => {
     const paths = await fixture();
     const source = await repository(paths.root, "scope-layout-source");
     await symlink("../repo/src", join(source.path, "alias"), "dir");
@@ -2051,10 +2051,30 @@ testPosix(
     commitFixture(source.path, "add checkout-relative scope alias");
     const revision = git(source.path, "rev-parse", "HEAD");
     await writeRecoveryTask(paths, source, "alias", revision);
-    const { runs, campaign } = savedCampaign(paths);
-    await expectScanned(campaign);
+    const { runs, campaign } = savedCampaign(paths, { maxAttempts: 1 });
+    if (kind !== "initial scan") {
+      runs.mockRejectedValueOnce(new Error("Transient scan failure"));
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 0,
+        failed: 1,
+      });
+    }
+    const summary = await expectScanned({
+      ...campaign,
+      ...(kind === "recovery retry"
+        ? { recoverScan: async () => undefined }
+        : {}),
+    });
+    const receipt = (await results(summary.resultsPath)).at(-1)!;
+    const { manifest } = await loadContract(receipt["outputDir"] as string, {
+      pluginRoot: PLUGIN_ROOT,
+    });
+    expect(manifest.scan.target.displayName).toBe("repo");
+    expect(manifest.scan.scope.includePaths).toEqual(["src"]);
+    if (kind !== "initial scan")
+      expect(runs.mock.calls[1]![0]).not.toBe(runs.mock.calls[0]![0]);
     await expectReused(campaign);
-    expect(runs).toHaveBeenCalledTimes(1);
+    expect(runs).toHaveBeenCalledTimes(kind === "initial scan" ? 1 : 2);
   },
 );
 

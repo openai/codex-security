@@ -1734,7 +1734,8 @@ existing checkout before an ordinary retry.
 If checkout cleanup previously failed, the next invocation removes it only when
 its marker still identifies the same directory and scan attempt. Older or
 replacement checkouts without a matching marker are preserved. Fresh retries use
-`recovery-checkouts/<id>/attempt-<n>` to keep each checkout distinct in scan history.
+`recovery-checkouts/<id>/attempt-<n>/<id>` to keep each checkout distinct in scan history
+while preserving its basename.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
@@ -1782,7 +1783,7 @@ ledger backup that includes every committed attempt, or start a separate campaig
 in a new `--output-dir`. If a repository exhausts its attempt numbers, starting
 a fresh attempt requires a new campaign.
 
-New attempts use `recovery-checkouts/<id>/attempt-<n>`. Recovery defaults to four
+New attempts use `recovery-checkouts/<id>/attempt-<n>/<id>`. Recovery defaults to four
 workers and one recovery/new attempt per repository. A resume connection failure
 stops only that repository for this invocation. Failed recovery checkouts remain;
 fresh completed checkouts are removed after recording their result.

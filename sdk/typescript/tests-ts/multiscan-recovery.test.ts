@@ -200,6 +200,7 @@ describe("multiscan", () => {
           "recovery-checkouts",
           "replaced",
           "attempt-2",
+          "replaced",
         );
         await runMultiscan(
           options(paths, client(rejecting("Stopped")), { maxAttempts: 1 }),

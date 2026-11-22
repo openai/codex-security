@@ -806,9 +806,11 @@ async function runCampaign(
               const taskRoot = await ensureOutputDirectory(
                 join(isolatedRoot, task.id),
               );
-              const isolatedCheckout = join(taskRoot, `attempt-${attempt}`);
+              const attemptRoot = join(taskRoot, `attempt-${attempt}`);
+              const isolatedCheckout = join(attemptRoot, task.id);
               if (options.recoverScan !== undefined)
                 await mkdir(scanDir, { mode: 0o700 });
+              await mkdir(attemptRoot, { mode: 0o700 });
               await mkdir(isolatedCheckout, { mode: 0o700 });
               checkout = isolatedCheckout;
             }
@@ -1671,19 +1673,24 @@ async function campaignCheckoutRoots(
     for (const parent of [
       dirname(dirname(recoveryCheckout)),
       dirname(recoveryCheckout),
+      recoveryCheckout,
     ]) {
       if (await lstat(parent).catch(undefinedIfMissingFile))
         await ensureOutputDirectory(parent);
     }
   }
-  return [
-    checkout,
+  const retainedCheckout =
     process.platform === "win32"
       ? join(
           await canonicalConfigPath(dirname(recoveryCheckout)),
           basename(recoveryCheckout),
         )
-      : recoveryCheckout,
+      : recoveryCheckout;
+  // Existing registrations use the attempt root; new checkouts retain the task basename.
+  return [
+    checkout,
+    retainedCheckout,
+    join(retainedCheckout, basename(checkout)),
   ];
 }
 
@@ -1743,7 +1750,7 @@ async function loadResumableScan(
   attempt: CampaignAttempt,
   onWarning: (warning: string) => void,
 ) {
-  const { options, scanDir, receipt, checkout, recoveryCheckout } = attempt;
+  const { options, scanDir, receipt, checkout } = attempt;
   const { signal, recoverScan } = options;
   const accepted = await loadRegisteredCampaignScan(loaded, attempt);
   if (accepted instanceof Error) {
@@ -1770,7 +1777,7 @@ async function loadResumableScan(
     receipt.status === "completed" &&
     receipt.cleanupPending === cleanupKind
   ) {
-    const selected = cleanupKind === "checkout" ? checkout : recoveryCheckout;
+    const selected = matchedRoot;
     try {
       if (await lstat(selected).catch(undefinedIfMissingFile)) {
         if (cleanupKind === "recovery-checkout")
