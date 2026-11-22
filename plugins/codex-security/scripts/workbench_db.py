@@ -1902,20 +1902,23 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 raise SystemExit(
                     "Wait for the pending remediation operation to finish before closing this finding."
                 )
-            if (
-                close_reason == "already_fixed"
-                and remediation is not None
-                and remediation["state"] == "verified"
-            ):
-                scan = require_scan(connection, occurrence["scan_id"])
-                require_remediation_checkout_unchanged(
-                    scan,
-                    remediation,
-                    require_applied_content=True,
-                )
-        scan_history.record_finding_decision(
+        changed = scan_history.record_finding_decision(
             connection, occurrence["id"], args.status, close_reason, note, fixed_revision, now()
         )
+        if (
+            changed
+            and fixed_revision is None
+            and args.status == "closed"
+            and close_reason == "already_fixed"
+            and remediation is not None
+            and remediation["state"] == "verified"
+        ):
+            scan = require_scan(connection, occurrence["scan_id"])
+            require_remediation_checkout_unchanged(
+                scan,
+                remediation,
+                require_applied_content=True,
+            )
     return scan_context(connection, occurrence["scan_id"])
 
 

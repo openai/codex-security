@@ -989,6 +989,9 @@ the saved files:
 When a checkpoint is retained, `checkpoint-head.json` identifies the file in
 `checkpoints/`. In a retained draft or checkpoint, `reviewState.deferred` lists
 unfinished work and `reviewState.openQuestions` lists follow-up questions.
+Current completed scans bind their final review checkpoint in the manifest's
+`scan.artifacts`; comparisons use that sealed checkpoint without changing the
+checkpoint head or retained recovery records.
 Older manifests with `scan.coverageRef` point to a separate `coverage.json`
 with reviewed surfaces, explicit exclusions and deferred work. A saved source
 inventory identifies inputs. Neither that inventory nor session logs establish
@@ -2633,9 +2636,13 @@ or unknown. An absent finding in the later scope is not observed; absence alone
 does not verify remediation. To record a verified fix, close the occurrence as
 `already_fixed` through `set_codex_security_finding_triage`, supplying the full
 Git commit ID in `fixedRevision` and the verification evidence in `note`.
+This explicit evidence can be recorded after committing a verified workbench
+patch, including when the occurrence was closed before the commit.
 Comparison reports a covered absence as resolved when every earlier occurrence
 in the group has that decision for the exact commit scanned. The later scan must
 cover committed contents, such as a clean checkout or a committed diff.
+Older saved results without the required revision or sealed review evidence
+remain not observed.
 A different revision, local changes, or a legacy closure without revision
 evidence leaves a covered absence not observed. An affected path explicitly
 deferred in the later scan's saved coverage also stays not observed. Excluded

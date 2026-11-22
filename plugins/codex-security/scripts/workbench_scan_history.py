@@ -28,7 +28,12 @@ from report_projection import SEVERITY_ORDER
 from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_source_scopes import public_scan_recipe, saved_tree_scopes
+from workbench_source_scopes import (
+    OBJECT_ID,
+    public_scan_recipe,
+    requested_scan_paths,
+    saved_tree_scopes,
+)
 from workbench_target import (
     clean_worktree_content_digest,
     require_remediation_target,
@@ -814,9 +819,22 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
+    tree_scopes = saved_tree_scopes(after)
+    bound_scopes = [
+        record
+        for record in (tree_scopes[1] if tree_scopes is not None else [])
+        if isinstance(record, dict)
+        and isinstance(record.get("path"), str)
+        and record.get("kind") in {"file", "directory"}
+        and isinstance(record.get("objectId"), str)
+        and OBJECT_ID.fullmatch(record["objectId"])
+    ]
+    unbound_scopes = set(map(PurePosixPath, requested_scan_paths(after))) - {
+        PurePosixPath(record["path"]) for record in bound_scopes
+    }
     after_revision = (
         after["target_revision"]
-        if saved_tree_scopes(after) is not None
+        if tree_scopes is not None
         and (
             after["diff_target_kind"] in {"commit", "range"}
             or after["target_snapshot_digest"] == clean_worktree_content_digest()
@@ -911,11 +929,25 @@ def compare_scans(
         ):
             status = "not_observed"
             item["reason"] = "Review of the affected path was deferred in the later scan."
-        elif after_revision and all(
-            row["triage_status"] == "closed"
-            and row["close_reason"] == "already_fixed"
-            and row["fixed_revision"] == after_revision
-            for row in previous_rows
+        elif (
+            after_revision
+            and "deferred" in after_coverage
+            and all(
+                any(
+                    path == record["path"]
+                    if record["kind"] == "file"
+                    else _path_within(path, record["path"])
+                    for record in bound_scopes
+                )
+                and not any(_path_within(path, str(scope)) for scope in unbound_scopes)
+                for path in paths
+            )
+            and all(
+                row["triage_status"] == "closed"
+                and row["close_reason"] == "already_fixed"
+                and row["fixed_revision"] == after_revision
+                for row in previous_rows
+            )
         ):
             status = "resolved"
         else:
@@ -1285,7 +1317,7 @@ def record_finding_decision(
     note: str | None,
     fixed_revision: str | None,
     timestamp: str,
-) -> None:
+) -> bool:
     """Record a change to the current triage state and append its audit entry in the caller's transaction."""
     decision = (occurrence_id, status, close_reason, note, fixed_revision, timestamp)
     changed = connection.execute(
@@ -1319,6 +1351,7 @@ def record_finding_decision(
             """,
             (str(uuid.uuid4()), *decision),
         )
+    return bool(changed.rowcount)
 
 
 def _triage_fields(row: sqlite3.Row) -> dict[str, Any]:

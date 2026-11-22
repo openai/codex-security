@@ -182,6 +182,8 @@ Record each explicit exclusion with a `pattern` and `reason`. Record each deferr
 When retained, detailed ledgers live under the numbered scan artifact directories.
 Receipt references must point to regular non-symlink files under `artifacts/`.
 `scan.review` retains additional exclusions for adapters and comparison. Legacy sealed scans continue to reference their original `coverage.json`.
+Finalization binds the current format's final review checkpoint in `scan.artifacts`.
+Comparisons read its sealed deferred-work record without changing the checkpoint head or retained recovery ordering.
 
 ## Canonical Report Semantics
 

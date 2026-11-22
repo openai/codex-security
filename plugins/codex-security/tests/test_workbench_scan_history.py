@@ -187,6 +187,7 @@ def create_cli_scan(
     repository: Path,
     *,
     complete: bool = True,
+    inline_review: bool = False,
     deferred_path: str | None = None,
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
@@ -279,6 +280,13 @@ def create_cli_scan(
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": [deferred_path]}
         ]
         coverage_path.write_text(json.dumps(coverage))
+    if inline_review:
+        manifest_path = scan_dir / "scan-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["scan"].pop("coverageRef")
+        manifest["scan"]["mode"] = coverage_mode
+        manifest["scan"]["reviewState"] = json.loads((scan_dir / "coverage.json").read_text())
+        manifest_path.write_text(json.dumps(manifest))
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
     completion = ["complete-scan", "--scan-id", launched["scanId"]]
     if cost is not None:
@@ -1082,7 +1090,10 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
 
 
-def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inline_review", [False, True])
+def test_verified_revision_applies_only_to_covered_committed_contents(
+    tmp_path: Path, inline_review: bool
+) -> None:
     state, root, repo = tmp_path / "state", tmp_path / "results", tmp_path / "repository"
     original_revision = initialize_git_repository(repo)
     primary = {"role": "expected_control", "path": "README.md", "startLine": 1}
@@ -1097,7 +1108,13 @@ def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: 
 
     def scan_revision(**options):
         return create_cli_scan(
-            state, root, repo, target_revision=revision, finding=False, **options
+            state,
+            root,
+            repo,
+            target_revision=revision,
+            finding=False,
+            inline_review=inline_review,
+            **options,
         )
 
     corrected = scan_revision()
@@ -1147,6 +1164,46 @@ def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: 
                 "note": note,
             }
         ]
+
+
+@pytest.mark.parametrize("affected_path", ["generated/handler.py", "README.md"])
+def test_resolution_requires_committed_affected_scopes(tmp_path: Path, affected_path: str) -> None:
+    state, root, repo = tmp_path / "state", tmp_path / "results", tmp_path / "repository"
+    initialize_git_repository(repo)
+    (repo / ".gitignore").write_text("generated/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "Ignore generated fixture"], cwd=repo, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    (repo / "generated").mkdir()
+    source = repo / "generated/handler.py"
+    source.write_text("local fixture before correction\n")
+    paths = ["README.md", "generated/handler.py"]
+    before = create_cli_scan(
+        state,
+        root,
+        repo,
+        target_revision=revision,
+        paths=paths,
+        locations=[{"path": affected_path, "startLine": 1, "role": "sink"}],
+    )
+    source.write_text("local fixture after correction\n")
+    after = create_cli_scan(state, root, repo, target_revision=revision, paths=paths, finding=False)
+    occurrence = get_scan(state, before["scanId"])["scan"]["findings"][0]["occurrenceId"]
+    set_triage(
+        state,
+        occurrence,
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        "--fixed-revision",
+        revision,
+        "--note",
+        "Checked the corrected behavior at the selected revision.",
+    )
+    comparison = compare_scan_pair(state, before, after)
+    assert comparison["findings"][0]["status"] == (
+        "not_observed" if affected_path.startswith("generated/") else "resolved"
+    )
 
 
 def create_ordered_history(root: Path, anchors: tuple[str, ...]):

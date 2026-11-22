@@ -30,10 +30,12 @@ from finalize_scan_contract import (
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
+    _validate_coverage,
     _write_prepared_scan_finalization,
     finalize_scan,
     manifest_is_sealed,
     open_scan_local_file_descriptor,
+    validate_against_schema,
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
@@ -418,11 +420,38 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     db.require_recorded_manifest_digest(scan, scan_dir)
     try:
         prepared = _prepare_scan_finalization(scan_dir)
+        coverage = prepared.coverage
+        sealed_scan = prepared.manifest["scan"]
+        if "coverageRef" not in sealed_scan:
+            # Older compact seals did not bind their final review bookkeeping.
+            # A mutable checkpoint head cannot prove that no affected work was deferred.
+            coverage = {key: value for key, value in coverage.items() if key != "deferred"}
+            checkpoints = [
+                artifact
+                for artifact in sealed_scan["artifacts"]
+                if artifact["mediaType"] == "application/json"
+                and re.fullmatch(r"checkpoints/[0-9a-f]{64}\.json", artifact["path"])
+            ]
+            if len(checkpoints) == 1:
+                artifact = checkpoints[0]
+                checkpoint, contents = _read_scan_local_json_bytes(
+                    scan_dir, artifact["path"], "Sealed review checkpoint"
+                )
+                if (
+                    hashlib.sha256(contents).hexdigest() != artifact["sha256"]
+                    or checkpoint.get("scanId") != scan["id"]
+                    or not isinstance(checkpoint.get("reviewState"), dict)
+                ):
+                    raise ContractError("The sealed review checkpoint does not match this scan.")
+                if "deferred" in checkpoint["reviewState"]:
+                    coverage["deferred"] = checkpoint["reviewState"]["deferred"]
+                    _validate_coverage(prepared.manifest, coverage, scan_dir)
+                    validate_against_schema(coverage, prepared.schema_dir / "coverage.schema.json")
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
     if not prepared.was_sealed or prepared.manifest["scan"]["id"] != scan["id"]:
         raise SystemExit("Only sealed scans can be compared.")
-    return prepared.coverage
+    return coverage
 
 
 def preserve_deep_deadline_draft(

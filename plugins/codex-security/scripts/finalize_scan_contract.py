@@ -3097,6 +3097,21 @@ def _write_sarif_projection_if_possible(
         )
 
 
+def _final_review_checkpoint(
+    scan: dict[str, Any], findings: dict[str, Any], coverage: dict[str, Any]
+) -> tuple[str, bytes]:
+    checkpoint = {
+        "scanId": scan["id"],
+        "complete": scan["status"] == "completed",
+        "scope": scan["scope"],
+        "findings": findings["findings"],
+        "reviewState": checkpoint_review_state(coverage),
+        **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
+    }
+    contents = _json_bytes(checkpoint)
+    return "checkpoints/" + hashlib.sha256(contents).hexdigest() + ".json", contents
+
+
 class PreparedScanFinalization(NamedTuple):
     """Validated in-memory scan documents, rendered report bytes, and warnings awaiting publication."""
 
@@ -3302,6 +3317,15 @@ def _prepare_scan_finalization(
                 for ref in _supplementary_artifact_refs(scan, coverage)
             ],
         ]
+        if "coverageRef" not in scan:
+            checkpoint_path, checkpoint_bytes = _final_review_checkpoint(scan, findings, coverage)
+            scan["artifacts"].append(
+                {
+                    "path": checkpoint_path,
+                    "mediaType": "application/json",
+                    "sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
+                }
+            )
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         _contract_json_bytes("scan-manifest.json", manifest)
@@ -3349,19 +3373,16 @@ def _write_prepared_scan_finalization(
         _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
         if "coverageRef" in scan:
             _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
-        elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
-            checkpoint = {
-                "scanId": scan["id"],
-                "complete": scan["status"] == "completed",
-                "scope": scan["scope"],
-                "findings": prepared.findings["findings"],
-                "reviewState": checkpoint_review_state(prepared.coverage),
-                **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
-            }
-            contents = _json_bytes(checkpoint)
-            name = hashlib.sha256(contents).hexdigest() + ".json"
-            write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
-            _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+        else:
+            checkpoint_path, contents = _final_review_checkpoint(
+                scan, prepared.findings, prepared.coverage
+            )
+            if not (scan_dir / checkpoint_path).exists():
+                write_scan_local_bytes(scan_dir, checkpoint_path, contents)
+            if "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+                _write_scan_local_json(
+                    scan_dir, "checkpoint-head.json", {"checkpoint": Path(checkpoint_path).name}
+                )
     if not prepared.was_sealed and "coverageRef" not in scan:
         _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
     sealed_paths = (
