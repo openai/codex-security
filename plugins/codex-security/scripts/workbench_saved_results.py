@@ -623,7 +623,7 @@ def preserve_scan_results_locked(
 
     def record_publication(manifest: dict[str, Any], findings: dict[str, Any]) -> None:
         retained_sources = _source_digests(
-            manifest.get("scan", {}).get("preservedSources"),
+            manifest.get("scan", {}).get("preservedSources", frozen_source_digests),
             "Stopped scan source digests could not be frozen.",
         )
         digest = db.published_manifest_digest(scan_dir, manifest)
@@ -658,7 +658,8 @@ def preserve_scan_results_locked(
                     digest,
                     _encode_retained_sources(retained_sources, model_source),
                     json.dumps(
-                        manifest["scan"].get("preservedCheckpointHeads", {}), sort_keys=True
+                        manifest["scan"].get("preservedCheckpointHeads", checkpoint_heads or {}),
+                        sort_keys=True,
                     ),
                     json.dumps(list(dict.fromkeys(warnings))),
                     timestamp,

@@ -357,15 +357,32 @@ def authored_budget_scan(tmp_path: Path) -> tuple[Path, Path, str]:
 
 
 @pytest.mark.parametrize("command", ["preserve-scan-results", "recover-scan-results"])
+@pytest.mark.parametrize("projection_warning", [False, True])
 def test_budget_exhaustion_keeps_published_results_stable(
-    authored_budget_scan: tuple[Path, Path, str], command: str
+    authored_budget_scan: tuple[Path, Path, str], command: str, projection_warning: bool
 ) -> None:
     state_dir, scan_dir, scan_id = authored_budget_scan
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["threatModel"] = {
+        "summary": "Queue producers and consumers cross a service boundary."
+    }
+    manifest_path.write_text(json.dumps(manifest))
     complete_budget_scan(state_dir, scan_id)
     artifacts = {
         path: (scan_dir / path).read_bytes()
         for path in ("scan-manifest.json", "findings.json", "report.md", "exports/results.sarif")
     }
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        baseline = connection.execute(
+            "SELECT retained_source_digests_json, retained_checkpoint_heads_json "
+            "FROM scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    if projection_warning:
+        document = scan_dir / "threatmodel.md"
+        document.unlink()
+        document.mkdir()
 
     saved = scan_command(state_dir, command, scan_id)["scan"]
 
@@ -373,6 +390,26 @@ def test_budget_exhaustion_keeps_published_results_stable(
     assert saved["progress"]["status"] == "failed"
     assert saved["findingCount"] == 1
     assert saved["cost"] == BUDGET_COST
+    assert (
+        any(
+            warning.startswith("Automatic threat model save failed:")
+            for warning in saved["warnings"]
+        )
+        is projection_warning
+    )
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == saved["warnings"]
+    repeated = scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]
+    assert repeated["warnings"] == saved["warnings"]
+    assert repeated["resultsRecoveryNeeded"] is False
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT retained_source_digests_json, retained_checkpoint_heads_json "
+                "FROM scans WHERE id = ?",
+                (scan_id,),
+            ).fetchone()
+            == baseline
+        )
     assert all((scan_dir / path).read_bytes() == contents for path, contents in artifacts.items())
 
 
