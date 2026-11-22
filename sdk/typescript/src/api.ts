@@ -12,10 +12,18 @@ import {
   dependencyScanResult,
   dependencyRepositoryDirty,
   saveDependencyScan,
+  readDependencyScan,
+  hasDependencyScan,
+  missingDependencyAssessments,
+  writeDependencyArtifact,
 } from "./sca.js";
+import { dependencyPackageContexts } from "./sca-context.js";
+import { prioritizedDependencyMatches } from "./sca-report.js";
+import { acquireScanOutputLock } from "./multiscan.js";
 import {
   dependencyTriageContract,
   dependencyTriagePrompt,
+  dependencyTriageEvidence,
 } from "./sca-triage.js";
 import type { ScaAssessment, ScaResult } from "./sca-types.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
@@ -134,7 +142,11 @@ import {
   type ScanUsageObservation,
   type ScanWorkerEvent,
 } from "./cost.js";
-import type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
+import {
+  tokenUsage,
+  type ScanPricingContext,
+  type ScanTokenUsage,
+} from "./cost-model.js";
 import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
@@ -512,6 +524,8 @@ export interface DependencyScanOptions extends Pick<
   repositoryPath: string;
   /** Best-effort observations; callbacks are not awaited and cannot gate work. */
   onProgress?: (progress: DependencyScanProgress) => void;
+  /** A detached checkpoint of advisory facts, before model assessment. */
+  onInventory?: (result: Readonly<ScaResult>) => void;
 }
 export type DependencyScanResult = ScaResult;
 
@@ -742,6 +756,7 @@ type ScanObserverName =
   | "onActivity"
   | "onSessionEvent"
   | "onProgress"
+  | "onInventory"
   | "onDeepProgress"
   | "onWorkerStatus"
   | "onWorkerEvent"
@@ -1073,7 +1088,7 @@ export class CodexSecurity {
   async #scanDependencies(
     options: DependencyScanOptions,
   ): Promise<DependencyScanResult> {
-    const { onProgress, ...scanOptions } = options;
+    const { onProgress, onInventory, ...scanOptions } = options;
     const reportProgress = onProgress && notifyObserver(options, "onProgress");
     const onActivity =
       options.onActivity && notifyObserver(options, "onActivity");
@@ -1086,6 +1101,9 @@ export class CodexSecurity {
     ]);
     let outputDir = "";
     let result: ScaResult | undefined;
+    let releaseOutput: (() => Promise<void>) | undefined;
+    let canSave = false;
+    let continuing = false;
     try {
       throwIfAborted(signal);
       reportProgress?.({ phase: "preparing" });
@@ -1093,6 +1111,8 @@ export class CodexSecurity {
         options.repositoryPath,
         scanOptions,
         signal,
+        undefined,
+        true,
       );
       const temporaryRoot = await realpath(tmpdir());
       requireOutputOutsideRepository(
@@ -1108,20 +1128,55 @@ export class CodexSecurity {
               basename(inputs.repository),
             )
           : temporaryRoot;
-      outputDir = await prepareOutputDir(
+      const resume =
+        inputs.outputDir !== null &&
+        (await hasDependencyScan(inputs.outputDir));
+      outputDir = await prepareScanRegistrationOutput(
         inputs.outputDir ?? undefined,
         basename(inputs.repository),
         outputRoot,
         (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+        resume,
       );
-      result = dependencyScanResult(
-        initialOsvScanResult(outputDir),
-        { path: inputs.repository, revision: null, dirty: null },
-        outputDir,
-      );
-      result.diagnostics.push("Dependency inventory has not started.");
-      await saveDependencyScan(result);
-      notifyObserver(options, "onOutputDirReady")(outputDir);
+      releaseOutput = await acquireScanOutputLock(outputDir, "dependency scan");
+      // A competing run may have finished after we prepared the empty directory.
+      continuing =
+        resume ||
+        (inputs.outputDir !== null && (await hasDependencyScan(outputDir)));
+      result = continuing
+        ? await readDependencyScan(outputDir)
+        : dependencyScanResult(
+            initialOsvScanResult(outputDir),
+            { path: inputs.repository, revision: null, dirty: null },
+            outputDir,
+          );
+      const missing = continuing ? missingDependencyAssessments(result) : [];
+      const fullyAssessed =
+        continuing &&
+        missing.length === 0 &&
+        result.assessments.every((item) => item.status === "completed");
+      if (continuing) {
+        if (result.repository.path !== inputs.repository)
+          throw new CodexSecurityError(
+            "The saved dependency scan belongs to a different repository.",
+          );
+        if (!result.assessmentContext)
+          throw new CodexSecurityError(
+            "This dependency run has no source checkpoint for continuation. Start a new run in a new output directory.",
+          );
+        if (
+          result.status === "completed" ||
+          (result.coverage.status !== "complete" && fullyAssessed)
+        )
+          throw new CodexSecurityError(
+            "All advisory assessments are already complete. Start a new run in a new output directory to refresh matching.",
+          );
+      } else {
+        canSave = true;
+        result.diagnostics.push("Dependency inventory has not started.");
+        await saveDependencyScan(result);
+        notifyObserver(options, "onOutputDirReady")(outputDir);
+      }
       let sourceWorkflow: FindingWorkflow | undefined;
       const snapshotSource = async (): Promise<JsonObject> => {
         if (this.#dependencies.sourceSnapshot !== undefined)
@@ -1150,75 +1205,233 @@ export class CodexSecurity {
         }
         return await sourceWorkflow.sourceSnapshot(inputs.repository);
       };
-      const sourceDigest = async () => {
+      const sourceSnapshot = async (saved?: ScaResult) => {
         const { repository, revision, content } = await snapshotSource();
-        return workflowDigest({ repository, revision, content });
+        const digest = workflowDigest({ repository, revision, content });
+        if (saved && digest !== saved.assessmentContext?.sourceDigest)
+          throw new CodexSecurityError(
+            `Cannot continue dependency assessment: source changed (saved revision ${saved.repository.revision ?? "unversioned"}, current revision ${String(revision)}). Restore the original source or start a new run.`,
+          );
+        return { digest, revision };
       };
-      // Bind triage to the source before inventory, including dirty and ignored files.
-      // A snapshot failure must not discard deterministic scanner evidence.
-      const source = await sourceDigest().then(
-        (digest) => ({ digest }),
-        (error: unknown) => ({ error }),
-      );
+      // A fresh scan can retain its deterministic inventory if the snapshot fails.
+      let source = continuing
+        ? await sourceSnapshot(result)
+        : await sourceSnapshot().catch((error: unknown) => ({ error }));
       throwIfAborted(signal, outputDir);
-      const repository = result.repository;
-      repository.revision = await (
-        this.#dependencies.repositoryRevision ?? repositoryRevision
-      )(inputs.repository, signal);
-      repository.dirty = await dependencyRepositoryDirty(
-        inputs.repository,
-        this.#dependencies.environment,
-        signal,
-      );
-      try {
-        const scan = await (this.#dependencies.runOsvScan ?? runOsvScan)({
-          repositoryPath: inputs.repository,
-          outputDir,
-          environment: this.#dependencies.environment,
+      if (!continuing) {
+        const repository = result.repository;
+        repository.revision = await (
+          this.#dependencies.repositoryRevision ?? repositoryRevision
+        )(inputs.repository, signal);
+        repository.dirty = await dependencyRepositoryDirty(
+          inputs.repository,
+          this.#dependencies.environment,
           signal,
-          onProgress: reportProgress,
-        });
-        result = dependencyScanResult(scan, repository, outputDir);
-      } catch (error) {
-        if (error instanceof Error && "osvResult" in error) {
-          result = dependencyScanResult(
-            error.osvResult as OsvScanResult,
-            repository,
+        );
+        try {
+          const scan = await (this.#dependencies.runOsvScan ?? runOsvScan)({
+            repositoryPath: inputs.repository,
             outputDir,
+            environment: this.#dependencies.environment,
+            signal,
+            onProgress: reportProgress,
+          });
+          result = dependencyScanResult(scan, repository, outputDir);
+        } catch (error) {
+          if (error instanceof Error && "osvResult" in error) {
+            result = dependencyScanResult(
+              error.osvResult as OsvScanResult,
+              repository,
+              outputDir,
+            );
+          }
+          throw error;
+        }
+        try {
+          result.packageContexts = await dependencyPackageContexts(
+            result,
+            signal,
+          );
+        } catch (error) {
+          throwIfAborted(signal, outputDir);
+          result.diagnostics.push(
+            `Installed dependency context unavailable: ${errorMessage(error)}`,
           );
         }
-        throw error;
       }
       if (result.matches.length === 0) reportProgress?.({ phase: "saving" });
-      await saveDependencyScan(result);
+      if (canSave) await saveDependencyScan(result);
+      if (!continuing && result.matches.length > 0 && !("error" in source)) {
+        try {
+          const inventorySource = await sourceSnapshot();
+          if (inventorySource.digest !== source.digest)
+            throw new CodexSecurityError(
+              `Source changed during dependency inventory (original revision ${String(source.revision)}, current revision ${String(inventorySource.revision)}). Rerun the dependency scan.`,
+            );
+          result.assessmentContext = {
+            sourceDigest: source.digest,
+            configurationDigest: null,
+          };
+          await saveDependencyScan(result);
+        } catch (error) {
+          source = { error };
+        }
+      }
+      if (onInventory !== undefined)
+        notifyObserver(options, "onInventory")(structuredClone(result));
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
+      if (fullyAssessed) {
+        // No model work remains: finalize the saved evidence with its original
+        // model, skill, and configuration rather than preparing a new session.
+        const cost = result.model.costPending
+          ? null
+          : (result.model.cost ?? null);
+        requireContinuationBudget(
+          cost,
+          cost === null,
+          options.maxCostUsd,
+          outputDir,
+        );
+        if (cost !== null) onCost(cost, options.maxCostUsd);
+        notifyObserver(options, "onOutputDirReady")(outputDir);
+        await sourceSnapshot(result);
+        throwIfAborted(signal, outputDir);
+        canSave = true;
+        recordPreviousAttempt(result, cost === null);
+        result.status = "completed";
+        reportProgress?.({ phase: "saving" });
+        await saveDependencyScan(result);
+        throwIfAborted(signal, outputDir);
+        return result;
+      }
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
         reportProgress?.({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
-        const auth =
-          this.#dependencies.chooseDependencyAuthentication === undefined
-            ? options.auth
-            : await this.#dependencies.chooseDependencyAuthentication(
-                options.auth,
-                signal,
-              );
-        throwIfAborted(signal, outputDir);
-        const session = await this.#prepareSession(
-          inputs,
-          { ...options, auth },
-          signal,
-          temporaryRoot,
-        );
+        const verifyAssessmentSource = async () => {
+          const currentSource = await sourceSnapshot();
+          if (currentSource.digest !== source.digest)
+            throw new CodexSecurityError(
+              `Source changed during dependency assessment (original revision ${String(source.revision)}, current revision ${String(currentSource.revision)}); earlier assessments describe the original source. Rerun the dependency scan.`,
+            );
+        };
+        let auth = options.auth;
+        let session: PreparedSession;
+        try {
+          if (this.#dependencies.chooseDependencyAuthentication !== undefined)
+            auth = await this.#dependencies.chooseDependencyAuthentication(
+              options.auth,
+              signal,
+            );
+          throwIfAborted(signal, outputDir);
+          session = await this.#prepareSession(
+            inputs,
+            { ...options, auth },
+            signal,
+            temporaryRoot,
+          );
+        } catch (error) {
+          if (!continuing) throw error;
+          throwIfAborted(signal, outputDir);
+          // Setup failed before configuration validation; retain the checkpoint.
+          return {
+            ...result,
+            status: "partial",
+            diagnostics: [
+              ...result.diagnostics,
+              `Static assessment: ${errorMessage(error)}`,
+            ],
+          };
+        }
         const { runtime, pricingContext } = session;
-        const { model } = scanModelConfiguration(session.effectiveConfig);
+        const { model, reasoningEffort } = scanModelConfiguration(
+          session.effectiveConfig,
+        );
         result.model.model = model;
         validateScanCostLimit(options.maxCostUsd, model, pricingContext);
         const contract = await dependencyTriageContract(
           runtime.plugin.pluginRoot,
         );
-        result.model.skillDigest = contract.skillDigest;
+        const resolvedConfig = resolveCodexProfile(session.effectiveConfig);
+        const providers = resolvedConfig["model_providers"];
+        const provider =
+          typeof session.modelProvider === "string"
+            ? session.modelProvider
+            : "openai";
+        const providerConfiguration = isRecord(providers)
+          ? (providers[provider] ?? null)
+          : null;
+        const assessmentConfig = policyCodexConfig(session.sessionConfig);
+        const configurationFile = async (key: string) => {
+          const configuredPath = resolvedConfig[key];
+          if (typeof configuredPath !== "string") return null;
+          // Runtime path overrides are relative to the assessment cwd.
+          const expandedPath =
+            configuredPath === "~" ||
+            configuredPath.startsWith("~/") ||
+            (process.platform === "win32" && configuredPath.startsWith("~\\"))
+              ? expandHome(configuredPath, runtime.environment)
+              : configuredPath;
+          const path = resolve(outputDir, expandedPath);
+          assessmentConfig[key] = path;
+          return { path, contents: (await readFile(path, "utf8")).trim() };
+        };
+        const compactPrompt = resolvedConfig["compact_prompt"];
+        const modelCatalog = await configurationFile("model_catalog_json");
+        const configuration = {
+          model,
+          reasoningEffort,
+          modelSettings: Object.fromEntries(
+            Object.entries(resolvedConfig).filter(
+              ([key]) =>
+                key.startsWith("model_") &&
+                key !== "model_providers" &&
+                key !== "model_instructions_file",
+            ),
+          ),
+          ...(modelCatalog === null ? {} : { modelCatalog }),
+          instructions: {
+            developer: resolvedConfig["developer_instructions"] ?? null,
+            model:
+              (await configurationFile("model_instructions_file")) ??
+              resolvedConfig["instructions"] ??
+              null,
+            compact:
+              typeof compactPrompt === "string" && compactPrompt.trim()
+                ? compactPrompt.trim()
+                : await configurationFile("experimental_compact_prompt_file"),
+          },
+          provider,
+          providerConfiguration: assessmentProviderSettings(
+            providerConfiguration,
+          ),
+          ...(pricingContext?.provider === "amazon-bedrock"
+            ? { bedrockRegion: pricingContext.region }
+            : {}),
+          endpoint:
+            provider === "openai"
+              ? (resolvedConfig["openai_base_url"] ??
+                (process.platform === "win32"
+                  ? environmentValue(runtime.environment, "OPENAI_BASE_URL")
+                  : runtime.environment["OPENAI_BASE_URL"]) ??
+                null)
+              : null,
+          skill: contract.skillDigest,
+          workflow: "focused-dependency-assessment-v1",
+        };
+        const previousCost =
+          continuing && !result.model.costPending
+            ? (result.model.cost ?? null)
+            : null;
+        const previousUsageUnknown =
+          continuing &&
+          previousCost === null &&
+          (result.model.costPending === true ||
+            result.model.threadId !== null ||
+            result.assessments.some((item) => item.threadId !== undefined));
+        const assessmentResult = result;
         const command = this.#codexCommand();
         const mcpServers = await disabledMcpServers(
           await providerPreflightCommand(command, session.effectiveConfig),
@@ -1231,7 +1444,62 @@ export class CodexSecurity {
         );
         const { codex } = await this.#createSessionCodex(
           session,
-          { command: "dependencies" },
+          {
+            command: "dependencies",
+            beforeCreate: async (environment) => {
+              const providerEnvironment = assessmentProviderEnvironment(
+                providerConfiguration,
+                environment,
+              );
+              const checkpointConfiguration = {
+                ...configuration,
+                ...(Object.keys(providerEnvironment).length
+                  ? { providerEnvironment }
+                  : {}),
+              };
+              const configurationDigest = workflowDigest(
+                checkpointConfiguration,
+              );
+              if (continuing) {
+                const savedDigest =
+                  assessmentResult.assessmentContext!.configurationDigest;
+                // Migrate earlier checkpoints when their full provider settings still match.
+                if (
+                  savedDigest !== null &&
+                  savedDigest !== configurationDigest &&
+                  savedDigest !==
+                    workflowDigest({
+                      ...checkpointConfiguration,
+                      providerConfiguration,
+                    })
+                )
+                  throw new CodexSecurityError(
+                    "Dependency assessment model, effort, provider, instructions, or skill changed. Use the original settings or start a new run.",
+                  );
+                requireContinuationBudget(
+                  previousCost,
+                  previousUsageUnknown,
+                  options.maxCostUsd,
+                  outputDir,
+                );
+                canSave = true;
+                recordPreviousAttempt(assessmentResult, previousUsageUnknown);
+                for (const assessment of assessmentResult.assessments)
+                  if (assessment.status !== "completed") {
+                    assessment.status = "not_started";
+                    assessment.error = null;
+                    delete assessment.threadId;
+                  }
+                for (const assessment of missing)
+                  assessmentResult.assessments.push(assessment);
+                notifyObserver(options, "onOutputDirReady")(outputDir);
+              }
+              assessmentResult.model.skillDigest = contract.skillDigest;
+              assessmentResult.assessmentContext!.configurationDigest =
+                configurationDigest;
+              await saveDependencyScan(assessmentResult);
+            },
+          },
           {
             CODEX_SECURITY_REPOSITORY: inputs.repository,
             CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1240,7 +1508,7 @@ export class CodexSecurity {
           auth,
           undefined,
           {
-            ...policyCodexConfig(session.sessionConfig),
+            ...assessmentConfig,
             default_permissions: SCA_PERMISSION_PROFILE,
           },
           [`mcp_servers=${inlineToml(mcpServers)}`],
@@ -1274,10 +1542,17 @@ export class CodexSecurity {
           checkpointBudget = undefined;
         };
         const reportCost = (
-          cost: Readonly<ScanCost>,
+          currentCost: Readonly<ScanCost>,
           complete = true,
         ): void => {
+          if (previousUsageUnknown) return;
+          const cost =
+            previousCost === null
+              ? currentCost
+              : addScanCosts(previousCost, currentCost);
           result!.model.costUsd = complete ? cost.estimatedUsd : null;
+          if (complete) result!.model.cost = cost;
+          else delete result!.model.cost;
           if (
             options.maxCostUsd !== undefined &&
             cost.estimatedUsd > options.maxCostUsd
@@ -1296,17 +1571,22 @@ export class CodexSecurity {
           else
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
+        let attemptedTurn = false;
+        let unverifiedTurn = false;
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
-          if (cost !== null) reportCost(cost);
-          else {
+          if (!attemptedTurn) return;
+          result!.model.costPending =
+            cost === null || previousUsageUnknown || unverifiedTurn;
+          if (cost === null) {
             result!.model.costUsd = null;
-            if (options.maxCostUsd !== undefined)
-              budgetController.abort(
-                new CodexSecurityError(
-                  "Could not verify the dependency assessment cost limit.",
-                ),
-              );
-          }
+            delete result!.model.cost;
+          } else reportCost(cost);
+          if (result!.model.costPending && options.maxCostUsd !== undefined)
+            budgetController.abort(
+              new CodexSecurityError(
+                "Could not verify the dependency assessment cost limit.",
+              ),
+            );
         };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
@@ -1317,19 +1597,47 @@ export class CodexSecurity {
           maxCostUsd: options.maxCostUsd,
           onCost: (cost, complete) => {
             reportCost(cost, complete);
-            if (complete) onCost(cost, options.maxCostUsd);
+            if (complete && !previousUsageUnknown)
+              onCost(result!.model.cost!, options.maxCostUsd);
           },
           onUsage: notifyObserver(options, "onUsage"),
           onError: reportTrackingError,
         });
-
+        if (previousCost !== null) onCost(previousCost, options.maxCostUsd);
         try {
-          for (const [index, match] of result.matches.entries()) {
+          const initialCheck = await sourceSnapshot();
+          if (initialCheck.digest !== source.digest)
+            throw new CodexSecurityError(
+              `Source changed before dependency assessment (original revision ${String(source.revision)}, current revision ${String(initialCheck.revision)}). Rerun the dependency scan.`,
+            );
+          const threads = new Map<
+            string,
+            ReturnType<typeof codex.startThread>
+          >();
+          for (const match of prioritizedDependencyMatches(result)) {
+            const index = result.assessments.findIndex(
+              (item) => item.matchId === match.id,
+            );
+            if (result.assessments[index]!.status === "completed") continue;
             throwIfAborted(signal, outputDir);
             reportProgress?.(assessmentProgress(result, match));
-            const thread = codex.startThread(threadOptions);
+            let thread = threads.get(match.componentId);
+            const reusedThread = thread !== undefined;
+            if (thread === undefined) {
+              thread = codex.startThread(threadOptions);
+              threads.set(match.componentId, thread);
+            }
             let assessment: ScaAssessment;
+            let turnCompleted = false;
+            await writeDependencyArtifact(
+              outputDir,
+              "sca-assessment-input.json",
+              `${JSON.stringify(dependencyTriageEvidence(result, match), null, 2)}\n`,
+            );
             try {
+              result.model.costPending = true;
+              await saveDependencyScan(result);
+              attemptedTurn = true;
               const { events } = await thread.runStreamed(
                 dependencyTriagePrompt(result, contract.skillPath, match),
                 { signal, outputSchema: contract.schema },
@@ -1365,7 +1673,15 @@ export class CodexSecurity {
                     checkpointBudget ??= new AbortController();
                 },
               });
-              tracker.recordUsage(turn.usage, turn.threadId);
+              turnCompleted = turn.status === "completed";
+              const usage = tokenUsage(turn.usage);
+              if (reusedThread && usage === null) {
+                // A rollout can still contain only the preceding turn's usage.
+                unverifiedTurn = true;
+                threads.delete(match.componentId);
+              }
+              // Native receipts already contain the cumulative thread usage.
+              tracker.recordUsage(usage, turn.threadId);
               result.model.threadId = turn.threadId;
               if (turn.threadId !== null)
                 result.assessments[index]!.threadId = turn.threadId;
@@ -1379,6 +1695,11 @@ export class CodexSecurity {
                 matches: [match],
               })[0]!;
             } catch (error) {
+              // A later turn cannot supply the missing usage of an interrupted turn.
+              if (!turnCompleted) {
+                unverifiedTurn = true;
+                threads.delete(match.componentId);
+              }
               throwIfAborted(signal, outputDir);
               const message = errorMessage(error);
               const failure = classifyConnectionFailure(message);
@@ -1399,10 +1720,7 @@ export class CodexSecurity {
                 error: message,
               };
             }
-            if ((await sourceDigest()) !== source.digest)
-              throw new CodexSecurityError(
-                "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
-              );
+            await verifyAssessmentSource();
             throwIfAborted(signal, outputDir);
             const threadId = result.assessments[index]!.threadId;
             if (threadId !== undefined) assessment.threadId = threadId;
@@ -1416,6 +1734,7 @@ export class CodexSecurity {
               return { cost: null };
             });
             verifyCost(snapshot.cost);
+            await saveDependencyScan(result);
             throwIfAborted(signal, outputDir);
           }
         } finally {
@@ -1428,10 +1747,7 @@ export class CodexSecurity {
           verifyCost(snapshot.cost);
         }
         throwIfAborted(signal, outputDir);
-        if ((await sourceDigest()) !== source.digest)
-          throw new CodexSecurityError(
-            "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
-          );
+        await verifyAssessmentSource();
         throwIfAborted(signal, outputDir);
         if (
           result.coverage.status === "complete" &&
@@ -1439,6 +1755,7 @@ export class CodexSecurity {
         )
           result.status = "completed";
       } catch (error) {
+        if (!canSave) throw error;
         const message = errorMessage(error);
         result.diagnostics.push(`Static assessment: ${message}`);
         throwIfAborted(signal, outputDir);
@@ -1459,7 +1776,7 @@ export class CodexSecurity {
       throwIfAborted(signal, outputDir);
       return result;
     } catch (error) {
-      if (result !== undefined) {
+      if (result !== undefined && canSave) {
         if (signal.aborted) {
           result.status = "partial";
           for (const assessment of result.assessments) {
@@ -1476,6 +1793,8 @@ export class CodexSecurity {
       }
       throwIfAborted(signal, outputDir);
       throw error;
+    } finally {
+      await releaseOutput?.();
     }
   }
 
@@ -5253,10 +5572,14 @@ export class CodexSecurity {
       command,
       mode,
       pluginReadRoot,
+      beforeCreate,
     }: {
       command: string;
       mode?: ScanMode;
       pluginReadRoot?: string;
+      beforeCreate?: (
+        environment: Readonly<ProcessEnvironment>,
+      ) => Promise<void>;
     },
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
@@ -5302,6 +5625,7 @@ export class CodexSecurity {
         ...environmentWithGit(session.runtime.environment, git),
         ...pluginPaths,
       });
+      if (beforeCreate !== undefined) await beforeCreate(environment);
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -5523,6 +5847,13 @@ export class CodexSecurity {
       env: sdkEnvironment,
       config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
     };
+    if (beforeCreate !== undefined)
+      await beforeCreate({
+        ...sdkEnvironment,
+        ...(codexOptions.apiKey === undefined
+          ? {}
+          : { CODEX_API_KEY: codexOptions.apiKey }),
+      });
     if (readOnlyProfile !== undefined) {
       const verified = await preflightReadOnlyProfileCodex(
         codexOptions,
@@ -7252,13 +7583,44 @@ function validateScanCostLimit(
   }
 }
 
+function requireContinuationBudget(
+  cost: Readonly<ScanCost> | null,
+  usageUnknown: boolean,
+  maxCostUsd: number | undefined,
+  outputDir: string,
+): void {
+  if (maxCostUsd === undefined) return;
+  if (usageUnknown)
+    throw new CodexSecurityError(
+      "Cannot continue with a cost limit because earlier assessment usage is unavailable.",
+    );
+  if (cost !== null && cost.estimatedUsd > maxCostUsd)
+    throw new ScanCostLimitExceededError(maxCostUsd, cost, outputDir);
+}
+
+function recordPreviousAttempt(result: ScaResult, usageUnknown: boolean): void {
+  result.diagnostics = result.diagnostics.map(
+    (message) => `Previous attempt: ${message}`,
+  );
+  if (usageUnknown) {
+    result.model.costUsd = null;
+    delete result.model.cost;
+    result.diagnostics.push(
+      "Earlier assessment usage is unavailable; cumulative estimated cost remains unavailable.",
+    );
+  }
+}
+
 function addScanCosts(
   previous: Readonly<ScanCost> | null,
   current: Readonly<ScanCost>,
 ): ScanCost {
   if (previous === null) return { ...current };
   const { estimatedUsdRange: currentRange, ...currentCost } = current;
-  const previousRange = previous.estimatedUsdRange!;
+  const previousRange = previous.estimatedUsdRange ?? {
+    min: previous.estimatedUsd,
+    max: null,
+  };
   return {
     ...currentCost,
     inputTokens: previous.inputTokens + current.inputTokens,
@@ -7273,11 +7635,11 @@ function addScanCosts(
       : {}),
     estimatedUsdRange: {
       context: "unknown" as const,
-      min: previousRange.min + currentRange!.min,
+      min: previousRange.min + (currentRange?.min ?? current.estimatedUsd),
       max:
-        previousRange.max === null || currentRange!.max === null
+        previousRange.max === null || currentRange?.max == null
           ? null
-          : previousRange.max + currentRange!.max,
+          : previousRange.max + currentRange.max,
     },
   };
 }
@@ -7838,6 +8200,58 @@ export function scanRuntimeCodexConfig(
       },
     },
   };
+}
+
+const providerCredentialNames = {
+  http_headers: new Set([
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "api-key",
+    "x-api-key",
+    "x-goog-api-key",
+    "x-auth-token",
+    "ocp-apim-subscription-key",
+  ]),
+  query_params: new Set(["api-key", "api_key", "apikey", "access_token"]),
+};
+
+function assessmentProviderSettings(provider: unknown) {
+  if (!isRecord(provider)) return provider;
+  const settings = { ...provider };
+  delete settings["experimental_bearer_token"];
+  for (const [field, credentials] of Object.entries(providerCredentialNames)) {
+    const values = settings[field];
+    if (!isRecord(values)) continue;
+    const retained = Object.entries(values).filter(
+      ([name]) => !credentials.has(name.toLowerCase()),
+    );
+    if (retained.length) settings[field] = Object.fromEntries(retained);
+    else delete settings[field];
+  }
+  return settings;
+}
+
+function assessmentProviderEnvironment(
+  provider: unknown,
+  environment: Readonly<ProcessEnvironment>,
+) {
+  if (!isRecord(provider) || !isRecord(provider["env_http_headers"])) return {};
+  return Object.fromEntries(
+    Object.entries(provider["env_http_headers"]).flatMap(([header, name]) =>
+      typeof name === "string" &&
+      !providerCredentialNames.http_headers.has(header.toLowerCase())
+        ? [
+            [
+              header,
+              (process.platform === "win32"
+                ? environmentValue(environment, name)
+                : environment[name]) ?? null,
+            ],
+          ]
+        : [],
+    ),
+  );
 }
 
 function dependencyPermissions(
