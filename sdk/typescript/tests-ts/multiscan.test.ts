@@ -2058,6 +2058,10 @@ testPosix.each(["initial scan", "ordinary retry", "recovery retry"] as const)(
         completed: 0,
         failed: 1,
       });
+      if (kind === "ordinary retry")
+        await mkdir(join(paths.output, "artifacts", "repo", "attempt-2"), {
+          mode: 0o700,
+        });
     }
     const summary = await expectScanned({
       ...campaign,
@@ -2066,6 +2070,7 @@ testPosix.each(["initial scan", "ordinary retry", "recovery retry"] as const)(
         : {}),
     });
     const receipt = (await results(summary.resultsPath)).at(-1)!;
+    expect(receipt["attempt"]).toBe(kind === "initial scan" ? 1 : 2);
     const { manifest } = await loadContract(receipt["outputDir"] as string, {
       pluginRoot: PLUGIN_ROOT,
     });

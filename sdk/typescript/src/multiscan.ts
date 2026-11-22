@@ -808,7 +808,10 @@ async function runCampaign(
               );
               const attemptRoot = join(taskRoot, `attempt-${attempt}`);
               const isolatedCheckout = join(attemptRoot, task.id);
-              await mkdir(scanDir, { mode: 0o700 });
+              await mkdir(scanDir, {
+                mode: 0o700,
+                recursive: options.recoverScan === undefined,
+              });
               await mkdir(attemptRoot, { mode: 0o700 });
               await mkdir(isolatedCheckout, { mode: 0o700 });
               checkout = isolatedCheckout;
