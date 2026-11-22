@@ -2170,7 +2170,8 @@ def _validate_schema_node(
             raise ContractError(f"{context}: string is too short")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             raise ContractError(f"{context}: string is too long")
-        if "pattern" in schema and not re.search(schema["pattern"], value):
+        # JSON Schema patterns are ECMA-262 regexes, where $ doesn't match before a final newline.
+        if "pattern" in schema and not re.search(schema["pattern"].replace("$", r"\Z"), value):
             raise ContractError(f"{context}: string does not match schema pattern")
         if _matches_sealed_path_exclusion(value, schema.get("oneOf")):
             raise ContractError(f"{context}: string matches excluded schema pattern")
