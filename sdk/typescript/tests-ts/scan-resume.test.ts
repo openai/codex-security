@@ -2188,7 +2188,7 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 join(f.root, "artifacts", "repo", "attempt-2"),
               );
               expect(repository).toBe(
-                join(f.root, "recovery-checkouts", "repo", "attempt-2"),
+                join(f.root, "recovery-checkouts", "repo", "attempt-2", "repo"),
               );
               expect(
                 (
