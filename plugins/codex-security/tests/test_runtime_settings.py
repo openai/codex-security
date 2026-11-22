@@ -62,6 +62,14 @@ def test_count_validation_still_rejects_nonintegers(value):
         deep["require_integer"](value, "workers", minimum=1)
 
 
+@pytest.mark.parametrize("value", [2**53, 1e30])
+def test_count_validation_rejects_counts_the_sdk_cannot_represent(value):
+    deep = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
+    assert deep["require_integer"](2**53 - 1, "workers", minimum=1) == 2**53 - 1
+    with pytest.raises(SystemExit, match="positive integer"):
+        deep["require_integer"](value, "workers", minimum=1)
+
+
 @pytest.mark.parametrize("absolute", [False, True])
 def test_config_and_storage_preserve_literal_home_spaces(tmp_path, monkeypatch, absolute):
     monkeypatch.chdir(tmp_path)

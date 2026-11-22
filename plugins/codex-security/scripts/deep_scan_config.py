@@ -22,6 +22,8 @@ DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = DEFAULTS["stopAfterConsecutiveErrors"]
 DEFAULT_MAX_DISCOVERY_RUNS = DEFAULTS["maxDiscoveryRuns"]
 DEFAULT_MAX_TIME_HOURS = DEFAULTS["maxTimeHours"]
 MAX_TIME_HOURS = 96
+# The SDK accepts the same counts only as JavaScript safe integers.
+MAX_SAFE_INTEGER = 2**53 - 1
 CONFIG_FIELDS = {
     "workers": "workers",
     "subagents": "subagents",
@@ -126,7 +128,11 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
     """Return an integer at least minimum, accepting integral floats and raising SystemExit for invalid counts."""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= MAX_SAFE_INTEGER
+    ):
         qualifier = (
             "a non-negative integer"
             if minimum == 0
