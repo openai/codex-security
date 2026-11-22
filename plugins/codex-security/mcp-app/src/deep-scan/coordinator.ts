@@ -1,7 +1,14 @@
 /// <reference lib="es2023.array" />
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, join, relative, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  join,
+  relative,
+  sep,
+  toNamespacedPath,
+} from "node:path";
 import {
   writeWorkerUsageReceipt,
   type WorkerUsageReceipt,
@@ -723,7 +730,10 @@ export class DeepScanCoordinator {
     let batch = accepted.filter((w) => !merged.has(w.id));
     const checkpointNumber = (resultPath: string) =>
       workerLabelSequence(
-        relative(this.artifacts.dedupRoot, resultPath).split(sep)[0]!,
+        relative(
+          toNamespacedPath(this.artifacts.dedupRoot),
+          toNamespacedPath(resultPath),
+        ).split(sep)[0]!,
         "dedup",
       );
     let resultPath = persisted

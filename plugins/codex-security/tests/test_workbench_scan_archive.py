@@ -660,8 +660,14 @@ def test_archive_follows_the_owner_across_windows_spellings(
 
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires long Win32 archive paths")
-@pytest.mark.parametrize("root_size", [232, 242], ids=["report", "root"])
-def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(tmp_path, root_size):
+@pytest.mark.parametrize(
+    "root_size, archive_extended",
+    [(232, True), (242, True), (232, False)],
+    ids=["report", "root", "ordinary-report"],
+)
+def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(
+    tmp_path, root_size, archive_extended
+):
     extended = load_script("windows_scan_local_files")._extended_path
     state, repo = tmp_path / "state", tmp_path / "repo"
     repo.mkdir()
@@ -673,11 +679,14 @@ def test_archive_keeps_extended_access_after_suffix_exceeds_max_path(tmp_path, r
     report = output / "report.md"
     report.write_text("Previous report")
     archived, root, artifact = archive_with_report(
-        state, repo, Path(extended(output)), scan_id, report
+        state, repo, Path(extended(output)) if archive_extended else output, scan_id, report
     )
-    assert root == extended(archived)
-    assert artifact == str(Path(root) / report.name)
+    assert root == (extended(archived) if archive_extended else str(archived))
+    assert artifact == str(Path(extended(archived)) / report.name)
     assert Path(artifact).read_text() == "Previous report"
+    saved = run_workbench(state, "get-scan", "--scan-id", str(scan_id))["scan"]
+    assert saved["reportAvailable"] is True
+    assert Path(saved["artifacts"]["markdownReport"]).samefile(artifact)
 
 
 @pytest.mark.native_windows
@@ -708,7 +717,7 @@ def test_archive_does_not_move_state_or_checkout_via_an_extended_output(tmp_path
     [(r"C:\scans", r"\\?\C:\scans"), (r"\\host\share\scans", r"\\?\UNC\host\share\scans")],
 )
 def test_mixed_worker_paths_preserve_file_identity_through_archive(
-    windows_directory, monkeypatch, root, prefix
+    windows_directory, monkeypatch, root, prefix, workbench_api
 ):
     import deep_scan_workbench as deep
     from workbench import storage
@@ -719,6 +728,12 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
         deep,
         "_dependencies",
         SimpleNamespace(require_canonical_scan_directory=lambda root: root.resolve(strict=True)),
+    )
+    available = workbench_api["available_artifact_path"]
+    monkeypatch.setitem(
+        available.__globals__,
+        "require_canonical_scan_directory",
+        deep.dependencies().require_canonical_scan_directory,
     )
     ordinary, extended = Directory(root) / "run", Directory(prefix) / "run"
     ordinary.local().mkdir(parents=True)
@@ -734,6 +749,7 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
         path.local().mkdir()
         candidate = path / "result.json."
         candidate.local().touch()
+        assert available(ordinary, candidate) is None
         with pytest.raises(SystemExit, match="inside the scan directory"):
             deep.deep_scan_path(
                 {"scan_dir": str(ordinary)}, str(candidate), "Worker result", kind="file"
@@ -762,6 +778,7 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
             assert moved == storage.archived_deep_path(archived, saved)
             ordinary.local().rename(archived.local())
             try:
+                assert available(archived, Directory(moved)) == Directory(moved)
                 assert Directory(moved).local().read_text() == (
                     "verbatim" if supplied == literal else "ordinary"
                 )

@@ -58,6 +58,7 @@ from windows_scan_local_files import pin_replay_metadata, workbench_sqlite_paths
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
+    require_worker_path,
     resolve_scan_root,
     saved_deep_workers,
     state_dir,
@@ -3235,7 +3236,7 @@ def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
     try:
         resolved_scan_dir = require_canonical_scan_directory(scan_dir)
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(resolved_scan_dir)
+        require_worker_path(resolved, resolved_scan_dir)
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
     if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():

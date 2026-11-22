@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+  toNamespacedPath,
+} from "node:path";
 import { errorMessage } from "./errors.js";
 export type DeepScanArtifacts = ReturnType<typeof createDeepScanArtifacts>;
 
@@ -85,7 +93,12 @@ export async function requireRegularFile(
   ) {
     throw new Error(containmentMessage);
   }
-  if (relative(resolve(path), resolvedPath) !== "") {
+  if (
+    relative(
+      toNamespacedPath(resolve(path)),
+      toNamespacedPath(resolvedPath),
+    ) !== ""
+  ) {
     throw new Error(
       `Deep Scan artifact must use a canonical non-symlink path: ${path}`,
     );
