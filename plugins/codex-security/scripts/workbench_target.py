@@ -1225,24 +1225,18 @@ def _has_checkout_metadata(marker: Path, *, follow_links: bool) -> bool:
     return stat.S_ISREG(info.st_mode)
 
 
-def _check_nested_worktree(path: Path, *, selected_ancestor: bool = False) -> None:
+def _check_nested_worktree(path: Path) -> None:
     """Diagnose a nested marker when Git reported the enclosing checkout."""
     marker = path / ".git"
-    if selected_ancestor:
-        if not _has_checkout_metadata(marker, follow_links=False):
-            return
-    else:
-        try:
-            marker.lstat()
-        except FileNotFoundError:
-            return
+    if not _has_checkout_metadata(marker, follow_links=False):
+        return
     probe = git_command(
         path, "rev-parse", "--show-toplevel", git_dir=marker, work_tree=path, text=False
     )
-    if selected_ancestor and not probe.returncode:
+    if not probe.returncode:
         # A valid gitfile can refer to the enclosing worktree.
         return
-    detail = _git_diagnostic(probe.stderr).rstrip() if probe.returncode else ""
+    detail = _git_diagnostic(probe.stderr).rstrip()
     raise OSError(detail or f"Could not inspect the nested Git working tree: {path}")
 
 
@@ -1267,7 +1261,11 @@ def git_directory_paths(
         root = _git_output_line(probe.stdout) if probe.returncode == 0 else None
         if root is None:
             # A broken worktree must not turn into an unfiltered directory scan.
-            if onerror and probe.stderr:
+            if (
+                onerror
+                and probe.stderr
+                and git_output(target, "rev-parse", "--is-bare-repository") != "true"
+            ):
                 device = target.stat().st_dev
                 for parent in (target, *target.parents):
                     if parent.stat().st_dev != device:
@@ -1281,7 +1279,7 @@ def git_directory_paths(
             directory = repository
             for part in Path(pathspec).parts:
                 directory /= part
-                _check_nested_worktree(directory, selected_ancestor=True)
+                _check_nested_worktree(directory)
     else:
         # The temporary copy of an unborn repository uses the selected Git config and index.
         repository, pathspec = target, "."
@@ -1362,7 +1360,7 @@ def _iter_git_directory_paths(
                     key = str(prefix)
                     if key not in checked_prefixes:
                         checked_prefixes[key] = False
-                        _check_nested_worktree(prefix, selected_ancestor=True)
+                        _check_nested_worktree(prefix)
                         checked_prefixes[key] = True
                     if not checked_prefixes[key]:
                         return None

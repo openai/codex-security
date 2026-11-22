@@ -342,3 +342,72 @@ def test_directory_on_separate_filesystem_does_not_inherit_checkout(
     (mounted / ".git" / "HEAD").write_text("broken")
     with pytest.raises(OSError, match="git repository"):
         check_targets(mounted, ["src"], [])
+
+
+@pytest.mark.cross_platform
+def test_selected_bare_repository_directory_keeps_filesystem_discovery(tmp_path, check_targets):
+    import workbench_target
+
+    root = tmp_path / "repo"
+    initialize_git_repository(root)
+    bare = root / "fixtures" / "repo.git"
+    bare.mkdir(parents=True)
+    git(bare, "init", "--bare", "-q")
+    selected = bare / "source"
+    selected.mkdir()
+    source = selected / "source.py"
+    source.touch()
+    assert workbench_target.git_directory_snapshot_paths(selected) is None
+    check_targets(root, ["fixtures/repo.git/source"], [])
+    source.unlink()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(root, ["fixtures/repo.git/source"], [])
+    source.touch()
+    (bare / "config").write_text("[broken\n")
+    with pytest.raises(OSError, match="config"):
+        check_targets(root, ["fixtures/repo.git/source"], [])
+
+
+@pytest.mark.cross_platform
+def test_valid_gitfile_alias_in_enumerated_directory(tmp_path, check_targets):
+    import workbench_target
+
+    root = tmp_path / "repo"
+    initialize_git_repository(root)
+    (root / "README.md").unlink()
+    selected = root / "selected"
+    selected.mkdir()
+    source = selected / "source.py"
+    source.touch()
+    git(root, "config", "core.worktree", root.as_posix())
+    (selected / ".git").write_text("gitdir: ../.git\n")
+    assert source in workbench_target.git_directory_snapshot_paths(root)
+    check_targets(root, ["."], [])
+    source.unlink()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(root, ["."], [])
+    source.touch()
+    (selected / ".git").write_text("gitdir: ../missing\n")
+    with pytest.raises(OSError, match="git"):
+        check_targets(root, ["."], [])
+
+
+@pytest.mark.cross_platform
+def test_gitlink_with_empty_metadata_keeps_filesystem_discovery(tmp_path, check_targets):
+    import workbench_target
+
+    root = tmp_path / "repo"
+    initialize_git_repository(root)
+    (root / "README.md").unlink()
+    selected = root / "selected"
+    initialize_git_repository(selected)
+    git(root, "add", "selected")
+    marker = selected / ".git"
+    marker.rename(tmp_path / "saved-metadata")
+    marker.mkdir()
+    source = selected / "README.md"
+    assert source in workbench_target.git_directory_snapshot_paths(root)
+    check_targets(root, ["."], [])
+    source.unlink()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(root, ["."], [])
