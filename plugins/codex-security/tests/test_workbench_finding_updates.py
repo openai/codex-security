@@ -151,6 +151,89 @@ def test_live_finding_update_replay(tmp_path):
     assert feed(terminal["nextCursor"])["updates"] == []
 
 
+@pytest.mark.parametrize("kind", ["standard", "commit", "range", "working_tree"])
+def test_corrected_finding_identities_withdraw_only_their_prior_versions(tmp_path, kind):
+    if kind == "standard":
+        state, target, scan_id, directory = empty_target_scan(tmp_path)
+        contract = tmp_path / "fixture"
+        contract.mkdir()
+        write_completed_contract(contract, scan_id, target)
+        documents = read_draft_documents(contract)
+    else:
+        state, _, scan = _start_diff_scan_with_draft(tmp_path, kind)
+        scan_id, directory = scan["scanId"], Path(scan["scanDir"])
+        documents = read_draft_documents(directory)
+    documents["manifest"]["scan"]["complete"] = False
+    original = documents["findings"]["findings"][0]
+    original["provenance"]["candidateId"] = "shared-candidate"
+    original["provenance"]["previousFindings"] = "legacy metadata"
+    sibling = copy.deepcopy(original)
+    sibling["identity"]["instance"] = "independent"
+    documents["findings"]["findings"].append(sibling)
+    publish = partial(publish_draft, state, scan_id, directory, documents)
+    feed = partial(finding_updates, state, scan_id)
+    publish()
+    first = feed()
+    original_id, sibling_id = [event["findingId"] for event in first["updates"]]
+    original["provenance"]["previousFindings"] = [copy.deepcopy(original)]
+    publish()
+    assert feed(first["nextCursor"])["updates"] == []
+
+    corrected = copy.deepcopy(original)
+    corrected["identity"]["anchor"] += "-corrected"
+    corrected["provenance"]["previousFindings"] = [original]
+    corrected["provenance"]["sourceFindings"] = [sibling]
+    documents["findings"]["findings"] = [corrected]
+    publish()
+    correction = feed(first["nextCursor"])
+    reviewed, withdrawn = correction["updates"]
+    corrected_id = reviewed["findingId"]
+    assert reviewed["kind"] == "reviewed" and corrected_id != original_id
+    assert (withdrawn["kind"], withdrawn["findingId"]) == ("withdrawn", original_id)
+    assert correction["status"] == "running"
+    publish()
+    assert feed(correction["nextCursor"])["updates"] == []
+
+    # A later accepted correction can outlive a failed journal append. Its next
+    # revision must retire the last visible identity through the retained history.
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("""CREATE TRIGGER fail_feed_append BEFORE INSERT ON scan_finding_updates
+                      BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END""")
+    intermediate = copy.deepcopy(corrected)
+    intermediate["identity"]["anchor"] += "-intermediate"
+    intermediate["provenance"]["previousFindings"] = [corrected]
+    documents["findings"]["findings"] = [intermediate]
+    publish()
+    assert feed(correction["nextCursor"])["updates"] == []
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("DROP TRIGGER fail_feed_append")
+    another_version = copy.deepcopy(intermediate)
+    another_version["summary"] = "Revised source proof for the same identity."
+    latest = copy.deepcopy(intermediate)
+    latest["identity"]["anchor"] += "-latest"
+    latest["provenance"]["previousFindings"] = [intermediate, another_version]
+    documents["findings"]["findings"] = [latest]
+    publish()
+    recovered = feed(correction["nextCursor"])
+    reviewed, withdrawn = recovered["updates"]
+    assert reviewed["kind"] == "reviewed" and reviewed["findingId"] != corrected_id
+    assert (withdrawn["kind"], withdrawn["findingId"]) == ("withdrawn", corrected_id)
+    publish()
+    assert feed(recovered["nextCursor"])["updates"] == []
+    # History cannot withdraw an identity still present in the accepted set.
+    latest["provenance"]["previousFindings"].append(sibling)
+    documents["findings"]["findings"] = [latest, sibling]
+    publish()
+    assert feed(recovered["nextCursor"])["updates"] == []
+    active = set()
+    for event in feed()["updates"]:
+        if event["kind"] == "withdrawn":
+            active.remove(event["findingId"])
+        else:
+            active.add(event["findingId"])
+    assert active == {sibling_id, reviewed["findingId"]}
+
+
 def test_direct_files_and_historical_index_are_replayed(tmp_path):
     state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)

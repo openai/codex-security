@@ -163,6 +163,9 @@ Use `findingId` to follow an item through review. A `reviewed` update
 introduces a finding, `updated` carries its revised assessment,
 `withdrawn` removes it from the current view, and `finalized` gives the
 version in the completed result. A finding can first appear at finalization.
+An accepted identity correction withdraws the prior identity and introduces
+the corrected one. Omitting a finding from a Standard or Diff checkpoint alone
+does not withdraw it.
 For an `updated` event, `changedFields` names the revised fields, including
 changes to evidence outside the event's abbreviated preview.
 Deferred leads and candidates awaiting custom validation stay out of the
