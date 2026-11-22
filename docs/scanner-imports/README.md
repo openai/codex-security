@@ -26,7 +26,7 @@ Cloud publication requires a destination that supports the provider and its repo
 | Guide                                                       | `--provider`  | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | `inspector`   | Inspector2 `ListFindings` JSON for one Code Security repository                 |
-| [ArmorCode](armorcode.md)                                   | `armorcode`   | Findings API JSON for one repository (local verified, Cloud unverified)         |
+| [ArmorCode](armorcode.md)                                   | `armorcode`   | Findings API JSON for one repository                                            |
 | [AWS Continuum](continuum.md)                               | `continuum`   | Code issues with linked evidence, or saved findings and patches                 |
 | [Black Duck SCA](blackduck.md)                              | `blackduck`   | BOM-6 vulnerable components for one project version                             |
 | [Checkmarx SAST](checkmarx.md)                              | `checkmarx`   | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |

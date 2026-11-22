@@ -1,4 +1,4 @@
-# Import CrowdStrike findings locally
+# Import CrowdStrike findings
 
 Use a saved JSON report from `fcs scan iac` in the CrowdStrike Falcon Cloud Security (FCS) CLI 4.x. The reader imports each detection in `rule_detections` as one misconfiguration or secret finding. It works offline and does not run the FCS CLI. Reports in the older `violations` format and image scan reports are not supported. For Cloud publication, run from the scanned checkout and provide its verified repository URL. The destination must advertise CrowdStrike support.
 
@@ -33,13 +33,11 @@ git clone --quiet "$repository_url.git" "$checkout"
 git -C "$checkout" checkout --quiet --detach "$commit"
 ```
 
-To scan another branch, replace `HEAD` with `refs/heads/BRANCH`. Paths start at the repository root. If the URL ends with a subdirectory, such as `.git//infra?ref=...`, paths start at that subdirectory. Use `"$checkout/infra"` as `--repository`. If the checkout is at a different commit, the import stops at the first file that changed.
-
-For Cloud publication, run from the directory that FCS scanned. If that directory is `infra` and the report lists `main.tf`, Cloud uses `infra/main.tf` for both the location and the finding ID. With the same source key, a scan from the repository root identifies the same detection, and equivalent detections in sibling directories have distinct Cloud IDs. Local findings and the retained FCS detection keep the original `main.tf` path.
+To scan another branch, replace `HEAD` with `refs/heads/BRANCH`. Paths start at the repository root. If the URL ends with a subdirectory, such as `.git//infra?ref=...`, paths start at that subdirectory. For a local import of that report, pass `--repository "$checkout/infra"`. If the checkout is at a different commit, the import stops at the first file that changed.
 
 A report of a `git::https://` URL names its repository. The import records that URL, without the subdirectory or `?ref=`, as the findings' repository. If you also pass `--source-repository-url`, both must name the same repository, or the import stops. If the scanned URL has a user name and token, FCS keeps them in the report's `flags.path`. The import does not store that field, but keep the report private.
 
-## Preview, save and read back
+## Preview and save locally
 
 The project does not need to be a Git checkout.
 
@@ -54,6 +52,25 @@ Every detection's file must exist in `--repository` with the content that FCS sc
 Add `--source-repository-url https://github.com/example/project` to record the repository of a local scan. With a repository URL, findings get typed `iac` or `secret` details. If you pass the URL and `--repository` is a Git checkout, the URL must match one of its fetch remotes. Without a URL, each finding has a title, severity, description and location, and `evidence.source_data` keeps the native FCS rule and detection.
 
 Remove `--dry-run` and confirm to save. Run `codex-security findings imported /path/to/project --format json` to read back the findings and their initial `not_assessed` Codex assessment. To check a finding against the code, see [Work with imported findings](README.md#work-with-imported-findings).
+
+## Publish to Cloud
+
+Run from the directory where you ran FCS. For a remote scan, use the matching
+checkout directory, such as `"$checkout/infra"` for `.git//infra?ref=...`.
+Set `repository_url` to the connected repository’s verified HTTPS clone URL.
+
+```sh
+repository_url=https://github.com/example/project
+codex-security publish findings "$report" --to cloud --provider crowdstrike \
+  --repository "$repository_url" --source-repository-url "$repository_url" \
+  --source-key example/project/main --dry-run --format json
+```
+
+The preview checks the Git fetch remote and the file hashes recorded by FCS.
+For `main.tf` scanned from `infra`, Cloud uses `infra/main.tf` for the location
+and finding ID. With the same source key, scanning from the root gives that
+detection the same ID. Sibling directories have distinct IDs. Local findings
+and retained FCS evidence keep the scanned path. [Publish and verify the reviewed selection](README.md#save-or-publish-and-verify).
 
 ## Read the evidence
 
@@ -89,7 +106,7 @@ This shortened report has one detection. The reader keeps its file and line as t
 - With a repository URL, `details.kind` is `secret` for the Secret Management rule category and `iac` for all others. `details.configuration.actual` is the FCS `reason`, and `details.configuration.expected` is its `recommendation`. FCS names the attribute that holds a secret, not its value.
 - A detection in a local Terraform module points to the module file. FCS also reports a copy at the module call, and both are imported.
 - A detection in a registry or Git module names the calling file. Its location is the call line from `module_remediation`, or no line if FCS does not state one.
-- `evidence.source_data` keeps the FCS version, the native rule without its detection list, and the one detection. For a `git::` scan, it also keeps the scanned URL without `?ref=`. A saved preview imports only if each finding's location matches its retained detection.
+- `evidence.source_data` keeps the FCS version, the native rule without its detection list, and the one detection. For a `git::` scan, it also keeps the scanned URL without `?ref=`. The reader checks each scan-relative location against its retained detection before preparing the Cloud location.
 
 ## Repeat an import
 
