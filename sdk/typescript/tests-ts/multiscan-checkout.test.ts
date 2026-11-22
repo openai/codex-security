@@ -501,6 +501,70 @@ describe("multiscan", () => {
     );
   });
 
+  test("recovery advances past an ordinary retry interrupted during checkout allocation", async () => {
+    const { paths } = await repositoryFixture("retry-interruption");
+    await runMultiscan(
+      options(paths, client(rejecting("Initial interrupted scan")), {
+        maxAttempts: 1,
+      }),
+    );
+    const ledger = join(paths.output, "results.jsonl");
+    const before = await readFile(ledger);
+    const attemptRoot = join(
+      paths.output,
+      "recovery-checkouts",
+      "retry-interruption",
+      "attempt-2",
+    );
+    const checkout = join(attemptRoot, "retry-interruption");
+    const marker = join(checkout, "retained.txt");
+    const originalMkdir = filesystem.mkdir;
+    const runs = mock(completeRun);
+    const configured = options(paths, client(runs), { maxAttempts: 1 });
+    const create = spyOn(filesystem, "mkdir").mockImplementation((async (
+      ...args: Parameters<typeof filesystem.mkdir>
+    ) => {
+      const result = await originalMkdir(...args);
+      if (String(args[0]) === checkout) {
+        await writeFile(marker, "Retained interrupted checkout.\n");
+        throw new Error("Synthetic interruption before Git checkout");
+      }
+      return result;
+    }) as typeof filesystem.mkdir);
+    try {
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 0,
+        failed: 1,
+      });
+    } finally {
+      create.mockRestore();
+    }
+    expect((await results(ledger)).at(-1)).toMatchObject({
+      attempt: 2,
+      error: "Synthetic interruption before Git checkout",
+    });
+    expect(runs).toHaveBeenCalledTimes(0);
+    // A killed process retains its checkout but cannot append its receipt.
+    await writeFile(ledger, before);
+    const identity = await lstat(attemptRoot);
+    expect(
+      await runMultiscan({
+        ...configured,
+        recoverScan: async () => undefined,
+      }),
+    ).toMatchObject({ completed: 1, failed: 0 });
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect((await results(ledger)).at(-1)).toMatchObject({
+      attempt: 3,
+      status: "completed",
+    });
+    const retained = await lstat(attemptRoot);
+    expect([retained.dev, retained.ino]).toEqual([identity.dev, identity.ino]);
+    expect(await readFile(marker, "utf8")).toBe(
+      "Retained interrupted checkout.\n",
+    );
+  });
+
   test("preserves an existing checkout directory on the first campaign attempt", async () => {
     const { paths } = await repositoryFixture("occupied-first", "demo");
     const checkout = join(paths.output, "checkouts", "demo");

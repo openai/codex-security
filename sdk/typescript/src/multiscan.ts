@@ -808,8 +808,7 @@ async function runCampaign(
               );
               const attemptRoot = join(taskRoot, `attempt-${attempt}`);
               const isolatedCheckout = join(attemptRoot, task.id);
-              if (options.recoverScan !== undefined)
-                await mkdir(scanDir, { mode: 0o700 });
+              await mkdir(scanDir, { mode: 0o700 });
               await mkdir(attemptRoot, { mode: 0o700 });
               await mkdir(isolatedCheckout, { mode: 0o700 });
               checkout = isolatedCheckout;
@@ -1639,7 +1638,6 @@ function matchesRegisteredRequest(
   // A batch reservation sets these execution options for just this attempt.
   const limit = recipe["maxCostUsd"];
   return (
-    options.maxTotalCostUsd !== undefined &&
     typeof limit === "number" &&
     recipe["ownerSuggestions"] === false &&
     (scan.maxCostUsd === undefined || limit <= scan.maxCostUsd) &&

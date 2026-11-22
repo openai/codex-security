@@ -1264,6 +1264,107 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   ]);
 }
 
+test("bulk recovery resumes a saved budgeted Deep session without an invocation cap", async () => {
+  const f = await interruptedScan("deep", true, {
+    maxCostUsd: 6,
+    ownerSuggestions: false,
+  });
+  const digest = scanRequestDigest(
+    { codexOverrides: {} },
+    {
+      mode: "deep",
+      outputDir: f.scanDir,
+      maxCostUsd: 6,
+      skipFindingMatching: true,
+      ownerSuggestions: false,
+    },
+  );
+  const updated = runPython(f.python, [
+    "-c",
+    [
+      "import sqlite3, sys, time",
+      "with sqlite3.connect(sys.argv[1]) as db:",
+      "  db.execute(\"UPDATE scans SET recipe_json = json_set(recipe_json, '$.scanRequestDigest', ?) WHERE id = ?\", (sys.argv[2], sys.argv[3]))",
+      "with sqlite3.connect(sys.argv[4]) as db:",
+      "  db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, created_at INTEGER)')",
+      "  db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)')",
+      "  db.execute('INSERT INTO threads VALUES (?, ?, ?, ?)', (sys.argv[5], sys.argv[6], sys.argv[7], int(time.time())))",
+    ].join("\n"),
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    digest,
+    f.scanId,
+    join(f.codexHome, "state_5.sqlite"),
+    f.threadId,
+    f.sessionPath,
+    f.scanDir,
+  ]);
+  expect(updated.exitCode, new TextDecoder().decode(updated.stderr)).toBe(0);
+  const { stdout, stderr, runCli } = createCliTest(main);
+  let resumed = 0;
+  const code = await runCli(
+    ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+    resumeDependencies(f, () => ({
+      startThread: () => fail("Unexpected new session"),
+      resumeThread(threadId) {
+        expect(threadId).toBe(f.threadId);
+        resumed++;
+        return {
+          id: threadId,
+          async runStreamed() {
+            await appendFile(
+              f.sessionPath,
+              JSON.stringify({
+                type: "event_msg",
+                timestamp: new Date().toISOString(),
+                payload: {
+                  type: "token_count",
+                  info: {
+                    total_token_usage: {
+                      input_tokens: 10000,
+                      cached_input_tokens: 0,
+                      cache_write_input_tokens: 0,
+                      output_tokens: 2000,
+                      reasoning_output_tokens: 0,
+                      total_tokens: 12000,
+                    },
+                  },
+                },
+              }) + "\n",
+            );
+            await finishDiscovery(f);
+            const usage = await f.command([
+              "read-scan-usage",
+              "--scan-id",
+              f.scanId,
+              "--thread-id",
+              threadId,
+            ]);
+            expect(usage, JSON.stringify(usage)).toMatchObject({
+              coverage: "complete",
+            });
+            return { events: completedEvents(threadId) };
+          },
+        };
+      },
+    })),
+  );
+  expect(code, stderr.text()).toBe(0);
+  expect(resumed).toBe(1);
+  const result = JSON.parse(stdout.text());
+  expect(result).toMatchObject({ completed: 1, failed: 0 });
+  const receipts = await readJsonLines(result.resultsPath);
+  expect(receipts).toHaveLength(2);
+  expect(receipts[1]).toMatchObject({
+    attempt: 1,
+    outputDir: f.scanDir,
+    status: "completed",
+    scanId: f.scanId,
+  });
+  expect(await readdir(join(f.root, "artifacts", "repo"))).toEqual([
+    "attempt-1",
+  ]);
+});
+
 test.each(["completed", "failed"] as const)(
   "bulk recovery retains original correlation and unpriced usage after %s without a ledger",
   async (outcome) => {

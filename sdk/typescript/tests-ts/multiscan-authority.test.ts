@@ -384,20 +384,23 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test("a saved batch reservation can be reused with a new invocation budget", async () => {
-  const value = await fixture();
-  value.options.maxTotalCostUsd = 6;
-  expect(await runMultiscan(value.options)).toMatchObject({
-    completed: 1,
-    skipped: 0,
-  });
-  value.options.maxTotalCostUsd = 3;
-  expect(await runMultiscan(value.options)).toMatchObject({
-    completed: 1,
-    skipped: 1,
-  });
-  expect(value.runs()).toBe(1);
-});
+test.each([3, undefined])(
+  "a saved batch reservation can be reused with invocation budget %s",
+  async (maxTotalCostUsd) => {
+    const value = await fixture();
+    value.options.maxTotalCostUsd = 6;
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    value.options.maxTotalCostUsd = maxTotalCostUsd;
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(value.runs()).toBe(1);
+  },
+);
 
 test("SDK registration records the same complete request identity used by campaign reuse", async () => {
   const root = await temporaryDirectory();
