@@ -58,6 +58,39 @@ test("groups two occurrences under one issue with the headline first", () => {
   expect(result.summary.split("\n")).toHaveLength(1);
   expect(result.items).toHaveLength(2);
 });
+test.each(["validatedAt", "scoredAt"] as const)(
+  "grouped headline and body use the freshest issue %s regardless of occurrence order",
+  (timestamp) => {
+    const older = assessment("first");
+    older.record!.issue = {
+      ...older.record!.issue!,
+      severity: "low",
+      verdict: "NOT_EXPLOITABLE",
+      title: "Older result",
+      reachableFromAttacker: false,
+    };
+    older.record!.findingResult = { verdict: "NOT_EXPLOITABLE" };
+    const newer = assessment("second");
+    newer.record!.issue![timestamp] = "2026-01-02T00:00:00Z";
+    newer.record!.issue!.title = "Newer result";
+    for (const items of [
+      [older, newer],
+      [newer, older],
+    ]) {
+      const result = validationReport([{}, {}], items);
+      expect(result.summary).toContain("Continuum: exploitable, Critical");
+      expect(result.report).toContain("Continuum: exploitable, Critical");
+      expect(result.report).toContain("What Continuum found:** Newer result");
+      expect(result.report).not.toContain(
+        "What Continuum found:** Older result",
+      );
+      expect(result.report).toContain("For this finding specifically (first)");
+      // JSON retains dated observations, not a fabricated per-finding reassessment.
+      expect(result.items).toEqual(items.map((item) => item.record!));
+    }
+  },
+);
+
 test("a named negative finding result remains visible beside an exploitable issue", () => {
   const item = assessment("first");
   item.record!.findingResult = { verdict: "NOT_EXPLOITABLE" };

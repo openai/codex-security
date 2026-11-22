@@ -37,11 +37,27 @@ function severity(value?: string): string {
 function verdict(value?: string): string {
   return value?.toLowerCase().replaceAll("_", " ") ?? "verdict not returned";
 }
+/** Keep each occurrence's observation, but present the newest completed issue snapshot. */
+function freshestIssueRecord(
+  records: readonly ValidationItemRecord[],
+): ValidationItemRecord {
+  const completed = records.filter((record) => record.state === "validated");
+  return completed.reduce((latest, record) => {
+    const timestamp = (item: ValidationItemRecord) =>
+      Math.max(
+        ...[item.issue?.validatedAt, item.issue?.scoredAt].map((value) => {
+          const parsed = Date.parse(value ?? "");
+          return Number.isNaN(parsed) ? 0 : parsed;
+        }),
+      );
+    return timestamp(record) >= timestamp(latest) ? record : latest;
+  }, completed[0] ?? records[0]!);
+}
+
 export function validationHeadline(
   records: readonly ValidationItemRecord[],
 ): string {
-  const first =
-    records.find((record) => record.state === "validated") ?? records[0]!;
+  const first = freshestIssueRecord(records);
   const ratings = [
     ...new Set(records.map((record) => severity(record.codexSeverity))),
   ].join(" and ");
@@ -88,8 +104,7 @@ function date(value: string): string {
 export function validationBody(
   records: readonly ValidationItemRecord[],
 ): string {
-  const first =
-    records.find((record) => record.state === "validated") ?? records[0]!;
+  const first = freshestIssueRecord(records);
   const issue = first.issue;
   const headline = validationHeadline(records);
   const split = headline.indexOf(" Codex");
