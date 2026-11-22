@@ -6,12 +6,14 @@ import {
   cp,
   mkdir,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { PLUGIN_ROOT as pluginRoot } from "./plugin-root.js";
 import {
+  hasSealedReport,
   loadContract,
   loadContractWithScanDirectory,
 } from "../src/contract.js";
@@ -40,6 +42,10 @@ async function fixture(registerOnly = false) {
   git(source, "init", "--quiet");
   await mkdir(join(source, "src"));
   await writeFile(join(source, "src/app.ts"), "export const value = 1;\n");
+  await writeFile(
+    join(source, ".gitattributes"),
+    "src/*.ts text eol=lf filter=codexCampaignFixture\n",
+  );
   git(source, "add", ".");
   git(source, "commit", "--no-gpg-sign", "-qm", "Synthetic baseline");
   const revision = git(source, "rev-parse", "HEAD");
@@ -67,18 +73,36 @@ async function fixture(registerOnly = false) {
       close: async () => {},
       run: async (checkout, scan = {}) => {
         runs++;
-        return registeredCampaignResult(
+        const result = await registeredCampaignResult(
           environment,
           config,
           checkout,
           scan,
-          registerOnly ? "interrupted" : "empty",
+          registerOnly ? "interrupted" : "sealed",
         );
+        expect(await hasSealedReport(result.scanDir, result.manifest)).toBe(
+          true,
+        );
+        return result;
       },
     }),
   };
   return { root, source, state, options, runs: () => runs };
 }
+
+test("registered sealed campaign reuse does not need report Python", async () => {
+  const value = await fixture();
+  value.options.config.pythonPath = join(value.root, "unavailable-python");
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(value.runs()).toBe(1);
+});
 
 for (const recovery of [false, true]) {
   test(`concurrent campaigns retain independent invocation authority with recovery=${recovery}`, async () => {
@@ -576,3 +600,87 @@ test.each([
   }
   expect(await readFile(join(scanDir, "findings.json"))).toEqual(before);
 });
+
+test.each([
+  "local",
+  "include",
+  "worktree",
+  "host",
+  "conditional-host",
+] as const)(
+  "retained restoration isolates %s configuration while preserving trusted host filters",
+  async (kind) => {
+    const value = await fixture();
+    value.options.scanOptionsByMode = { standard: { target: ["src/app.ts"] } };
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(value.options.outputDir, "checkouts/repo");
+    git(value.root, "clone", "--quiet", value.source, checkout);
+    const marker = join(value.root, "filter-called");
+    const script = join(value.root, "filter.cjs");
+    await writeFile(
+      script,
+      `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(marker)}, "called"); process.stdout.write(fs.readFileSync(0));`,
+    );
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+    const filter = `${quote(process.execPath)} ${quote(script)}`;
+    const host = kind === "host" || kind === "conditional-host";
+    const configured =
+      host || kind === "include"
+        ? join(value.root, "synthetic.gitconfig")
+        : join(
+            checkout,
+            ".git",
+            kind === "worktree" ? "config.worktree" : "config",
+          );
+    git(
+      checkout,
+      "config",
+      "--file",
+      configured,
+      "filter.codexCampaignFixture.smudge",
+      filter,
+    );
+    if (kind === "include") git(checkout, "config", "include.path", configured);
+    if (kind === "worktree")
+      git(checkout, "config", "extensions.worktreeConfig", "true");
+    const originalConfig = await readFile(join(checkout, ".git/config"));
+    const configuredBytes = await readFile(configured);
+    await rm(join(checkout, "src/app.ts"));
+    const hostConfig = process.env["GIT_CONFIG_GLOBAL"];
+    if (host) process.env["GIT_CONFIG_GLOBAL"] = configured;
+    if (kind === "conditional-host") {
+      const conditional = join(value.root, "conditional.gitconfig");
+      git(
+        checkout,
+        "config",
+        "--file",
+        conditional,
+        `includeIf.gitdir:${join(checkout, ".git")}.path`,
+        configured,
+      );
+      process.env["GIT_CONFIG_GLOBAL"] = conditional;
+    }
+    try {
+      expect(await runMultiscan(value.options)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(value.runs()).toBe(1);
+      expect(await readFile(join(checkout, "src/app.ts"), "utf8")).toBe(
+        "export const value = 1;\n",
+      );
+      if (host) expect(await readFile(marker, "utf8")).toBe("called");
+      else await expect(readFile(marker)).rejects.toThrow();
+      expect(await readFile(join(checkout, ".git/config"))).toEqual(
+        originalConfig,
+      );
+      expect(await readFile(configured)).toEqual(configuredBytes);
+    } finally {
+      if (hostConfig === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
+      else process.env["GIT_CONFIG_GLOBAL"] = hostConfig;
+    }
+  },
+);

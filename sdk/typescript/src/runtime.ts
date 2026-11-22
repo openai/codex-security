@@ -106,6 +106,7 @@ import {
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
+  type TrustedExecutable,
 } from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
@@ -247,7 +248,7 @@ export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
 }
 
-function environmentValue(
+export function environmentValue(
   environment: ProcessEnvironment,
   requested: string,
   preserveWhitespace = false,
@@ -4118,7 +4119,15 @@ export async function pluginMetadata(
 export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
-  const environment = options.environment ?? process.env;
+  return (await resolvePluginPythonCommand(options)).executable;
+}
+
+export async function pluginPythonLookupRoots(
+  options: Pick<
+    PluginPythonOptions,
+    "protectedRoot" | "currentDirectory" | "signal"
+  >,
+) {
   const cwd = process.cwd();
   const requestedRoots = options.protectedRoot ?? cwd;
   const protectedRoot =
@@ -4129,6 +4138,15 @@ export async function resolvePluginPython(
     for (const checkout of await gitProtectionRoots(directory, options.signal))
       if (!protectedRoot.includes(checkout)) protectedRoot.push(checkout);
   }
+  return { cwd, protectedRoot, callerDirectories };
+}
+
+export async function resolvePluginPythonCommand(
+  options: PluginPythonOptions = {},
+): Promise<TrustedExecutable> {
+  const environment = options.environment ?? process.env;
+  const { cwd, protectedRoot, callerDirectories } =
+    await pluginPythonLookupRoots(options);
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
   const discoveryRoots = [
@@ -4293,7 +4311,7 @@ export function pythonUtf8Environment(
   return normalized;
 }
 
-function pluginHelperEnvironment(
+export function pluginHelperEnvironment(
   environment: ProcessEnvironment,
 ): ProcessEnvironment {
   return pythonUtf8Environment(
@@ -4648,7 +4666,7 @@ async function requirePython(
   environment: ProcessEnvironment,
   protectedRoot: string | readonly string[],
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<TrustedExecutable> {
   const resolved = await usablePython(
     candidate,
     environment,
@@ -4667,7 +4685,8 @@ async function usablePython(
   environment: ProcessEnvironment = process.env,
   protectedRoot: string | readonly string[] = process.cwd(),
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<TrustedExecutable | null> {
+  throwIfSignalAborted(signal);
   const command = await resolveTrustedExecutable(
     isPythonPathCandidate(candidate)
       ? expandHomeForLookup(candidate, environment)
@@ -4688,7 +4707,7 @@ async function usablePython(
         signal,
       },
     );
-    return stdout.trim() === PLUGIN_PYTHON_READY ? command.executable : null;
+    return stdout.trim() === PLUGIN_PYTHON_READY ? command : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;

@@ -3,12 +3,14 @@ import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   open,
   readFile,
   readdir,
+  readlink,
   realpath,
   rename,
   rm,
@@ -21,6 +23,7 @@ import { hostname } from "node:os";
 import {
   basename,
   dirname,
+  extname,
   isAbsolute,
   join,
   posix,
@@ -34,6 +37,7 @@ import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject } from "./config.js";
 import {
   ContractSchemaError,
+  hasSealedReport,
   loadContract,
   loadContractWithScanDirectory,
   readScanFile,
@@ -46,9 +50,11 @@ import { readThreatModelPath } from "./artifact-export.js";
 import {
   ContractValidationError,
   OutputDirectoryNotEmptyError,
+  InvalidTargetError,
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
+import { isExplicitPathWithTrailingWhitespace } from "./executable-path.js";
 import { isRecord } from "./record.js";
 import {
   readKnowledgeBaseSnapshot,
@@ -56,21 +62,31 @@ import {
 } from "./knowledge-base.js";
 import { type DocumentRoots, resolveScanPrompts } from "./prompt-files.js";
 import {
+  bundledPluginRoot,
   canonicalConfigPath,
   createWindowsOutputDirectory,
+  environmentValue,
+  expandHomeForLookup,
+  isPythonPathCandidate,
+  executablePathForSpawn,
+  pluginHelperEnvironment,
+  pluginPythonLookupRoots,
   requireSecureOutputAncestry,
   requireWindowsOutputPath,
   validateOutputDir,
   resolvePluginPath,
+  resolvePluginPythonCommand,
 } from "./runtime.js";
 import {
   DiffTarget,
+  normalizeTarget,
   normalizeExcludedPaths,
   gitOutput,
   gitProtectionRoots,
   nullIfMissingPath,
   UNSUPPORTED_GIT_ENVIRONMENT,
   relativePathIsOutside,
+  resolveRepositoryPath,
   resolveTargetPath,
   type ScanMode,
 } from "./targets.js";
@@ -98,6 +114,14 @@ const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
 class AttemptNumberExhaustedError extends Error {}
+class LinkedOutputDirectoryError extends Error {
+  constructor(
+    readonly path: string,
+    options?: ErrorOptions,
+  ) {
+    super("Multiscan output directories must not be symbolic links.", options);
+  }
+}
 
 type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
@@ -281,7 +305,9 @@ export async function runMultiscan(
     if (!manifest?.isFile())
       throw new Error("Bulk recovery requires an existing campaign manifest.");
   }
-  const output = await ensureOutputDirectory(requestedOutput, "artifacts");
+  const output = await ensureOutputDirectory(requestedOutput, {
+    retainedDirectory: "artifacts",
+  });
   if (process.platform !== "win32") await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   let pluginWorkspace: string | undefined;
@@ -409,6 +435,51 @@ async function runCampaign(
     maxAttempt: number;
     rejectedAttempt: number | undefined;
   }[] = [];
+  const restoreReport = async (
+    scanDir: string,
+    schemaPluginRoot: string,
+    protectedRoot: string,
+  ): Promise<void> => {
+    try {
+      // Configured historical archives may contain schemas without helper scripts.
+      const [python, helperRoot] = await Promise.all([
+        resolvePluginPythonCommand({
+          configuredPath: options.config.pythonPath,
+          environment: pluginHelperEnvironment(environment),
+          protectedRoot,
+          signal: options.signal,
+        }),
+        bundledPluginRoot(),
+      ]);
+      await execFile(
+        executablePathForSpawn(python.executable),
+        [
+          "-I",
+          "-X",
+          "utf8",
+          "-B",
+          join(helperRoot, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+          "--schema-dir",
+          join(schemaPluginRoot, "schemas"),
+          "--report-only",
+        ],
+        {
+          env: python.environment,
+          maxBuffer: Infinity,
+          windowsHide: true,
+          signal: options.signal,
+        },
+      );
+      options.signal?.throwIfAborted();
+    } catch (error) {
+      if (options.signal?.aborted) options.signal.throwIfAborted();
+      throw new Error(
+        `Multiscan report recovery is required: ${errorMessage(error)}`,
+      );
+    }
+  };
   const selectAttempt = (
     task: MultiscanTask,
     scanDir: string,
@@ -529,6 +600,8 @@ async function runCampaign(
       const resumed = await loadResumableScan(
         loaded,
         selectAttempt(task, artifactOutput, receipt),
+        schemaPluginRoot,
+        restoreReport,
         (warning) => emitWarnings([warning]),
       );
       if (resumed !== undefined) {
@@ -594,6 +667,8 @@ async function runCampaign(
       };
       let recoveryAttempt = previous?.attempt ?? 0;
       const artifactRoot = join(output, "artifacts", task.id);
+      const recoveryRoot = join(output, "recovery-checkouts");
+      const recoveryTaskRoot = join(recoveryRoot, task.id);
       if (options.recoverScan !== undefined) {
         await ensureOutputDirectory(artifactRoot);
         for (const name of await readdir(artifactRoot)) {
@@ -700,7 +775,7 @@ async function runCampaign(
               ) {
                 protectedRoot = authority.target_path;
                 const loadRegistered = async () => {
-                  const accepted = await loadRegisteredCampaignScan(
+                  const scan = await loadRegisteredCampaignScan(
                     await readCampaignContract(
                       scanDir,
                       await resolveResumePluginRoot(),
@@ -708,13 +783,10 @@ async function runCampaign(
                     ),
                     selected,
                   );
-                  if (accepted instanceof Error) throw accepted;
-                  if (accepted === undefined) return undefined;
-                  const root = await verifiedCampaignCheckout(
-                    accepted,
-                    selected,
-                  );
-                  return root === undefined ? undefined : accepted;
+                  if (scan instanceof Error) throw scan;
+                  if (scan === undefined) return undefined;
+                  const root = await verifiedCampaignCheckout(scan, selected);
+                  return root === undefined ? undefined : scan;
                 };
                 if (
                   authority.status !== "complete" ||
@@ -740,7 +812,7 @@ async function runCampaign(
                     const accepted = await loadRegistered();
                     if (
                       accepted !== undefined &&
-                      (await hasCampaignReport(scanDir))
+                      (await campaignReport(scanDir))?.isFile()
                     ) {
                       result = { ...result, ...accepted.contract };
                     } else if (result.alreadyCompleted) {
@@ -800,9 +872,7 @@ async function runCampaign(
             // Each new Git checkout has a distinct history identity. Recreating
             // it at a previously registered path would invalidate that binding.
             if (checkout === undefined) {
-              const isolatedRoot = await ensureOutputDirectory(
-                join(output, "recovery-checkouts"),
-              );
+              const isolatedRoot = await ensureOutputDirectory(recoveryRoot);
               const taskRoot = await ensureOutputDirectory(
                 join(isolatedRoot, task.id),
               );
@@ -814,12 +884,7 @@ async function runCampaign(
             }
             protectedRoot = checkout;
             // Claim the fresh checkout before Git or the scanner can fail.
-            const marker = await checkoutMarker(checkout, scanDir);
-            await mkdir(join(checkout, ".git"), { mode: 0o700 });
-            await writeFile(join(checkout, CHECKOUT_MARKER), marker, {
-              flag: "wx",
-              mode: 0o600,
-            });
+            await claimCheckout(checkout, scanDir);
             await checkoutRevision(
               task,
               checkout,
@@ -896,7 +961,15 @@ async function runCampaign(
           if (result.manifest.scan.status !== "completed")
             throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
-          if (error instanceof AttemptNumberExhaustedError) throw error;
+          // A redirected recovery directory invalidates the checkout binding for every retry.
+          if (
+            error instanceof AttemptNumberExhaustedError ||
+            (options.recoverScan !== undefined &&
+              error instanceof LinkedOutputDirectoryError &&
+              (relative(error.path, recoveryRoot) === "" ||
+                relative(error.path, recoveryTaskRoot) === ""))
+          )
+            throw error;
           // Recovery retains its resumable attempt and checkout; SDK telemetry records cancellation.
           if (options.signal?.aborted && options.recoverScan !== undefined)
             options.signal.throwIfAborted();
@@ -1040,28 +1113,45 @@ async function checkoutMarker(
   ]);
 }
 
+async function claimCheckout(checkout: string, scanDir: string): Promise<void> {
+  const marker = await checkoutMarker(checkout, scanDir);
+  await mkdir(join(checkout, ".git"), { mode: 0o700 });
+  await writeFile(join(checkout, CHECKOUT_MARKER), marker, {
+    flag: "wx",
+    mode: 0o600,
+  });
+}
+
+async function ownsCheckout(
+  checkout: string,
+  scanDir: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
+    undefinedIfMissingFile,
+  );
+  if (!marker?.isFile()) return false;
+  const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
+  return (
+    marker.size === expected.length &&
+    (
+      await readScanFile(
+        checkout,
+        CHECKOUT_MARKER,
+        "campaign checkout marker",
+        signal,
+      )
+    ).equals(expected)
+  );
+}
+
 async function removeCheckout(
   checkout: string,
   scanDir: string,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   try {
-    const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
-      undefinedIfMissingFile,
-    );
-    if (!marker?.isFile()) return undefined;
-    const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
-    if (
-      marker.size === expected.length &&
-      (
-        await readScanFile(
-          checkout,
-          CHECKOUT_MARKER,
-          "campaign checkout marker",
-          signal,
-        )
-      ).equals(expected)
-    ) {
+    if (await ownsCheckout(checkout, scanDir, signal)) {
       await rm(checkout, { recursive: true, force: true });
     }
   } catch (error) {
@@ -1071,22 +1161,23 @@ async function removeCheckout(
 
 async function ensureOutputDirectory(
   path: string,
-  retainedDirectory?: string,
+  {
+    privateGitMetadata = false,
+    retainedDirectory,
+  }: { privateGitMetadata?: boolean; retainedDirectory?: string } = {},
 ): Promise<string> {
-  const linkedOutput =
-    "Multiscan output directories must not be symbolic links.";
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
   if (metadata === undefined) {
     if (process.platform === "win32") {
       // Resolve parent aliases while leaving the leaf for lstat to verify.
-      path = join(await canonicalConfigPath(dirname(path)), basename(path));
+      path = await canonicalCreationPath(path);
       try {
         await createWindowsOutputDirectory(path, true);
       } catch (error) {
         if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) {
-          throw new Error(linkedOutput, { cause: error });
+          throw new LinkedOutputDirectoryError(path, { cause: error });
         }
         throw error;
       }
@@ -1096,7 +1187,7 @@ async function ensureOutputDirectory(
     metadata = await lstat(path, { bigint: true });
   }
   if (metadata.isSymbolicLink()) {
-    throw new Error(linkedOutput);
+    throw new LinkedOutputDirectoryError(path);
   }
   if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
@@ -1110,18 +1201,40 @@ async function ensureOutputDirectory(
     await requireWindowsOutputPath(canonical, true, retainedDirectory);
     return canonical;
   }
-  if ((directory.mode & 0o022n) !== 0n) {
-    throw new Error(
-      "Multiscan output directories must not be group- or world-writable.",
-    );
-  }
   const owner = process.geteuid?.();
   if (owner !== undefined && directory.uid !== BigInt(owner)) {
     throw new Error(
       "Multiscan output directories must be owned by the current user.",
     );
   }
+  if ((directory.mode & 0o022n) !== 0n) {
+    if (privateGitMetadata) await chmod(canonical, 0o700);
+    else
+      throw new Error(
+        "Multiscan output directories must not be group- or world-writable.",
+      );
+  }
   return canonical;
+}
+
+async function canonicalCreationPath(path: string): Promise<string> {
+  return join(await canonicalConfigPath(dirname(path)), basename(path));
+}
+
+async function canonicalPythonPath(path: string): Promise<string> {
+  const requested = resolveTargetPath(path);
+  for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
+    // Keep missing components (including "link/..") for pinned-tree lookup.
+    const suffix = requested.slice(ancestor.length);
+    const physical = await realpath(ancestor).catch(undefinedIfMissingFile);
+    if (physical !== undefined) return physical + suffix;
+    const metadata = await lstat(ancestor).catch(undefinedIfMissingFile);
+    if (metadata?.isSymbolicLink())
+      return canonicalPythonPath(
+        resolveTargetPath(await readlink(ancestor), dirname(ancestor)) + suffix,
+      );
+    if (dirname(ancestor) === ancestor) return requested;
+  }
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
@@ -1679,10 +1792,7 @@ async function campaignCheckoutRoots(
   return [
     checkout,
     process.platform === "win32"
-      ? join(
-          await canonicalConfigPath(dirname(recoveryCheckout)),
-          basename(recoveryCheckout),
-        )
+      ? await canonicalCreationPath(recoveryCheckout)
       : recoveryCheckout,
   ];
 }
@@ -1731,61 +1841,169 @@ async function loadRegisteredCampaignScan(
   return { contract: loaded.contract, authority };
 }
 
-async function hasCampaignReport(scanDir: string): Promise<boolean> {
-  const report = await lstat(join(scanDir, "report.md")).catch(
-    undefinedIfMissingFile,
-  );
-  return report?.isFile() === true;
+function campaignReport(scanDir: string) {
+  return lstat(join(scanDir, "report.md")).catch(undefinedIfMissingFile);
 }
 
 async function loadResumableScan(
   loaded: CampaignContract,
   attempt: CampaignAttempt,
+  pluginRoot: string,
+  restoreReport: (
+    scanDir: string,
+    schemaRoot: string,
+    protectedRoot: string,
+  ) => Promise<void>,
   onWarning: (warning: string) => void,
 ) {
   const { options, scanDir, receipt, checkout, recoveryCheckout } = attempt;
   const { signal, recoverScan } = options;
+  const environment = options.environment ?? process.env;
   const accepted = await loadRegisteredCampaignScan(loaded, attempt);
   if (accepted instanceof Error) {
     // Registered report recovery must retain its selected-scan integrity error.
     // Otherwise invalid saved evidence starts a new scan at the original CSV target.
     if (
       recoverScan !== undefined &&
-      (await lstat(join(scanDir, "report.md")).catch(
-        undefinedIfMissingFile,
-      )) === undefined
+      (await campaignReport(scanDir)) === undefined
     )
       throw accepted;
     return undefined;
   }
   if (!accepted || !receipt || !isCompletedReceipt(receipt)) return undefined;
-  const matchedRoot = await verifiedCampaignCheckout(accepted, attempt);
-  if (matchedRoot === undefined) return undefined;
-  if (!(await hasCampaignReport(scanDir))) return undefined;
-
-  // The ledger can request cleanup only of the checkout bound to this scan.
-  const cleanupKind =
-    matchedRoot === checkout ? "checkout" : "recovery-checkout";
-  if (
-    receipt.status === "completed" &&
-    receipt.cleanupPending === cleanupKind
-  ) {
-    const selected = cleanupKind === "checkout" ? checkout : recoveryCheckout;
+  const campaignRoot = dirname(dirname(dirname(scanDir)));
+  let createdCheckout: string | undefined;
+  const restorePaths = async (root: string, paths: readonly string[]) => {
+    if (root !== checkout) {
+      await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
+      await ensureOutputDirectory(dirname(recoveryCheckout));
+    }
     try {
-      if (await lstat(selected).catch(undefinedIfMissingFile)) {
-        if (cleanupKind === "recovery-checkout")
-          await ensureOutputDirectory(dirname(dirname(selected)));
-        const parent = await ensureOutputDirectory(dirname(selected));
-        if (relative(parent, dirname(matchedRoot)) !== "")
-          throw new Error("The registered checkout directory has moved.");
-        const warning = await removeCheckout(selected, scanDir, signal);
-        if (warning !== undefined) onWarning(warning);
-      }
+      await mkdir(root, { mode: 0o700 });
     } catch (error) {
-      onWarning(`Multiscan checkout cleanup failed: ${errorMessage(error)}`);
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      await ensureOutputDirectory(root);
+      // Use private Git configuration and refs while repairing a retained checkout.
+      const retained = await lstat(join(root, ".git")).catch(
+        undefinedIfMissingFile,
+      );
+      const repairDirectory = retained
+        ? await mkdtemp(join(dirname(root), ".repair-git-"))
+        : undefined;
+      try {
+        await checkoutRevision(receipt, root, signal, options.githubHost, {
+          paths,
+          repairDirectory,
+        });
+      } finally {
+        if (repairDirectory)
+          await rm(repairDirectory, { recursive: true, force: true });
+      }
+      return;
+    }
+    createdCheckout = root;
+    await claimCheckout(root, scanDir);
+    await checkoutRevision(receipt, root, signal, options.githubHost);
+  };
+  try {
+    const matchedRoot = await verifiedCampaignCheckout(
+      accepted,
+      attempt,
+      restorePaths,
+    );
+    if (matchedRoot === undefined) return undefined;
+    const reportSealed = await hasSealedReport(
+      scanDir,
+      accepted.contract.manifest,
+      signal,
+    );
+    const reportMissing = (await campaignReport(scanDir)) === undefined;
+    if (
+      reportMissing &&
+      receipt.scanId === undefined &&
+      recoverScan === undefined
+    )
+      return undefined;
+    if (!reportSealed) {
+      const helperEnvironment = pluginHelperEnvironment(environment);
+      const inherited = environmentValue(helperEnvironment, "PYTHON", true);
+      const configuredPythonPath =
+        options.config.pythonPath ?? inherited?.trim();
+      // PATH discovery excludes campaign sources. Only an explicit executable
+      // path can refer to an alias that needs restoring in the pinned checkout.
+      if (configuredPythonPath && isPythonPathCandidate(configuredPythonPath)) {
+        const paths = [configuredPythonPath];
+        if (
+          options.config.pythonPath === undefined &&
+          inherited &&
+          isExplicitPathWithTrailingWhitespace(inherited, process.platform)
+        ) {
+          paths.unshift(inherited);
+        }
+        for (const pythonPath of paths) {
+          const candidate =
+            expandHomeForLookup(pythonPath, helperEnvironment) +
+            (process.platform === "win32" && extname(pythonPath) === ""
+              ? ".exe"
+              : "");
+          if (!(await realpath(candidate).catch(undefinedIfMissingFile))) {
+            const selected = await canonicalPythonPath(candidate);
+            if (
+              selected.startsWith(matchedRoot + sep) ||
+              !relativePathIsOutside(relative(matchedRoot, selected))
+            )
+              await restorePaths(matchedRoot, [selected]);
+          }
+          if (pythonPath === configuredPythonPath) break;
+          // Only a trusted, executable literal path takes precedence over
+          // the trimmed interpreter alias when the report helper starts.
+          const { protectedRoot } = await pluginPythonLookupRoots({
+            protectedRoot: matchedRoot,
+            signal,
+          });
+          if (
+            await resolveTrustedExecutable(
+              candidate,
+              helperEnvironment,
+              protectedRoot,
+            )
+          )
+            break;
+        }
+      }
+      await restoreReport(scanDir, pluginRoot, matchedRoot);
+    }
+    if (!(await campaignReport(scanDir))?.isFile()) return undefined;
+    // The ledger can request cleanup only of the checkout bound to this scan.
+    const cleanupKind =
+      matchedRoot === checkout ? "checkout" : "recovery-checkout";
+    if (
+      createdCheckout === undefined &&
+      receipt.status === "completed" &&
+      receipt.cleanupPending === cleanupKind
+    ) {
+      const selected = cleanupKind === "checkout" ? checkout : recoveryCheckout;
+      try {
+        if (await lstat(selected).catch(undefinedIfMissingFile)) {
+          if (cleanupKind === "recovery-checkout")
+            await ensureOutputDirectory(dirname(dirname(selected)));
+          const parent = await ensureOutputDirectory(dirname(selected));
+          if (relative(parent, dirname(matchedRoot)) !== "")
+            throw new Error("The registered checkout directory has moved.");
+          const warning = await removeCheckout(selected, scanDir, signal);
+          if (warning !== undefined) onWarning(warning);
+        }
+      } catch (error) {
+        onWarning(`Multiscan checkout cleanup failed: ${errorMessage(error)}`);
+      }
+    }
+    return accepted.contract.findings;
+  } finally {
+    if (createdCheckout !== undefined) {
+      const warning = await removeCheckout(createdCheckout, scanDir);
+      if (warning !== undefined) onWarning(warning);
     }
   }
-  return accepted.contract.findings;
 }
 
 type RegisteredCampaignScan = Exclude<
@@ -1795,7 +2013,15 @@ type RegisteredCampaignScan = Exclude<
 
 async function verifiedCampaignCheckout(
   { contract, authority }: RegisteredCampaignScan,
-  { options, task, checkout, recoveryCheckout, receipt }: CampaignAttempt,
+  {
+    options,
+    task,
+    scanDir,
+    checkout,
+    recoveryCheckout,
+    receipt,
+  }: CampaignAttempt,
+  restorePaths?: (root: string, paths: readonly string[]) => Promise<void>,
 ): Promise<string | undefined> {
   const { manifest, mode } = contract;
   const { target, scope, producer } = manifest.scan;
@@ -1843,6 +2069,15 @@ async function verifiedCampaignCheckout(
     )
   )
     return undefined;
+  const sealedArtifacts = new Set(
+    manifest.scan.artifacts.map(({ path }) => path),
+  );
+  if (
+    !sealedArtifacts.has("findings.json") ||
+    (manifest.scan.coverageRef !== undefined &&
+      !sealedArtifacts.has(manifest.scan.coverageRef))
+  )
+    return undefined;
   let expectedPaths: readonly unknown[] = ["."];
   if (requestedPaths !== undefined) {
     const metadata = await lstat(matchedRoot).catch(undefinedIfMissingFile);
@@ -1852,18 +2087,55 @@ async function verifiedCampaignCheckout(
         relative(await realpath(matchedRoot), matchedRoot) !== "")
     )
       return undefined;
-    // Cleanup can remove all or part of a completed checkout. Registration
-    // preserves the canonical paths from the authenticated scan request.
     const target = authority.recipe["target"];
+    const cleanupKind =
+      matchedRoot === checkout ? "checkout" : "recovery-checkout";
     if (
-      !isRecord(target) ||
-      target["kind"] !== "paths" ||
-      !Array.isArray(target["paths"])
-    )
-      return undefined;
-    expectedPaths = target["paths"];
+      target !== undefined &&
+      (metadata === undefined ||
+        restorePaths === undefined ||
+        (receipt?.cleanupPending === cleanupKind &&
+          (await ownsCheckout(matchedRoot, scanDir, options.signal).catch(
+            () => false,
+          ))))
+    ) {
+      // Cleanup may remove all or part of a completed checkout. Registration
+      // preserves the canonical paths from the authenticated scan request.
+      if (
+        !isRecord(target) ||
+        target["kind"] !== "paths" ||
+        !Array.isArray(target["paths"])
+      )
+        return undefined;
+      expectedPaths = target["paths"];
+    } else {
+      const paths =
+        task.scope === undefined
+          ? requestedPaths
+          : [resolve(matchedRoot, task.scope)];
+      if (metadata === undefined) {
+        // Older registrations may need the pinned checkout to resolve a scope.
+        if (restorePaths === undefined) return undefined;
+        await restorePaths(matchedRoot, paths);
+      }
+      try {
+        expectedPaths = (
+          await normalizeTarget(matchedRoot, paths, options.signal)
+        ).paths;
+      } catch (error) {
+        if (!(error instanceof InvalidTargetError)) throw error;
+        if (restorePaths === undefined) return undefined;
+        if (!error.message.startsWith("Path target does not exist:"))
+          throw error;
+        // An interrupted checkout can be missing individual tracked paths.
+        await restorePaths(matchedRoot, paths);
+        expectedPaths = (
+          await normalizeTarget(matchedRoot, paths, options.signal)
+        ).paths;
+      }
+    }
     if (
-      metadata !== undefined &&
+      (metadata !== undefined || target === undefined) &&
       receipt?.scope !== undefined &&
       receipt.resolvedScope === undefined &&
       expectedPaths[0] !== posix.normalize(receipt.scope).replace(/\/+$/u, "")
@@ -1880,15 +2152,6 @@ async function verifiedCampaignCheckout(
     (receipt?.resolvedScope !== undefined &&
       (expectedPaths.length !== 1 ||
         receipt.resolvedScope !== expectedPaths[0]))
-  )
-    return undefined;
-  const sealedArtifacts = new Set(
-    manifest.scan.artifacts.map(({ path }) => path),
-  );
-  if (
-    !sealedArtifacts.has("findings.json") ||
-    (manifest.scan.coverageRef !== undefined &&
-      !sealedArtifacts.has(manifest.scan.coverageRef))
   )
     return undefined;
   return matchedRoot;
@@ -2011,6 +2274,7 @@ async function checkoutRevision(
   path: string,
   signal?: AbortSignal,
   githubHost?: string,
+  restore?: { paths: readonly string[]; repairDirectory: string | undefined },
 ): Promise<void> {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
@@ -2024,42 +2288,594 @@ async function checkoutRevision(
   const command = await resolveTrustedExecutable(
     "git",
     environment,
-    resolve(process.cwd()),
+    restore ? [process.cwd(), path] : process.cwd(),
   );
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
-  const git = async (...args: string[]): Promise<string> => {
+  const gitDirectory = join(path, ".git");
+  const repairDirectory = restore?.repairDirectory;
+  const gitOptions: string[] = [];
+  const gitEnvironment = { ...command.environment };
+  const gitOutput = async (
+    args: string[],
+    input?: string | Buffer,
+  ): Promise<Buffer> => {
     // Use the resolved absolute path so Windows PATHEXT cannot prefer a
     // .bat/.cmd shim over the trusted executable selected above.
-    const result = await execFile(
+    const pending = execFile(
       command.executable,
       [
+        "--no-replace-objects",
         "-c",
         "core.hooksPath=/dev/null",
         ...buildGitHubCredentialArgs(githubHost),
         "-C",
         path,
+        ...gitOptions,
         ...args,
       ],
-      { env: command.environment, signal },
+      {
+        env: gitEnvironment,
+        signal,
+        maxBuffer: Infinity,
+        encoding: "buffer",
+      },
     );
-    return result.stdout.trim();
+    let inputError: Error | undefined;
+    if (input !== undefined) {
+      pending.child.stdin!.on("error", (error: Error) => {
+        inputError = error;
+      });
+      pending.child.stdin!.end(input);
+    }
+    const output = await pending;
+    if (inputError !== undefined) throw inputError;
+    return output.stdout;
   };
-  await git("init", "--quiet");
-  await git(
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--depth=1",
-    "--",
-    task.repository,
-    task.revision,
-  );
-  await git("checkout", "--quiet", "--detach", "FETCH_HEAD");
-  if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
-    throw new Error("Git checkout revision did not match the pinned SHA.");
+  const git = async (...args: string[]): Promise<string> =>
+    (await gitOutput(args)).toString("utf8").trim();
+  const allowMissing = (error: unknown) => {
+    if ((error as { code?: number }).code === 1) return undefined;
+    throw error;
+  };
+  let retainedHead: string | undefined;
+  if (repairDirectory) {
+    const canonicalGit = await ensureOutputDirectory(gitDirectory, {
+      privateGitMetadata: true,
+    });
+    const canonicalObjects = await ensureOutputDirectory(
+      join(gitDirectory, "objects"),
+      { privateGitMetadata: true },
+    );
+    for (const entry of await readdir(canonicalObjects)) {
+      if (/^[0-9a-f]{2}$/.test(entry))
+        await ensureOutputDirectory(join(canonicalObjects, entry), {
+          privateGitMetadata: true,
+        });
+    }
+    if (
+      await lstat(join(canonicalObjects, "pack")).catch(undefinedIfMissingFile)
+    )
+      await ensureOutputDirectory(join(canonicalObjects, "pack"), {
+        privateGitMetadata: true,
+      });
+    for (const entry of [
+      "config",
+      "config.worktree",
+      "FETCH_HEAD",
+      "shallow",
+      "index",
+      "logs",
+      "logs/HEAD",
+    ]) {
+      const saved = await lstat(join(gitDirectory, entry)).catch(
+        undefinedIfMissingFile,
+      );
+      if (
+        saved?.isSymbolicLink() ||
+        ((entry === "FETCH_HEAD" || entry === "logs/HEAD") &&
+          saved !== undefined &&
+          saved.nlink > 1)
+      ) {
+        throw new Error(
+          "The retained campaign checkout has linked Git metadata write destinations.",
+        );
+      }
+    }
+    await ensureOutputDirectory(join(gitDirectory, "refs"), {
+      privateGitMetadata: true,
+    });
+    const commonBinding = await readFile(
+      join(gitDirectory, "commondir"),
+      "utf8",
+    ).catch(undefinedIfMissingFile);
+    if (
+      commonBinding !== undefined &&
+      (await realpath(resolve(gitDirectory, commonBinding.trim()))) !==
+        canonicalGit
+    )
+      throw new Error(
+        "The retained campaign checkout has Git bindings outside its own directory.",
+      );
+
+    // Reading the ref needs neither a worktree checkout nor the retained filters.
+    if (await lstat(join(canonicalGit, "HEAD")).catch(undefinedIfMissingFile)) {
+      retainedHead = await git(
+        "--git-dir",
+        canonicalGit,
+        "--work-tree",
+        path,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD",
+      ).catch(allowMissing);
+    }
+    gitOptions.push("--git-dir", repairDirectory, "--work-tree", path);
+    gitEnvironment["GIT_OBJECT_DIRECTORY"] = canonicalObjects;
+    const configured = async (
+      file: string,
+      key: string,
+      type: "bool" | "path",
+    ): Promise<string | undefined> => {
+      const value = await gitOutput([
+        "config",
+        "--null",
+        "--no-includes",
+        "--file",
+        file,
+        `--type=${type}`,
+        "--get",
+        key,
+      ]).catch(allowMissing);
+      return value?.subarray(0, -1).toString("utf8");
+    };
+    const local = join(canonicalGit, "config");
+    const layers = [
+      local,
+      ...((await configured(local, "extensions.worktreeConfig", "bool")) ===
+      "true"
+        ? [join(canonicalGit, "config.worktree")]
+        : []),
+    ];
+    await git("init", "--quiet", "--template=");
+    for (const file of layers) {
+      const worktree = await configured(file, "core.worktree", "path");
+      if (
+        worktree !== undefined &&
+        (await realpath(
+          isAbsolute(worktree) ? worktree : `${gitDirectory}${sep}${worktree}`,
+        )) !== (await realpath(path))
+      )
+        throw new Error(
+          "The retained campaign checkout has Git bindings outside its own directory.",
+        );
+      for (const key of ["core.ignorecase", "core.filemode", "core.symlinks"]) {
+        const value = await configured(file, key, "bool");
+        if (value !== undefined) await git("config", "--local", key, value);
+      }
+    }
+    if (retainedHead)
+      await writeFile(join(repairDirectory, "HEAD"), retainedHead + "\n");
+    const shallow = await readFile(join(canonicalGit, "shallow")).catch(
+      undefinedIfMissingFile,
+    );
+    if (shallow) await writeFile(join(repairDirectory, "shallow"), shallow);
+  } else {
+    await git("init", "--quiet");
   }
+  let createdHead = false;
+  try {
+    if (repairDirectory) {
+      // Git discovers the original directory before applying GIT_COMMON_DIR.
+      // Reconstruct a missing pinned HEAD now and remove it if repair fails.
+      const head = await open(join(gitDirectory, "HEAD"), "wx").catch(
+        (error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === "EEXIST")
+            return undefined;
+          throw error;
+        },
+      );
+      if (head) {
+        createdHead = true;
+        try {
+          await head.writeFile(task.revision + "\n");
+        } finally {
+          await head.close();
+        }
+      }
+      // Keep conditional host configuration in the checkout's context while
+      // private common metadata and an explicit index exclude retained config.
+      gitOptions.push("--git-dir", gitDirectory);
+      gitEnvironment["GIT_COMMON_DIR"] = repairDirectory;
+      gitEnvironment["GIT_INDEX_FILE"] = join(repairDirectory, "index");
+    }
+    let locallyPinned = false;
+    let incompleteObjects = false;
+    if (restore) {
+      try {
+        await git(
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          `${task.revision}^{commit}`,
+        );
+        const reachable = await git(
+          "rev-list",
+          "--objects",
+          "--missing=print",
+          "--no-walk",
+          task.revision,
+        );
+        incompleteObjects = reachable
+          .split("\n")
+          .some((line) => line.startsWith("?"));
+        locallyPinned = !incompleteObjects;
+      } catch (error) {
+        if ((error as { code?: number }).code !== 1) throw error;
+      }
+    }
+    if (!locallyPinned) {
+      await git(
+        ...(incompleteObjects ? ["-c", "fetch.negotiationAlgorithm=noop"] : []),
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        ...(!repairDirectory || incompleteObjects ? ["--depth=1"] : []),
+        ...(repairDirectory ? ["--no-write-fetch-head"] : []),
+        "--no-auto-gc",
+        "--no-write-commit-graph",
+        "--",
+        task.repository,
+        task.revision,
+      );
+      if (
+        repairDirectory &&
+        !incompleteObjects &&
+        (await lstat(join(repairDirectory, "shallow")).catch(
+          undefinedIfMissingFile,
+        ))
+      )
+        await rename(
+          join(repairDirectory, "shallow"),
+          join(gitDirectory, "shallow"),
+        );
+    }
+    if (
+      repairDirectory &&
+      !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
+    ) {
+      // Rebuild the lost index without restoring unrelated deleted worktree files.
+      gitEnvironment["GIT_INDEX_FILE"] = join(gitDirectory, "index");
+      await git("read-tree", retainedHead || task.revision);
+      gitEnvironment["GIT_INDEX_FILE"] = join(repairDirectory, "index");
+    }
+    if (!restore) {
+      await git("checkout", "--quiet", "--detach", task.revision);
+    } else {
+      if (!retainedHead)
+        await git(
+          ...(repairDirectory ? ["--git-dir", repairDirectory] : []),
+          "update-ref",
+          "--no-deref",
+          "HEAD",
+          task.revision,
+        );
+      // A full pinned index in the private (or freshly initialized) Git directory
+      // inventories selected paths even when the retained index omits them.
+      await git("read-tree", "--no-sparse-checkout", task.revision);
+      const ignoreCase =
+        (await git("config", "--bool", "core.ignorecase").catch(
+          allowMissing,
+        )) === "true";
+      const symlinks =
+        (await git("config", "--bool", "core.symlinks").catch(allowMissing)) !==
+        "false";
+      const comparisonPath = (name: string) =>
+        ignoreCase ? name.toLowerCase() : name;
+      const unicodeCandidates = (names: Iterable<string>) => {
+        const candidates = new Map<string, string[]>();
+        for (const name of names) {
+          const key = comparisonPath(name).normalize("NFC");
+          const matches = candidates.get(key);
+          if (matches) matches.push(name);
+          else candidates.set(key, [name]);
+        }
+        return candidates;
+      };
+      const pathAliases = new Map<string, Promise<boolean>>();
+      const sameFilesystemPath = (tracked: string, requested: string) => {
+        const key = JSON.stringify([tracked, requested]);
+        let result = pathAliases.get(key);
+        if (result === undefined) {
+          result = retainedPathAliases(path, tracked, requested, ignoreCase);
+          pathAliases.set(key, result);
+        }
+        return result;
+      };
+      const tree = await gitOutput(["ls-tree", "-r", "-z", task.revision]);
+      const links = new Map<string, string>();
+      const unicodeLinkNames: string[] = [];
+      for (const row of tree.toString("latin1").split("\0")) {
+        if (!symlinks || !row.startsWith("120000 ")) continue;
+        const bytes = Buffer.from(row.slice(row.indexOf("\t") + 1), "latin1");
+        const name = bytes.toString("utf8");
+        const key = comparisonPath(name);
+        if (!links.has(key)) links.set(key, name);
+        if (Buffer.from(name).equals(bytes)) unicodeLinkNames.push(name);
+      }
+      const unicodeLinks = unicodeCandidates(unicodeLinkNames);
+      const aliases = new Set<string>();
+      const requiredDirectories = new Set<string>();
+      const canonicalTrackedPath = async (
+        requested: string,
+        visited: Set<string>,
+      ): Promise<string> => {
+        // Resolve the directory before each POSIX "..", including a tracked link
+        // that is currently missing. Only then is it safe to compare Git paths.
+        const parts = requested.split(sep);
+        const parent = parts.lastIndexOf("..");
+        if (sep === "/" && parent !== -1) {
+          const directory = await canonicalTrackedPath(
+            parts.slice(0, parent).join(sep) || sep,
+            visited,
+          );
+          // Looking up "." requires a directory even on systems where realpath
+          // collapses "file/..". Reject an obstruction before Git restores paths.
+          const entry = await lstat(`${directory}${sep}.`).catch(
+            undefinedIfMissingFile,
+          );
+          if (
+            entry === undefined &&
+            !relativePathIsOutside(relative(path, directory))
+          )
+            requiredDirectories.add(directory);
+          return canonicalTrackedPath(
+            join(dirname(directory), ...parts.slice(parent + 1)),
+            visited,
+          );
+        }
+        for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
+          const canonical = await realpath(ancestor).catch(
+            undefinedIfMissingFile,
+          );
+          if (canonical !== undefined) {
+            if (ancestor === requested) return canonical;
+            const candidate = resolve(canonical, relative(ancestor, requested));
+            // A live directory link may lead to another missing tracked link.
+            return canonical === ancestor
+              ? candidate
+              : canonicalTrackedPath(candidate, visited);
+          }
+          const requestedName = relative(path, ancestor).split(sep).join("/");
+          const key = comparisonPath(requestedName);
+          let name = links.get(key);
+          if (name === undefined) {
+            for (const candidate of unicodeLinks.get(key.normalize("NFC")) ??
+              []) {
+              if (await sameFilesystemPath(candidate, requestedName)) {
+                name = candidate;
+                break;
+              }
+            }
+          }
+          if (name !== undefined) {
+            if (visited.has(name))
+              throw new Error(
+                "Symbolic link cycle in retained checkout target.",
+              );
+            aliases.add(name);
+            const target = (
+              await gitOutput(["show", `${task.revision}:${name}`])
+            ).toString("utf8");
+            const directory = await canonicalTrackedPath(
+              resolveTargetPath(target, join(path, dirname(name))),
+              new Set(visited).add(name),
+            );
+            // A later component can traverse the same link again.
+            return ancestor === requested
+              ? directory
+              : canonicalTrackedPath(
+                  directory + requested.slice(ancestor.length),
+                  visited,
+                );
+          }
+          if (dirname(ancestor) === ancestor)
+            return canonicalCreationPath(requested);
+        }
+      };
+      const selectedPaths = new Set<string>();
+      for (const requested of restore.paths) {
+        const selected = relative(
+          path,
+          await canonicalTrackedPath(
+            resolveRepositoryPath(requested, path),
+            new Set(),
+          ),
+        );
+        if (!relativePathIsOutside(selected))
+          selectedPaths.add(selected.split(sep).join("/") || ".");
+      }
+      const restoreAll = selectedPaths.has(".");
+      // Latin-1 gives each raw Git byte a distinct key on case-sensitive filesystems.
+      const scopeKey = (bytes: Buffer) =>
+        ignoreCase
+          ? bytes.toString("utf8").toLowerCase()
+          : bytes.toString("latin1");
+      const scopes = new Set(
+        [...selectedPaths, ...aliases].map((name) =>
+          scopeKey(Buffer.from(name)),
+        ),
+      );
+      const unicodeScopes = unicodeCandidates([...selectedPaths, ...aliases]);
+      const selectedForRestore = async (name: Buffer) => {
+        if (restoreAll) return true;
+        for (
+          let end = name.length;
+          end !== -1;
+          end = name.lastIndexOf(47, end - 1)
+        ) {
+          const prefix = name.subarray(0, end);
+          if (scopes.has(scopeKey(prefix))) return true;
+          const decoded = prefix.toString("utf8");
+          if (!Buffer.from(decoded).equals(prefix)) continue;
+          const key = comparisonPath(decoded).normalize("NFC");
+          for (const candidate of unicodeScopes.get(key) ?? []) {
+            if (await sameFilesystemPath(decoded, candidate)) return true;
+          }
+        }
+        return false;
+      };
+      const deletedPaths = await gitOutput(["ls-files", "--deleted", "-z"]);
+      const selectedDeleted: Buffer[] = [];
+      let start = 0;
+      for (
+        let end = deletedPaths.indexOf(0);
+        end !== -1;
+        end = deletedPaths.indexOf(0, start)
+      ) {
+        const name = deletedPaths.subarray(start, end);
+        if (
+          (await selectedForRestore(name)) &&
+          (await canRestoreDeletedPath(path, name))
+        )
+          selectedDeleted.push(deletedPaths.subarray(start, end + 1));
+        start = end + 1;
+      }
+      const deleted = Buffer.concat(selectedDeleted);
+      if (deleted.length !== 0) {
+        await gitOutput(
+          [
+            "--literal-pathspecs",
+            "restore",
+            `--source=${task.revision}`,
+            "--worktree",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+          ],
+          deleted,
+        );
+      }
+      for (const directory of requiredDirectories)
+        await mkdir(directory, { recursive: true });
+    }
+    if (
+      (
+        await git(
+          ...(repairDirectory ? ["--git-dir", repairDirectory] : []),
+          "rev-parse",
+          "HEAD",
+        )
+      ).toLowerCase() !== (retainedHead || task.revision)
+    ) {
+      throw new Error("Git checkout revision did not match the pinned SHA.");
+    }
+    if (repairDirectory && !retainedHead) {
+      // Replace the reconstructed HEAD only after the worktree is ready.
+      await rename(join(repairDirectory, "HEAD"), join(gitDirectory, "HEAD"));
+    }
+  } catch (error) {
+    if (createdHead) await rm(join(gitDirectory, "HEAD"), { force: true });
+    throw error;
+  }
+}
+
+async function retainedPathAliases(
+  root: string,
+  tracked: string,
+  requested: string,
+  ignoreCase: boolean,
+): Promise<boolean> {
+  if (
+    [tracked, requested].some((name) =>
+      relativePathIsOutside(relative(root, resolve(root, name))),
+    )
+  )
+    return false;
+  const names = tracked.split("/");
+  const aliases = requested.split("/");
+  if (names.length !== aliases.length) return false;
+  let parent = root;
+  let missingParent = false;
+  for (let index = 0; index < names.length; index++) {
+    const name = names[index]!;
+    const alias = aliases[index]!;
+    const left = ignoreCase ? name.toLowerCase() : name;
+    const right = ignoreCase ? alias.toLowerCase() : alias;
+    if (left !== right) {
+      // Normalization only finds a candidate. The actual filename pair must
+      // refer to one inode on the filesystem where Git will restore it.
+      if (left.normalize("NFC") !== right.normalize("NFC")) return false;
+      const originalPath = join(root, ...names.slice(0, index + 1));
+      const alternativePath = join(root, ...aliases.slice(0, index + 1));
+      const original = await lstat(originalPath).catch(undefinedIfMissingFile);
+      const alternative = await lstat(alternativePath).catch(
+        undefinedIfMissingFile,
+      );
+      if (original !== undefined || alternative !== undefined) {
+        if (
+          original === undefined ||
+          alternative === undefined ||
+          original.dev !== alternative.dev ||
+          original.ino !== alternative.ino
+        )
+          return false;
+      }
+      if (original?.isDirectory() && alternative?.isDirectory()) {
+        // Existing directories establish the spelling without requiring write
+        // permission in their parent. Distinct mountpoints remain distinct.
+        if (
+          (await realpath(originalPath)) !== (await realpath(alternativePath))
+        )
+          return false;
+      } else {
+        const probe = await mkdtemp(join(parent, ".repair-name-"));
+        try {
+          await writeFile(join(probe, name), "", { flag: "wx" });
+          const original = await lstat(join(probe, name));
+          const alternative = await lstat(join(probe, alias)).catch(
+            undefinedIfMissingFile,
+          );
+          if (
+            alternative === undefined ||
+            original.dev !== alternative.dev ||
+            original.ino !== alternative.ino
+          )
+            return false;
+        } finally {
+          await rm(probe, { recursive: true, force: true });
+        }
+      }
+    }
+    if (!missingParent && index < names.length - 1) {
+      const child = join(parent, name);
+      const entry = await lstat(child).catch(undefinedIfMissingFile);
+      if (entry === undefined) missingParent = true;
+      else if (!entry.isDirectory()) return false;
+      else parent = child;
+    }
+  }
+  return true;
+}
+
+// Git names are raw bytes. Restore missing entries only through real directories.
+async function canRestoreDeletedPath(
+  root: string,
+  name: Buffer,
+): Promise<boolean> {
+  const prefix = Buffer.from(root + sep);
+  for (let end = name.length; end !== -1; end = name.lastIndexOf(47, end - 1)) {
+    const candidate = Buffer.concat([prefix, name.subarray(0, end)]);
+    try {
+      const entry = await lstat(candidate);
+      if (end === name.length || !entry.isDirectory()) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return false;
+      undefinedIfMissingFile(error as NodeJS.ErrnoException);
+    }
+  }
+  return true;
 }
 
 export function buildGitHubCredentialArgs(host: string | undefined): string[] {
