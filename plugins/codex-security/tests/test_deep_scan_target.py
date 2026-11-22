@@ -298,3 +298,47 @@ def test_selected_scope_allows_an_empty_git_marker_or_a_valid_gitfile_alias(
     git(root, "config", "core.worktree", root.as_posix())
     marker.write_text("gitdir: ../.git\n")
     check_targets(root, ["selected"], [])
+
+
+@pytest.mark.cross_platform
+def test_directory_on_separate_filesystem_does_not_inherit_checkout(
+    tmp_path, monkeypatch, check_targets
+):
+    import workbench_target
+
+    git(tmp_path, "init", "-q")
+    mounted = tmp_path / "mounted"
+    selected = mounted / "src"
+    selected.mkdir(parents=True)
+    source = selected / "source.py"
+    source.touch()
+    original_stat = Path.stat
+    original_git = workbench_target.git_command
+
+    # Emulate a device boundary without mount privileges, and give Git the same discovery ceiling.
+    def stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == tmp_path:
+            fields = list(result)
+            fields[2] += 1  # st_dev
+            return os.stat_result(fields)
+        return result
+
+    def query(target, *args, **kwargs):
+        return original_git(
+            target,
+            *args,
+            **kwargs,
+            environment_overrides={"GIT_CEILING_DIRECTORIES": tmp_path.as_posix()},
+        )
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(workbench_target, "git_command", query)
+    check_targets(mounted, ["src"], [])
+    source.unlink()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(mounted, ["src"], [])
+    (mounted / ".git").mkdir()
+    (mounted / ".git" / "HEAD").write_text("broken")
+    with pytest.raises(OSError, match="git repository"):
+        check_targets(mounted, ["src"], [])

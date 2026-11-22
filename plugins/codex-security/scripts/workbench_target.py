@@ -1268,7 +1268,10 @@ def git_directory_paths(
         if root is None:
             # A broken worktree must not turn into an unfiltered directory scan.
             if onerror and probe.stderr:
+                device = target.stat().st_dev
                 for parent in (target, *target.parents):
+                    if parent.stat().st_dev != device:
+                        break
                     if _has_checkout_metadata(parent / ".git", follow_links=True):
                         raise OSError(_git_diagnostic(probe.stderr).rstrip())
             return None
