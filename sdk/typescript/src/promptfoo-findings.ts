@@ -112,16 +112,26 @@ export async function readPromptfooFindings(
           );
         const metric = text(assertion["metric"]);
         if (!metric || generated?.["metric"] !== metric) return false;
-        // Later transforms can change strategyId and append metric segments
-        // while keeping the Best-of-N provider and its basic refusal check.
-        if (assertion["type"] === "is-refusal")
+        // Later transforms can replace strategyId, provider, and metric names.
+        // Layer metadata retains the original strategy steps.
+        if (assertion["type"] === "is-refusal") {
+          const steps = asRecord(meta?.["strategyConfig"])?.["steps"];
           return (
             (meta?.["strategyId"] === "best-of-n" ||
               asRecord(testCase?.["provider"])?.["id"] ===
-                "promptfoo:redteam:best-of-n") &&
-            /\/BestOfN(?:\/|$)/.test(metric) &&
+                "promptfoo:redteam:best-of-n" ||
+              (Array.isArray(steps) &&
+                steps.some((step) => {
+                  const id =
+                    typeof step === "string" ? step : asRecord(step)?.["id"];
+                  return (
+                    typeof id === "string" &&
+                    id.split(":", 1)[0] === "best-of-n"
+                  );
+                }))) &&
             generated["type"] === "is-refusal"
           );
+        }
         return (
           (plugin.startsWith("file://") ||
             (["cyberseceval", "donotanswer", "xstest"].includes(plugin) &&

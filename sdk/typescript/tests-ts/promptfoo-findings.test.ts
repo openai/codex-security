@@ -250,6 +250,8 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
   await using fixture = await checkout();
   const refusal = { type: "is-refusal", metric: "RBAC/BestOfN" };
   const layered = { ...refusal, metric: "RBAC/BestOfN/Base64" };
+  const injected = { ...refusal, metric: "Harmful/Injection" };
+  const attack = { ...refusal, metric: "Harmful/Injection/Hydra" };
   const harmful = { type: "promptfoo:redteam:harmful:hate", metric: "Hate" };
   const moderation = { type: "moderation", metric: "Hate" };
   const makeRow = (
@@ -259,11 +261,12 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
     declared: (typeof refusal)[],
     checked: typeof refusal,
     provider?: { id: string },
+    strategyConfig?: Record<string, unknown>,
   ) => ({
     ...leak,
     id,
     testCase: {
-      metadata: { pluginId, strategyId },
+      metadata: { pluginId, strategyId, strategyConfig },
       assert: declared,
       provider,
     },
@@ -298,6 +301,65 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
       makeRow("layered refusal", "rbac", "base64", [layered], layered, {
         id: "promptfoo:redteam:best-of-n",
       }),
+      makeRow(
+        "replaced refusal",
+        "harmful:hate",
+        "jailbreak-templates",
+        [injected],
+        injected,
+        { id: "promptfoo:redteam:best-of-n" },
+      ),
+      makeRow(
+        "ordinary transformed refusal",
+        "harmful:hate",
+        "jailbreak-templates",
+        [injected],
+        injected,
+      ),
+      makeRow(
+        "mismatched refusal metric",
+        "harmful:hate",
+        "jailbreak-templates",
+        [injected],
+        refusal,
+        { id: "promptfoo:redteam:best-of-n" },
+      ),
+      makeRow(
+        "replaced provider",
+        "harmful:hate",
+        "jailbreak:hydra",
+        [attack],
+        attack,
+        { id: "promptfoo:redteam:hydra" },
+        {
+          steps: [
+            { id: "best-of-n", config: { useBasicRefusal: true } },
+            "jailbreak-templates",
+            "hydra",
+          ],
+        },
+      ),
+      makeRow(
+        "string layer step",
+        "harmful:hate",
+        "jailbreak:hydra",
+        [attack],
+        attack,
+        { id: "promptfoo:redteam:hydra" },
+        {
+          steps: ["best-of-n:refusal", "jailbreak-templates", "hydra"],
+          useBasicRefusal: true,
+        },
+      ),
+      makeRow(
+        "ordinary layered refusal",
+        "harmful:hate",
+        "jailbreak:hydra",
+        [attack],
+        attack,
+        { id: "promptfoo:redteam:hydra" },
+        { steps: ["jailbreak-templates", "hydra"] },
+      ),
     ]),
   );
   const selection = await readPromptfooFindings(fixture.file);
@@ -305,8 +367,13 @@ test("recognizes generated Best-of-N refusal and harmful moderation failures", a
     "refusal",
     "moderation",
     "layered refusal",
+    "replaced refusal",
+    "replaced provider",
+    "string layer step",
   ]);
-  expect(selection.excluded.map((item) => item.position)).toEqual([3, 4, 5, 6]);
+  expect(selection.excluded.map((item) => item.position)).toEqual([
+    3, 4, 5, 6, 9, 10, 13,
+  ]);
 });
 
 test.each([
