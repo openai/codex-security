@@ -184,6 +184,63 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
   },
 );
 
+test("escapes model-authored provider headlines before terminal progress", async () => {
+  const root = await temporaryDirectory("provider-terminal-");
+  const batch = spyOn(ContinuumValidationProvider.prototype, "validateBatch");
+  try {
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir);
+    const config = join(root, "security.json");
+    await writeFile(
+      config,
+      JSON.stringify({ scan: { validation: configured } }),
+    );
+    const base = fakeResult(["high"]);
+    const title = "Synthetic\u001b[2J\u001b]52;c;ZmFrZQ==\u0007 title";
+    batch.mockResolvedValue([
+      {
+        disposition: "reportable",
+        report: "Synthetic result",
+        provenance: {
+          provider: "continuum",
+          providerVersion: "1",
+          validatedAt: "2026-01-01",
+        },
+      },
+    ]);
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        ["scan", "--validate", ".", "-c", config, "--headless"],
+        dependencies({
+          currentDirectory: root,
+          result: new ScanResult({
+            manifest: base.manifest,
+            findings: {
+              ...base.findings,
+              findings: [{ ...base.findings.findings[0]!, title }],
+            },
+            review: base.review,
+            mode: base.mode,
+            scanDir,
+            threadId: base.threadId,
+            turnResult: base.turnResult,
+          }),
+        }),
+      ),
+      cli.stderr.text(),
+    ).toBe(0);
+    expect(cli.stderr.text()).toContain(
+      "Synthetic\\u001b[2J\\u001b]52;c;ZmFrZQ==\\u0007 title: Synthetic result",
+    );
+    expect(cli.stderr.text()).not.toContain("\u001b[2J");
+    expect(cli.stderr.text()).not.toContain("\u001b]52;");
+  } finally {
+    batch.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test.each(["--validate", "--validate=false"])(
   "no configured provider preserves boolean flag behavior for %s",
   async (flag) => {

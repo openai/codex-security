@@ -12688,7 +12688,7 @@ async function executeScan(
                 await report.writeFile(rendered.report);
                 for (const headline of rendered.summary.split("\n")) {
                   try {
-                    if (headline) progress?.stage(headline);
+                    if (headline) progress?.stage(escapeTerminalText(headline));
                   } catch {}
                 }
               }
