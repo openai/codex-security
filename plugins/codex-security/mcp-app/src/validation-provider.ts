@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { replaceArtifactText } from "./artifact-io.js";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readProjectConfig } from "../../../../sdk/typescript/src/project-config.js";
+import { codexSecurityStateDirectory } from "../../../../sdk/typescript/src/runtime.js";
 import { validationProviderFromConfiguration } from "../../../../sdk/typescript/src/validation-providers.js";
 import {
   unavailableAssessment,
@@ -24,8 +24,7 @@ export function validationCompletionText(
 
 function configurationPath(scanId: string): string {
   return join(
-    process.env.CODEX_SECURITY_STATE_DIR?.trim() ||
-      join(homedir(), ".codex-security"),
+    codexSecurityStateDirectory(),
     "validation-providers",
     `${scanId}.json`,
   );

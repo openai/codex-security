@@ -36,6 +36,91 @@ await test("unconfigured plugin scans never invoke a validation provider", async
   assert.equal(calls, 0);
 });
 
+await test("provider configuration and cache follow CODEX_HOME without a state override", async () => {
+  const root = await temporaryDirectory("plugin-provider-home-");
+  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  const oldHome = process.env.CODEX_HOME;
+  delete process.env.CODEX_SECURITY_STATE_DIR;
+  process.env.CODEX_HOME = join(root, "codex-home");
+  try {
+    const configuration = {
+      provider: "continuum",
+      continuum: { environment_id: "synthetic-environment" },
+    };
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir);
+    await writeFile(
+      join(repository, "security.json"),
+      JSON.stringify({ scan: { validation: configuration } }),
+    );
+    await writeFile(
+      join(scanDir, "findings.json"),
+      JSON.stringify({ findings: [{}] }),
+    );
+    await bindValidationProvider(
+      "custom-home-scan",
+      repository,
+      "security.json",
+      true,
+    );
+    const savedPath = join(
+      process.env.CODEX_HOME,
+      "state",
+      "plugins",
+      "codex-security",
+      "validation-providers",
+      "custom-home-scan.json",
+    );
+    assert.deepEqual(
+      JSON.parse(await readFile(savedPath, "utf8")),
+      configuration,
+    );
+    let calls = 0;
+    const scan = {
+      scanId: "custom-home-scan",
+      targetPath: repository,
+      scanDir,
+    };
+    const provider = () => ({
+      name: "synthetic",
+      version: "1",
+      async validate() {
+        calls++;
+        return {
+          disposition: "deferred" as const,
+          report: "Synthetic result",
+          provenance: {
+            provider: "synthetic",
+            providerVersion: "1",
+            validatedAt: "2026-01-01",
+          },
+        };
+      },
+    });
+    assert.equal(
+      (await validateCompletedScan(scan, provider))?.status,
+      "complete",
+    );
+    assert.equal(
+      JSON.parse(await readFile(`${savedPath}.result`, "utf8")).result.status,
+      "complete",
+    );
+    assert.equal(
+      (await validateCompletedScan(scan, provider))?.status,
+      "complete",
+    );
+    assert.equal(calls, 1);
+  } finally {
+    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+    if (oldHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = oldHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 await test("configured plugin completion returns supplemental results and preserves sealed artifacts", async () => {
   const root = await temporaryDirectory("plugin-validation-");
   const oldState = process.env.CODEX_SECURITY_STATE_DIR;
