@@ -177,14 +177,16 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         manifest_scan = manifest.get("scan")
         if not isinstance(manifest_scan, dict):
             return True
-        published_sources = _source_digests(
-            manifest_scan.get("preservedSources", {}),
-            "Published scan source digests are malformed.",
-        )
-        _, pending_recovery = _retained_checkpoint_state(scan)
+        retained_heads, pending_recovery = _retained_checkpoint_state(scan)
         if pending_recovery:
             return True
-        published_heads = manifest_scan.get("preservedCheckpointHeads")
+        published_sources = _source_digests(
+            manifest_scan.get(
+                "preservedSources", _retained_source_state(frozen_sources).get("sources", {})
+            ),
+            "Published scan source digests are malformed.",
+        )
+        published_heads = manifest_scan.get("preservedCheckpointHeads", retained_heads)
         if published_heads is None:
             published_heads = _frozen_checkpoint_heads(
                 scan_dir, scan["id"], published_sources, skip_unreadable=True
@@ -685,6 +687,10 @@ def preserve_scan_results_locked(
         if existing_scan.get("status") == outcome:
             existing_sources = existing_scan.get("preservedSources")
             existing_heads = existing_scan.get("preservedCheckpointHeads")
+            if existing_sources is None and not pending_recovery and raw_frozen_sources is not None:
+                # Direct cost-stop seals retain their accepted baseline in the terminal row.
+                existing_sources = retained["sources"]
+                existing_heads = _retained_checkpoint_state(scan)[0]
             if frozen_source_digests is None:
                 if (
                     existing_sources is None
@@ -1463,6 +1469,16 @@ if __name__ == "__main__":
 
 def budget_stop_receipt(db: Any, scan_id: str) -> Path:
     return db.state_dir() / "completion-locks" / f"{scan_id}.budget-stop.json"
+
+
+def retain_budget_stop_sources(db: Any, connection: Any, scan: sqlite3.Row) -> None:
+    """Record accepted sources in the caller's terminal transaction before receipt cleanup."""
+    sources, _, heads = _recovery_source_digests(db, connection, scan)
+    connection.execute(
+        "UPDATE scans SET retained_source_digests_json = ?, "
+        "retained_checkpoint_heads_json = ? WHERE id = ?",
+        (json.dumps(sources, sort_keys=True), json.dumps(heads, sort_keys=True), scan["id"]),
+    )
 
 
 def record_budget_stop(

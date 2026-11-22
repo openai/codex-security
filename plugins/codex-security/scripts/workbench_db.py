@@ -1549,6 +1549,8 @@ def complete_scan_locked(
                 )
         connection.execute("DELETE FROM finding_occurrences WHERE scan_id = ?", (scan["id"],))
         index_findings(connection, scan["id"], findings, timestamp)
+        if cost_stop is not None:
+            saved_results.retain_budget_stop_sources(_WORKBENCH_DB_CONTEXT, connection, scan)
         finding_count = len(findings.get("findings", []))
         connection.execute(
             """

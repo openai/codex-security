@@ -16123,6 +16123,11 @@ if __name__ == "__main__":
                 args
                   .find((value) => value.startsWith("--message="))!
                   .slice("--message=".length),
+                ...(completion === "failed"
+                  ? [
+                      "Skipped missing writeup for finding 1: synthetic missing file.",
+                    ]
+                  : []),
               ],
             },
           };
@@ -16148,6 +16153,10 @@ if __name__ == "__main__":
             expect(commands.some((args) => args[0] === "fail-scan")).toBe(
               false,
             );
+            expect(warnings).toEqual([
+              expect.stringContaining("Scan stopped:"),
+              "Skipped missing writeup for finding 1: synthetic missing file.",
+            ]);
           }
         } else {
           const recovered = await result;
