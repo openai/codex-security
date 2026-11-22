@@ -288,6 +288,10 @@ runpy.run_path(${JSON.stringify(join(pluginRoot, "scripts", scriptName))}, run_n
               ),
             ),
         ]);
+        // Terminating a child can reset its connection on Windows.
+        witness.on("error", (error: NodeJS.ErrnoException) => {
+          assert.equal(error.code, "ECONNRESET");
+        });
         t.after(() => {
           witness.destroy();
         });
