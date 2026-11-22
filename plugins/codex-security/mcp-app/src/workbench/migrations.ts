@@ -15,9 +15,9 @@ export interface Migration {
 }
 
 // Python owns the repository-dependent migrations 67–71. Both runtimes apply
-// the external source and finding chronology migrations.
+// external source, finding chronology, and instruction digest migrations.
 export const migrations: readonly Migration[] = history.filter(
-  (item) => item.version <= 66 || (item.version >= 72 && item.version <= 75),
+  (item) => item.version <= 66 || (item.version >= 72 && item.version <= 76),
 );
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;
@@ -232,7 +232,7 @@ export function applyMigrations(
       else if (applied.has(item.version)) {
         if (
           [
-            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61,
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61, 76,
           ].includes(item.version)
         )
           repairSchema(database, item.version);

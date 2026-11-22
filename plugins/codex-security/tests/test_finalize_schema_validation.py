@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from workbench_test_support import load_script
 
@@ -26,3 +28,21 @@ def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> N
         FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
     with pytest.raises(RecursionError):
         FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
+
+
+@pytest.mark.parametrize(
+    "digests",
+    [
+        [],
+        ["sha256:" + "0" * 64] * 2,
+        [{}],
+        ["sha256:" + "A" * 64],
+        ["sha256:" + "0" * 64 + "\n"],
+    ],
+)
+def test_invalid_manifest_instruction_digests(digests) -> None:
+    root = Path(__file__).resolve().parents[1]
+    manifest = FINALIZER._read_json(root / "examples" / "completed-scan" / "scan-manifest.json")
+    manifest["scan"]["producer"]["instructionDigests"] = digests
+    with pytest.raises(FINALIZER.ContractError, match="producer.instructionDigests"):
+        FINALIZER.validate_against_schema(manifest, root / "schemas" / "scan-manifest.schema.json")

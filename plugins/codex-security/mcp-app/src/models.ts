@@ -8,6 +8,10 @@ export interface ScanManifest {
     producer: {
       name: string;
       version: string;
+      /**
+       * @minItems 1
+       */
+      instructionDigests?: string[];
       [k: string]: unknown;
     };
     status: "completed" | "failed" | "canceled" | "interrupted";

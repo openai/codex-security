@@ -9,14 +9,22 @@ import { startDeepScanEngine } from "./src/deep-scan/engine.js";
 import { resolveDeepWorkerParentSandbox } from "./src/deep-scan/parent-sandbox.js";
 import { DeepScanCoordinatorRegistry } from "./src/deep-scan/registry.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
+import { deepRoleDigests } from "./src/deep-scan/templates.js";
 
 /** Private SDK entry point. The child process isolates each scan's environment. */
 export async function runCliDeepScan(): Promise<void> {
-  const runWorkbench = (args: string[], input?: string | Buffer) =>
-    runWorkbenchCommand(args, input, { isolatedPython: true });
+  const runWorkbench = (
+    args: string[],
+    input?: string | Buffer,
+    options?: { workerInstructionDigest?: string; signal?: AbortSignal },
+  ) => runWorkbenchCommand(args, input, { isolatedPython: true, ...options });
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const registry = new DeepScanCoordinatorRegistry();
   const controller = new AbortController();
+  const store = new WorkbenchDeepScanStore(runWorkbench, {
+    pluginRoot: PLUGIN_ROOT,
+    roleDigests: deepRoleDigests(),
+  });
   let scanId: string | undefined;
   const stop = () => {
     controller.abort();
@@ -40,7 +48,6 @@ export async function runCliDeepScan(): Promise<void> {
     scanId = input.scanId;
     const pluginRoot = PLUGIN_ROOT;
     process.chdir(pluginRoot);
-    const store = new WorkbenchDeepScanStore(runWorkbench);
     const parentSandbox = resolveDeepWorkerParentSandbox({
       _meta: {
         "codex/sandbox-state-meta": {
@@ -93,6 +100,7 @@ export async function runCliDeepScan(): Promise<void> {
       }) + "\n",
     );
   } finally {
+    store.stopInstructionMeasurements();
     const coordinator = scanId === undefined ? undefined : registry.get(scanId);
     registry.shutdown("cli_engine_closed");
     process.removeListener("SIGINT", stop);

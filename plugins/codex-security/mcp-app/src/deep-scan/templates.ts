@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
+import discoveryTemplate from "../../../references/deep-scan/discovery.md";
 import type { DeepScanRunState } from "./types.js";
-import discoveryTemplate from "../../templates/deep-scan/discovery.md";
+
+export function deepRoleDigests() {
+  return {
+    discovery: createHash("sha256").update(discoveryTemplate).digest("hex"),
+  };
+}
 
 export interface DiscoveryPromptInput {
   scanId: string;

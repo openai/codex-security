@@ -148,6 +148,20 @@ permissions; newly created directories are private to you by default.
 | `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
 | `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
 
+To compare the bundled instructions selected by native scans, compare
+`scan.producer.instructionDigests` in their sealed `scan-manifest.json` files.
+The first entry identifies the plugin Markdown selected at registration. Each
+Deep Scan coordinator measures its references and compiled discovery template when
+it claims a lease. A worker whose bundle differs can add another entry. The
+workbench receives that digest with the worker's first start record. If the
+digest is unavailable when that write is dispatched, the scan omits the list.
+Standard resumes retain the registration digest. Workers can read individual files later.
+Older scans, imports, and mock runs also omit the list. Custom validation
+records the SHA when the skill and reference bytes used to build its discovery
+prompt match the selected bundle at registration. A previously accepted manifest
+keeps its original producer metadata. Compare user prompts, models, and settings
+separately.
+
 Read `result.manifest.scan.status` and `result.manifest.scan.scope` alongside
 `result.review.excludedPaths` to see the outcome, the requested scope and any
 additional exclusions. A completed scan can report zero findings within that scope.

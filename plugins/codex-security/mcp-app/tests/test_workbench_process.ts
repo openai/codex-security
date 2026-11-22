@@ -1,9 +1,17 @@
 import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
@@ -108,6 +116,82 @@ def main():
       else process.env[name] = value;
     }
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+await test("native scan starts record the MCP host's selected instruction bundle", async (t) => {
+  const root = await temporaryDirectory("workbench-instruction-starts-", true);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const state = path.join(root, "state");
+  const target = path.join(root, "target");
+  const scanRoot = path.join(root, "scans");
+  const pluginRoot = path.join(root, "plugin");
+  await mkdir(path.join(pluginRoot, "skills"), { recursive: true });
+  await mkdir(path.join(pluginRoot, "references"));
+  const instructions = "Synthetic scan instructions.\n";
+  await writeFile(path.join(pluginRoot, "references/audit.md"), instructions);
+  await symlink(
+    path.resolve(import.meta.dirname, "../../scripts"),
+    path.join(pluginRoot, "scripts"),
+    "junction",
+  );
+  const previous = process.env;
+  t.after(() => {
+    process.env = previous;
+  });
+  process.env = {
+    ...previous,
+    CODEX_HOME: path.join(root, "home"),
+    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: path.join(root, "config.toml"),
+    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+    CODEX_SECURITY_STATE_DIR: state,
+  };
+  const { runWorkbench } = await importSource(
+    path.resolve(import.meta.dirname, "../src/workbench-client.ts"),
+  );
+  await mkdir(target);
+  await writeFile(path.join(target, "example.py"), "value = 1");
+  const workspaceId = randomUUID();
+  await runWorkbench(workbenchArgs("create-workspace", { workspaceId }));
+  await runWorkbench(
+    workbenchArgs("save-workspace", {
+      workspaceId,
+      targetPath: target,
+      scope: ".",
+      mode: "standard",
+    }),
+  );
+  await runWorkbench(workbenchArgs("start-scan", { workspaceId, scanRoot }));
+  for (const command of [
+    "start-prompt-only-scan",
+    "start-headless-standard-scan",
+    "begin-deep-scan",
+  ]) {
+    await runWorkbench(
+      workbenchArgs(command, {
+        targetPath: target,
+        threadId: randomUUID(),
+        scope: ".",
+        scanRoot,
+        mode: command === "start-prompt-only-scan" ? "standard" : undefined,
+      }),
+    );
+  }
+  const db = new DatabaseSync(path.join(state, "workbench.sqlite3"), {
+    readOnly: true,
+  });
+  try {
+    const rows = db.prepare("SELECT instruction_digest FROM scans").all();
+    const expected = createHash("sha256")
+      .update("references/audit.md\0")
+      .update(createHash("sha256").update(instructions).digest())
+      .digest("hex");
+    assert.deepEqual(
+      rows.map((row) => row.instruction_digest),
+      Array(4).fill(`sha256:${expected}`),
+    );
+  } finally {
+    db.close();
   }
 });
 
