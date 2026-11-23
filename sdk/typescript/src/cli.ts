@@ -10972,8 +10972,14 @@ async function executeDependencyAgent(
     process.platform === "win32"
       ? request.directory.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
       : request.directory;
+  const command = "exploitability check";
   const settings: JsonObject = {
     ...overrides,
+    responses_api_metadata: codexSecurityRequestContext(overrides, {
+      surface: "cli",
+      command,
+      providerResolved: false,
+    }).metadata,
     model: model.model,
     model_reasoning_effort: request.coordinator
       ? "high"
@@ -11036,7 +11042,7 @@ async function executeDependencyAgent(
         : ["--skip-git-repo-check", "--cd", request.directory, "-"]),
     ],
     {
-      command: "exploitability check",
+      command,
       directory: request.directory,
       signal: request.signal,
       auth: "auto",
