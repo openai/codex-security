@@ -23,6 +23,8 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
+  /** The finding has no issue or the issue no longer lists this finding. */
+  issueUnlinked?: true;
   validationArtifactId?: string;
   scoringArtifactId?: string;
   /** True when a completed validation is still waiting for a linked issue score. */

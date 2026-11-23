@@ -93,7 +93,7 @@ the exact identity, evidence, timestamps and disposition of each finding.
 Codex checks issue membership and reads validation runs newest first.
 When applicable runs share the newest timestamp, Codex defers the verdict.
 Retry after a newer run appears. While a finding is being submitted or
-validated, older issue evidence alone does not end polling.
+validated, only current evidence specific to that finding can end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from

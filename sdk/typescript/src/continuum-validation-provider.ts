@@ -36,9 +36,15 @@ async function forEachPending(
     }),
   );
 }
-type Submission = ContinuumReceipt & { issueId?: string; issueArn?: string };
+type Submission = ContinuumReceipt & {
+  issueId?: string;
+  issueArn?: string;
+  issueUnlinked?: true;
+};
 
 class ScoreReadError extends Error {}
+const scoreTimeout =
+  "Continuum timed out waiting for an unambiguous linked issue score. Retry validation to refresh the score.";
 
 export type ContinuumAwsLauncher = (
   operation: string,
@@ -680,6 +686,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
       record.disposition = assessment.disposition;
       const submission = submissions[index];
       if (!submission) return { ...assessment, record };
+      // Until membership is confirmed again, a partial poll cannot undo an
+      // explicit detachment reported by either side of the relationship.
+      if (submission.issueUnlinked) {
+        delete submission.issueId;
+        delete submission.issueArn;
+      }
       const { submittedAt, ...ids } = submission;
       const issueUrl = continuumIssueUrl(this.#options, submission);
       const issue = issueUrl ? `[${ids.issueArn}](${issueUrl})` : ids.issueArn;
@@ -765,11 +777,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
       text(current["mergedIntoIssueId"]) ??
       text(current["duplicateOfIssueId"]) ??
       text(current["createdIssueId"]);
-    if (terminal || issueId !== submission.issueId) {
+    if (terminal) {
+      delete submission.issueUnlinked;
       delete submission.issueId;
       delete submission.issueArn;
-    }
-    if (terminal) {
       return this.#report(finding, submittedAt, {
         verdict: status,
         statusMessage: text(
@@ -780,7 +791,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
         disposition: "not_applicable",
       });
     }
-    if (!issueId) return;
+    if (!issueId) {
+      submission.issueUnlinked = true;
+      return;
+    }
     // Keep the finding's current link even if reading a merge destination
     // fails. A retry must not restore a verdict from the previous issue.
     const scope = findingArn.slice(0, -("/code-findings/" + findingId).length);
@@ -792,7 +806,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
     if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
       throw new Error("Continuum returned a different issue while polling.");
     const ids = issue["findingIds"];
-    if (!Array.isArray(ids) || !ids.includes(findingId)) return;
+    if (!Array.isArray(ids)) return;
+    if (!ids.includes(findingId)) {
+      submission.issueUnlinked = true;
+      return;
+    }
+    delete submission.issueUnlinked;
     const validation = await selectValidation(
       issueArtifacts(request, issueArgs, "VALIDATION_EVIDENCE"),
       findingId,
@@ -801,7 +820,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const { outcome, artifact, scope: resultScope } = validation;
     const currentEvidence =
       compareTimestamps(createdAt(artifact), submittedAt.toISOString()) >= 0;
-    if (!currentEvidence && (status === "SUBMITTED" || status === "VALIDATING"))
+    if (
+      (status === "SUBMITTED" || status === "VALIDATING") &&
+      (!currentEvidence || resultScope === "issue")
+    )
       return;
     const issueVerdict = validationOutcome(artifact).verdict;
     const details = {
@@ -845,18 +867,16 @@ export class ContinuumValidationProvider implements ValidationProvider {
           });
       }
     } catch (error) {
-      if (!timedOut()) {
-        if (!(error instanceof ScoreReadError)) throw error;
-        return this.#report(
-          finding,
-          submittedAt,
-          {
-            ...outcome,
-            unavailable: `Could not read the linked issue score. ${error.message}`,
-          },
-          { ...details, scoringPending: true },
-        );
-      }
+      if (!(error instanceof ScoreReadError)) throw error;
+      const reason = timedOut()
+        ? scoreTimeout
+        : "Could not read the linked issue score.";
+      return this.#report(
+        finding,
+        submittedAt,
+        { ...outcome, unavailable: `${reason} ${error.message}` },
+        { ...details, scoringPending: true },
+      );
     }
     return {
       waiting: this.#report(finding, submittedAt, outcome, {
@@ -923,7 +943,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       `Codex finding severity: ${severity} (retained).`,
     ];
     if (statusMessage) report.push(statusMessage);
-    if (unavailable && !terminalStatus) report.push(unavailable);
+    if (unavailable && !terminalStatus && !scoringPending)
+      report.push(unavailable);
     if (validationArtifactId) {
       report.push(
         "Codex has not independently verified that this result reproduces the submitted flaw. Deployment source identity is not compared.",
@@ -980,8 +1001,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ),
       );
     } else if (scoringPending) {
-      unavailable ??=
-        "Continuum timed out waiting for an unambiguous linked issue score. Retry validation to refresh the score.";
+      unavailable ??= scoreTimeout;
       disposition = "deferred";
       reasons.push({ basis: "INFERRED", reason: unavailable });
       report.push(unavailable);
