@@ -111,6 +111,31 @@
           "type": "string",
           "minLength": 1
         },
+        "validation": {
+          "description": "Optional host-side follow-up validation provider. Omit to use Codex static validation.",
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "continuum": {
+              "type": "object",
+              "properties": {
+                "environment_id": { "type": "string", "minLength": 1 },
+                "aws_profile": { "type": "string", "minLength": 1 },
+                "aws_region": { "type": "string", "minLength": 1 },
+                "wait_minutes": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 240
+                },
+                "console_base_url": { "type": "string", "minLength": 1 }
+              },
+              "required": ["environment_id"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["provider"],
+          "additionalProperties": false
+        },
         "deep": {
           "description": "Deep defaults; a valid block may be retained while standard mode is selected.",
           "type": "object",
