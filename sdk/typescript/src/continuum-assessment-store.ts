@@ -20,7 +20,8 @@ import {
 import { nullIfMissingFile } from "./targets.js";
 
 // Earlier assessments could infer a match from issue membership or keywords.
-export const continuumAssessmentVersion = 4;
+// Version 4 could finish validation before the linked score arrived.
+export const continuumAssessmentVersion = 5;
 
 type Entry = {
   environmentId: string;

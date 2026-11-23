@@ -110,6 +110,11 @@ an older conclusive member result. A reason labelled `FINDING` comes from
 submitted context. `GRAPH`, `CODE` and `INFERRED` distinguish deployment
 evidence, source evidence and inference.
 
+An earlier plugin version could mark an assessment complete before AWS
+published its score. After upgrading, request completion again if the plugin
+marks the saved assessment outdated. Keep the original receipts to resume
+without a new upload.
+
 Issue scoring can lag validation. Codex looks for the newest unambiguous
 score tied to the same issue, validation artifact and issue verdict. If
 scoring is still pending at the deadline, `scoringPending` is true. The
@@ -134,6 +139,12 @@ requesting another attempt.
 Completion retries pending items and keeps finished assessments. If
 `status` is `incomplete` and `retryable` is false, check the individual
 run statuses before deciding how to proceed.
+
+A missing code location or oversized document sets `invalidInput` on the
+item. No upload was attempted for that item. Completion skips it on retry.
+Correct the input and rescan instead of editing sealed findings.
+If local validation text pushed the document over the limit, submit the
+selected occurrence with `include_local_validation` disabled.
 
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.

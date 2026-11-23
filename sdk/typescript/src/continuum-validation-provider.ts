@@ -576,31 +576,51 @@ export class ContinuumValidationProvider implements ValidationProvider {
     };
     const results: ValidationProviderAssessment[] = new Array(supplied.length);
     const submissions: (Submission | undefined)[] = new Array(supplied.length);
+    const invalid = new Set<number>();
     let pending = supplied.map((_, index) => index);
     let request: ContinuumRequest;
     try {
-      const launch = await this.#launcher(context);
-      request = (operation, args) =>
-        this.#call(launch, operation, args, context, deadline, delay, now);
-      const submit = await prepareContinuumSubmissions(
-        request,
-        this.#options.environmentId,
-        context.repositoryPath,
-        context.signal,
-        context.checkSubmissionTarget,
-      );
+      // Prepare AWS once, after the first valid document. Only active senders
+      // retain serialized findings while the shared setup runs.
+      const prepare = async () => {
+        const launch = await this.#launcher(context);
+        request = (operation, args) =>
+          this.#call(launch, operation, args, context, deadline, delay, now);
+        return prepareContinuumSubmissions(
+          request,
+          this.#options.environmentId,
+          context.repositoryPath,
+          context.signal,
+          context.checkSubmissionTarget,
+        );
+      };
+      let ready: ReturnType<typeof prepare> | undefined;
       await forEachPending(pending, async (index) => {
+        const item = supplied[index]!;
+        const time = now();
+        let document: Record<string, unknown>;
         try {
-          const item = supplied[index]!;
           if (typeof item === "string")
             throw new Error(
               "not submittable: no structured item or code location",
             );
-          const time = now();
-          submissions[index] = await submit(
-            findingToOcsf(item, time, this.#options.includeLocalValidation),
+          document = findingToOcsf(
+            item,
             time,
+            this.#options.includeLocalValidation,
           );
+        } catch (error) {
+          invalid.add(index);
+          const reason = error instanceof Error ? error.message : String(error);
+          results[index] = unavailableAssessment(
+            this,
+            `${reason} No upload attempted for this finding. Correct the input before submitting again.`,
+          );
+          return;
+        }
+        try {
+          const submit = await (ready ??= prepare());
+          submissions[index] = await submit(document, now());
         } catch (error) {
           results[index] = unavailableAssessment(this, error);
         }
@@ -671,6 +691,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         itemId: occurrence(finding),
         provider: this.name,
         verdict: "UNAVAILABLE",
+        ...(invalid.has(index) && { invalidInput: true }),
         severityBefore: severityLevel(finding),
         severityAfter: severityLevel(finding),
         reasons: [],

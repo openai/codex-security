@@ -420,7 +420,7 @@ const expectedCompleted = {
   freshness: { stale: false, validatedAt: completed.freshness.validatedAt },
   terminalStatus: "COMPLETED",
 } as const;
-test.each([undefined, 2, 3])(
+test.each([undefined, 2, 3, 4])(
   "a legacy plugin verdict only binds the original admission for a fresh CLI assessment (version %s)",
   async (schemaVersion) => {
     await save(
@@ -441,7 +441,7 @@ test.each([undefined, 2, 3])(
   },
 );
 
-test.each([1, 2, 3])(
+test.each([1, 2, 3, 4])(
   "v%i CLI snapshots cannot supply or mask a refreshed assessment",
   async (schemaVersion) => {
     const repositoryPath = await realpath(repo);
@@ -454,17 +454,19 @@ test.each([1, 2, 3])(
         digest(JSON.stringify([repositoryPath, "scan"])),
     );
     await mkdir(directory, { mode: 0o700 });
+    const entry = { environmentId: "env", record: completed };
+    const entries = [entry];
     const raw = JSON.stringify({
       schemaVersion,
       repositoryPath,
       scanId: "scan",
-      environmentId: "env",
-      record: completed,
+      ...(schemaVersion === 4
+        ? { entries, checksum: digest(JSON.stringify(entries)) }
+        : entry),
     });
-    const filename = join(
-      directory,
-      ["occ_a", "env", raw].map(digest).join(".") + ".json",
-    );
+    const parts = ["occ_a", "env"];
+    if (schemaVersion < 4) parts.push(raw);
+    const filename = join(directory, parts.map(digest).join(".") + ".json");
     await writeFile(filename, raw);
     expect((await read()).size).toBe(0);
     await saveCli([conclusion]);
@@ -760,7 +762,7 @@ test.each(["duplicate", "invalid"])(
             },
           ]
         : [{ ...completed, findingId: "wrong" }];
-    await save(legacy, { schemaVersion: 3 });
+    await save(legacy, { schemaVersion: kind === "duplicate" ? 4 : 3 });
     await saveCli([third]);
     expect((await read()).size).toBe(0);
     const provider = () => ({

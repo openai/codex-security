@@ -41,7 +41,8 @@ export const validationProviderFromConfiguration: (
 ) => unknown = unavailable;
 export const assessPluginFindings: (...args: unknown[]) => never = unavailable;
 // Source-only builds can read the protected cache written by the packaged SDK.
-export const continuumAssessmentVersion = 4;
+// Version 4 could finish validation before the linked score arrived.
+export const continuumAssessmentVersion = 5;
 
 export async function savedContinuumAssessments(
   _environment: Record<string, string | undefined>,

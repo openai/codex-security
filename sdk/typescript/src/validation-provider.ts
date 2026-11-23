@@ -31,6 +31,8 @@ export interface ValidationItemRecord {
   scoringArtifactId?: string;
   /** True when a completed validation is still waiting for a linked issue score. */
   scoringPending?: boolean;
+  /** The local serializer rejected the input before any upload. */
+  invalidInput?: boolean;
   disposition?: ValidationProviderAssessment["disposition"];
   submittedAt?: string;
   provider: string;
@@ -113,6 +115,7 @@ export type ValidationProviderConfiguration = {
 export function retryableAssessment(
   item: ValidationProviderAssessment,
 ): boolean {
+  if (item.record?.invalidInput) return false;
   return Boolean(
     item.record?.scoringPending ||
     (item.unavailable && !item.record?.terminalStatus),
