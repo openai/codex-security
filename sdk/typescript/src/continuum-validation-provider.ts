@@ -4,6 +4,7 @@ import {
   type ContinuumRequest,
 } from "./continuum-submissions.js";
 import { repositoryFilePath } from "./scanner-import.js";
+import { errorMessage } from "./errors.js";
 import { compareTimestamps } from "./timestamps.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -39,6 +40,8 @@ async function forEachPending(
   );
 }
 type Submission = ContinuumReceipt & { issueId?: string; issueArn?: string };
+
+class ScoreReadError extends Error {}
 
 export type ContinuumAwsLauncher = (
   operation: string,
@@ -582,8 +585,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
             request,
             timedOut,
           );
-          if (assessment?.record?.scoringPending)
-            waiting.set(index, assessment);
+          if (assessment && "waiting" in assessment)
+            waiting.set(index, assessment.waiting);
           else {
             waiting.delete(index);
             if (assessment) results[index] = assessment;
@@ -699,7 +702,11 @@ export class ContinuumValidationProvider implements ValidationProvider {
     submission: Submission,
     request: ContinuumRequest,
     timedOut: () => boolean,
-  ): Promise<ValidationProviderAssessment | undefined> {
+  ): Promise<
+    | ValidationProviderAssessment
+    | { waiting: ValidationProviderAssessment }
+    | undefined
+  > {
     const { findingId, findingArn, submittedAt } = submission;
     const environmentArgs = ["--environment-id", this.#options.environmentId];
     const current = await request("get-code-finding", [
@@ -733,14 +740,16 @@ export class ContinuumValidationProvider implements ValidationProvider {
       });
     }
     if (!issueId) return;
-    const issueArgs = [...environmentArgs, "--issue-id", issueId];
-    const issue = await request("get-code-issue", issueArgs);
+    // Keep the finding's current link even if reading a merge destination
+    // fails. A retry must not restore a verdict from the previous issue.
     const scope = findingArn.slice(0, -("/code-findings/" + findingId).length);
     const issueArn = scope + "/code-issues/" + issueId;
-    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
-      throw new Error("Continuum returned a different issue while polling.");
     submission.issueId = issueId;
     submission.issueArn = issueArn;
+    const issueArgs = [...environmentArgs, "--issue-id", issueId];
+    const issue = await request("get-code-issue", issueArgs);
+    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
+      throw new Error("Continuum returned a different issue while polling.");
     const ids = issue["findingIds"];
     if (!Array.isArray(ids) || !ids.includes(findingId)) return;
     const validation = await selectValidation(
@@ -767,10 +776,14 @@ export class ContinuumValidationProvider implements ValidationProvider {
 
     // A score describes the issue, even if this member has a different verdict.
     // AWS can expose validation before publishing the corresponding score.
+    const readScore: ContinuumRequest = (...args) =>
+      request(...args).catch((error: unknown) => {
+        throw new ScoreReadError(errorMessage(error));
+      });
     try {
       let score: Record<string, unknown> | undefined;
       for await (const { artifact: candidate, tied } of issueArtifacts(
-        request,
+        readScore,
         issueArgs,
         "EVIDENCE",
       )) {
@@ -787,12 +800,25 @@ export class ContinuumValidationProvider implements ValidationProvider {
           });
       }
     } catch (error) {
-      if (!timedOut()) throw error;
+      if (!timedOut()) {
+        if (!(error instanceof ScoreReadError)) throw error;
+        return this.#report(
+          finding,
+          submittedAt,
+          {
+            ...outcome,
+            unavailable: `Could not read the linked issue score. ${error.message}`,
+          },
+          { ...details, scoringPending: true },
+        );
+      }
     }
-    return this.#report(finding, submittedAt, outcome, {
-      ...details,
-      scoringPending: true,
-    });
+    return {
+      waiting: this.#report(finding, submittedAt, outcome, {
+        ...details,
+        scoringPending: true,
+      }),
+    };
   }
 
   #report(
@@ -908,7 +934,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ),
       );
     } else if (scoringPending) {
-      unavailable =
+      unavailable ??=
         "Continuum timed out waiting for an unambiguous linked issue score. Retry validation to refresh the score.";
       disposition = "deferred";
       reasons.push({ basis: "INFERRED", reason: unavailable });

@@ -14404,7 +14404,7 @@ function showValidationRetry(
     file && escapeTerminalText(file) === file ? quoteCliPath(file) : "FILE";
   const ids = pending.map((id) => quoteCliPath(diagnosticValue(id))).join(" ");
   stderr.write(
-    `To retry pending findings with the same settings and host state, run${cliShellLabel(config)} codex-security validate --scan ${quoteCliPath(diagnosticValue(scanId))} -c ${config} ${ids}\nChanging the payload or destination can create a new finding.\n`,
+    `To retry pending findings, make sure the file sets scan.validation.provider to continuum. Keep the other settings and host state, then run${cliShellLabel(config)} codex-security validate --scan ${quoteCliPath(diagnosticValue(scanId))} -c ${config} ${ids}\nChanging the payload or destination can create a new finding.\n`,
   );
 }
 
