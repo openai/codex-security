@@ -1,3 +1,4 @@
+import { compareTimestamps } from "./timestamps.js";
 import { validationSummary } from "./validation-provider-report.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
@@ -48,21 +49,50 @@ export async function assessPluginFindings(
     const saved = previous[index];
     if (saved && !retryableAssessment(saved)) return saved;
     const update = updates[next++]!;
-    // A transport failure cannot undo acceptance, or erase a verdict
-    // waiting on a score.
+    const prior = saved?.record;
+    const current = update.record;
+    const sameAdmission =
+      prior?.findingArn &&
+      prior.findingArn === current?.findingArn &&
+      prior.submittedAt === current.submittedAt;
+    // A replica may return just one of two disputed scores on retry.
+    // Only a newer score can settle the dispute for this validation.
     if (
-      update.unavailable &&
-      (!update.record || update.record.verdict === "UNAVAILABLE")
+      sameAdmission &&
+      prior.issueArn === current.issueArn &&
+      prior.validationArtifactId === current.validationArtifactId &&
+      prior.scoringPending &&
+      prior.freshness.scoredAt &&
+      !(
+        compareTimestamps(
+          current.freshness.scoredAt ?? "",
+          prior.freshness.scoredAt,
+        ) > 0
+      )
     ) {
-      const prior = saved?.record;
+      if (current.scoringPending)
+        current.freshness.scoredAt = prior.freshness.scoredAt;
+      else if (current.scoringArtifactId) {
+        update.disposition = "deferred";
+        update.unavailable =
+          "Continuum has not returned a newer score to resolve the earlier conflict. Retry validation.";
+        update.record = { ...prior, unavailable: update.unavailable };
+        update.report = validationSummary([update]);
+        return update;
+      }
+    }
+
+    // A failed lookup cannot undo acceptance or a confirmed change of issue.
+    // A successful lookup with no issue must drop the previous issue's verdict.
+    if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {
       if (
         prior?.findingArn &&
-        (!update.record?.findingArn ||
-          (prior.scoringPending &&
-            prior.findingArn === update.record.findingArn &&
-            (!update.record.issueArn ||
-              prior.issueArn === update.record.issueArn) &&
-            prior.submittedAt === update.record.submittedAt))
+        (!current?.findingArn ||
+          (sameAdmission &&
+            !current.issueUnlinked &&
+            (prior.issueUnlinked ||
+              !current.issueArn ||
+              prior.issueArn === current.issueArn)))
       ) {
         update.record = { ...prior, unavailable: update.unavailable };
         if (prior.scoringPending) update.report = validationSummary([update]);

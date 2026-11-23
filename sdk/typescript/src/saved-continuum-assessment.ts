@@ -34,6 +34,7 @@ const verdict = z.enum([
 const conclusion = admission.extend({
   issueId: id.optional(),
   issueArn: z.string().optional(),
+  issueUnlinked: z.literal(true).optional(),
   validationArtifactId: id.optional(),
   scoringArtifactId: id.optional(),
   scoringPending: z.boolean().optional(),
@@ -132,6 +133,7 @@ function forRemediation(item: Conclusion) {
     findingArn,
     issueId,
     issueArn,
+    issueUnlinked,
     validationArtifactId,
     scoringArtifactId,
     submittedAt,
@@ -199,7 +201,25 @@ function withoutScore(item: Conclusion) {
 
 /** Compare validation first. A later scorer can update the same verdict.
  * Conflicting scores alone do not invalidate an undisputed verdict. */
-function selectConclusion(records: Conclusion[]) {
+function selectConclusion(
+  records: Conclusion[],
+  plugin: Conclusion | undefined,
+) {
+  // A successful lookup without an issue supersedes earlier CLI verdicts.
+  // CLI polls and the workbench cache have no common ordering.
+  const unlink = records.findLastIndex((item) => item.issueUnlinked);
+  if (unlink >= 0) records = records.slice(unlink);
+  if (plugin?.issueUnlinked && records.some((item) => item.issueArn)) return;
+  if (
+    plugin?.issueArn &&
+    unlink >= 0 &&
+    !records.some(
+      (item) =>
+        item.issueArn === plugin.issueArn && item.verdict !== "UNAVAILABLE",
+    )
+  )
+    return;
+  if (plugin) records.unshift(plugin);
   const terminal = records.filter((item) => item.verdict !== "UNAVAILABLE");
   if (!terminal.length) return records.at(-1);
   // A failed artifact read can still confirm that the finding changed issues.
@@ -284,7 +304,6 @@ async function readAssessments(
       ({ record, environmentId }) =>
         project(record, destination ?? { environment_id: environmentId }) ?? [],
     );
-    if (plugin) candidates.unshift(plugin);
     const selected = plugin ?? candidates.at(-1);
     if (!selected) continue;
     // Only a CLI-only scan can switch admissions on explicit validation.
@@ -300,6 +319,7 @@ async function readAssessments(
       continue;
     const active = selectConclusion(
       candidates.filter((item) => sameAdmission(item, selected)),
+      plugin,
     );
     if (active) assessments.set(occurrence, active);
   }

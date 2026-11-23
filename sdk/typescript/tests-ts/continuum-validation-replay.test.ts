@@ -172,14 +172,22 @@ test.each(["member", "failed issue", "sibling"])(
   },
 );
 
-test.each(["SUBMITTED", "VALIDATING"])(
-  "waits for current evidence when a %s finding joins an issue with historical proof",
-  async (status) => {
+test.each([
+  ["SUBMITTED", "historical"],
+  ["VALIDATING", "sibling"],
+])(
+  "keeps polling a %s finding with only %s evidence",
+  async (status, evidence) => {
     const { fake, proof } = scoringFixture();
-    const first = structuredClone(recorded);
-    first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
-    first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
-      first.artifacts[proofId].createdAt;
+    const first = structuredClone(fake);
+    if (evidence === "historical") {
+      first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
+      first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
+        first.artifacts[proofId].createdAt;
+    } else {
+      first.issue.findingIds.push("sibling");
+      validation(first).perFindingResults[0].findingId = "sibling";
+    }
     let polls = 0;
     const { record } = await provider(async (operation, args) => {
       if (operation === "get-code-finding") polls++;
@@ -701,7 +709,13 @@ describe("explicitly fake outcome variations", () => {
     },
   );
 
-  test.each(["between polls", "first score", "same issue", "changed issue"])(
+  test.each([
+    "between polls",
+    "first score",
+    "score error",
+    "same issue",
+    "changed issue",
+  ])(
     "a deadline retains the pending verdict only for its issue (%s)",
     async (stage) => {
       let milliseconds = 0;
@@ -714,6 +728,10 @@ describe("explicitly fake outcome variations", () => {
             op === "list-code-issue-artifacts" &&
             args.at(-1) === "EVIDENCE"
           ) {
+            if (stage === "score error") {
+              milliseconds = 60_000;
+              throw new Error("Synthetic scoring access denied");
+            }
             if (stage !== "first score") return { items: [] };
             milliseconds = 60_000;
           }
@@ -741,6 +759,8 @@ describe("explicitly fake outcome variations", () => {
         return;
       }
       expect(result.unavailable).toContain("timed out");
+      if (stage === "score error")
+        expect(result.unavailable).toContain("Synthetic scoring access denied");
       expect(result.record).toMatchObject({
         issueId: recorded.issueId,
         verdict: "EXPLOITABLE",
@@ -754,6 +774,84 @@ describe("explicitly fake outcome variations", () => {
     },
   );
 });
+
+test.each(["finding", "issue"])(
+  "when the %s no longer links the pair, retries keep only the receipt until a new issue is found",
+  async (side) => {
+    const launch = transport();
+    let stage: "linked" | "detached" | "offline" | "merged" = "linked";
+    const p = provider(async (op, args) => {
+      if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+        return { items: [] };
+      if (op === "get-code-" + side && stage === "offline")
+        throw Error("Offline");
+      const response = await launch(op, args);
+      if (op === "get-code-issue" && stage === "detached" && side === "issue")
+        response["findingIds"] = ["sibling"];
+      if (
+        op === "get-code-finding" &&
+        stage === "detached" &&
+        side === "finding"
+      ) {
+        delete response["createdIssueId"];
+        delete response["duplicateOfIssueId"];
+        delete response["mergedIntoIssueId"];
+      }
+      if (stage === "merged") {
+        if (op === "get-code-finding") response["mergedIntoIssueId"] = "new";
+        if (op === "get-code-issue") {
+          response["issueId"] = "new";
+          response["issueArn"] = recorded.issue.issueArn.replace(
+            recorded.issueId,
+            "new",
+          );
+        }
+      }
+      return response;
+    });
+    const config = {
+      provider: "continuum",
+      continuum: { environment_id: recorded.environmentId },
+    };
+    let result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+    );
+    const first = result.records.items[0]!;
+    expect(first.scoringPending).toBe(true);
+    for (const next of ["detached", "offline"] as const) {
+      stage = next;
+      result = await assessPluginFindings(
+        config,
+        [finding],
+        context,
+        () => p,
+        result.retry!,
+      );
+      const item = result.records.items[0]!;
+      expect(item).toMatchObject({
+        findingArn: first.findingArn,
+        issueUnlinked: true,
+        verdict: "UNAVAILABLE",
+      });
+      expect(item.issueArn).toBeUndefined();
+      expect(item.validationArtifactId).toBeUndefined();
+      expect(result.summary).not.toContain("EXPLOITABLE");
+    }
+    stage = "merged";
+    result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+      result.retry!,
+    );
+    expect(result.records.items[0]?.issueId).toBe("new");
+    expect(result.records.items[0]?.issueUnlinked).toBeUndefined();
+  },
+);
 
 test("a plugin retry drops the old verdict when reading the merge destination fails", async () => {
   const launch = transport();
