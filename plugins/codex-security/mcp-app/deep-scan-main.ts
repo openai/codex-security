@@ -6,6 +6,7 @@ import {
 } from "./src/workbench-client.js";
 import { resolvePythonCommand } from "./src/python_command.js";
 import { startDeepScanEngine } from "./src/deep-scan/engine.js";
+import { DeepScanModelInputRecoveryError } from "./src/deep-scan/model-file-inputs.js";
 import { resolveDeepWorkerParentSandbox } from "./src/deep-scan/parent-sandbox.js";
 import { DeepScanCoordinatorRegistry } from "./src/deep-scan/registry.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
@@ -92,6 +93,17 @@ export async function runCliDeepScan(): Promise<void> {
         manifestPath: terminal.manifestPath,
       }) + "\n",
     );
+  } catch (error) {
+    if (scanId && error instanceof DeepScanModelInputRecoveryError) {
+      process.stdout.write(
+        JSON.stringify({
+          scanId,
+          error: "model_input_recovery",
+          message: error.message,
+        }) + "\n",
+      );
+    }
+    throw error;
   } finally {
     const coordinator = scanId === undefined ? undefined : registry.get(scanId);
     registry.shutdown("cli_engine_closed");

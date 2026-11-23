@@ -2558,6 +2558,17 @@ automatic discovery. When an older saved target lacks a recorded checkout
 directory, set `CODEX_SECURITY_GIT` to the absolute path of a trusted Git
 executable outside the checkouts. If you use a system Python instead of the
 Codex managed runtime, set `PYTHON` to the absolute path of your interpreter.
+Deep Scan saves the paths it excludes when selecting Python, including the
+checkouts supplying prompt files, severity rubrics, model files, configured
+skills, agent settings, and knowledge sources. Recovery uses these exclusions
+even if the scan starts and resumes in different directories or the original
+target is removed.
+
+For Deep scans that predate these records, automatic Python discovery skips interpreters
+in Git checkouts and continues searching `PATH`. To select a trusted interpreter
+in a checkout explicitly, set `PYTHON` to its absolute path. If the saved native
+Codex profile omitted inherited sources, use the managed runtime or set `PYTHON`
+to an absolute interpreter path outside Git checkouts.
 
 Saved scan logs retain the finishing turn, including its final response, and
 exclude later turns once the scan records a completion boundary. Older scans
@@ -2598,7 +2609,10 @@ cannot verify it, resume with the Python runtime that started the scan or use
 `codex-security scans rerun SCAN_ID` to start a new scan.
 
 Resume keeps the scan ID, saved settings and instructions, completed workers, artifacts,
-and accumulated cost. A Standard scan continues in its original Codex session with
+and accumulated cost. Before continuing model work, Deep Scan checks that
+`developer_instructions` and the selected model instruction file
+match the saved inputs. If a setting changed, restore its
+original value and resume the scan. A Standard scan continues in its original Codex session with
 the same `--max-cost` limit and `--max-time` deadline. Only one CLI or SDK call
 can run it at a time. If the connection fails after the session is saved, the CLI
 prints the resume command. Work since the last checkpoint may need to be repeated.
@@ -2616,7 +2630,11 @@ New records save the authentication mode, explicit safety
 identifier, and post-scan prompt; older records cannot reconstruct missing values.
 A failed connection leaves the scan available for another resume attempt.
 Compatible scans can resume after plugin updates; sealed results keep their
-original producer version. Unsupported artifacts are rejected without rewriting them.
+original producer version. For newly registered Deep scans, sealed recovery
+reads token usage from the original Codex state database location to reconcile
+costs and verify the scan budget. For an older Deep scan that used a separate
+`sqlite_home`, set `CODEX_SQLITE_HOME` to the original directory when resuming.
+Unsupported artifacts are rejected without rewriting them.
 
 For bulk scans, use [bulk recovery](#recovering-failed-or-interrupted-bulk-scans)
 to update campaign receipts. Individual resume does not update `results.jsonl`.

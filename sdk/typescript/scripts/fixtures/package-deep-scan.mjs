@@ -81,6 +81,11 @@ try {
         `Validated installed SDK direct Deep Scan${retryMissingResult ? " and worker retry" : ""}.`,
       ),
     ),
+    runInstalledSdk(installedPlugin, executable, true).then(() =>
+      console.log(
+        "Validated model-input recovery through the installed SDK direct engine.",
+      ),
+    ),
     runDetachedPlugin(detachedPlugin, executable).then(() =>
       console.log("Validated detached plugin restart and finalization."),
     ),
@@ -292,27 +297,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
   } finally {
     await rpc.close();
   }
-  // Simulate an expired owner lease without waiting for wall-clock expiry. Keep
-  // the real stored workers/results and use the production recovery path.
-  await rm(
-    join(
-      scanDir,
-      "artifacts",
-      "deep_discovery",
-      `coordinator-heartbeat-${partial.coordinatorGeneration}.json`,
-    ),
-    { force: true },
-  );
-  await promisify(execFile)(
-    f.env.PYTHON,
-    [
-      "-c",
-      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?', ('2000-01-01T00:00:00Z',sys.argv[2])); c.commit()",
-      join(f.env.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-      scanId,
-    ],
-    { env: f.env },
-  );
+  await expireLease(f, scanDir, scanId, partial.coordinatorGeneration);
   await rm(f.env.PACKAGE_DEEP_HOLD);
   rpc = await server(f);
   try {
@@ -368,6 +353,30 @@ async function runDetachedPlugin(pluginRoot, executable) {
   await assertExecutions(f, scanId);
 }
 
+async function expireLease(f, scanDir, scanId, generation) {
+  // Simulate an expired owner lease without waiting for wall-clock expiry. Keep
+  // the real stored workers/results and use the production recovery path.
+  await rm(
+    join(
+      scanDir,
+      "artifacts",
+      "deep_discovery",
+      `coordinator-heartbeat-${generation}.json`,
+    ),
+    { force: true },
+  );
+  await promisify(execFile)(
+    f.env.PYTHON,
+    [
+      "-c",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?', ('2000-01-01T00:00:00Z',sys.argv[2])); c.commit()",
+      join(f.env.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      scanId,
+    ],
+    { env: f.env },
+  );
+}
+
 async function workbench(f, args) {
   const { stdout } = await promisify(execFile)(
     f.env.PYTHON,
@@ -381,9 +390,24 @@ async function workbench(f, args) {
   return JSON.parse(stdout);
 }
 
-async function runInstalledSdk(pluginRoot, executable) {
-  const f = await fixture("installed", pluginRoot, executable);
-  if (retryMissingResult) {
+async function runInstalledSdk(pluginRoot, executable, changeInput = false) {
+  const f = await fixture(
+    changeInput ? "input-recovery" : "installed",
+    pluginRoot,
+    executable,
+  );
+  let configPath;
+  if (changeInput) {
+    f.env.PACKAGE_DEEP_CHANGE_INPUT = join(f.home, "instructions.md");
+    await writeFile(f.env.PACKAGE_DEEP_CHANGE_INPUT, "Original input.");
+    configPath = join(f.home, "selected-config.toml");
+    await writeFile(
+      configPath,
+      `model_instructions_file = ${JSON.stringify(f.env.PACKAGE_DEEP_CHANGE_INPUT)}\n`,
+    );
+    f.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+  }
+  if (retryMissingResult && !changeInput) {
     f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
       f.directory,
       "missing-result-completion",
@@ -399,11 +423,19 @@ async function runInstalledSdk(pluginRoot, executable) {
   f.env.PACKAGE_DEEP_PARENT_THREAD = owner;
   let scanId;
   const client = new sdk.CodexSecurity(
-    { pythonPath: f.env.PYTHON },
+    {
+      pythonPath: f.env.PYTHON,
+      ...(changeInput && {
+        codexOverrides: {
+          model_instructions_file: f.env.PACKAGE_DEEP_CHANGE_INPUT,
+        },
+      }),
+    },
     {
       environment: f.env,
       prepareRuntime: async () => ({
         codexHome: f.home,
+        configPath,
         deepScanConfigPath: join(f.home, "deep-scan-config.toml"),
         environment: f.env,
         credentialsAvailable: true,
@@ -434,7 +466,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     },
   );
   try {
-    const result = await client.run(f.target, {
+    const operation = client.run(f.target, {
       mode: "deep",
       onScanRegistered: (scan) => {
         scanId = scan.scanId;
@@ -446,6 +478,63 @@ async function runInstalledSdk(pluginRoot, executable) {
       stopAfterNoNew: 2,
       outputDir: join(f.directory, "output"),
     });
+    if (changeInput) {
+      await assert.rejects(operation, /model_instructions_file changed/);
+      const parent = (await workbench(f, ["get-scan", "--scan-id", scanId]))
+        .scan;
+      assert.equal(parent.progress.status, "running");
+      const query = [
+        "get-deep-scan",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        owner,
+      ];
+      const paused = (await workbench(f, query)).deepScan;
+      assert.equal(paused.status, "running");
+      const accepted = paused.workers.filter(
+        (worker) =>
+          worker.kind === "discovery" && worker.status === "succeeded",
+      );
+      assert.equal(accepted.length, 1);
+      const receipt = await readFile(accepted[0].resultManifestPath);
+      await writeFile(f.env.PACKAGE_DEEP_CHANGE_INPUT, "Original input.");
+      await expireLease(
+        f,
+        parent.scanDir,
+        scanId,
+        paused.coordinatorGeneration,
+      );
+      const rpc = await server(f);
+      try {
+        const result = await rpc.call(
+          "start_codex_security_deep_scan",
+          { scanId },
+          metadata(f, owner),
+        );
+        await assertDraft(result.manifestPath);
+      } finally {
+        await rpc.close();
+      }
+      const completed = (await workbench(f, query)).deepScan;
+      assert.equal(
+        completed.workers.filter(
+          (worker) =>
+            worker.kind === "discovery" && worker.status === "succeeded",
+        ).length,
+        2,
+      );
+      assert.ok(
+        completed.workers.some(
+          (worker) =>
+            worker.id === accepted[0].id && worker.status === "succeeded",
+        ),
+      );
+      assert.deepEqual(await readFile(accepted[0].resultManifestPath), receipt);
+      await assertExecutions(f, scanId);
+      return;
+    }
+    const result = await operation;
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
     assert.ok(result.manifest.scan.sealedAt);

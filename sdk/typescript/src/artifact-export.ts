@@ -87,6 +87,9 @@ export interface ArtifactExportResult {
 interface HelperOptions {
   pythonPath?: string;
   protectedRoot?: PluginPythonOptions["protectedRoot"];
+  discoveryProtectedRoots?: readonly string[];
+  /** @internal Forward the saved scan's interpreter policy. */
+  excludeCheckoutPython?: PluginPythonOptions["excludeCheckoutPython"];
   pluginRoot?: string;
   signal?: AbortSignal;
   output?: ArtifactOutput;
@@ -149,6 +152,8 @@ export async function runArtifactHelper(
     configuredPath: options.pythonPath,
     environment,
     protectedRoot: options.protectedRoot,
+    discoveryProtectedRoots: options.discoveryProtectedRoots,
+    excludeCheckoutPython: options.excludeCheckoutPython,
     signal: options.signal,
   });
   const plugin = options.pluginRoot ?? (await bundledPluginRoot());

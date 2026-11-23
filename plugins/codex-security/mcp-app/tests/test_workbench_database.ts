@@ -189,6 +189,19 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+test("rejects an ambiguous composition preview before changing its history", (t) => {
+  const database = memory(t, 62);
+  database.exec(`
+    INSERT INTO schema_migrations VALUES (63, 'persist composition child membership', 'preview');
+    INSERT INTO schema_migrations VALUES (64, 'unknown migration', 'later');
+  `);
+  const history = migrationHistory(database);
+  const originalSchema = schema(database);
+  assert.throws(() => applyMigrations(database), /matching preview version/);
+  assert.deepEqual(migrationHistory(database), history);
+  assert.deepEqual(schema(database), originalSchema);
+});
+
 test("log completion migration leaves legacy terminal boundaries unknown", (t) => {
   const database = memory(t, 49);
   insertScan(database);

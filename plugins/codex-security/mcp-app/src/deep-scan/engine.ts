@@ -43,6 +43,8 @@ export function startDeepScanEngine(options: {
         reasoningEffort: options.reasoningEffort,
         serviceTier: run.serviceTier,
         deepScanConfig: run.config,
+        configSourcePaths: run.configSourcePaths,
+        modelFileInputs: run.modelFileInputs,
         parentSandbox: options.parentSandbox,
         parentTurn: options.parentTurn,
         artifactContext: {

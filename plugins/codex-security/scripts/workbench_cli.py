@@ -132,6 +132,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")
     begin_deep_scan.add_argument("--join-only", action="store_true")
+    begin_deep_scan.add_argument("--probe-model-file-inputs", action="store_true")
+    begin_deep_scan.add_argument("--model-file-inputs-json")
     begin_deep_scan.add_argument("--workflow-version", default="deep-security-scan/v1")
 
     add_command("get-deep-scan", "--scan-id", "--thread-id")

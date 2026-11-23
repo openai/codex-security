@@ -1,3 +1,4 @@
+import { modelFileInputsSchema } from "./model-file-inputs.js";
 import { isRecord } from "../record.js";
 import { z } from "zod";
 
@@ -73,11 +74,13 @@ export const runSchema = z
         },
       ),
       config: configSchema,
+      modelFileInputs: modelFileInputsSchema.optional(),
       includePaths: z.array(z.string()).optional(),
       excludePaths: z.array(z.string()).optional(),
       filePaths: z.array(z.string()).optional(),
       scanId: requiredString,
       sdkOwnsCompletion: z.boolean().optional(),
+      configSourcePaths: z.array(requiredString).optional(),
       serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
       discoveryStarted: z.boolean().optional(),

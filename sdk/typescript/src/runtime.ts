@@ -102,6 +102,7 @@ import {
 import { isRecord } from "./record.js";
 import {
   campaignExecutable,
+  campaignProtectedRoots,
   inspectTrustedExecutable,
   isWithin,
   resolveTrustedExecutable,
@@ -218,7 +219,14 @@ interface CodexCommandResult {
 
 export type ProcessEnvironment = Record<string, string | undefined>;
 
+export interface PythonProtectionRoots {
+  protected: string[];
+  discovery: string[];
+}
+
 export interface PluginPythonOptions {
+  /** @internal Retain the actual interpreter boundaries with the scan. */
+  captureRoots?: PythonProtectionRoots;
   configuredPath?: string;
   environment?: ProcessEnvironment;
   homeDirectory?: string;
@@ -228,6 +236,8 @@ export interface PluginPythonOptions {
   discoveryProtectedRoots?: readonly string[];
   /** @internal Ambient PATH lookup requires a known boundary for saved Git targets. */
   allowPathLookup?: boolean;
+  /** @internal Older recipes may lack their original source checkouts. */
+  excludeCheckoutPython?: boolean | "discovery";
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -2751,6 +2761,18 @@ export async function validatePreparedOutputDir(
   return canonical;
 }
 
+/** Check directory identity without following a replacement link at either leaf. */
+export async function sameOutputDirectory(
+  left: string,
+  right: string,
+): Promise<boolean> {
+  const [a, b] = await Promise.all([
+    lstat(left, { bigint: true }),
+    lstat(right, { bigint: true }),
+  ]);
+  return a.isDirectory() && b.isDirectory() && a.ino !== 0n && sameInode(a, b);
+}
+
 async function checkedOutputPath(
   path: string,
   writableLeaf: boolean,
@@ -2765,14 +2787,11 @@ async function checkedOutputPath(
     const canonical = await realpath(selected);
     if (canonical === selected) return selected;
     // Accept a canonical leaf spelling (case or short name) within the checked parent.
-    if (dirname(canonical) === parent) {
-      const [leaf, resolved] = await Promise.all([
-        lstat(selected, { bigint: true }),
-        lstat(canonical, { bigint: true }),
-      ]);
-      if (leaf.isDirectory() && leaf.ino !== 0n && sameInode(leaf, resolved)) {
-        return canonical;
-      }
+    if (
+      dirname(canonical) === parent &&
+      (await sameOutputDirectory(selected, canonical))
+    ) {
+      return canonical;
     }
     throw new OutputDirectoryError(
       `Scan output directory changed during preparation: ${path}`,
@@ -4149,13 +4168,22 @@ export async function resolvePluginPython(
     )
       discoveryRoots.push(directory);
   }
+  if (options.captureRoots) {
+    const protectedPaths = new Set([
+      ...protectedRoot,
+      ...campaignProtectedRoots(),
+    ]);
+    options.captureRoots.protected = [...protectedPaths];
+    options.captureRoots.discovery = [...new Set(discoveryRoots)].filter(
+      (path) => !protectedPaths.has(path),
+    );
+  }
+  const allowPathLookup =
+    options.allowPathLookup !== false && options.excludeCheckoutPython !== true;
   const missingBoundaryMessage =
     "Could not establish the saved checkout boundary for Python discovery. Set PYTHON to an absolute trusted interpreter.";
   if (options.configuredPath !== undefined) {
-    if (
-      !isPythonPathCandidate(options.configuredPath) &&
-      options.allowPathLookup === false
-    )
+    if (!isPythonPathCandidate(options.configuredPath) && !allowPathLookup)
       throw new PluginPythonUnavailableError(missingBoundaryMessage);
     return await requirePython(
       options.configuredPath,
@@ -4164,12 +4192,12 @@ export async function resolvePluginPython(
       isPythonPathCandidate(options.configuredPath)
         ? protectedRoot
         : discoveryRoots,
-      options.signal,
+      options,
     );
   }
   const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
-    if (!isPythonPathCandidate(inherited) && options.allowPathLookup === false)
+    if (!isPythonPathCandidate(inherited) && !allowPathLookup)
       throw new PluginPythonUnavailableError(missingBoundaryMessage);
     const roots = isPythonPathCandidate(inherited)
       ? protectedRoot
@@ -4189,7 +4217,7 @@ export async function resolvePluginPython(
       "PYTHON",
       environment,
       roots,
-      options.signal,
+      options,
     );
   }
 
@@ -4228,13 +4256,13 @@ export async function resolvePluginPython(
         candidate,
         environment,
         protectedRoot,
-        options.signal,
+        options,
       );
       if (resolved !== null) return resolved;
     }
   }
 
-  if (options.allowPathLookup === false)
+  if (!allowPathLookup)
     throw new PluginPythonUnavailableError(missingBoundaryMessage);
   for (const candidate of process.platform === "win32"
     ? ["python", "python3", "py"]
@@ -4243,7 +4271,7 @@ export async function resolvePluginPython(
       candidate,
       environment,
       discoveryRoots,
-      options.signal,
+      options,
     );
     if (resolved !== null) return resolved;
   }
@@ -4646,14 +4674,15 @@ async function requirePython(
   candidate: string,
   source: string,
   environment: ProcessEnvironment,
-  protectedRoot: string | readonly string[],
-  signal?: AbortSignal,
+  protectedRoot: readonly string[],
+  options: Pick<PluginPythonOptions, "signal" | "excludeCheckoutPython">,
 ): Promise<string> {
   const resolved = await usablePython(
     candidate,
     environment,
     protectedRoot,
-    signal,
+    options,
+    true,
   );
   if (resolved !== null) return resolved;
   throw new PluginPythonUnavailableError(
@@ -4664,17 +4693,30 @@ async function requirePython(
 
 async function usablePython(
   candidate: string,
-  environment: ProcessEnvironment = process.env,
-  protectedRoot: string | readonly string[] = process.cwd(),
-  signal?: AbortSignal,
+  environment: ProcessEnvironment,
+  protectedRoot: readonly string[],
+  options: Pick<PluginPythonOptions, "signal" | "excludeCheckoutPython">,
+  configured = false,
 ): Promise<string | null> {
-  const command = await resolveTrustedExecutable(
-    isPythonPathCandidate(candidate)
-      ? expandHomeForLookup(candidate, environment)
-      : candidate,
-    environment,
-    protectedRoot,
-  );
+  const { signal } = options;
+  const path = isPythonPathCandidate(candidate)
+    ? expandHomeForLookup(candidate, environment)
+    : candidate;
+  const exclude = options.excludeCheckoutPython;
+  if (exclude === true && !isAbsolute(path)) return null;
+  const roots = [...protectedRoot];
+  let command = await resolveTrustedExecutable(path, environment, roots);
+  if (exclude && !(exclude === "discovery" && configured && isAbsolute(path))) {
+    // Exclude each launcher's checkout before probing, so a later trusted
+    // interpreter with the same name remains eligible on PATH.
+    while (command) {
+      const checkouts = await gitProtectionRoots(command.executable, signal);
+      if (checkouts.length === 0) break;
+      if (checkouts.every((root) => roots.includes(root))) return null;
+      roots.push(...checkouts);
+      command = await resolveTrustedExecutable(path, environment, roots);
+    }
+  }
   if (command === null) return null;
   try {
     const { stdout } = await execFile(
