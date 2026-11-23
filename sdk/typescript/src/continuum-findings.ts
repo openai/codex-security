@@ -250,6 +250,27 @@ export function readPatch(value: unknown) {
   };
 }
 
+export function findingPatchDestination(
+  finding: Record<string, unknown>,
+  patches: readonly unknown[],
+) {
+  const links = linkedIssueIds(finding);
+  const destination = links[0];
+  if (!patches.length) return destination;
+  if (!destination)
+    throw new Error("Continuum patches require a finding linked to an issue.");
+  const expected = `${findingIdentity(finding).scope}/code-issues/${destination}`;
+  // Older collectors could have fetched a merged finding's patch from the original issue.
+  for (const patch of patches) {
+    const arn = record(patch, "Continuum patch artifact")["issueArn"];
+    if (arn !== expected && (arn !== undefined || links.length > 1))
+      throw new Error(
+        "Cannot confirm the patch belongs to the destination issue. Recollect this finding with codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT before publishing.",
+      );
+  }
+  return destination;
+}
+
 interface ArtifactGroups {
   evidence_artifacts?: Record<string, unknown>[];
   patches?: Record<string, unknown>[];
@@ -730,20 +751,7 @@ export function normalizeContinuumFindings(
         capture?.["patches"],
         "Continuum patches",
       ).map(readPatch);
-      const links = linkedIssueIds(row);
-      const linkedIssue = links[0];
-      if (patches.length && linkedIssue) {
-        const expected = `${findingIdentity(row).scope}/code-issues/${linkedIssue}`;
-        // Older collectors could have fetched the patch from the original issue.
-        if (
-          patches.some(({ issueArn }) =>
-            issueArn ? issueArn !== expected : links.length > 1,
-          )
-        )
-          throw new Error(
-            "Cannot confirm the patch belongs to the destination issue. Recollect this finding with codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT before publishing.",
-          );
-      }
+      const linkedIssue = findingPatchDestination(row, patches);
       let validationIssue:
         ReturnType<typeof singleFindingValidationIssue> | undefined;
       const evidenceArtifacts = issueEvidenceArtifacts(
@@ -767,9 +775,9 @@ export function normalizeContinuumFindings(
           return [selected.artifact];
         }),
       );
-      if ((patches.length || evidenceArtifacts.length) && !linkedIssue)
+      if (evidenceArtifacts.length && !linkedIssue)
         throw new Error(
-          `Continuum ${patches.length ? "patches" : "validation artifacts"} require a finding linked to an issue.`,
+          "Continuum validation artifacts require a finding linked to an issue.",
         );
       if (
         row["type"] !== "CONTINUUM_CODE_VULN" &&

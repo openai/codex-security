@@ -23,7 +23,7 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
-  /** A successful finding lookup confirmed there is no current issue link. */
+  /** The finding has no issue or the issue no longer lists this finding. */
   issueUnlinked?: true;
   /** An unsuccessful upgrade could not resolve an invalid or duplicate saved admission. */
   admissionConflict?: true;

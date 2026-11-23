@@ -1,3 +1,4 @@
+import { compareTimestamps } from "./timestamps.js";
 import { validationSummary } from "./validation-provider-report.js";
 import { verifiedAdmissions } from "./saved-continuum-assessment.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
@@ -57,17 +58,32 @@ export async function assessPluginFindings(
       prior?.findingArn &&
       prior.findingArn === current?.findingArn &&
       prior.submittedAt === current.submittedAt;
-    // Retain the timestamp of a disputed score if a retry still has no score.
+    // A replica may return just one of two disputed scores on retry.
+    // Only a newer score can settle the dispute for this validation.
     if (
       sameAdmission &&
       prior.issueArn === current.issueArn &&
       prior.validationArtifactId === current.validationArtifactId &&
       prior.scoringPending &&
-      current.scoringPending &&
       prior.freshness.scoredAt &&
-      !current.freshness.scoredAt
-    )
-      current.freshness.scoredAt = prior.freshness.scoredAt;
+      !(
+        compareTimestamps(
+          current.freshness.scoredAt ?? "",
+          prior.freshness.scoredAt,
+        ) > 0
+      )
+    ) {
+      if (current.scoringPending)
+        current.freshness.scoredAt = prior.freshness.scoredAt;
+      else if (current.scoringArtifactId) {
+        update.disposition = "deferred";
+        update.unavailable =
+          "Continuum has not returned a newer score to resolve the earlier conflict. Retry validation.";
+        update.record = { ...prior, unavailable: update.unavailable };
+        update.report = validationSummary([update]);
+        return update;
+      }
+    }
 
     // A failed lookup cannot undo acceptance or a confirmed change of issue.
     // A successful lookup with no issue must drop the previous issue's verdict.
@@ -77,7 +93,9 @@ export async function assessPluginFindings(
         (!current?.findingArn ||
           (sameAdmission &&
             !current.issueUnlinked &&
-            (!current.issueArn || prior.issueArn === current.issueArn)))
+            (prior.issueUnlinked ||
+              !current.issueArn ||
+              prior.issueArn === current.issueArn)))
       ) {
         update.record = { ...prior, unavailable: update.unavailable };
         if (prior.scoringPending) update.report = validationSummary([update]);

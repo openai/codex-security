@@ -103,7 +103,7 @@ the exact identity, evidence, timestamps and disposition of each finding.
 Codex checks issue membership and reads validation runs newest first.
 When applicable runs share the newest timestamp, Codex defers the verdict.
 Retry after a newer run appears. While a finding is being submitted or
-validated, older issue evidence alone does not end polling.
+validated, only current evidence specific to that finding can end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from
@@ -183,8 +183,9 @@ between installations. If a failed refresh reports `admissionConflict`,
 remediation skips the occurrence. Restore provider access and repeat plugin
 completion to establish the submission identity.
 
-An `issueUnlinked` result means AWS returned the finding with no current
-issue. Earlier verdicts for that issue cannot supply remediation evidence.
+An `issueUnlinked` result means the finding has no issue or the linked
+issue no longer lists this finding. Earlier verdicts for that issue cannot
+supply remediation evidence.
 If CLI and plugin results disagree on the current link, refresh the entry
 point reporting no link before using the assessment for remediation.
 

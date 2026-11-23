@@ -67,7 +67,9 @@ const binding = z.object({
 });
 type Destination = z.infer<typeof binding>["continuum"];
 const cached = z.object({
-  schemaVersion: z.literal([2, 3, 4, continuumAssessmentVersion]).optional(),
+  schemaVersion: z
+    .literal([2, 3, 4, 5, 6, continuumAssessmentVersion])
+    .optional(),
   configuration: z.unknown(),
   repositoryPath: z.string(),
   result: z.object({ provider: z.literal("continuum") }),

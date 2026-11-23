@@ -19,7 +19,10 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import * as gitMetadata from "../src/local-git-metadata.js";
-import type { ValidationItemRecord } from "../src/validation-provider.js";
+import type {
+  ValidationItemRecord,
+  ValidationProviderAssessment,
+} from "../src/validation-provider.js";
 import { continuumAssessmentVersion } from "../src/continuum-assessment-store.js";
 import {
   saveCliContinuumAssessments,
@@ -420,15 +423,19 @@ const expectedCompleted = {
   freshness: { stale: false, validatedAt: completed.freshness.validatedAt },
   terminalStatus: "COMPLETED",
 } as const;
-test.each([undefined, 2, 3, 4])(
+test.each([undefined, 2, 3, 4, 5, 6])(
   "a legacy plugin verdict only binds the original admission for a fresh CLI assessment (version %s)",
   async (schemaVersion) => {
     await save(
       [
         {
           ...completed,
-          claimMatch: "on_target",
-          proofObservation: { kind: "execution" },
+          ...(schemaVersion === undefined || schemaVersion < 4
+            ? {
+                claimMatch: "on_target",
+                proofObservation: { kind: "execution" },
+              }
+            : {}),
         },
       ],
       { schemaVersion },
@@ -441,7 +448,7 @@ test.each([undefined, 2, 3, 4])(
   },
 );
 
-test.each([1, 2, 3, 4])(
+test.each([1, 2, 3, 4, 5, 6])(
   "v%i CLI snapshots cannot supply or mask a refreshed assessment",
   async (schemaVersion) => {
     const repositoryPath = await realpath(repo);
@@ -460,7 +467,7 @@ test.each([1, 2, 3, 4])(
       schemaVersion,
       repositoryPath,
       scanId: "scan",
-      ...(schemaVersion === 4
+      ...(schemaVersion >= 4
         ? { entries, checksum: digest(JSON.stringify(entries)) }
         : entry),
     });
@@ -852,7 +859,7 @@ test("a confirmed unlink suppresses previous verdicts until the issue is establi
   expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
 });
 
-test("a retry waiting for the same score preserves the time of an earlier dispute", async () => {
+test("plugin retries require a strictly newer score after a dispute", async () => {
   const pending = {
     disposition: "deferred" as const,
     report: "Waiting for score",
@@ -873,22 +880,55 @@ test("a retry waiting for the same score preserves the time of an earlier disput
       freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
     },
   };
-  const result = await assessPluginFindings(
-    config,
-    [{ occurrenceId: "occ_a" }],
-    { repositoryPath: repo },
-    () => ({
-      name: "continuum",
-      version: "1",
-      async validate() {
-        return pending;
-      },
-    }),
-    [disputed],
-  );
-  expect(result.records.items[0]?.freshness.scoredAt).toBe(
-    disputed.record.freshness.scoredAt,
-  );
+  const disputedAt = disputed.record.freshness.scoredAt;
+  let previous: ValidationProviderAssessment[] = [disputed];
+  const newer = "2026-11-21T03:00:00.000001Z";
+  for (const scoredAt of [
+    undefined,
+    "2026-11-21T02:59:00Z",
+    disputedAt,
+    newer,
+  ]) {
+    const result = await assessPluginFindings(
+      config,
+      [{ occurrenceId: "occ_a" }],
+      { repositoryPath: repo },
+      () => ({
+        name: "continuum",
+        version: "1",
+        async validate() {
+          if (!scoredAt) return pending;
+          return {
+            ...pending,
+            disposition: "reportable" as const,
+            record: {
+              ...pending.record,
+              scoringPending: undefined,
+              scoringArtifactId: "score",
+              providerSeverity: "critical",
+              reachableFromAttacker: true,
+              freshness: { ...completed.freshness, scoredAt },
+            },
+          };
+        },
+      }),
+      previous,
+    );
+    await save(result.records.items, { retry: result.retry });
+    const assessment = (await read()).get("occ_a");
+    expect(assessment?.verdict).toBe("EXPLOITABLE");
+    if (scoredAt === newer) {
+      expect(result.retry).toBeNull();
+      expect(assessment?.issueSeverity).toBe("critical");
+      expect(assessment?.issueReachableFromAttacker).toBe(true);
+    } else {
+      expect(result.retry).not.toBeNull();
+      previous = result.retry!;
+      expect(assessment?.freshness.scoredAt).toBe(disputedAt);
+      expect(assessment?.issueSeverity).toBeUndefined();
+      expect(assessment?.issueReachableFromAttacker).toBeUndefined();
+    }
+  }
 });
 
 test("a pending linked score survives transport failure unless the issue changed", async () => {

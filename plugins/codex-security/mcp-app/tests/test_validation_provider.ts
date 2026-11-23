@@ -137,7 +137,7 @@ await test("unconfigured plugin scans never invoke a validation provider", async
   assert.equal(calls, 0);
 });
 
-for (const schemaVersion of [undefined, 2, 4]) {
+for (const schemaVersion of [undefined, 2, 4, 5, 6]) {
   const mixed = schemaVersion === 2;
   await test(`legacy version ${schemaVersion} assessments refresh only on explicit completion`, async () => {
     const root = await temporaryDirectory("plugin-validation-upgrade-");
@@ -163,10 +163,10 @@ for (const schemaVersion of [undefined, 2, 4]) {
       const record = {
         itemId: ids[0],
         verdict: "EXPLOITABLE",
-        claimMatch: schemaVersion === 4 ? "unknown" : "on_target",
+        claimMatch: (schemaVersion ?? 0) >= 4 ? "unknown" : "on_target",
         resultScope: "finding",
         severityBefore: "high",
-        severityAfter: schemaVersion === 4 ? "high" : "critical",
+        severityAfter: (schemaVersion ?? 0) >= 4 ? "high" : "critical",
       };
       const old = JSON.stringify({
         schemaVersion,
