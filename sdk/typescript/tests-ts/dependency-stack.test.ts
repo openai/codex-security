@@ -26,6 +26,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
+import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const cve = "CVE-2099-0001";
@@ -701,6 +702,10 @@ async function reviewedStackCheck(
     async onCodex(argv, out, _env, prompt) {
       calls++;
       expect(argv[0]).toBe("exec");
+      expect(requestMetadata(argv)).toMatchObject({
+        codex_security_surface: "cli",
+        codex_security_command: "exploitability check",
+      });
       expect(argv).toContain("--ignore-user-config");
       expect(argv).toContain("mcp_servers={}");
       expect(out?.investigationServers).toEqual({});
