@@ -192,6 +192,7 @@ import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  standaloneRemediationText,
   verificationBatches,
   VerificationModeSchema,
   type FindingPatch,
@@ -467,8 +468,10 @@ import {
   saveCliContinuumAssessments,
   savedContinuumAssessments,
 } from "./saved-continuum-assessment.js";
+import { validationSummary } from "./validation-provider-report.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
+  retryableAssessment,
   supplementalValidationStatus,
   unavailableAssessment,
   type ValidationItemRecord,
@@ -7326,7 +7329,7 @@ export async function main(
         { suffix: "--records" },
       ],
       examples: [{ args: { "findings...": "findings.json" } }],
-      hint: "With --scan, submit open findings from a saved scan to the validation provider in the selected project file. Pass finding identifiers to narrow the selection. Use --records alone for host-provided reviews over JSON-RPC.",
+      hint: "With --scan, submit all open findings or pass IDs to narrow the selection. Review full findings locally with codex-security export --scan ID --export-format json --output -. Use --records alone for host-provided reviews over JSON-RPC.",
       output: jsonDocument.optional(),
       description:
         "Assess candidate security findings using source evidence, or submit sealed findings to a validation provider.",
@@ -7407,6 +7410,7 @@ export async function main(
               options.scan,
               undefined,
               dependencies,
+              "validation",
             );
             const openIds = new Set(
               selected.findings.flatMap((f) => [f.occurrenceId, f.findingId]),
@@ -7421,14 +7425,29 @@ export async function main(
               const context = {
                 repositoryPath: selected.repository,
                 signal: controller.signal,
+                checkSubmissionTarget: (signal?: AbortSignal) =>
+                  checkValidationTarget(
+                    dependencies,
+                    selected.scanId,
+                    selected.repository,
+                    signal,
+                  ),
               };
-              const results = provider.validateBatch
-                ? await provider.validateBatch(selected.findings, context)
-                : await Promise.all(
-                    selected.findings.map((finding) =>
-                      provider.validate(finding, context),
-                    ),
-                  );
+              announceContinuum(
+                errorOutput,
+                configuration,
+                selected.findings.length,
+              );
+              const results = !selected.findings.length
+                ? []
+                : provider.validateBatch
+                  ? await provider.validateBatch(selected.findings, context)
+                  : await Promise.all(
+                      selected.findings.map((finding) =>
+                        provider.validate(finding, context),
+                      ),
+                    );
+              const status = supplementalValidationStatus(provider, results);
               const items = results.map((result) => result.record);
               await saveForRemediation(
                 errorOutput,
@@ -7445,16 +7464,30 @@ export async function main(
                 : results.some((r) => r.unavailable)
                   ? 1
                   : 0;
+              showValidationRetry(
+                errorOutput,
+                selected.scanId,
+                project.path,
+                results,
+              );
               if (format === "json" || format === "jsonl") {
                 return {
                   schemaVersion: 1,
                   scanId: selected.scanId,
+                  status,
                   items,
                 };
               }
               await writeCliOutput(
                 output,
-                results.map((result) => result.report).join("\n\n") + "\n",
+                [
+                  `Supplemental validation ${status} (${items.length} findings).`,
+                  ...(results.length > 1 ? [validationSummary(results)] : []),
+                  ...results.map(
+                    (result, index) =>
+                      `## ${escapeTerminalText(selected.findings[index]!.occurrenceId)} — ${result.disposition}\n\n${escapeTerminalText(result.report, true)}`,
+                  ),
+                ].join("\n\n") + "\n",
               );
               return;
             } finally {
@@ -7597,7 +7630,6 @@ export async function main(
                 options.scan,
                 options.severity,
                 dependencies,
-                "remediation",
               )
             : undefined;
           const imports = linear
@@ -7631,7 +7663,7 @@ export async function main(
                 : withoutLinearCredentials(dependencies.environment);
             const batches = selected
               ? await verificationBatches(
-                  selected.findings,
+                  await remediationFindings(selected, dependencies),
                   await bundledPluginRoot(),
                   options.verificationMode,
                 )
@@ -7883,7 +7915,6 @@ export async function main(
               options.scan,
               options.severity,
               dependencies,
-              "remediation",
             );
             const validationPrompt = await resolvePatchValidationPrompt(
               options.validationPromptFile,
@@ -9876,7 +9907,12 @@ async function saveForRemediation(
   ...args: Parameters<typeof saveCliContinuumAssessments>
 ): Promise<void> {
   try {
-    await saveCliContinuumAssessments(...args);
+    const warning = await saveCliContinuumAssessments(...args);
+    if (warning)
+      await writeCliOutput(
+        stderr,
+        `codex-security: ${diagnosticValue(warning)}\n`,
+      ).catch(() => {});
   } catch (error) {
     await writeCliOutput(
       stderr,
@@ -9890,7 +9926,7 @@ async function selectSavedFindings(
   requestedScanId: string | undefined,
   severity: FailureSeverity | undefined,
   dependencies: CliDependencies,
-  purpose?: "remediation",
+  purpose?: "validation",
 ): Promise<SelectedFindings> {
   if (identifiers.some((identifier) => !isFindingIdentifier(identifier))) {
     throw new CodexSecurityError(
@@ -9949,6 +9985,8 @@ async function selectSavedFindings(
     | {
         scanId: string;
         targetPath: string;
+        progress?: { status?: string };
+        sealManifestDigest?: string | null;
         findings?: Finding[];
         findingsTruncated?: boolean;
       }
@@ -9963,6 +10001,13 @@ async function selectSavedFindings(
     );
   }
 
+  if (
+    purpose === "validation" &&
+    (scan.progress?.status !== "complete" || !scan.sealManifestDigest)
+  )
+    throw new CodexSecurityError(
+      "External validation requires a completed scan with a recorded seal.",
+    );
   let findings = scan.findings ?? [];
   if (scan.findingsTruncated) {
     findings = [];
@@ -10003,16 +10048,8 @@ async function selectSavedFindings(
       : await (dependencies.readSavedFindings ?? readSavedFindings)(
           scan.scanId,
           dependencies.runWorkbench,
+          scan.sealManifestDigest ?? undefined,
         );
-  const assessments =
-    purpose === "remediation"
-      ? await savedContinuumAssessments(
-          dependencies.environment,
-          scan.scanId,
-          scan.targetPath,
-          selected.map((finding) => finding.occurrenceId),
-        )
-      : undefined;
   const byOccurrence = new Map(
     fullFindings.map((finding) => [finding.occurrenceId, finding]),
   );
@@ -10042,17 +10079,35 @@ async function selectSavedFindings(
         if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
         else delete hydrated[key];
       }
-      const assessment = assessments?.get(finding.occurrenceId);
-      if (assessment) hydrated["continuumAssessment"] = assessment;
-      else delete hydrated["continuumAssessment"];
+      delete hydrated["continuumAssessment"];
       return hydrated;
     }),
   };
 }
 
+/** Use the same host-only evidence for inline and reopened remediation. */
+async function remediationFindings(
+  { scanId, repository, findings }: SelectedFindings,
+  dependencies: CliDependencies,
+): Promise<Finding[]> {
+  const assessments = await savedContinuumAssessments(
+    dependencies.environment,
+    scanId,
+    repository,
+    findings.map((finding) => finding.occurrenceId),
+  );
+  return findings.map(({ continuumAssessment: _ignored, ...finding }) => {
+    const assessment = assessments.get(finding.occurrenceId);
+    return assessment
+      ? { ...finding, continuumAssessment: assessment }
+      : finding;
+  });
+}
+
 async function readSavedFindings(
   scanId: string,
   workbench: CliDependencies["runWorkbench"],
+  expectedManifestDigest?: string,
 ): Promise<readonly Finding[]> {
   const directory = await resolveSavedArtifactDirectory(
     scanId,
@@ -10062,6 +10117,7 @@ async function readSavedFindings(
   const { findings } = await loadContract(directory, {
     pluginRoot: await bundledPluginRoot(),
     expectedScanId: scanId,
+    expectedManifestDigest,
   });
   return findings.findings;
 }
@@ -10792,7 +10848,7 @@ async function runFindingPatches(
     `\nPatching ${formatItemCount(selected.findings.length, "confirmed finding")}...\n`,
   );
   const patches: FindingPatch[] = [];
-  for (const finding of selected.findings) {
+  for (const finding of await remediationFindings(selected, dependencies)) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
     const progress = new FindingProgressPresenter(
@@ -11139,8 +11195,14 @@ async function executeDependencyAgent(
     process.platform === "win32"
       ? request.directory.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
       : request.directory;
+  const command = "exploitability check";
   const settings: JsonObject = {
     ...overrides,
+    responses_api_metadata: codexSecurityRequestContext(overrides, {
+      surface: "cli",
+      command,
+      providerResolved: false,
+    }).metadata,
     model: model.model,
     model_reasoning_effort: request.coordinator
       ? "high"
@@ -11203,7 +11265,7 @@ async function executeDependencyAgent(
         : ["--skip-git-repo-check", "--cd", request.directory, "-"]),
     ],
     {
-      command: "exploitability check",
+      command,
       directory: request.directory,
       signal: request.signal,
       auth: "auto",
@@ -11344,6 +11406,10 @@ async function runSkill(
       : new Ajv2020({ strict: false }).compile(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
+  const directInput = (value: string) =>
+    skill === "fix-finding" || skill === "verify-fix"
+      ? standaloneRemediationText(value)
+      : value;
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   let standaloneFileContents: string | undefined;
   for (const input of inputs) {
@@ -11364,10 +11430,11 @@ async function runSkill(
         throw new CodexSecurityError(
           "Finding or issue inputs must not be empty.",
         );
-      contents.push(literal);
+      contents.push(directInput(literal));
       continue;
     }
     let contentsOrLiteral = input;
+    let fromFile = false;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
       : undefined;
@@ -11445,12 +11512,13 @@ async function runSkill(
             "Finding or issue inputs must not be empty.",
           );
         }
-        if (inputs.length === 1 && contents.length === 0) {
-          standaloneFileContents = contentsOrLiteral;
-        }
+        fromFile = true;
       }
     }
-    contents.push(contentsOrLiteral);
+    const data = directInput(contentsOrLiteral);
+    if (fromFile && inputs.length === 1 && contents.length === 0)
+      standaloneFileContents = data;
+    contents.push(data);
   }
   const plugin = await bundledPluginRoot();
   const pluginVersion = await pluginMetadata(plugin).then(
@@ -13151,26 +13219,15 @@ async function executeScan(
       );
       if (arguments_.validate) {
         const scanId = result.manifest.scan.id;
-        const checkTarget = async () => {
-          const context = await dependencies.runWorkbench(
-            ["get-scan", "--scan-id", scanId, "--check-target"],
-            undefined,
-            preparationAbortController.signal,
-            config.pythonPath,
+        const checkTarget = (signal = preparationAbortController.signal) =>
+          checkValidationTarget(
+            dependencies,
+            scanId,
             repository,
+            signal,
+            config,
             options.knowledgeBaseSnapshot?.protectedRoots,
-            config.pluginPath,
           );
-          const scan = context["scan"];
-          if (
-            !isJsonObject(scan) ||
-            scan["targetPath"] !== (await realpath(repository))
-          ) {
-            throw new CodexSecurityError(
-              "The recorded scan target does not match the validation repository.",
-            );
-          }
-        };
         const findings = result.findings.findings;
         const configuredValidation = arguments_.validationProvider;
         const validationProvider =
@@ -13221,11 +13278,17 @@ async function executeScan(
             const records: ValidationItemRecord[] = [];
             let providerAssessments: ValidationProviderAssessment[] | undefined;
             try {
+              announceContinuum(
+                errorOutput,
+                configuredValidation,
+                validationInputs.length,
+              );
               providerAssessments =
                 validationProvider?.validateBatch === undefined
                   ? undefined
                   : await validationProvider
                       .validateBatch(validationInputs, {
+                        checkSubmissionTarget: checkTarget,
                         repositoryPath: repository,
                         signal: preparationAbortController.signal,
                       })
@@ -13234,6 +13297,20 @@ async function executeScan(
                           unavailableAssessment(validationProvider, error),
                         ),
                       );
+              if (
+                providerAssessments &&
+                validationProvider?.name === "continuum"
+              )
+                errorOutput.write(
+                  validationSummary(providerAssessments) + "\n",
+                );
+              if (providerAssessments)
+                showValidationRetry(
+                  errorOutput,
+                  scanId,
+                  arguments_.projectConfig?.path,
+                  providerAssessments,
+                );
               for (const [index, finding] of validationInputs.entries()) {
                 const assessment =
                   providerAssessments?.[index] ??
@@ -14267,6 +14344,65 @@ function importedFindingsCommand(repository: string): string {
     return "From the repository directory, run codex-security findings imported.";
   const path = quoteCliPath(repository);
   return `Stored evidence${cliShellLabel(path)}: codex-security findings imported ${path}`;
+}
+
+async function checkValidationTarget(
+  dependencies: CliDependencies,
+  scanId: string,
+  repository: string,
+  signal?: AbortSignal,
+  config?: { pythonPath?: string; pluginPath?: string },
+  protectedRoots?: readonly string[],
+) {
+  const { scan } = await dependencies.runWorkbench(
+    ["get-scan", "--scan-id", scanId, "--check-target"],
+    undefined,
+    signal,
+    config?.pythonPath,
+    repository,
+    protectedRoots,
+    config?.pluginPath,
+  );
+  if (
+    !isJsonObject(scan) ||
+    scan["targetPath"] !== (await realpath(repository))
+  ) {
+    throw new CodexSecurityError(
+      "The recorded scan target does not match the validation repository.",
+    );
+  }
+}
+
+function announceContinuum(
+  stderr: Writable,
+  configuration: ResolvedScanSettings["validationProvider"],
+  count: number,
+) {
+  const settings = configuration?.continuum;
+  if (!settings || !count) return;
+  stderr.write(
+    `Continuum environment ${diagnosticValue(settings.environment_id)}. Submitting or polling ${count} selected findings.\n`,
+  );
+}
+
+function showValidationRetry(
+  stderr: Writable,
+  scanId: string,
+  file: string | undefined,
+  results: readonly ValidationProviderAssessment[],
+) {
+  const pending = results.flatMap((item) =>
+    item.record?.provider === "continuum" && retryableAssessment(item)
+      ? [item.record.itemId]
+      : [],
+  );
+  if (!pending.length) return;
+  const config =
+    file && escapeTerminalText(file) === file ? quoteCliPath(file) : "FILE";
+  const ids = pending.map((id) => quoteCliPath(diagnosticValue(id))).join(" ");
+  stderr.write(
+    `To retry pending findings with the same settings and host state, run${cliShellLabel(config)} codex-security validate --scan ${quoteCliPath(diagnosticValue(scanId))} -c ${config} ${ids}\nChanging the payload or destination can create a new finding.\n`,
+  );
 }
 
 async function selectedProjectConfig(

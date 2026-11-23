@@ -157,6 +157,18 @@ describe("CodexSecurity finding validation", () => {
         outputDir: options.outputDir,
         threadId: "validation-thread",
       });
+      expect(captured.turn?.outputSchema).toEqual({
+        type: "object",
+        properties: {
+          disposition: {
+            type: "string",
+            enum: ["reportable", "suppressed", "not_applicable", "deferred"],
+          },
+          report: { type: "string", minLength: 1 },
+        },
+        required: ["disposition", "report"],
+        additionalProperties: false,
+      });
       expect(workbench).not.toHaveBeenCalled();
       expect(captured.prompt).toContain(
         await readFile(
@@ -479,6 +491,21 @@ describe("CodexSecurity finding validation", () => {
     [
       "empty report",
       '{"disposition":"reportable","report":" "}',
+      true,
+      "invalid result",
+    ],
+    [
+      "model-authored provider provenance",
+      JSON.stringify({
+        ...assessment,
+        provenance: { provider: "continuum", providerVersion: "1" },
+      }),
+      true,
+      "invalid result",
+    ],
+    [
+      "model-authored provider failure",
+      JSON.stringify({ ...assessment, unavailable: "No AWS connection" }),
       true,
       "invalid result",
     ],

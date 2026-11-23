@@ -1,280 +1,153 @@
 # Validation providers
 
-A validation provider assesses reported findings with evidence outside the source
-scan, such as the live deployment. It runs on the host after the scan is sealed,
-not in the scan model's sandbox. Provider assessments are supplemental: they do
-not rewrite sealed findings or change `--fail-on-severity`.
+AWS Continuum can assess code findings after a Codex scan finishes. The host
+sends findings to AWS and reads the resulting verdicts and issue scores.
+The sealed source report, Codex severity and `--fail-on-severity` stay unchanged.
+Provider work falls outside Codex cost accounting. Scan cost limits and
+`scan --validate` cannot be combined.
 
-## Select a provider
+## Choose the destination
 
-Select `scan.validation.provider` in an explicitly chosen, trusted project file.
-AWS Continuum is the first built-in provider. See
-[project configuration](project-configuration.md#validation-provider-settings)
-for its keys and defaults.
+Install AWS CLI v2.38.5 or later outside the checkout. Configure credentials
+and a Region. Run from a Git repository root. The Continuum environment must
+have exactly one Git source, matching a remote of the checkout, and no S3
+sources. Codex checks the repository before submitting. It cannot establish
+that the deployed revision matches the scanned source.
+
+Select a trusted [project file](project-configuration.md#validation-provider-settings)
+explicitly. Check the AWS account, environment and Region before starting.
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: YOUR_ENVIRONMENT_ID
+      aws_region: us-east-1
+```
+
+AWS receives the repository, finding identifiers, titles, summaries, severities,
+CWEs when available, and paths and line ranges. These fields may contain
+sensitive information. Posture questions and other deferred work are excluded.
+
+## Start a scan
 
 ```sh
 codex-security scan . --validate -c codex-security.yaml
-codex-security scan . --validate=continuum -c codex-security.yaml
 ```
 
-Bare `--validate` uses the configured provider; `--validate=NAME` overrides its
-name. Without a configured provider, bare `--validate` keeps the existing Codex
-validation. This is separate from `--provider`, which selects inference.
-Project files are not discovered automatically.
+Bare `--validate` uses the selected provider or the existing Codex validator
+if none is configured. `--validate=NAME` selects a validation provider.
+`--provider` selects the inference provider. SDK callers can use
+[`validate()`](../sdk/typescript/docs/sdk.md#use-a-validation-provider).
 
-For automatic validation at plugin scan completion, install the packaged plugin or build the plugin in a full checkout after installing the SDK dependencies. With a standalone plugin source checkout, use the CLI on the saved scan as described below.
-
-For a plugin scan, include the project file in the request:
+For automatic submission from the plugin, install the packaged plugin or
+build it from the full checkout with SDK dependencies installed. Select the
+file in scan setup or explicitly request it.
 
 > Scan this repository for security issues using codex-security.yaml.
 
-Standard and diff setup save the provider settings from the selected project
-file. Rejoining the scan uses that saved configuration.
+Review the destination in setup. The plugin saves the selection before the
+scan and submits the findings automatically after sealing. Rejoining keeps
+the saved settings. A standalone plugin source build has no AWS provider.
 
-The plugin runs the configured provider after sealing the scan. Ask Codex to
-show the completed scan to read the last saved assessment from protected host
-state. If polling timed out, ask Codex to retry supplemental validation for
-that scan ID. Completing the scan again resumes polling accepted findings by
-their AWS IDs and reuses finished assessments. The CLI can also poll a
-selection from the saved scan. SDK callers invoke `validate()` with the
-provider after `run()`. [SDK example](../sdk/typescript/docs/sdk.md#use-a-validation-provider)
+## Review a saved scan before sending
 
-The first explicit completion after upgrading refreshes older cached
-assessments that predate terminal status handling. If the original submission
-predates AWS receipt storage on this host, the refresh can create a new finding.
-
-Provider work is outside Codex cost accounting. As with existing validation,
-`scan --validate` cannot be combined with a scan cost limit. Posture questions
-and other deferred review work are not submitted. External provider registry
-discovery is not supported.
-
-## Validate findings from a saved scan
-
-From the checkout, use `codex-security scans list --json` to find a completed
-scan and `codex-security scans show SCAN_ID --json` to inspect its findings.
-Submit a selection by occurrence ID with the trusted provider configuration.
+Run the scan without provider validation first. From the original checkout,
+find the scan, inspect its occurrence IDs, then review the full sealed
+findings. Keep the export private.
 
 ```sh
+codex-security scans list --json
+codex-security scans show SCAN_ID --json
+codex-security export --scan SCAN_ID --export-format json --output -
 codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
 ```
 
-Supply multiple IDs separated by spaces. Omitting the IDs selects all open
-findings from the scan. `--scan latest` selects the latest completed scan in
-the current directory. The command reads the saved findings and runs the
-provider directly. Output goes to stdout. JSON contains `scanId` and one
-`items` entry per selected finding. Exit code 1 indicates at least one
-unavailable assessment. Check the individual records for accepted submissions.
+Pass multiple IDs separated by spaces. **Omitting IDs selects all open
+findings.** `--scan latest` selects the latest completed scan for this
+directory. Use an explicit scan ID for retries. New submissions require
+the registered scan and the original source snapshot. A receipt allows
+polling an accepted finding after the checkout changes.
 
-Continuum receives each selected finding's identifier, title, summary, severity,
-CWE when available, file paths and line ranges. Before calling
-`CreateCodeFinding`, the host saves the exact request and token in its private
-state directory under `continuum-submissions`. After acceptance it saves the
-AWS finding ID, ARN and original submission time, and deletes the request body.
-After an interruption, rerun the command with the same scan ID, selection,
-environment and host state. Pending requests reuse the same document and token.
-Accepted findings resume at `GetCodeFinding`. A new finding, changed submitted
-content, another destination or loss of the host state can create a fresh
-submission. If a finding stays `SUBMITTED`, check the scan activity in the
-Continuum environment. The finding may be waiting for the next build.
+The command returns `schemaVersion`, `scanId`, `status` and `items` in JSON.
+Check `status` even on exit code 0. An inconclusive verdict can be incomplete
+without a transport error. Exit code 1 can indicate a failure for just one
+finding. Check its `findingId` before assuming the upload failed.
 
-### Patch and verify a saved occurrence
+## Read the results
 
-After validation, reopen the original occurrence on the same host. CLI patch
-and verify-fix and workbench Generate and Verify can read its saved assessment
-without AWS access. The model receives sensitive provider identifiers, status,
-scope, freshness and any eligible observation. It checks the candidate against
-the original remediation tests. Apply uses the recorded patch unchanged.
+Scan completion writes `validation.md` and `validation.json` beside the scan
+report. Treat them as sensitive. Read the detailed records in `items` for
+the exact identity, evidence, timestamps and disposition of each finding.
 
-The workbench owns the whole scan's validation report and retries. The CLI
-saves individual results under `cli-continuum-*` in its private state directory.
-Validating a subset leaves the workbench's queue and report intact. For a
-timed-out workbench finding, only a retry of the same AWS submission can supply
-its result. For competing results on the same submission and issue, the latest
-AWS validation artifact wins. An invalid workbench result prevents a CLI
-result from a different submission taking its place. Missing or ambiguous
-evidence leaves the original finding available for remediation.
+| Question                                  | What to check                                                                                                                                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Did AWS accept the finding?               | `itemId` is the local ID. `findingId`, `findingArn` and `submittedAt` identify the acceptance even if polling failed.                                                                             |
+| Whose verdict is this?                    | Check `resultScope` with `verdict`. A unique explicit result for the AWS finding gives scope `finding`. Otherwise the verdict can describe the whole `issue`, even if `issueFindingCount` is one. |
+| Did the run finish?                       | Read `terminalStatus`, `disposition`, `unavailable` and `statusMessage`. A partial, uncertain or failed run is deferred. A discarded or declined submission is `not_applicable`.                  |
+| Does the result establish the exact flaw? | Codex has not independently reproduced the claim. `claimMatch` stays `unknown` and `severityAfter` equals `severityBefore`.                                                                       |
+| What did AWS say about the issue?         | `issueVerdict` can differ from a finding verdict. `providerSeverity` is the issue severity. `reachableFromAttacker` describes the issue. An absent value means unknown.                           |
+| How old is the evidence?                  | See `validationArtifactId`, `scoringArtifactId` and `freshness`. `joinedValidatedIssue` indicates pre-existing issue validation. A recent timestamp does not establish the deployed revision.     |
 
-Import is optional. To collect full AWS evidence or available patches, pass
-the returned `findingId` to
-`codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT --format json`.
-Use the same AWS profile and Region as for validation. The collector retrieves
-the finding's evidence and any matching patches. [Collect, patch and verify a finding](scanner-imports/continuum.md#collect-a-finding-with-patches)
+Codex checks issue membership and reads validation runs newest first.
+It skips bundles explicitly for other findings when looking for a member
+result. A newer failed or partial run for the issue takes precedence over
+an older conclusive member result. A reason labelled `FINDING` comes from
+submitted context. `GRAPH`, `CODE` and `INFERRED` distinguish deployment
+evidence, source evidence and inference.
 
-### Match an imported issue to local findings
+Issue scoring can lag validation. Codex looks for the newest unambiguous
+score tied to the same issue, validation artifact and issue verdict. If
+scoring is still pending at the deadline, `scoringPending` is true. The
+verdict remains visible and the assessment is incomplete. Retry to refresh
+the score.
 
-A local Continuum import stores one external record per AWS issue. Its
-`sourceFindingId` is the issue ARN. The raw export also has a `sourceFindingId`
-on each contributing finding if AWS returns it. For a finding submitted from a
-Codex scan, that value is the occurrence ID. [Continuum import guide](scanner-imports/continuum.md)
+## Resume without starting a new scan
 
-To match contributors using local records, set `issue_arn` to the imported
-issue ARN, `import_json` to the JSON output file from
-`publish findings --to local --format json`, and `assessment` to the scan's
-`validation.json` or saved `validate --scan` JSON output. This prints a row
-with the AWS finding ARN and local occurrence ID for each match in that scan.
+Under `continuum-submissions` in private host state, Codex stores each request
+and its token until AWS acknowledges it, then replaces the request body with
+a receipt. Retries reuse the token or poll the accepted finding. Keep the
+same host state, destination and submitted content. A change to any of these
+can create a new AWS finding.
 
-```sh
-jq -r --arg issue "$issue_arn" --slurpfile validation "$assessment" '
-  .findings[] | select(.sourceFindingId == $issue)
-  | (.evidence.source_data.findings[]?.findingArn // empty) as $arn
-  | $validation[0].items[] | select(.findingArn == $arn)
-  | [.findingArn, .itemId] | @tsv
-' "$import_json"
-```
+Ask the plugin to show the completed scan by ID. This reads the saved
+result without contacting AWS. Check `validation.retryable` before
+requesting another attempt.
 
-## Read the supplemental results
+> Resume supplemental validation for scan SCAN_ID. Show which findings are
+> still waiting and which have finished.
 
-CLI and plugin scans save two files beside the sealed scan report:
+Completion retries pending items and keeps finished assessments. If
+`status` is `incomplete` and `retryable` is false, check the individual
+run statuses before deciding how to proceed.
 
-- `validation.md`: one section per finding, with disposition, verdict, original
-  and supplemental severity, reasons and their bases, claim match, freshness,
-  and an issue link when available. CLI sections also include provider provenance.
-- `validation.json`: `schemaVersion: 1` and `items`, containing structured
-  conclusions. Plugin completion also writes a `findings` count and `summary`.
+For a CLI retry, repeat `validate --scan` with the same ID, project file
+and affected occurrence IDs.
 
-Each structured item uses these fields:
+A finding still marked `SUBMITTED` may be waiting for a build. For `FAILED`,
+open `issueUrl` and check the run or ask AWS privately for worker logs.
+Polling cannot restart a failed worker. Keep raw artifacts and logs private.
 
-| Field                     | Meaning                                                                                |
-| ------------------------- | -------------------------------------------------------------------------------------- |
-| `itemId`                  | Codex finding identifier                                                               |
-| `findingId`, `findingArn` | AWS identity after acceptance, including when subsequent polling fails                 |
-| `issueId`, `issueArn`     | Associated AWS issue, when retrieved                                                   |
-| `submittedAt`             | Original submission time                                                               |
-| `provider`                | Validation provider name                                                               |
-| `verdict`                 | Provider verdict, or `UNAVAILABLE`                                                     |
-| `terminalStatus`          | How the validation run ended, when reported by the provider                            |
-| `statusMessage`           | Provider explanation for a discarded or declined finding, when supplied                |
-| `severityBefore`          | Original Codex severity                                                                |
-| `severityAfter`           | Original severity unless current validation and scoring support this finding           |
-| `validationArtifactId`    | AWS identifier of the selected validation artifact, when available                     |
-| `scoringArtifactId`       | AWS identifier of the selected scoring artifact, when available                        |
-| `proofObservation`        | Selected AWS execution effect or source-analysis conclusion for a matched finding      |
-| `providerSeverity`        | Provider's severity, when returned. Continuum reports the severity of the issue.       |
-| `resultScope`             | `finding` or `issue`, indicating the scope of the verdict                              |
-| `issueFindingCount`       | Number of distinct findings in the associated issue, when known                        |
-| `joinedValidatedIssue`    | Issue-scoped proof predates this finding's submission                                  |
-| `reasons`                 | Entries with `basis` and `reason`                                                      |
-| `claimMatch`              | `on_target`, `on_target_escalated`, `different_flaw`, or `unknown`                     |
-| `issueUrl`                | Provider issue link, when available                                                    |
-| `freshness`               | Optional `evidenceCreatedAt` and `validatedAt` timestamps, `stale` flag, and `reasons` |
-| `unavailable`             | Per-finding failure explanation, when present                                          |
+## Patch and verify a saved occurrence
 
-`reachableFromAttacker`, when returned, is a structured boolean at `resultScope`;
-absence means unknown. Reason prose is never used to infer it.
+On the same host, CLI patch and verify-fix and workbench Generate and Verify
+can read a saved conclusion without contacting AWS. The workbench keeps its
+original submission binding when the CLI validates a subset. For CLI-only
+scans, the latest accepted submission for a single destination takes
+precedence. Conflicting destinations or ambiguous evidence can leave an
+occurrence without supplemental context.
 
-Reports contain conclusions, not raw proof bodies or validation console output.
-Custom SDK providers can omit `record`; their text assessment is still reported,
-but they then contribute no entry to JSON `items`.
+The model receives a limited set of status and scope fields from protected
+host state. It receives no AWS identifiers, provider free text or proof
+through this channel. The original finding and its remediation tests remain
+the criteria for the fix. Apply uses the recorded patch unchanged.
 
-### Reason bases and claim matching
+## AWS permissions
 
-A basis describes where a reason came from, not its severity or certainty:
-
-- `GRAPH`: deployment graph evidence, such as live reachability.
-- `CODE`: source or validation evidence about the code.
-- `FINDING`: stated in the finding or its supplied validation context, without
-  independent confirmation by the scorer in code or the deployment graph. It is
-  not a finding-specific proof or a deployment observation.
-- `INFERRED`: an inference rather than a directly established fact.
-
-Unknown future basis values are preserved as reported, not renamed to `INFERRED`.
-Missing bases use `INFERRED`; aggregate severity factors are also labelled
-`INFERRED` because the adapter does not receive one provenance basis for the
-combined severity.
-
-A provider can prove a related flaw without validating the submitted claim.
-Continuum labels that case “Not validated: Continuum proved a related flaw” and
-retains Codex severity (`claimMatch: different_flaw`). An `unknown` match also
-retains Codex severity. Matching requires an independent source analysis or
-an executed program with an observed effect. The adapter checks for related
-security terms and a citation to the exact repository path and line range
-of the first submitted location. An abbreviated path, an HTTP payload or a
-bundle verdict alone leaves the match unknown. Distinct flaws can share both
-a location and vocabulary. Consult the selected artifact for the details.
-
-The newest eligible scorer supplies reachability and other scoring evidence.
-Its signals must identify the issue by ID or ARN, with a single exploitability
-signal referencing the selected proof and verdict. Timestamps must establish
-submission, validation, scoring and issue update in that order. To apply the
-issue severity to the finding, the proof must match, the issue must have one
-member and the linked scorer must be the newest on the issue. The issue
-severity is reported separately in `providerSeverity`.
-
-A matched result with linked scoring and an explicit `COMPLETED` status can
-include a `proofObservation`. Its kind distinguishes an observed execution
-effect from a source analysis summary and inferred effect. Text fields are
-limited to 320 characters. The adapter reports the selected verdict for a
-bundle member. Source analyses and executed programs apply to the bundle as
-a whole, so its members have an unknown claim match and no observation.
-
-### Findings that share an issue
-
-Continuum can group several findings into one issue. If validation and scoring
-artifacts exist but the validation cannot be attributed to this finding alone,
-the adapter returns promptly with an **issue-level result**, not an individual
-validation. It says how many other findings share the issue and reports that
-issue's verdict, severity and structured reachability with its reason basis.
-Codex's finding severity is retained; Continuum's issue severity is separate.
-JSON records use `resultScope: "issue"`, `issueFindingCount`, and
-`claimMatch: "unknown"`. An issue with one member can also have an issue-scoped
-result if its artifact cannot be attributed individually.
-
-An explicit matching `perFindingResults` entry takes precedence, even in an older
-artifact; another finding's proof is never presented as this finding's proof.
-Issue-wide proof can be treated as finding-scoped only when the checked issue
-identity and sole contributor match this finding. For a conclusive verdict, the
-adapter waits for the scoring artifact within the shared deadline.
-
-If issue proof predates submission, the report says the finding joined an issue
-Continuum had already validated (`joinedValidatedIssue: true`). Validation,
-scoring and issue timestamps all participate in stale checking. Reachability
-comes only from the structured boolean value; missing or `UNKNOWN` stays unknown.
-
-### Inconclusive, unavailable or stale evidence
-
-Read `verdict` together with `terminalStatus`. For example, a run can end
-with `FAILED`, return `UNCERTAIN` for exploitability and still have a low
-issue score. Codex defers the assessment, preserves the original finding
-severity in `severityAfter` and reports the issue score in `providerSeverity`.
-A failed run or missing source also sets `unavailable`, so `validate --scan`
-exits with code 1.
-
-A partial run or an uncertain verdict also yields a deferred assessment.
-In plugin completion and `scan --validate --format json`, a deferred Continuum
-assessment sets `validation.status` to `incomplete`.
-`DISCARDED` and `NOT_PURSUED` yield `not_applicable` with the provider's
-explanation when available. All these outcomes have `claimMatch: unknown`.
-`validatedAt` requires a conclusive verdict and a timestamp from the
-validation artifact.
-
-Submission rejections, missing code locations, read errors, and polling deadlines
-produce unavailable assessments per finding. Other findings keep their results,
-and supplemental provider failures do not fail the sealed scan. Continuum records
-`verdict: UNAVAILABLE`, retained severity, and an `unavailable` explanation;
-the assessment disposition is `deferred`.
-
-Evidence older than the submission is marked stale in `freshness` and Markdown.
-Freshness describes the age of the evidence. Verifying that the deployed
-revision matches the scanned tree requires a separate revision comparison.
-
-## AWS Continuum requirements
-
-Install AWS CLI v2.38.5 or later outside the checkout. Configure credentials and
-the Region for the selected environment. Scan the Git repository root.
-Continuum must have a single Git repository as its only code source, matching
-a remote of that checkout. The adapter verifies the source using
-`GetEnvironment` and `GetIntegration` before sending any results.
-The caller also needs `CreateCodeFinding`, `GetCodeFinding`, `GetCodeIssue`,
+The host uses the AWS credential chain. Keep profiles and custom AWS models
+outside the checkout. Allow `GetEnvironment`, `GetIntegration`,
+`CreateCodeFinding`, `GetCodeFinding`, `GetCodeIssue`,
 `ListCodeIssueArtifacts` and `GetCodeIssueArtifact`. See
-[AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html).
-Calls use the existing protected host AWS launcher and credential chain, not the
-scan model. Keep profiles and custom AWS models outside the scanned checkout.
-
-The adapter sends reported code findings as sink-first OCSF 2002. It submits all
-items before polling up to four concurrently under one `wait_minutes` deadline,
-including throttling backoff. It follows created, duplicate, and merged issues
-and reads `VALIDATION_EVIDENCE` and scorer `EVIDENCE`. Recorded-shape
-tests are anonymised offline replays, not live results.
-
-Importing existing Continuum issues is a separate workflow; see the
-[Continuum import guide](scanner-imports/continuum.md).
+[AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html)
+and the [import guide](scanner-imports/continuum.md).

@@ -944,6 +944,11 @@ exec "$CODEX_SECURITY_TEST_SYSTEM_PYTHON" "$@"
   }
 }
 
+const remediationCriteria = Array.from(
+  { length: 40 },
+  (_, index) => `Regression ${index}. ${"Synthetic check. ".repeat(32)}`,
+);
+
 async function writeCompletedContract(
   scanDir: string,
   scanId: string,
@@ -959,6 +964,7 @@ async function writeCompletedContract(
         ruleId: "path-traversal.archive-extraction",
         identity: { anchor: "archive-entry-write-without-containment" },
         continuumAssessment: { provider: "continuum", verdict: "EXPLOITABLE" },
+        remediationTests: remediationCriteria,
         title: "Fixture finding",
         summary: "An attacker-controlled path reaches a filesystem write.",
         severity: { level: "high" },
@@ -2660,6 +2666,7 @@ try {
   const projection = path.join(initializedScanDir, "validation.json");
   const save = (record: object) =>
     writeJson(configFile + ".result", {
+      schemaVersion: 4,
       configuration,
       repositoryPath: results.targetPath,
       result: { provider: "continuum" },
@@ -2683,6 +2690,15 @@ try {
   assertNoError(baseline);
   const original = baseline.result.structuredContent.scan.findings[0];
   assert.equal(original.continuumAssessment, undefined);
+  assert.deepEqual(original.remediationTests, remediationCriteria);
+  const modelAssessment = {
+    itemId: occurrenceId,
+    provider: "continuum",
+    verdict: assessment.verdict,
+    terminalStatus: assessment.terminalStatus,
+    claimMatch: "unknown",
+    freshness: { stale: false },
+  };
   await save(assessment);
   const otherFinding = await stageContext(6301, {
     ...generationClaim,
@@ -2694,7 +2710,7 @@ try {
   assert.deepEqual(Object.keys(stage.result.structuredContent), ["scan"]);
   const scopedScan = stage.result.structuredContent.scan;
   assert.deepEqual(scopedScan.findings, [
-    { ...original, continuumAssessment: assessment },
+    { ...original, continuumAssessment: modelAssessment },
   ]);
   assert.deepEqual(Object.keys(scopedScan).sort(), [
     "findings",
@@ -2889,6 +2905,7 @@ try {
   const revised = {
     ...assessment,
     statusMessage: "Synthetic validation failed during setup.",
+    freshness: { stale: true, reasons: ["Synthetic stale evidence"] },
   };
   await save(revised);
   const refreshedStage = await stageContext(6322, {
@@ -2899,7 +2916,11 @@ try {
   assert.deepEqual(
     refreshedStage.result.structuredContent.scan.findings[0]
       .continuumAssessment,
-    revised,
+    { ...modelAssessment, freshness: { stale: true } },
+  );
+  assert.deepEqual(
+    refreshedStage.result.structuredContent.scan.findings[0].remediationTests,
+    remediationCriteria,
   );
   await rm(configFile);
   await rm(configFile + ".result");

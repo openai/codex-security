@@ -113,6 +113,7 @@ from workbench_setup import (
     require_scope,
     require_target,
     resolve_git_commit,
+    validation_selection,
 )
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
@@ -2415,6 +2416,11 @@ def assigned_remediation_context(
     ):
         # The next action may already have started since this write committed.
         return {"occurrenceId": occurrence_id, "requestId": request_id, "version": written_version}
+    if state.get("pendingAction") in ("generate", "verify"):
+        # List previews may abbreviate criteria. Assigned workers need every original test.
+        details = read_finding_details(occurrence["details_json"])
+        if "remediationTests" in details:
+            finding["remediationTests"] = details["remediationTests"]
     return {
         "scan": {
             "scanId": scan["id"],
@@ -2613,8 +2619,7 @@ def workspace_state(
         snapshot = json.loads(workspace["deep_scan_config_json"])
         if workspace["default_mode"] == "deep":
             result["deepScanConfig"] = snapshot
-        elif "validation" in snapshot:
-            result["validationProvider"] = snapshot["validation"]["provider"]
+        result.update(validation_selection(snapshot))
     selected_scan_id = result_scan_id or workspace["active_scan_id"]
     if selected_scan_id:
         if result_scan is None:
@@ -2893,6 +2898,7 @@ def scan_result(
         ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
+        "sealManifestDigest": scan["seal_manifest_digest"],
         "severityCounts": severity_counts,
         "handoffClaimedAt": scan["handoff_claimed_at"],
         "handoffClaimToken": scan["handoff_claim_token"],
@@ -3514,7 +3520,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             raise SystemExit(f"Unknown command: {args.command}")
         if args.command in {"start-scan", "start-prompt-only-scan", "start-headless-standard-scan"}:
             workspace = result.get("workspace", result)
-            if "validationProvider" in workspace:
+            if "validationProvider" in workspace and workspace["mode"] != "deep":
                 stored = require_workspace(connection, workspace["id"])
                 snapshot = json.loads(stored["deep_scan_config_json"])
                 result["validationProviderConfiguration"] = snapshot["validation"]

@@ -29,7 +29,7 @@ const finding: Record<string, unknown> & {
   occurrenceId: recorded.findings[recorded.issue.findingIds[0]].sourceFindingId,
 };
 
-/** Only the AWS transport is faked. Admission is synthetic, responses have recorded shape. */
+/** Admission and the external producer identity are synthetic. Issue evidence has the recorded shape. */
 function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
   return async (operation, args) => {
     const setup = registeredSource(operation, recorded.environmentId);
@@ -40,7 +40,11 @@ function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
         recorded.environmentId,
       );
     if (operation === "get-code-finding")
-      return { ...(Object.values(fixture.findings)[0] as object) };
+      return {
+        ...(Object.values(fixture.findings)[0] as object),
+        source: "Codex Security",
+        sourceFindingId: finding["occurrenceId"],
+      };
     if (operation === "get-code-issue") return structuredClone(fixture.issue);
     if (operation === "list-code-issue-artifacts")
       return structuredClone(fixture.artifactLists[args.at(-1)!]);
@@ -54,12 +58,18 @@ function provider(launcher = transport()) {
   return new ContinuumValidationProvider({
     environmentId: recorded.environmentId,
     launcher,
+    waitMinutes: 1,
     now: () => new Date(Date.parse("2026-11-06T15:20:00Z") + elapsed),
     delay: async (ms) => {
       elapsed += ms;
     },
   });
 }
+function validation(fixture: typeof recorded) {
+  const { artifactId } = fixture.artifactLists.VALIDATION_EVIDENCE.items[0];
+  return fixture.artifacts[artifactId].body.validationEvidence;
+}
+
 function reachability(fixture: typeof recorded) {
   const evidence = Object.values(fixture.artifacts).find(
     (a: any) => a.artifactType === "EVIDENCE",
@@ -69,24 +79,52 @@ function reachability(fixture: typeof recorded) {
   ).preconditions.reachableFromAttacker;
 }
 
-// The actual recording contains only a verdict. Give variants their own
-// independent observation when testing a successful proof-to-claim match.
+// The recorded issue has no finding-specific result. Supply independent
+// synthetic AWS PerFindingResult data to exercise the positive path.
+const step = {
+  step: 1,
+  claim: "PRIVATE_CLAIM: Evaluating supplied template text permits injection.",
+  source: "src/templates.py:23",
+};
+const httpProof = {
+  httpMethod: "POST",
+  targetUrl: "https://example.invalid/PRIVATE_PATH",
+  payload: "PRIVATE_PAYLOAD",
+  responseStatus: 200,
+  responseSnippet: "PRIVATE_RESPONSE",
+  effect: "BEHAVIOR_CHANGED",
+};
+
+function withObservation(
+  proof: Record<string, unknown> = {
+    reasoningChain: [step],
+    exploitArtifact: httpProof,
+  },
+) {
+  const fixture = structuredClone(recorded);
+  validation(fixture).perFindingResults = [
+    {
+      findingId: finding["findingId"],
+      exploitable: "EXPLOITABLE",
+      ...structuredClone(proof),
+    },
+  ];
+  return fixture;
+}
+
 const proofId = recorded.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
 const scoreId = recorded.artifactLists.EVIDENCE.items[0].artifactId;
 const summary = "Template injection in src/templates.py:23.";
 
-function withObservation() {
-  const fake = structuredClone(recorded);
+function scoringFixture() {
+  const fake = withObservation();
   const proof = fake.artifacts[proofId];
-  const validation = proof.body.validationEvidence;
-  validation.sourceAnalysis = { summary };
   const score = fake.artifacts[scoreId];
   const signal = score.body.prevalidationSignals.signals[0];
   return {
     fake,
     issue: fake.issue,
     proof,
-    validation,
     score,
     signal,
     exploitability: signal.exploitability,
@@ -94,8 +132,11 @@ function withObservation() {
 }
 
 describe("recorded shape, anonymised replay", () => {
-  test("reports the issue score and GRAPH exposure without inferring a match from an echoed caption", async () => {
+  test("keeps the recorded singleton's verdict, GRAPH exposure and severity on the issue", async () => {
     const result = await provider().validate(finding, context);
+    expect(result.report).toContain(
+      "Issue reachable from attacker (basis GRAPH)",
+    );
     expect(result.report).toContain("likelihood HIGH × impact HIGH");
     expect(result.report).toContain(
       "Deployment source identity is not compared",
@@ -106,6 +147,8 @@ describe("recorded shape, anonymised replay", () => {
       severityBefore: "high",
       severityAfter: "high",
       providerSeverity: "critical",
+      resultScope: "issue",
+      issueFindingCount: 1,
       claimMatch: "unknown",
       reachableFromAttacker: true,
       freshness: { stale: false },
@@ -143,21 +186,15 @@ describe("explicitly fake outcome variations", () => {
   ] as const)(
     "keeps %s distinct from verdict %s and retains the finding's severity",
     async (terminalStatus, exploitable, failed) => {
-      const fake = structuredClone(recorded);
-      const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
-      fake.artifacts[id].body.validationEvidence = {
-        terminalStatus,
-        exploitable,
-        sourceAnalysis: {
-          summary:
-            "In src/templates.py:23, evaluating supplied template text permits injection.",
-        },
-      };
+      const fake = withObservation();
+      validation(fake).terminalStatus = terminalStatus;
+      validation(fake).exploitable = exploitable;
+      validation(fake).perFindingResults[0].exploitable = exploitable;
       fake.issue.severity = "LOW";
       reachability(fake).value = false;
       const result = await provider(transport(fake)).validate(finding, context);
       expect(result.disposition).toBe("deferred");
-      expect(result.record?.proofObservation).toBeUndefined();
+      expect(result.record).not.toHaveProperty("proofObservation");
       expect(result.record).toMatchObject({
         terminalStatus,
         verdict: exploitable ?? "UNKNOWN",
@@ -186,13 +223,16 @@ describe("explicitly fake outcome variations", () => {
         {
           findingId: finding["findingId"],
           exploitable: "EXPLOITABLE",
-          reasoningChain: ["Template injection"],
+          reasoningChain: [step],
+          exploitArtifact: httpProof,
         },
       ],
     };
     fake.artifactLists.EVIDENCE.items = [];
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.unavailable).toContain("FAILED");
+    expect(result.report).toContain(id);
+    expect(result.report).toContain(fake.artifacts[id].createdAt);
     expect(result.record).toMatchObject({
       terminalStatus: "FAILED",
       verdict: "EXPLOITABLE",
@@ -214,8 +254,8 @@ describe("explicitly fake outcome variations", () => {
     expect(result.report).not.toContain("current at submission");
   });
 
-  test("lowers supplemental severity for a NOT_EXPOSED graph answer", async () => {
-    const { fake } = withObservation();
+  test("keeps issue exposure separate from finding severity", async () => {
+    const fake = withObservation();
     fake.issue.severity = "LOW";
     Object.assign(reachability(fake), {
       value: false,
@@ -223,57 +263,104 @@ describe("explicitly fake outcome variations", () => {
       reason: "NOT_EXPOSED: the observed deployment has no public ingress.",
     });
     const result = await provider(transport(fake)).validate(finding, context);
-    expect(result.record?.severityAfter).toBe("low");
+    expect(result.record).toMatchObject({
+      resultScope: "finding",
+      providerSeverity: "low",
+      severityAfter: "high",
+    });
     expect(result.report).toContain(
       "not reachable from attacker (basis GRAPH)",
     );
-    expect(result.report).toContain("lower priority");
+    expect(result.report).not.toContain("lower priority");
     expect(finding.severity.level).toBe("high");
   });
 
-  test("projects a bounded analysis with linked scoring identified by issue ARN", async () => {
-    const { fake, validation, score } = withObservation();
-    const fullSummary = summary + "\n\n" + "x".repeat(400);
-    validation.sourceAnalysis = {
-      summary: fullSummary,
-      inferredEffect: "DATA_LEAKED",
-    };
-    for (const signal of score.body.prevalidationSignals.signals)
-      signal.subjectRef = fake.issue.issueArn;
+  test.each(["issueId", "issueArn"])(
+    "applies linked scoring signals identified by %s",
+    async (key) => {
+      const fake = withObservation();
+      const score =
+        fake.artifacts[fake.artifactLists.EVIDENCE.items[0].artifactId];
+      for (const signal of score.body.prevalidationSignals.signals)
+        signal.subjectRef = fake.issue[key];
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        validationArtifactId:
+          fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId,
+        scoringArtifactId: fake.artifactLists.EVIDENCE.items[0].artifactId,
+        reachableFromAttacker: true,
+        resultScope: "finding",
+        freshness: { scoredAt: score.createdAt },
+        severityAfter: "high",
+        claimMatch: "unknown",
+      });
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    },
+  );
+
+  test.each([
+    "related caption",
+    "issue-level proof",
+    "conflicting entries",
+    "missing verdict",
+  ])("an issue's %s leaves the finding match unknown", async (scenario) => {
+    const fake = structuredClone(recorded);
+    if (scenario === "related caption") {
+      fake.issue.name = "Resource exhaustion and denial";
+      fake.issue.synopsis = "Resource exhaustion in src/templates.py";
+    } else if (scenario === "issue-level proof") {
+      validation(fake).executedProof = {
+        code: {
+          proofCode: [{ content: "Template injection in src/templates.py:23" }],
+        },
+        observedEffect: "BEHAVIOR_CHANGED",
+      };
+      validation(fake).reasoningChain = [step];
+      validation(fake).exploitArtifact = httpProof;
+    } else if (scenario === "conflicting entries") {
+      validation(fake).perFindingResults = [
+        { findingId: finding["findingId"], exploitable: "NOT_EXPLOITABLE" },
+        { findingId: finding["findingId"], exploitable: "UNCERTAIN" },
+      ];
+    } else {
+      validation(fake).perFindingResults = [
+        { findingId: finding["findingId"] },
+      ];
+    }
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record).toMatchObject({
-      validationArtifactId: proofId,
-      scoringArtifactId: scoreId,
-      reachableFromAttacker: true,
-      claimMatch: "on_target",
-      severityAfter: "critical",
-      proofObservation: {
-        kind: "source_analysis",
-        effect: "DATA_LEAKED",
-        summary: fullSummary.replace(/\s+/gu, " ").slice(0, 320),
-      },
+      verdict: "EXPLOITABLE",
+      resultScope: "issue",
+      claimMatch: "unknown",
+      severityAfter: "high",
+      providerSeverity: "critical",
     });
+    expect(result.record).not.toHaveProperty("proofObservation");
+    expect(result.report).not.toContain("findings false-positive");
   });
 
-  test("retains matching and scoring for a conclusive legacy verdict without run status", async () => {
-    const { fake, validation } = withObservation();
-    delete validation.terminalStatus;
+  test("reports issue scoring for a conclusive legacy verdict without run status", async () => {
+    const fake = withObservation();
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    delete fake.artifacts[id].body.validationEvidence.terminalStatus;
     const result = await provider(transport(fake)).validate(finding, context);
-    expect(result.record?.severityAfter).toBe("critical");
-    expect(result.record?.proofObservation).toBeUndefined();
+    expect(result.disposition).toBe("reportable");
+    expect(result.record).toMatchObject({
+      verdict: "EXPLOITABLE",
+      claimMatch: "unknown",
+      severityAfter: "high",
+    });
+    expect(result.record?.terminalStatus).toBeUndefined();
+    expect(result.record).not.toHaveProperty("proofObservation");
   });
 
   test.each([
-    [
-      "2026-11-06T16:40:18.536989+01:00",
-      "2026-11-06T10:42:53.583051-05:00",
-      "critical",
-    ],
-    ["invalid", "invalid", "high"],
+    ["2026-11-06T16:40:18.536989+01:00", "2026-11-06T10:42:53.583051-05:00"],
+    ["invalid", "invalid"],
   ])(
     "selects the newest dated proof and score with competing times %s and %s",
-    async (proofTime, scoreTime, severityAfter) => {
-      const { fake, proof, score } = withObservation();
+    async (proofTime, scoreTime) => {
+      const { fake, proof, score } = scoringFixture();
       for (const [artifact, createdAt] of [
         [proof, proofTime],
         [score, scoreTime],
@@ -289,14 +376,38 @@ describe("explicitly fake outcome variations", () => {
       expect(result.record).toMatchObject({
         validationArtifactId: proofId,
         scoringArtifactId: scoreId,
-        severityAfter,
-        freshness: { evidenceCreatedAt: "2026-11-06T15:40:18.536Z" },
+        severityAfter: "high",
+        freshness: { evidenceCreatedAt: "2026-11-06T15:40:18.536990+00:00" },
       });
     },
   );
 
+  test.each([true, false])(
+    "checks whether a concurrent issue score is also linked (%s)",
+    async (linked) => {
+      const { fake, score } = scoringFixture();
+      const concurrent = {
+        ...structuredClone(score),
+        artifactId: "concurrent",
+      };
+      if (!linked)
+        concurrent.body.prevalidationSignals.signals[0].exploitability.sourceValidationArtifactId =
+          "other";
+      fake.artifacts[concurrent.artifactId] = concurrent;
+      fake.artifactLists.EVIDENCE.items.push(concurrent);
+      const { record } = await provider(transport(fake)).validate(
+        finding,
+        context,
+      );
+      expect(record?.verdict).toBe("EXPLOITABLE");
+      expect(record?.scoringArtifactId).toBe(linked ? undefined : scoreId);
+      expect(record?.scoringPending).toBe(linked ? true : undefined);
+      expect(record?.reachableFromAttacker).toBe(linked ? undefined : true);
+    },
+  );
+
   test("uses the newest linked evidence while retaining severity if a newer issue score is unrelated", async () => {
-    const { fake, score } = withObservation();
+    const { fake, score } = scoringFixture();
     for (const [artifactId, createdAt] of [
       ["unrelated", fake.issue.updatedAt],
       ["older", "2026-11-06T15:41:00Z"],
@@ -318,37 +429,10 @@ describe("explicitly fake outcome variations", () => {
       scoringArtifactId: scoreId,
       severityAfter: "high",
       providerSeverity: "critical",
-      proofObservation: { kind: "source_analysis" },
       reachableFromAttacker: true,
     });
     expect(JSON.stringify(result)).not.toContain("UNRELATED_FACTORS");
   });
-
-  test.each([
-    [summary, "on_target"],
-    ["Template injection in tests/templates.py:23", "unknown"],
-    ["Loads a template in src/templates.py:23", "unknown"],
-  ] as const)(
-    "compares executed code independently of output: %s",
-    async (code, claimMatch) => {
-      const fake = structuredClone(recorded);
-      fake.artifacts[proofId].body.validationEvidence.executedProof = {
-        observedEffect: "BEHAVIOR_CHANGED",
-        code: { proofCode: [{ content: "PRIVATE_PROOF: " + code }] },
-        output: { consoleOutput: "PRIVATE_OUTPUT: " + summary },
-      };
-      const result = await provider(transport(fake)).validate(finding, context);
-      const expected =
-        claimMatch === "on_target"
-          ? { kind: "execution" as const, effect: "BEHAVIOR_CHANGED" }
-          : undefined;
-      expect(result.record?.claimMatch).toBe(claimMatch);
-      expect(result.record?.proofObservation).toEqual(expected);
-      expect(JSON.stringify(result)).not.toMatch(
-        /PRIVATE_PROOF|PRIVATE_OUTPUT/u,
-      );
-    },
-  );
 
   test.each([1, 2])(
     "keeps a bundled proof separate with %i current members",
@@ -380,9 +464,9 @@ describe("explicitly fake outcome variations", () => {
         claimMatch: "unknown",
         severityAfter: "high",
       });
-      expect(result.record?.proofObservation).toBeUndefined();
-      if (members === 2)
-        expect(result.record?.reachableFromAttacker).toBeUndefined();
+      expect(result.record).not.toHaveProperty("proofObservation");
+      expect(result.record?.reachableFromAttacker).toBe(true);
+      expect(result.report).toContain("Issue reachable");
     },
   );
 
@@ -409,7 +493,7 @@ describe("explicitly fake outcome variations", () => {
   ] as const)(
     "rejects scoring when %s.%s is %s",
     async (record, field, value) => {
-      const fixture = withObservation();
+      const fixture = scoringFixture();
       fixture[record][field] = value;
       reachability(fixture.fake).reason = "PRIVATE_PRECONDITION";
       fixture.issue.severityReasoning = "PRIVATE_FACTORS";
@@ -421,29 +505,13 @@ describe("explicitly fake outcome variations", () => {
         severityAfter: "high",
         providerSeverity: "critical",
       });
-      expect(result.record?.proofObservation).toBeUndefined();
+      expect(result.record).not.toHaveProperty("proofObservation");
       expect(result.record?.reachableFromAttacker).toBeUndefined();
       expect(JSON.stringify(result)).not.toMatch(
         /PRIVATE_PRECONDITION|PRIVATE_FACTORS|likelihood HIGH × impact HIGH/,
       );
     },
   );
-
-  test("a contradictory proof keeps Codex severity even in the same file", async () => {
-    const { fake, validation } = withObservation();
-    validation.sourceAnalysis.summary =
-      "Resource exhaustion and denial in src/templates.py:23";
-    const result = await provider(transport(fake)).validate(finding, context);
-    expect(result.record).toMatchObject({
-      claimMatch: "different_flaw",
-      severityAfter: "high",
-      providerSeverity: "critical",
-    });
-    expect(result.report).toContain(
-      "Not validated: Continuum proved a related flaw",
-    );
-    expect(result.report).not.toContain("findings false-positive");
-  });
 
   test.each([
     "No complete deployment reachability answer was returned.",
@@ -461,12 +529,32 @@ describe("explicitly fake outcome variations", () => {
     expect(result.report).not.toContain("lower priority");
   });
 
-  test("reports on-target not exploitable without changing the sealed finding", async () => {
-    const { fake, validation } = withObservation();
-    validation.exploitable = "NOT_EXPLOITABLE";
+  test("distinguishes a member verdict from the issue verdict referenced by the scorer", async () => {
+    const fake = structuredClone(recorded);
+    validation(fake).perFindingResults = [
+      {
+        findingId: finding["findingId"],
+        exploitable: "NOT_EXPLOITABLE",
+        exploitArtifact: { ...httpProof, effect: "NO_EFFECT" },
+        reasoningChain: [
+          {
+            step: 1,
+            claim: "Template injection was blocked by the sandbox.",
+            source: "src/templates.py:23",
+          },
+        ],
+      },
+    ];
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
-    expect(result.record?.claimMatch).toBe("on_target");
+    expect(result.record?.resultScope).toBe("finding");
+    expect(result.record?.claimMatch).toBe("unknown");
+    expect(result.record?.issueVerdict).toBe("EXPLOITABLE");
+    expect(result.record?.scoringArtifactId).toBe(scoreId);
+    expect(result.report).toContain("finding verdict: NOT_EXPLOITABLE");
+    expect(result.report).toContain("issue verdict: EXPLOITABLE");
+    expect(result.record?.severityAfter).toBe("high");
+    expect(result.record).not.toHaveProperty("proofObservation");
     expect(finding.severity.level).toBe("high");
   });
 
@@ -518,34 +606,140 @@ describe("explicitly fake outcome variations", () => {
     ]);
   });
 
-  test("waits for BOTH scorer and validation artifacts until the deadline", async () => {
-    let milliseconds = 0;
-    const p = new ContinuumValidationProvider({
-      environmentId: recorded.environmentId,
-      waitMinutes: 1,
-      launcher: async (op, args, signal) =>
-        op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE"
-          ? { items: [] }
-          : transport()(op, args, signal),
-      now: () => new Date(milliseconds),
-      delay: async (ms) => {
-        milliseconds += ms;
-      },
-    });
-    expect((await p.validate(finding, context)).unavailable).toContain(
-      "timed out",
-    );
-  });
+  test.each(["between polls", "first score", "same issue", "changed issue"])(
+    "a deadline retains the pending verdict only for its issue (%s)",
+    async (stage) => {
+      let milliseconds = 0;
+      const launch = transport();
+      const p = new ContinuumValidationProvider({
+        environmentId: recorded.environmentId,
+        waitMinutes: 1,
+        launcher: async (op, args, signal) => {
+          if (
+            op === "list-code-issue-artifacts" &&
+            args.at(-1) === "EVIDENCE"
+          ) {
+            if (stage !== "first score") return { items: [] };
+            milliseconds = 60_000;
+          }
+          const response = await launch(op, args, signal);
+          if (
+            op === "get-code-finding" &&
+            milliseconds &&
+            stage !== "between polls"
+          ) {
+            if (stage === "changed issue")
+              response["mergedIntoIssueId"] = "new";
+            milliseconds = 60_000;
+          }
+          return response;
+        },
+        now: () => new Date(milliseconds),
+        delay: async (ms) => {
+          milliseconds += ms;
+        },
+      });
+      const result = await p.validate(finding, context);
+      if (stage === "changed issue") {
+        expect(result.record?.verdict).toBe("UNAVAILABLE");
+        expect(result.record?.issueId).toBeUndefined();
+        return;
+      }
+      expect(result.unavailable).toContain("timed out");
+      expect(result.record).toMatchObject({
+        issueId: recorded.issueId,
+        verdict: "EXPLOITABLE",
+        terminalStatus: "COMPLETED",
+        validationArtifactId: proofId,
+        scoringPending: true,
+        disposition: "deferred",
+      });
+      expect(result.record?.scoringArtifactId).toBeUndefined();
+      expect(result.report).toContain("Retry");
+    },
+  );
 });
 
 test.each(["EVIDENCE", "VALIDATION_EVIDENCE"])(
   "rejects %s returned for another requested ID",
   async (kind) => {
-    const { fake } = withObservation();
+    const fake = withObservation();
     fake.artifacts[fake.artifactLists[kind].items[0].artifactId].artifactId =
       "other";
     const result = await provider(transport(fake)).validate(finding, context);
     expect(result.record?.verdict).toBe("UNAVAILABLE");
-    expect(result.record?.proofObservation).toBeUndefined();
+    expect(result.record).not.toHaveProperty("proofObservation");
   },
 );
+
+test("negated same-line evidence cannot authorize a regrade", async () => {
+  const fake = withObservation({
+    reasoningChain: [
+      {
+        ...step,
+        claim:
+          "Template injection is impossible because the template is static.",
+      },
+      {
+        ...step,
+        step: 2,
+        claim:
+          "The actual flaw is credential disclosure in the debug response.",
+      },
+    ],
+    exploitArtifact: { ...httpProof, effect: "DATA_LEAKED" },
+  });
+  const { record } = await provider(transport(fake)).validate(finding, context);
+  expect(record?.claimMatch).not.toStartWith("on_target");
+  expect(record?.severityAfter).toBe("high");
+  expect(record).not.toHaveProperty("proofObservation");
+});
+
+test.each(["FAILED", "PARTIAL", "COMPLETED"])(
+  "a newer %s issue run supersedes an earlier finding verdict",
+  async (terminalStatus) => {
+    const fake = withObservation();
+    const newer = {
+      ...fake.artifacts[proofId],
+      artifactId: "failed-newer",
+      createdAt: "2026-11-06T20:00:00Z",
+      body: {
+        validationEvidence: {
+          terminalStatus,
+          exploitable: "UNCERTAIN",
+        },
+      },
+    };
+    fake.artifacts[newer.artifactId] = newer;
+    fake.artifactLists.VALIDATION_EVIDENCE.items.unshift(newer);
+    fake.issue.updatedAt = "2026-11-06T20:01:00Z";
+    fake.issue.severity = "LOW";
+    const { record } = await provider(transport(fake)).validate(
+      finding,
+      context,
+    );
+    expect(record?.severityAfter).toBe("high");
+    expect(record?.terminalStatus).toBe(terminalStatus);
+    expect(record?.disposition).toBe("deferred");
+    expect(record?.resultScope).toBe("issue");
+    expect(record?.validationArtifactId).toBe(newer.artifactId);
+    expect(record?.scoringArtifactId).toBeUndefined();
+    expect(record).not.toHaveProperty("proofObservation");
+  },
+);
+
+test("keep polling when an unrelated score arrives first", async () => {
+  const ready = withObservation();
+  const waiting = scoringFixture();
+  waiting.exploitability.sourceValidationArtifactId = "older-proof";
+  waiting.score.artifactId = "older-score";
+  waiting.fake.artifacts["older-score"] = waiting.score;
+  waiting.fake.artifactLists.EVIDENCE.items[0].artifactId = "older-score";
+  let polls = 0;
+  const { record } = await provider((operation, args) => {
+    if (operation === "get-code-finding") polls++;
+    return transport(polls < 2 ? waiting.fake : ready)(operation, args);
+  }).validate(finding, context);
+  expect(polls).toBeGreaterThan(1);
+  expect(record?.scoringArtifactId).toBe(scoreId);
+});

@@ -1,10 +1,9 @@
 import { hash } from "node:crypto";
 import { lstat, readdir, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import { readRegularInputFile } from "./prompt-files.js";
-import { writeAtomicJson } from "./publication-state.js";
+import { withPublicationLock, writeAtomicJson } from "./publication-state.js";
 import {
   type ProcessEnvironment,
   canonicalizeModelSafePath,
@@ -20,24 +19,14 @@ import {
 } from "./runtime.js";
 import { nullIfMissingFile } from "./targets.js";
 
-/** The plugin binding predates the workbench state directory. */
-export function assessmentStateDirectories(environment: ProcessEnvironment) {
-  return {
-    plugin:
-      environment["CODEX_SECURITY_STATE_DIR"]?.trim() ||
-      join(homedir(), ".codex-security"),
-    cli: codexSecurityStateDirectory(environment),
-  };
-}
+// Earlier assessments could infer a match from issue membership or keywords.
+export const continuumAssessmentVersion = 4;
 
 type Entry = { environmentId: string; record: { itemId: string } };
 const digest = (value: string) => hash("sha256", value);
 
-function snapshotName(entry: Entry, raw: string) {
-  return (
-    [entry.record.itemId, entry.environmentId, raw].map(digest).join(".") +
-    ".json"
-  );
+function snapshotName(itemId: string, environmentId: string) {
+  return `${digest(itemId)}.${digest(environmentId)}.json`;
 }
 
 /** One store per operation. Most scans have no assessment; discover Git metadata
@@ -48,13 +37,18 @@ export async function assessmentStore(
   selectedRepository: string,
 ) {
   if (!/^[a-zA-Z0-9_-]+$/.test(scanId)) throw new Error("Invalid scan ID.");
-  const state = assessmentStateDirectories(environment);
+  const state = codexSecurityStateDirectory(environment);
   const repositoryPath = await realpath(selectedRepository);
   const key =
-    "cli-continuum-" + digest(JSON.stringify([repositoryPath, scanId]));
-  const cli = join(state.cli, key);
-  const plugin = resolve(state.plugin, "validation-providers");
-  const scope = { schemaVersion: 1, repositoryPath, scanId };
+    `cli-continuum-v${continuumAssessmentVersion}-` +
+    digest(JSON.stringify([repositoryPath, scanId]));
+  const cli = join(state, key);
+  const plugin = join(state, "validation-providers");
+  const scope = {
+    schemaVersion: continuumAssessmentVersion,
+    repositoryPath,
+    scanId,
+  };
   const windows = process.platform === "win32";
   let gitRoots: Promise<string[]> | undefined;
   let pluginDirectory: Promise<string> | undefined;
@@ -68,7 +62,7 @@ export async function assessmentStore(
     await validateDirectoryLinks(path, check);
     if (create && windows) {
       // Concurrent writers may populate the directory during setup.
-      const location = join(await canonicalizeModelSafePath(state.cli), key);
+      const location = join(await canonicalizeModelSafePath(state), key);
       check(location);
       await createWindowsOutputDirectory(location, true);
     }
@@ -112,21 +106,56 @@ export async function assessmentStore(
     }
   }
 
+  async function readEntries(dir: string, name: string, itemId: string) {
+    const { entries, checksum, ...saved } = JSON.parse(
+      await read(join(dir, name)),
+    );
+    if (
+      saved.schemaVersion !== scope.schemaVersion ||
+      saved.repositoryPath !== repositoryPath ||
+      saved.scanId !== scanId ||
+      !Array.isArray(entries) ||
+      !entries.length ||
+      digest(JSON.stringify(entries)) !== checksum ||
+      entries.some(
+        (entry: Entry) =>
+          entry.record.itemId !== itemId ||
+          snapshotName(itemId, entry.environmentId) !== name,
+      )
+    )
+      throw new Error("Invalid assessment snapshot.");
+    return entries as Entry[];
+  }
+
   return {
     readBinding: () => readPlugin(".json"),
     readPluginResult: () => readPlugin(".json.result"),
 
-    /** Independent immutable files allow concurrent partial batches and retries. */
+    /** Save in explicit validation order, including a return to an earlier
+     * submission. Concurrent partial selections must retain each other's results. */
     async writeSnapshots(
       environmentId: string,
       records: readonly { itemId: string }[],
     ) {
       const dir = await directory(cli, true);
-      for (const record of records) {
-        const value = { ...scope, environmentId, record };
-        const name = snapshotName(value, JSON.stringify(value));
-        await writeAtomicJson(join(dir, name), value);
-      }
+      await withPublicationLock(dir, "snapshots", undefined, async () => {
+        for (const record of records) {
+          const name = snapshotName(record.itemId, environmentId);
+          const previous = await readEntries(dir, name, record.itemId).catch(
+            nullIfMissingFile,
+          );
+          const raw = JSON.stringify(record);
+          const entries = (previous ?? []).filter(
+            (entry) => JSON.stringify(entry.record) !== raw,
+          );
+          entries.push({ environmentId, record });
+          await writeAtomicJson(join(dir, name), {
+            ...scope,
+            entries,
+            checksum: digest(JSON.stringify(entries)),
+          });
+        }
+      });
     },
 
     async readSnapshots(
@@ -151,20 +180,8 @@ export async function assessmentStore(
         const batch = records.get(itemId);
         if (batch === null) continue;
         try {
-          const raw = await read(join(dir, name));
-          const saved: Entry & typeof scope = JSON.parse(raw);
-          if (
-            saved.schemaVersion !== scope.schemaVersion ||
-            saved.repositoryPath !== repositoryPath ||
-            saved.scanId !== scanId ||
-            typeof saved.environmentId !== "string" ||
-            !saved.environmentId ||
-            saved.record.itemId !== itemId ||
-            snapshotName(saved, raw) !== name
-          )
-            throw new Error("Invalid assessment snapshot.");
-          if (batch) batch.push(saved);
-          else records.set(itemId, [saved]);
+          const entries = await readEntries(dir, name, itemId);
+          records.set(itemId, batch ? batch.concat(entries) : entries);
         } catch {
           // Corruption can conceal a conflict for this occurrence in either cache.
           records.set(itemId, null);

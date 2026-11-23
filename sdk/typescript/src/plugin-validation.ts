@@ -1,51 +1,20 @@
+import { validationSummary } from "./validation-provider-report.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
   supplementalValidationStatus,
+  retryableAssessment,
   unavailableAssessment,
   type ValidationProviderAssessment,
   type ValidationProviderConfiguration,
   type ValidationProviderContext,
-  type ValidationItemRecord,
 } from "./validation-provider.js";
 
 export { validationProviderFromConfiguration };
+export { codexSecurityStateDirectory } from "./runtime.js";
+export { continuumAssessmentVersion } from "./continuum-assessment-store.js";
 export { savedContinuumAssessments } from "./saved-continuum-assessment.js";
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };
-
-function itemConclusion(record: ValidationItemRecord): string {
-  const verdict = record.terminalStatus
-    ? `${record.verdict} (validation run ${record.terminalStatus})`
-    : record.verdict;
-  const detail = record.statusMessage ? ` ${record.statusMessage}` : "";
-  const severity =
-    record.severityBefore === record.severityAfter
-      ? `Codex severity ${record.severityBefore} retained`
-      : `${record.severityBefore} → ${record.severityAfter}`;
-  const bases = [...new Set(record.reasons.map((reason) => reason.basis))];
-  if (record.resultScope === "issue") {
-    const others =
-      record.issueFindingCount === undefined
-        ? "other findings"
-        : `${record.issueFindingCount - 1} other findings`;
-    const reachability = record.reasons.find((reason) =>
-      reason.reason.startsWith("Basis:"),
-    );
-    const exposure =
-      record.reachableFromAttacker === true
-        ? "reachable from attacker"
-        : record.reachableFromAttacker === false
-          ? "not reachable from attacker"
-          : "unknown";
-    return `Item ${record.itemId}: Codex severity ${record.severityBefore} retained. Continuum grouped this finding with ${others} into an issue. Issue-level verdict: ${verdict}; issue severity: ${record.providerSeverity ?? "not returned"}. Not individually validated. Issue reachability: ${exposure}.${reachability ? ` Context: ${reachability.reason}` : ""}${record.joinedValidatedIssue ? " This finding joined an issue Continuum had already validated." : ""}${bases.length ? ` Reason bases: ${bases.join(", ")}.` : ""}${record.freshness.stale ? " Evidence predates this submission." : ""}`;
-  }
-  return `Item ${record.itemId}: ${severity}. Verdict: ${verdict}.${detail}${record.providerSeverity ? ` Provider severity: ${record.providerSeverity}.` : ""}${bases.length ? ` Reason bases: ${bases.join(", ")}.` : ""} Claim match: ${record.claimMatch}.${record.freshness.stale ? " Evidence predates this submission." : ""}${record.unavailable && !record.terminalStatus ? ` Unavailable: ${record.unavailable}` : ""}`;
-}
-
-function retryable(item: ValidationProviderAssessment) {
-  // A terminal validation failure is distinct from a transport failure.
-  return Boolean(item.unavailable && !item.record?.terminalStatus);
-}
 
 export async function assessPluginFindings(
   configuration: ValidationProviderConfiguration,
@@ -57,7 +26,7 @@ export async function assessPluginFindings(
   const provider = resolveProvider(configuration);
   // Each assessment corresponds to the same position in the sealed findings.
   const pending = findings.filter(
-    (_, index) => !previous[index] || retryable(previous[index]),
+    (_, index) => !previous[index] || retryableAssessment(previous[index]),
   );
   const updates = provider.validateBatch
     ? await provider
@@ -77,23 +46,31 @@ export async function assessPluginFindings(
   let next = 0;
   const assessments = findings.map((_, index) => {
     const saved = previous[index];
-    if (saved && !retryable(saved)) return saved;
+    if (saved && !retryableAssessment(saved)) return saved;
     const update = updates[next++]!;
-    // A retry that fails before reaching AWS still has an accepted finding.
+    // A transport failure cannot undo acceptance, or erase a verdict
+    // waiting on a score.
     if (
-      saved?.record?.findingArn &&
-      !update.record?.findingArn &&
-      retryable(update)
+      update.unavailable &&
+      (!update.record || update.record.verdict === "UNAVAILABLE")
     ) {
-      update.record = { ...saved.record, unavailable: update.unavailable };
+      const prior = saved?.record;
+      if (
+        prior?.findingArn &&
+        (!update.record?.findingArn ||
+          (prior.scoringPending &&
+            prior.findingArn === update.record.findingArn &&
+            (!update.record.issueArn ||
+              prior.issueArn === update.record.issueArn) &&
+            prior.submittedAt === update.record.submittedAt))
+      ) {
+        update.record = { ...prior, unavailable: update.unavailable };
+        if (prior.scoringPending) update.report = validationSummary([update]);
+      }
     }
     return update;
   });
-  const summary = assessments
-    .map((assessment) =>
-      assessment.record ? itemConclusion(assessment.record) : assessment.report,
-    )
-    .join("\n");
+  const summary = validationSummary(assessments);
   const report = assessments
     .map(
       (assessment, index) =>
@@ -111,7 +88,7 @@ export async function assessPluginFindings(
   // Continuum persists requests and receipts before polling. It is safe to
   // retry transport failures while reusing each definitive provider result.
   const retry =
-    provider.name === "continuum" && assessments.some(retryable)
+    provider.name === "continuum" && assessments.some(retryableAssessment)
       ? assessments
       : null;
   const status = supplementalValidationStatus(provider, assessments);
