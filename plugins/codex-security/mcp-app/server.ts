@@ -2031,8 +2031,20 @@ async function startWithValidation(
   const configuration = started.validationProviderConfiguration as
     ValidationProviderConfiguration | undefined;
   if (configuration) {
-    const { scanId } = (started.scan ?? started.results) as { scanId: string };
-    await bindValidationProviderConfiguration(scanId, configuration, true);
+    const { scanId, targetPath } = (started.scan ?? started.results) as {
+      scanId: string;
+      targetPath: string;
+    };
+    const notice = await bindValidationProviderConfiguration(
+      scanId,
+      configuration,
+      started.startDisposition !== "joined",
+      projectConfigPath === undefined
+        ? undefined
+        : { file: projectConfigPath, target: targetPath, mode: "standard" },
+    );
+    if (notice)
+      ((started.workspace ?? started) as JsonObject).validationNotice = notice;
     delete started.validationProviderConfiguration;
   }
   return started;

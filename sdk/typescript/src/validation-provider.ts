@@ -23,6 +23,10 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
+  /** A successful finding lookup confirmed there is no current issue link. */
+  issueUnlinked?: true;
+  /** An unsuccessful upgrade could not resolve an invalid or duplicate saved admission. */
+  admissionConflict?: true;
   validationArtifactId?: string;
   scoringArtifactId?: string;
   /** True when a completed validation is still waiting for a linked issue score. */
@@ -55,7 +59,7 @@ export interface ValidationItemRecord {
     /** Creation time of the returned validation artifact, including inconclusive results. */
     evidenceCreatedAt?: string;
     validatedAt?: string;
-    /** Creation time of the linked issue score, if available. */
+    /** Linked score time. With scoringPending, this marks a tie between scores. */
     scoredAt?: string;
     stale: boolean;
     reasons: string[];

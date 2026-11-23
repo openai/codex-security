@@ -3,6 +3,7 @@ import { lstatSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { replaceArtifactText } from "./artifact-io.js";
 import { dirname, join } from "node:path";
+import { readSelectedProjectConfig } from "./deep-scan/project-config.js";
 import { loadSealedContract } from "./sealed-contract.js";
 import {
   codexSecurityStateDirectory,
@@ -26,6 +27,13 @@ export function validationCompletionText(
     ? `\nOn request, ${validation.status === "outdated" ? "refresh assessments" : "resume pending checks or retry unavailable findings"} with complete_codex_security_scan and this scan ID.`
     : "";
   return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}${retry}`;
+}
+
+const sharingConflict =
+  "Automatic Continuum validation is disabled for this scan because the project file selected on rejoin did not confirm the saved destination and permission to share local validation details. Finish the local scan, then review the findings and use codex-security validate --scan with your chosen project file. Earlier submissions cannot be recalled.";
+
+function sharingBlocked(path: string) {
+  return Boolean(lstatSync(path + ".blocked", { throwIfNoEntry: false }));
 }
 
 function configurationPath(scanId: string): string {
@@ -67,14 +75,46 @@ export async function withAssignedAssessment(
   return { ...context, scan: { ...scan, findings } };
 }
 
-/** Bind the host-owned setup snapshot without rereading a changed project file. */
+/** A rejoin may withdraw permission but cannot expand or redirect an existing grant. */
 export async function bindValidationProviderConfiguration(
   scanId: string,
   configuration: ValidationProviderConfiguration | undefined,
   created: boolean,
-): Promise<void> {
+  selection?: { file: string; target: string; mode: "standard" | "deep" },
+): Promise<string | undefined> {
   if (configuration === undefined) return;
   const path = configurationPath(scanId);
+  if (sharingBlocked(path)) return sharingConflict;
+  const saved = asRecord(configuration.continuum);
+  if (!created && selection && saved?.include_local_validation === true) {
+    let candidate: JsonObject | undefined;
+    let problem: unknown;
+    try {
+      const { input } = await readSelectedProjectConfig(
+        selection.file,
+        selection.target,
+        selection.mode,
+      );
+      const validation = input.scan?.validation;
+      if (validation?.provider === configuration.provider)
+        candidate = asRecord(validation.continuum);
+    } catch (error) {
+      problem = error;
+    }
+    if (
+      candidate?.include_local_validation !== true ||
+      candidate.environment_id !== saved.environment_id ||
+      candidate.aws_region !== saved.aws_region ||
+      candidate.aws_profile !== saved.aws_profile
+    ) {
+      // Persist the withdrawal for detached coordinators and later rejoins.
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await replaceArtifactText(path + ".blocked", sharingConflict);
+      return problem
+        ? sharingConflict + " " + String(problem)
+        : sharingConflict;
+    }
+  }
   // Registration may have committed before the original host wrote the binding.
   if (!created && lstatSync(path, { throwIfNoEntry: false })) return;
   validationProviderFromConfiguration(configuration);
@@ -150,9 +190,14 @@ async function completedScanValidation(
   if (typeof scanId !== "string") return;
   let configuration: ValidationProviderConfiguration;
   try {
-    configuration = JSON.parse(
-      await readFile(configurationPath(scanId), "utf8"),
-    );
+    const path = configurationPath(scanId);
+    if (sharingBlocked(path))
+      return {
+        status: "failed",
+        provider: "continuum",
+        message: sharingConflict,
+      };
+    configuration = JSON.parse(await readFile(path, "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     return { status: "failed", message: String(error) };
@@ -218,6 +263,8 @@ async function completedScanValidation(
         if (contract.manifest.scan.status !== "completed")
           throw new Error("Validation requires a completed scan.");
         if (!saved || saved.retry) {
+          if (sharingBlocked(configurationPath(scanId)))
+            throw new Error(sharingConflict);
           const { findings } = contract.findings;
           // Receipt-backed polls do not require a fresh upload or an unchanged checkout.
           const checkSubmissionTarget = async (signal?: AbortSignal) => {
@@ -227,6 +274,8 @@ async function completedScanValidation(
               undefined,
               { signal },
             );
+            if (sharingBlocked(configurationPath(scanId)))
+              throw new Error(sharingConflict);
             const registered = asRecord(current);
             if (
               registered?.scanId !== scanId ||

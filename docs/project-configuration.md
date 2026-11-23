@@ -98,7 +98,10 @@ scan start. These modes accept `scan.validation` and an optional
 error before a new scan starts. Inspection returns the
 provider name in `setup.validationProvider`. Saving setup or
 starting a conversational scan stores the selection before analysis begins.
-Rejoining the same scan uses the saved settings even if the file changes.
+Rejoining the same scan uses the saved settings. When local validation text
+sharing is enabled, an explicitly reselected file must confirm the original
+grant and destination. See [validation providers](validation-providers.md)
+for recovery after a conflict.
 
 ## Desktop and conversational Deep Scans
 

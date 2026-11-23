@@ -52,7 +52,14 @@ file in scan setup or explicitly request it.
 
 Review the destination in setup. The plugin saves the selection before the
 scan and submits the findings automatically after sealing. Rejoining keeps
-the saved settings. A standalone plugin source build has no AWS provider.
+the saved settings. If the scan opted into sending local validation text and
+you explicitly select a file on rejoin, the file must still opt in for the
+same provider, environment, Region and profile. A conflict or unreadable file
+disables automatic submission for this scan, including later completion by
+the original caller. A batch already uploading may finish. Finish
+locally and use `validate --scan` to submit the findings you review. Omit
+the file on rejoin to retain the original grant when recovering a scan.
+A standalone plugin source build has no AWS provider.
 
 ## Review a saved scan before sending
 
@@ -94,6 +101,9 @@ the exact identity, evidence, timestamps and disposition of each finding.
 | How old is the evidence?                  | See `validationArtifactId`, `scoringArtifactId` and `freshness`. `joinedValidatedIssue` indicates pre-existing issue validation. A recent timestamp does not establish the deployed revision.     |
 
 Codex checks issue membership and reads validation runs newest first.
+When applicable runs share the newest timestamp, Codex defers the verdict.
+Retry after a newer run appears. While a finding is being submitted or
+validated, older issue evidence alone does not end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from
@@ -137,9 +147,15 @@ Polling cannot restart a failed worker. Keep raw artifacts and logs private.
 On the same host, CLI patch and verify-fix and workbench Generate and Verify
 can read a saved conclusion without contacting AWS. The workbench keeps its
 original submission binding when the CLI validates a subset. For CLI-only
-scans, the latest accepted submission for a single destination takes
-precedence. Conflicting destinations or ambiguous evidence can leave an
-occurrence without supplemental context.
+scans, the most recently started validation with an accepted submission
+for a single destination takes precedence, even if an earlier request
+finishes later. Conflicting destinations or ambiguous evidence can leave
+an occurrence without supplemental context.
+
+If two linked scores share a timestamp, `scoringPending` and
+`freshness.scoredAt` identify the conflict. Patch and verify keep the
+verdict and withhold issue severity and reachability until a newer score
+resolves the conflict.
 
 The model receives a limited set of status and scope fields from protected
 host state. The live issue member count stays in the reports. A change in
@@ -152,7 +168,14 @@ After an upgrade, an `outdated` result needs an explicit refresh. Repeat
 plugin completion or rerun the saved CLI command on the original host.
 Older results can identify the accepted submission but cannot supply a
 remediation conclusion. Preserve the original state directory when moving
-between installations.
+between installations. If a failed refresh reports `admissionConflict`,
+remediation skips the occurrence. Restore provider access and repeat plugin
+completion to establish the submission identity.
+
+An `issueUnlinked` result means AWS returned the finding with no current
+issue. Earlier verdicts for that issue cannot supply remediation evidence.
+If CLI and plugin results disagree on the current link, refresh the entry
+point reporting no link before using the assessment for remediation.
 
 ## Inspect AWS evidence and patches
 

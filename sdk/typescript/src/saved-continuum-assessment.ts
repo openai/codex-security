@@ -34,6 +34,7 @@ const verdict = z.enum([
 const conclusion = admission.extend({
   issueId: id.optional(),
   issueArn: z.string().optional(),
+  issueUnlinked: z.literal(true).optional(),
   validationArtifactId: id.optional(),
   scoringArtifactId: id.optional(),
   scoringPending: z.boolean().optional(),
@@ -93,22 +94,22 @@ function scopeOf(record: Admission, destination?: Destination) {
   return scope;
 }
 
-/** Legacy records may preserve the original admission, never their conclusions. */
+/** A null admission is ambiguous. Only an absent or unsubmitted occurrence is unbound. */
 export function verifiedAdmissions(
   records: readonly unknown[],
   configuration: unknown,
 ) {
   const destination = binding.safeParse(configuration).data?.continuum;
-  const pins = new Map<string, Admission | undefined>();
+  const pins = new Map<string, Admission | null | undefined>();
   if (!destination) return pins;
   for (const raw of records) {
-    const itemId = (raw as { itemId?: unknown } | null)?.itemId;
-    if (typeof itemId !== "string") continue;
+    const item = raw as Record<string, unknown> | null;
+    const itemId = item?.["itemId"];
+    if (!item || typeof itemId !== "string") continue;
     const pin = admission.safeParse(raw).data;
-    pins.set(
-      itemId,
-      !pins.has(itemId) && pin && scopeOf(pin, destination) ? pin : undefined,
-    );
+    if (pins.has(itemId) || item["admissionConflict"]) pins.set(itemId, null);
+    else if (pin && scopeOf(pin, destination)) pins.set(itemId, pin);
+    else pins.set(itemId, unsubmitted(item) ? undefined : null);
   }
   return pins;
 }
@@ -119,6 +120,7 @@ function unsubmitted(item: Record<string, unknown>) {
     item["provider"] === "continuum" &&
     item["verdict"] === "UNAVAILABLE" &&
     ![
+      "admissionConflict",
       "findingId",
       "findingArn",
       "submittedAt",
@@ -152,6 +154,7 @@ function forRemediation(item: Conclusion) {
     findingArn,
     issueId,
     issueArn,
+    issueUnlinked,
     validationArtifactId,
     scoringArtifactId,
     submittedAt,
@@ -175,13 +178,14 @@ export async function saveCliContinuumAssessments(
   scanId: string,
   configuration: ValidationProviderConfiguration,
   records: readonly (ValidationItemRecord | undefined)[],
+  requestedAt = performance.timeOrigin + performance.now(),
 ) {
   if (configuration.provider.trim().toLowerCase() !== "continuum") return;
   const destination = binding.parse(configuration).continuum;
   const accepted = records.flatMap((raw) => project(raw, destination) ?? []);
   if (!accepted.length) return;
   const store = await assessmentStore(environment, scanId, repositoryPath);
-  await store.writeSnapshots(destination.environment_id, accepted);
+  await store.writeSnapshots(destination.environment_id, accepted, requestedAt);
   const active = await readAssessments(
     store,
     repositoryPath,
@@ -192,7 +196,7 @@ export async function saveCliContinuumAssessments(
     return !selected || !sameAdmission(selected, item);
   });
   if (skipped.length)
-    return `Patch and verify cannot use this Continuum submission for ${skipped.map((item) => item.itemId).join(", ")}. The workbench is bound to another submission or the saved assessments conflict. Check the original destination and submission before retrying. Local findings remain available.`;
+    return `Patch and verify cannot use this Continuum submission for ${skipped.map((item) => item.itemId).join(", ")}. A newer request, a different workbench submission, or conflicting assessments prevented selection. Check the original destination and submission before retrying. Local findings remain available.`;
 }
 
 function sameAdmission(a: Admission, b: Admission) {
@@ -218,7 +222,25 @@ function withoutScore(item: Conclusion) {
 
 /** Compare validation first. A later scorer can update the same verdict.
  * Conflicting scores alone do not invalidate an undisputed verdict. */
-function selectConclusion(records: Conclusion[]) {
+function selectConclusion(
+  records: Conclusion[],
+  plugin: Conclusion | undefined,
+) {
+  // A successful lookup without an issue supersedes earlier CLI verdicts.
+  // CLI polls and the workbench cache have no common ordering.
+  const unlink = records.findLastIndex((item) => item.issueUnlinked);
+  if (unlink >= 0) records = records.slice(unlink);
+  if (plugin?.issueUnlinked && records.some((item) => item.issueArn)) return;
+  if (
+    plugin?.issueArn &&
+    unlink >= 0 &&
+    !records.some(
+      (item) =>
+        item.issueArn === plugin.issueArn && item.verdict !== "UNAVAILABLE",
+    )
+  )
+    return;
+  if (plugin) records.unshift(plugin);
   const terminal = records.filter((item) => item.verdict !== "UNAVAILABLE");
   if (!terminal.length) return records.at(-1);
   // A failed artifact read can still confirm that the finding changed issues.
@@ -242,9 +264,12 @@ function selectConclusion(records: Conclusion[]) {
     latest.some((item) => !isDeepStrictEqual(validation, withoutScore(item)))
   )
     return;
+  // A pending result with a score time records a known conflict. A plain
+  // timeout supplies no score evidence and cannot invalidate a linked score.
   const scored = latest.filter(
     (item) =>
-      item.freshness.scoredAt && item.scoringArtifactId && !item.scoringPending,
+      item.freshness.scoredAt &&
+      (item.scoringArtifactId || item.scoringPending),
   );
   scored.sort((a, b) =>
     compareTimestamps(b.freshness.scoredAt!, a.freshness.scoredAt!),
@@ -252,6 +277,7 @@ function selectConclusion(records: Conclusion[]) {
   const best = scored[0];
   if (
     best &&
+    !best.scoringPending &&
     !scored.some(
       (item) =>
         compareTimestamps(
@@ -299,6 +325,7 @@ async function readAssessments(
     const entries = snapshots.get(occurrence);
     if ((group && group.length !== 1) || entries === null) continue;
     const item = group?.[0];
+    if (item?.["admissionConflict"]) continue;
     const plugin =
       !legacy && destination && item ? project(item, destination) : undefined;
     const pin = plugin ?? legacy?.get(occurrence);
@@ -307,7 +334,6 @@ async function readAssessments(
       ({ record, environmentId }) =>
         project(record, destination ?? { environment_id: environmentId }) ?? [],
     );
-    if (plugin) candidates.unshift(plugin);
     const selected = pin ?? candidates.at(-1);
     if (!selected) continue;
     // Only a CLI-only scan can switch admissions on explicit validation.
@@ -323,6 +349,7 @@ async function readAssessments(
       continue;
     const active = selectConclusion(
       candidates.filter((item) => sameAdmission(item, selected)),
+      plugin,
     );
     if (active) assessments.set(occurrence, active);
   }

@@ -9,7 +9,7 @@ import {
   readPatch,
 } from "./continuum-findings.js";
 import {
-  linkedIssueId,
+  linkedIssueIds,
   selectFindingValidationArtifact,
   singleFindingValidationIssue,
 } from "./continuum-validation-evidence.js";
@@ -255,7 +255,8 @@ export async function collectContinuumFinding(
       `Unexpected detail for Continuum finding ${findingId}.`,
     );
 
-  const linkedIssue = linkedIssueId(finding);
+  const links = linkedIssueIds(finding);
+  const linkedIssue = links[0];
   if (!linkedIssue) return finding;
   const issueId = continuumId.parse(linkedIssue);
   const list = await request(
@@ -318,7 +319,16 @@ export async function collectContinuumFinding(
         );
       continue;
     }
-    patches.push(readPatch({ ...patch, artifactId }));
+    patches.push(
+      readPatch({
+        ...patch,
+        artifactId,
+        issueArn:
+          links.length > 1
+            ? `${identity.scope}/code-issues/${issueId}`
+            : undefined,
+      }),
+    );
   }
   signal?.throwIfAborted();
   if (!patches.length && !evidenceArtifacts.length) return finding;

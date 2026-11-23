@@ -634,14 +634,18 @@ async function collectSelectedArtifacts(
   return { finding, issue, capture, aws };
 }
 
-test("merged findings collect and replay proof from the destination issue", async () => {
+test("merged findings collect and replay proof and patches from the destination issue", async () => {
   const artifact = {
     ...continuumValidationArtifact(),
     body: { validationEvidence: { exploitable: "EXPLOITABLE" } },
   };
+  const patch = patchArtifact("patch1", "+// example\n");
   const { issue, capture, aws } = await collectSelectedArtifacts(
     ["one"],
-    [artifact],
+    [
+      artifact,
+      { artifactId: patch.artifactId, artifactType: "PATCH", body: { patch } },
+    ],
     {
       createdIssueId: "original",
       duplicateOfIssueId: "duplicate",
@@ -650,11 +654,52 @@ test("merged findings collect and replay proof from the destination issue", asyn
   );
   for (const [args] of aws.mock.calls.slice(1))
     expect(args[args.indexOf("--issue-id") + 1]).toBe(issue.issueId);
-  const { findings } = normalizeContinuumFindings(capture, continuumRepository);
-  expect(findings[0]?.evidence.source_data).toMatchObject({
-    validation_issue: { issueArn: issue.issueArn },
-    evidence_artifacts: [artifact],
-  });
+  const patches = [{ ...patch, issueArn: issue.issueArn }];
+  expect(capture).toMatchObject({ patches });
+  for (const target of ["local", "cloud"] as const) {
+    const { findings } = normalizeContinuumFindings(
+      capture,
+      continuumRepository,
+      target,
+    );
+    expect(findings[0]?.evidence.source_data).toMatchObject({
+      validation_issue: { issueArn: issue.issueArn },
+      evidence_artifacts: [artifact],
+      patches,
+    });
+  }
+});
+
+test("requires recollection of ambiguous or misattributed saved patches after an issue merge", () => {
+  const { issue } = continuumIssueExport().issues[0]!;
+  const patch = patchArtifact("patch1", "+// example\n");
+  const finding = {
+    ...continuumDetail(),
+    createdIssueId: "original",
+    mergedIntoIssueId: issue.issueId,
+  };
+  for (const issueArn of [
+    undefined,
+    issue.issueArn.replace(/issue1$/u, "original"),
+    issue.issueArn.replace("/example/", "/elsewhere/"),
+  ]) {
+    const result = normalizeContinuumFindings(
+      { finding, patches: [{ ...patch, issueArn }] },
+      continuumRepository,
+    );
+    expect(result.findings).toHaveLength(0);
+    expect(result.excluded[0]?.reason).toMatch(/recollect/i);
+  }
+  // Repeated links to a single issue leave old captures unambiguous.
+  expect(
+    normalizeContinuumFindings(
+      {
+        finding: { ...finding, createdIssueId: issue.issueId },
+        patches: [patch],
+      },
+      continuumRepository,
+    ).findings[0]?.evidence.source_data?.["patches"],
+  ).toEqual([patch]);
 });
 
 test("a bundled validation artifact includes only the selected finding's proof and verdict alongside its patch", async () => {

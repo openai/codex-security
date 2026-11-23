@@ -1,12 +1,18 @@
 import { isRecord } from "./record.js";
 import { text } from "./scanner-import.js";
 
+/** Distinct issue links in destination-first order. */
+export function linkedIssueIds(finding: Record<string, unknown>) {
+  const ids = [
+    text(finding["mergedIntoIssueId"]),
+    text(finding["duplicateOfIssueId"]),
+    text(finding["createdIssueId"]),
+  ];
+  return [...new Set(ids.filter((id) => id !== null))];
+}
+
 export function linkedIssueId(finding: Record<string, unknown>) {
-  return (
-    text(finding["mergedIntoIssueId"]) ??
-    text(finding["duplicateOfIssueId"]) ??
-    text(finding["createdIssueId"])
-  );
+  return linkedIssueIds(finding)[0];
 }
 
 export function singleFindingValidationIssue(

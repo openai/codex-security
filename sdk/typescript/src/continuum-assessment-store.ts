@@ -22,7 +22,12 @@ import { nullIfMissingFile } from "./targets.js";
 // Earlier assessments could infer a match from issue membership or keywords.
 export const continuumAssessmentVersion = 4;
 
-type Entry = { environmentId: string; record: { itemId: string } };
+type Entry = {
+  environmentId: string;
+  record: { itemId: string };
+  /** Host time when validation began. Older entries preserve file order. */
+  requestedAt?: number;
+};
 const digest = (value: string) => hash("sha256", value);
 
 function snapshotName(itemId: string, environmentId: string) {
@@ -136,6 +141,7 @@ export async function assessmentStore(
     async writeSnapshots(
       environmentId: string,
       records: readonly { itemId: string }[],
+      requestedAt: number,
     ) {
       const dir = await directory(cli, true);
       await withPublicationLock(dir, "snapshots", undefined, async () => {
@@ -145,10 +151,24 @@ export async function assessmentStore(
             nullIfMissingFile,
           );
           const raw = JSON.stringify(record);
-          const entries = (previous ?? []).filter(
-            (entry) => JSON.stringify(entry.record) !== raw,
+          const entries = previous ?? [];
+          const duplicate = entries.findIndex(
+            (entry) => JSON.stringify(entry.record) === raw,
           );
-          entries.push({ environmentId, record });
+          if (duplicate >= 0) {
+            if ((entries[duplicate]!.requestedAt ?? 0) > requestedAt) continue;
+            entries.splice(duplicate, 1);
+          }
+          // A slower poll may return after a different submission was selected.
+          // Preserve both results, ordered by the start of each CLI request.
+          const next = entries.findIndex(
+            (entry) => (entry.requestedAt ?? 0) > requestedAt,
+          );
+          entries.splice(next < 0 ? entries.length : next, 0, {
+            environmentId,
+            record,
+            requestedAt,
+          });
           await writeAtomicJson(join(dir, name), {
             ...scope,
             entries,

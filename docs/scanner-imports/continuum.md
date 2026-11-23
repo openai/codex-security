@@ -223,7 +223,12 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 
 The collector verifies the finding ARN and reads artifacts under the issue
 linked by that finding. If AWS merged the finding into another issue, both
-the collector and the saved import use the destination issue.
+the collector and the saved import use the destination issue. When a finding
+lists different issue IDs, each collected patch records the destination
+`issueArn`. Import excludes the finding if a patch has a different ARN or
+lacks one in such a capture. Recollect the finding using the command above
+before publishing an older capture with ambiguous patches.
+
 When AWS supplies `perFindingResults`, the collector looks for
 exactly one entry matching the selected `findingId` with a verdict of `EXPLOITABLE`,
 `NOT_EXPLOITABLE` or `UNCERTAIN`. It retains that entry, including any flow
@@ -240,7 +245,9 @@ verdict and evidence for the group, [export the issue](#export-issues-for-one-re
 
 Without a per-finding breakdown, the collector can retain the issue artifact
 when the selected finding is the issue’s sole contributor. Its verdict describes
-the AWS issue. The capture records the issue ARN, issue ID and `findingIds` in
+the AWS issue. Historical issue evidence may include content from other findings
+that previously shared it. Review the evidence before publishing.
+The capture records the issue ARN, issue ID and `findingIds` in
 `validationIssue` so a saved import can verify the association. The imported
 record keeps this identity in `evidence.source_data.validation_issue`. If no
 artifacts match, the collector saves the native finding detail. If an AWS read

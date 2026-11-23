@@ -247,6 +247,7 @@ function saveCli(
   items: Omit<ValidationItemRecord, "severityBefore" | "severityAfter">[],
   environment = "env",
   state = root,
+  requestedAt?: number,
 ) {
   return saveCliContinuumAssessments(
     { CODEX_SECURITY_STATE_DIR: state },
@@ -258,6 +259,7 @@ function saveCli(
       severityAfter: "high",
       ...item,
     })),
+    requestedAt,
   );
 }
 
@@ -564,6 +566,92 @@ test("retains a terminal decline that has no issue across transport failures", a
   expect((await read()).get("occ_a")?.verdict).toBe("DISCARDED");
 });
 
+test("concurrent CLI validations select by request order across receipt switches", async () => {
+  await rm(path);
+  const other = {
+    ...completed,
+    findingId: "other",
+    findingArn: prefix + "/code-findings/other",
+    submittedAt: "2026-11-21T01:20:00Z",
+    verdict: "NOT_EXPLOITABLE",
+  };
+  // The later request finishes first.
+  await saveCli([other], "env", root, 2);
+  expect(await saveCli([completed], "env", root, 1)).toContain("occ_a");
+  expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
+  // A fresh request can switch back. Late duplicates cannot undo that choice.
+  await saveCli([completed], "env", root, 4);
+  await saveCli([other], "env", root, 3);
+  await saveCli([completed], "env", root, 1);
+  expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
+});
+
+test("a tied provider score withholds older cached scoring until a newer linked score", async () => {
+  const scored = {
+    ...completed,
+    providerSeverity: "critical",
+    reachableFromAttacker: true,
+    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
+  };
+  await save([scored]);
+  const tie = {
+    ...completed,
+    scoringArtifactId: undefined,
+    scoringPending: true,
+    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:01:00Z" },
+  };
+  await saveCli([tie]);
+  await saveCli([{ ...tie, freshness: completed.freshness }]);
+  const pending = (await read()).get("occ_a");
+  expect(pending?.verdict).toBe("EXPLOITABLE");
+  expect(pending?.scoringPending).toBe(true);
+  expect(pending?.issueSeverity).toBeUndefined();
+  expect(pending?.issueReachableFromAttacker).toBeUndefined();
+  await saveCli([
+    {
+      ...scored,
+      scoringArtifactId: "score-new",
+      providerSeverity: "low",
+      freshness: { ...scored.freshness, scoredAt: "2026-11-21T03:02:00Z" },
+    },
+  ]);
+  expect((await read()).get("occ_a")).toMatchObject({
+    verdict: completed.verdict,
+    issueSeverity: "low",
+    issueReachableFromAttacker: true,
+  });
+});
+
+test("a later unresolved validation tie suppresses the prior verdict until resolved", async () => {
+  await save([completed]);
+  await saveCli([
+    {
+      ...completed,
+      verdict: "UNKNOWN",
+      validationArtifactId: undefined,
+      scoringArtifactId: undefined,
+      terminalStatus: undefined,
+      freshness: {
+        stale: false,
+        reasons: [],
+        evidenceCreatedAt: "2026-11-21T03:00:00Z",
+      },
+    },
+  ]);
+  expect((await read()).get("occ_a")?.verdict).toBe("UNKNOWN");
+  await saveCli([
+    {
+      ...completed,
+      validationArtifactId: "later",
+      freshness: {
+        ...completed.freshness,
+        validatedAt: "2026-11-21T04:00:00Z",
+      },
+    },
+  ]);
+  expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
+});
+
 test("workbench bindings follow CODEX_HOME and explicit state overrides", async () => {
   const home = join(root, "home");
   const otherHome = join(root, "other");
@@ -650,6 +738,155 @@ test("a failed legacy refresh retains only the admission for a valid same-submis
   await save(result.records.items, { retry: result.retry });
   await saveCli([conclusion]);
   expect((await read()).get("occ_a")).toEqual(expected);
+});
+
+test.each(["duplicate", "invalid"])(
+  "failed refreshes of a %s legacy admission keep unrelated CLI evidence out until recovery",
+  async (kind) => {
+    const third = {
+      ...completed,
+      findingId: "third",
+      findingArn: prefix + "/code-findings/third",
+      verdict: "NOT_EXPLOITABLE",
+    };
+    const legacy =
+      kind === "duplicate"
+        ? [
+            completed,
+            {
+              ...completed,
+              findingId: "other",
+              findingArn: prefix + "/code-findings/other",
+            },
+          ]
+        : [{ ...completed, findingId: "wrong" }];
+    await save(legacy, { schemaVersion: 3 });
+    await saveCli([third]);
+    expect((await read()).size).toBe(0);
+    const provider = () => ({
+      name: "continuum",
+      version: "1",
+      async validate() {
+        throw Error("signed out");
+      },
+    });
+    const findings = [{ occurrenceId: "occ_a" }];
+    const context = { repositoryPath: repo };
+    let result = await assessPluginFindings(
+      config,
+      findings,
+      context,
+      provider,
+      [],
+      legacy,
+    );
+    for (const again of [false, true]) {
+      if (again)
+        result = await assessPluginFindings(
+          config,
+          findings,
+          context,
+          provider,
+          result.retry!,
+        );
+      expect(result.summary).toContain("ambiguous");
+      await save(result.records.items, { retry: result.retry });
+      expect((await read()).size).toBe(0);
+    }
+    const recovered = await assessPluginFindings(
+      config,
+      findings,
+      context,
+      () => ({
+        name: "continuum",
+        version: "1",
+        async validate() {
+          return {
+            disposition: "reportable",
+            report: "refreshed",
+            provenance: { provider: "continuum", providerVersion: "1" },
+            record: {
+              ...completed,
+              severityBefore: "high",
+              severityAfter: "high",
+            },
+          };
+        },
+      }),
+      result.retry!,
+    );
+    await save(recovered.records.items, { retry: recovered.retry });
+    expect((await read()).get("occ_a")).toEqual(expectedCompleted);
+  },
+);
+
+test("a confirmed unlink suppresses previous verdicts until the issue is established again", async () => {
+  const unlinked = {
+    itemId: completed.itemId,
+    provider: completed.provider,
+    findingId: completed.findingId,
+    findingArn: completed.findingArn,
+    submittedAt: completed.submittedAt,
+    claimMatch: completed.claimMatch,
+    reasons: [],
+    freshness: { stale: false, reasons: [] },
+    verdict: "UNAVAILABLE",
+    issueUnlinked: true as const,
+  };
+  await saveCli([completed]);
+  await save([unlinked]);
+  expect((await read()).size).toBe(0);
+  await rm(path + ".result");
+  await saveCli([unlinked]);
+  expect((await read()).get("occ_a")?.verdict).toBe("UNAVAILABLE");
+  await saveCli([
+    {
+      ...completed,
+      issueId: "next",
+      issueArn: prefix + "/code-issues/next",
+      verdict: "NOT_EXPLOITABLE",
+    },
+  ]);
+  expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
+});
+
+test("a retry waiting for the same score preserves the time of an earlier dispute", async () => {
+  const pending = {
+    disposition: "deferred" as const,
+    report: "Waiting for score",
+    provenance: { provider: "continuum", providerVersion: "1" },
+    record: {
+      ...completed,
+      severityBefore: "high",
+      severityAfter: "high",
+      scoringPending: true,
+      scoringArtifactId: undefined,
+      freshness: { ...completed.freshness },
+    },
+  };
+  const disputed = {
+    ...pending,
+    record: {
+      ...pending.record,
+      freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
+    },
+  };
+  const result = await assessPluginFindings(
+    config,
+    [{ occurrenceId: "occ_a" }],
+    { repositoryPath: repo },
+    () => ({
+      name: "continuum",
+      version: "1",
+      async validate() {
+        return pending;
+      },
+    }),
+    [disputed],
+  );
+  expect(result.records.items[0]?.freshness.scoredAt).toBe(
+    disputed.record.freshness.scoredAt,
+  );
 });
 
 test("a pending linked score survives transport failure unless the issue changed", async () => {

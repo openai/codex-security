@@ -132,6 +132,71 @@ function scoringFixture() {
   };
 }
 
+test.each(["member", "failed issue", "sibling"])(
+  "tied member and %s validations are independent of list order",
+  async (competitor) => {
+    const { fake, proof } = scoringFixture();
+    const other = structuredClone(proof);
+    other.artifactId = "concurrent";
+    const evidence = other.body.validationEvidence;
+    if (competitor === "failed issue") {
+      delete evidence.perFindingResults;
+      evidence.terminalStatus = "FAILED";
+    } else {
+      evidence.perFindingResults[0].exploitable = "NOT_EXPLOITABLE";
+      if (competitor === "sibling")
+        evidence.perFindingResults[0].findingId = "sibling";
+    }
+    fake.artifacts[other.artifactId] = other;
+    const items = fake.artifactLists.VALIDATION_EVIDENCE.items;
+    items.push(other);
+    for (let i = 0; i < 2; i++) {
+      items.reverse();
+      const { record, disposition, unavailable } = await provider(
+        transport(fake),
+      ).validate(finding, context);
+      if (competitor === "sibling") {
+        expect(record?.validationArtifactId).toBe(proofId);
+        expect(disposition).toBe("reportable");
+        continue;
+      }
+      expect(disposition).toBe("deferred");
+      expect(record?.verdict).toBe("UNKNOWN");
+      expect(record?.validationArtifactId).toBeUndefined();
+      expect(record?.scoringArtifactId).toBeUndefined();
+      expect(record?.freshness.evidenceCreatedAt).toBe(proof.createdAt);
+      expect(record?.freshness.validatedAt).toBeUndefined();
+      expect(unavailable).toContain(proofId);
+      expect(unavailable).toContain(other.artifactId);
+    }
+  },
+);
+
+test.each(["SUBMITTED", "VALIDATING"])(
+  "waits for current evidence when a %s finding joins an issue with historical proof",
+  async (status) => {
+    const { fake, proof } = scoringFixture();
+    const first = structuredClone(recorded);
+    first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
+    first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
+      first.artifacts[proofId].createdAt;
+    let polls = 0;
+    const { record } = await provider(async (operation, args) => {
+      if (operation === "get-code-finding") polls++;
+      const response = await transport(polls < 2 ? first : fake)(
+        operation,
+        args,
+      );
+      if (operation === "get-code-finding" && polls === 1)
+        response["status"] = status;
+      return response;
+    }).validate(finding, context);
+    expect(polls).toBe(2);
+    expect(record?.resultScope).toBe("finding");
+    expect(record?.freshness.evidenceCreatedAt).toBe(proof.createdAt);
+  },
+);
+
 describe("recorded shape, anonymised replay", () => {
   test("keeps the recorded singleton's verdict, GRAPH exposure and severity on the issue", async () => {
     const result = await provider().validate(finding, context);
@@ -402,6 +467,7 @@ describe("explicitly fake outcome variations", () => {
       );
       expect(record?.verdict).toBe("EXPLOITABLE");
       expect(record?.scoringArtifactId).toBe(linked ? undefined : scoreId);
+      expect(record?.freshness.scoredAt).toBe(score.createdAt);
       expect(record?.scoringPending).toBe(linked ? true : undefined);
       expect(record?.reachableFromAttacker).toBe(linked ? undefined : true);
     },
@@ -687,6 +753,70 @@ describe("explicitly fake outcome variations", () => {
       expect(result.report).toContain("Retry");
     },
   );
+});
+
+test("after issue detachment a timeout and a failed lookup keep only the receipt until a new issue is found", async () => {
+  const launch = transport();
+  let stage: "linked" | "detached" | "offline" | "merged" = "linked";
+  const p = provider(async (op, args) => {
+    if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+      return { items: [] };
+    if (op === "get-code-finding" && stage === "offline")
+      throw Error("Offline");
+    const response = await launch(op, args);
+    if (op === "get-code-finding" && stage === "detached") {
+      delete response["createdIssueId"];
+      delete response["duplicateOfIssueId"];
+      delete response["mergedIntoIssueId"];
+    }
+    if (stage === "merged") {
+      if (op === "get-code-finding") response["mergedIntoIssueId"] = "new";
+      if (op === "get-code-issue") {
+        response["issueId"] = "new";
+        response["issueArn"] = recorded.issue.issueArn.replace(
+          recorded.issueId,
+          "new",
+        );
+      }
+    }
+    return response;
+  });
+  const config = {
+    provider: "continuum",
+    continuum: { environment_id: recorded.environmentId },
+  };
+  let result = await assessPluginFindings(config, [finding], context, () => p);
+  const first = result.records.items[0]!;
+  expect(first.scoringPending).toBe(true);
+  for (const next of ["detached", "offline"] as const) {
+    stage = next;
+    result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+      result.retry!,
+    );
+    const item = result.records.items[0]!;
+    expect(item).toMatchObject({
+      findingArn: first.findingArn,
+      issueUnlinked: true,
+      verdict: "UNAVAILABLE",
+    });
+    expect(item.issueArn).toBeUndefined();
+    expect(item.validationArtifactId).toBeUndefined();
+    expect(result.summary).not.toContain("EXPLOITABLE");
+  }
+  stage = "merged";
+  result = await assessPluginFindings(
+    config,
+    [finding],
+    context,
+    () => p,
+    result.retry!,
+  );
+  expect(result.records.items[0]?.issueId).toBe("new");
+  expect(result.records.items[0]?.issueUnlinked).toBeUndefined();
 });
 
 test("a plugin retry drops the old verdict when reading the merge destination fails", async () => {

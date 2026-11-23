@@ -51,27 +51,47 @@ export async function assessPluginFindings(
     const saved = previous[index];
     if (saved && !retryableAssessment(saved)) return saved;
     const update = updates[next++]!;
-    // A transport failure cannot undo acceptance, or erase a verdict
-    // waiting on a score. Legacy attribution must never be reused.
+    const prior = saved?.record;
+    const current = update.record;
+    const sameAdmission =
+      prior?.findingArn &&
+      prior.findingArn === current?.findingArn &&
+      prior.submittedAt === current.submittedAt;
+    // Retain the timestamp of a disputed score if a retry still has no score.
     if (
-      update.unavailable &&
-      (!update.record || update.record.verdict === "UNAVAILABLE")
-    ) {
-      const prior = saved?.record;
+      sameAdmission &&
+      prior.issueArn === current.issueArn &&
+      prior.validationArtifactId === current.validationArtifactId &&
+      prior.scoringPending &&
+      current.scoringPending &&
+      prior.freshness.scoredAt &&
+      !current.freshness.scoredAt
+    )
+      current.freshness.scoredAt = prior.freshness.scoredAt;
+
+    // A failed lookup cannot undo acceptance or a confirmed change of issue.
+    // A successful lookup with no issue must drop the previous issue's verdict.
+    if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {
       if (
         prior?.findingArn &&
-        (!update.record?.findingArn ||
-          (prior.scoringPending &&
-            prior.findingArn === update.record.findingArn &&
-            (!update.record.issueArn ||
-              prior.issueArn === update.record.issueArn) &&
-            prior.submittedAt === update.record.submittedAt))
+        (!current?.findingArn ||
+          (sameAdmission &&
+            !current.issueUnlinked &&
+            (!current.issueArn || prior.issueArn === current.issueArn)))
       ) {
         update.record = { ...prior, unavailable: update.unavailable };
         if (prior.scoringPending) update.report = validationSummary([update]);
-      } else if (!update.record?.findingArn) {
-        const pin = pins.get(String(finding["occurrenceId"]));
-        if (pin)
+      } else if (!current?.findingArn) {
+        const itemId = String(finding["occurrenceId"]);
+        const pin = pins.get(itemId);
+        const conflict = prior?.admissionConflict || pin === null;
+        if (pin || conflict) {
+          if (conflict) {
+            const reason =
+              "Saved Continuum submission identity is ambiguous. Refresh this occurrence before using its assessment for remediation.";
+            update.unavailable += " " + reason;
+            update.report += "\n\n" + reason;
+          }
           update.record = {
             verdict: "UNAVAILABLE",
             claimMatch: "unknown",
@@ -79,10 +99,15 @@ export async function assessPluginFindings(
             severityAfter: "unknown",
             reasons: [],
             freshness: { stale: false, reasons: [] },
+            ...current,
+            ...(pin ?? {
+              provider: "continuum",
+              itemId,
+              admissionConflict: true as const,
+            }),
             unavailable: update.unavailable,
-            ...update.record,
-            ...pin,
           };
+        }
       }
     }
     return update;
