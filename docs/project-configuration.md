@@ -93,8 +93,9 @@ You can also omit the hint. The CLI validates the file using its bundled schema.
 ## Standard scans and change reviews in the plugin
 
 Pass an explicitly selected `projectConfigPath` to setup or a conversational
-scan start. These modes read `scan.validation` from the file. App setup accepts
-that setting and an optional `scan.mode: standard`. Inspection returns the
+scan start. These modes accept `scan.validation` and an optional
+`scan.mode: standard`. Other settings, including path exclusions, cause an
+error before a new scan starts. Inspection returns the
 provider name in `setup.validationProvider`. Saving setup or
 starting a conversational scan stores the selection before analysis begins.
 Rejoining the same scan uses the saved settings even if the file changes.
@@ -212,6 +213,12 @@ insert defaults; the adapter and AWS CLI apply them at runtime.
 | `console_base_url` | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
 
 Issue links use the Region from the AWS issue ARN.
+
+Unacknowledged requests
+retain the submitted text in private host state until a receipt is saved.
+The adapter rejects descriptions over 65,536 characters or documents over 256 KiB
+before saving the request. [AWS document limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_CreateCodeFinding.html)
+and [field limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_FindingVulnerability.html).
 
 `--validate=NAME` overrides the provider name, not its settings. Without a
 configured provider, bare `--validate` keeps the existing Codex validation.

@@ -76,6 +76,7 @@ test("validates only the requested saved occurrence and reports its receipt on f
       itemId: "occ_1",
       provider: "continuum",
       findingId: "accepted",
+      disposition: "deferred" as const,
       verdict: "UNAVAILABLE",
       severityBefore: "high",
       severityAfter: "high",
@@ -97,12 +98,15 @@ test("validates only the requested saved occurrence and reports its receipt on f
         },
       },
     ]);
+    const progress = { status: "failed" };
     const deps = dependencies({
       currentDirectory: root,
       onWorkbench: () => ({
         scan: {
           scanId: "scan",
           targetPath: root,
+          progress,
+          sealManifestDigest: "sha256:" + "a".repeat(64),
           findings: findings.map(({ occurrenceId, findingId }) => ({
             occurrenceId,
             findingId,
@@ -111,6 +115,15 @@ test("validates only the requested saved occurrence and reports its receipt on f
       }),
       readSavedFindings: async () => findings,
     });
+    // Stopped scans can have sealed, exportable partial findings.
+    const stopped = createCliTest(main);
+    expect(
+      await stopped.runCli(["validate", "--scan", "scan", "-c", config], deps),
+    ).toBe(2);
+    expect(stopped.stderr.text()).toContain("requires a completed scan");
+    expect(method).not.toHaveBeenCalled();
+
+    progress.status = "complete";
     const cli = createCliTest(main);
     expect(
       await cli.runCli(
@@ -129,7 +142,37 @@ test("validates only the requested saved occurrence and reports its receipt on f
       cli.stderr.text(),
     ).toBe(1);
     expect(method.mock.calls[0]?.[0]).toEqual([findings[1]!]);
-    expect(JSON.parse(cli.stdout.text())).toMatchObject({ items: [record] });
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({
+      status: "incomplete",
+      items: [record],
+    });
+    expect(cli.stderr.text()).toContain("environment-1");
+    expect(cli.stderr.text()).toContain("validate --scan scan -c");
+    expect(cli.stderr.text()).toContain("occ_1");
+    expect(cli.stderr.text()).not.toContain("occ_0");
+    method.mockResolvedValue([
+      {
+        record: {
+          ...record,
+          unavailable: undefined,
+          terminalStatus: "PARTIAL",
+          verdict: "EXPLOITABLE",
+        },
+        report: "Partial assessment",
+        disposition: "deferred",
+        provenance: { provider: "continuum", providerVersion: "1" },
+      },
+    ]);
+    const partial = createCliTest(main);
+    expect(
+      await partial.runCli(
+        ["validate", "--scan", "scan", "-c", config, "occ_1"],
+        deps,
+      ),
+    ).toBe(0);
+    expect(partial.stdout.text()).toContain("incomplete");
+    expect(partial.stdout.text()).toContain("occ_1 — deferred");
+    expect(partial.stderr.text()).not.toContain("To retry");
   } finally {
     method.mockRestore();
     await rm(root, { recursive: true, force: true });
@@ -194,9 +237,10 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       provider: "continuum",
       verdict: "EXPLOITABLE",
       severityBefore: "high",
-      severityAfter: "critical",
+      severityAfter: "high",
+      providerSeverity: "critical",
       reasons: [{ basis: "GRAPH" as const, reason: "Fake exposed deployment" }],
-      claimMatch: "on_target" as const,
+      claimMatch: "unknown" as const,
       issueUrl: "https://example.invalid/issue",
       freshness: { stale: false, reasons: [] },
     };
@@ -262,6 +306,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       expect(batch).toHaveBeenCalledTimes(1);
       expect(batch.mock.calls[0]?.[1]).toMatchObject({
         repositoryPath: repository,
+        checkSubmissionTarget: expect.any(Function),
       });
       expect(
         JSON.parse(await readFile(join(scanDir, "validation.json"), "utf8")),

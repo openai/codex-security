@@ -18,7 +18,7 @@ export interface DeepScanProjectConfig {
 export async function readSelectedProjectConfig(
   file: string,
   canonicalTarget: string,
-  setupMode?: "standard" | "deep",
+  setupMode: "standard" | "deep",
 ) {
   const spelling =
     process.platform !== "win32" && file.startsWith("~\\")
@@ -67,7 +67,6 @@ export async function readSelectedProjectConfig(
     };
     [key: string]: unknown;
   };
-  if (!setupMode) return { path, input };
   const supported =
     setupMode === "deep"
       ? ["mode", "max_time_minutes", "deep", "validation"]

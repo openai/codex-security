@@ -76,20 +76,18 @@ export type DeepScanOptions = z.infer<typeof DeepScanSettingsSchema>;
 
 const inputPath = z.string().min(1);
 
-export const ValidationProviderSettingsSchema = z
-  .object({
-    provider: z.string().min(1),
-    continuum: z
-      .strictObject({
-        environment_id: z.string().min(1),
-        aws_profile: z.string().min(1).optional(),
-        aws_region: z.string().min(1).optional(),
-        wait_minutes: z.number().positive().max(240).optional(),
-        console_base_url: z.string().min(1).optional(),
-      })
-      .optional(),
-  })
-  .catchall(z.json());
+export const ValidationProviderSettingsSchema = z.strictObject({
+  provider: z.string().min(1),
+  continuum: z
+    .strictObject({
+      environment_id: z.string().min(1),
+      aws_profile: z.string().min(1).optional(),
+      aws_region: z.string().min(1).optional(),
+      wait_minutes: z.number().positive().max(240).optional(),
+      console_base_url: z.string().min(1).optional(),
+    })
+    .optional(),
+});
 
 export type ValidationProviderSettings = z.infer<
   typeof ValidationProviderSettingsSchema

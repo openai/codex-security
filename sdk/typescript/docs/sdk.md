@@ -250,12 +250,15 @@ Public types are `ValidationProviderSettings`, `ValidationProvider`,
 `ValidationProviderContext`, `ValidationProviderAssessment`,
 `ValidationProvenance`, `ValidationItemRecord`, `ValidationBasis`,
 `ValidationResultScope`, and `ValidationClaimMatch`. Continuum records distinguish
-finding-scoped results from issue-scoped results with `resultScope`; issue-scoped
-results retain Codex severity and expose `issueFindingCount`. `ValidationBasis`
-includes `FINDING` (a statement from the finding, not independently checked by the
-scorer), and preserves unknown future values. The built-in `ContinuumValidationProvider` constructor
-accepts `ContinuumValidationOptions`. Provider authors implement `validate()`
-and optionally `validateBatch()`; external registry discovery is not supported.
+finding and issue verdicts with `resultScope`. Both retain Codex severity.
+`issueFindingCount` describes membership and `providerSeverity` is the
+issue's severity. A member verdict alone cannot establish that the exact
+flaw was reproduced. `claimMatch` stays `unknown`. The `FINDING` reason
+basis indicates a statement from the submitted finding.
+
+The built-in `ContinuumValidationProvider` constructor accepts
+`ContinuumValidationOptions`. Provider authors implement `validate()` and
+optionally `validateBatch()`. External registry discovery is unsupported.
 
 Continuum returns `record.terminalStatus` alongside `record.verdict` when AWS
 supplies a run status. Check `disposition` before using a result to prioritize
