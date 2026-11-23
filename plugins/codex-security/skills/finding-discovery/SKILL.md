@@ -19,6 +19,8 @@ Standard and Deep workers use their coordinator's self-contained prompts rather 
 
 For a diff, inspect the actual changed behavior, including deleted files at the baseline revision. Follow supporting code far enough to understand the affected boundary; expand to sibling callers when a changed shared control affects them. Do not broaden into an unrelated repository audit.
 
+For credentials in source, apply [Secrets Exposed In Source](../../references/core-scan.md#secrets-exposed-in-source), including the scan's reporting preferences, in each assignment. A diff that only removes a credential does not introduce that exposure.
+
 ## Evidence Criteria
 
 - Trace attacker-controlled input or a privileged operation through the closest relevant control to the sink and security impact. Explain why the control is absent, bypassable, or applied to the wrong value or boundary.

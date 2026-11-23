@@ -1053,7 +1053,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1], nodeSearchPath: process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, policyBase: process.env.CODEX_SECURITY_POLICY_BASE, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1], nodeSearchPath: process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1136,6 +1136,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           ...mcp.mcpServers["codex-security"].env_vars,
           ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
           "CODEX_SECURITY_REPOSITORY",
+          "CODEX_SECURITY_POLICY_BASE",
         ],
       });
       expect(
@@ -1166,6 +1167,10 @@ for await (const line of createInterface({ input: process.stdin })) {
                 root,
                 pluginRoot === second ? "second source" : "first source",
               ),
+              CODEX_SECURITY_POLICY_BASE: (pluginRoot === second
+                ? "b"
+                : "a"
+              ).repeat(40),
               SYNTHETIC_UNDECLARED_VALUE: "ambient fixture",
               ...(pluginRoot === undefined
                 ? {}
@@ -1229,6 +1234,9 @@ for await (const line of createInterface({ input: process.stdin })) {
           tools: { probe: { description: expect.any(String) } },
         });
         const details = server.tools.probe._meta.launch;
+        expect(details.policyBase).toBe(
+          (pluginRoot === second ? "b" : "a").repeat(40),
+        );
         expect(details.nodeSearchPath).toBe(
           declaresNodeSearchPath ? nodeSearchPath : undefined,
         );
@@ -2346,6 +2354,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           "CODEX_HOME",
           "CODEX_SECURITY_PLUGIN_ROOT",
           "CODEX_SECURITY_REPOSITORY",
+          "CODEX_SECURITY_POLICY_BASE",
         ],
       });
       expect(

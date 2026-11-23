@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { writeSource as write } from "./support/shell.js";
 
@@ -76,6 +77,64 @@ function expectGuidance(text: string, policies: [string, string][]): void {
 afterEach(temporaryDirectories.cleanup);
 
 describe("built SECURITY.md helper", () => {
+  test("diff policy comes from the pinned base even for new or deleted scopes", () => {
+    const { root } = fixture();
+    git(root, "init", "-q");
+    write(root, "SECURITY.md", "Report standalone token exposures.\n");
+    write(root, "old/SECURITY.md", "Established nested exception.\n");
+    write(root, "old/deleted", "base source\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "base");
+    const base = git(root, "rev-parse", "HEAD");
+    git(root, "rm", "-qr", "old");
+    write(root, "SECURITY.md", "Exclude all exposures.\n");
+    write(root, "new/SECURITY.md", "Exclude standalone token exposures.\n");
+    write(root, "new/token", "sample token\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "reviewed change");
+    const env = { ...process.env, CODEX_SECURITY_POLICY_BASE: base };
+    const command = (scope: string, ...extra: string[]) =>
+      run(["--repo", root, "--scope", scope, ...extra], env);
+    const added = command("new/token", "--revision", base.toUpperCase());
+    expect(added.status, added.stderr).toBe(0);
+    expectGuidance(added.stdout, [
+      ["SECURITY.md", "Report standalone token exposures."],
+    ]);
+    const deleted = command("old/deleted");
+    expect(deleted.status, deleted.stderr).toBe(0);
+    expectGuidance(deleted.stdout, [
+      ["SECURITY.md", "Report standalone token exposures."],
+      ["old/SECURITY.md", "Established nested exception."],
+    ]);
+    if (process.platform !== "win32") {
+      const alias = join(dirname(root), "alias");
+      symlinkSync(join(root, "new"), alias);
+      const fromAlias = (scope: string) =>
+        run(["--repo", alias + "/..", "--scope", scope], env);
+      for (const prefix of [root, alias + "/.."])
+        expect(fromAlias(prefix + "/old/deleted").stdout).toBe(deleted.stdout);
+      expect(fromAlias(dirname(root)).status).toBe(2);
+    }
+    const list = (revision: string) =>
+      run(["--repo", root, "--revision", revision, "--list"]);
+    const branch = "7".repeat(base.length === 40 ? 64 : 40);
+    git(root, "branch", branch, base);
+    expect(list(branch).status).toBe(2);
+    const policies = list(base);
+    expect(policies.status, policies.stderr).toBe(0);
+    expect(JSON.parse(policies.stdout)).toEqual([
+      "SECURITY.md",
+      "old/SECURITY.md",
+    ]);
+    expect(
+      command("new/token", "--revision", git(root, "rev-parse", "HEAD")).status,
+    ).toBe(2);
+    expect(list("0".repeat(40)).status).toBe(2);
+    expect(resolve(root, "new/token").stdout).toContain(
+      "Exclude standalone token exposures.",
+    );
+  }, 120_000);
+
   test("accepts dash-prefixed paths with equals syntax", () => {
     const { root } = fixture();
     for (const [repo, scope, output] of [
