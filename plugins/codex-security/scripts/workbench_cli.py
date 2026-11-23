@@ -200,6 +200,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     detail = get_scan.add_mutually_exclusive_group()
     detail.add_argument("--occurrence-id")
     detail.add_argument("--progress-only", action="store_true")
+    get_scan.add_argument("--after-cursor", type=non_negative_int)
     get_scan.add_argument("--check-target", action="store_true")
 
     add_command("rename-scan", "--scan-id", "--name")
@@ -446,6 +447,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     args = parser.parse_args()
+    if args.command == "get-scan" and args.after_cursor is not None and not args.progress_only:
+        parser.error("--after-cursor requires --progress-only with get-scan")
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")
         args.user_context_stdin = False

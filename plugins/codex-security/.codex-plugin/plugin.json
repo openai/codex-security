@@ -22,6 +22,7 @@
     "directDeepScanEngine": 1,
     "findingUpdates": 1,
     "hostedScopeInventory": 1,
+    "progressFindingUpdates": 1,
     "scopedInventoryReceipt": 1,
     "standardFindingUpdates": 1,
     "standardScanHandoff": 1,
