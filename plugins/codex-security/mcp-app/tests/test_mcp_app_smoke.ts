@@ -1,3 +1,4 @@
+import { continuumAssessmentVersion } from "../src/standalone-validation.ts";
 import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
@@ -2666,7 +2667,7 @@ try {
   const projection = path.join(initializedScanDir, "validation.json");
   const save = (record: object) =>
     writeJson(configFile + ".result", {
-      schemaVersion: 4,
+      schemaVersion: continuumAssessmentVersion,
       configuration,
       repositoryPath: results.targetPath,
       result: { provider: "continuum" },

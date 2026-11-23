@@ -144,7 +144,7 @@ export class WorkbenchDeepScanStore {
     threadId: string;
     modelThreadId?: string;
     scanRoot: string;
-  }): Promise<DeepScanRunState> {
+  }): Promise<DeepScanRunState & { validationNotice?: string }> {
     const userContext = input.userContext;
     const args = {
       threadId: input.threadId,
@@ -195,7 +195,7 @@ export class WorkbenchDeepScanStore {
       );
     }
     if (result.validationProviderConfiguration !== undefined) {
-      await bindValidationProviderConfiguration(
+      const validationNotice = await bindValidationProviderConfiguration(
         run.scanId,
         result.validationProviderConfiguration as ValidationProviderConfiguration,
         startDisposition === "created",
@@ -207,6 +207,7 @@ export class WorkbenchDeepScanStore {
               mode: "deep",
             },
       );
+      if (validationNotice) return { ...run, validationNotice };
     }
     return run;
   }

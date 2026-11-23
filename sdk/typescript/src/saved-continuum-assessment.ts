@@ -139,7 +139,13 @@ function project(raw: unknown, destination: Destination) {
   if (!item) return;
   const scope = scopeOf(item, destination);
   const issueArn = item.issueId && scope + "/code-issues/" + item.issueId;
-  if (scope && item.issueArn === issueArn) return item;
+  if (!scope || item.issueArn !== issueArn) return;
+  // An unconfirmed link is useful in reports but cannot establish membership.
+  if (item.issueUnlinked) {
+    delete item.issueId;
+    delete item.issueArn;
+  }
+  return item;
 }
 
 /** Provider identifiers and prose stay on the host. Scores describe the issue. */

@@ -776,10 +776,11 @@ describe("explicitly fake outcome variations", () => {
 });
 
 test.each(["finding", "issue"])(
-  "when the %s no longer links the pair, retries keep only the receipt until a new issue is found",
+  "after detachment on the %s, retries show observed issue IDs without restoring the verdict",
   async (side) => {
     const launch = transport();
-    let stage: "linked" | "detached" | "offline" | "merged" = "linked";
+    let stage: "linked" | "detached" | "offline" | "relink" | "merged" =
+      "linked";
     const p = provider(async (op, args) => {
       if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
         return { items: [] };
@@ -797,7 +798,9 @@ test.each(["finding", "issue"])(
         delete response["duplicateOfIssueId"];
         delete response["mergedIntoIssueId"];
       }
-      if (stage === "merged") {
+      if (stage === "relink" || stage === "merged") {
+        if (stage === "relink" && op === "get-code-issue")
+          throw Error("Offline");
         if (op === "get-code-finding") response["mergedIntoIssueId"] = "new";
         if (op === "get-code-issue") {
           response["issueId"] = "new";
@@ -821,7 +824,7 @@ test.each(["finding", "issue"])(
     );
     const first = result.records.items[0]!;
     expect(first.scoringPending).toBe(true);
-    for (const next of ["detached", "offline"] as const) {
+    for (const next of ["detached", "offline", "relink"] as const) {
       stage = next;
       result = await assessPluginFindings(
         config,
@@ -836,7 +839,17 @@ test.each(["finding", "issue"])(
         issueUnlinked: true,
         verdict: "UNAVAILABLE",
       });
-      expect(item.issueArn).toBeUndefined();
+      const id =
+        next === "relink"
+          ? "new"
+          : side === "issue"
+            ? first.issueId
+            : undefined;
+      expect(item.issueId).toBe(id);
+      if (id) {
+        expect(item.issueArn?.endsWith("/code-issues/" + id)).toBe(true);
+        expect(result.summary).toContain(id);
+      } else expect(item.issueArn).toBeUndefined();
       expect(item.validationArtifactId).toBeUndefined();
       expect(result.summary).not.toContain("EXPLOITABLE");
     }

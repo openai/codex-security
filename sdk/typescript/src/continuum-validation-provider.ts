@@ -704,12 +704,6 @@ export class ContinuumValidationProvider implements ValidationProvider {
       record.disposition = assessment.disposition;
       const submission = submissions[index];
       if (!submission) return { ...assessment, record };
-      // Until membership is confirmed again, a partial poll cannot undo an
-      // explicit detachment reported by either side of the relationship.
-      if (submission.issueUnlinked) {
-        delete submission.issueId;
-        delete submission.issueArn;
-      }
       const { submittedAt, ...ids } = submission;
       const issueUrl = continuumIssueUrl(this.#options, submission);
       const issue = issueUrl ? `[${ids.issueArn}](${issueUrl})` : ids.issueArn;
@@ -807,6 +801,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       });
     }
     if (!issueId) {
+      delete submission.issueId;
+      delete submission.issueArn;
       submission.issueUnlinked = true;
       return;
     }

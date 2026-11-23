@@ -23,7 +23,7 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
-  /** The finding has no issue or the issue no longer lists this finding. */
+  /** Membership was lost. Any reported issue ID is unconfirmed. */
   issueUnlinked?: true;
   /** An unsuccessful upgrade could not resolve an invalid or duplicate saved admission. */
   admissionConflict?: true;

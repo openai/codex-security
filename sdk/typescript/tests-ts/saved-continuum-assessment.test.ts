@@ -840,6 +840,8 @@ test("a confirmed unlink suppresses previous verdicts until the issue is establi
     reasons: [],
     freshness: { stale: false, reasons: [] },
     verdict: "UNAVAILABLE",
+    issueId: completed.issueId,
+    issueArn: completed.issueArn,
     issueUnlinked: true as const,
   };
   await saveCli([completed]);

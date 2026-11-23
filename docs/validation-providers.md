@@ -56,7 +56,9 @@ the saved settings. If the scan opted into sending local validation text and
 you explicitly select a file on rejoin, the file must still opt in for the
 same provider, environment, Region and profile. A conflict or unreadable file
 disables automatic submission for this scan, including later completion by
-the original caller. A batch already uploading may finish. Finish
+the original caller. For a running Deep Scan, the rejoin returns a notice
+immediately. Rejoin by scan ID alone to wait for the local result.
+A batch already uploading may finish. Finish
 locally and use `validate --scan` to submit the findings you review. Omit
 the file on rejoin to retain the original grant when recovering a scan.
 A standalone plugin source build has no AWS provider.
@@ -146,6 +148,10 @@ Correct the input and rescan instead of editing sealed findings.
 If local validation text pushed the document over the limit, submit the
 selected occurrence with `include_local_validation` disabled.
 
+After a finding loses its issue membership, `issueUnlinked` stays true
+until validation can confirm the link again. An issue ID shown with that
+flag identifies the issue reported by the finding. Its evidence is withheld.
+
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.
 
@@ -183,11 +189,8 @@ between installations. If a failed refresh reports `admissionConflict`,
 remediation skips the occurrence. Restore provider access and repeat plugin
 completion to establish the submission identity.
 
-An `issueUnlinked` result means the finding has no issue or the linked
-issue no longer lists this finding. Earlier verdicts for that issue cannot
-supply remediation evidence.
-If CLI and plugin results disagree on the current link, refresh the entry
-point reporting no link before using the assessment for remediation.
+If CLI and plugin results disagree on issue membership, refresh the
+entry point reporting `issueUnlinked` before using its assessment for remediation.
 
 ## Inspect AWS evidence and patches
 
