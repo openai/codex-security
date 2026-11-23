@@ -1318,7 +1318,7 @@ def record_finding_decision(
     fixed_revision: str | None,
     timestamp: str,
 ) -> bool:
-    """Record a change to the current triage state and append its audit entry in the caller's transaction."""
+    """Update current triage and append changed decisions in the caller's transaction."""
     decision = (occurrence_id, status, close_reason, note, fixed_revision, timestamp)
     changed = connection.execute(
         """
@@ -1350,6 +1350,11 @@ def record_finding_decision(
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (str(uuid.uuid4()), *decision),
+        )
+    else:
+        connection.execute(
+            "UPDATE finding_triage SET updated_at = ? WHERE occurrence_id = ?",
+            (timestamp, occurrence_id),
         )
     return bool(changed.rowcount)
 

@@ -142,6 +142,7 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
         connection.executescript("""
+            DROP TRIGGER retain_finding_decision_revision;
             ALTER TABLE finding_triage DROP COLUMN fixed_revision;
             ALTER TABLE finding_decisions DROP COLUMN fixed_revision;
             DROP TABLE external_finding_publications;

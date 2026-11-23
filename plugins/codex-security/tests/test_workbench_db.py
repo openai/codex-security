@@ -1044,7 +1044,7 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
         db.execute("ALTER TABLE finding_decisions DROP COLUMN fixed_revision")
         db.execute("DELETE FROM schema_migrations WHERE version IN (80, 81)")
     migrated = close()
-    assert migrated == legacy
+    assert migrated == {**legacy, "updatedAt": migrated["updatedAt"]}
     for reason, revision, rationale, diagnostic in (
         (None, sha1, note, "already_fixed"),
         ("wont_fix", sha1, note, "already_fixed"),
@@ -1066,7 +1066,7 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
     assert bound["note"] == note
     for args in (("--fixed-revision", sha1, "--note", note), ("--note", note), ()):
         replay = close(*args)
-        assert replay == bound
+        assert replay == {**bound, "updatedAt": replay["updatedAt"]}
     rebound = close("--fixed-revision", sha256, "--note", note)
     assert rebound["fixedRevision"] == sha256
     unbound = close("--note", "Updated unbound rationale")
@@ -1415,7 +1415,7 @@ def test_verified_remediation_accepts_committed_fix_evidence(
     replayed = set_triage(state_dir, occurrence, "closed", "--close-reason", "already_fixed")[
         "scan"
     ]["findings"][0]["triage"]
-    assert replayed == closed
+    assert replayed == {**closed, "updatedAt": replayed["updatedAt"]}
     assert closed["fixedRevision"] == fixed_revision
     assert closed["note"] == note
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
