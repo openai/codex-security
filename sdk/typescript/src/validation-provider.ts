@@ -23,6 +23,8 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
+  /** Membership was lost. Any reported issue ID is unconfirmed. */
+  issueUnlinked?: true;
   validationArtifactId?: string;
   scoringArtifactId?: string;
   /** True when a completed validation is still waiting for a linked issue score. */

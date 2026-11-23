@@ -11,7 +11,7 @@ import {
 
 export { validationProviderFromConfiguration };
 export { codexSecurityStateDirectory } from "./runtime.js";
-export const continuumAssessmentVersion = 4;
+export const continuumAssessmentVersion = 6;
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };
 
@@ -47,21 +47,24 @@ export async function assessPluginFindings(
     const saved = previous[index];
     if (saved && !retryableAssessment(saved)) return saved;
     const update = updates[next++]!;
-    // A transport failure cannot undo acceptance, or erase a verdict
-    // waiting on a score.
-    if (
-      update.unavailable &&
-      (!update.record || update.record.verdict === "UNAVAILABLE")
-    ) {
-      const prior = saved?.record;
+    const prior = saved?.record;
+    const current = update.record;
+    const sameAdmission =
+      prior?.findingArn &&
+      prior.findingArn === current?.findingArn &&
+      prior.submittedAt === current.submittedAt;
+    // A failed lookup cannot undo acceptance or a confirmed change of issue.
+    // A successful lookup with no issue must drop the previous issue's verdict.
+    if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {
+      // Keep a newly observed link visible without reviving detached evidence.
+      if (sameAdmission && prior.issueUnlinked && current.issueArn)
+        current.issueUnlinked = true;
       if (
         prior?.findingArn &&
-        (!update.record?.findingArn ||
-          (prior.scoringPending &&
-            prior.findingArn === update.record.findingArn &&
-            (!update.record.issueArn ||
-              prior.issueArn === update.record.issueArn) &&
-            prior.submittedAt === update.record.submittedAt))
+        (!current?.findingArn ||
+          (sameAdmission &&
+            !current.issueUnlinked &&
+            (!current.issueArn || prior.issueArn === current.issueArn)))
       ) {
         update.record = { ...prior, unavailable: update.unavailable };
         if (prior.scoringPending) update.report = validationSummary([update]);

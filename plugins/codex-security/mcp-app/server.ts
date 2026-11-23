@@ -1135,6 +1135,18 @@ export function createCodexSecurityServer(): McpServer {
               scanId: begun.scanId,
             });
           }
+          if (begun.validationNotice && projectConfigPath !== undefined) {
+            const instructions = `The local Deep Scan continues. Call start_codex_security_deep_scan with only scanId ${begun.scanId} to await the result.`;
+            return scanActionResult(
+              {
+                scanId: begun.scanId,
+                validationNotice: begun.validationNotice,
+                instructions,
+              },
+              begun.validationNotice + "\n" + instructions,
+              begun.scanId,
+            );
+          }
           const terminal = await coordinator.wait(abortSignalFromExtra(extra));
           result = preparation.completion.result
             ? await preparation.completion.result

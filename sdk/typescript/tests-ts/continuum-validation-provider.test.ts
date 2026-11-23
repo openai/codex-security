@@ -539,7 +539,8 @@ describe("Continuum validation provider", () => {
     }).validate(finding, context);
     expect(result.record?.scoringArtifactId).toBeUndefined();
     expect(result.record?.reachableFromAttacker).toBeUndefined();
-    expect(result.disposition).toBe("reportable");
+    expect(result.disposition).toBe("deferred");
+    expect(result.record?.scoringPending).toBe(true);
   });
 
   test.each(["another sole finding", "wrong issue ARN"])(

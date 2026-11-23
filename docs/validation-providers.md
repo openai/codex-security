@@ -56,7 +56,9 @@ the saved settings. If the scan opted into sending local validation text and
 you explicitly select a file on rejoin, the file must still opt in for the
 same provider, environment, Region and profile. A conflict or unreadable file
 disables automatic submission for this scan, including later completion by
-the original caller. A batch already uploading may finish. Finish
+the original caller. For a running Deep Scan, the rejoin returns a notice
+immediately. Rejoin by scan ID alone to wait for the local result.
+A batch already uploading may finish. Finish
 locally and use `validate --scan` to submit the findings you review. Omit
 the file on rejoin to retain the original grant when recovering a scan.
 A standalone plugin source build has no AWS provider.
@@ -103,14 +105,16 @@ the exact identity, evidence, timestamps and disposition of each finding.
 Codex checks issue membership and reads validation runs newest first.
 When applicable runs share the newest timestamp, Codex defers the verdict.
 Retry after a newer run appears. While a finding is being submitted or
-validated, older issue evidence alone does not end polling.
+validated, only current evidence specific to that finding can end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from
 submitted context. `GRAPH`, `CODE` and `INFERRED` distinguish deployment
 evidence, source evidence and inference.
-Issue reachability requires a single score linked to the selected validation
-artifact and issue verdict. Missing or ambiguous scoring stays unknown.
+Issue reachability uses the newest score linked to the selected validation
+artifact and issue verdict. If a current verdict has no unambiguous
+linked score, the verdict remains visible and `scoringPending` is true.
+Retry the incomplete assessment to refresh its score.
 
 ## Resume without starting a new scan
 
@@ -136,6 +140,10 @@ item. No upload was attempted for that item. Completion skips it on retry.
 Correct the input and rescan instead of editing sealed findings.
 If local validation text pushed the document over the limit, submit the
 selected occurrence with `include_local_validation` disabled.
+
+After a finding loses its issue membership, `issueUnlinked` stays true
+until validation can confirm the link again. An issue ID shown with that
+flag identifies the issue reported by the finding. Its evidence is withheld.
 
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.
