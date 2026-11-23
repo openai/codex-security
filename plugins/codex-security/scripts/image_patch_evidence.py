@@ -96,7 +96,7 @@ def database_identity(scan):
     return {
         "built": required_text(status["built"], "Grype DB built"),
         "schemaVersion": required_text(status["schemaVersion"], "Grype DB schemaVersion"),
-        "from": status["from"],
+        "from": status.get("from"),
         "providers": db["providers"],
     }
 
@@ -107,6 +107,12 @@ def reported_fixes(match):
     if not isinstance(versions, list):
         raise ValueError("Expected a list of reported fixed versions")
     return {required_text(v, "fixed version") for v in versions}
+
+
+def comparable_versions(versions, package_type):
+    if package_type == "rpm":
+        return {version.removeprefix("0:") for version in versions}
+    return set(versions)
 
 
 def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package, package_type):
@@ -133,13 +139,14 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
     if any(m["artifact"]["version"] not in before["installed_versions"] for m in active):
         raise ValueError("Selected match must be present in the baseline report and inventory")
     fixes = set.intersection(*(reported_fixes(match) for match in active))
+    installed = comparable_versions(after["installed_versions"], package_type)
     if after["selected_matches"]:
         outcome = "still_reported"
     elif (
-        after["installed_versions"]
+        installed
         and len(before_distros | after_distros) <= 1
-        and set(after["installed_versions"]) <= fixes
-        and before["installed_versions"] != after["installed_versions"]
+        and installed <= comparable_versions(fixes, package_type)
+        and comparable_versions(before["installed_versions"], package_type) != installed
         and before["manifest_digest"] != after["manifest_digest"]
         and not after["selected_ignored_matches"]
     ):
@@ -163,8 +170,11 @@ def scan_sbom(path):
     contents = path.read_bytes()
     sbom = json.loads(contents)
     scan = subprocess.run(
-        ["grype", "--file", "", "-o", "json"], input=contents, stdout=subprocess.PIPE, check=True
+        ["grype", "--file", "", "-o", "json"], input=contents, stdout=subprocess.PIPE, check=False
     )
+    # Grype exits with 2 when completed findings exceed the configured severity threshold.
+    if scan.returncode not in (0, 2):
+        scan.check_returncode()
     return (sbom, json.loads(scan.stdout)), hashlib.sha256(contents).hexdigest()
 
 

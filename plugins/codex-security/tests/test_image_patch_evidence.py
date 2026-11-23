@@ -1,11 +1,15 @@
 """Image patch evidence binds the selected advisory to a comparable pair of images."""
 
+import hashlib
+import json
+import subprocess
+import sys
 from copy import deepcopy
 
 import pytest
 from workbench_test_support import load_script
 
-compare = load_script("image_patch_evidence").compare
+image_evidence = load_script("image_patch_evidence")
 
 pytestmark = pytest.mark.cross_platform
 
@@ -59,7 +63,7 @@ def reports(package_type="apk"):
 
 
 def run(inputs, package_type="apk", advisory="test-advisory"):
-    return compare(*inputs, advisory, "example", package_type)
+    return image_evidence.compare(*inputs, advisory, "example", package_type)
 
 
 @pytest.mark.parametrize("advisory", ["test-advisory", "alias"])
@@ -152,3 +156,77 @@ def test_fixed_version_applies_to_its_distribution(package_type, distro, next_di
     items[2]["artifacts"].append(fixed)
     package.update(version="1", purl=f"pkg:{package_type}/vendor/example@1?distro={next_distro}")
     assert run(items, package_type)["scanner_evidence"] == "still_reported"
+
+
+@pytest.mark.parametrize("status", [0, 2, 1, 3])
+def test_scan_preserves_completed_reports_and_scanner_failures(
+    tmp_path, monkeypatch, capfd, status
+):
+    contents = b'{ "artifacts": [] }\n'
+    path = tmp_path / "image.syft.json"
+    path.write_bytes(contents)
+    report = {"matches": []}
+    scanner = """
+import json
+import sys
+
+assert sys.stdin.buffer.read() == b'{ "artifacts": [] }\\n'
+print(json.dumps({"matches": []}))
+print("synthetic scanner diagnostic", file=sys.stderr)
+sys.exit(int(sys.argv[1]))
+"""
+    run_process = subprocess.run
+
+    def scan(args, **kwargs):
+        return run_process([sys.executable, "-c", scanner, str(status)], **kwargs)
+
+    monkeypatch.setattr(image_evidence.subprocess, "run", scan)
+    if status in (0, 2):
+        evidence, digest = image_evidence.scan_sbom(path)
+        assert evidence == (json.loads(contents), report)
+        assert digest == hashlib.sha256(contents).hexdigest()
+    else:
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            image_evidence.scan_sbom(path)
+        assert error.value.returncode == status
+    assert capfd.readouterr().err == "synthetic scanner diagnostic\n"
+
+
+@pytest.mark.parametrize(
+    ("package_type", "installed", "fixed", "outcome"),
+    [
+        ("rpm", "1.2-3.el9", "0:1.2-3.el9", "reported_fix_present"),
+        ("rpm", "0:1.2-3.el9", "1.2-3.el9", "reported_fix_present"),
+        ("rpm", "1:1.2-3.el9", "0:1.2-3.el9", "inconclusive"),
+        ("rpm", "1.2-3.el9", "1:1.2-3.el9", "inconclusive"),
+        ("apk", "1.2-r3", "0:1.2-r3", "inconclusive"),
+        ("deb", "1.2-3", "0:1.2-3", "inconclusive"),
+    ],
+)
+def test_zero_rpm_epoch_is_equivalent(package_type, installed, fixed, outcome):
+    items = reports(package_type)
+    items[1]["matches"][0]["vulnerability"]["fix"]["versions"] = [fixed]
+    after = items[2]["artifacts"][0]
+    after.update(version=installed, purl=f"pkg:{package_type}/vendor/example@{installed}")
+    result = run(items, package_type)
+    assert result["scanner_evidence"] == outcome
+    assert result["reported_fixed_versions"] == [fixed]
+    assert result["after"]["installed_versions"] == [installed]
+    items[3]["matches"] = [{**items[1]["matches"][0], "artifact": after}]
+    assert run(items, package_type)["scanner_evidence"] == "still_reported"
+
+
+def test_zero_rpm_epoch_does_not_make_a_version_change():
+    items = reports("rpm")
+    items[1]["matches"][0]["vulnerability"]["fix"]["versions"] = ["0:1"]
+    items[2]["artifacts"][0].update(version="0:1", purl="pkg:rpm/vendor/example@0:1")
+    assert run(items, "rpm")["scanner_evidence"] == "inconclusive"
+
+
+def test_database_origin_is_compared_when_present():
+    items = reports()
+    del items[1]["descriptor"]["db"]["status"]["from"]
+    with pytest.raises(ValueError, match="Incomparable Grype databases"):
+        run(items)
+    del items[3]["descriptor"]["db"]["status"]["from"]
+    assert run(items)["scanner_evidence"] == "reported_fix_present"
