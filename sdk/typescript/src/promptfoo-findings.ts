@@ -20,6 +20,38 @@ function hasGraderError(grade: Record<string, unknown>) {
   );
 }
 
+function matchesProviderReference(reference: unknown, value: unknown) {
+  const provider = asRecord(value);
+  if (typeof reference !== "string" || !provider) return false;
+  // Older exports retain provider objects but omit their id() method.
+  return (
+    typeof provider["id"] !== "string" ||
+    reference === provider["id"] ||
+    reference === provider["label"]
+  );
+}
+
+function matchesDefaultProvider(original: unknown, evaluated: unknown) {
+  if (
+    isDeepStrictEqual(original, evaluated) ||
+    matchesProviderReference(original, evaluated)
+  )
+    return true;
+  const declared = asRecord(original);
+  const actual = asRecord(evaluated);
+  if (!declared || !actual || Object.hasOwn(declared, "id")) return false;
+  const expected = { ...declared };
+  for (const type of ["text", "embedding", "classification", "moderation"]) {
+    const entry = declared[type];
+    const options = asRecord(entry);
+    const reference =
+      options && Object.keys(options).length === 1 ? options["id"] : entry;
+    if (matchesProviderReference(reference, actual[type]))
+      expected[type] = actual[type];
+  }
+  return isDeepStrictEqual(expected, actual);
+}
+
 function matchesDefaultAssertion(
   value: unknown,
   declared: unknown,
@@ -31,18 +63,29 @@ function matchesDefaultAssertion(
   if (
     !original ||
     !evaluated ||
-    (original["type"] !== "llm-rubric" && original["type"] !== "not-llm-rubric")
+    !matchesDefaultProvider(original["provider"], evaluated["provider"])
   )
     return false;
-  // Grading fills rubric values while retaining the other fields.
-  const prompt = original["rubricPrompt"] || rubricPrompt;
-  const expectedValue =
-    original["value"] ||
-    (prompt && typeof prompt === "object" ? JSON.stringify(prompt) : prompt);
-  return isDeepStrictEqual(
-    { ...original, value: expectedValue },
-    { ...evaluated, value: evaluated["value"] },
-  );
+  const expected: Record<string, unknown> = {
+    ...original,
+    provider: evaluated["provider"],
+  };
+  const actual: Record<string, unknown> = {
+    ...evaluated,
+    provider: evaluated["provider"],
+  };
+  if (
+    original["type"] === "llm-rubric" ||
+    original["type"] === "not-llm-rubric"
+  ) {
+    // Grading also fills rubric values while retaining the other fields.
+    const prompt = original["rubricPrompt"] || rubricPrompt;
+    expected["value"] =
+      original["value"] ||
+      (prompt && typeof prompt === "object" ? JSON.stringify(prompt) : prompt);
+    actual["value"] = evaluated["value"];
+  }
+  return isDeepStrictEqual(expected, actual);
 }
 
 /** Each result ID identifies one observed probe in the native evaluation export. */

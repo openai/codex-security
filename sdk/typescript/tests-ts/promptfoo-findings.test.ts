@@ -371,6 +371,144 @@ test("keeps evaluated default rubrics separate from generated security rubrics",
   expect(setSelection.excluded.map((item) => item.position)).toEqual([1]);
 });
 
+test("keeps resolved default grading providers separate from generated assertions", async () => {
+  await using fixture = await checkout();
+  const security = {
+    type: "llm-rubric",
+    metric: "TenantBoundary",
+    value: "Only return this tenant's invoice.",
+  };
+  // These are JSON export shapes, not calls to the Promptfoo runtime.
+  const providers = [
+    [
+      "0.124.1",
+      "judge",
+      { modelName: "fixture-model", config: {}, label: "judge" },
+    ],
+    [
+      "0.124.1",
+      "openai:chat:fixture-model",
+      { modelName: "fixture-model", config: {}, label: "" },
+    ],
+    [
+      "0.125.1",
+      "judge",
+      { id: "openai:chat:fixture-model", label: "judge", config: {} },
+    ],
+  ] as const;
+  const observations = [];
+  for (const [version, reference, provider] of providers) {
+    const embeddingReference = "openai:embedding:fixture-model";
+    const embeddingProvider =
+      version === "0.124.1"
+        ? { modelName: "fixture-model", config: {}, label: "" }
+        : { id: embeddingReference, label: "", config: {} };
+    for (const grouped of [false, true]) {
+      const quality = {
+        type: "llm-rubric",
+        metric: "Brevity",
+        provider: reference,
+      };
+      const evaluatedQuality = { ...quality, provider, value: "Be brief." };
+      const relevance = {
+        type: "answer-relevance",
+        metric: "Relevance",
+        provider: {
+          text: reference,
+          embedding: { id: embeddingReference },
+          classification: { id: "inline", config: { fixture: true } },
+          moderation: "unresolved",
+        },
+      };
+      const evaluatedRelevance = {
+        ...relevance,
+        provider: {
+          ...relevance.provider,
+          text: provider,
+          embedding: embeddingProvider,
+        },
+      };
+      const defaultAssertion = grouped
+        ? { type: "assert-set", assert: [quality, relevance] }
+        : quality;
+      const evaluatedDefault = grouped
+        ? { type: "assert-set", assert: [evaluatedQuality, evaluatedRelevance] }
+        : evaluatedQuality;
+      const row = (id: string, qualityFailed: boolean, disabled = false) => {
+        const children = [
+          { ...failed, assertion: evaluatedQuality, pass: !qualityFailed },
+          { ...failed, assertion: evaluatedRelevance, pass: true },
+        ];
+        return {
+          ...leak,
+          id,
+          testCase: {
+            metadata: { pluginId: "file://./tenant-policy.yaml" },
+            assert: disabled ? [security] : [evaluatedDefault, security],
+            options: { disableDefaultAsserts: true, rubricPrompt: "Be brief." },
+          },
+          gradingResult: {
+            pass: false,
+            componentResults: [
+              ...(disabled
+                ? []
+                : grouped
+                  ? [
+                      { pass: !qualityFailed, componentResults: children },
+                      ...children,
+                    ]
+                  : [children[0]]),
+              { ...failed, assertion: security, pass: qualityFailed },
+            ],
+          },
+        };
+      };
+      const input = report([
+        row("quality", true),
+        row("security", false),
+        row("disabled", false, true),
+      ]);
+      await fixture.writeJson({
+        ...input,
+        metadata: { promptfooVersion: version },
+        config: {
+          ...input.config,
+          providers: [
+            {
+              id: "openai:chat:fixture-model",
+              label: reference === "judge" ? "judge" : "",
+            },
+            embeddingReference,
+          ],
+          defaultTest: {
+            assert: [defaultAssertion],
+            options: { disableDefaultAsserts: true, rubricPrompt: "Be brief." },
+          },
+        },
+      });
+      const selection = await readPromptfooFindings(fixture.file);
+      observations.push({
+        version,
+        reference,
+        grouped,
+        findings: selection.findings.map((item) => item.source_finding_id),
+        excluded: selection.excluded.map((item) => item.source_finding_id),
+      });
+    }
+  }
+  expect(observations).toEqual(
+    providers.flatMap(([version, reference]) =>
+      [false, true].map((grouped) => ({
+        version,
+        reference,
+        grouped,
+        findings: ["security", "disabled"],
+        excluded: ["quality"],
+      })),
+    ),
+  );
+});
+
 test("recognizes generated Best-of-N refusal and harmful moderation failures", async () => {
   await using fixture = await checkout();
   const refusal = { type: "is-refusal", metric: "RBAC/BestOfN" };
