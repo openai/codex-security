@@ -135,7 +135,7 @@
             }
           },
           "required": ["provider"],
-          "additionalProperties": { "$ref": "#/definitions/__schema0" }
+          "additionalProperties": false
         },
         "deep": {
           "description": "Deep defaults; a valid block may be retained while standard mode is selected.",
@@ -229,7 +229,7 @@
                     }
                   },
                   "required": ["name"],
-                  "additionalProperties": { "$ref": "#/definitions/__schema1" },
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
                   "if": { "properties": { "line": {} }, "required": ["line"] },
                   "then": {
                     "properties": { "location": {} },
@@ -315,7 +315,7 @@
                     }
                   },
                   "required": ["name"],
-                  "additionalProperties": { "$ref": "#/definitions/__schema1" },
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
                   "if": { "properties": { "line": {} }, "required": ["line"] },
                   "then": {
                     "properties": { "location": {} },
@@ -413,7 +413,7 @@
         "model_reasoning_effort": { "type": "string", "minLength": 1 },
         "model_provider": { "type": "string", "minLength": 1 }
       },
-      "additionalProperties": { "$ref": "#/definitions/__schema2" }
+      "additionalProperties": { "$ref": "#/definitions/__schema1" }
     },
     "limits": {
       "type": "object",
@@ -476,20 +476,6 @@
           "type": "object",
           "propertyNames": { "type": "string" },
           "additionalProperties": { "$ref": "#/definitions/__schema1" }
-        }
-      ]
-    },
-    "__schema2": {
-      "anyOf": [
-        { "type": "string" },
-        { "type": "number" },
-        { "type": "boolean" },
-        { "type": "null" },
-        { "type": "array", "items": { "$ref": "#/definitions/__schema2" } },
-        {
-          "type": "object",
-          "propertyNames": { "type": "string" },
-          "additionalProperties": { "$ref": "#/definitions/__schema2" }
         }
       ]
     }

@@ -7,7 +7,6 @@ import {
 import { describe, expect, test } from "bun:test";
 import {
   ContinuumValidationProvider,
-  assessClaimMatch,
   findingToOcsf,
   type ContinuumAwsLauncher,
 } from "../src/continuum-validation-provider.js";
@@ -45,6 +44,7 @@ function fakeAws(link = "createdIssueId") {
     if (operation === "get-code-issue")
       return {
         severity: "HIGH",
+        updatedAt: "2026-11-13T00:00:00Z",
         issueId: "issue-1",
         findingIds: ["finding-1"],
         issueArn:
@@ -58,15 +58,24 @@ function fakeAws(link = "createdIssueId") {
       return args.at(-1) === "EVIDENCE"
         ? {
             artifactType: "EVIDENCE",
-            artifactId: "scorer-artifact",
+            artifactId: args.at(-1),
             createdAt: "2026-11-13T00:00:00Z",
             body: {
               prevalidationSignals: {
                 signals: [
                   {
+                    subjectRef: "issue-1",
                     dimension: "REACHABILITY_ENABLER",
                     conclusion: "The affected route is reachable.",
                     basis: "GRAPH",
+                  },
+                  {
+                    dimension: "EXPLOITABILITY",
+                    subjectRef: "issue-1",
+                    exploitability: {
+                      sourceValidationArtifactId: "VALIDATION_EVIDENCE",
+                      verdict: "EXPLOITABLE",
+                    },
                   },
                 ],
               },
@@ -74,15 +83,22 @@ function fakeAws(link = "createdIssueId") {
           }
         : {
             artifactType: "VALIDATION_EVIDENCE",
-            artifactId: "validation-artifact",
+            artifactId: args.at(-1),
             createdAt: "2026-11-13T00:00:00Z",
             body: {
               validationEvidence: {
                 verdict: "EXPLOITABLE",
+                terminalStatus: "COMPLETED",
                 executedProof: {
-                  observedEffect: "cross-user authorization changed",
-                  path: "src/store.ts",
-                  code: "RAW_PROOF_SHOULD_NEVER_APPEAR",
+                  observedEffect: "BEHAVIOR_CHANGED",
+                  code: {
+                    proofCode: [
+                      {
+                        content:
+                          "RAW_PROOF_SHOULD_NEVER_APPEAR cross-user authorization at src/store.ts:40",
+                      },
+                    ],
+                  },
                   output: "RAW_CONSOLE_SHOULD_NEVER_APPEAR",
                   payload: "RAW_PAYLOAD_SHOULD_NEVER_APPEAR",
                 },
@@ -99,6 +115,7 @@ function provider(launcher: ContinuumAwsLauncher) {
   return new ContinuumValidationProvider({
     environmentId: "environment1",
     launcher,
+    waitMinutes: 1,
     now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
     delay: async (ms) => {
       elapsed += ms;
@@ -107,6 +124,32 @@ function provider(launcher: ContinuumAwsLauncher) {
 }
 
 describe("Continuum validation provider", () => {
+  test("an empty batch performs no AWS setup or validation", async () => {
+    let calls = 0;
+    const p = provider(async () => {
+      calls++;
+      throw new Error("Unexpected AWS request");
+    });
+    expect(await p.validateBatch([], context)).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  test("stops before reading the issue when the echoed source is a different occurrence", async () => {
+    const aws = fakeAws();
+    const result = await provider(async (op, args, signal) => {
+      const response = await aws.launcher(op, args, signal);
+      if (op === "get-code-finding")
+        response["sourceFindingId"] = "another-occurrence";
+      return response;
+    }).validate(finding, context);
+    expect(result.record).toMatchObject({
+      itemId: finding.occurrenceId,
+      verdict: "UNAVAILABLE",
+      severityAfter: "high",
+      claimMatch: "unknown",
+    });
+    expect(aws.calls).not.toContain("get-code-issue");
+  });
   test("replays the exact document after a lost response and resumes from its receipt", async () => {
     const requests: string[] = [];
     const aws = fakeAws();
@@ -145,7 +188,7 @@ describe("Continuum validation provider", () => {
       issueArn:
         "arn:aws:continuum:us-east-1:123456789012:environments/environment1/code-issues/issue-1",
       verdict: "EXPLOITABLE",
-      resultScope: "finding",
+      resultScope: "issue",
       freshness: { stale: false },
     });
     expect(requests).toHaveLength(2);
@@ -211,6 +254,28 @@ describe("Continuum validation provider", () => {
     expect(() => convert("\u0001".repeat(15_000))).toThrow("256 KiB");
   });
 
+  test.each([false, true])(
+    "checks unenriched documents before submission (opt-in %s)",
+    async (includeLocalValidation) => {
+      const { launcher, calls } = fakeAws();
+      const p = new ContinuumValidationProvider({
+        environmentId: "environment1",
+        launcher,
+        includeLocalValidation,
+      });
+      const results = await p.validateBatch(
+        [
+          { ...finding, summary: "a".repeat(65_537) },
+          { ...finding, summary: "📋".repeat(22_000) },
+        ],
+        context,
+      );
+      expect(results[0]?.unavailable).toContain("65,536");
+      expect(results[1]?.unavailable).toContain("256 KiB");
+      expect(calls).not.toContain("create-code-finding");
+    },
+  );
+
   test("concurrent senders share a receipt", async () => {
     const aws = fakeAws();
     const results = await Promise.all(
@@ -252,7 +317,7 @@ describe("Continuum validation provider", () => {
       expect(result.provenance.referenceUrl).toBe(url);
       expect(result.record?.issueUrl).toBe(url);
       expect(result.report).toContain(url);
-      expect(result.record?.claimMatch).toBe("on_target");
+      expect(result.record?.claimMatch).toBe("unknown");
       expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
       expect(JSON.stringify(result.record)).not.toMatch(
         /RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u,
@@ -388,7 +453,7 @@ describe("Continuum validation provider", () => {
     let elapsed = 0;
     const p = new ContinuumValidationProvider({
       environmentId: "environment1",
-      waitMinutes: 0.1,
+      waitMinutes: 1,
       now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
       delay: async (ms) => {
         elapsed += ms;
@@ -413,7 +478,7 @@ describe("Continuum validation provider", () => {
       claimMatch: "unknown",
       severityAfter: "high",
     });
-    expect(result.report).toContain("not an individual validation");
+    expect(result.report).toContain("issue-level result");
     expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
   });
 
@@ -423,7 +488,7 @@ describe("Continuum validation provider", () => {
     let elapsed = 0;
     const p = new ContinuumValidationProvider({
       environmentId: "environment1",
-      waitMinutes: 0.1,
+      waitMinutes: 1,
       now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
       delay: async (ms) => {
         expect(polled).toContain("item-5");
@@ -471,9 +536,9 @@ describe("Continuum validation provider", () => {
         response["createdAt"] = "2025-11-13T00:00:00Z";
       return response;
     }).validate(finding, context);
-    expect(result.record?.freshness.stale).toBe(true);
-    expect(result.report).toContain("possibly stale");
-    expect(result.report).not.toContain("current at submission");
+    expect(result.record?.scoringArtifactId).toBeUndefined();
+    expect(result.record?.reachableFromAttacker).toBeUndefined();
+    expect(result.disposition).toBe("reportable");
   });
 
   test.each(["another sole finding", "wrong issue ARN"])(
@@ -483,7 +548,7 @@ describe("Continuum validation provider", () => {
       let elapsed = 0;
       const p = new ContinuumValidationProvider({
         environmentId: "environment1",
-        waitMinutes: 0.1,
+        waitMinutes: 1,
         now: () => new Date(Date.parse("2026-11-13T00:00:00Z") + elapsed),
         delay: async (ms) => {
           elapsed += ms;
@@ -526,6 +591,9 @@ describe("Continuum validation provider", () => {
       const response = await aws.launcher(op, args, signal);
       if (op === "get-code-issue-artifact" && args.at(-1) !== "EVIDENCE") {
         fetched.push(args.at(-1)!);
+        if (args.at(-1) === "new-validation")
+          (response["body"] as any).validationEvidence.terminalStatus =
+            "FAILED";
         (response["body"] as any).validationEvidence.perFindingResults = [
           {
             findingId:
@@ -536,8 +604,14 @@ describe("Continuum validation provider", () => {
           },
         ];
       }
+      if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
+        (
+          response["body"] as any
+        ).prevalidationSignals.signals[1].exploitability.sourceValidationArtifactId =
+          "older-validation";
       return response;
     }).validate(finding, context);
+    expect(result.record?.terminalStatus).toBe("COMPLETED");
     expect(fetched).toEqual(["new-validation", "older-validation"]);
     expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
   });
@@ -563,10 +637,7 @@ describe("Continuum validation provider", () => {
       providerSeverity: "critical",
       claimMatch: "unknown",
     });
-    expect(result.report).toContain(
-      "grouped this finding with 2 other findings",
-    );
-    expect(result.report).toContain("not an individual validation");
+    expect(result.report).toContain("issue-level result");
     expect(result.report).toContain("Continuum issue severity: critical");
     expect(result.report).not.toMatch(/RAW_PROOF|RAW_CONSOLE|RAW_PAYLOAD/u);
   });
@@ -613,40 +684,6 @@ describe("Continuum validation provider", () => {
     expect(result.record?.resultScope).toBe("issue");
   });
 
-  test.each([1, 2])(
-    "an older per-finding result beats the newest issue proof with %i members",
-    async (members) => {
-      const aws = fakeAws();
-      const result = await provider(async (op, args, signal) => {
-        if (
-          op === "list-code-issue-artifacts" &&
-          args.at(-1) === "VALIDATION_EVIDENCE"
-        )
-          return {
-            items: [
-              { artifactId: "new", createdAt: "2026-11-14T00:00:00Z" },
-              { artifactId: "old", createdAt: "2026-11-13T00:00:00Z" },
-            ],
-          };
-        const response = await aws.launcher(op, args, signal);
-        if (op === "get-code-issue")
-          response["findingIds"] =
-            members === 1 ? ["finding-1"] : ["finding-1", "other-1"];
-        if (op === "get-code-issue-artifact" && args.at(-1) === "old")
-          (response["body"] as any).validationEvidence.perFindingResults = [
-            { findingId: "finding-1", exploitable: "NOT_EXPLOITABLE" },
-          ];
-        return response;
-      }).validate(finding, context);
-      expect(result.record).toMatchObject({
-        resultScope: "finding",
-        verdict: "NOT_EXPLOITABLE",
-        severityAfter: "high",
-        issueFindingCount: members,
-      });
-    },
-  );
-
   test.each(["FINDING", "FUTURE_SOURCE"])(
     "preserves %s reachability basis",
     async (basis) => {
@@ -655,7 +692,9 @@ describe("Continuum validation provider", () => {
         const response = await aws.launcher(op, args, signal);
         if (op === "get-code-issue-artifact" && args.at(-1) === "EVIDENCE")
           (response["body"] as any).prevalidationSignals.signals = [
+            ...(response["body"] as any).prevalidationSignals.signals,
             {
+              subjectRef: "issue-1",
               dimension: "LIKELIHOOD_ASSESSMENT",
               conclusion: "reachable",
               preconditions: {
@@ -717,27 +756,4 @@ describe("Continuum validation provider", () => {
       ],
     ).toBe(2002);
   });
-});
-
-describe("claim matching", () => {
-  test.each([
-    [{ effect: "authorization cross-user", path: "src/store.ts" }, "on_target"],
-    [
-      {
-        effect: "authorization cross-user credential exposure",
-        path: "src/store.ts",
-      },
-      "on_target_escalated",
-    ],
-    [
-      { effect: "resource exhaustion and denial", path: "src/store.ts" },
-      "different_flaw",
-    ],
-    [{}, "unknown"],
-  ] as const)(
-    "compares demonstrated concepts, not just a shared file: %j",
-    (proof, expected) => {
-      expect(assessClaimMatch(proof, finding)).toBe(expected);
-    },
-  );
 });

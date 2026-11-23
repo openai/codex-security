@@ -307,6 +307,7 @@ await test("built MCP setup previews and saves the selected project before scan 
     await writeSelection();
     const setup = (await call("inspect_codex_security_setup", standard)).setup;
     assert.equal(setup.validationProvider, validation.provider);
+    assert.match(setup.validationNotice, /synthetic-environment.*omit/);
     assert.equal(setup.deepScanConfig, undefined);
     const session = await call("open_codex_security_workspace", {
       targetPath,
@@ -334,6 +335,19 @@ await test("built MCP setup previews and saves the selected project before scan 
       });
       assert.equal(failure.isError, true);
       assert.match(JSON.stringify(failure.content), /ENOENT.*validation\.json/);
+      await writeFile(
+        validationPath,
+        JSON.stringify({
+          scan: { validation, exclude_paths: ["fixture.py"] },
+        }),
+      );
+      const restricted = await client.callTool({
+        name,
+        arguments: args,
+        _meta: { "openai/threadId": "project-owner" },
+      });
+      assert.equal(restricted.isError, true);
+      assert.match(JSON.stringify(restricted.content), /scan.exclude_paths/);
       await writeSelection();
       const created = await call(name, args);
       assert.equal(created.startDisposition, "created");
