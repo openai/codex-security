@@ -107,9 +107,17 @@ a receipt. Retries reuse the token or poll the accepted finding. Keep the
 same host state, destination and submitted content. A change to any of these
 can create a new AWS finding.
 
-Ask the plugin to show the completed scan to read the saved result without
-contacting AWS. If it is retryable, ask to resume validation for that scan ID.
-Completion retries pending items and keeps finished assessments.
+Ask the plugin to show the completed scan by ID. This reads the saved
+result without contacting AWS. Check `validation.retryable` before
+requesting another attempt.
+
+> Resume supplemental validation for scan SCAN_ID. Show which findings are
+> still waiting and which have finished.
+
+Completion retries pending items and keeps finished assessments. If
+`status` is `incomplete` and `retryable` is false, check the individual
+run statuses before deciding how to proceed.
+
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.
 
