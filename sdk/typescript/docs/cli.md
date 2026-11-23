@@ -2014,7 +2014,12 @@ Run the command with `--dry-run --format json`. Check `accountId`,
 To import, run the same command without `--dry-run` and confirm. The terminal
 shows the file, exclusions, severities and up to five finding IDs and titles.
 The prompt defaults to No. For a noninteractive import, add `--yes` after
-reviewing the full JSON preview.
+reviewing the full JSON preview. For new Continuum inbox jobs with a
+`privateImport.sourceCheckpoint`, `--yes` checks the upload, destination and
+source revision against a digest saved by the latest dry run for the same
+file path and state directory. Use separate paths for independent reviews.
+If the revision changes, compare the current inbox evidence with a fresh
+preview before approving an update.
 
 ### Configure an alternate Cloud deployment
 
