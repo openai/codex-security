@@ -20,6 +20,31 @@ function hasGraderError(grade: Record<string, unknown>) {
   );
 }
 
+function matchesDefaultAssertion(
+  value: unknown,
+  declared: unknown,
+  rubricPrompt: unknown,
+) {
+  if (isDeepStrictEqual(value, declared)) return true;
+  const original = asRecord(value);
+  const evaluated = asRecord(declared);
+  if (
+    !original ||
+    !evaluated ||
+    (original["type"] !== "llm-rubric" && original["type"] !== "not-llm-rubric")
+  )
+    return false;
+  // Grading fills rubric values while retaining the other fields.
+  const prompt = original["rubricPrompt"] || rubricPrompt;
+  const expectedValue =
+    original["value"] ||
+    (prompt && typeof prompt === "object" ? JSON.stringify(prompt) : prompt);
+  return isDeepStrictEqual(
+    { ...original, value: expectedValue },
+    { ...evaluated, value: evaluated["value"] },
+  );
+}
+
 /** Each result ID identifies one observed probe in the native evaluation export. */
 export async function readPromptfooFindings(
   path: string,
@@ -80,14 +105,37 @@ export async function readPromptfooFindings(
       // Promptfoo prepends default assertions before merging defaultTest.options.
       // The exported disableDefaultAsserts can therefore be true even with the prefix.
       const declared = testCase?.["assert"];
+      const rubricPrompt = asRecord(testCase?.["options"])?.["rubricPrompt"];
       const skipDefaults =
         Array.isArray(defaults) &&
         Array.isArray(declared) &&
         (asRecord(testCase?.["options"])?.["disableDefaultAsserts"] !== true ||
           (declared.length > defaults.length &&
-            defaults.every((item, index) =>
-              isDeepStrictEqual(item, declared[index]),
-            )));
+            defaults.every((item, index) => {
+              if (matchesDefaultAssertion(item, declared[index], rubricPrompt))
+                return true;
+              const original = asRecord(item);
+              const evaluated = asRecord(declared[index]);
+              const children = original?.["assert"];
+              const evaluatedChildren = evaluated?.["assert"];
+              return (
+                original?.["type"] === "assert-set" &&
+                Array.isArray(children) &&
+                Array.isArray(evaluatedChildren) &&
+                isDeepStrictEqual(
+                  { ...original, assert: undefined },
+                  { ...evaluated, assert: undefined },
+                ) &&
+                children.length === evaluatedChildren.length &&
+                children.every((child, childIndex) =>
+                  matchesDefaultAssertion(
+                    child,
+                    evaluatedChildren[childIndex],
+                    rubricPrompt,
+                  ),
+                )
+              );
+            })));
       const generatedIndex = skipDefaults ? defaults.length : 0;
       const generated = Array.isArray(declared)
         ? asRecord(declared[generatedIndex])

@@ -246,6 +246,131 @@ test("imports file and dataset plugin rubrics while excluding inherited quality 
   ]);
 });
 
+test("keeps evaluated default rubrics separate from generated security rubrics", async () => {
+  await using fixture = await checkout();
+  const quality = { type: "llm-rubric", metric: "Brevity" };
+  const inverse = {
+    type: "not-llm-rubric",
+    metric: "Tone",
+    rubricPrompt: [{ role: "user", content: "Check the response tone." }],
+  };
+  const evaluatedQuality = { ...quality, value: "Be brief." };
+  const evaluatedInverse = {
+    ...inverse,
+    value: '[{"role":"user","content":"Check the response tone."}]',
+  };
+  const objectPrompt = [{ role: "user", content: "Check response brevity." }];
+  const objectQuality = {
+    ...quality,
+    value: '[{"role":"user","content":"Check response brevity."}]',
+  };
+  const security = {
+    type: "llm-rubric",
+    metric: "TenantBoundary",
+    value: "Only return this tenant's invoice.",
+  };
+  const row = (
+    id: string,
+    declared: Record<string, unknown>[],
+    failing: Record<string, unknown>,
+    rubricPrompt: unknown = "Be brief.",
+  ) => ({
+    ...leak,
+    id,
+    testCase: {
+      metadata: { pluginId: "file://./tenant-policy.yaml" },
+      assert: declared,
+      options: { disableDefaultAsserts: true, rubricPrompt },
+    },
+    gradingResult: {
+      pass: false,
+      componentResults: declared.map((assertion) => ({
+        ...failed,
+        assertion,
+        pass: assertion !== failing,
+        reason: `${assertion["metric"]} ${assertion === failing ? "failed" : "passed"}.`,
+      })),
+    },
+  });
+  const inherited = [evaluatedQuality, evaluatedInverse, security];
+  const overridden = [objectQuality, evaluatedInverse, security];
+  const input = report([
+    row("quality", inherited, evaluatedQuality),
+    row("security", inherited, security),
+    row("object-quality", overridden, objectQuality, objectPrompt),
+    row("object-security", overridden, security, objectPrompt),
+    row("disabled", [security], security),
+  ]);
+  await fixture.writeJson({
+    ...input,
+    config: {
+      ...input.config,
+      defaultTest: {
+        assert: [quality, inverse],
+        options: { disableDefaultAsserts: true, rubricPrompt: "Be brief." },
+      },
+    },
+  });
+  const selection = await readPromptfooFindings(fixture.file);
+  const assertionSet = {
+    type: "assert-set",
+    metric: "Quality",
+    assert: [quality, inverse],
+  };
+  const evaluatedSet = {
+    ...assertionSet,
+    assert: [evaluatedQuality, evaluatedInverse],
+  };
+  const setRow = (id: string, failing: Record<string, unknown>) => {
+    const result = row(id, [evaluatedSet, security], failing);
+    const children = row(id, evaluatedSet.assert, failing).gradingResult
+      .componentResults;
+    return {
+      ...result,
+      gradingResult: {
+        pass: false,
+        componentResults: [
+          {
+            pass: children.every((child) => child.pass),
+            componentResults: children,
+          },
+          ...children,
+          result.gradingResult.componentResults[1],
+        ],
+      },
+    };
+  };
+  await fixture.writeJson({
+    ...report([
+      setRow("set-quality", evaluatedQuality),
+      setRow("set-security", security),
+    ]),
+    config: {
+      ...input.config,
+      defaultTest: {
+        assert: [assertionSet],
+        options: { disableDefaultAsserts: true, rubricPrompt: "Be brief." },
+      },
+    },
+  });
+  const setSelection = await readPromptfooFindings(fixture.file);
+  const findings = [...selection.findings, ...setSelection.findings];
+  expect(findings.map((item) => item.source_finding_id)).toEqual([
+    "security",
+    "object-security",
+    "disabled",
+    "set-security",
+  ]);
+  expect(findings.map((item) => item.evidence.description)).toEqual([
+    "TenantBoundary failed.",
+    "TenantBoundary failed.",
+    "TenantBoundary failed.",
+    "TenantBoundary failed.",
+  ]);
+  expect(selection.excluded.map((item) => item.position)).toEqual([1, 3]);
+  expect(setSelection.excluded.map((item) => item.position)).toEqual([1]);
+});
+
 test("recognizes generated Best-of-N refusal and harmful moderation failures", async () => {
   await using fixture = await checkout();
   const refusal = { type: "is-refusal", metric: "RBAC/BestOfN" };
