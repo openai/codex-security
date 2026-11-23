@@ -29,6 +29,7 @@ import functools
 import importlib
 import ntpath
 import os
+import re
 import secrets
 import struct
 from collections.abc import Callable, Iterator
@@ -366,6 +367,64 @@ def _extended_path(path: Path) -> str:
     if value.startswith("\\\\"):
         return "\\\\?\\UNC\\" + value[2:]
     return "\\\\?\\" + value
+
+
+def windows_path_spellings(path: Path) -> tuple[Path, Path, tuple[str, ...]] | None:
+    """Return ordinary and extended drive or UNC names, and the components subject to DOS aliases."""
+    value = str(path)
+    if value[:8].upper() == "\\\\?\\UNC\\":
+        ordinary = type(path)("\\\\" + value[8:])
+        native = path
+    elif re.fullmatch(r"\\\\\?\\[A-Za-z]:", path.drive):
+        ordinary = type(path)(value[4:])
+        native = path
+    elif value.startswith(("\\\\?\\", "\\\\.\\")):
+        return None
+    else:
+        ordinary = path
+        native = type(path)(_extended_path(path))
+    components = ordinary.parts[1:]
+    if ordinary.drive.startswith("\\\\"):
+        server, share = ordinary.drive[2:].split("\\", 1)
+        if server in {".", "?"}:
+            return None
+        components = (server, share, *components)
+    return ordinary, native, components
+
+
+def workbench_sqlite_paths(path: Path) -> tuple[Path, Path]:
+    """Choose equivalent filenames for Win32 file access and the default SQLite pager."""
+    if os.name != "nt":
+        return path, path
+    value = str(path)
+    # SQLite also opens a sibling with the eight-character "-journal" suffix.
+    if (
+        not path.is_absolute()
+        or len(value.encode("utf-16-le", errors="surrogatepass")) // 2 + 8 < 260
+    ):
+        return path, path
+    spellings = windows_path_spellings(path)
+    if spellings is None:
+        return path, path
+    ordinary, native, components = spellings
+    # The verbatim namespace bypasses DOS aliases such as trailing dots and device names.
+    if any(
+        not name
+        or name.endswith((" ", "."))
+        or any(ord(c) < 32 or c in _INVALID_COMPONENT_CHARACTERS for c in name)
+        or name.partition(".")[0].rstrip(" ").upper() in _RESERVED_DEVICE_NAMES
+        for name in components
+    ):
+        return path, path
+    # Win32's default VFS allows 1,040 UTF-8 bytes; the pager reserves eight for "-journal".
+    limit = 260 * 4 - 8
+    if (
+        len(str(ordinary).encode("utf-8", errors="surrogatepass"))
+        <= limit
+        < len(str(native).encode("utf-8", errors="surrogatepass"))
+    ):
+        return native, ordinary
+    return native, native
 
 
 def _normalized_windows_path(path: Path | str) -> str:

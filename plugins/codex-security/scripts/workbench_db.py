@@ -54,10 +54,11 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
-from windows_scan_local_files import pin_replay_metadata
+from windows_scan_local_files import pin_replay_metadata, workbench_sqlite_paths
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
+    require_worker_path,
     resolve_scan_root,
     saved_deep_workers,
     state_dir,
@@ -92,6 +93,7 @@ from workbench_scan_start import (
     restore_cli_scan_archive,
     safe_segment,
     scan_diff_identity,
+    scan_output_overlaps_target,
     scan_target_identity,
     stored_diff_target,
 )
@@ -279,6 +281,7 @@ def connect(
             lock contention persists after retries.
     """
     path = database_path()
+    filesystem_path, sqlite_path = workbench_sqlite_paths(path)
     guidance = (
         f"Workbench database: {path}. Ensure the state directory and SQLite journal files "
         "are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside "
@@ -286,13 +289,13 @@ def connect(
     )
     try:
         if not in_memory:
-            create_private_directory(path.parent)
+            create_private_directory(filesystem_path.parent)
     except OSError:
         print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(":memory:" if in_memory else path, timeout=5)
+            connection = sqlite3.connect(":memory:" if in_memory else sqlite_path, timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
@@ -306,7 +309,7 @@ def connect(
             )
             connection.execute("PRAGMA journal_mode = WAL")
             if not in_memory:
-                path.chmod(0o600)
+                filesystem_path.chmod(0o600)
             return connection
         except sqlite3.OperationalError as exc:
             connection.close()
@@ -1565,7 +1568,7 @@ def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Pa
     scan_dir = require_canonical_scan_directory(
         Path(args.scan_dir).expanduser(), writable_output=True
     )
-    if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
+    if scan_output_overlaps_target(scan_dir, repository):
         raise SystemExit(
             "The scan artifact directory must be outside and not contain the selected target."
         )
@@ -3233,7 +3236,7 @@ def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
     try:
         resolved_scan_dir = require_canonical_scan_directory(scan_dir)
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(resolved_scan_dir)
+        require_worker_path(resolved, resolved_scan_dir)
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
     if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():

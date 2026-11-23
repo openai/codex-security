@@ -2171,6 +2171,79 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
   );
 }
 
+async function testResumedWorkerPathAliasesPreserveCoverage() {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 1,
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 3,
+  });
+  const executor = new FakeExecutor();
+  const run = executor.run.bind(executor);
+  executor.run = async (request) => {
+    const result = await run(request);
+    const output = request.artifactContext!.root;
+    const resultPath = path.join(output, "result.json");
+    const draft = await readJson(resultPath);
+    draft.reviewState.surfaces[0].receiptRefs = ["artifacts/review.md"];
+    await mkdir(path.join(output, "artifacts"), { recursive: true });
+    await writeFile(
+      path.join(output, "artifacts/review.md"),
+      "Review evidence.\n",
+    );
+    await writeJson(resultPath, draft);
+    return result;
+  };
+  const published: { draft: ScanDraftInput; resultPath: string | null }[] = [];
+  const onComplete: NonNullable<CoordinatorOptions["onComplete"]> = async (
+    draft,
+    _signal,
+    publication,
+  ) => {
+    published.push({
+      draft: structuredClone(draft),
+      resultPath: publication.resultPath,
+    });
+  };
+  const original = await runCoordinator(fixture, store, executor, {
+    onComplete,
+  });
+  assert.equal(original?.status, "succeeded", original?.error);
+  assert.equal(store.iterations.length, 2);
+  assert.equal(published.length, 1);
+  const expected = published[0].draft;
+  const latest = store.iterations.at(-1)!.resultPath;
+  store.run = {
+    ...store.run,
+    status: "running",
+    persistedWorkers: structuredClone([...store.workers.values()]),
+    persistedDedupInputs: store.iterations.flatMap(iterationInputs),
+  };
+  for (const worker of store.run.persistedWorkers!) {
+    worker.artifactDir = path.toNamespacedPath(worker.artifactDir);
+    if (
+      worker.resultManifestPath &&
+      (worker.kind === "discovery" || worker.resultManifestPath === latest)
+    ) {
+      worker.resultManifestPath = path.toNamespacedPath(
+        worker.resultManifestPath,
+      );
+    }
+  }
+  const persisted = structuredClone(store.run.persistedWorkers);
+  const replacement = new FakeExecutor();
+  const terminal = await runCoordinator(fixture, store, replacement, {
+    run: store.run,
+    onComplete,
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(replacement.discoveryCalls, 0);
+  assert.equal(store.iterations.length, 2);
+  assert.equal(published.length, 2);
+  assert.equal(published[1].resultPath, path.toNamespacedPath(latest));
+  assert.deepEqual(published[1].draft, expected);
+  assert.deepEqual(store.run.persistedWorkers, persisted);
+}
+
 async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
   removeHistoricalPrompts = true,
@@ -2966,6 +3039,7 @@ registerCases(testResumedDiscoveryDeadlineUsesPersistedCreationTime, [
   [false, 2.5],
   [true, 96],
 ]);
+test(testResumedWorkerPathAliasesPreserveCoverage);
 registerCases(testResumedManifestPreservesCompletedReducer, [
   [false, false],
   [],

@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { dirname, join, posix, relative, sep } from "node:path";
+import {
+  dirname,
+  join,
+  posix,
+  relative,
+  sep,
+  toNamespacedPath,
+} from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
@@ -147,7 +154,10 @@ export function scanCoverage(
   additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
-  const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
+  const artifactPrefix = relative(
+    toNamespacedPath(scanDir),
+    toNamespacedPath(dirname(worker.resultPath)),
+  )
     .split(sep)
     .join("/");
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;

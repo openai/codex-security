@@ -22,6 +22,7 @@ from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
     empty_target_paths,
+    fail_deep_scan,
     fail_scan,
     finish_deep_scan,
     get_deep_scan,
@@ -372,6 +373,111 @@ class DeepScan:
                 else ()
             ),
         )["deepScan"]
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 directory and result aliases")
+@pytest.mark.parametrize("manifest_name", ["scan-manifest.json", "coordinator.json"])
+def test_record_worker_and_iteration_require_readable_mixed_namespace_paths(
+    tmp_path: Path, manifest_name: str
+) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    prompt, output, result = worker_paths(deep.directory, "worker")
+    result.write_text("{}")
+    extended = Path(load_script("windows_scan_local_files")._extended_path(output))
+    literal_dir = extended.with_name("worker.")
+    literal_result = extended / "result.json."
+    literal_dir.mkdir()
+    try:
+        literal_result.write_text("{}")
+        worker = str(uuid.uuid4())
+        fields = {"worker_id": worker, "prompt_path": prompt}
+        rejected = deep.upsert_worker(**fields, artifact_dir=literal_dir, check=False)
+        assert "Verbatim-only" in rejected["stderr"]
+        deep.upsert_worker(**fields, artifact_dir=extended)
+        rejected = deep.upsert_worker(
+            **fields,
+            artifact_dir=extended,
+            result_path=literal_result,
+            status="succeeded",
+            check=False,
+        )
+        assert "Verbatim-only" in rejected["stderr"]
+        deep.upsert_worker(
+            **fields, artifact_dir=extended, result_path=extended / result.name, status="succeeded"
+        )
+
+        deep.upsert_worker(**fields, artifact_dir=output, result_path=result, status="succeeded")
+
+        iteration = str(uuid.uuid4())
+        args = (
+            "--worker-id",
+            iteration,
+            "--input-worker-id",
+            worker,
+            "--no-new-streak",
+            "1",
+            "--consecutive-errors",
+            "0",
+            "--result-manifest-path",
+        )
+        rejected = deep.command(
+            "record-deep-scan-iteration", *args, str(literal_result), check=False
+        )
+        assert "Verbatim-only" in rejected["stderr"]
+        deep.command("record-deep-scan-iteration", *args, str(extended / result.name))
+        deep.command("record-deep-scan-iteration", *args, str(result))
+        with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+            rows = connection.execute(
+                "SELECT id, result_manifest_path FROM deep_scan_workers WHERE scan_id = ?",
+                (deep.id,),
+            )
+            assert {identifier: Path(path) for identifier, path in rows} == {
+                worker: extended / result.name,
+                iteration: extended / result.name,
+            }
+            connection.execute(
+                "UPDATE deep_scan_runs SET max_discovery_runs = discovery_runs_dispatched WHERE scan_id = ?",
+                (deep.id,),
+            )
+        write_canonical_artifacts(deep.directory)
+        manifest = deep.directory / manifest_name
+        for path in (manifest, deep.directory / "findings.json"):
+            path.touch()
+        alias_manifest = Path(load_script("windows_scan_local_files")._extended_path(manifest))
+        recorded = manifest if manifest_name == "scan-manifest.json" else alias_manifest
+        for spelling in (alias_manifest, manifest):
+            finished = deep.finish("capped", spelling)["deepScan"]
+            assert finished["status"] == "succeeded" and finished["manifestPath"] == str(recorded)
+    finally:
+        literal_result.unlink(missing_ok=True)
+        literal_dir.rmdir()
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 worker aliases")
+def test_recovery_credits_the_accepted_worker_in_an_extended_directory(tmp_path: Path) -> None:
+    from test_workbench_standard_deep_results import accepted_standard_worker, deep_scan_fixture
+
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    extended = Path(load_script("windows_scan_local_files")._extended_path(scan_dir))
+    worker_id, result = accepted_standard_worker(state_dir, codex_home, extended, scan_id)
+    result.write_text(
+        json.dumps(
+            saved_draft(
+                scan_id,
+                complete=True,
+                surfaces=[{"id": "api", "label": "API", "disposition": "no_issue_found"}],
+            )
+        )
+    )
+
+    fail_deep_scan(state_dir, codex_home, scan_id)
+    coverage = read_review_state(state_dir, scan_dir)
+    surface = coverage["surfaces"][0]
+    assert surface["id"] == f"{worker_id}-attempt-1-surface-1"
+    assert surface["provenance"] == {"workerId": worker_id, "attempt": 1, "sourceId": "api"}
+    assert coverage["reviews"] == [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}]
 
 
 def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> None:

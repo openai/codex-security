@@ -24,6 +24,9 @@ from finalize_scan_contract import write_scan_local_bytes
 from workbench.storage import (
     archive_source_directory,
     create_private_temporary_directory,
+    relocate_scan_artifact,
+    same_directory_spelling,
+    scan_directory_spellings,
     short_archive_prefix,
     state_dir,
 )
@@ -138,6 +141,51 @@ def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
     return target
 
 
+def _within_protected_directory(path: Path, root: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    ancestor = path.parents[len(relative.parts) - 1] if relative.parts else path
+    # Keep the boundary when an apparent Windows case alias cannot be verified.
+    return same_directory_spelling(ancestor, root) is not False
+
+
+def scan_output_overlaps_target(scan_dir: Path, repository: Path) -> bool:
+    targets = scan_directory_spellings(repository)
+    return any(
+        _within_protected_directory(output, target) or _within_protected_directory(target, output)
+        for output in scan_directory_spellings(scan_dir)
+        for target in targets
+    )
+
+
+def _archive_owner(
+    connection: sqlite3.Connection, spellings: tuple[Path, ...], *, for_registration: bool = False
+) -> sqlite3.Row | None:
+    name = str(spellings[0])
+    if os.name == "nt":
+        folded = {os.path.normcase(path): path for path in spellings}
+        name = None
+        # Read only the unique directory index before retrieving the matching scan row.
+        for (stored,) in connection.execute("SELECT scan_dir FROM scans"):
+            expected = folded.get(os.path.normcase(stored))
+            if expected is None:
+                continue
+            matches = same_directory_spelling(Path(stored), expected)
+            if matches is None:
+                raise SystemExit("Cannot verify the owner of a case-variant scan directory.")
+            if not matches:
+                continue
+            if name is not None:
+                raise SystemExit("Cannot archive an output directory claimed by multiple scans.")
+            name = stored
+        if name is None:
+            return None
+    columns = "id, status, scan_dir" if for_registration else "id"
+    return connection.execute(f"SELECT {columns} FROM scans WHERE scan_dir = ?", (name,)).fetchone()
+
+
 @contextmanager
 def archive_scan(
     connection: sqlite3.Connection,
@@ -154,16 +202,14 @@ def archive_scan(
         if args.archived_scan_dir is not None
         else None
     )
+    spellings = scan_directory_spellings(scan_dir)
     if archived_scan_dir is not None and (
         not args.archive_existing
-        or archived_scan_dir.parent != scan_dir.parent
-        or archive_source_directory(archived_scan_dir, scan_dir) != scan_dir
+        or not any(archive_source_directory(archived_scan_dir, path) == path for path in spellings)
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
-    previous_scan = connection.execute(
-        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
-    ).fetchone()
+    previous_scan = _archive_owner(connection, spellings, for_registration=True)
     if previous_scan is not None:
         if not args.archive_existing:
             raise SystemExit(
@@ -197,7 +243,11 @@ def archive_scan(
                     if row[2]
                 ),
             ]
-            if any(path == scan_dir or scan_dir in path.parents for path in protected_directories):
+            if any(
+                _within_protected_directory(path, root)
+                for path in protected_directories
+                for root in spellings
+            ):
                 raise SystemExit(
                     "Cannot archive output containing the workbench state or active database."
                 )
@@ -229,9 +279,16 @@ def archive_scan(
                 scan_dir.mkdir(mode=0o700)
                 scan_dir.chmod(0o700)
         if previous_scan is not None:
+            source = Path(previous_scan["scan_dir"])
+
+            def archive_path(value: str | None) -> str | None:
+                return relocate_scan_artifact(source, archived_scan_dir, value, keep_extended=True)
+
+            archive = archive_path(str(source))
+            sarif = str(source / "exports" / "results.sarif")
             connection.execute(
                 "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-                (str(archived_scan_dir), timestamp, previous_scan["id"]),
+                (archive, timestamp, previous_scan["id"]),
             )
             connection.execute(
                 """UPDATE finding_workflows SET scan_dir = ?,
@@ -239,18 +296,13 @@ def archive_scan(
                         THEN json_set(results_json, '$.scan.sarifPath', ?) ELSE results_json END
                     WHERE scan_id = ? AND scan_dir = ?""",
                 (
-                    str(archived_scan_dir),
-                    str(scan_dir / "exports" / "results.sarif"),
-                    str(archived_scan_dir / "exports" / "results.sarif"),
+                    archive,
+                    sarif,
+                    archive_path(sarif),
                     previous_scan["id"],
-                    str(scan_dir),
+                    str(source),
                 ),
             )
-
-            def archive_path(value: str | None) -> str | None:
-                if value is None or not Path(value).is_relative_to(scan_dir):
-                    return value
-                return str(archived_scan_dir / Path(value).relative_to(scan_dir))
 
             connection.create_function("archive_path", 1, archive_path)
             try:
@@ -288,9 +340,7 @@ def archive_scan(
     except BaseException:
         if moved:
             if not connection.in_transaction:
-                current_owner = connection.execute(
-                    "SELECT id FROM scans WHERE scan_dir = ?", (str(scan_dir),)
-                ).fetchone()
+                current_owner = _archive_owner(connection, spellings)
                 if current_owner is not None and (
                     previous_scan is None or current_owner["id"] != previous_scan["id"]
                 ):
@@ -316,12 +366,9 @@ def restore_cli_scan_archive(
     try:
         scan_dir = supplied_scan_dir.resolve()
         archived_scan_dir = supplied_archive.resolve()
-        archived_owner = connection.execute(
-            "SELECT id FROM scans WHERE scan_dir = ?", (str(archived_scan_dir),)
-        ).fetchone()
-        previous_scan = connection.execute(
-            "SELECT id FROM scans WHERE scan_dir = ?", (str(scan_dir),)
-        ).fetchone()
+        archived_owner = _archive_owner(connection, scan_directory_spellings(archived_scan_dir))
+        spellings = scan_directory_spellings(scan_dir)
+        previous_scan = _archive_owner(connection, spellings)
         previous_scan_id = previous_scan["id"] if previous_scan is not None else None
         if archived_owner is not None:
             disposition = "already-recorded"
@@ -331,8 +378,10 @@ def restore_cli_scan_archive(
             archived_scan_dir = canonical_directory(supplied_archive)
             if (
                 os.path.normcase(supplied_scan_dir) != os.path.normcase(scan_dir)
-                or archived_scan_dir.parent != scan_dir.parent
-                or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
+                or not archived_scan_dir.name[len(scan_dir.name) :].startswith(".previous-")
+                or not any(
+                    archive_source_directory(archived_scan_dir, path) == path for path in spellings
+                )
             ):
                 raise SystemExit(
                     "The archived scan must be a previous sibling of the scan directory."
