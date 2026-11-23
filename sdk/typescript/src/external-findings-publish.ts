@@ -7,11 +7,13 @@ import { nullIfMissingFile } from "./targets.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { isProxy } from "node:util/types";
 import {
+  continuumRowErrors,
   privateImportClient,
   privateJobVersions,
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
+  rejectedSourceRevision,
   parsePrivateCheckpoint,
   type PrivateImportContext,
   unsuccessfulJob,
@@ -255,6 +257,33 @@ export function cloudReviewDigest(
       ),
     }),
   );
+}
+
+/** A split CLI approval must refer to the revision shown by the dry run. */
+export async function reviewContinuumPublication(
+  preview: ExternalPublicationPreview,
+  report: string,
+  environment: NodeJS.ProcessEnv,
+  dryRun: boolean,
+  signal: AbortSignal,
+) {
+  if (preview.source.provider !== "continuum" || preview.resumed) return;
+  const state = externalPublicationStateDirectory(environment);
+  const key = hash("sha256", report);
+  const path = join(state, key + ".review.json");
+  const saved = await readOptionalFile(path);
+  if (!preview.privateImport?.sourceCheckpoint && saved === undefined) return;
+  const digest = cloudReviewDigest(preview, report, []);
+  if (dryRun)
+    await withImportLock(state, key, signal, () =>
+      preview.privateImport?.sourceCheckpoint
+        ? writeAtomicJson(path, digest)
+        : rm(path, { force: true }),
+    );
+  else if (saved !== JSON.stringify(digest))
+    throw new CodexSecurityError(
+      "No matching Continuum preview for this file, destination and source checkpoint. Run --dry-run --format json and review it before using --yes.",
+    );
 }
 
 export interface PreparedExternalPublication {
@@ -1408,14 +1437,13 @@ async function preparePublicationInput(
   const privateSaved = await readPrivate();
   const usePrivateImport =
     !saved && (canStartJob || privateSaved !== undefined);
+  const scopedSource = source.provider === "continuum" ? source : undefined;
   async function preparePrivateAttempt() {
     if (source.source_key.trim() !== source.source_key)
       throw new CodexSecurityError(
         "A private source key cannot have leading or trailing whitespace.",
       );
-    const context = await privateClient.context(
-      source.provider === "continuum" ? source : undefined,
-    );
+    const context = await privateClient.context(scopedSource);
     const report = selectPrivateReport(
       parsed.findings,
       source.provider,
@@ -1452,8 +1480,14 @@ async function preparePublicationInput(
   const previous =
     privateAttempt &&
     readPrivateCheckpoint(privateSaved, privateAttempt.binding);
+  const reviewedRevision =
+    scopedSource && privateAttempt?.context.source_checkpoint;
+  const retryRowErrors =
+    continuumRowErrors(previous?.receipt) &&
+    reviewedRevision !== undefined &&
+    reviewedRevision !== previous?.sourceCheckpoint;
   const retryOfJobId =
-    unsuccessfulJob(previous?.receipt) &&
+    (unsuccessfulJob(previous?.receipt) || retryRowErrors) &&
     canStartJob &&
     privateAttempt?.context.can_upload &&
     acceptsJob(privateAttempt.context, privateAttempt.report.format)
@@ -1727,7 +1761,7 @@ async function preparePublicationInput(
     requireAccess(context, previous);
     const sourceCheckpoint = privateApproval
       ? privateApproval.sourceCheckpoint
-      : context.source_checkpoint;
+      : reviewedRevision;
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
@@ -1750,7 +1784,7 @@ async function preparePublicationInput(
       preview: structuredClone(preview),
       publish: () =>
         underPublishLock(async () => {
-          const current = await client.context();
+          const current = await client.context(scopedSource);
           if (current.context_version !== binding.contextVersion)
             throw new CodexSecurityError(
               "The private inbox changed. Run the command again to review the new destination.",
@@ -1767,6 +1801,14 @@ async function preparePublicationInput(
           if (active && active.sourceCheckpoint !== sourceCheckpoint)
             throw new CodexSecurityError(
               "The saved source checkpoint changed. Preview this report again to resume.",
+            );
+          if (
+            !active &&
+            scopedSource &&
+            current.source_checkpoint !== sourceCheckpoint
+          )
+            throw new CodexSecurityError(
+              "The Continuum source checkpoint changed. Review a new preview before uploading.",
             );
           requireAccess(current, active);
           if (await readPending())
@@ -1865,7 +1907,16 @@ async function preparePublicationInput(
             result.status = "interrupted";
             result.error =
               error instanceof Error ? error.message : String(error);
-            result.savedSubmission = privatePath;
+            if (
+              sourceCheckpoint &&
+              checkpoint.fileId &&
+              !checkpoint.jobId &&
+              rejectedSourceRevision(error)
+            ) {
+              await rm(privatePath);
+              result.error +=
+                " The job was rejected. Review a new preview against the current inbox evidence before retrying.";
+            } else result.savedSubmission = privatePath;
             throw new ExternalPublicationError(result.error, result, error);
           }
         }),

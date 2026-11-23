@@ -95,10 +95,22 @@ ARNs. [Verify the import](README.md#verify-the-import)
 To update an issue in your private inbox, collect a fresh report and preview
 it with the original source key. When the preview includes
 `privateImport.sourceCheckpoint`, confirmation authorizes replacing changed
-evidence for the selected ARNs as of that checkpoint. A resumed upload keeps
-its original checkpoint. Cloud reports a conflict if another import updated
-the same ARN after the checkpoint. On deployments that omit the checkpoint,
-changed evidence can return `source_order_unknown`.
+evidence for the selected ARNs as of that checkpoint. Compare the checkpoint
+at the prompt with the one you reviewed. For a new noninteractive upload,
+`--yes` requires a matching dry run. The CLI saves a digest of the latest
+preview for that file path in the local state directory. Use separate paths
+for independent reviews.
+
+If the source checkpoint changes before upload, review a new preview. Cloud
+can also report a conflict if another import updates the same ARN during the
+upload. Compare the current inbox evidence with the report before approving a
+new attempt. If a completed job had item errors and the checkpoint has
+advanced, the fresh preview identifies that job in `privateImport.retryOfJobId`.
+Confirmation retries the entire selection, including previously accepted items.
+
+After a lost response, resume the original upload with its saved checkpoint.
+On deployments that omit the checkpoint, changed evidence can return
+`source_order_unknown`.
 
 ## Identity, evidence, and repeat imports
 

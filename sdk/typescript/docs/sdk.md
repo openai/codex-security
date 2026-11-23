@@ -744,6 +744,13 @@ returned `preview`, then call `import()` to save locally or `publish()` to
 upload. The [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md)
 list the supported report formats and destinations for each provider.
 
+For a Continuum inbox import, `preview.privateImport.sourceCheckpoint`
+identifies the source revision on which the update is based. Call `publish()`
+on the object you reviewed. If Cloud rejects the revision, compare the current
+inbox evidence with a new preview. A preview with `retryOfJobId` starts a
+fresh attempt for the full selection. A resumed upload retains its original
+revision.
+
 For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
 or `prepareNormalizedExternalPublication(findings, options)` and review the
 preview in the same way. Cloud file imports use `ExternalPublicationOptions`,

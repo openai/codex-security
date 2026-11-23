@@ -248,7 +248,9 @@ const checkpointSchema = z.object({
   receipt: jobSchema
     .refine((job) => job.status === "completed" || unsuccessfulJob(job))
     .optional(),
-  previousReceipt: jobSchema.refine(unsuccessfulJob).optional(),
+  previousReceipt: jobSchema
+    .refine((job) => unsuccessfulJob(job) || continuumRowErrors(job))
+    .optional(),
 });
 
 function matchesJobScope(
@@ -271,6 +273,14 @@ function matchesJobScope(
 
 export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
+}
+
+export function continuumRowErrors(job: PrivateImportJob | undefined) {
+  return (
+    job?.source.provider === "continuum" &&
+    job.status === "completed" &&
+    job.counts.error > 0
+  );
 }
 
 export function parsePrivateCheckpoint(serialized: string | undefined) {
@@ -308,6 +318,8 @@ export function readPrivateCheckpoint(
     (receipt &&
       (receipt.id !== jobId ||
         receipt.request_id !== checkpoint.jobRequestId ||
+        (receipt.source_checkpoint ?? undefined) !==
+          checkpoint.sourceCheckpoint ||
         receipt.input.file_id !== fileId)) ||
     checkpoint.uploadRequestId === checkpoint.jobRequestId
   )
@@ -325,6 +337,15 @@ class PrivateImportRequestError extends CodexSecurityError {
   ) {
     super(message);
   }
+}
+
+export function rejectedSourceRevision(error: unknown) {
+  return (
+    error instanceof PrivateImportRequestError &&
+    error.status === 409 &&
+    (error.code === "version_conflict" ||
+      error.code === "stale_source_snapshot")
+  );
 }
 
 export function privateImportClient(
