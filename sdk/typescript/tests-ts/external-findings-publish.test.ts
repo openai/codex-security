@@ -3867,8 +3867,10 @@ test("noninteractive Continuum approval requires the previewed revision and evid
   inbox.sourceCheckpoint = "newer";
   expect(await invoke("--yes")).toBe(2);
   expect(await invoke("--dry-run")).toBe(0);
+  const original = JSON.stringify(report);
   report.issues[0]!.issue.summary = "Updated evidence";
-  await writeFile(f.file, JSON.stringify(report));
+  const updated = JSON.stringify(report);
+  await writeFile(f.file, updated);
   expect(await invoke("--yes")).toBe(2);
   expect(uploads).toHaveLength(0);
 
@@ -3876,6 +3878,17 @@ test("noninteractive Continuum approval requires the previewed revision and evid
   expect(await invoke("--yes")).toBe(2); // Lost upload response.
   expect(uploads).toHaveLength(1);
   inbox.sourceCheckpoint = "later";
+
+  // Previewing the saved submission supersedes another dry run at this path.
+  await writeFile(f.file, original);
+  expect(await invoke("--dry-run")).toBe(0);
+  await writeFile(f.file, updated);
+  expect(await invoke("--dry-run")).toBe(0);
+  await writeFile(f.file, original);
+  expect(await invoke("--yes")).toBe(2);
+  expect(uploads).toHaveLength(1);
+
+  await writeFile(f.file, updated);
   inbox.recoverUpload = true;
   expect(await invoke("--yes")).toBe(0);
   expect(jobs).toMatchObject([{ source_checkpoint: "newer" }]);

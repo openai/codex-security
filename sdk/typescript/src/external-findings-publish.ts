@@ -267,18 +267,19 @@ export async function reviewContinuumPublication(
   dryRun: boolean,
   signal: AbortSignal,
 ) {
-  if (preview.source.provider !== "continuum" || preview.resumed) return;
+  if (preview.source.provider !== "continuum" || (preview.resumed && !dryRun))
+    return;
   const state = externalPublicationStateDirectory(environment);
   const key = hash("sha256", report);
   const path = join(state, key + ".review.json");
   const saved = await readOptionalFile(path);
-  if (!preview.privateImport?.sourceCheckpoint && saved === undefined) return;
+  const needsReview =
+    !preview.resumed && preview.privateImport?.sourceCheckpoint !== undefined;
+  if (!needsReview && saved === undefined) return;
   const digest = cloudReviewDigest(preview, report, []);
   if (dryRun)
     await withImportLock(state, key, signal, () =>
-      preview.privateImport?.sourceCheckpoint
-        ? writeAtomicJson(path, digest)
-        : rm(path, { force: true }),
+      needsReview ? writeAtomicJson(path, digest) : rm(path, { force: true }),
     );
   else if (saved !== JSON.stringify(digest))
     throw new CodexSecurityError(
