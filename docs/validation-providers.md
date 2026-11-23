@@ -129,6 +129,10 @@ A missing code location or oversized document sets `invalidInput` on the
 item. No upload was attempted for that item. Completion skips it on retry.
 Correct the input and rescan instead of editing sealed findings.
 
+After a finding loses its issue membership, `issueUnlinked` stays true
+until validation can confirm the link again. An issue ID shown with that
+flag identifies the issue reported by the finding. Its evidence is withheld.
+
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.
 
@@ -158,11 +162,8 @@ provider free text and proof stay out of the remediation context.
 The original finding and its remediation tests remain
 the criteria for the fix. Apply uses the recorded patch unchanged.
 
-An `issueUnlinked` result means the finding has no issue or the linked
-issue no longer lists this finding. Earlier verdicts for that issue cannot
-supply remediation evidence.
-If CLI and plugin results disagree on the current link, refresh the entry
-point reporting no link before using the assessment for remediation.
+If CLI and plugin results disagree on issue membership, refresh the
+entry point reporting `issueUnlinked` before using its assessment for remediation.
 
 ## AWS permissions
 
