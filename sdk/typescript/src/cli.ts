@@ -465,6 +465,14 @@ import {
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import { validationSummary } from "./validation-provider-report.js";
+import { validationProviderFromConfiguration } from "./validation-providers.js";
+import {
+  supplementalValidationStatus,
+  unavailableAssessment,
+  type ValidationItemRecord,
+  type ValidationProviderAssessment,
+} from "./validation-provider.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -2636,6 +2644,18 @@ export async function main(
   const separator = argv.indexOf("--");
   const literalArgs = separator < 0 ? [] : argv.slice(separator + 1);
   if (separator >= 0) argv = argv.slice(0, separator);
+  // Keep the bare boolean form from consuming the repository positional.
+  let validationProviderOverride: string | undefined;
+  argv = argv.map((argument) => {
+    if (
+      !argument.startsWith("--validate=") ||
+      argument === "--validate=true" ||
+      argument === "--validate=false"
+    )
+      return argument;
+    validationProviderOverride = argument.slice("--validate=".length);
+    return "--validate";
+  });
   const inspection = argv.some((arg) => INSPECTION_FLAGS.includes(arg));
   const actionFlags = argv.filter(
     (arg) => arg === "--mcp" || arg === "--update",
@@ -5761,7 +5781,9 @@ export async function main(
           validate: z
             .boolean()
             .default(false)
-            .describe("Run standalone finding validation after the scan."),
+            .describe(
+              "Validate after sealing the scan. Uses the configured provider, or the existing Codex validator. --validate=NAME overrides the provider.",
+            ),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -5864,6 +5886,19 @@ export async function main(
             directory,
             scope.sources,
           );
+          if (validationProviderOverride !== undefined) {
+            if (!validationProviderOverride.trim())
+              throw new CodexSecurityError(
+                "--validate=NAME requires a provider name.",
+              );
+            settings.validationProvider = {
+              ...settings.validationProvider,
+              provider: validationProviderOverride,
+            };
+          }
+          if (options.validate && settings.validationProvider) {
+            validationProviderFromConfiguration(settings.validationProvider);
+          }
           if (options.archiveExisting && settings.outputDir === undefined) {
             throw new CodexSecurityError(
               "--archive-existing requires --output-dir.",
@@ -9754,7 +9789,7 @@ async function selectSavedFindings(
 ): Promise<SelectedFindings> {
   if (identifiers.some((identifier) => !isFindingIdentifier(identifier))) {
     throw new CodexSecurityError(
-      "Saved scan patching accepts only finding identifiers.",
+      "Saved scan selection accepts only finding identifiers.",
     );
   }
 
@@ -9809,6 +9844,7 @@ async function selectSavedFindings(
     | {
         scanId: string;
         targetPath: string;
+        sealManifestDigest?: string | null;
         findings?: Finding[];
         findingsTruncated?: boolean;
       }
@@ -9863,6 +9899,7 @@ async function selectSavedFindings(
       : await (dependencies.readSavedFindings ?? readSavedFindings)(
           scan.scanId,
           dependencies.runWorkbench,
+          scan.sealManifestDigest ?? undefined,
         );
   const byOccurrence = new Map(
     fullFindings.map((finding) => [finding.occurrenceId, finding]),
@@ -9901,6 +9938,7 @@ async function selectSavedFindings(
 async function readSavedFindings(
   scanId: string,
   workbench: CliDependencies["runWorkbench"],
+  expectedManifestDigest?: string,
 ): Promise<readonly Finding[]> {
   const directory = await resolveSavedArtifactDirectory(
     scanId,
@@ -9910,6 +9948,7 @@ async function readSavedFindings(
   const { findings } = await loadContract(directory, {
     pluginRoot: await bundledPluginRoot(),
     expectedScanId: scanId,
+    expectedManifestDigest,
   });
   return findings.findings;
 }
@@ -13005,33 +13044,28 @@ async function executeScan(
       );
       if (arguments_.validate) {
         const scanId = result.manifest.scan.id;
-        const checkTarget = async () => {
-          const context = await dependencies.runWorkbench(
-            ["get-scan", "--scan-id", scanId, "--check-target"],
-            undefined,
-            preparationAbortController.signal,
-            config.pythonPath,
+        const checkTarget = (signal = preparationAbortController.signal) =>
+          checkValidationTarget(
+            dependencies,
+            scanId,
             repository,
+            signal,
+            config,
             options.knowledgeBaseSnapshot?.protectedRoots,
-            config.pluginPath,
           );
-          const scan = context["scan"];
-          if (
-            !isJsonObject(scan) ||
-            scan["targetPath"] !== (await realpath(repository))
-          ) {
-            throw new CodexSecurityError(
-              "The recorded scan target does not match the validation repository.",
-            );
-          }
-        };
         const findings = result.findings.findings;
+        const configuredValidation = arguments_.validationProvider;
+        const validationProvider =
+          configuredValidation === undefined
+            ? undefined
+            : validationProviderFromConfiguration(configuredValidation);
+        const validationInputs = findings;
         if (targetWarnings.length > 0) {
           validation = {
             status: "skipped",
             reason: "The scan target changed during execution.",
           };
-        } else if (findings.length === 0) {
+        } else if (validationInputs.length === 0) {
           try {
             await checkTarget();
             validation = { status: "complete", findings: 0 };
@@ -13046,7 +13080,9 @@ async function executeScan(
         } else {
           stopPresentation();
           try {
-            progress?.stage(`Validating ${findings.length} scan findings`);
+            progress?.stage(
+              `Validating ${validationInputs.length} scan findings`,
+            );
           } catch {}
           try {
             const scanDirectory = result.scanDir;
@@ -13064,22 +13100,64 @@ async function executeScan(
             );
             validation = { status: "failed", findings: 0, reportPath };
             let completed = 0;
+            const records: ValidationItemRecord[] = [];
+            let providerAssessments: ValidationProviderAssessment[] | undefined;
             try {
-              for (const finding of findings) {
-                const assessment = await security.validate({
-                  repositoryPath: repository,
-                  scanId: result.manifest.scan.id,
-                  workflowId: arguments_.workflowId,
-                  knowledgeBasePaths: options.knowledgeBasePaths,
-                  knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
-                  finding,
-                  auth,
-                  cyberAccessProgram: arguments_.cyberAccessProgram,
-                  safetyIdentifier: arguments_.safetyIdentifier,
-                  signal: preparationAbortController.signal,
-                });
+              announceContinuum(
+                errorOutput,
+                configuredValidation,
+                validationInputs.length,
+              );
+              providerAssessments =
+                validationProvider?.validateBatch === undefined
+                  ? undefined
+                  : await validationProvider
+                      .validateBatch(validationInputs, {
+                        checkSubmissionTarget: checkTarget,
+                        repositoryPath: repository,
+                        signal: preparationAbortController.signal,
+                      })
+                      .catch((error: unknown) =>
+                        validationInputs.map(() =>
+                          unavailableAssessment(validationProvider, error),
+                        ),
+                      );
+              if (
+                providerAssessments &&
+                validationProvider?.name === "continuum"
+              )
+                errorOutput.write(
+                  validationSummary(providerAssessments) + "\n",
+                );
+              for (const [index, finding] of validationInputs.entries()) {
+                const assessment =
+                  providerAssessments?.[index] ??
+                  (await security.validate({
+                    repositoryPath: repository,
+                    scanId: result.manifest.scan.id,
+                    workflowId: arguments_.workflowId,
+                    knowledgeBasePaths: options.knowledgeBasePaths,
+                    knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
+                    finding,
+                    validationProvider,
+                    auth,
+                    cyberAccessProgram: arguments_.cyberAccessProgram,
+                    safetyIdentifier: arguments_.safetyIdentifier,
+                    signal: preparationAbortController.signal,
+                  }));
+                if (assessment.record) records.push(assessment.record);
+                const provenance = assessment.provenance;
+                const evidence =
+                  "outputDir" in assessment && assessment.outputDir
+                    ? `Evidence: ${assessment.outputDir}\n\n`
+                    : "";
+                const label = String(
+                  finding["occurrenceId"] ??
+                    finding["id"] ??
+                    `item-${index + 1}`,
+                );
                 await report.writeFile(
-                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}${provenance.validatedAt ? `; validated ${provenance.validatedAt}` : ""}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
                 );
                 completed += 1;
                 validation = { ...validation, findings: completed };
@@ -13087,11 +13165,25 @@ async function executeScan(
             } finally {
               await report.close();
             }
+            const recordsPath = validationProvider
+              ? reportPath.replace(/\.md$/u, ".json")
+              : undefined;
+            if (recordsPath)
+              await writeFile(
+                recordsPath,
+                JSON.stringify({ schemaVersion: 1, items: records }, null, 2) +
+                  "\n",
+                { flag: "wx", mode: 0o600 },
+              );
             await checkTarget();
             validation = {
-              status: "complete",
-              findings: findings.length,
+              status: supplementalValidationStatus(
+                validationProvider,
+                providerAssessments,
+              ),
+              findings: validationInputs.length,
               reportPath,
+              ...(recordsPath ? { recordsPath } : {}),
             };
             try {
               progress?.stage(`Finding validation saved to ${reportPath}`);
@@ -14061,6 +14153,45 @@ function importedFindingsCommand(repository: string): string {
     return "From the repository directory, run codex-security findings imported.";
   const path = quoteCliPath(repository);
   return `Stored evidence${cliShellLabel(path)}: codex-security findings imported ${path}`;
+}
+
+async function checkValidationTarget(
+  dependencies: CliDependencies,
+  scanId: string,
+  repository: string,
+  signal?: AbortSignal,
+  config?: { pythonPath?: string; pluginPath?: string },
+  protectedRoots?: readonly string[],
+) {
+  const { scan } = await dependencies.runWorkbench(
+    ["get-scan", "--scan-id", scanId, "--check-target"],
+    undefined,
+    signal,
+    config?.pythonPath,
+    repository,
+    protectedRoots,
+    config?.pluginPath,
+  );
+  if (
+    !isJsonObject(scan) ||
+    scan["targetPath"] !== (await realpath(repository))
+  ) {
+    throw new CodexSecurityError(
+      "The recorded scan target does not match the validation repository.",
+    );
+  }
+}
+
+function announceContinuum(
+  stderr: Writable,
+  configuration: ResolvedScanSettings["validationProvider"],
+  count: number,
+) {
+  const settings = configuration?.continuum;
+  if (!settings || !count) return;
+  stderr.write(
+    `Continuum environment ${diagnosticValue(settings.environment_id)}. Submitting or polling ${count} selected findings.\n`,
+  );
 }
 
 async function selectedProjectConfig(

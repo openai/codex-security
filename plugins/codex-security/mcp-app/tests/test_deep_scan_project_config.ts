@@ -59,6 +59,26 @@ await test("explicit YAML and JSON selection use the CLI project format and minu
   }
 });
 
+await test("Deep Scan project reader retains the explicit validation provider", async () => {
+  const root = await temporaryDirectory("deep-project-validation-");
+  try {
+    const validation = {
+      provider: "continuum",
+      continuum: { environment_id: "synthetic-environment" },
+    };
+    await writeFile(
+      join(root, "selected.json"),
+      JSON.stringify({ scan: { validation } }),
+    );
+    assert.deepEqual(
+      (await readDeepScanProjectConfig("selected.json", root))?.validation,
+      validation,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 await test("unsupported settings and contradictory time aliases fail before launch", async () => {
   const root = await temporaryDirectory("deep-project-rejections-");
   try {
@@ -130,6 +150,12 @@ await test("built MCP setup previews and saves the selected project before scan 
       "[deep_scan]\nworkers=7\nmax_time_hours=4\n",
     );
     await buildServer(bundle, {
+      alias: {
+        "#validation-runtime": join(
+          applicationRoot,
+          "../../../sdk/typescript/src/plugin-validation.ts",
+        ),
+      },
       banner: {
         js: `require("node:diagnostics_channel").subscribe("child_process", ({ process: child }) => {
           child.once("spawn", () => {
@@ -243,6 +269,97 @@ await test("built MCP setup previews and saves the selected project before scan 
       await call("start_codex_security_scan", { sessionId: workspace.id })
     ).workspace;
     assert.deepEqual(started.deepScanConfig, preview);
+
+    const validation = {
+      provider: "continuum",
+      continuum: { environment_id: "synthetic-environment" },
+    };
+    const validationPath = join(root, "validation.json");
+    const writeSelection = () =>
+      writeFile(
+        validationPath,
+        JSON.stringify({ scan: { mode: "standard", validation } }),
+      );
+    const standard = {
+      targetPath,
+      scope: ".",
+      mode: "standard",
+      projectConfigPath: validationPath,
+    };
+    const configPath = (scanId: string) =>
+      join(root, "state", "validation-providers", scanId + ".json");
+    const assertBound = async (scanId: string) =>
+      assert.deepEqual(
+        JSON.parse(await readFile(configPath(scanId), "utf8")),
+        validation,
+      );
+
+    await writeFile(
+      validationPath,
+      JSON.stringify({ scan: { validation, max_time_minutes: 30 } }),
+    );
+    const incompatible = await client.callTool({
+      name: "inspect_codex_security_setup",
+      arguments: standard,
+    });
+    assert.equal(incompatible.isError, true);
+    assert.match(JSON.stringify(incompatible.content), /scan.max_time_minutes/);
+    await writeSelection();
+    const setup = (await call("inspect_codex_security_setup", standard)).setup;
+    assert.equal(setup.validationProvider, validation.provider);
+    assert.match(setup.validationNotice, /synthetic-environment.*omit/);
+    assert.equal(setup.deepScanConfig, undefined);
+    const session = await call("open_codex_security_workspace", {
+      targetPath,
+      mode: "standard",
+    });
+    const sessionId = session.workspace.id;
+    await call("submit_codex_security_setup", { ...standard, sessionId });
+    await rm(validationPath);
+    const launched = (await call("start_codex_security_scan", { sessionId }))
+      .workspace;
+    await assertBound(launched.results.scanId);
+    assert.equal(launched.validationProviderConfiguration, undefined);
+
+    for (const [name, args] of [
+      [
+        "start_codex_security_standard_scan",
+        { targetPath, projectConfigPath: validationPath },
+      ],
+      ["start_codex_security_prompt_only_scan", standard],
+    ] as const) {
+      const failure = await client.callTool({
+        name,
+        arguments: args,
+        _meta: { "openai/threadId": "project-owner" },
+      });
+      assert.equal(failure.isError, true);
+      assert.match(JSON.stringify(failure.content), /ENOENT.*validation\.json/);
+      await writeFile(
+        validationPath,
+        JSON.stringify({
+          scan: { validation, exclude_paths: ["fixture.py"] },
+        }),
+      );
+      const restricted = await client.callTool({
+        name,
+        arguments: args,
+        _meta: { "openai/threadId": "project-owner" },
+      });
+      assert.equal(restricted.isError, true);
+      assert.match(JSON.stringify(restricted.content), /scan.exclude_paths/);
+      await writeSelection();
+      const created = await call(name, args);
+      assert.equal(created.startDisposition, "created");
+      assert.equal(created.validationProviderConfiguration, undefined);
+      await assertBound(created.scan.scanId);
+      await rm(validationPath);
+      await rm(configPath(created.scan.scanId));
+      const joined = await call(name, args);
+      assert.equal(joined.startDisposition, "joined");
+      assert.equal(joined.scan.scanId, created.scan.scanId);
+      await assertBound(joined.scan.scanId);
+    }
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });
