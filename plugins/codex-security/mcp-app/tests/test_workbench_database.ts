@@ -1491,7 +1491,7 @@ test("Node initialization leaves repository migration semantics to the Python co
       pythonMigrations(controlPath);
       await databaseInfo(directory);
       const initialized = new DatabaseSync(databasePath);
-      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60, 72, 80);
+      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60, 72, 80, 81);
       assert.deepEqual(
         initialized.prepare("SELECT * FROM external_source_reports").all(),
         originalReports,

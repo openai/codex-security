@@ -596,5 +596,13 @@
       "ALTER TABLE finding_triage ADD COLUMN fixed_revision TEXT;",
       "ALTER TABLE finding_decisions ADD COLUMN fixed_revision TEXT;"
     ]
+  },
+  {
+    "version": 81,
+    "name": "keep triage revisions consistent with recorded decisions",
+    "statements": [
+      "UPDATE finding_triage\nSET fixed_revision = (\n    SELECT fixed_revision FROM finding_decisions\n    WHERE occurrence_id = finding_triage.occurrence_id\n    ORDER BY rowid DESC LIMIT 1\n);",
+      "CREATE TRIGGER retain_finding_decision_revision\nAFTER INSERT ON finding_decisions\nBEGIN\n    UPDATE finding_triage SET fixed_revision = NEW.fixed_revision\n    WHERE occurrence_id = NEW.occurrence_id;\nEND;"
+    ]
   }
 ]

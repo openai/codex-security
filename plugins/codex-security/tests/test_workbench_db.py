@@ -1039,9 +1039,10 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
     assert "fixedRevision" not in legacy
     # Reopen a v72 database containing an already_fixed decision.
     with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute("DROP TRIGGER retain_finding_decision_revision")
         db.execute("ALTER TABLE finding_triage DROP COLUMN fixed_revision")
         db.execute("ALTER TABLE finding_decisions DROP COLUMN fixed_revision")
-        db.execute("DELETE FROM schema_migrations WHERE version = 80")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (80, 81)")
     migrated = close()
     assert migrated == legacy
     for reason, revision, rationale, diagnostic in (

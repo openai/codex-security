@@ -1,4 +1,4 @@
-"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+"""Exercise workbench setup and historical migration compatibility."""
 
 from __future__ import annotations
 
@@ -121,6 +121,7 @@ EXPECTED_MIGRATIONS = [
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
     (80, "retain fixed revisions for finding triage decisions"),
+    (81, "keep triage revisions consistent with recorded decisions"),
 ]
 
 
