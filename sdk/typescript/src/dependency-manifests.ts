@@ -196,9 +196,17 @@ export async function readPythonRequirements(
   for (const path of paths.filter((p) =>
     /^requirements[^/]*\.(?:txt|lock|in)$/iu.test(posix.basename(p)),
   )) {
-    const lines = (await read(path))
-      .split(/\r?\n/u)
-      .map((line) => line.replace(/(?:^|\s+)#.*$/u, "").trim());
+    const physical = (await read(path)).split(/\r?\n/u);
+    // pip joins a line ending in a backslash with the next one (e.g. --generate-hashes output).
+    for (let index = physical.length - 2; index >= 0; index--) {
+      if (!physical[index]!.endsWith("\\")) continue;
+      physical[index] =
+        `${physical[index]!.slice(0, -1)} ${physical[index + 1]}`;
+      physical[index + 1] = "";
+    }
+    const lines = physical.map((line) =>
+      line.replace(/(?:^|\s+)#.*$/u, "").trim(),
+    );
     const matches = lines.flatMap((line, index) => {
       const match = /^([A-Za-z0-9][A-Za-z0-9_.-]*)(.*)$/u.exec(line);
       return match &&
