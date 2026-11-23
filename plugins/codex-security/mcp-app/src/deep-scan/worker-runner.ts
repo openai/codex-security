@@ -31,6 +31,7 @@ import type {
 
 export interface AcceptedDiscovery {
   id: string;
+  artifactDir?: string;
   resultPath: string;
   result: ScanDraftInput;
   attempt?: number;
@@ -68,6 +69,8 @@ type WorkerAttemptOutcome =
   | {
       status: "failed";
       error: Error;
+      attempt?: number;
+      threadId?: string;
       replaceableFailureKind?: DeepScanReplaceableFailureKind;
     }
   | { status: "canceled" };
@@ -206,7 +209,8 @@ export class DeepScanWorkerRunner {
       status: "succeeded",
       worker: {
         id: workerId,
-        resultPath,
+        artifactDir,
+        resultPath: persisted.acceptedResultPath ?? resultPath,
         result: discoveryResult!,
         attempt: persisted.attempt,
       },
@@ -333,6 +337,7 @@ export class DeepScanWorkerRunner {
         const resumePrompt = resumableThreadId
           ? (continuationPrompt ?? transientExecutionContinuation(attempt))
           : undefined;
+        signal.throwIfAborted();
         const result = await this.options.executor.run({
           attemptId,
           workerUsageDirectory: run.workerUsageDirectory,
@@ -403,12 +408,8 @@ export class DeepScanWorkerRunner {
         receipt.threadId = activeThreadId;
         receipt.turnId = result.turnId ?? receipt.turnId;
         if (result.usage !== undefined) receipt.usage = result.usage;
-        if (terminalFailure) return terminalFailure;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
         await persistUsage();
+        signal.throwIfAborted();
         validationStarted = true;
         try {
           await input.validate();
@@ -416,10 +417,8 @@ export class DeepScanWorkerRunner {
           throw withWorkerDiagnostics(validationError, result.diagnostics);
         }
         validationCompleted = true;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
+        signal.throwIfAborted();
+        if (terminalFailure) return terminalFailure;
         outcome = "validated";
         return {
           status: "validated",
@@ -462,6 +461,8 @@ export class DeepScanWorkerRunner {
             status: "failed",
             error: normalized,
             ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
+            attempt,
+            threadId: activeThreadId,
           };
         }
         await this.options.store.updateWorker({

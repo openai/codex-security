@@ -6,6 +6,7 @@ export function runTestInSubprocess(
   name: string,
   environment: NodeJS.ProcessEnv = {},
   cwd: string | URL = new URL("../../", import.meta.url),
+  preload?: string,
 ): boolean {
   const identity = `${file}::${name}`;
   if (process.env["CODEX_SECURITY_ISOLATED_TEST"] === identity) return false;
@@ -14,7 +15,15 @@ export function runTestInSubprocess(
 
   const result = spawnSync(
     process.execPath,
-    ["test", "--timeout", timeout, "--test-name-pattern", pattern, file],
+    [
+      "test",
+      ...(preload === undefined ? [] : ["--preload", preload]),
+      "--timeout",
+      timeout,
+      "--test-name-pattern",
+      pattern,
+      file,
+    ],
     {
       cwd,
       encoding: "utf8",

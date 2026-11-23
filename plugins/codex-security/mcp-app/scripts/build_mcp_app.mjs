@@ -102,7 +102,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
       );
     }
   }
-  await writeRuntime("helpers", "helpers-main.ts");
+  await writeRuntime("helpers", "src/helpers-runtime.ts");
   await build({
     bundle: true,
     entryPoints: [join(root, "src/session-decompression.ts")],
@@ -135,6 +135,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
       loader: { ".md": "text" },
       logLevel: "info",
       logOverride: { "empty-import-meta": "silent" },
+      nodePaths: [join(root, "node_modules")],
       outfile: bundle,
       platform: "node",
       plugins: [

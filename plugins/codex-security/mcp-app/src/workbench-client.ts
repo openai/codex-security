@@ -32,6 +32,7 @@ export async function scanRoot(): Promise<string> {
 
 interface WorkbenchOptions {
   isolatedPython?: boolean;
+  withExecutionSettings?: boolean;
 }
 
 export async function runWorkbench(
@@ -112,6 +113,7 @@ async function executeWorkbench(
       "-c",
       WORKBENCH_PYTHON,
       workbenchScriptPath(),
+      ...(options.withExecutionSettings ? ["with_execution_settings"] : []),
     ],
     {
       cwd: PLUGIN_ROOT,

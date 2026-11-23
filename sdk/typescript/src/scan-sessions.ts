@@ -1,6 +1,55 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 import { isRecord } from "./record.js";
 
+export interface ScanExecutionAttribution {
+  formatVersion: 1;
+  legacy?: true;
+  /** Committed worker home supplied only by the private workbench projection. */
+  codexHome?: string;
+  executionThreadIds: string[];
+  owner: { threadId: string | null; turnId: string | null; startedAt: string };
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export function attributedScanThreads(
+  children: ReadonlyMap<string | null, readonly { threadId: string | null }[]>,
+  attribution: ScanExecutionAttribution,
+): Set<string> {
+  const included = new Set(attribution.executionThreadIds);
+  for (const parent of included) {
+    for (const child of children.get(parent) ?? []) {
+      if (child.threadId !== null) included.add(child.threadId);
+    }
+  }
+  if (attribution.owner.threadId) included.add(attribution.owner.threadId);
+  return included;
+}
+
+export function isAttributedScanEvent(
+  attribution: ScanExecutionAttribution,
+  threadId: string,
+  turnId: string | null,
+  timestamp: unknown,
+): boolean {
+  const time = sessionStartedAt(timestamp);
+  if (
+    time === null ||
+    time < Date.parse(attribution.startedAt) ||
+    (attribution.completedAt !== null &&
+      time > Date.parse(attribution.completedAt))
+  )
+    return false;
+  if (
+    threadId !== attribution.owner.threadId ||
+    attribution.executionThreadIds.includes(threadId)
+  )
+    return true;
+  return (
+    attribution.owner.turnId !== null && turnId === attribution.owner.turnId
+  );
+}
+
 export function sessionStartedAt(timestamp: unknown): number | null {
   const startedAt =
     typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;

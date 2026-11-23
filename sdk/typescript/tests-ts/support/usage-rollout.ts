@@ -1,5 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { runNodePython } from "./python-probe.js";
+import {
+  PLUGIN_PYTHON_PROBE,
+  PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
+  PLUGIN_PYTHON_READY,
+} from "../../src/plugin-python-probe.js";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
@@ -142,8 +147,25 @@ export function readPythonRolloutUsage(
   pluginRoot: string,
   rolloutPath: string,
 ): unknown {
-  const python = Bun.which("python3") ?? Bun.which("python");
-  assert.notEqual(python, null);
+  const candidates =
+    process.platform === "win32"
+      ? ["python", "python3", "py"]
+      : ["python3", "python", "py"];
+  const python =
+    process.env["PYTHON"]?.trim() ||
+    candidates.find((candidate) => {
+      const result = runNodePython(candidate, ["-c", PLUGIN_PYTHON_PROBE], {
+        timeout: PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      return (
+        result.status === 0 && result.stdout.trim() === PLUGIN_PYTHON_READY
+      );
+    });
+  assert.ok(
+    python,
+    "A supported Python interpreter is required to read rollout usage.",
+  );
   const probe = [
     "import json, sys",
     "from datetime import datetime, timezone",
@@ -158,7 +180,7 @@ export function readPythonRolloutUsage(
     ")",
     "print(json.dumps({'usage': usage.tokens, 'warnings': sorted(usage.warnings)}, sort_keys=True))",
   ].join("\n");
-  const result = runNodePython(python!, [
+  const result = runNodePython(python, [
     "-c",
     probe,
     join(pluginRoot, "scripts"),

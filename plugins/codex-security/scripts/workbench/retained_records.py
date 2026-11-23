@@ -111,6 +111,46 @@ def _identity_candidate(finding: dict[str, Any]) -> str | None:
     )
 
 
+def _legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
+    content = _finding_content(finding)
+    locations = content.get("locations")
+    if isinstance(locations, list):
+        content["locations"] = sorted(
+            [
+                {**row, "endLine": row.get("endLine", row.get("startLine"))}
+                if isinstance(row, dict)
+                else row
+                for row in locations
+            ],
+            key=_encoded,
+        )
+    return _digest([owner, _identity_candidate(finding), content])
+
+
+def _restore_legacy_identity(
+    legacy_identities: dict[str, dict[str, Any] | None],
+    legacy_identity_sources: set[str],
+    finding: Any,
+    normalized: Any = None,
+    *,
+    allow_synthesis: bool = True,
+) -> None:
+    if isinstance(finding, dict) and "identity" not in finding:
+        provenance = finding.get("provenance")
+        owner = provenance.get("workerId") if isinstance(provenance, dict) else None
+        key = _legacy_identity_key(finding, owner)
+        identity = legacy_identities.get(key)
+        if identity is not None:
+            finding["identity"] = copy.deepcopy(identity)
+        allow_synthesis = allow_synthesis or key in legacy_identity_sources
+    if not allow_synthesis:
+        return
+    if isinstance(finding, dict) and isinstance(normalized, dict):
+        finding.setdefault("identity", normalized["identity"])
+    else:
+        _ensure_finding_identity(finding)
+
+
 def _ensure_finding_identity(finding: Any) -> None:
     _ensure_finding_identities([finding])
 

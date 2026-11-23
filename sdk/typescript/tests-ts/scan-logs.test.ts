@@ -72,6 +72,50 @@ function taskStarted(turnId: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("reads the complete worker log despite differing pre-scan history", async () => {
+    const current = await temporaryHome();
+    const recorded = await temporaryHome();
+    const before = "2026-08-11T12:00:00Z";
+    const startedAt = "2026-08-11T12:01:00Z";
+    const first = commandEvent("first", "first-call", startedAt);
+    const last = commandEvent("last", "last-call", startedAt);
+    await writeSession(current, "parent", []);
+    await writeSession(current, "worker", [
+      commandEvent("unrelated", "old-call", before),
+      first,
+    ]);
+    await writeSession(recorded, "worker", [
+      commandEvent("other history", "other-call", before),
+      first,
+      last,
+    ]);
+
+    const result = await readSavedScanLogs(
+      {
+        scanId: "scan-1",
+        continuationThreadId: "parent",
+        executionAttribution: {
+          formatVersion: 1,
+          codexHome: recorded,
+          executionThreadIds: ["worker"],
+          owner: { threadId: "parent", turnId: "scan-turn", startedAt },
+          startedAt,
+          completedAt: null,
+        },
+      },
+      current,
+    );
+    expect(
+      result.events
+        .filter(({ threadId }) => threadId === "worker")
+        .map(({ event }) => event),
+    ).toEqual([
+      { type: "session_meta", payload: { id: "worker" } },
+      first,
+      last,
+    ]);
+  });
+
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
     ["complete first", [0, 1, 1, 2], [0], 0, false, false],
@@ -973,6 +1017,93 @@ describe("saved scan logs", () => {
         : [...scanEvents, ...followup];
       expect(result.events.slice(1)).toEqual(
         expected.map((event) => ({ threadId: "parent", event })),
+      );
+    },
+  );
+
+  test.each(["bound", "unbound", "late", "legacy"] as const)(
+    "retains only the finishing bound owner turn after completion (%s)",
+    async (binding) => {
+      const home = await temporaryHome();
+      const start = "2026-08-11T12:00:00.000Z";
+      const end = "2026-08-11T12:00:05.000Z";
+      const later = "2026-08-11T12:00:06.000Z";
+      const reply = {
+        type: "response_item",
+        timestamp: later,
+        payload: {
+          type: "function_call_output",
+          call_id: "complete",
+          output: "{}",
+        },
+      };
+      const final = {
+        type: "event_msg",
+        timestamp: later,
+        payload: { type: "agent_message", message: "finished" },
+      };
+      const complete = {
+        type: "event_msg",
+        timestamp: later,
+        payload: { type: "task_complete", turn_id: "original" },
+      };
+      const sameTurnContext = {
+        type: "turn_context",
+        timestamp: later,
+        payload: { turn_id: "original" },
+      };
+      const orphan = commandEvent("after task_complete", "orphan", later);
+      await writeSession(home, "parent", [
+        taskStarted(binding === "late" ? "different" : "original", start),
+        sameTurnContext,
+        reply,
+        final,
+        complete,
+        orphan,
+        taskStarted("next", later),
+        commandEvent("next owner turn", "other", later),
+      ]);
+      await writeSession(home, "worker", [
+        taskStarted("original", start),
+        commandEvent("worker after completion", "worker", later),
+      ]);
+
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan",
+          mode: "deep",
+          continuationThreadId: "parent",
+          progress: { status: "complete" },
+          lifecycle: { startedAt: start, finishedAt: end },
+          logCompletedAt: end,
+          executionAttribution: {
+            formatVersion: 1,
+            ...(binding === "legacy" ? { legacy: true } : {}),
+            startedAt: start,
+            completedAt: end,
+            executionThreadIds: ["worker"],
+            owner: {
+              threadId: "parent",
+              turnId: binding === "unbound" ? null : "original",
+              startedAt: start,
+            },
+          },
+        },
+        home,
+      );
+
+      expect(
+        result.events
+          .map(({ event }) => event)
+          .filter(
+            (event) => (event as { timestamp?: string }).timestamp === later,
+          ),
+      ).toEqual(
+        binding === "bound"
+          ? [sameTurnContext, reply, final, complete]
+          : binding === "legacy"
+            ? [sameTurnContext, reply, final, complete, orphan]
+            : [],
       );
     },
   );

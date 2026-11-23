@@ -98,6 +98,9 @@ def apply_migrations(
                     or version not in applied
                     or should_backfill_targets
                 )
+            elif 82 <= version <= 85:
+                # Earlier readers created these objects under other previews’ receipts.
+                repair_schema(connection, version)
             elif version in applied:
                 if version in (
                     2,

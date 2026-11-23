@@ -12,8 +12,8 @@ import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
 
 /** Private SDK entry point. The child process isolates each scan's environment. */
 export async function runCliDeepScan(): Promise<void> {
-  const runWorkbench = (args: string[], input?: string | Buffer) =>
-    runWorkbenchCommand(args, input, { isolatedPython: true });
+  const runWorkbench: typeof runWorkbenchCommand = (args, input, options) =>
+    runWorkbenchCommand(args, input, { ...options, isolatedPython: true });
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const registry = new DeepScanCoordinatorRegistry();
   const controller = new AbortController();

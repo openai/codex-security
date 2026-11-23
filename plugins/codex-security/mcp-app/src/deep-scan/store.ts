@@ -25,9 +25,10 @@ type JsonObject = Record<string, unknown>;
 export type WorkbenchRunner = (
   args: string[],
   input?: string,
+  options?: { withExecutionSettings?: boolean },
 ) => Promise<JsonObject>;
 
-const WORKFLOW_VERSION = "deep-scan-mcp/v1";
+const WORKFLOW_VERSION = "deep-security-scan/v1";
 const MAX_IDEMPOTENT_PERSISTENCE_ATTEMPTS = 3;
 const PERSISTENCE_RETRY_BASE_DELAY_MS = 100;
 
@@ -187,7 +188,7 @@ export class WorkbenchDeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
-    return run;
+    return { ...run, startDisposition };
   }
 
   async get(scanId: string, threadId: string): Promise<DeepScanRunState> {
@@ -219,6 +220,8 @@ export class WorkbenchDeepScanStore {
         coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         claimToken: input.handoffClaimToken || undefined,
       }),
+      undefined,
+      { withExecutionSettings: true },
     );
     const run = parseDeepScan(result);
     const disposition = result.coordinatorDisposition;
@@ -323,6 +326,7 @@ export class WorkbenchDeepScanStore {
 
   async finish(input: {
     scanId: string;
+    coordinatorGeneration?: number;
     reason: DeepScanTerminalReason;
     manifestPath: string;
     stagedManifestPath?: string;
@@ -332,7 +336,9 @@ export class WorkbenchDeepScanStore {
       await this.enqueueWrite(
         workbenchArgs("finish-deep-scan", {
           scanId: input.scanId,
-          coordinatorGeneration: this.coordinatorGeneration(input.scanId),
+          coordinatorGeneration:
+            input.coordinatorGeneration ??
+            this.coordinatorGeneration(input.scanId),
           terminalReason: input.reason,
           manifestPath: input.manifestPath,
           stagedManifestPath: input.stagedManifestPath || undefined,
@@ -418,12 +424,16 @@ export class WorkbenchDeepScanStore {
    * other workbench processes. Reads remain concurrent and observe a committed
    * state before or after each mutation.
    */
-  private enqueueWrite(args: string[], input?: string): Promise<JsonObject> {
+  private enqueueWrite(
+    args: string[],
+    input?: string,
+    options?: { withExecutionSettings?: boolean },
+  ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
         return RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
           ? await this.runIdempotentPersistence(args)
-          : await this.runWorkbench(args, input);
+          : await this.runWorkbench(args, input, options);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
         const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;

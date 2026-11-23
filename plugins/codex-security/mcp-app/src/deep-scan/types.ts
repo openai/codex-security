@@ -11,13 +11,24 @@ import type {
 
 /** Effective configuration and durable run state returned by the workbench. */
 export type DeepScanConfig = z.output<typeof configSchema>;
+type RunResponse = z.output<typeof runSchema>;
+type RecoveryFields =
+  | "finalizationInput"
+  | "usageOwner"
+  | "executionSettings"
+  | "persistedMergeClaims";
+export type DeepScanFinalizationInput = NonNullable<
+  RunResponse["finalizationInput"]
+>;
 export type DeepScanRunState = Omit<
-  z.output<typeof runSchema>,
-  "persistedWorkers" | "persistedDedupInputs"
-> & {
-  persistedWorkers?: PersistedDeepScanWorker[];
-  persistedDedupInputs?: PersistedDeepScanDedupInput[];
-};
+  RunResponse,
+  "persistedWorkers" | "persistedDedupInputs" | RecoveryFields
+> &
+  Partial<Pick<RunResponse, RecoveryFields>> & {
+    startDisposition?: "created" | "joined";
+    persistedWorkers?: PersistedDeepScanWorker[];
+    persistedDedupInputs?: PersistedDeepScanDedupInput[];
+  };
 export type DeepScanTerminalReason = NonNullable<
   DeepScanRunState["terminalReason"]
 >;
@@ -42,7 +53,11 @@ export interface DeepScanCoordinatorLeaseInput {
 /** Fields supplied when the coordinator changes one worker. */
 export type DeepScanWorkerMutation = Omit<
   PersistedDeepScanWorker,
-  "completionSequence" | "consecutiveErrors" | "mergeState"
+  | "completionSequence"
+  | "consecutiveErrors"
+  | "mergeState"
+  | "acceptedResultPath"
+  | "acceptedResultSha256"
 > & {
   scanId: string;
   terminalFailure?: boolean;

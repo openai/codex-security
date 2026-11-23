@@ -15,6 +15,9 @@ export const executor = await importModule({
     // Expose internal worker checks only to the test fixtures.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic, bindCodexExecutable, verifyBoundCodexExecutable };
+export { classifyCodexWorkerError, DeepScanNonRetryableError, codexWorkerTurnError } from "./errors.js";
+export { captureDeepScanExecutionSettings, retainDeepScanExecutionSettings, loadDeepScanExecutionSettings, restoredDeepScanWorkerSettings } from "./recovery-settings.js";
+export { WorkbenchDeepScanStore } from "./store.js";
 export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
