@@ -136,7 +136,7 @@ export class DeepScanWorkerRunner {
           artifacts,
           resultPath,
           run.scanId,
-          run,
+          { ...run, workerId },
         );
       },
     });

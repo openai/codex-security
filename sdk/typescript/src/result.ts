@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
+  DeferredCoverage,
   Finding,
   FindingsDocument,
   ScanManifest,
@@ -10,6 +11,7 @@ import type {
   ThreatModel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
+import { uniqueCandidateRows, unresolvedCandidates } from "./candidates.js";
 import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
@@ -58,6 +60,7 @@ export interface ScanResultOptions {
 }
 
 export class ScanResult {
+  readonly #legacyCoverage: CoverageDocument | undefined;
   public readonly mode: NonNullable<ScanManifest["scan"]["mode"]>;
   public readonly manifest: ScanManifest;
   public readonly findings: FindingsDocument;
@@ -75,6 +78,7 @@ export class ScanResult {
   public constructor(options: ScanResultOptions) {
     this.mode =
       options.mode ?? options.manifest.scan.mode ?? options.coverage!.mode;
+    this.#legacyCoverage = options.coverage;
     this.manifest = options.manifest;
     this.findings = options.findings;
     this.review = options.review ??
@@ -141,6 +145,17 @@ export class ScanResult {
     return join(this.scanDir, "artifacts");
   }
 
+  /** Saved unresolved candidates, distinct within each logical worker. */
+  public get unresolvedCandidates(): readonly DeferredCoverage[] {
+    return this.#legacyCoverage
+      ? unresolvedCandidates(this.#legacyCoverage, this.findings.findings, true)
+      : uniqueCandidateRows(this.review.unresolvedCandidates ?? []);
+  }
+
+  public get unresolvedCandidateCount(): number {
+    return this.unresolvedCandidates.length;
+  }
+
   public hasFindingsAtOrAbove(threshold: SeverityLevel): boolean {
     severityThresholdRank(threshold);
     return this.findings.findings.some((finding) =>
@@ -149,6 +164,7 @@ export class ScanResult {
   }
 
   public toJSON(): Record<string, unknown> {
+    const unresolvedCandidates = this.unresolvedCandidates;
     return {
       manifest: this.manifest,
       repositoryFindings: this.repositoryFindings,
@@ -160,6 +176,8 @@ export class ScanResult {
         : { ownerSuggestionsError: this.ownerSuggestionsError }),
       findings: this.findings,
       review: this.review,
+      unresolvedCandidateCount: unresolvedCandidates.length,
+      unresolvedCandidates,
       scanDir: this.scanDir,
       threadId: this.threadId,
       reportPath: this.reportPath,

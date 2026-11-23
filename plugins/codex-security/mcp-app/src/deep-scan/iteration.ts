@@ -1,11 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
+import { findingCandidateKey } from "../artifact-candidates.js";
 import {
+  preserveFindingDetails,
   scanDraftInputSchema,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import { z } from "zod";
 import { asRecord, canonicalJson } from "../record.js";
-import { addScanCoverage, type ScanUnion } from "./artifact-validation.js";
+import {
+  addScanCoverage,
+  refreshCandidateFindingState,
+  type ScanUnion,
+} from "./artifact-validation.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { errorMessage, exceedsContext } from "./errors.js";
 import { checkSameFix, sharesSource } from "./same-fix.js";
@@ -530,6 +536,9 @@ export async function mergeBatch(
   ];
   const exact = originals.map(findingContent);
   const copies = new Map<string, (typeof retained)[number]>();
+  const usedSourceIds = new Set(
+    retained.flatMap(({ finding }) => sourceIds(finding)),
+  );
   const incomplete = new Set<number>();
   for (const group of retained) {
     copies.set(exact[group.id]!, group);
@@ -652,16 +661,35 @@ export async function mergeBatch(
         addLocations(group.finding, source);
         if (!copy && group.id < previous) changed.set(group.id, workerIndex);
       }
-      const sourceId = `${worker.id}:${index}`;
+      const baseId = `${worker.id}:${index}`;
       copies.set(exact[id]!, group);
-      const { finding } = group;
-      (finding.provenance.sourceFindingIds ??= sourceIds(finding)).push(
-        sourceId,
-      );
-      (finding.provenance.sourceFindings ??= []).push({
-        id: sourceId,
-        finding: structuredClone(source),
-      });
+      const provenance = group.finding.provenance;
+      const members = (provenance.sourceFindings ??= []);
+      // A resumed worker may update a report at the same position. Preserve its
+      // earlier evidence without assigning the same reference to two reports.
+      let sourceId = baseId;
+      let version = 1;
+      let existing = members.find((entry) => entry.id === sourceId);
+      while (
+        usedSourceIds.has(sourceId) &&
+        (!existing ||
+          findingContent(existing.finding) !== exact[id] ||
+          findingCandidateKey(existing.finding) !== findingCandidateKey(source))
+      ) {
+        sourceId = `${baseId}@${++version}`;
+        existing = members.find((entry) => entry.id === sourceId);
+      }
+      const current = structuredClone(source);
+      if (existing) {
+        preserveFindingDetails(current, existing.finding);
+        existing.finding = current;
+      } else {
+        usedSourceIds.add(sourceId);
+        (provenance.sourceFindingIds ??= sourceIds(group.finding)).push(
+          sourceId,
+        );
+        members.push({ id: sourceId, finding: current });
+      }
       id++;
     }
     addScanCoverage(aggregate, worker, scanDir);
@@ -788,6 +816,7 @@ export async function mergeBatch(
     }
     aggregate.findings = [...visible.values()];
   }
+  refreshCandidateFindingState(aggregate);
   if (limitation) {
     aggregate.scope = {
       ...aggregate.scope,

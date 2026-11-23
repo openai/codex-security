@@ -295,6 +295,18 @@ const evidence = {
   explanation: "Synthetic evidence.",
 } satisfies NonNullable<Finding["codeEvidence"]>[number];
 
+test("tracks findings when a pending candidate shares a resolved task ID", async () => {
+  const documents = await fixture();
+  documents.coverage.deferred = [
+    { id: "follow-up", candidateId: "review", reason: "Pending." },
+  ];
+  documents.coverage.resolvedDeferred = [{ id: "review", reason: "Done." }];
+  await saveAndSeal(documents);
+  expect(await validateTrackingSource(documents.scanDir)).toEqual(
+    documents.findings.findings,
+  );
+});
+
 const invalidCases: Array<[string, (documents: Documents) => void, string]> = [
   [
     "duplicate canonical evidence",
@@ -332,16 +344,6 @@ const invalidCases: Array<[string, (documents: Documents) => void, string]> = [
     ({ coverage }) => {
       coverage.deferred = [{ id: "task", reason: "Pending." }];
       coverage.resolvedDeferred = [{ id: "task", reason: "Done." }];
-    },
-    "deferred work is still active",
-  ],
-  [
-    "resolved candidate that remains active",
-    ({ coverage }) => {
-      coverage.deferred = [
-        { id: "task", candidateId: "candidate", reason: "Pending." },
-      ];
-      coverage.resolvedDeferred = [{ id: "candidate", reason: "Done." }];
     },
     "deferred work is still active",
   ],
