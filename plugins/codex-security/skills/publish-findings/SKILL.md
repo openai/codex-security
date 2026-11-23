@@ -15,6 +15,7 @@ For a fresh scan, look for the relevant executable in the environment where it w
 
 | Source | Acquisition guidance |
 | --- | --- |
+| Promptfoo | Use the native version 3 evaluation JSON from `promptfoo redteam eval -c redteam.yaml -o report.json`. Import with `--provider promptfoo --to local` into the checkout serving the targets. Review the failed assertions, target responses and numbered exclusions. [Promptfoo guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/promptfoo.md) |
 | Trivy | For a fresh filesystem vulnerability scan, run `trivy fs --scanners vuln --format json --output REPORT.json .` from the chosen directory. For an earlier scan, read its repository or filesystem schema-v2 JSON or gzip artifact. Supply the checkout-relative `--trivy-scan-root` for filesystem reports. |
 | Semgrep CLI or CI | For a fresh Code scan, use the installed CLI with the selected rules, e.g. `semgrep scan --config RULES --json-output REPORT.json .`. For an existing CI job, use its Code JSON or self-contained SARIF artifact. |
 | Semgrep Guardian MCP | Use the connected Guardian tool `get_semgrep_sast_findings` or `get_semgrep_supply_chain_findings` with the deployment, repository, full ref, and selected filters. Match exact string finding IDs. Preserve the original request and selected tool rows in the [Guardian capture](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/semgrep.md#import-selected-guardian-findings). |
