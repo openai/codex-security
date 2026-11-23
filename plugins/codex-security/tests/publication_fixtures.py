@@ -69,12 +69,13 @@ class PublicationScan(SimpleNamespace):
             )
         return worker_id, output
 
-    def finish(self, connection=None, *, terminal_reason="saturated"):
+    def finish(self, connection=None, *, terminal_reason="saturated", generation=None):
         return self.api["deep_scan"].finish_deep_scan(
             self.connection if connection is None else connection,
             Namespace(
                 scan_id=self.scan_id,
                 terminal_reason=terminal_reason,
+                coordinator_generation=generation,
                 manifest_path=str(self.scan_dir / "scan-manifest.json"),
                 staged_manifest_path=None,
                 omitted_worker_id=[],

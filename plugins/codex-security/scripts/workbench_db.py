@@ -80,7 +80,7 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
-from workbench_finding_index import index_findings
+from workbench_finding_index import index_findings, legacy_finding_matches
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
@@ -432,6 +432,10 @@ def workbench_completion_binding(
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    if scan["recipe_json"] is not None:
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        binding["imported"] = isinstance(recipe.get("import"), dict)
+        binding["customValidation"] = recipe.get("validationMode") == "custom"
     return scan_history.preserve_sealed_completion(binding, manifest)
 
 
@@ -1311,6 +1315,15 @@ def complete_scan_locked(
             _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
         )
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+    require_complete_evidence = True
+    if scan["mode"] == "deep":
+        run = deep_scan.require_deep_scan_run(connection, scan_id)
+        require_complete_evidence = not (
+            run["status"] == "succeeded"
+            and run["terminal_reason"] == "capped"
+            and run["completion_sequence"] == 0
+            and deep_scan.deep_scan_deadline_reached(run)
+        )
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
 
@@ -1391,6 +1404,7 @@ def complete_scan_locked(
                 recover_unsealed=scan["mode"] != "deep",
                 allow_missing_writeups=True,
                 draft_documents=draft_documents,
+                require_complete_evidence=require_complete_evidence,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
@@ -2991,19 +3005,6 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
-
-
-def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
-    if not isinstance(finding, dict):
-        return False
-    return (
-        finding.get("findingId") == row["finding_id"]
-        and finding.get("title") == row["title"]
-        and finding.get("summary") == row["summary"]
-        and finding.get("remediation") == row["remediation"]
-        and finding["severity"]["level"] == row["severity"]
-        and finding["confidence"]["level"] == row["confidence"]
-    )
 
 
 def finding_result(

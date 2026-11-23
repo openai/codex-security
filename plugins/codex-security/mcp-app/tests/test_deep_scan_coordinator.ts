@@ -864,6 +864,41 @@ async function testMissingDiscoveryResultResumesExistingThread(
   );
 }
 
+async function testIncompleteEvidenceRetriesBeforePublication() {
+  const { fixture, store } = await coordinatorFixture();
+  const executor = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  const run = executor.run.bind(executor);
+  let rejected = false;
+  executor.run = async (request) => {
+    const result = await run(request);
+    if (!rejected) {
+      rejected = true;
+      const output = path.join(request.artifactContext!.root, "result.json");
+      const draft = await readJson(output);
+      delete draft.findings[0].validation;
+      await writeJson(output, draft);
+    }
+    return result;
+  };
+  const completedDrafts: ScanDraftInput[] = [];
+  const terminal = await runCoordinator(fixture, store, executor, {
+    retryDelaysMs: [1],
+    onComplete: async (draft) => void completedDrafts.push(draft),
+  });
+  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(executor.discoveryCalls, 2);
+  assert.ok(
+    store.workerUpdates.some(
+      (update) =>
+        update.kind === "discovery" &&
+        update.error?.includes("validation.method"),
+    ),
+  );
+  assert.equal(completedDrafts.length, 1);
+  assert.ok(completedDrafts[0].findings[0].validation);
+  assert.equal(store.finishCalls.length, 1);
+}
+
 async function testInvalidArtifactsRetry() {
   const { fixture, store } = await coordinatorFixture(
     twoRunConfig({ workers: 2, subagents: 1 }),
@@ -2175,6 +2210,7 @@ async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
   removeHistoricalPrompts = true,
   includePaths?: string[],
+  sparseOutsideScope = false,
 ) {
   const fixture = await fixtureRun({
     workers: 2,
@@ -2241,6 +2277,16 @@ async function testResumedManifestPreservesCompletedReducer(
   const acceptedWorkers = store.run.persistedWorkers!.filter(
     (worker) => worker.status === "succeeded",
   );
+  if (sparseOutsideScope) {
+    for (const worker of acceptedWorkers) {
+      const result = await readJson(worker.resultManifestPath!);
+      for (const finding of result.findings) delete finding.validation;
+      await writeFile(worker.resultManifestPath!, JSON.stringify(result));
+    }
+    store.checkRepairTarget = async () => {
+      throw new Error("The checkout changed after the accepted review.");
+    };
+  }
   const acceptedResults = await Promise.all(
     acceptedWorkers.map((worker) =>
       readFile(worker.resultManifestPath!, "utf8"),
@@ -2935,6 +2981,7 @@ test(testDiscoveryPhasePersistenceFailureStopsDispatch);
 test(testCancellationClearsRetryWait);
 test(testGenericDiagnosticsPreserveMissingResultRetries);
 registerCases(testMissingDiscoveryResultResumesExistingThread, [[], [true]]);
+test(testIncompleteEvidenceRetriesBeforePublication);
 test(testWorkerUsageWithoutHostDirectory);
 test(testInvalidArtifactsRetry);
 test(testSharedReceiptSurvivesWorkerRetry);
@@ -2971,6 +3018,7 @@ registerCases(testResumedManifestPreservesCompletedReducer, [
   [],
   [true],
   [false, true, ["api", "background jobs"]],
+  [false, true, ["api", "background jobs"], true],
 ]);
 test(testPersistedErrorLimitStopsBeforeRescheduling);
 registerCases(testRestartRestoresDispatchOrderAfterMixedResults, [[1], [2]]);

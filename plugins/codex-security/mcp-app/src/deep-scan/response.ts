@@ -102,6 +102,7 @@ export const runSchema = z
         .nullish()
         .transform((value) => value ?? 0),
       manifestPath: optionalString,
+      evidenceRepairRequired: z.literal(true).optional(),
       terminalReason: optionalValue(z.enum(["saturated", "capped"])),
       error: optionalString,
       workers: z
@@ -114,8 +115,9 @@ export const runSchema = z
         .transform((value) => value ?? []),
     }),
   )
-  .transform(({ workers, dedupInputs, ...run }) => ({
+  .transform(({ workers, dedupInputs, evidenceRepairRequired, ...run }) => ({
     ...run,
+    ...(evidenceRepairRequired ? { evidenceRepairRequired } : {}),
     persistedWorkers: workers,
     persistedDedupInputs: dedupInputs,
   }));

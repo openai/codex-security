@@ -1,0 +1,85 @@
+"""Validate required fields in Codex Security scan artifacts."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class ContractError(ValueError):
+    """Raised when a completed scan does not satisfy the additive contract."""
+
+    def __init__(
+        self, message: str, *, reason: str = "validation_failed", location: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.location = location
+
+
+def _required_field_error(value: Any, location: str, expected: str) -> ContractError:
+    return ContractError(
+        f"{location}: expected {expected}",
+        reason="missing_required_field" if value is None else "invalid_required_field",
+        location=location,
+    )
+
+
+def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise _required_field_error(value, f"{context}.{key}", "an object")
+    return value
+
+
+def _require_list(payload: dict[str, Any], key: str, context: str) -> list[Any]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        raise _required_field_error(value, f"{context}.{key}", "an array")
+    return value
+
+
+def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise _required_field_error(value, f"{context}.{key}", "a non-empty string")
+    return value
+
+
+def _validate_finding_evidence(
+    finding: dict[str, Any], index: int = 0, *, source_only: bool = False
+) -> None:
+    context = f"findings.findings[{index}]"
+    if not _require_list(finding, "codeEvidence", context):
+        raise ContractError(f"{context}.codeEvidence: include the source snippets used as proof")
+    root_cause = finding.get("rootCause")
+    if isinstance(root_cause, dict):
+        _require_str(root_cause, "summary", f"{context}.rootCause")
+    else:
+        _require_str(finding, "rootCause", context)
+    attack_path = _require_dict(finding, "attackPath", context)
+    dataflow = attack_path.get("dataflow")
+    if isinstance(dataflow, dict):
+        if not dataflow.get("summary"):
+            _require_str(dataflow, "source", f"{context}.attackPath.dataflow")
+            _require_str(dataflow, "sink", f"{context}.attackPath.dataflow")
+    else:
+        _require_str(attack_path, "dataflow", f"{context}.attackPath")
+    if source_only:
+        return
+    validation = _require_dict(finding, "validation", context)
+    _require_str(validation, "method", f"{context}.validation")
+    if not validation.get("result"):
+        _require_str(validation, "summary", f"{context}.validation")
+    if not any(validation.get(key) for key in ("evidence", "evidenceRefs")):
+        raise ContractError(
+            f"{context}.validation: include observed evidence or evidenceRefs to the source proof"
+        )
+
+
+def finding_evidence_error(finding: dict[str, Any]) -> ContractError | None:
+    """Inspect an accepted finding before deciding whether to repair or defer it."""
+    try:
+        _validate_finding_evidence(finding)
+    except ContractError as error:
+        return error
+    return None

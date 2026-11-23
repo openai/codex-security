@@ -32,7 +32,7 @@ import type { JsonObject } from "../src/config.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
 import { git } from "./git-fixture.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -275,7 +275,7 @@ async function fixture(
       registration ??
       (await runWorkbench(options, scanRegistrationArguments(target, scanDir)));
     const scanId = registered["scanId"] as string;
-    await copyCompletedScanFixture(scanDir);
+    await copyScanForResealing(scanDir);
     const manifest = JSON.parse(
       await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
     );

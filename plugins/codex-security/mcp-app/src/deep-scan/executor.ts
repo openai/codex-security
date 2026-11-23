@@ -99,6 +99,10 @@ interface CodexSdkWorkerRuntimeSettings {
   cyberAccessProgram?: CyberAccessProgram;
 }
 
+type ReportWorkerArgs = Parameters<
+  NonNullable<CodexWorkerExecutor["compareFindings"]>
+>;
+
 export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
   // Each live coordinator keeps the executable selected for its first worker.
@@ -119,16 +123,21 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     return { threadId, turnId, usage, ...(diagnostics && { diagnostics }) };
   }
 
-  async compareFindings(
-    prompt: string,
-    workingDirectory: string,
-    signal: AbortSignal,
-    schema: Record<string, unknown>,
-    telemetry?: WorkerTelemetryOptions,
-  ): Promise<string> {
+  compareFindings(...args: ReportWorkerArgs) {
+    return this.runReport("compare", ...args);
+  }
+
+  repairFindingEvidence(...args: ReportWorkerArgs) {
+    return this.runReport("evidence", ...args);
+  }
+
+  private async runReport(
+    kind: "compare" | "evidence",
+    ...[prompt, workingDirectory, signal, schema, telemetry]: ReportWorkerArgs
+  ) {
     const turn = await this.runTurn({
       ...telemetry,
-      kind: "compare",
+      kind,
       prompt,
       workingDirectory,
       signal,
@@ -184,7 +193,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     request:
       | CodexWorkerRequest
       | (WorkerTelemetryOptions & {
-          kind: "compare";
+          kind: "compare" | "evidence";
           prompt: string;
           workingDirectory: string;
           signal: AbortSignal;
@@ -356,13 +365,15 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                   runtimeSettings.config.features),
                 apps: false,
                 plugins: false,
-                shell_tool: false,
                 view_image: false,
                 image_generation: false,
                 goals: false,
                 request_permissions_tool: false,
                 computer_use: false,
-                unified_exec: false,
+                ...(request.kind === "compare" && {
+                  shell_tool: false,
+                  unified_exec: false,
+                }),
                 code_mode: false,
                 code_mode_only: false,
                 js_repl: false,
@@ -446,7 +457,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           );
       configOverrides.push(...profileConfigOverrides({ mcp_servers: servers }));
       const prompt =
-        request.kind === "compare"
+        request.kind !== "discovery"
           ? request.prompt
           : await fs.readFile(request.promptPath, "utf8");
       const codexOptions = {
@@ -501,7 +512,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await verifyBoundCodexExecutable(executable, controller.signal);
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
-          ...(request.kind === "compare" && { outputSchema: request.schema }),
+          ...(request.kind !== "discovery" && { outputSchema: request.schema }),
           cyberAccessProgram:
             parentProgram ?? runtimeSettings.cyberAccessProgram,
         });

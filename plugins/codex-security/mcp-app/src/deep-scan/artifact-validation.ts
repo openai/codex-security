@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { asRecord } from "../record.js";
+import { asRecord, isNonEmptyString } from "../record.js";
 import type { JsonObject } from "../types.js";
 import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
@@ -92,8 +92,11 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  // Preserve the existing publication of previously accepted historical payloads.
-  if (admission === "new") validateWorkerReport(result);
+  // Historical worker inputs are immutable. The host repairs their evidence on resume.
+  if (admission === "new") {
+    validateWorkerReport(result);
+    validateCompletedFindingEvidence(result.findings);
+  }
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
@@ -296,4 +299,52 @@ export function parseStoredScanDraft<Result extends ScanUnion>(
     throw new Error(`${label} returned a result for a different scan.`);
   }
   return parsed;
+}
+
+/** Match the finalizer's evidence gate while worker validation can still retry. */
+export function validateCompletedFindingEvidence(findings: JsonObject[]): void {
+  for (const [index, finding] of findings.entries()) {
+    const error = Object.values(findingEvidenceErrors(finding)).find(Boolean);
+    if (error) throw new Error(`findings[${index}].${error}`);
+  }
+}
+
+export function findingEvidenceErrors(finding: JsonObject) {
+  const requireText = (value: unknown, field: string) =>
+    isNonEmptyString(value)
+      ? undefined
+      : `${field}: include the supporting analysis before completing the worker.`;
+
+  const dataflow = asRecord(finding.attackPath)?.dataflow;
+  const flow = asRecord(dataflow);
+  let flowError;
+  if (!flow) flowError = requireText(dataflow, "attackPath.dataflow");
+  else if (!flow.summary)
+    flowError =
+      requireText(flow.source, "attackPath.dataflow.source") ??
+      requireText(flow.sink, "attackPath.dataflow.sink");
+
+  const validation = asRecord(finding.validation);
+  const hasEvidence = [validation?.evidence, validation?.evidenceRefs].some(
+    (value) =>
+      Array.isArray(value) ? value.length > 0 : isNonEmptyString(value),
+  );
+  return {
+    codeEvidence:
+      Array.isArray(finding.codeEvidence) && finding.codeEvidence.length
+        ? undefined
+        : "codeEvidence: include the source snippets used as proof.",
+    rootCause: requireText(
+      asRecord(finding.rootCause)?.summary ?? finding.rootCause,
+      "rootCause",
+    ),
+    dataflow: flowError,
+    method: requireText(validation?.method, "validation.method"),
+    summary: validation?.result
+      ? undefined
+      : requireText(validation?.summary, "validation.summary"),
+    evidence: hasEvidence
+      ? undefined
+      : "validation: include observed evidence or evidenceRefs to the source proof.",
+  };
 }

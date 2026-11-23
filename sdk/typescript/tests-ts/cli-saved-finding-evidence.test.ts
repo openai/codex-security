@@ -5,7 +5,7 @@ import { exportEnvironment, main } from "../src/cli.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
-import { copyCompletedScanFixture } from "./plugin-root.js";
+import { copyScanForResealing } from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
 import { setFindingIdentity } from "./support/finding-identity.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -33,7 +33,7 @@ async function savedEvidence() {
       scanRegistrationArguments(repository, scanDir),
     );
     const scanId = registered["scanId"] as string;
-    await copyCompletedScanFixture(scanDir);
+    await copyScanForResealing(scanDir);
     const manifest = JSON.parse(
       await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
     ) as ScanManifest;
@@ -58,6 +58,8 @@ async function savedEvidence() {
       explanation: "Synthetic source-to-sink evidence.",
     }));
     finding.validation = {
+      method: "synthetic fixture",
+      evidenceRefs: ["evidence-0"],
       summary: "Synthetic validation evidence.",
       counterEvidence: ["A mitigation remains unverified. ".repeat(300)],
     };

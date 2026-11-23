@@ -44,6 +44,15 @@ export const copyCompletedScanFixture = (destination: string) =>
     recursive: true,
   });
 
+/** Drafts reusing legacy coverage need the current example's finding evidence to seal. */
+export async function copyScanForResealing(destination: string) {
+  await copyCompletedScanFixture(destination);
+  await cp(
+    new URL("examples/completed-scan/findings.json", bundledPlugin),
+    join(destination, "findings.json"),
+  );
+}
+
 export async function copyCompletedScan(root: string): Promise<string> {
   const scanDir = join(root, "scan");
   await copyCompletedScanFixture(scanDir);

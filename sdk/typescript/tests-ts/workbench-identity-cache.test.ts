@@ -588,6 +588,15 @@ with ExitStack() as stack:
                     owner = deep_workbench.dependencies() if module is deep_workbench else module
                     mocks.enter_context(patch.object(owner, "require_remediation_target", return_value=target))
                     mocks.enter_context(patch.object(module, "directory_snapshot_regular_file_count", return_value=0))
+                if kind == "deep-terminal":
+                    deep_workbench.ensure_deep_scan_run(
+                        connection, row,
+                        {"workers": 1, "subagents": 1, "stopAfterNoNew": 1,
+                         "stopAfterConsecutiveErrors": 1, "maxDiscoveryRuns": 1,
+                         "maxTimeHours": 1},
+                        "synthetic", timestamp, service_tier=None,
+                    )
+                    connection.commit()
                 mocks.enter_context(patch.object(workbench, "workspace_state", return_value={}))
                 mocks.enter_context(patch.object(workbench, "scan_context", return_value={}))
                 mocks.enter_context(patch.object(workbench, "inspect_setup_values", return_value={
@@ -959,6 +968,7 @@ with ExitStack() as stack:
                     "require_target": target,
                     "parse_scan_recipe": {"target": {"kind": "repository", "paths": []}, "mode": "standard"},
                     "prepare_cli_scan_target": (("synthetic", None, 7, 8), None),
+                    "capture_source_scopes": [],
                     "directory_snapshot_regular_file_count": 0,
                 }.items():
                     mocks.enter_context(patch.object(workbench, name, return_value=value))

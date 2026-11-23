@@ -205,6 +205,7 @@ def test_deadline_preserves_worker_evidence_when_one_excerpt_is_malformed(tmp_pa
     revised["codeEvidence"] = [excerpt, None]
     revised["rootCause"]["evidenceRefs"] = [excerpt["id"], "missing-excerpt"]
     revised["attackPath"]["evidenceRefs"] = [excerpt["id"]]
+    revised["validation"]["evidenceRefs"] = [excerpt["id"]]
     distinct = copy.deepcopy(revised)
     distinct["identity"]["anchor"] = "partial-code-evidence"
     distinct["provenance"]["candidateId"] = "partial-code-evidence"

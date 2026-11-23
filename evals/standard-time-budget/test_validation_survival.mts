@@ -57,10 +57,15 @@ for (const deferLast of [false, true]) {
     const accepted = (deferLast ? candidates.slice(0, -1) : candidates).map(
       (candidate) => ({
         ...candidate,
+        rootCause: `The ${candidate.ruleId} route omits the corresponding safe control.`,
+        attackPath: {
+          dataflow: `Request input reaches the cited sink in ${candidate.locations[0]!.path}.`,
+        },
         validation: {
           disposition: "reportable",
           method: "Static review",
           summary: `Verified ${candidate.ruleId} against its cited sink.`,
+          evidenceRefs: [candidate.ruleId],
           limitations: ["Synthetic review."],
         },
         provenance: {
@@ -96,6 +101,8 @@ for (const deferLast of [false, true]) {
         for (const field of [
           "identity",
           "locations",
+          "rootCause",
+          "attackPath",
           "validation",
           "codeEvidence",
         ] as const)

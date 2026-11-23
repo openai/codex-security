@@ -9,7 +9,7 @@ import {
 } from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
 import { useTestPython } from "./support/python.js";
-import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+import { copyScanForResealing, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { main } from "../src/cli.js";
@@ -150,7 +150,7 @@ async function startDraftScan(
   fixture.scanId = String(registration["scanId"]);
   fixture.registration = registration;
 
-  await copyCompletedScanFixture(scanDir);
+  await copyScanForResealing(scanDir);
   const manifestPath = join(scanDir, "scan-manifest.json");
   const manifest = await readJson<{
     scan: {

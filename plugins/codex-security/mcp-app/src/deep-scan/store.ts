@@ -298,6 +298,12 @@ export class WorkbenchDeepScanStore {
     return parseWorker(result, update.id);
   }
 
+  async checkRepairTarget(scanId: string): Promise<void> {
+    await this.runWorkbench(
+      workbenchArgs("get-scan", { scanId, checkTarget: true }),
+    );
+  }
+
   async recordIteration(input: {
     scanId: string;
     id: string;
