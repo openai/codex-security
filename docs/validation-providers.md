@@ -142,8 +142,10 @@ precedence. Conflicting destinations or ambiguous evidence can leave an
 occurrence without supplemental context.
 
 The model receives a limited set of status and scope fields from protected
-host state. It receives no AWS identifiers, provider free text or proof
-through this channel. The original finding and its remediation tests remain
+host state. The live issue member count stays in the reports. A change in
+that count alone does not invalidate a saved verdict. AWS identifiers,
+provider free text and proof stay out of the remediation context.
+The original finding and its remediation tests remain
 the criteria for the fix. Apply uses the recorded patch unchanged.
 
 After an upgrade, an `outdated` result needs an explicit refresh. Repeat

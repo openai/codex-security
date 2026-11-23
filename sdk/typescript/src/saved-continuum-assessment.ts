@@ -30,6 +30,7 @@ const verdict = z.enum([
   "DISCARDED",
   "NOT_PURSUED",
 ]);
+// Keep the live issue member count in reports. It can change independently of the verdict.
 const conclusion = admission.extend({
   issueId: id.optional(),
   issueArn: z.string().optional(),
@@ -45,7 +46,6 @@ const conclusion = admission.extend({
     .enum(["critical", "high", "medium", "low", "informational", "unknown"])
     .optional(),
   resultScope: z.enum(["finding", "issue"]).optional(),
-  issueFindingCount: z.number().int().nonnegative().optional(),
   joinedValidatedIssue: z.boolean().optional(),
   reachableFromAttacker: z.boolean().optional(),
   claimMatch: z.literal("unknown"),
