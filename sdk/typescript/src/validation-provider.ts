@@ -25,12 +25,9 @@ export interface ValidationItemRecord {
   issueArn?: string;
   validationArtifactId?: string;
   scoringArtifactId?: string;
-  /** Selected provider conclusion for a matched, current finding. */
-  proofObservation?: {
-    kind: "execution" | "source_analysis";
-    effect?: string;
-    summary?: string;
-  };
+  /** True when a completed validation is still waiting for a linked issue score. */
+  scoringPending?: boolean;
+  disposition?: ValidationProviderAssessment["disposition"];
   submittedAt?: string;
   provider: string;
   verdict: string;
@@ -40,11 +37,14 @@ export interface ValidationItemRecord {
   statusMessage?: string;
   severityBefore: string;
   severityAfter: string;
+  /** Issue-level severity, independent of the local finding's severity. */
   providerSeverity?: string;
-  /** Scope of the verdict and provider severity, not the sealed Codex finding. */
+  /** Overall verdict on the same validation artifact as an explicit member result. */
+  issueVerdict?: string;
+  /** Scope of the provider verdict. */
   resultScope?: ValidationResultScope;
   issueFindingCount?: number;
-  /** Structured attacker reachability at resultScope; absent means unknown. */
+  /** Structured attacker reachability from the provider's scoring evidence. */
   reachableFromAttacker?: boolean;
   /** Issue validation evidence existed before this finding was submitted. */
   joinedValidatedIssue?: boolean;
@@ -55,6 +55,8 @@ export interface ValidationItemRecord {
     /** Creation time of the returned validation artifact, including inconclusive results. */
     evidenceCreatedAt?: string;
     validatedAt?: string;
+    /** Creation time of the linked issue score, if available. */
+    scoredAt?: string;
     stale: boolean;
     reasons: string[];
   };
@@ -72,6 +74,8 @@ export interface ValidationProviderAssessment {
 export interface ValidationProviderContext {
   repositoryPath: string;
   signal?: AbortSignal;
+  /** Verify a saved scan's target before a new external submission. */
+  checkSubmissionTarget?: (signal?: AbortSignal) => Promise<void>;
   /** Use the hosting plugin's path protection instead of locating an SDK bundle. */
   resolveHostPaths?: (
     cwd: string,
@@ -100,6 +104,16 @@ export type ValidationProviderConfiguration = {
   provider: string;
   [provider: string]: unknown;
 };
+
+/** Failed validation runs are terminal. A missing score or transport failure can resume. */
+export function retryableAssessment(
+  item: ValidationProviderAssessment,
+): boolean {
+  return Boolean(
+    item.record?.scoringPending ||
+    (item.unavailable && !item.record?.terminalStatus),
+  );
+}
 
 export function supplementalValidationStatus(
   provider: ValidationProvider | undefined,

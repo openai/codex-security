@@ -162,6 +162,7 @@ import {
   unavailableAssessment,
   type ValidationProvider,
   type ValidationItemRecord,
+  type ValidationProvenance,
 } from "./validation-provider.js";
 export { SCAN_AUTH_MODES } from "./scan-settings.js";
 export type { DeepScanOptions, ScanAuthMode } from "./scan-settings.js";
@@ -506,14 +507,6 @@ export interface ValidationOptions extends Pick<
   validationProvider?: ValidationProviderSettings | ValidationProvider;
 }
 
-const validationProvenanceSchema = z.strictObject({
-  provider: z.string(),
-  providerVersion: z.string(),
-  referenceId: z.string().optional(),
-  referenceUrl: z.string().optional(),
-  validatedAt: z.string().optional(),
-});
-
 const validationResponseSchema = z.strictObject({
   disposition: z.enum([
     "reportable",
@@ -522,8 +515,6 @@ const validationResponseSchema = z.strictObject({
     "deferred",
   ]),
   report: z.string().trim().min(1),
-  provenance: validationProvenanceSchema.optional(),
-  unavailable: z.string().optional(),
 });
 
 export interface ValidationResult extends z.infer<
@@ -531,6 +522,8 @@ export interface ValidationResult extends z.infer<
 > {
   outputDir: string;
   threadId: string | null;
+  provenance?: ValidationProvenance;
+  unavailable?: string;
   record?: ValidationItemRecord;
 }
 

@@ -14,14 +14,6 @@ import {
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
-  selectFindingValidationArtifact,
-  singleFindingValidationIssue,
-} from "./continuum-validation-evidence.js";
-export {
-  selectFindingValidationArtifact,
-  singleFindingValidationIssue,
-} from "./continuum-validation-evidence.js";
-import {
   array,
   awsTimestampSeconds,
   concreteVersion,
@@ -470,6 +462,56 @@ function issueEvidenceDescriptor(artifact: Record<string, unknown>) {
     ...(artifact["createdAt"] != null && { createdAt: artifact["createdAt"] }),
     ...(artifact["mediaType"] != null && { mediaType: artifact["mediaType"] }),
     ...(artifact["producer"] != null && { producer: artifact["producer"] }),
+  };
+}
+
+export function singleFindingValidationIssue(
+  issue: unknown,
+  issueId: unknown,
+  finding: ReturnType<typeof findingIdentity>,
+) {
+  if (!isRecord(issue) || typeof issueId !== "string") return null;
+  const arn = `${finding.scope}/code-issues/${issueId}`;
+  const ids = issue["findingIds"];
+  if (
+    issue["issueArn"] !== arn ||
+    issue["issueId"] !== issueId ||
+    !Array.isArray(ids) ||
+    ids.length !== 1 ||
+    ids[0] !== finding.id
+  )
+    return null;
+  return { issueArn: arn, issueId, findingIds: [finding.id] };
+}
+
+export function selectFindingValidationArtifact(
+  artifact: Record<string, unknown>,
+  findingId: unknown,
+) {
+  if (artifact["artifactType"] !== "VALIDATION_EVIDENCE") return;
+  const body = issueEvidenceBody(artifact);
+  if (!body) return;
+  const results = body.validationEvidence?.["perFindingResults"];
+  if (results === undefined) return { scope: "issue", artifact };
+  // A bundle's top-level proof can belong to a different finding.
+  const matches = array(results, "Continuum per-finding results")
+    .map((value) => record(value, "Continuum per-finding result"))
+    .filter((result) => result["findingId"] === findingId);
+  if (matches.length === 0) return;
+  return {
+    scope: "finding",
+    artifact: {
+      ...issueEvidenceDescriptor(artifact),
+      body: {
+        validationEvidence: {
+          ...(matches.length === 1 &&
+            "exploitable" in matches[0]! && {
+              exploitable: matches[0]!["exploitable"],
+            }),
+          perFindingResults: matches,
+        },
+      },
+    },
   };
 }
 

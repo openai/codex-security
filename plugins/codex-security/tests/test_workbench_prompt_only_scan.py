@@ -179,7 +179,10 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
 ) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     (target / "fixture.py").write_text("print('fixture')\n")
-    started = start_prompt_only_scan(state_dir, target, tmp_path / "scans")
+    scan_root = tmp_path / "scans"
+    probe = start_prompt_only_scan(state_dir, target, scan_root, extra_args=("--join-only",))
+    assert probe == {"newScanTarget": str(target.resolve())}
+    started = start_prompt_only_scan(state_dir, target, scan_root)
     assert started["startDisposition"] == "created"
     scan = started["scan"]
     workspace = started["workspace"]

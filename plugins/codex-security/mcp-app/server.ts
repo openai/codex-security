@@ -647,6 +647,7 @@ export function createCodexSecurityServer(): McpServer {
         },
         [
           advisory,
+          validationNotice(started.workspace),
           `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. Use its target, scope and token for this review.`,
         ]
           .filter(Boolean)
@@ -856,7 +857,7 @@ export function createCodexSecurityServer(): McpServer {
       });
       return scanActionResult(
         { setup },
-        "Validated the local Codex Security setup.",
+        "Validated the local Codex Security setup." + validationNotice(setup),
       );
     },
   );
@@ -1012,6 +1013,8 @@ export function createCodexSecurityServer(): McpServer {
           const { accountRateLimits: _limits, ...scanUsage } = usage ?? {};
           const validation = await validateCompletedScan(
             completion.scan as JsonObject,
+            undefined,
+            abortSignalFromExtra(extra),
           );
           return deepScanTerminalResult(run, {
             ...(validation ? { validation } : {}),
@@ -1610,7 +1613,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Complete Codex Security Scan",
       description:
-        "Finalization only: validate and seal already-authored scan-manifest.json and findings.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
+        "On a completed scan, call again only if the user explicitly asks to retry or refresh supplemental validation. For new scans, Finalization only: validate and seal already-authored scan-manifest.json and findings.json, generate report.md, index findings, and mark the scan complete. For an app-backed running scan, scan-manifest.json is an unsealed draft and must omit scan.sealedAt and scan.artifacts; this tool supplies the exact workbench timestamps, seal, artifact digests, and derived finding identities. Call only after those canonical files exist; this tool does not create missing artifacts or run skipped phases. If it fails, surface the exact error and stop the current response without retrying completion or returning a final, no-findings, structured, or benchmark response.",
       inputSchema: completeScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -1626,7 +1629,11 @@ export function createCodexSecurityServer(): McpServer {
           turnId: securityScanTurnId(extra),
         });
         const validation = isJsonObject(completed.scan)
-          ? await validateCompletedScan(completed.scan)
+          ? await validateCompletedScan(
+              completed.scan,
+              undefined,
+              abortSignalFromExtra(extra),
+            )
           : undefined;
         return scanActionResult(
           modelScanContext({
@@ -2026,15 +2033,11 @@ async function startWithValidation(
   return started;
 }
 
-async function validationProjectSetup(
-  path: string,
-  targetPath: string,
-  setupMode?: "standard",
-) {
+async function validationProjectSetup(path: string, targetPath: string) {
   const { input } = await readSelectedProjectConfig(
     path,
     targetPath,
-    setupMode,
+    "standard",
   );
   const validation = input.scan?.validation;
   if (!validation) return { targetPath };
@@ -2054,15 +2057,13 @@ async function projectSetup(
   if (!inspectWithSetup) targetPath = await inspectProjectTarget(targetPath);
   try {
     if (mode !== "deep")
-      return await validationProjectSetup(
-        projectConfigPath,
-        targetPath,
-        "standard",
-      );
+      return await validationProjectSetup(projectConfigPath, targetPath);
     const project = await readDeepScanProjectConfig(
       projectConfigPath,
       targetPath,
     );
+    if (project?.validation)
+      validationProviderFromConfiguration(project.validation);
     return { targetPath, deepScanProjectJson: JSON.stringify(project) };
   } catch (error) {
     // Target or Git errors take precedence over an invalid project file.
@@ -2133,6 +2134,12 @@ function modelScanContext<T extends JsonObject>(
   return context;
 }
 
+function validationNotice(value: unknown): string {
+  return isJsonObject(value) && typeof value.validationNotice === "string"
+    ? "\n" + value.validationNotice
+    : "";
+}
+
 function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
   const results = workspace.results;
   const setupSummary = workspace.setup.submitted
@@ -2144,7 +2151,7 @@ function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
       : "";
   return scanActionResult(
     { workspace },
-    `${setupSummary}${resultsSummary}`,
+    `${setupSummary}${resultsSummary}${validationNotice(workspace)}`,
     scanId,
   );
 }
@@ -2180,7 +2187,7 @@ function promptOnlyScanResult(promptOnly: JsonObject) {
       : undefined;
   return scanActionResult(
     modelScanContext(promptOnly),
-    `${advisory ? advisory + "\n" : ""}${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
+    `${advisory ? advisory + "\n" : ""}${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.${validationNotice(promptOnly.workspace)}`,
     scanId,
   );
 }
@@ -2320,7 +2327,7 @@ function deepScanTerminalResult(
         : "Report the retained findings from completed Standard scans.";
     const instructions = run.sdkOwnsCompletion
       ? `Deep Scan ${run.scanId} stopped. ${outcome} End this turn with the returned scanId and manifestPath. The SDK owns finalization and report generation after the turn ends.`
-      : `Deep Scan ${run.scanId} completed. ${outcome} The coordinator sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again, rerun worker phases, list candidates, submit another draft, or start a replacement scan. Link the generated report.`;
+      : `Deep Scan ${run.scanId} completed. ${outcome} The coordinator sealed scan-manifest.json and findings.json and generated report.md under ${run.scanDir}. Use the returned authoritative scanId, scanDir, and manifestPath. Do not call complete_codex_security_scan again during this turn. Do not rerun worker phases, list candidates, submit another draft, or start a replacement scan. Link the generated report.`;
     return scanActionResult(
       {
         scanId: run.scanId,
