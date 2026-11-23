@@ -172,7 +172,7 @@ import sys
 
 assert sys.stdin.buffer.read() == b'{ "artifacts": [] }\\n'
 print(json.dumps({"matches": []}))
-print("synthetic scanner diagnostic", file=sys.stderr)
+sys.stderr.buffer.write(b"synthetic scanner diagnostic\\n")
 sys.exit(int(sys.argv[1]))
 """
     run_process = subprocess.run
