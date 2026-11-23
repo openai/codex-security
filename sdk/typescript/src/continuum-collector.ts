@@ -7,9 +7,12 @@ import {
   findingIdentity,
   issueIdentity,
   readPatch,
+} from "./continuum-findings.js";
+import {
+  linkedIssueId,
   selectFindingValidationArtifact,
   singleFindingValidationIssue,
-} from "./continuum-findings.js";
+} from "./continuum-validation-evidence.js";
 import { CodexSecurityError } from "./errors.js";
 import { array, record } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -252,8 +255,7 @@ export async function collectContinuumFinding(
       `Unexpected detail for Continuum finding ${findingId}.`,
     );
 
-  const linkedIssue =
-    finding["createdIssueId"] || finding["duplicateOfIssueId"];
+  const linkedIssue = linkedIssueId(finding);
   if (!linkedIssue) return finding;
   const issueId = continuumId.parse(linkedIssue);
   const list = await request(

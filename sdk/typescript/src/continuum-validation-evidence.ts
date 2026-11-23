@@ -1,4 +1,13 @@
 import { isRecord } from "./record.js";
+import { text } from "./scanner-import.js";
+
+export function linkedIssueId(finding: Record<string, unknown>) {
+  return (
+    text(finding["mergedIntoIssueId"]) ??
+    text(finding["duplicateOfIssueId"]) ??
+    text(finding["createdIssueId"])
+  );
+}
 
 export function singleFindingValidationIssue(
   issue: unknown,
@@ -77,6 +86,9 @@ export function selectFindingValidationArtifact(
       ...(artifact["producer"] != null && { producer: artifact["producer"] }),
       body: {
         validationEvidence: {
+          ...(typeof validation["terminalStatus"] === "string" && {
+            terminalStatus: validation["terminalStatus"],
+          }),
           exploitable: verdict,
           ...(findingVerdict && { perFindingResults: matches }),
         },

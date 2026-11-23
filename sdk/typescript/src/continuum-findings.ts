@@ -14,10 +14,7 @@ import {
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
-  selectFindingValidationArtifact,
-  singleFindingValidationIssue,
-} from "./continuum-validation-evidence.js";
-export {
+  linkedIssueId,
   selectFindingValidationArtifact,
   singleFindingValidationIssue,
 } from "./continuum-validation-evidence.js";
@@ -730,8 +727,7 @@ export function normalizeContinuumFindings(
         capture?.["patches"],
         "Continuum patches",
       ).map(readPatch);
-      const linkedIssue =
-        text(row["createdIssueId"]) ?? text(row["duplicateOfIssueId"]);
+      const linkedIssue = linkedIssueId(row);
       let validationIssue:
         ReturnType<typeof singleFindingValidationIssue> | undefined;
       const evidenceArtifacts = issueEvidenceArtifacts(

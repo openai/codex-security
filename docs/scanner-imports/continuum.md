@@ -222,7 +222,9 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 ```
 
 The collector verifies the finding ARN and reads artifacts under the issue
-linked by that finding. When AWS supplies `perFindingResults`, it looks for
+linked by that finding. If AWS merged the finding into another issue, both
+the collector and the saved import use the destination issue.
+When AWS supplies `perFindingResults`, the collector looks for
 exactly one entry matching the selected `findingId` with a verdict of `EXPLOITABLE`,
 `NOT_EXPLOITABLE` or `UNCERTAIN`. It retains that entry, including any flow
 or HTTP proof. If the breakdown omits the selected ID, the collector skips
