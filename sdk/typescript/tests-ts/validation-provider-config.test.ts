@@ -244,11 +244,14 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       issueUrl: "https://example.invalid/issue",
       freshness: { stale: false, reasons: [] },
     };
+    const overridden = flag === "--validate=continuum";
     const failed = {
       itemId: "fake-failed",
       provider: "continuum",
-      verdict: "UNCERTAIN",
-      terminalStatus: "FAILED",
+      verdict: overridden ? "UNAVAILABLE" : "UNCERTAIN",
+      ...(overridden
+        ? { unavailable: "Try again" }
+        : { terminalStatus: "FAILED" }),
       severityBefore: "medium",
       severityAfter: "medium",
       reasons: [],
@@ -272,6 +275,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       {
         disposition: "deferred",
         report: "Validation failed",
+        unavailable: "unavailable" in failed ? failed.unavailable : undefined,
         provenance: { provider: "continuum", providerVersion: "1" },
         record: failed,
       },
@@ -283,7 +287,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       const config = join(root, "codex-security.yaml");
       await writeFile(
         config,
-        `scan:\n  validation:\n    provider: ${flag === "--validate=continuum" ? "fake-unknown" : "continuum"}\n    continuum:\n      environment_id: example\n`,
+        `scan:\n  validation:\n    provider: ${overridden ? "fake-unknown" : "continuum"}\n    continuum:\n      environment_id: example\n`,
       );
       const base = fakeResult(["high", "medium"]);
       const result = new ScanResult({
@@ -304,6 +308,12 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
         cli.stderr.text(),
       ).toBe(0);
       expect(batch).toHaveBeenCalledTimes(1);
+      if (overridden) {
+        expect(cli.stderr.text()).toContain(
+          "scan.validation.provider to continuum",
+        );
+        expect(cli.stderr.text()).toContain("validate --scan");
+      }
       expect(batch.mock.calls[0]?.[1]).toMatchObject({
         repositoryPath: repository,
         checkSubmissionTarget: expect.any(Function),
