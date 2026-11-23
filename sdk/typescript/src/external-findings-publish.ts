@@ -1,6 +1,9 @@
 import { readScannerJson } from "./scanner-import.js";
 import { hash, randomUUID } from "node:crypto";
-import { withPublicationLock, writeAtomicJson } from "./publication-state.js";
+import {
+  withPublicationLock as withImportLock,
+  writeAtomicJson,
+} from "./publication-state.js";
 export { writeAtomicJson } from "./publication-state.js";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -1202,7 +1205,7 @@ async function preparePublicationInput(
   );
   const pendingPath = join(state, key + ".pending.json");
   const underPublishLock = <T>(operation: () => Promise<T>) =>
-    withPublicationLock(state, key, dependencies.signal, operation);
+    withImportLock(state, key, dependencies.signal, operation);
   const removePending = () => rm(pendingPath, { force: true });
   const privateClient = privateImportClient(
     apiBaseUrl,

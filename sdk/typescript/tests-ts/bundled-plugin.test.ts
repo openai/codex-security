@@ -52,13 +52,30 @@ test.each([
         ? { define: { "import.meta.url": "__filename" } }
         : {}),
     });
+    let modulePath = entrypoint;
+    if (format === "cjs") {
+      // The packaged loader compiles the bundle with its own filename.
+      modulePath = join(root, ...moduleParts, "server.mjs");
+      await writeFile(
+        modulePath,
+        `
+        import Module from "node:module";
+        import { readFileSync } from "node:fs";
+        import { fileURLToPath } from "node:url";
+        const filename = fileURLToPath(import.meta.url);
+        const runtime = new Module(filename);
+        runtime._compile(readFileSync(new URL("./runtime.cjs", import.meta.url), "utf8"), filename);
+        export default runtime.exports;
+      `,
+      );
+    }
     const { stdout } = await promisify(execFile)(
       "node",
       [
         "--input-type=module",
         "--eval",
         `const runtime = await import(process.argv[1]); process.stdout.write(await ${format === "cjs" ? "runtime.default" : "runtime"}.bundledPluginRoot());`,
-        pathToFileURL(entrypoint).href,
+        pathToFileURL(modulePath).href,
       ],
       { encoding: "utf8", windowsHide: true },
     );

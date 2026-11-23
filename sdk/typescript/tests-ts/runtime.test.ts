@@ -377,11 +377,12 @@ describe("plugin runtime preparation", () => {
   test("keeps installed-package plugin lookup inside the package", async () => {
     const root = await temporaryDirectory();
     const packageRoot = join(root, "node_modules", "@openai", "codex-security");
-    const candidates = bundledPluginCandidates(join(packageRoot, "dist"));
+    const candidates = bundledPluginCandidates(
+      pathToFileURL(join(packageRoot, "dist", "bundled-plugin.js")).href,
+    );
     expect(candidates).toEqual([
       join(packageRoot, "dist", "_bundled_plugin"),
       join(packageRoot, "_bundled_plugin"),
-      packageRoot,
     ]);
     expect(
       candidates.every((candidate) => {
@@ -391,6 +392,17 @@ describe("plugin runtime preparation", () => {
         );
       }),
     ).toBe(true);
+  });
+
+  test("resolves the MCP server's native payload inside its own plugin", async () => {
+    const root = join(await temporaryDirectory(), "standalone plugin");
+    expect(bundledPluginCandidates(join(root, "mcp", "server.mjs"))).toEqual([
+      root,
+    ]);
+    expect(bundledPluginCandidates(join(root, "other", "server.mjs"))).toEqual(
+      [],
+    );
+    expect(bundledPluginCandidates(join(root, "mcp", "other.mjs"))).toEqual([]);
   });
 
   test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
