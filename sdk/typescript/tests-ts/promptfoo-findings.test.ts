@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { expect, test } from "bun:test";
 import type { ExternalFindings } from "../src/external-findings.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import {
+  prepareNormalizedLocalImport,
+  selectLocalExternalFindings,
+} from "../src/external-findings-local.js";
 import { main } from "../src/cli.js";
 import { readPromptfooFindings } from "../src/promptfoo-findings.js";
 import {
@@ -729,6 +734,52 @@ test("preserves independent failed security assertions alongside grader errors",
     expect.stringContaining("Unavailable"),
     expect.stringContaining("Partial grader outage"),
   ]);
+});
+
+test("preserves embedded media through normalized imports and saved readback", async () => {
+  await using fixture = await checkout();
+  await fixture.writeJson(report([leak]));
+  const withoutMedia = await readPromptfooFindings(fixture.file);
+  // Promptfoo externalizes media at 1 KiB or above.
+  const media = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg"><text y="20">MINT-HARBOR-742</text><!--${" ".repeat(1024)}--></svg>`,
+  );
+  const hash = createHash("sha256").update(media).digest("hex");
+  const blobAssets = [
+    {
+      hash,
+      mimeType: "image/svg+xml",
+      sizeBytes: media.length,
+      data: media.toString("base64"),
+    },
+  ];
+  const result = { ...leak, response: { output: `promptfoo://blob/${hash}` } };
+  await fixture.writeJson({ ...report([result]), blobAssets });
+  const selection = await readPromptfooFindings(fixture.file);
+  const prepared = await fixture.prepareNormalized(selection);
+  await rm(fixture.file);
+  const imported = await prepared.import();
+  const saved = await selectLocalExternalFindings(
+    { repository: fixture.repository, importId: imported.importId! },
+    { environment: fixture.environment },
+  );
+  expect({
+    withoutMedia: withoutMedia.report,
+    reader: selection.report?.["blobAssets"],
+    normalized: prepared.preview.report?.["blobAssets"],
+    saved: saved.report?.["blobAssets"],
+    result: saved.findings[0]?.evidence.source_data?.["result"],
+  }).toStrictEqual({
+    withoutMedia: {
+      format: "promptfoo-redteam/v3",
+      evalId: "eval-invoice",
+      promptfooVersion: "0.124.1",
+    },
+    reader: blobAssets,
+    normalized: blobAssets,
+    saved: blobAssets,
+    result,
+  });
 });
 
 test("replays and updates one native occurrence, and excludes Promptfoo from Cloud publication", async () => {

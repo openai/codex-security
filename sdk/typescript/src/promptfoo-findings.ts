@@ -270,6 +270,9 @@ export async function readPromptfooFindings(
         promptfooVersion: text(
           asRecord(input["metadata"])?.["promptfooVersion"],
         ),
+        ...(input["blobAssets"] === undefined
+          ? {}
+          : { blobAssets: input["blobAssets"] }),
       },
     },
   );
