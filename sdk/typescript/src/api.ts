@@ -161,6 +161,7 @@ import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
   unavailableAssessment,
   type ValidationProvider,
+  type ValidationProviderAssessment,
   type ValidationItemRecord,
   type ValidationProvenance,
 } from "./validation-provider.js";
@@ -1047,8 +1048,9 @@ export class CodexSecurity {
           : validationProviderFromConfiguration(
               configured as ValidationProviderSettings,
             );
-      const assessment = await provider
-        .validate(
+      let assessment: ValidationProviderAssessment;
+      try {
+        assessment = await provider.validate(
           typeof options.finding === "string"
             ? options.finding
             : (options.finding as Record<string, unknown>),
@@ -1056,8 +1058,10 @@ export class CodexSecurity {
             repositoryPath: options.repositoryPath,
             signal,
           },
-        )
-        .catch((error: unknown) => unavailableAssessment(provider, error));
+        );
+      } catch (error) {
+        assessment = unavailableAssessment(provider, error);
+      }
       return { ...assessment, outputDir: "", threadId: null };
     }
     let outputDir = "";

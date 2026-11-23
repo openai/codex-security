@@ -40,6 +40,24 @@ describe("CodexSecurity finding validation", () => {
     runtimePreparer,
   } = createValidationFixtures();
 
+  test("defers a finding when its validation provider throws synchronously", async () => {
+    await using client = TestClient.withDependencies({});
+    const result = await client.validate({
+      repositoryPath: await temporaryDirectory(),
+      finding: "Synthetic finding",
+      validationProvider: {
+        name: "synthetic",
+        version: "1",
+        validate: throwing("provider unavailable"),
+      },
+    });
+    expect(result).toMatchObject({
+      disposition: "deferred",
+      unavailable: "provider unavailable",
+      provenance: { provider: "synthetic", providerVersion: "1" },
+    });
+  });
+
   test.each([false, true])(
     "validates oversized evidence through a temporary file (failure=%p)",
     async (fail) => {
