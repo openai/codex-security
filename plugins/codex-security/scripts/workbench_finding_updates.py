@@ -80,8 +80,9 @@ def record_checkpoint_updates(connection, scan, manifest, findings, scope, *, wo
         _ensure_finding_identities(visible, deep=True)
     identities = _derived_finding_identity_rows(manifest, {**findings, "findings": visible})
     findings_by_id = ((finding_id, finding) for _, finding, finding_id, _, _ in identities)
-    # Deep batches replace the full set. Other checkpoints withdraw only explicit rejections.
+    # Deep batches replace the full set; other checkpoints retain ordinary omissions.
     rejected = None
+    superseded = None
     if scan["mode"] != "deep":
         rejected = {
             surface["candidateId"]
@@ -89,15 +90,54 @@ def record_checkpoint_updates(connection, scan, manifest, findings, scope, *, wo
             if surface.get("disposition") in {"rejected", "not_applicable"}
             and surface.get("candidateId")
         }
-    _append_changes(connection, scan["id"], findings_by_id, final=False, rejected=rejected)
+        superseded = _previous_finding_ids(manifest, findings)
+    _append_changes(
+        connection,
+        scan["id"],
+        findings_by_id,
+        final=False,
+        rejected=rejected,
+        superseded=superseded,
+    )
 
 
-def _append_changes(connection, scan_id, findings_by_id, *, final, rejected=None):
+def _previous_finding_ids(manifest, findings):
+    previous_ids = set()
+    pending = list(findings["findings"])
+    while pending:
+        provenance = pending.pop().get("provenance")
+        history = provenance.get("previousFindings") if isinstance(provenance, dict) else None
+        if not isinstance(history, list):
+            continue
+        for previous in history:
+            if not isinstance(previous, dict):
+                continue
+            pending.append(previous)
+            try:
+                # Separate revisions may share an identity, unlike an active findings batch.
+                [identity] = _derived_finding_identity_rows(
+                    manifest, {**findings, "findings": [previous]}
+                )
+            except ContractError:
+                # Opaque legacy provenance is not a saved finding revision.
+                continue
+            previous_ids.add(identity[2])
+    return previous_ids
+
+
+def _append_changes(connection, scan_id, findings_by_id, *, final, rejected=None, superseded=None):
     connection.executemany(
         """INSERT INTO scan_finding_updates
            (scan_id,cursor,finding_id,candidate_id,kind,preview_json,fields_json,changed_json)
            VALUES (:scan_id,:cursor,:finding_id,:candidate_id,:kind,:preview_json,:fields_json,:changed_json)""",
-        _finding_changes(connection, scan_id, findings_by_id, final=final, rejected=rejected),
+        _finding_changes(
+            connection,
+            scan_id,
+            findings_by_id,
+            final=final,
+            rejected=rejected,
+            superseded=superseded,
+        ),
     )
 
 
@@ -108,6 +148,7 @@ def _finding_changes(
     *,
     final: bool,
     rejected: set[str] | None = None,
+    superseded: set[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     # SQLite returns the columns from the row attaining MAX(cursor); cursors are unique.
     rows = connection.execute(
@@ -153,7 +194,11 @@ def _finding_changes(
             yield {**entry, "kind": kind, "cursor": next(cursors)}
 
     for row in previous.values():
-        if row["kind"] != "withdrawn" and (rejected is None or row["candidate_id"] in rejected):
+        if row["kind"] != "withdrawn" and (
+            rejected is None
+            or row["candidate_id"] in rejected
+            or (superseded is not None and row["finding_id"] in superseded)
+        ):
             yield {
                 **row,
                 "scan_id": scan_id,
