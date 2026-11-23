@@ -747,9 +747,9 @@ list the supported report formats and destinations for each provider.
 For a Continuum inbox import, `preview.privateImport.sourceCheckpoint`
 identifies the source revision on which the update is based. Call `publish()`
 on the object you reviewed. If Cloud rejects the revision, compare the current
-inbox evidence with a new preview. A preview with `retryOfJobId` starts a
-fresh attempt for the full selection. A resumed upload retains its original
-revision.
+inbox evidence with a new preview. A preview with `retryOfJobId` and
+`resumed: false` offers a fresh attempt for the full selection. A resumed
+upload retains the approved revision and any prior job ID.
 
 For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
 or `prepareNormalizedExternalPublication(findings, options)` and review the

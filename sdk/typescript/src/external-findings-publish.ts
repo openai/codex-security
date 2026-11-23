@@ -1762,13 +1762,15 @@ async function preparePublicationInput(
     const sourceCheckpoint = privateApproval
       ? privateApproval.sourceCheckpoint
       : reviewedRevision;
+    // The prior job is part of the review ID even after its retry starts.
+    const priorJobId = retryOfJobId ?? privateApproval?.previousReceipt?.id;
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
       ...(sourceCheckpoint && { sourceCheckpoint }),
       sha256: report.digest,
       bytes: Buffer.byteLength(report.bytes),
-      ...(retryOfJobId ? { retryOfJobId } : {}),
+      ...(priorJobId && { retryOfJobId: priorJobId }),
     };
     const preview: ExternalPublicationPreview = {
       ...parsed,
@@ -1913,7 +1915,20 @@ async function preparePublicationInput(
               !checkpoint.jobId &&
               rejectedSourceRevision(error)
             ) {
-              await rm(privatePath);
+              const receipt = checkpoint.previousReceipt;
+              if (receipt) {
+                // Retire only the rejected attempt. The prior job may
+                // already have accepted part of this selection.
+                await writeAtomicJson(privatePath, {
+                  ...checkpoint,
+                  jobId: receipt.id,
+                  jobRequestId: receipt.request_id,
+                  fileId: receipt.input.file_id,
+                  sourceCheckpoint: receipt.source_checkpoint ?? undefined,
+                  receipt,
+                  previousReceipt: undefined,
+                });
+              } else await rm(privatePath);
               result.error +=
                 " The job was rejected. Review a new preview against the current inbox evidence before retrying.";
             } else result.savedSubmission = privatePath;

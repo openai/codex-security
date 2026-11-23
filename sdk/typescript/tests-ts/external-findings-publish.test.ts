@@ -45,6 +45,7 @@ import { NoPublishableFindingsError } from "../src/index.js";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import {
   ExternalPublicationError,
+  cloudReviewDigest,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
   type ExternalPublicationOptions,
@@ -3880,7 +3881,7 @@ test("noninteractive Continuum approval requires the previewed revision and evid
   expect(jobs).toMatchObject([{ source_checkpoint: "newer" }]);
 });
 
-test.each(["rejected", "partial", "ambiguous"])(
+test.each(["rejected", "partial", "ambiguous", "wrong checkpoint"])(
   "recovers a Continuum upload after the %s job response",
   async (outcome) => {
     const { f, deps, settings, inbox, jobs } = await privateUploadFixture(
@@ -3899,6 +3900,11 @@ test.each(["rejected", "partial", "ambiguous"])(
               inbox.sourceCheckpoint = "changed";
               if (outcome === "ambiguous")
                 return new Response(null, { status: 409 });
+              if (outcome === "wrong checkpoint")
+                return Response.json({
+                  ...privateJobReceipt(job, firstJob),
+                  source_checkpoint: "changed",
+                });
               return outcome === "partial"
                 ? Response.json(
                     privateJobReceipt(job, firstJob, "completed", 1, 1),
@@ -3907,6 +3913,13 @@ test.each(["rejected", "partial", "ambiguous"])(
                     { error: { code: "version_conflict" } },
                     { status: 409 },
                   );
+            }
+            if (outcome === "partial" && job.source_checkpoint === "changed") {
+              inbox.sourceCheckpoint = "newest";
+              return Response.json(
+                { error: { code: "version_conflict" } },
+                { status: 409 },
+              );
             }
           }
           return deps.fetch(url, init);
@@ -3918,8 +3931,10 @@ test.each(["rejected", "partial", "ambiguous"])(
     );
     inbox.recoverUpload = true;
     const original = (await prepare()).publish();
-    if (outcome === "ambiguous") {
-      await expect(original).rejects.toThrow("409");
+    if (outcome === "ambiguous" || outcome === "wrong checkpoint") {
+      await expect(original).rejects.toThrow(
+        outcome === "ambiguous" ? "409" : "different private import",
+      );
       const resumed = await prepare();
       expect(resumed.preview.resumed).toBe(true);
       await resumed.publish();
@@ -3935,7 +3950,26 @@ test.each(["rejected", "partial", "ambiguous"])(
     );
     expect(retry.preview.privateImport?.sourceCheckpoint).toBe("changed");
     await expect(retry.publish()).rejects.toThrow("Interrupted private upload");
-    expect((await (await prepare()).publish()).status).toBe("complete");
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(cloudReviewDigest(resumed.preview, f.root)).toBe(
+      cloudReviewDigest(retry.preview, f.root),
+    );
+    if (outcome === "partial") {
+      await expect(resumed.publish()).rejects.toThrow("version_conflict");
+      const fresh = await prepare();
+      expect(fresh.preview).toMatchObject({
+        resumed: false,
+        privateImport: { retryOfJobId: firstJob, sourceCheckpoint: "newest" },
+      });
+      await expect(fresh.publish()).rejects.toThrow(
+        "Interrupted private upload",
+      );
+      expect((await (await prepare()).publish()).status).toBe("complete");
+      expect(jobs).toMatchObject([{ source_checkpoint: "newest" }]);
+      return;
+    }
+    expect((await resumed.publish()).status).toBe("complete");
     expect(jobs).toMatchObject([{ source_checkpoint: "changed" }]);
   },
 );
