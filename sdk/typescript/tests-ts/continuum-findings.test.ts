@@ -479,6 +479,28 @@ test("a broken patch capture excludes only its own finding", () => {
   }
 });
 
+test("publishing a stored merged finding requires patches bound to the destination", () => {
+  const { issue } = continuumIssueExport().issues[0]!;
+  const finding = {
+    ...continuumDetail(),
+    createdIssueId: "original",
+    mergedIntoIssueId: issue.issueId,
+  };
+  const patch = patchArtifact("firstpatch", "+ok\n");
+  const input = { finding, patches: [{ ...patch, issueArn: issue.issueArn }] };
+  const stored = normalizeContinuumFindings(input, continuumRepository, "local")
+    .findings[0]!;
+  expect(publishStoredCapture(stored).findings).toEqual(
+    normalize(input).findings,
+  );
+
+  // Local records written before issue binding can contain an unmarked original patch.
+  stored.evidence.source_data!["patches"] = [patch];
+  const cloud = publishStoredCapture(stored);
+  expect(cloud.findings).toHaveLength(0);
+  expect(cloud.excluded[0]?.reason).toMatch(/recollect/i);
+});
+
 test("Cloud publication of a stored capture keeps fitting patches and identifies oversized patch bodies", () => {
   const finding = { ...continuumDetail(), duplicateOfIssueId: "otherissue" };
   const big = patchArtifact("bigpatch", "+example\n".repeat(32 * 1024));
