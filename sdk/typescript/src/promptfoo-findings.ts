@@ -88,6 +88,112 @@ function matchesDefaultAssertion(
   return isDeepStrictEqual(expected, actual);
 }
 
+function matchesConfiguredAssertion(
+  original: unknown,
+  evaluated: unknown,
+  rubricPrompt: unknown,
+) {
+  if (matchesDefaultAssertion(original, evaluated, rubricPrompt)) return true;
+  const value = asRecord(original);
+  const actual = asRecord(evaluated);
+  const children = value?.["assert"];
+  const actualChildren = actual?.["assert"];
+  return (
+    value?.["type"] === "assert-set" &&
+    Array.isArray(children) &&
+    Array.isArray(actualChildren) &&
+    isDeepStrictEqual(
+      { ...value, assert: undefined },
+      { ...actual, assert: undefined },
+    ) &&
+    children.length === actualChildren.length &&
+    children.every((child, index) =>
+      matchesDefaultAssertion(child, actualChildren[index], rubricPrompt),
+    )
+  );
+}
+
+function scenarioAssertionOwners(
+  config: Record<string, unknown>,
+  evalId: string,
+) {
+  const owners: {
+    metadata: Record<string, unknown>;
+    tracedMetadata: Record<string, unknown>;
+    assertions: unknown[];
+    generatedIndex: number;
+  }[] = [];
+  const scenarios = config["scenarios"];
+  if (!Array.isArray(scenarios) || !scenarios.length) return owners;
+  const defaults = asRecord(config["defaultTest"]);
+  const defaultMetadata = asRecord(
+    defaults?.["metadata"] ?? config["metadata"],
+  );
+  const defaultAssertions = Array.isArray(defaults?.["assert"])
+    ? defaults["assert"]
+    : [];
+  const add = (
+    test: unknown,
+    data?: Record<string, unknown>,
+    scenarioIndex?: number,
+  ) => {
+    const original = asRecord(test);
+    const assertions = original?.["assert"];
+    if (!Array.isArray(assertions) || !assertions.length) return;
+    const metadata: Record<string, unknown> = {
+      ...defaultMetadata,
+      ...asRecord(data?.["metadata"]),
+      ...asRecord(original?.["metadata"]),
+    };
+    if (scenarioIndex !== undefined)
+      metadata["conversationId"] ??= `__scenario_${scenarioIndex}__`;
+    if (
+      data &&
+      asRecord(original?.["metadata"])?.["pluginId"] !== metadata["pluginId"]
+    )
+      return;
+    // Scenarios merge default options before deciding whether to prepend defaults.
+    const options = {
+      ...(data ? asRecord(defaults?.["options"]) : {}),
+      ...asRecord(data?.["options"]),
+      ...asRecord(original?.["options"]),
+    };
+    const prefix = [
+      ...(options["disableDefaultAsserts"] === true ? [] : defaultAssertions),
+      ...(Array.isArray(data?.["assert"]) ? data["assert"] : []),
+    ];
+    owners.push({
+      metadata,
+      tracedMetadata: {
+        ...metadata,
+        tracingEnabled: true,
+        evaluationId: evalId,
+      },
+      assertions: [...prefix, ...assertions],
+      generatedIndex: prefix.length,
+    });
+  };
+  // Ordinary tests may coexist with scenarios and retain their own first assertion.
+  for (const test of Array.isArray(config["tests"]) ? config["tests"] : [])
+    add(test);
+  let scenarioIndex = 0;
+  for (const value of scenarios) {
+    const scenario = asRecord(value);
+    for (const entry of Array.isArray(scenario?.["config"])
+      ? scenario["config"]
+      : []) {
+      const data = asRecord(entry);
+      for (const test of Array.isArray(scenario?.["tests"])
+        ? scenario["tests"]
+        : []) {
+        if (data) add(test, data, scenarioIndex);
+      }
+      scenarioIndex++;
+    }
+  }
+  return owners;
+}
+
 /** Each result ID identifies one observed probe in the native evaluation export. */
 export async function readPromptfooFindings(
   path: string,
@@ -102,6 +208,7 @@ export async function readPromptfooFindings(
     );
   const rows = array(summary["results"], "Promptfoo results.results");
   const defaults = asRecord(config["defaultTest"])?.["assert"];
+  const assertionOwners = scenarioAssertionOwners(config, evalId);
   return normalizeRecords(
     rows,
     (value) => {
@@ -154,32 +261,26 @@ export async function readPromptfooFindings(
         Array.isArray(declared) &&
         (asRecord(testCase?.["options"])?.["disableDefaultAsserts"] !== true ||
           (declared.length > defaults.length &&
-            defaults.every((item, index) => {
-              if (matchesDefaultAssertion(item, declared[index], rubricPrompt))
-                return true;
-              const original = asRecord(item);
-              const evaluated = asRecord(declared[index]);
-              const children = original?.["assert"];
-              const evaluatedChildren = evaluated?.["assert"];
-              return (
-                original?.["type"] === "assert-set" &&
-                Array.isArray(children) &&
-                Array.isArray(evaluatedChildren) &&
-                isDeepStrictEqual(
-                  { ...original, assert: undefined },
-                  { ...evaluated, assert: undefined },
-                ) &&
-                children.length === evaluatedChildren.length &&
-                children.every((child, childIndex) =>
-                  matchesDefaultAssertion(
-                    child,
-                    evaluatedChildren[childIndex],
-                    rubricPrompt,
-                  ),
-                )
-              );
-            })));
-      const generatedIndex = skipDefaults ? defaults.length : 0;
+            defaults.every((item, index) =>
+              matchesConfiguredAssertion(item, declared[index], rubricPrompt),
+            )));
+      const traced =
+        meta?.["tracingEnabled"] === true && meta["evaluationId"] === evalId;
+      const owner = Array.isArray(declared)
+        ? assertionOwners.find(
+            (candidate) =>
+              isDeepStrictEqual(
+                traced ? candidate.tracedMetadata : candidate.metadata,
+                meta,
+              ) &&
+              candidate.assertions.length === declared.length &&
+              candidate.assertions.every((item, index) =>
+                matchesConfiguredAssertion(item, declared[index], rubricPrompt),
+              ),
+          )
+        : undefined;
+      const generatedIndex =
+        owner?.generatedIndex ?? (skipDefaults ? defaults.length : 0);
       const generated = Array.isArray(declared)
         ? asRecord(declared[generatedIndex])
         : null;

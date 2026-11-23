@@ -376,6 +376,198 @@ test("keeps evaluated default rubrics separate from generated security rubrics",
   expect(setSelection.excluded.map((item) => item.position)).toEqual([1]);
 });
 
+test("keeps scenario quality assertions separate from generated security assertions", async () => {
+  await using fixture = await checkout();
+  const quality = { type: "llm-rubric", metric: "Brevity", value: "Be brief." };
+  const alternate = { ...quality, metric: "Clarity", value: "Be clear." };
+  const security = {
+    type: "llm-rubric",
+    metric: "TenantBoundary",
+    value: "Only return this tenant's invoice.",
+  };
+  const defaultAssertion = { type: "latency", threshold: 1000 };
+  const pluginId = "file://tenant-policy.yaml";
+  const suiteMetadata = {
+    origin: "suite",
+    tracingEnabled: false,
+    evaluationId: "configured-eval",
+  };
+  const observations = [];
+  for (const mode of [
+    "absent",
+    "enabled",
+    "inherited-disabled",
+    "re-enabled",
+  ]) {
+    const hasDefaults = mode !== "absent";
+    const disabled = mode === "inherited-disabled" || mode === "re-enabled";
+    const defaultTest = {
+      ...(hasDefaults ? { assert: [defaultAssertion] } : {}),
+      options: { disableDefaultAsserts: disabled },
+      ...(mode === "inherited-disabled"
+        ? { metadata: { origin: "default" } }
+        : mode === "re-enabled"
+          ? { metadata: {} }
+          : {}),
+    };
+    const ordinary = {
+      assert: [quality, security],
+      metadata: { pluginId, conversationId: "ordinary" },
+    };
+    const scenarioTest = {
+      assert: [security],
+      metadata: { pluginId },
+      ...(mode === "re-enabled"
+        ? { options: { disableDefaultAsserts: false } }
+        : {}),
+    };
+    const dataOwned = {
+      ...scenarioTest,
+      metadata: { pluginId, conversationId: "data-owned" },
+    };
+    const data = [quality, alternate].map((assertion) => ({
+      assert: [assertion],
+      ...(mode === "absent"
+        ? {}
+        : { metadata: { conversationId: "shared-scenario" } }),
+    }));
+    const row = (
+      id: string,
+      assertions: Record<string, unknown>[],
+      failing: Record<string, unknown>,
+      conversationId: string,
+      disableDefaultAsserts: boolean,
+    ) => {
+      const componentResults = assertions.map((assertion) => ({
+        assertion,
+        pass: assertion !== failing,
+        score: assertion === failing ? 0 : 1,
+        reason:
+          assertion === failing ? `${assertion["metric"]} failed.` : "Passed.",
+      }));
+      const score = (assertions.length - 1) / assertions.length;
+      return {
+        ...leak,
+        id,
+        score,
+        error: `${failing["metric"]} failed.`,
+        testCase: {
+          assert: assertions,
+          options: { disableDefaultAsserts },
+          metadata: {
+            ...("metadata" in defaultTest
+              ? defaultTest.metadata
+              : suiteMetadata),
+            pluginId,
+            conversationId,
+            ...(mode === "enabled"
+              ? { tracingEnabled: true, evaluationId: "eval-invoice" }
+              : {}),
+          },
+        },
+        gradingResult: { pass: false, score, componentResults },
+      };
+    };
+    const ordinaryAssertions = [
+      ...(hasDefaults ? [defaultAssertion] : []),
+      ...ordinary.assert,
+    ];
+    const scenarioDefaults = hasDefaults && mode !== "inherited-disabled";
+    const dataOwnedAssertions = [
+      ...(scenarioDefaults ? [defaultAssertion] : []),
+      ...dataOwned.assert,
+      quality,
+    ];
+    const rows = [
+      row(
+        "ordinary-primary",
+        ordinaryAssertions,
+        quality,
+        "ordinary",
+        disabled,
+      ),
+      row(
+        "ordinary-appended",
+        ordinaryAssertions,
+        security,
+        "ordinary",
+        disabled,
+      ),
+      ...data.flatMap((entry, index) => {
+        const assertions = [
+          ...(scenarioDefaults ? [defaultAssertion] : []),
+          ...entry.assert,
+          ...scenarioTest.assert,
+        ];
+        const conversationId =
+          entry.metadata?.conversationId ?? `__scenario_${index}__`;
+        return [
+          row(
+            `quality-${index}`,
+            assertions,
+            entry.assert[0]!,
+            conversationId,
+            mode === "inherited-disabled",
+          ),
+          row(
+            `security-${index}`,
+            assertions,
+            security,
+            conversationId,
+            mode === "inherited-disabled",
+          ),
+        ];
+      }),
+      row(
+        "data-primary",
+        dataOwnedAssertions,
+        security,
+        "data-owned",
+        mode === "inherited-disabled",
+      ),
+      row(
+        "data-appended",
+        dataOwnedAssertions,
+        quality,
+        "data-owned",
+        mode === "inherited-disabled",
+      ),
+    ];
+    await fixture.writeJson({
+      ...report(rows),
+      config: {
+        redteam: { plugins: [pluginId] },
+        defaultTest,
+        metadata: suiteMetadata,
+        tracing: { enabled: mode === "enabled" },
+        tests: [ordinary],
+        scenarios: [
+          { config: data, tests: [scenarioTest] },
+          { config: [dataOwned], tests: [{ assert: [quality] }] },
+        ],
+      },
+    });
+    const selection = await readPromptfooFindings(fixture.file);
+    observations.push({
+      mode,
+      findings: selection.findings.map((item) => item.source_finding_id),
+      excluded: selection.excluded.map((item) => item.position),
+    });
+  }
+  expect(observations).toEqual(
+    ["absent", "enabled", "inherited-disabled", "re-enabled"].map((mode) => ({
+      mode,
+      findings: [
+        "ordinary-primary",
+        "security-0",
+        "security-1",
+        "data-primary",
+      ],
+      excluded: [2, 3, 5, 8],
+    })),
+  );
+});
+
 test("keeps resolved default grading providers separate from generated assertions", async () => {
   await using fixture = await checkout();
   const security = {
