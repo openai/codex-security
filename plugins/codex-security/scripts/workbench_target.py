@@ -1613,6 +1613,10 @@ def copy_git_worktree_files(
         elif stat.S_ISREG(metadata.st_mode):
             shutil.copy2(source_path, destination_path, follow_symlinks=False)
         elif stat.S_ISDIR(metadata.st_mode):
+            nested_root = git_output(source_path, "rev-parse", "--show-toplevel")
+            if nested_root is not None and not Path(nested_root).samefile(source_path):
+                # A directory that replaced a tracked file lists its own untracked files.
+                continue
             nested_git_dir = git_output(source_path, "rev-parse", "--absolute-git-dir")
             if nested_git_dir is None:
                 raise SystemExit(f"Could not inspect nested Git working tree: {relative}")
