@@ -118,6 +118,36 @@ class ValidateScanContractTest(ScanFixtureTestCase):
 
         self.assertEqual(validated["findings"], findings)
 
+    def test_completion_checks_locations_against_the_registered_file_scope(self) -> None:
+        for path in ("src/extract.py", "src/other.py"):
+            with self.subTest(path=path):
+                coverage = self.read_json("coverage.json")
+                coverage.update(includePaths=[path], mode="scoped_path")
+                self.rewrite_sealed_artifact("coverage.json", coverage)
+                manifest = self.read_json("scan-manifest.json")
+                scan = manifest["scan"]
+                scan["scope"]["includePaths"] = [path]
+                self.write_json("scan-manifest.json", manifest)
+                binding = {
+                    "scanId": scan["id"],
+                    "startedAt": scan["startedAt"],
+                    "completedAt": scan["completedAt"],
+                    "producer": scan["producer"],
+                    "allowedTargetKinds": [scan["target"]["kind"]],
+                    "target": scan["target"],
+                    "scope": {"includePaths": [path], "excludePaths": []},
+                    "coverageMode": "scoped_path",
+                }
+                options = {"completion_binding": binding, "finding_scope": [(path, True)]}
+                if path == "src/extract.py":
+                    result = VALIDATOR.validate_contract(self.scan_dir, **options)
+                    self.assertEqual(result["reportSha256"], self.sha256_file("report.md"))
+                else:
+                    with self.assertRaisesRegex(
+                        VALIDATOR.FINALIZER.ContractError, "no location in the requested scope"
+                    ):
+                        VALIDATOR.validate_contract(self.scan_dir, **options)
+
     def test_accepts_canonical_document_beyond_previous_size_limit(self) -> None:
         manifest = self.read_json("scan-manifest.json")
         manifest["metadata"] = "x" * (16 * 1024 * 1024)
