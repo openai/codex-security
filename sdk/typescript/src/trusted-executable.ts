@@ -9,6 +9,7 @@ import {
   extname,
   isAbsolute,
   join,
+  parse,
   relative,
   resolve,
   sep,
@@ -21,6 +22,7 @@ export interface TrustedExecutable {
 
 export interface InspectedExecutable {
   executable: string | null;
+  gitTransport?: { launcher: string; target: string };
   environment: Record<string, string | undefined>;
 }
 
@@ -131,15 +133,21 @@ function searchPath(
   );
 }
 
+interface HostLookup {
+  hostDirectory: string;
+}
+
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  lookup?: HostLookup,
 ): Promise<TrustedExecutable | null> {
   const inspected = await inspectTrustedExecutable(
     candidate,
     environment,
     protectedRoot,
+    lookup,
   );
   return inspected.executable === null
     ? null
@@ -150,7 +158,10 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  lookup?: { gitTransportDirectory: string } | HostLookup,
 ): Promise<InspectedExecutable> {
+  const options =
+    lookup && "gitTransportDirectory" in lookup ? lookup : undefined;
   const selectedRoots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
       canonicalRoot,
@@ -163,8 +174,21 @@ export async function inspectTrustedExecutable(
       )
     : selectedRoots;
   const roots = campaign ? [...campaign.roots, ...extra] : selectedRoots;
+  // Native mode checks the supplied filenames and their interpreters without
+  // enumerating PATH directories or projecting a temporary tool directory.
+  const host: ToolPathView | undefined =
+    lookup && "hostDirectory" in lookup
+      ? (await campaignPathHelper())("", lookup.hostDirectory, roots, "native")
+      : undefined;
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
+  const fromLauncherDirectory = (value: string) => {
+    if (!options || isAbsolute(value)) return value;
+    // Keep parent traversal through symlinks until realpath inspects it.
+    return parse(value).root
+      ? resolve(options.gitTransportDirectory, value)
+      : `${options.gitTransportDirectory}${sep}${value}`;
+  };
   const path =
     searchPath(environment) ??
     (campaign
@@ -182,14 +206,21 @@ export async function inspectTrustedExecutable(
       entry = entry.slice(1, -1);
     }
     if (entry.length === 0) continue;
-    const canonical = await realpath(entry).catch(() => null);
+    const launcherEntry = fromLauncherDirectory(entry);
+    const canonical = await realpath(launcherEntry).catch(() => null);
     if (canonical === null || isProtected(canonical)) continue;
+    if (host && launcherEntry !== canonical) {
+      const path = isAbsolute(launcherEntry)
+        ? launcherEntry
+        : `${process.cwd()}${sep}${launcherEntry}`;
+      if (!host.allows(path)) continue;
+    }
     // A directory containing the separator can be on PATH through a safe alias.
     // Keep that absolute spelling so joining the entries cannot split its name.
     const directory = canonical.includes(delimiter)
-      ? isAbsolute(entry)
-        ? entry
-        : `${process.cwd()}${sep}${entry}`
+      ? isAbsolute(launcherEntry)
+        ? launcherEntry
+        : `${process.cwd()}${sep}${launcherEntry}`
       : canonical;
     if (
       !directory.includes(delimiter) &&
@@ -213,23 +244,37 @@ export async function inspectTrustedExecutable(
     }
   }
 
-  const pathLike = candidate.includes("/") || candidate.includes("\\");
+  const pathLike =
+    candidate.includes("/") ||
+    candidate.includes("\\") ||
+    Boolean(options && parse(candidate).root);
+  if (pathLike) candidate = fromLauncherDirectory(candidate);
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
   // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
   // will actually run instead of rejecting an otherwise valid Windows configuration.
+  // Git for Windows can use an interpreter for explicit transport and askpass scripts.
+  const allowScript = options !== undefined;
   const windows = process.platform === "win32";
   const suffixes =
     !windows || /\.(?:exe|com)$/iu.test(candidate)
       ? [""]
       : pathLike
-        ? [extname(candidate) === "" ? ".exe" : ""]
+        ? extname(candidate) === ""
+          ? allowScript
+            ? [".exe", ""]
+            : [".exe"]
+          : [""]
         : [".exe", ".com", ".bat", ".cmd", ""];
   const primary = suffixes.map((suffix) => candidate + suffix);
   // The Windows MCP launcher and inventory look up Node and ripgrep on this PATH.
-  const names =
-    campaign && windows && candidate === "git"
-      ? [...primary, "node.exe", "rg.exe", "rg.com"]
-      : primary;
+  const names = [...primary];
+  if (campaign && windows && candidate === "git")
+    names.push("node.exe", "rg.exe", "rg.com");
+  // Hosting clients look up Git again in the environment they inherit.
+  const hostsGit = host && (candidate === "gh" || candidate === "glab");
+  if (hostsGit) names.push(...suffixes.map((suffix) => "git" + suffix));
+  // These PATHs are reused from another cwd, where a dangling link can resolve.
+  const inherited = view ?? (hostsGit ? host : undefined);
   const candidates = (pathLike ? [null] : entries).flatMap((entry) => {
     // PATH lookup traverses links before "..". join() would collapse it first.
     const directory = entry ?? "";
@@ -239,13 +284,18 @@ export async function inspectTrustedExecutable(
       entry,
       path: entry === null && windows ? resolve(name) : prefix + name,
       runnable:
-        primary.includes(name) && (!windows || /\.(?:exe|com)$/iu.test(name)),
+        primary.includes(name) &&
+        (!windows ||
+          /\.(?:exe|com)$/iu.test(name) ||
+          (allowScript && name === candidate)),
     }));
   });
   const unsafeEntries = new Set<string>();
   let executable: string | null = null;
+  let gitTransport: InspectedExecutable["gitTransport"];
   for (const current of candidates) {
-    const crossesSource = view !== undefined && !view.allows(current.path);
+    const crossesSource =
+      inherited !== undefined && !inherited.allows(current.path);
     if (!pathLike && crossesSource) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
@@ -254,12 +304,17 @@ export async function inspectTrustedExecutable(
     if (canonical === null) continue;
     if (
       isProtected(canonical) ||
+      (host && !inherited && !host.allows(current.path)) ||
       (pathLike && view && crossesSource && !view.allows(canonical))
     ) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
-    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
+    if (
+      !allowScript &&
+      process.platform === "win32" &&
+      /\.(?:bat|cmd)$/iu.test(canonical)
+    ) {
       continue;
     }
     if (!current.runnable) continue;
@@ -269,11 +324,23 @@ export async function inspectTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      // Keep explicit virtualenv launchers, but resolve repository-local aliases
-      // to the trusted target instead of invoking them from the repository.
-      const invocationPath = pathLike
-        ? join(await realpath(dirname(current.path)), basename(current.path))
-        : current.path;
+      // Keep the launcher's name for virtualenvs and other argv[0]-sensitive tools.
+      const launcher =
+        pathLike || options
+          ? join(await realpath(dirname(current.path)), basename(current.path))
+          : current.path;
+      let invocationPath = launcher;
+      if (options && invocationPath !== canonical) {
+        // Authentication can run after the patch replaces a link in the checkout.
+        const resolveHostPath = await trustedHostPathResolver(
+          options.gitTransportDirectory,
+          roots,
+        ).catch(() => undefined);
+        if (resolveHostPath?.(invocationPath) !== canonical)
+          invocationPath = canonical;
+      }
+      if (!executable && options)
+        gitTransport = { launcher, target: canonical };
       executable ??=
         pathLike &&
         (crossesSource ||
@@ -295,10 +362,14 @@ export async function inspectTrustedExecutable(
     entries.filter((entry) => !unsafeEntries.has(entry)).join(delimiter);
   // An empty POSIX PATH searches the current directory.
   sanitizedEnvironment["PATH"] =
-    campaign && process.platform !== "win32" && !filteredPath
+    (campaign || host) && process.platform !== "win32" && !filteredPath
       ? "/dev/null"
       : filteredPath;
-  return { executable, environment: sanitizedEnvironment };
+  return {
+    executable,
+    environment: sanitizedEnvironment,
+    ...(gitTransport && { gitTransport }),
+  };
 }
 
 /** @internal */

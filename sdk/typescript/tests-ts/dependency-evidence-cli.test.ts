@@ -239,6 +239,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
             {
               ...output!.appServer!,
               linkedEvidence: undefined,
+              onPermissions: undefined,
               cyberAccessProgram: "standard",
               input: new Writable({
                 write(chunk, _encoding, done) {

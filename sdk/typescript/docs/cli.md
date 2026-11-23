@@ -3057,10 +3057,180 @@ output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
 The assessment does not change the patch or merge state.
 
+Git snapshots, including snapshots of initialized submodules, run configured Git
+filters with the workspace permissions from your Codex configuration. Configure
+additional writable roots and network access in your user configuration.
+Snapshot Git uses the external Git settings selected by the operator. The patch
+model’s filesystem profile denies access to those files. On Windows, managed
+Git commands and their descendants receive those settings through temporary
+named pipes. Each configuration file has 32 listeners. If concurrent connections
+use every listener for a file, the CLI reports an error before accepting the
+Git result because Git can skip a busy configuration source. Git evaluates
+conditional includes within each checkout and reports the pipe names in
+`--show-origin`. When Git selects both XDG and home configuration files,
+`git config --global` inside the sandbox sees their combined settings.
+The CLI omits recognized inline credentials from the streams, which can
+affect conditions that match a remote URL containing credentials.
+When a snapshot filter or publication hook can run, keep inline Git credentials
+out of external configuration files, including conditional includes. A patch
+stops before running a delegate with an authorization header, credential-bearing
+URL or proxy, or inline secret available in those files. The check covers
+`imap.pass`, `sendemail.smtpPass`, `gitcvs.dbPass`, and `receive.certNonceSeed`,
+including SMTP passwords for individual identities and CVS passwords for
+specific access methods. The CLI also removes these secrets from the command
+configuration that Git delegates inherit.
+
+When looking up Git and hosting clients on `PATH`, publication skips
+directories granted to patch turns for writing. Install those tools outside
+the patch's writable roots.
+
+Patch commands clear interpreter startup overrides such as `PYTHONPATH`,
+`PYTHONHOME`, `NODE_OPTIONS`, and `BASH_ENV` before launching Git, hosting
+clients, and the sandbox runner on the host. They set `PYTHONNOUSERSITE=1`
+to disable Python’s default user site-packages directory. If your wrapper uses
+`python -E` to ignore environment settings, add `-s` to skip that directory.
+They clear `BUNDLE_*` and `BUNDLER_*` so Ruby wrappers start outside the
+caller's bundle. Configure required Bundler settings in the trusted wrapper
+and set `BUNDLE_GEMFILE` to its absolute Gemfile path before loading
+`bundler/setup`. Bundler otherwise searches the working directory and its
+parents for a Gemfile, and hosting clients run in the checkout.
+They point `ZDOTDIR` at the system null device so Zsh wrappers skip user startup
+files such as `~/.zshenv`. Put required settings in the trusted wrapper.
+On all platforms they clear `OPENSSL_CONF`, `OPENSSL_CONF_INCLUDE`,
+`OPENSSL_MODULES`, and `OPENSSL_ENGINES` so host tools use their default
+OpenSSL configuration and module directories. Configure required cryptographic
+policies in those defaults.
+For Tcl and Tk, they clear `TCL_LIBRARY`, `TK_LIBRARY`, `TCLLIBPATH` and
+versioned module paths such as `TCL8_6_TM_PATH` and `TCL8.6_TM_PATH`.
+On Unix, Git target discovery and patch commands clear native loader overrides
+(`LD_*` and `DYLD_*`). On Linux they also clear `GCONV_PATH` so glibc uses its
+default conversion modules.
+Install host wrapper dependencies alongside the trusted launcher or in its
+interpreter environment. Set overrides for snapshot filters in the sandbox’s
+shell environment policy.
+
+HTTPS publication runs named Git credential helpers and executable wrappers
+outside the checkout. Operator settings can also select `!gh auth git-credential`
+or an interpreter with an absolute external script. Put shell logic in an
+external executable wrapper. Git applies the original URL scopes and empty
+helper resets when choosing which helper to invoke.
+
+Git's built-in `store` helper can authenticate the host publication transport.
+The patch model, snapshot filters, and publication hooks have filesystem deny
+rules for Git's standard credential stores and for operator-selected
+`store --file` commands with a literal absolute file path. Use forward slashes
+and a drive letter for an explicit store on Windows. The same rules cover
+`.netrc` and `_netrc` in the host user's effective home directory, the file
+selected by libcurl's `NETRC` environment variable, and files selected by Git's
+`http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
+URL-specific values. SSH protection covers identities selected by `-i` and
+`-o IdentityFile=...` in `GIT_SSH_COMMAND` or your Git `core.sshCommand`.
+The CLI also reads static `IdentityFile` entries in standard user and system
+SSH configuration, an explicit `-F` file, and their `Include` files outside
+the checkout. Includes support literal paths and one `*` in the filename.
+Use absolute paths for identities outside `.ssh` so the CLI can identify
+the files before running the model or a Git filter. The trusted transport
+retains its SSH command. The rules also protect the account's `.ssh` directory,
+file-based SSH signing keys selected by `user.signingKey`, and the default
+GnuPG homes (`~/.gnupg` and Roaming AppData on Windows). Set `GNUPGHOME`
+to identify a custom GnuPG home. Its directory is protected and the selector
+is removed from delegate environments.
+They also cover GitHub CLI’s `hosts.yml` and `config.yml`, `.docker/config.json`,
+`.kube/config`, `.npmrc`, and `.pypirc`. The rules cover home-directory defaults
+and files selected by `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`,
+`NPM_CONFIG_USERCONFIG`, and `NPM_CONFIG_GLOBALCONFIG`. For pip, they cover
+`PIP_CONFIG_FILE`, `PIP_CLIENT_CERT`, and pip configuration in standard user and
+system locations, `VIRTUAL_ENV`, or `CONDA_PREFIX`. Git delegates also strip
+`MYSQL_PWD`, `PGPASSWORD`, `DATABASE_URL` and environment values containing
+URLs with embedded passwords. They treat a username alone as a credential for
+HTTP(S), FTP(S), Redis, and NATS transports (including TLS and WebSockets).
+For credential file selectors such as `GIT_SSL_KEY`, `REGISTRY_AUTH_FILE`, and
+`AWS_WEB_IDENTITY_TOKEN_FILE`, delegates lose the selector and filesystem
+access to the selected file. The rules protect
+`auth.json`, `.credentials.json`, and
+Codex configuration files (including named profiles) in the default Codex home,
+the selected `CODEX_HOME`, and the Codex Security credential home.
+In the standard gcloud directory and under `CLOUDSDK_CONFIG`, the rules cover
+Application Default Credentials, `credentials.db`, `access_tokens.db`, their
+SQLite journals, and the `legacy_credentials` directory. They also cover the
+file selected by `GOOGLE_APPLICATION_CREDENTIALS`.
+Databricks protection covers `~/.databrickscfg`, `~/.databricks/token-cache.json`,
+and files selected by `DATABRICKS_CONFIG_FILE` or `DATABRICKS_OIDC_TOKEN_FILEPATH`.
+GitLab CLI tokens are protected in `config.yml` under `GLAB_CONFIG_DIR`,
+the standard `glab-cli` configuration directories and Git administration.
+MySQL protection covers `~/.my.cnf` and `~/.mylogin.cnf` on Unix,
+`%APPDATA%\MySQL\.mylogin.cnf` on Windows, and the login file selected by
+`MYSQL_TEST_LOGIN_FILE`. In `MYSQL_HOME`, the rules protect `my.cnf` and, on
+Windows, `my.ini`. MySQL adds a leading dot to these filenames when the
+directory setting starts with a literal `~`.
+PostgreSQL password and service file protection covers `PGPASSFILE`,
+`PGSERVICEFILE`, the standard per-user files and `pg_service.conf` in
+the directory selected by `PGSYSCONFDIR`.
+TLS client identity protection covers `PGSSLKEY`, `PGSSLCERT`, and the
+standard per-user `postgresql.key` and `postgresql.crt` files.
+Terraform protection covers `TF_CLI_CONFIG_FILE`, `TERRAFORM_CONFIG`, the
+standard CLI configuration and login files, and existing `*.tfrc` and
+`*.tfrc.json` fragments in the user's Terraform configuration directory.
+Git delegates also run with Terraform's `TF_TOKEN_*` variables removed.
+For rclone, the rules cover `~/.config/rclone/rclone.conf`, `~/.rclone.conf`,
+and `rclone/rclone.conf` under `XDG_CONFIG_HOME` or Windows `APPDATA`.
+Set `RCLONE_CONFIG` to protect a custom path, including a portable config
+beside the rclone executable. Delegates lose that selector, `RCLONE_CONFIG_PASS`,
+`RCLONE_PASSWORD_COMMAND`, and recognized rclone key and password settings.
+Additional protected locations include Git Credential Manager’s plaintext
+store and token caches, SOPS age identities, AWS CLI role, login and SSO
+caches, and Azure CLI token files. Package-manager rules cover credential
+files in the standard and selected Cargo, Gradle, Maven, Bundler, RubyGems,
+NuGet, Helm, Docker and Podman directories. The host transport retains access
+to these files.
+For `GIT_CONFIG`, patching inspects the selected file and its includes for
+inline authentication and credential sources. A file containing inline
+authentication prevents managed Git filters and hooks from running. Git LFS
+can use ordinary selected settings, including `lfs.storage`.
+The native sandbox applies these rules when it launches a command. Keep these
+credential files stable until active patch commands finish. For a Windows
+credential file that does not yet exist, use a path the native sandbox can
+represent with ordinary drive or UNC syntax.
+Other helpers, including shell commands and OS credential managers, can use
+storage outside those files. An operator Git configuration file can also
+select a `core.askPass` program to supply credentials to the HTTPS transport.
+A nonregular credential source such as a named pipe is handled the same way.
+When an operator configuration names one of these sources, a patch stops
+before running a publication hook that could call it. Configured filters can
+stay installed. If a file's attributes select one, Git reports the incompatible
+credential source before processing the file. An empty helper reset controls
+Git's lookup order. A filter can still read and invoke an earlier helper named
+in the same configuration. For patching with those delegates, select a
+configuration that omits the opaque helper. When the CLI manages the patch
+sandbox for automatic publication, a configured clean or process filter selected
+for a file must succeed during snapshot staging. If the filter fails, the CLI
+keeps the local edits for review. In this mode, host Git reuses the captured
+blobs during publication. The delegated commit hooks retain their existing
+filter configuration and permissions.
+
+An external Git administration directory must belong to a registered worktree or
+be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
+directory points to a separate external common directory, select that common
+directory too unless the worktree is registered.
+For Git LFS storage outside the checkout, select the cache in your user or
+system Git configuration, pass it through Git's command environment, or grant
+the snapshot workspace write access to the cache.
+
+In a sparse checkout, Git can remove a materialized out-of-cone file when it
+reapplies the sparse rules. If the patch sees the file disappear after an index
+rewrite and cannot determine whether you intended to delete it, it stops before
+publishing. For an intended deletion, stage it with
+`git rm --cached --sparse -- <path>` and retry. To keep the file, restore it
+before retrying.
+
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
 File changes alone do not prove a fix; saved findings require a verified result.
+Errors from interrupted patches or unfinished preparation retain completed
+finding results and known file lists. When the final inspection is incomplete,
+they omit `applied` and `filesChanged` and
+explain that limitation in the error message; local edits remain in place.
 
 For a controlled container providing its own isolation:
 
@@ -3084,29 +3254,162 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 ### Create or resume a draft pull request
 
+For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
+Publication checks the source of `core.sshCommand` and binds its executable
+before Git probes a host or examines remote branches. Keep SSH launchers,
+identity files and explicit configuration files outside directories the patch
+can write. Use existing files and absolute paths for explicit file operands such
+as `-i` and `-F`. Keep each symlink in those paths outside the checkout.
+SSH and its configuration probes run from the filesystem
+volume root, with checkout directories excluded from their command search path. For a
+command that needs shell expansion, use an operator-owned wrapper on a trusted
+PATH. Virtualenv interpreters need a protected launcher path to retain their
+environment. Publication rechecks the selected files before running SSH.
+If they change, inspect them before retrying. A resumed publication selects
+the current operator settings. With `--external-sandbox`, the operator supplies
+the filesystem isolation.
+
+Publication binds the OpenSSH configuration selected by `-F`. With the default
+search it checks the account's `.ssh/config` and system files under `/etc/ssh`,
+standard installation prefixes or `%ProgramData%\ssh` on Windows. On Unix it
+follows static `Include` paths, including `~/` paths, double-quoted names
+containing spaces and `*` globs in the filename. Relative includes start in
+`~/.ssh` for user configurations and the system configuration directory for
+system configurations. For dynamic expansions, complex globs, Windows includes
+or custom installation paths, select a self-contained configuration outside
+patch-writable directories with `-F /absolute/path`.
+
+SSH can run `Match exec` during hostname lookup and `ProxyCommand`,
+`KnownHostsCommand`, or `LocalCommand` during the connection. Publication
+checks these commands in every host block of the selected configuration and
+its includes, along with the `SHELL` used to execute them. Use
+literal executable and script paths outside the patch's writable directories,
+or executable names on the protected search path. On Windows use drive-qualified
+paths with forward slashes. Select an existing script file for an interpreter.
+Keep `..` components out of executable and script paths.
+Routing arguments after the script can use `%h`, `%n`, `%p`, and `%r`.
+Publication also supports netcat and stock systemd and SSSD proxy templates.
+Put nested SSH, option-based dispatch and shell expressions in a trusted
+external wrapper. Select key-provider libraries and `XAuthLocation` by
+absolute external path. Publication also checks `SSH_SK_PROVIDER`,
+`SSH_SK_HELPER` and `SSH_PKCS11_HELPER`.
+
+For a `git://` origin using `core.gitProxy` or `GIT_PROXY_COMMAND`,
+publication also rechecks the selected executable before starting Git.
+A pre-push hook can run before Git launches another process for packing
+or authentication, or between connections to multiple push URLs. Publication
+checks hard links on the host commands it launches directly and on the
+executables and input files Git can use after a hook.
+It accepts links confined to the protected installation directories, including
+Git's `libexec/git-core` and `bin`. On Unix it also accepts files owned by
+another account when their permissions prevent modification. If a launcher
+has an alias in a writable checkout, select a separate external executable.
+Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
+HTTP fetch and push URLs before contacting the hosting service.
+
+For HTTPS, publication checks `GIT_ASKPASS`, the operator's `core.askPass`, and
+`SSH_ASKPASS` in order. The first defined value selects the helper. An empty
+value disables askpass. If the patch branch activates a new helper, inspect
+the configuration and run `codex-security patch --resume-pr BRANCH` to publish
+the saved commit. For SSH, publication binds the SSH client's own
+`SSH_ASKPASS` executable outside patch-writable directories.
+
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
+For hosting discovery, a relative `GIT_CONFIG` selects a file from the initial
+hosting command’s working directory. Publication verifies that selection before
+subsequent hosting commands. Git stores the verified commit and branch settings
+in the repository configuration.
+
+Publication checks the hosting client's configuration before its first
+request. Keep the configuration files and any GitHub CLI `http_unix_socket`
+outside the checkout and other directories the patch can write to. Use
+`GH_CONFIG_DIR` or `GLAB_CONFIG_DIR` to select an external directory.
+The socket path must reach the same socket from every publication directory.
+For socket paths with line breaks, use a double-quoted YAML value on one line
+with escapes such as `\n`.
+On Unix, keep these paths and their symlinks outside `/proc` and `/dev/fd`.
+
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.
-GitLab merge requests stay within the origin project; a fork merge request with
-the same branch name is not reused. GitLab descriptions display the report in a
-blockquote so report text cannot execute quick actions. The report contents,
-including code, HTML, and math, retain their original text.
+For GitLab, the first network `origin` push URL selects the source project. A
+network `origin` fetch URL on the same host selects the target project.
+SSH and `git+ssh` transport ports are ignored in that comparison, matching `glab`
+project selectors; ports on other URL schemes remain significant. Git still uses
+the original URLs and SSH configuration. If the fetch URL is a local path, a
+`file://` URL, or uses another host or retained port, the target is the push
+project too. On resume, an existing merge request for the patch branch is reused
+only when its source project is the selected push project and its head matches
+the saved patch commit. A request from another project with the same branch name
+is not reused.
+
+GitLab descriptions display the report in a blockquote so report text cannot
+execute quick actions. The report contents, including code, HTML, and math,
+retain their original text.
 
 ```bash
 GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
-Both providers return `pullRequest: { branch, url }`. Saved-finding publication
-includes files changed and verified in the same patch turn. If a selected file
-already had local edits, the CLI keeps the patch in the working tree for review.
-The risk assessment and commit use the same verified tree. If staging changed
-during the run and Git cannot update the index, the CLI reports it and keeps
-the existing staging.
-Supplied-issue patching requires a clean tree. If publication fails, run the printed
+Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
+requires a clean tree. Saved-finding publication uses the changes verified for each patch turn. An
+exact move includes the source deletion when its file mode and Git object
+uniquely match the reported destination in that turn. For an edited move,
+report both the source and destination to publish the deletion. If Git cannot
+update staging after the commit, the CLI reports the error and preserves the
+existing staging. Saved-scan publication also refuses patched files that had
+staged, unstaged, or untracked changes before patching; local edits and generated
+patches remain available for review. Existing patch branches and pull requests
+are checked before patching, including closed or merged requests. Review and
+publish further patches from the same scan separately.
+
+Automatic publication also compares changed files with in-memory digests of
+nonempty, ignored regular files enumerated by Git before patching. An exact
+content match is refused, including a move or copy into a new publishable path;
+the edits remain available for manual review and publication. This can also
+refuse independently generated content identical to an ignored template or build
+output. Empty files and external link targets are not fingerprinted. Files that
+disappear during preflight (`ENOENT`) are skipped. Other read errors for eligible
+ignored files stop the command before patching and report the original error.
+File permissions are left unchanged. This adds reads proportional to the ignored
+data and does not detect arbitrary transformed or partial copies. Existing tracked
+edits are protected by path overlap and Git's rename/copy recognition.
+
+Publication preflight also reads materialized files in its checkout snapshot
+and tracked files in initialized submodules. Git can report a clean file after
+an attribute or clean filter discards local bytes. The CLI checks for exact
+copies of content that differs from the indexed blob and its built-in checkout
+representation. This adds reads proportional to the materialized data in
+the snapshot and submodules. Copies of externally smudged content can require
+manual review.
+
+When `origin` pushes to multiple distinct URLs, select each effective
+`remote.origin.pushurl` explicitly in the system, user, or command scope.
+A conditional include in your user Git configuration can select mirrors
+for a single checkout. The CLI checks the effective destinations after
+URL rewriting during preflight and before pushing, including on resume.
+All configured push destinations are checked for existing branch namespace
+collisions before patching. Separate remote servers cannot be updated atomically:
+a remote can change or fail after that check, leaving an earlier push complete.
+
+Automatic publication pushes the parent repository only. By default it checks
+that changed submodule commits are available and also checks remote-tracking
+refs in the retained metadata of deinitialized submodules. An explicit setting
+that disables recursion skips these checks. On-demand recursion and
+`submodule.recurse=true` use check-only mode. Child-only push mode stops
+publication. Publish missing child commits separately, then resume the saved
+parent from a configuration that allows a parent push.
+
+When a Git hook edits the generated commit message, the CLI keeps the accepted
+commit on its local branch and prints its identifier. Inspect the message
+before running the printed `patch --resume-pr BRANCH` command to publish that
+commit. A hook can still veto a commit.
+
+If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
-commit and refuses changed branches. Retain the GitLab host setting on resume.
+commit without rerunning Codex, but refuses changed branches or an existing
+request pointing to a different commit. Retain the GitLab host setting on resume.
 
 ### Patch Linear issues
 

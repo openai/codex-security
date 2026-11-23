@@ -1338,6 +1338,7 @@ for (const [mode, undoStagedChange] of [
 ] as const) {
   test(`${mode} inventories type changes with staged change undone ${undoStagedChange}`, () => {
     const f = fixture();
+    git(f.repo, "config", "--local", "core.symlinks", "true");
     f.write("routes.py");
     const changed = join(f.repo, "changed.py");
     symlinkSync("routes.py", changed, "file");

@@ -23,7 +23,7 @@ use windows_sys::Win32::{
             ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             SDDL_REVISION_1,
         },
-        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES,
+        GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     },
     Storage::FileSystem::*,
     System::{SystemServices::SE_TOKEN_USER, Threading::GetCurrentProcess},
@@ -704,39 +704,62 @@ pub fn create_private_windows_directory(
         Ok(sid) => sid,
         Err(error) => return Ok(error),
     };
-    let descriptor = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})");
-    let mut attributes = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        ..Default::default()
-    };
+    Ok(with_private_directory_security(&sid, |descriptor| {
+        if check_output == Some(true) {
+            let target = OsString::from_wide(&path[..path.len() - 1]);
+            crate::windows_output::inspect_output_path(
+                std::path::Path::new(&target),
+                &sid,
+                Some(descriptor),
+                None,
+                None,
+            )
+        } else {
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                ..Default::default()
+            };
+            let error = status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) });
+            if error == 0 {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    })
+    .map_or_else(|error| error, |()| 0))
+}
+
+pub(crate) fn with_private_directory_security<T>(
+    sid: &str,
+    create: impl FnOnce(PSECURITY_DESCRIPTOR) -> Result<T, u32>,
+) -> Result<T, u32> {
     // Match the credential-home policy: current user, SYSTEM and administrators.
+    let descriptor = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})");
+    with_security_descriptor(&descriptor, create)
+}
+
+pub(crate) fn with_security_descriptor<T>(
+    descriptor: &str,
+    create: impl FnOnce(PSECURITY_DESCRIPTOR) -> Result<T, u32>,
+) -> Result<T, u32> {
     let descriptor = descriptor.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut security = null_mut();
     let error = status(unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             descriptor.as_ptr(),
             SDDL_REVISION_1,
-            &mut attributes.lpSecurityDescriptor,
+            &mut security,
             null_mut(),
         )
     });
     if error != 0 {
-        return Ok(error);
+        return Err(error);
     }
-    let error = if check_output == Some(true) {
-        let target = OsString::from_wide(&path[..path.len() - 1]);
-        crate::windows_output::inspect_output_path(
-            std::path::Path::new(&target),
-            &sid,
-            Some(attributes.lpSecurityDescriptor),
-            None,
-            None,
-        )
-        .map_or_else(|error| error, |()| 0)
-    } else {
-        status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) })
-    };
-    unsafe { LocalFree(attributes.lpSecurityDescriptor) };
-    Ok(error)
+    let result = create(security);
+    unsafe { LocalFree(security) };
+    result
 }
 
 #[napi]
@@ -906,14 +929,18 @@ impl WindowsHandle {
 
     #[napi]
     pub fn set_disposition(&self, delete: bool) -> u32 {
-        let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
-        status(unsafe {
-            SetFileInformationByHandle(
-                self.raw(),
-                FileDispositionInfo,
-                (&info as *const FILE_DISPOSITION_INFO).cast(),
-                size_of::<FILE_DISPOSITION_INFO>() as u32,
-            )
-        })
+        set_disposition(self.raw(), delete)
     }
+}
+
+pub(crate) fn set_disposition(handle: HANDLE, delete: bool) -> u32 {
+    let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
+    status(unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    })
 }

@@ -1,7 +1,7 @@
 /** Split quoted command words without evaluating shell expansions. */
 export function splitCommand(
   command: string,
-  backslashes: "escape" | "literal" = "escape",
+  backslashes: "escape" | "literal" | "ssh" = "escape",
 ): string[] | null {
   const words: string[] = [];
   let word = "";
@@ -9,7 +9,21 @@ export function splitCommand(
   let quote: "'" | '"' | null = null;
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
-    if (character === "\\" && quote !== "'" && backslashes === "escape") {
+    if (backslashes === "ssh" && !started && character === "#") break;
+    if (character === "\\" && backslashes === "ssh") {
+      // OpenSSH argv_split escapes quotes and backslashes in any context,
+      // and spaces outside quotes. Other backslashes are literal.
+      const next = command[index + 1];
+      if (next && ("'\"\\".includes(next) || (!quote && next === " "))) {
+        word += next;
+        index++;
+      } else word += character;
+      started = true;
+    } else if (
+      character === "\\" &&
+      quote !== "'" &&
+      backslashes === "escape"
+    ) {
       const next = command[++index];
       if (next === undefined) return null;
       if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))

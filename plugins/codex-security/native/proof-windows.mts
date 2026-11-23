@@ -8,6 +8,7 @@ import {
   realpathSync,
   renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -374,6 +375,58 @@ function handleProof(root: string) {
   }
 }
 
+function hookMessageStageProof(root: string) {
+  const outer = join(root, "hook-message-stage");
+  const outside = join(root, "hook-message-outside");
+  mkdirSync(outside);
+  const canary = join(outside, "COMMIT_EDITMSG");
+  writeFileSync(canary, "outside");
+  const stage = native.createWindowsHookMessageStage(pathBytes(outer));
+  try {
+    const directory = join(outer, "message");
+    const message = join(directory, "COMMIT_EDITMSG");
+    writeFileSync(message, "original");
+    writeFileSync(join(directory, "replacement"), "edited");
+    renameSync(join(directory, "replacement"), message);
+    assert.equal(
+      native.readWindowsHookMessage(pathBytes(message)).toString(),
+      "edited",
+    );
+    const writer = open(message, flags.GENERIC_WRITE);
+    try {
+      assert.throws(() => native.readWindowsHookMessage(pathBytes(message)));
+    } finally {
+      success(writer.close());
+    }
+    linkSync(message, join(directory, "message-link"));
+    assert.throws(
+      () => native.readWindowsHookMessage(pathBytes(message)),
+      /regular, unlinked COMMIT_EDITMSG/u,
+    );
+    unlinkSync(message);
+    symlinkSync(outside, message, "junction");
+    assert.throws(
+      () => native.readWindowsHookMessage(pathBytes(message)),
+      /regular, unlinked COMMIT_EDITMSG/u,
+    );
+    assert.throws(() => native.createWindowsHookMessageStage(pathBytes(outer)));
+    assert.throws(() => renameSync(outer, join(root, "moved-stage")));
+    assert.throws(() => renameSync(directory, join(outer, "moved-message")));
+    assert.throws(() => unlinkSync(join(directory, ".guard")));
+    assert.throws(() => unlinkSync(join(outer, ".guard")));
+    const nested = join(directory, "editor-backups");
+    mkdirSync(nested);
+    symlinkSync(outside, join(nested, "junction"), "junction");
+    linkSync(canary, join(nested, "hardlink"));
+  } finally {
+    stage.close();
+  }
+  stage.close();
+  assert(!existsSync(outer));
+  assert.equal(readFileSync(canary, "utf8"), "outside");
+  return true;
+}
+
 async function ownershipProof(root: string): Promise<boolean> {
   assert(global.gc, "Run the Windows proof with --expose-gc");
   const path = join(root, "garbage-collected-handle");
@@ -402,6 +455,7 @@ try {
         architecture: process.arch,
         nodeApi: 8,
         handles,
+        hookMessageStage: hookMessageStageProof(root),
         scanReads: scanReadProof(),
         privateDirectories,
         wideProcessAndPaths,
