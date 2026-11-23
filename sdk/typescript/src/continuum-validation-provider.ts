@@ -412,37 +412,72 @@ async function* issueArtifacts(
   }
 }
 
+interface SelectedValidation {
+  artifact: Record<string, unknown>;
+  outcome: ContinuumOutcome;
+  scope: ValidationResultScope;
+}
+
 async function selectValidation(
   artifacts: ReturnType<typeof issueArtifacts>,
   findingId: string,
-) {
-  let issueFallback;
-  for await (const { artifact } of artifacts) {
+): Promise<SelectedValidation | undefined> {
+  let issueFallback: SelectedValidation | undefined;
+  const applicable: SelectedValidation[] = [];
+  const siblings: SelectedValidation[] = [];
+  for await (const { artifact, tied } of artifacts) {
     const member = selectFindingValidationArtifact(artifact, findingId);
-    if (member?.scope === "finding")
-      return {
+    if (member?.scope === "finding") {
+      applicable.push({
         artifact,
         outcome: validationOutcome(member.artifact),
-        scope: "finding" as const,
-      };
-    const outcome = validationOutcome(artifact);
-    if (!outcome.terminalStatus && outcome.verdict === "UNKNOWN") continue;
-    const issue = { artifact, outcome, scope: "issue" as const };
-    const results = validationBody(artifact)["perFindingResults"];
-    // Only an explicitly sibling-only bundle can be skipped. In particular,
-    // a newer failed or partial issue run supersedes earlier member results.
-    if (
-      !Array.isArray(results) ||
-      !results.length ||
-      results.some((item) => {
-        const id = text(object(item)["findingId"]);
-        return !id || id === findingId;
-      })
-    )
-      return issue;
-    issueFallback ??= issue;
+        scope: "finding",
+      });
+    } else {
+      const outcome = validationOutcome(artifact);
+      if (outcome.terminalStatus || outcome.verdict !== "UNKNOWN") {
+        const results = validationBody(artifact)["perFindingResults"];
+        // A newer issue run supersedes earlier member results unless the
+        // bundle explicitly reports results only for other members.
+        const siblingOnly =
+          Array.isArray(results) &&
+          results.length > 0 &&
+          results.every((item) => {
+            const id = text(object(item)["findingId"]);
+            return id && id !== findingId;
+          });
+        (siblingOnly ? siblings : applicable).push({
+          artifact,
+          outcome,
+          scope: "issue",
+        });
+      }
+    }
+    if (tied) continue;
+    if (applicable.length) return uniqueValidation(applicable);
+    issueFallback ??= uniqueValidation(siblings);
+    siblings.length = 0;
   }
   return issueFallback;
+}
+
+function uniqueValidation(
+  candidates: SelectedValidation[],
+): SelectedValidation | undefined {
+  const ids = [
+    ...new Set(candidates.map(({ artifact }) => text(artifact["artifactId"]))),
+  ].sort();
+  if (ids.length < 2) return candidates[0];
+  // Preserve the time so remediation can avoid selecting a superseded result.
+  return {
+    artifact: { createdAt: createdAt(candidates[0]!.artifact) },
+    scope: "issue",
+    outcome: {
+      verdict: "UNKNOWN",
+      disposition: "deferred",
+      unavailable: `Continuum validation artifacts have the same timestamp (${ids.join(", ")}). Retry when a newer result is available.`,
+    },
+  };
 }
 
 function defaultDelay(milliseconds: number, signal?: AbortSignal) {
@@ -744,6 +779,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
     );
     if (!validation) return;
     const { outcome, artifact, scope: resultScope } = validation;
+    const currentEvidence =
+      compareTimestamps(createdAt(artifact), submittedAt.toISOString()) >= 0;
+    if (!currentEvidence && (status === "SUBMITTED" || status === "VALIDATING"))
+      return;
     const issueVerdict = validationOutcome(artifact).verdict;
     const details = {
       issue,
@@ -756,7 +795,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     if (
       outcome.disposition !== "reportable" ||
       issueVerdict === "UNKNOWN" ||
-      !(compareTimestamps(createdAt(artifact), submittedAt.toISOString()) >= 0)
+      !currentEvidence
     )
       return this.#report(finding, submittedAt, outcome, details);
 
@@ -864,6 +903,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       `Codex finding severity: ${severity} (retained).`,
     ];
     if (statusMessage) report.push(statusMessage);
+    if (unavailable && !terminalStatus) report.push(unavailable);
     if (validationArtifactId) {
       report.push(
         "Codex has not independently verified that this result reproduces the submitted flaw. Deployment source identity is not compared.",

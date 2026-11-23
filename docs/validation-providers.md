@@ -91,6 +91,9 @@ the exact identity, evidence, timestamps and disposition of each finding.
 | How old is the evidence?                  | See `validationArtifactId`, `scoringArtifactId` and `freshness`. `joinedValidatedIssue` indicates pre-existing issue validation. A recent timestamp does not establish the deployed revision.     |
 
 Codex checks issue membership and reads validation runs newest first.
+When applicable runs share the newest timestamp, Codex defers the verdict.
+Retry after a newer run appears. While a finding is being submitted or
+validated, older issue evidence alone does not end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from

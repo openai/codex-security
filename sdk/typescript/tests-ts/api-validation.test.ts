@@ -40,6 +40,30 @@ describe("CodexSecurity finding validation", () => {
     runtimePreparer,
   } = createValidationFixtures();
 
+  test.each(["before dispatch", "during validation"])(
+    "honors provider cancellation %s",
+    async (when) => {
+      await using client = TestClient.withDependencies({});
+      const controller = new AbortController();
+      const validate = mock(async () => {
+        controller.abort();
+        throw new Error("interrupted");
+      });
+      if (when === "before dispatch") controller.abort();
+      await expect(
+        client.validate({
+          repositoryPath: await temporaryDirectory(),
+          finding: "Synthetic finding",
+          signal: controller.signal,
+          validationProvider: { name: "synthetic", version: "1", validate },
+        }),
+      ).rejects.toBeInstanceOf(ScanInterruptedError);
+      expect(validate).toHaveBeenCalledTimes(
+        when === "before dispatch" ? 0 : 1,
+      );
+    },
+  );
+
   test("defers a finding when its validation provider throws synchronously", async () => {
     await using client = TestClient.withDependencies({});
     const result = await client.validate({
