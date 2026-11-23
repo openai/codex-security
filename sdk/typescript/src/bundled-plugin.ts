@@ -7,6 +7,7 @@ export function bundledPluginCandidates(moduleDirectory: string): string[] {
   return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
+    resolve(moduleDirectory, ".."),
   ];
 }
 
@@ -18,7 +19,10 @@ export async function hasPluginManifest(root: string): Promise<boolean> {
 }
 
 export async function bundledPluginRoot(): Promise<string> {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const modulePath = import.meta.url;
+  const moduleDirectory = dirname(
+    modulePath.startsWith("file:") ? fileURLToPath(modulePath) : modulePath,
+  );
   for (const candidate of bundledPluginCandidates(moduleDirectory)) {
     if (await hasPluginManifest(candidate)) {
       return await realpath(candidate);
