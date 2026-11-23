@@ -10,6 +10,7 @@ import {
   ContinuumValidationProvider,
   type ContinuumAwsLauncher,
 } from "../src/continuum-validation-provider.js";
+import { assessPluginFindings } from "../src/plugin-validation.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 
 const recorded = JSON.parse(
@@ -606,6 +607,34 @@ describe("explicitly fake outcome variations", () => {
     ]);
   });
 
+  test.each(["EVIDENCE", scoreId])(
+    "keeps the validated verdict and stops polling when reading %s fails",
+    async (target) => {
+      const launch = transport(withObservation());
+      const diagnostic = "AccessDeniedException\nSynthetic score read failure";
+      let polls = 0;
+      const result = await provider(async (op, args) => {
+        if (op === "get-code-finding") polls++;
+        if (args.at(-1) === target) throw new Error(diagnostic);
+        return launch(op, args);
+      }).validate(finding, context);
+      expect(result.unavailable).toContain(diagnostic);
+      expect(polls).toBe(1);
+      expect(result.report).toContain(diagnostic);
+      expect(result.record).toMatchObject({
+        verdict: "EXPLOITABLE",
+        resultScope: "finding",
+        terminalStatus: "COMPLETED",
+        validationArtifactId: proofId,
+        issueId: recorded.issueId,
+        scoringPending: true,
+        disposition: "deferred",
+        unavailable: result.unavailable,
+      });
+      expect(result.record?.scoringArtifactId).toBeUndefined();
+    },
+  );
+
   test.each(["between polls", "first score", "same issue", "changed issue"])(
     "a deadline retains the pending verdict only for its issue (%s)",
     async (stage) => {
@@ -642,7 +671,7 @@ describe("explicitly fake outcome variations", () => {
       const result = await p.validate(finding, context);
       if (stage === "changed issue") {
         expect(result.record?.verdict).toBe("UNAVAILABLE");
-        expect(result.record?.issueId).toBeUndefined();
+        expect(result.record?.issueId).toBe("new");
         return;
       }
       expect(result.unavailable).toContain("timed out");
@@ -658,6 +687,48 @@ describe("explicitly fake outcome variations", () => {
       expect(result.report).toContain("Retry");
     },
   );
+});
+
+test("a plugin retry drops the old verdict when reading the merge destination fails", async () => {
+  const launch = transport();
+  let merged = false;
+  const p = provider(async (op, args) => {
+    if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+      return { items: [] };
+    if (op === "get-code-issue" && args.at(-1) === "new")
+      throw new Error("Issue read failed");
+    const response = await launch(op, args);
+    if (op === "get-code-finding" && merged)
+      response["mergedIntoIssueId"] = "new";
+    return response;
+  });
+  const pending = await p.validate(finding, context);
+  expect(pending.record).toMatchObject({
+    issueId: recorded.issueId,
+    verdict: "EXPLOITABLE",
+    scoringPending: true,
+  });
+  merged = true;
+  const result = await assessPluginFindings(
+    {
+      provider: "continuum",
+      continuum: { environment_id: recorded.environmentId },
+    },
+    [finding],
+    context,
+    () => p,
+    [pending],
+  );
+  const record = result.records.items[0]!;
+  expect(record).toMatchObject({
+    issueId: "new",
+    issueArn: recorded.issue.issueArn.replace(recorded.issueId, "new"),
+    verdict: "UNAVAILABLE",
+    unavailable: "Issue read failed",
+  });
+  expect(record.validationArtifactId).toBeUndefined();
+  expect(record.providerSeverity).toBeUndefined();
+  expect(result.summary).not.toContain("EXPLOITABLE");
 });
 
 test.each(["EVIDENCE", "VALIDATION_EVIDENCE"])(
