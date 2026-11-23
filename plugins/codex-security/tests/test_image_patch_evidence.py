@@ -230,3 +230,81 @@ def test_database_origin_is_compared_when_present():
         run(items)
     del items[3]["descriptor"]["db"]["status"]["from"]
     assert run(items)["scanner_evidence"] == "reported_fix_present"
+
+
+@pytest.mark.parametrize(
+    ("other_fixed", "outcome"),
+    [
+        ("1.2-3.el9", "reported_fix_present"),
+        ("1:1.2-3.el9", "inconclusive"),
+        ("1.2-4.el9", "inconclusive"),
+    ],
+)
+def test_rpm_fix_intersection_across_scanner_namespaces(other_fixed, outcome):
+    items = reports("rpm")
+    _, scan, after, scanned = items
+    for report in (scan, scanned):
+        report["descriptor"]["configuration"] = {"match": {"rpm": {"using-cpes": True}}}
+    match = scan["matches"][0]
+    match["vulnerability"].update(
+        id="CVE-2099-1234",
+        namespace="redhat:distro:redhat:9",
+        fix={"state": "fixed", "versions": ["0:1.2-3.el9", "9.9-1.el9"]},
+    )
+    other = deepcopy(match)
+    other["vulnerability"].update(
+        namespace="nvd:cpe", fix={"state": "fixed", "versions": [other_fixed, "8.8-1.el9"]}
+    )
+    scan["matches"].append(other)
+    after["artifacts"][0].update(version="1.2-3.el9", purl="pkg:rpm/vendor/example@1.2-3.el9")
+    result = run(items, "rpm", "CVE-2099-1234")
+    assert result["before"]["selected_matches"] == 2
+    assert result["scanner_evidence"] == outcome
+    expected = ["0:1.2-3.el9", "1.2-3.el9"] if outcome == "reported_fix_present" else []
+    assert result["reported_fixed_versions"] == expected
+
+
+@pytest.mark.parametrize("bucket", ["matches", "ignoredMatches"])
+@pytest.mark.parametrize("relation", ["same advisory", "unrelated advisory", "other package"])
+def test_baseline_alias_selects_residual_matches(bucket, relation):
+    items = reports("npm")
+    before, scan, after, scanned = items
+    for sbom, version in ((before, "1.0.0"), (after, "2.0.0")):
+        sbom["artifacts"][0].update(version=version, purl=f"pkg:npm/example@{version}")
+    for report in (scan, scanned):
+        report["descriptor"]["configuration"] = {"match": {"javascript": {"using-cpes": True}}}
+    match = scan["matches"][0]
+    match["vulnerability"].update(
+        id="GHSA-xxxx-xxxx-xxxx",
+        namespace="github:language:javascript",
+        fix={"state": "fixed", "versions": ["2.0.0"]},
+    )
+    match["relatedVulnerabilities"] = [{"id": "CVE-2099-1234", "namespace": "nvd:cpe"}]
+    residual = deepcopy(match)
+    residual["artifact"] = deepcopy(after["artifacts"][0])
+    residual["vulnerability"].update(
+        id="CVE-2099-1234", namespace="nvd:cpe", fix={"state": "fixed", "versions": ["3.0.0"]}
+    )
+    residual["relatedVulnerabilities"] = []
+    if relation == "same advisory":
+        baseline = deepcopy(residual)
+        baseline["artifact"] = deepcopy(before["artifacts"][0])
+        scan["matches"].append(baseline)
+    elif relation == "unrelated advisory":
+        residual["vulnerability"]["id"] = "CVE-2099-1235"
+    elif relation == "other package":
+        residual["artifact"].update(name="other-example", purl="pkg:npm/other-example@2.0.0")
+        after["artifacts"].append(deepcopy(residual["artifact"]))
+    scanned[bucket] = [residual]
+    result = run(items, "npm", "GHSA-xxxx-xxxx-xxxx")
+    assert result["before"]["selected_matches"] == 1
+    expected = "reported_fix_present"
+    if relation == "same advisory":
+        expected = "still_reported" if bucket == "matches" else "inconclusive"
+    assert result["scanner_evidence"] == expected
+    assert result["after"]["selected_matches"] == (
+        relation == "same advisory" and bucket == "matches"
+    )
+    assert result["after"]["selected_ignored_matches"] == (
+        relation == "same advisory" and bucket == "ignoredMatches"
+    )

@@ -43,7 +43,13 @@ def package_distros(artifacts):
     return distros
 
 
-def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=None):
+def advisory_ids(match):
+    return {match["vulnerability"]["id"]} | {
+        v["id"] for v in match.get("relatedVulnerabilities", [])
+    }
+
+
+def image_snapshot(sbom, scan, advisories, package, package_type, identity_key=None):
     if sbom["source"]["type"] != "image" or scan["source"]["type"] != "image":
         raise ValueError("Expected image reports")
     identity = image_identity(sbom["source"]["metadata"])
@@ -60,10 +66,9 @@ def image_snapshot(sbom, scan, advisory, package, package_type, identity_key=Non
         )
 
     def selected(match):
-        return (
-            match["vulnerability"]["id"] == advisory
-            or any(v["id"] == advisory for v in match.get("relatedVulnerabilities", []))
-        ) and selected_package(match["artifact"])
+        return not advisory_ids(match).isdisjoint(advisories) and selected_package(
+            match["artifact"]
+        )
 
     matches = scan["matches"]
     active = [m for m in matches if selected(m)]
@@ -109,12 +114,6 @@ def reported_fixes(match):
     return {required_text(v, "fixed version") for v in versions}
 
 
-def comparable_versions(versions, package_type):
-    if package_type == "rpm":
-        return {version.removeprefix("0:") for version in versions}
-    return set(versions)
-
-
 def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package, package_type):
     for before, after, tool in [
         (before_sbom, after_sbom, "syft"),
@@ -129,24 +128,30 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
         raise ValueError("Incomparable Grype databases")
 
     before, active, before_distros = image_snapshot(
-        before_sbom, before_scan, advisory, package, package_type
+        before_sbom, before_scan, {advisory}, package, package_type
     )
+    advisories = set.union(*(advisory_ids(match) for match in active))
     after, _, after_distros = image_snapshot(
-        after_sbom, after_scan, advisory, package, package_type, before["package_identity"]
+        after_sbom, after_scan, advisories, package, package_type, before["package_identity"]
     )
     if before["platform"] != after["platform"]:
         raise ValueError("Image platforms differ")
     if any(m["artifact"]["version"] not in before["installed_versions"] for m in active):
         raise ValueError("Selected match must be present in the baseline report and inventory")
-    fixes = set.intersection(*(reported_fixes(match) for match in active))
-    installed = comparable_versions(after["installed_versions"], package_type)
+
+    def version_key(version):
+        return version.removeprefix("0:") if package_type == "rpm" else version
+
+    fix_sets = [reported_fixes(match) for match in active]
+    fixes = set.intersection(*(set(map(version_key, versions)) for versions in fix_sets))
+    installed = set(map(version_key, after["installed_versions"]))
     if after["selected_matches"]:
         outcome = "still_reported"
     elif (
         installed
         and len(before_distros | after_distros) <= 1
-        and installed <= comparable_versions(fixes, package_type)
-        and comparable_versions(before["installed_versions"], package_type) != installed
+        and installed <= fixes
+        and set(map(version_key, before["installed_versions"])) != installed
         and before["manifest_digest"] != after["manifest_digest"]
         and not after["selected_ignored_matches"]
     ):
@@ -158,7 +163,9 @@ def compare(before_sbom, before_scan, after_sbom, after_scan, advisory, package,
         "package": package,
         "package_type": package_type,
         "scanner_evidence": outcome,
-        "reported_fixed_versions": sorted(fixes),
+        "reported_fixed_versions": sorted(
+            {v for versions in fix_sets for v in versions if version_key(v) in fixes}
+        ),
         "database_built": database["built"],
         "before": before,
         "after": after,
