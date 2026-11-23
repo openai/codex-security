@@ -56,14 +56,15 @@ export async function assessPluginFindings(
     // A failed lookup cannot undo acceptance or a confirmed change of issue.
     // A successful lookup with no issue must drop the previous issue's verdict.
     if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {
+      // Keep a newly observed link visible without reviving detached evidence.
+      if (sameAdmission && prior.issueUnlinked && current.issueArn)
+        current.issueUnlinked = true;
       if (
         prior?.findingArn &&
         (!current?.findingArn ||
           (sameAdmission &&
             !current.issueUnlinked &&
-            (prior.issueUnlinked ||
-              !current.issueArn ||
-              prior.issueArn === current.issueArn)))
+            (!current.issueArn || prior.issueArn === current.issueArn)))
       ) {
         update.record = { ...prior, unavailable: update.unavailable };
         if (prior.scoringPending) update.report = validationSummary([update]);

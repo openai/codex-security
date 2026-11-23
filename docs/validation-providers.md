@@ -129,6 +129,10 @@ A missing code location or oversized document sets `invalidInput` on the
 item. No upload was attempted for that item. Completion skips it on retry.
 Correct the input and rescan instead of editing sealed findings.
 
+After a finding loses its issue membership, `issueUnlinked` stays true
+until validation can confirm the link again. An issue ID shown with that
+flag identifies the issue reported by the finding. Its evidence is withheld.
+
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.
 
