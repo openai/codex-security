@@ -142,10 +142,12 @@ import { publishScanToCustom } from "./custom-publish.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  reviewContinuumPublication,
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { continuumRowErrors } from "./private-finding-import.js";
 import {
   collectContinuumFinding,
   collectContinuumIssues,
@@ -867,6 +869,11 @@ function renderExternalPublicationSummary(
       : `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
     ...(result.privateJob?.error
       ? [diagnosticValue(result.privateJob.error.message)]
+      : []),
+    ...(continuumRowErrors(result.privateJob)
+      ? [
+          "Check the job errors in the private inbox. For conflicting evidence, compare the current inbox records with a new --dry-run --format json before retrying.",
+        ]
       : []),
     ...result.failures.map(
       (item) =>
@@ -4330,7 +4337,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Confirm publication of the previewed input without a terminal prompt.",
+            "Confirm the previewed input without a prompt. Continuum inbox updates require a matching --dry-run.",
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4518,8 +4525,12 @@ export async function main(
             const showPreview = () => {
               showScannerReport(preview);
               writeDiagnostic(
-                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nRetrying private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nPrior private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
+              if (preview.privateImport?.sourceCheckpoint)
+                writeDiagnostic(
+                  `Confirming this import can update evidence for matching ARNs in your inbox.\nSource checkpoint: ${diagnosticValue(preview.privateImport.sourceCheckpoint)}\n${preview.privateImport.retryOfJobId && !preview.resumed ? "This retries the full selection, including any previously accepted items.\n" : ""}`,
+                );
               if (preview.cloudUrl)
                 writeDiagnostic(
                   `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
@@ -4550,6 +4561,14 @@ export async function main(
               );
             };
             if (!structured) showPreview();
+            if (options.dryRun || options.yes)
+              await reviewContinuumPublication(
+                preview,
+                report,
+                dependencies.environment,
+                options.dryRun,
+                controller.signal,
+              );
             if (options.dryRun) {
               if (humanSummary)
                 renderedOutput = "Dry run complete. No findings uploaded.\n";

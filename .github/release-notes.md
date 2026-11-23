@@ -46,6 +46,7 @@
 - bump taiki-e/install-action in / ([#2804](https://github.com/openai/codex-security/pull/2804))
 - attribute exploitability model requests ([#2801](https://github.com/openai/codex-security/pull/2801))
 - include prereleases in stack affected ranges ([#2800](https://github.com/openai/codex-security/pull/2800))
+- carry reviewed Continuum revisions into private jobs ([#2780](https://github.com/openai/codex-security/pull/2780))
 
 </details>
 
