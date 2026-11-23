@@ -11,6 +11,7 @@ export function buildServer(outfile: string, options: BuildOptions = {}) {
     external: ["fsevents"],
     format: "cjs",
     loader: { ".md": "text" },
+    nodePaths: [path.join(applicationRoot, "node_modules")],
     logLevel: "silent",
     outfile,
     platform: "node",

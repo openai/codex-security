@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_constants import (
+    DEEP_SCAN_WORKFLOW_VERSION,
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
     FINDING_CLOSE_REASONS,
@@ -36,7 +38,9 @@ def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False)
     context.add_argument("--user-context-stdin", action="store_true")
 
 
-def parse_args(description: str, *, inspection_only: bool = False) -> argparse.Namespace:
+def parse_args(
+    description: str, *, inspection_only: bool = False, execution_settings: bool = False
+) -> argparse.Namespace:
     """Parse the workbench command line into the namespace consumed by its dispatcher.
 
     For a full command, read UTF-8 user context from stdin when requested. In
@@ -132,7 +136,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")
     begin_deep_scan.add_argument("--join-only", action="store_true")
-    begin_deep_scan.add_argument("--workflow-version", default="deep-security-scan/v1")
+    begin_deep_scan.add_argument("--workflow-version", default=DEEP_SCAN_WORKFLOW_VERSION)
 
     add_command("get-deep-scan", "--scan-id", "--thread-id")
 
@@ -442,6 +446,14 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     args = parser.parse_args()
+    if execution_settings:
+        args.require_execution_settings = True
+        if args.command == "begin-deep-scan":
+            # Private MCP creation input shares stdin with the user's unchanged context.
+            payload = json.load(sys.stdin)
+            args.execution_settings = payload["executionSettings"]
+            args.user_context = payload.get("userContext")
+            args.user_context_stdin = False
     if getattr(args, "user_context_stdin", False):
         args.user_context = sys.stdin.buffer.read().decode("utf-8")
         args.user_context_stdin = False

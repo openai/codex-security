@@ -69,10 +69,8 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
     ) as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (summary["id"],)).fetchone()
-        workers = connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-            (summary["id"],),
-        ).fetchall()
+        workers = saved._saved_workers(connection, scan)
+        accepted_digests = saved._accepted_source_digests(connection, scan)
     if summary["status"] == "completed" and scan["mode"] == "deep":
         # Deep completion saves the accepted parent aggregate before sealing,
         # including deadline recovery's validated records and pending tasks.
@@ -93,6 +91,7 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
             f"Scan {summary['status']}; saved findings and pending review were preserved. {scan['failure_message'] or ''}"
         ).strip(),
         frozen_source_digests=summary["preservedSources"],
+        accepted_source_digests=accepted_digests,
         checkpoint_heads=summary.get("preservedCheckpointHeads", {}).copy(),
         scan_mode=scan["mode"],
         finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
@@ -388,7 +387,7 @@ def seed_legacy_reducer(
         )
         for i, source in enumerate(input_worker_ids):
             db.execute(
-                "INSERT INTO deep_scan_dedup_inputs VALUES (?, ?, ?, ?)",
+                "INSERT INTO deep_scan_dedup_inputs (scan_id, dedup_worker_id, discovery_worker_id, input_order) VALUES (?, ?, ?, ?)",
                 (scan_id, worker_id, source, i),
             )
             db.execute(
@@ -817,7 +816,7 @@ def worker_paths(scan_dir: Path, name: str) -> tuple[Path, Path, Path]:
 
 def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Path) -> Path:
     manifest = scan_dir / "artifacts" / "deep_discovery" / "coordinator-manifest.json"
-    manifest.parent.mkdir(parents=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('{"status":"succeeded"}\n')
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(

@@ -1,6 +1,8 @@
+import { importSource } from "./import-module.ts";
 import {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
+  captureDeepScanExecutionSettings,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
   parseDeepScan,
@@ -22,6 +24,10 @@ import {
   expectedGitEnvironment,
   restoreEnv,
 } from "./support/fake-codex-source.ts";
+import { testRestoredPrivateProfileHomes } from "./deep_scan_private_profile_cases.ts";
+import { testDurableWorkerRuntimeSnapshots } from "./deep_scan_runtime_snapshot_cases.ts";
+import { testHome } from "./deep_scan_home_case.ts";
+import { testReconstructedWorkers } from "./deep_scan_reconstructed_cases.ts";
 import { windowsAcl } from "./support/windows-output-fixture.ts";
 import {
   deniedWorkerPermissionProfile,
@@ -57,6 +63,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { rootCertificates } from "node:tls";
+import { fileURLToPath } from "node:url";
 
 import type {
   CodexWorkerDiagnostic,
@@ -119,6 +126,9 @@ try {
         }),
       "selected profile files",
     );
+    await check(t, testDurableWorkerRuntimeSnapshots);
+    await check(t, testReconstructedWorkers);
+    await check(t, testRestoredPrivateProfileHomes);
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
@@ -166,6 +176,7 @@ try {
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
+      await check(t, () => testHome(withWorkerFixture), "saved Codex home");
       await check(
         t,
         testConcurrentWorkerExecutableAliases,
@@ -3040,6 +3051,14 @@ async function testZeroSubagentsPreservesHostRestrictions() {
 }
 
 async function testLargeScopeTransport() {
+  const engineSource = new URL("../src/deep-scan/engine.ts", import.meta.url);
+  const { startDeepScanEngine } = await importSource(
+    fileURLToPath(engineSource),
+    {
+      loader: { ".md": "text" },
+      define: { "import.meta.url": JSON.stringify(engineSource.href) },
+    },
+  );
   const names = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -3049,7 +3068,7 @@ async function testLargeScopeTransport() {
   ];
   const saved = names.map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
-  const fixture = await fakeCodexFixture();
+  const fixture = await fakeCodexFixture(null);
   const scanIds = [randomUUID(), randomUUID()];
   try {
     process.env.CODEX_CLI_PATH = process.execPath;
@@ -3110,26 +3129,47 @@ async function testLargeScopeTransport() {
                 excludePaths,
                 scanDir: workerRoot,
                 config: {
-                  workers: 1,
+                  workers: index + 1,
                   subagents: 0,
-                  stopAfterNoNew: 1,
-                  maxDiscoveryRuns: 1,
+                  stopAfterNoNew: 2,
+                  stopAfterConsecutiveErrors: 3,
+                  maxDiscoveryRuns: 9,
+                  maxTimeHours: index + 0.5,
                 },
                 dispatchedCount: 0,
                 noNewStreak: 0,
               },
             });
-            const executor = new CodexSdkWorkerExecutor({
-              parentSandbox: trustedParentSandbox,
-              artifactContext: {
-                pluginRoot: fixture.root,
-                repoRoot: run.targetPath,
-                scanId: run.scanId,
-                scope: run.scope,
-                includePaths: run.includePaths,
-                filePaths: run.filePaths,
-                excludePaths: run.excludePaths,
+            const pluginRoot = path.join(fixture.root, "current-plugin");
+            const currentRoots =
+              index === 0
+                ? { pluginReadRoot: pluginRoot, sourceReadRoot: run.targetPath }
+                : {};
+            const settings = await captureDeepScanExecutionSettings(run, {
+              ...trustedParentSandbox,
+              pluginReadRoot: path.join(fixture.root, "previous-plugin"),
+              sourceReadRoot: path.join(fixture.root, "previous-source"),
+            });
+            const { coordinator: executor } = await startDeepScanEngine({
+              run,
+              store: {
+                claimCoordinator: async () => ({
+                  acquired: true,
+                  run: {
+                    ...run,
+                    executionSettings: { version: 1, settings },
+                  },
+                }),
               },
+              registry: {
+                get: () => undefined,
+                start: ({ executor }: { executor: unknown }) => executor,
+              },
+              runWorkbench: async () => ({}),
+              pluginRoot: fixture.root,
+              pythonCommand: process.env.PYTHON || "python3",
+              parentSandbox: { ...trustedParentSandbox, ...currentRoots },
+              threadId: `scope-parent-${index}`,
             });
             await executor.run(
               workerRequest(prompt, output, {
@@ -3141,6 +3181,38 @@ async function testLargeScopeTransport() {
               }),
             );
             const invocation = await readJson(output, "invocation.json");
+            const profile = workerPermissionProfileOverride(invocation.argv);
+            assert.ok(profile);
+            const permission = parseToml(profile).permissions as {
+              codex_security_deep_scan_worker: { filesystem: object };
+            };
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  permission.codex_security_deep_scan_worker.filesystem,
+                ),
+              ),
+              {
+                ":root": "read",
+                ...(index === 0
+                  ? {
+                      [pluginRoot]: { ".": "read" },
+                      [run.targetPath]: { ".": "read" },
+                    }
+                  : {}),
+              },
+            );
+            assert.deepEqual(
+              { ...(parseToml(invocation.deepConfig).deep_scan as object) },
+              {
+                workers: index + 1,
+                subagents: 0,
+                stop_after_no_new: 2,
+                stop_after_consecutive_errors: 3,
+                max_discovery_runs: 9,
+                max_time_hours: index + 0.5,
+              },
+            );
             assert.deepEqual(invocation.scopeInput.paths, includePaths);
             assert.deepEqual(invocation.scopeInput.filePaths, filePaths);
             assert.deepEqual(invocation.scopeInput.excludePaths, excludePaths);

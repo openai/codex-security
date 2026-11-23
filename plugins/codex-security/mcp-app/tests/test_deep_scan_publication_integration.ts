@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildServer } from "./build-server.ts";
-import { importModule } from "./import-module.ts";
+import { importNativeModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
 import { readOnlyParentSandboxState } from "./sandbox-state.ts";
 import { finding as sourceFinding } from "./scan-draft-fixture.ts";
@@ -90,7 +90,7 @@ await buildServer(serverPath, {
   },
   target: "node20",
 });
-const host = (await importModule({
+const host = (await importNativeModule({
   stdin: {
     contents: [
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
@@ -177,7 +177,11 @@ test("three Standard scans publish two distinct findings with their original evi
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 30_000);
-  assert.equal(terminal?.status, "succeeded");
+  assert.equal(
+    terminal?.status,
+    "succeeded",
+    terminal?.error ?? "Coordinator did not succeed",
+  );
   assert.equal(terminal.dispatchedCount, 3);
   assertSuccess(await completeScan());
   const saved = JSON.parse(
@@ -567,12 +571,7 @@ for (const claimed of [false, true]) {
       },
       clock: { now: () => deadline, sleep: async () => {} },
       onComplete: async (draft, signal, publication) => {
-        await writeDraft(
-          draft,
-          runWorkbench,
-          signal,
-          claimed ? publication : undefined,
-        );
+        await writeDraft(draft, runWorkbench, signal, publication);
         await assertInterleavedProgressRetained(fixture);
       },
     });
@@ -593,7 +592,7 @@ for (const claimed of [false, true]) {
 
     assertToolError(
       await fixture.recordDraft(partial(run, "late-progress")),
-      /coordinator lease|terminal/,
+      /coordinator lease|terminal|committed selection/,
     );
     assert.deepEqual(await snapshot(run), interrupted);
     assertSuccess(await fixture.completeScan());
@@ -740,13 +739,21 @@ async function createFixture(t: TestContext, paths: FixturePaths = {}) {
   }
   const instant = new Date().toISOString();
   let now = instant;
-  const runWorkbench: RunArtifactWorkbench = async (args, input) => {
+  const runWorkbench = async (
+    args: string[],
+    input?: string | Buffer,
+    selectFinalization = false,
+  ): Promise<Record<string, unknown>> => {
     const child = execFileAsync(
       python,
       [path.join(testsRoot, "clock_workbench.py"), workbenchPath, ...args],
       {
         cwd: pluginRoot,
-        env: { ...environment, TEST_WORKBENCH_NOW: now },
+        env: {
+          ...environment,
+          TEST_WORKBENCH_NOW: now,
+          TEST_SELECT_FINALIZATION: selectFinalization ? "1" : "0",
+        },
         timeout: 30_000,
         maxBuffer: 4 * 1024 * 1024,
       },
@@ -858,7 +865,7 @@ async function commitReducers(
       }),
     );
     fixture.setTime(offsets[batch]);
-    await store.recordIteration({
+    const committed = await store.recordIteration({
       id,
       scanId: run.scanId,
       workerIds,
@@ -867,7 +874,11 @@ async function commitReducers(
       consecutiveErrors: 0,
     });
     fixture.setTime(0);
-    results.push(resultManifestPath);
+    const accepted = committed.persistedWorkers?.find(
+      (worker) => worker.id === id,
+    )?.acceptedResultPath;
+    assert.ok(accepted);
+    results.push(accepted);
   }
   return results;
 }
@@ -1380,24 +1391,21 @@ test("raw publication repeats the same staged paths without changing their bytes
 });
 
 for (const changed of ["draftPath", "checkpointPath"] as const) {
-  test(`publication acknowledgment must match the original ${changed}`, async (t) => {
+  test(`publication checks the staged bytes of its original ${changed}`, async (t) => {
     const f = await publicationFixture(t);
-    const lost = new Error(
-      "Synthetic response loss after different staged input",
-    );
     const runner = publicationRunner(f, {
       async before(attempt, paths) {
         const document = JSON.parse(await readFile(paths[changed], "utf8"));
         document.threatModel = { summary: "Different staged input" };
         await writeFile(paths[changed], JSON.stringify(document));
       },
-      after() {
-        throw lost;
-      },
     });
-    await assert.rejects(f.publish(runner.run), (error) => error === lost);
+    await assert.rejects(
+      f.publish(runner.run),
+      /staged Deep Scan publication changed before admission/,
+    );
     assert.equal(runner.requests.length, 1);
-    assert.equal(runner.writes(), 1);
+    assert.equal(runner.writes(), 0);
     assert.deepEqual(await readdir(path.join(f.run.scanDir, "drafts")), []);
   });
 }

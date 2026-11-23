@@ -2718,13 +2718,13 @@ export async function main(
     }
     return finishScan(outcome, format, incurError, code);
   };
-  const runScan = (format: string, args: ScanArguments) =>
+  const runScan = (format: string, args: ScanArguments, interactive = true) =>
     withTerminalErrorsHandled(errorOutput, () =>
       executeScan(
         args,
         errorOutput,
         dependencies,
-        format !== "json" && format !== "jsonl",
+        interactive && format !== "json" && format !== "jsonl",
         includeFailureResults(format),
       ),
     );
@@ -3297,6 +3297,7 @@ export async function main(
           return;
         }
         let scanArguments: ScanArguments;
+        let selectedFinalization = false;
         try {
           const saved = await dependencies.runWorkbench(
             workbenchArgs("get-cli-scan-resume", { scanId: args.scanId }),
@@ -3309,23 +3310,46 @@ export async function main(
               "The workbench returned invalid scan resume context.",
             );
           }
+          selectedFinalization = saved["selectedFinalization"] === true;
           scanArguments = await prepareScanArgumentsFromRecipe(
             saved,
             "resume",
             dependencies.currentDirectory(),
             dependencies.environment,
+            { selectedFinalization },
           );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
             dependencies.currentDirectory(),
             saved["scanDir"],
           );
-          if (scanArguments.knowledgeBasePaths.length > 0) {
-            scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
-              scanArguments.outputDir,
-              scanArguments.repository!,
-              (saved["recipe"] as JsonObject)["scanInputs"],
-            );
+          const publicationOnly =
+            selectedFinalization &&
+            !scanArguments.postScanPrompt?.trim() &&
+            !scanArguments.postScanPromptFile &&
+            !scanArguments.ownerSuggestions;
+          if (scanArguments.knowledgeBasePaths.length > 0 && !publicationOnly) {
+            try {
+              scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
+                scanArguments.outputDir,
+                scanArguments.repository!,
+                (saved["recipe"] as JsonObject)["scanInputs"],
+              );
+            } catch (error) {
+              const cause = error instanceof Error ? error.cause : undefined;
+              // A missing original checkout can use selected artifact recovery.
+              if (
+                !selectedFinalization ||
+                typeof cause !== "object" ||
+                cause === null ||
+                !("code" in cause) ||
+                cause.code !== "ENOENT" ||
+                !("path" in cause) ||
+                cause.path !== scanArguments.repository
+              ) {
+                throw error;
+              }
+            }
           }
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
@@ -3339,7 +3363,11 @@ export async function main(
             "SCAN_RESUME_UNAVAILABLE",
           );
         }
-        const outcome = await runScan(format, scanArguments);
+        const outcome = await runScan(
+          format,
+          scanArguments,
+          !selectedFinalization,
+        );
         return finishScanCommand(outcome, format, incurError);
       },
     })
@@ -7014,26 +7042,31 @@ export async function main(
                       );
                       return undefined;
                     }
-                    const session =
-                      typeof saved["threadId"] === "string"
-                        ? await findScanSession(
-                            codexSecurityCredentialHome(
-                              dependencies.environment,
-                            ),
-                            saved["threadId"],
-                          )
-                        : null;
-                    if (session?.workingDirectory !== scanDir) {
-                      errorOutput.write(
-                        `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
-                      );
-                      return undefined;
+                    const selectedFinalization =
+                      saved["selectedFinalization"] === true;
+                    if (!selectedFinalization) {
+                      const session =
+                        typeof saved["threadId"] === "string"
+                          ? await findScanSession(
+                              codexSecurityCredentialHome(
+                                dependencies.environment,
+                              ),
+                              saved["threadId"],
+                            )
+                          : null;
+                      if (session?.workingDirectory !== scanDir) {
+                        errorOutput.write(
+                          `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
+                        );
+                        return undefined;
+                      }
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
                       saved,
                       "resume",
                       currentDirectory,
                       dependencies.environment,
+                      { selectedFinalization },
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -9056,9 +9089,12 @@ async function prepareScanArgumentsFromRecipe(
   directory: string,
   environment: CliDependencies["environment"],
   {
+    selectedFinalization = false,
     scanPromptFile,
     validationPromptFile,
-  }: Pick<ScanPromptSettings, "scanPromptFile" | "validationPromptFile"> = {},
+  }: Pick<ScanPromptSettings, "scanPromptFile" | "validationPromptFile"> & {
+    selectedFinalization?: boolean;
+  } = {},
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -9066,13 +9102,16 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const requiresRerunPrompt =
-    operation === "rerun" && recipe["requiresScanPrompt"] === true;
+    !selectedFinalization &&
+    operation === "rerun" &&
+    recipe["requiresScanPrompt"] === true;
   if (requiresRerunPrompt && scanPromptFile === undefined) {
     throw new CodexSecurityError(
       "This scan used additional instructions. Supply --scan-prompt-file to rerun it.",
     );
   }
   if (
+    !selectedFinalization &&
     recipe["validationMode"] === "custom" &&
     validationPromptFile === undefined
   ) {

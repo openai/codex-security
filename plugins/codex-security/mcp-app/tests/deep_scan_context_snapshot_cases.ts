@@ -11,7 +11,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
-import { importModule } from "./import-module.ts";
+import { importNativeModule } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
 import type { DeepScanWorkerRunner as Runner } from "../src/deep-scan/worker-runner.js";
 import type { createDeepScanArtifacts as Artifacts } from "../src/deep-scan/artifacts.js";
@@ -27,7 +27,7 @@ export async function testDeepScanContextSnapshots() {
     WorkbenchDeepScanStore,
     DeepScanWorkerRunner,
     createDeepScanArtifacts,
-  } = (await importModule({
+  } = (await importNativeModule({
     stdin: {
       contents: [
         'export { WorkbenchDeepScanStore } from "./store.ts";',

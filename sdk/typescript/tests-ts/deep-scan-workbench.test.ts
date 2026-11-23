@@ -1,3 +1,4 @@
+import { useTestPython } from "./support/python.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CoverageDocument } from "../src/models.js";
@@ -11,6 +12,7 @@ import { importSource } from "../../../plugins/codex-security/mcp-app/tests/impo
 import { runPython } from "./support/python-probe.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
+const getTestPython = useTestPython();
 const originalClaimToken = "22222222-2222-4222-8222-222222222222";
 const replacementClaimToken = "33333333-3333-4333-8333-333333333333";
 const temporaryDirectories = createTemporaryDirectories(true);
@@ -27,12 +29,12 @@ const deepScanOwnershipProbe = [
   "connection.executescript('''",
   "CREATE TABLE workspaces (id TEXT PRIMARY KEY, thread_id TEXT, updated_at TEXT);",
   "CREATE TABLE scans (id TEXT PRIMARY KEY, workspace_id TEXT, mode TEXT, status TEXT, recipe_json TEXT, handoff_status TEXT, handoff_claim_token TEXT, deep_scan_owner_thread_id TEXT, continuation_thread_id TEXT, updated_at TEXT);",
-  "CREATE TABLE deep_scan_runs (scan_id TEXT PRIMARY KEY);",
+  "CREATE TABLE deep_scan_runs (scan_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL DEFAULT 1, workflow_version TEXT NOT NULL DEFAULT 'deep-scan-mcp/v1');",
   "''')",
   "scan_id = '11111111-1111-4111-8111-111111111111'",
   "connection.execute(\"INSERT INTO workspaces VALUES ('workspace', NULL, 'before')\")",
   "connection.execute(\"INSERT INTO scans VALUES (?, 'workspace', 'deep', 'running', '{}', 'delivered', ?, NULL, NULL, 'before')\", (scan_id, case['storedToken']))",
-  "connection.execute('INSERT INTO deep_scan_runs VALUES (?)', (scan_id,))",
+  "connection.execute('INSERT INTO deep_scan_runs (scan_id) VALUES (?)', (scan_id,))",
   "connection.commit()",
   "if case.get('mutation') == 'rotate':",
   "    connection.executescript(\"CREATE TRIGGER rotate_claim BEFORE UPDATE OF thread_id ON workspaces BEGIN UPDATE scans SET handoff_claim_token = '33333333-3333-4333-8333-333333333333' WHERE workspace_id = NEW.id; END\")",
@@ -62,7 +64,7 @@ interface OwnershipProbe {
 }
 
 function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  const python = getTestPython();
   expect(python).not.toBeNull();
 
   const result = runPython(python!, [
@@ -83,8 +85,7 @@ test("recovers a legacy publication copied without hardlinks", async () => {
   const root = await temporaryDirectories.create(
     "codex-security-deep-copy-recovery-",
   );
-  const python =
-    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  const python = getTestPython();
   expect(python).not.toBeNull();
 
   const result = runPython(python!, [
@@ -152,7 +153,7 @@ test.each([
         "# scoped fixture\n",
       );
     }
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = getTestPython();
     expect(python).not.toBeNull();
     const command = workbench(python!, () => ({
       ...process.env,
@@ -255,7 +256,7 @@ describe("deep scan workbench ownership", () => {
     const stateDir = join(root, "state");
     await mkdir(repository);
     await writeFile(join(repository, "source.py"), "# source fixture\n");
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = getTestPython();
     expect(python).not.toBeNull();
     const userContext = "deep security focus".repeat(4_000);
 
@@ -296,7 +297,7 @@ describe("deep scan workbench ownership", () => {
     const stateDir = join(root, "state");
     await mkdir(repository);
     await mkdir(scanDir, { mode: 0o700 });
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = getTestPython();
     expect(python).not.toBeNull();
     const command = (args: string[]) =>
       runPython(
@@ -346,7 +347,7 @@ describe("deep scan workbench ownership", () => {
       isolatedConfig,
       "[deep_scan]\nworkers = 7\nmax_time_hours = 0.5\n",
     );
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = getTestPython();
     expect(python).not.toBeNull();
     const readConfig = () =>
       runPython(
@@ -403,7 +404,7 @@ describe("deep scan workbench ownership", () => {
         join(repository, "shared", "support.py"),
         "# supporting context\n",
       );
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = getTestPython();
       expect(python).not.toBeNull();
 
       const command = (args: string[]): Record<string, unknown> => {
@@ -749,7 +750,7 @@ describe("deep scan workbench ownership", () => {
       ),
     ]);
 
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = getTestPython();
     expect(python).not.toBeNull();
     const command = workbench(python!, () => ({
       ...process.env,

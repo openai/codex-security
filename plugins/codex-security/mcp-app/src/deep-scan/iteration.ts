@@ -1,8 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
-import {
-  scanDraftInputSchema,
-  type ScanDraftInput,
-} from "../artifact-scan-draft.js";
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
+import { acceptedDeepScanDraftInputSchema } from "../artifact-contracts.js";
 import { z } from "zod";
 import { asRecord, canonicalJson } from "../record.js";
 import { addScanCoverage, type ScanUnion } from "./artifact-validation.js";
@@ -58,7 +56,7 @@ function report(finding: Finding, retained: boolean) {
     : undefined;
   const locations =
     first?.title === finding.title
-      ? scanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
+      ? acceptedDeepScanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
           first.locations,
         ).data
       : undefined;
@@ -362,7 +360,8 @@ function addLocations(finding: Finding, source: Pick<Finding, "locations">) {
 const repairGroupSchema = z.strictObject({
   order: z.number().int().nonnegative(),
   sources: z.array(z.string()),
-  representative: scanDraftInputSchema.shape.findings.element.optional(),
+  representative:
+    acceptedDeepScanDraftInputSchema.shape.findings.element.optional(),
 });
 const repairGroupsSchema = z.array(repairGroupSchema).min(1);
 type RepairGroup = z.infer<typeof repairGroupSchema>;
@@ -388,7 +387,9 @@ function hasCompleteSources(finding: Finding) {
     ids.every((id) => known.has(id)) &&
     sources.every(
       ({ finding }) =>
-        scanDraftInputSchema.shape.findings.element.safeParse(finding).success,
+        acceptedDeepScanDraftInputSchema.shape.findings.element.safeParse(
+          finding,
+        ).success,
     )
   );
 }
@@ -409,7 +410,7 @@ function savedRepresentative(finding: Finding) {
   const members = finding.provenance.sourceFindings;
   if (!members?.length) return;
   const accepted = withoutSourceHistory(finding);
-  const schema = scanDraftInputSchema.shape.findings.element;
+  const schema = acceptedDeepScanDraftInputSchema.shape.findings.element;
   const primary = schema.safeParse(members[0]!.finding).data;
   if (!primary) return accepted;
   for (const member of members.slice(1)) {
@@ -481,16 +482,17 @@ function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
         originals.delete(id);
         members.push(source);
       }
-      const finding = scanDraftInputSchema.shape.findings.element.safeParse(
-        representative ?? members[0]!.finding,
-      ).data;
+      const finding =
+        acceptedDeepScanDraftInputSchema.shape.findings.element.safeParse(
+          representative ?? members[0]!.finding,
+        ).data;
       if (!finding) return visibleGroups();
       delete finding.provenance.deepScanRepairGroups;
       finding.provenance.sourceFindingIds = sources;
       finding.provenance.sourceFindings = members;
       for (const member of members.slice(1)) {
         const locations =
-          scanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
+          acceptedDeepScanDraftInputSchema.shape.findings.element.shape.locations.safeParse(
             member.finding.locations,
           ).data;
         if (!locations) return visibleGroups();

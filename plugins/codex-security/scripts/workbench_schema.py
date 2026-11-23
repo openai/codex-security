@@ -98,6 +98,9 @@ def apply_migrations(
                     or version not in applied
                     or should_backfill_targets
                 )
+            elif 82 <= version <= 85:
+                # Earlier readers created these objects under other previews’ receipts.
+                repair_schema(connection, version)
             elif version in applied:
                 if version in (
                     2,
@@ -112,6 +115,7 @@ def apply_migrations(
                     50,
                     54,
                     55,
+                    57,
                     58,
                     59,
                     60,
@@ -122,6 +126,14 @@ def apply_migrations(
                     repair_schema(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
+                elif version in (51, 63, 86):
+                    # Recreated Deep tables need the recorded extensions too.
+                    # Do not replay data updates from an already applied migration.
+                    for statement in _STATEMENTS[version]:
+                        if statement.startswith(
+                            ("ALTER TABLE ", "CREATE TABLE ", "CREATE TRIGGER ")
+                        ):
+                            apply_repair_statement(connection, statement)
             else:
                 if version in (38, 39):
                     connection.create_function("migration_json_extract", 2, migration_json_extract)
@@ -412,7 +424,7 @@ def apply_repair_statement(connection: sqlite3.Connection, statement: str) -> No
     if statement.startswith("ALTER TABLE "):
         add_migration_column(connection, statement)
         return
-    for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TABLE "):
+    for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TABLE ", "CREATE TRIGGER "):
         if statement.startswith(prefix):
             statement = statement.replace(prefix, f"{prefix}IF NOT EXISTS ", 1)
             break

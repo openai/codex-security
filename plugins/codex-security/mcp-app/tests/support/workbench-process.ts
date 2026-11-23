@@ -19,6 +19,9 @@ export async function loadWorkbenchProcess(
       __dirname: JSON.stringify(applicationRoot),
       "import.meta.url": JSON.stringify(pathToFileURL(file).href),
     },
+    banner: {
+      js: `import { createRequire as fixtureCreateRequire } from "node:module"; const require = fixtureCreateRequire(${JSON.stringify(pathToFileURL(file).href)});`,
+    },
     loader: { ".md": "text" },
   });
 }

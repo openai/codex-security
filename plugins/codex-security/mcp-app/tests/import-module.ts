@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const moduleDirectory = mkdtempSync(
@@ -23,6 +23,7 @@ export async function importModule(options: BuildOptions) {
     bundle: true,
     format: "esm",
     platform: "node",
+    nodePaths: [resolve(import.meta.dirname, "../node_modules")],
     write: false,
     ...options,
   });
@@ -41,11 +42,36 @@ export function importSource(entryPoint: string, options: BuildOptions = {}) {
   return importModule({ entryPoints: [entryPoint], ...options });
 }
 
+export function importNativeModule(options: BuildOptions) {
+  const root =
+    process.env["CODEX_SECURITY_TEST_PLUGIN_ROOT"] ??
+    resolve(import.meta.dirname, "../../../../sdk/typescript/_bundled_plugin");
+  return importModule({
+    ...options,
+    define: {
+      ...options.define,
+      "import.meta.url": JSON.stringify(
+        pathToFileURL(join(root, "mcp", "server.mjs")).href,
+      ),
+    },
+  });
+}
+
+export function importNativeSource(
+  entryPoint: string,
+  options: BuildOptions = {},
+) {
+  return importNativeModule({ entryPoints: [entryPoint], ...options });
+}
+
 export async function importCoordinatorServer(fixture: string) {
   const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
   const server = new URL("../server.ts", import.meta.url);
   const source = await readFile(server, "utf8");
   return importModule({
+    banner: {
+      js: `const require = process.getBuiltinModule("node:module").createRequire(${JSON.stringify(server.href)});`,
+    },
     stdin: {
       contents: source
         .replace(
