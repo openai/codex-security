@@ -126,7 +126,9 @@ import {
   continuumIssueExport,
   continuumRepository,
   continuumValidationArtifact,
+  patchArtifact,
 } from "./support/continuum-import-fixtures.js";
+import * as continuum from "../src/continuum-findings.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
 import {
@@ -3670,6 +3672,63 @@ test("Continuum Cloud publication checks repository and provider and replays an 
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
 });
+
+test.each(["repository", "private"])(
+  "normalized Continuum %s publication checks merged patches on new approvals and preserves legacy retries",
+  async (route) => {
+    const { issue } = continuumIssueExport().issues[0]!;
+    const finding = {
+      ...continuumDetail(),
+      createdIssueId: "original",
+      mergedIntoIssueId: issue.issueId,
+    };
+    const patch = patchArtifact("firstpatch", "+ok\n");
+    const capture = {
+      finding,
+      patches: [{ ...patch, issueArn: issue.issueArn }],
+    };
+    const input = continuum.normalizeContinuumFindings(
+      capture,
+      continuumRepository,
+    );
+    const { f, deps, settings, inbox, uploads } = await privateUploadFixture(
+      capture,
+      "continuum",
+      continuumRepository,
+    );
+    if (route === "repository") f.state.catalogHeaders = {};
+    const prepare = () =>
+      prepareNormalizedExternalPublication(input, settings, deps);
+    expect((await prepare()).preview.resumed).toBe(false);
+
+    input.findings[0]!.evidence.source_data!["patches"] = [patch];
+    await expect(prepare()).rejects.toThrow(/recollect/i);
+    expect(uploads).toHaveLength(0);
+    expect(f.posts).toHaveLength(0);
+
+    // Reproduce an interrupted pre-upgrade publication of these exact bytes.
+    const legacy = spyOn(
+      continuum,
+      "checkRetainedContinuumPatches",
+    ).mockImplementation(() => {});
+    try {
+      const prepared = await prepare();
+      if (route === "private")
+        await expect(prepared.publish()).rejects.toThrow(
+          "Interrupted private upload",
+        );
+      else await f.loseResponse(prepared);
+    } finally {
+      legacy.mockRestore();
+    }
+    inbox.recoverUpload = true;
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect((await retry.publish()).status).toBe("complete");
+    if (route === "repository") expect(f.posts[1]).toBe(f.posts[0]);
+    else expect(uploads).toHaveLength(1);
+  },
+);
 
 test("Continuum Cloud publication preserves issue identity and linked source ranges", async () => {
   const report = {
