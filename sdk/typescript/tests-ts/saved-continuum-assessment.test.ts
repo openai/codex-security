@@ -54,7 +54,6 @@ const expected = {
   verdict: "UNCERTAIN",
   terminalStatus: "FAILED",
   resultScope: "issue",
-  issueFindingCount: 2,
   joinedValidatedIssue: true,
   claimMatch: "unknown",
   freshness: { stale: true },
@@ -415,7 +414,6 @@ const expectedCompleted = {
   ...expected,
   resultScope: "finding",
   verdict: "EXPLOITABLE",
-  issueFindingCount: 1,
   joinedValidatedIssue: false,
   freshness: { stale: false, validatedAt: completed.freshness.validatedAt },
   terminalStatus: "COMPLETED",
@@ -654,6 +652,12 @@ test("a pending linked score survives transport failure unless the issue changed
   }
 });
 
+test("a change in live issue membership leaves the saved finding verdict intact", async () => {
+  await save([completed]);
+  await saveCli([{ ...completed, issueFindingCount: 3 }]);
+  expect((await read()).get("occ_a")).toEqual(expectedCompleted);
+});
+
 test.each([true, false])(
   "rescoring one validation preserves the verdict and chooses the latest linked issue score (%s)",
   async (reverse) => {
@@ -667,6 +671,7 @@ test.each([true, false])(
     };
     const second = {
       ...first,
+      issueFindingCount: 2,
       scoringArtifactId: "other-score",
       providerSeverity: "critical",
       freshness: {
