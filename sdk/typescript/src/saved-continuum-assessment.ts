@@ -155,13 +155,14 @@ export async function saveCliContinuumAssessments(
   scanId: string,
   configuration: ValidationProviderConfiguration,
   records: readonly (ValidationItemRecord | undefined)[],
+  requestedAt = performance.timeOrigin + performance.now(),
 ) {
   if (configuration.provider.trim().toLowerCase() !== "continuum") return;
   const destination = binding.parse(configuration).continuum;
   const accepted = records.flatMap((raw) => project(raw, destination) ?? []);
   if (!accepted.length) return;
   const store = await assessmentStore(environment, scanId, repositoryPath);
-  await store.writeSnapshots(destination.environment_id, accepted);
+  await store.writeSnapshots(destination.environment_id, accepted, requestedAt);
   const active = await readAssessments(
     store,
     repositoryPath,
@@ -172,7 +173,7 @@ export async function saveCliContinuumAssessments(
     return !selected || !sameAdmission(selected, item);
   });
   if (skipped.length)
-    return `Patch and verify cannot use this Continuum submission for ${skipped.map((item) => item.itemId).join(", ")}. The workbench is bound to another submission or the saved assessments conflict. Check the original destination and submission before retrying. Local findings remain available.`;
+    return `Patch and verify cannot use this Continuum submission for ${skipped.map((item) => item.itemId).join(", ")}. A newer request, a different workbench submission, or conflicting assessments prevented selection. Check the original destination and submission before retrying. Local findings remain available.`;
 }
 
 function sameAdmission(a: Admission, b: Admission) {
@@ -222,9 +223,12 @@ function selectConclusion(records: Conclusion[]) {
     latest.some((item) => !isDeepStrictEqual(validation, withoutScore(item)))
   )
     return;
+  // A pending result with a score time records a known conflict. A plain
+  // timeout supplies no score evidence and cannot invalidate a linked score.
   const scored = latest.filter(
     (item) =>
-      item.freshness.scoredAt && item.scoringArtifactId && !item.scoringPending,
+      item.freshness.scoredAt &&
+      (item.scoringArtifactId || item.scoringPending),
   );
   scored.sort((a, b) =>
     compareTimestamps(b.freshness.scoredAt!, a.freshness.scoredAt!),
@@ -232,6 +236,7 @@ function selectConclusion(records: Conclusion[]) {
   const best = scored[0];
   if (
     best &&
+    !best.scoringPending &&
     !scored.some(
       (item) =>
         compareTimestamps(

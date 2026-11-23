@@ -7438,6 +7438,7 @@ export async function main(
                 configuration,
                 selected.findings.length,
               );
+              const requestedAt = performance.timeOrigin + performance.now();
               const results = !selected.findings.length
                 ? []
                 : provider.validateBatch
@@ -7456,6 +7457,7 @@ export async function main(
                 selected.scanId,
                 configuration,
                 items,
+                requestedAt,
               );
               exitCode = controller.signal.aborted
                 ? controller.signal.reason === "SIGTERM"
@@ -13277,6 +13279,7 @@ async function executeScan(
             let completed = 0;
             const records: ValidationItemRecord[] = [];
             let providerAssessments: ValidationProviderAssessment[] | undefined;
+            const requestedAt = performance.timeOrigin + performance.now();
             try {
               announceContinuum(
                 errorOutput,
@@ -13366,6 +13369,7 @@ async function executeScan(
                 result.manifest.scan.id,
                 configuredValidation,
                 records,
+                requestedAt,
               );
             validation = {
               status: supplementalValidationStatus(

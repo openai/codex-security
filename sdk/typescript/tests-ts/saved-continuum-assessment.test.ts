@@ -247,6 +247,7 @@ function saveCli(
   items: Omit<ValidationItemRecord, "severityBefore" | "severityAfter">[],
   environment = "env",
   state = root,
+  requestedAt?: number,
 ) {
   return saveCliContinuumAssessments(
     { CODEX_SECURITY_STATE_DIR: state },
@@ -258,6 +259,7 @@ function saveCli(
       severityAfter: "high",
       ...item,
     })),
+    requestedAt,
   );
 }
 
@@ -550,6 +552,92 @@ test("retains a terminal decline that has no issue across transport failures", a
   await saveCli([declined]);
   await saveCli([{ ...declined, verdict: "UNAVAILABLE" }]);
   expect((await read()).get("occ_a")?.verdict).toBe("DISCARDED");
+});
+
+test("concurrent CLI validations select by request order across receipt switches", async () => {
+  await rm(path);
+  const other = {
+    ...completed,
+    findingId: "other",
+    findingArn: prefix + "/code-findings/other",
+    submittedAt: "2026-11-21T01:20:00Z",
+    verdict: "NOT_EXPLOITABLE",
+  };
+  // The later request finishes first.
+  await saveCli([other], "env", root, 2);
+  expect(await saveCli([completed], "env", root, 1)).toContain("occ_a");
+  expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
+  // A fresh request can switch back. Late duplicates cannot undo that choice.
+  await saveCli([completed], "env", root, 4);
+  await saveCli([other], "env", root, 3);
+  await saveCli([completed], "env", root, 1);
+  expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
+});
+
+test("a tied provider score withholds older cached scoring until a newer linked score", async () => {
+  const scored = {
+    ...completed,
+    providerSeverity: "critical",
+    reachableFromAttacker: true,
+    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
+  };
+  await save([scored]);
+  const tie = {
+    ...completed,
+    scoringArtifactId: undefined,
+    scoringPending: true,
+    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:01:00Z" },
+  };
+  await saveCli([tie]);
+  await saveCli([{ ...tie, freshness: completed.freshness }]);
+  const pending = (await read()).get("occ_a");
+  expect(pending?.verdict).toBe("EXPLOITABLE");
+  expect(pending?.scoringPending).toBe(true);
+  expect(pending?.issueSeverity).toBeUndefined();
+  expect(pending?.issueReachableFromAttacker).toBeUndefined();
+  await saveCli([
+    {
+      ...scored,
+      scoringArtifactId: "score-new",
+      providerSeverity: "low",
+      freshness: { ...scored.freshness, scoredAt: "2026-11-21T03:02:00Z" },
+    },
+  ]);
+  expect((await read()).get("occ_a")).toMatchObject({
+    verdict: completed.verdict,
+    issueSeverity: "low",
+    issueReachableFromAttacker: true,
+  });
+});
+
+test("a later unresolved validation tie suppresses the prior verdict until resolved", async () => {
+  await save([completed]);
+  await saveCli([
+    {
+      ...completed,
+      verdict: "UNKNOWN",
+      validationArtifactId: undefined,
+      scoringArtifactId: undefined,
+      terminalStatus: undefined,
+      freshness: {
+        stale: false,
+        reasons: [],
+        evidenceCreatedAt: "2026-11-21T03:00:00Z",
+      },
+    },
+  ]);
+  expect((await read()).get("occ_a")?.verdict).toBe("UNKNOWN");
+  await saveCli([
+    {
+      ...completed,
+      validationArtifactId: "later",
+      freshness: {
+        ...completed.freshness,
+        validatedAt: "2026-11-21T04:00:00Z",
+      },
+    },
+  ]);
+  expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
 });
 
 test("workbench bindings follow CODEX_HOME and explicit state overrides", async () => {

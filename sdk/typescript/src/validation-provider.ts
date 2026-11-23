@@ -55,7 +55,7 @@ export interface ValidationItemRecord {
     /** Creation time of the returned validation artifact, including inconclusive results. */
     evidenceCreatedAt?: string;
     validatedAt?: string;
-    /** Creation time of the linked issue score, if available. */
+    /** Linked score time. With scoringPending, this marks a tie between scores. */
     scoredAt?: string;
     stale: boolean;
     reasons: string[];

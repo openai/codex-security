@@ -91,6 +91,9 @@ the exact identity, evidence, timestamps and disposition of each finding.
 | How old is the evidence?                  | See `validationArtifactId`, `scoringArtifactId` and `freshness`. `joinedValidatedIssue` indicates pre-existing issue validation. A recent timestamp does not establish the deployed revision.     |
 
 Codex checks issue membership and reads validation runs newest first.
+When applicable runs share the newest timestamp, Codex defers the verdict.
+Retry after a newer run appears. While a finding is being submitted or
+validated, older issue evidence alone does not end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from
@@ -134,9 +137,15 @@ Polling cannot restart a failed worker. Keep raw artifacts and logs private.
 On the same host, CLI patch and verify-fix and workbench Generate and Verify
 can read a saved conclusion without contacting AWS. The workbench keeps its
 original submission binding when the CLI validates a subset. For CLI-only
-scans, the latest accepted submission for a single destination takes
-precedence. Conflicting destinations or ambiguous evidence can leave an
-occurrence without supplemental context.
+scans, the most recently started validation with an accepted submission
+for a single destination takes precedence, even if an earlier request
+finishes later. Conflicting destinations or ambiguous evidence can leave
+an occurrence without supplemental context.
+
+If two linked scores share a timestamp, `scoringPending` and
+`freshness.scoredAt` identify the conflict. Patch and verify keep the
+verdict and withhold issue severity and reachability until a newer score
+resolves the conflict.
 
 The model receives a limited set of status and scope fields from protected
 host state. The live issue member count stays in the reports. A change in

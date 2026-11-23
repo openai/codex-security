@@ -1043,6 +1043,7 @@ export class CodexSecurity {
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
     if (options.validationProvider !== undefined) {
+      throwIfAborted(signal);
       const configured = options.validationProvider;
       const provider: ValidationProvider =
         typeof (configured as { validate?: unknown }).validate === "function"
@@ -1064,6 +1065,7 @@ export class CodexSecurity {
       } catch (error) {
         assessment = unavailableAssessment(provider, error);
       }
+      throwIfAborted(signal);
       return { ...assessment, outputDir: "", threadId: null };
     }
     let outputDir = "";
