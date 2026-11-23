@@ -220,6 +220,23 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
     return normalized
 
 
+def validation_selection(snapshot: dict[str, Any]) -> dict[str, str]:
+    validation = snapshot.get("validation")
+    if not validation:
+        return {}
+    config = validation.get("continuum") or {}
+    details = "include" if config.get("include_local_validation") else "omit"
+    destination = config.get("environment_id")
+    region = config.get("aws_region", "AWS CLI Region")
+    return {
+        "validationProvider": validation["provider"],
+        "validationNotice": (
+            f"After sealing, send reported findings to AWS Continuum environment {destination}"
+            f" ({region}). Submissions {details} the local validation method and summary."
+        ),
+    }
+
+
 def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
     inspected = inspect_setup_values(
         args.target_path,
@@ -234,11 +251,12 @@ def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
         inspected["deepScanConfig"] = resolve_deep_scan_setup(
             project_json=args.deep_scan_project_json
         )
+        inspected.update(validation_selection(inspected["deepScanConfig"]))
     elif args.deep_scan_project_json is not None:
         raise SystemExit("Project Deep Scan settings require Deep Scan mode.")
     elif getattr(args, "validation_project_json", None) is not None:
         snapshot = json.loads(args.validation_project_json)
-        inspected["validationProvider"] = snapshot["validation"]["provider"]
+        inspected.update(validation_selection(snapshot))
     return inspected
 
 

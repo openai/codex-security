@@ -16,26 +16,17 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import * as gitMetadata from "../src/local-git-metadata.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
-import {
-  assessmentStateDirectories,
-  continuumAssessmentVersion,
-} from "../src/continuum-assessment-store.js";
+import { continuumAssessmentVersion } from "../src/continuum-assessment-store.js";
 import {
   saveCliContinuumAssessments,
   savedContinuumAssessments,
 } from "../src/saved-continuum-assessment.js";
 
-test("uses both native storage locations under default settings", () => {
-  expect(assessmentStateDirectories({})).toEqual({
-    plugin: join(homedir(), ".codex-security"),
-    cli: join(homedir(), ".codex", "state", "plugins", "codex-security"),
-  });
-});
-
+import { assessPluginFindings } from "../src/plugin-validation.js";
 const config = { provider: "continuum", continuum: { environment_id: "env" } };
 const prefix = "arn:aws:continuum:us-east-1:123456789012:environments/env";
 const conclusion = {
@@ -57,6 +48,17 @@ const conclusion = {
   freshness: { stale: true, reasons: ["pre-existing proof"] },
   reasons: [{ basis: "CODE", reason: "no deployment edge" }],
 };
+const expected = {
+  itemId: "occ_a",
+  provider: "continuum",
+  verdict: "UNCERTAIN",
+  terminalStatus: "FAILED",
+  resultScope: "issue",
+  issueFindingCount: 2,
+  joinedValidatedIssue: true,
+  claimMatch: "unknown",
+  freshness: { stale: true },
+} as const;
 let root: string;
 let repo: string;
 let path: string;
@@ -87,9 +89,16 @@ function save(items: unknown[], overrides: object = {}) {
     }),
   );
 }
-test("projects only conclusions with the attribution limits and external identifiers", async () => {
-  await save([{ ...conclusion, proofBody: "untrusted", secret: "private" }]);
-  expect((await read()).get("occ_a")).toEqual(conclusion);
+test("keeps provider identifiers, reasons and other free text out of model input", async () => {
+  await save([
+    {
+      ...conclusion,
+      statusMessage: "private",
+      proofBody: "untrusted",
+      secret: "private",
+    },
+  ]);
+  expect((await read()).get("occ_a")).toEqual(expected);
   expect((await read()).has("occ_b")).toBe(false);
   expect((await read("other-scan")).size).toBe(0);
 });
@@ -100,6 +109,28 @@ test("ignores missing cache even when the repository supplies a lookalike", asyn
 test("rejects ambiguous occurrence IDs", async () => {
   await save([conclusion, conclusion, conclusion]);
   await saveCli([conclusion]);
+  expect((await read()).size).toBe(0);
+});
+test("a failed submission allows a single CLI admission without releasing partial or duplicate bindings", async () => {
+  const failure = {
+    provider: "continuum",
+    itemId: "occ_a",
+    verdict: "UNAVAILABLE",
+    unavailable: "No credentials",
+  };
+  await save([failure]);
+  expect(await saveCli([conclusion])).toBeUndefined();
+  expect((await read()).get("occ_a")).toEqual(expected);
+  for (const items of [
+    [failure, conclusion],
+    [failure, failure],
+    [{ ...failure, findingId: conclusion.findingId }],
+  ]) {
+    await save(items);
+    expect((await read()).size).toBe(0);
+  }
+  await save([failure]);
+  await saveCli([{ ...conclusion, submittedAt: "2026-11-21T01:20:00Z" }]);
   expect((await read()).size).toBe(0);
 });
 test.each([
@@ -116,7 +147,10 @@ test.each([
       findingArn: prefix + "/code-findings/other",
     };
     await saveCli([other]);
-    expect((await read()).get("occ_a")).toEqual(other);
+    expect((await read()).get("occ_a")).toEqual({
+      ...expected,
+      itemId: other.itemId,
+    });
     await save([conclusion], extra);
     expect((await read()).size).toBe(0);
   },
@@ -168,7 +202,7 @@ test("rejects a plugin assessment editable through a checkout hard link", async 
 
 test("rejects plugin state in a directory another user can write", async () => {
   await save([conclusion]);
-  expect((await read()).get("occ_a")).toEqual(conclusion);
+  expect((await read()).get("occ_a")).toEqual(expected);
   const directory = dirname(path);
   if (process.platform === "win32") {
     execFileSync("icacls.exe", [directory, "/grant", "*S-1-1-0:W"]);
@@ -189,7 +223,7 @@ test.skipIf(process.platform === "win32")(
       expect((await lstat(file)).mode & 0o777).toBe(0o664);
       await chmod(file, 0o644);
     }
-    expect((await read()).get("occ_a")).toEqual(conclusion);
+    expect((await read()).get("occ_a")).toEqual(expected);
     await chmod(root, 0o777);
     expect((await read()).size).toBe(0);
   },
@@ -236,13 +270,13 @@ test("loads only the requested occurrences from concurrent partial CLI batches",
     saveCli([{ ...conclusion, issueUrl: "https://console.example/issue" }]),
     saveCli([other]),
   ]);
-  expect([...(await read()).entries()]).toEqual([["occ_a", conclusion]]);
+  expect([...(await read()).entries()]).toEqual([["occ_a", expected]]);
   const env = { CODEX_SECURITY_STATE_DIR: root };
   expect(
     (
       await savedContinuumAssessments(env, "scan", repo, ["occ_a", "occ_b"])
     ).get("occ_b"),
-  ).toEqual(other);
+  ).toEqual({ ...expected, itemId: other.itemId });
   expect((await read("other")).size).toBe(0);
   expect(
     (await savedContinuumAssessments(env, "scan", root, ["occ_a"])).size,
@@ -265,7 +299,7 @@ test("a writer can populate the assessment directory after another observes it e
     return entries;
   });
   await saveCli([conclusion]);
-  expect((await read()).get("occ_a")).toEqual(conclusion);
+  expect((await read()).get("occ_a")).toEqual(expected);
 });
 
 test.skipIf(process.platform === "win32")(
@@ -277,7 +311,7 @@ test.skipIf(process.platform === "win32")(
     } finally {
       process.umask(previous);
     }
-    expect((await read()).get("occ_a")).toEqual(conclusion);
+    expect((await read()).get("occ_a")).toEqual(expected);
   },
 );
 
@@ -302,7 +336,7 @@ test("plugin binding restricts an ambiguous CLI selection to its destination", a
   await saveCli([other], "other");
   expect((await read()).size).toBe(0);
   await saveCli([conclusion]);
-  expect((await read()).get("occ_a")).toEqual(conclusion);
+  expect((await read()).get("occ_a")).toEqual(expected);
   await writeFile(path, "{");
   expect((await read()).size).toBe(0);
   await writeFile(
@@ -348,10 +382,11 @@ test("a changed snapshot invalidates only its own occurrence across caches", asy
   await saveCli([conclusion, other]);
   const directory = await cliDirectory();
   for (const name of await readdir(directory)) {
+    if (!name.endsWith(".json")) continue;
     const filename = join(directory, name);
     const saved = JSON.parse(await readFile(filename, "utf8"));
-    if (saved.record.itemId === "occ_a") {
-      saved.record.verdict = "EXPLOITABLE";
+    if (saved.entries[0].record.itemId === "occ_a") {
+      saved.entries[0].record.verdict = "EXPLOITABLE";
       await writeFile(filename, JSON.stringify(saved));
     }
   }
@@ -361,45 +396,61 @@ test("a changed snapshot invalidates only its own occurrence across caches", asy
     repo,
     ["occ_a", "occ_b"],
   );
-  expect([...results.values()]).toEqual([other]);
+  expect([...results.values()]).toEqual([
+    { ...expected, itemId: other.itemId },
+  ]);
 });
 
-const observation = {
-  kind: "source_analysis" as const,
-  effect: "DATA_LEAKED",
-  summary: "Source shows file persists.",
-};
 const completed = {
   ...conclusion,
   resultScope: "finding" as const,
-  claimMatch: "on_target" as const,
+  claimMatch: "unknown" as const,
   verdict: "EXPLOITABLE",
   issueFindingCount: 1,
   joinedValidatedIssue: false,
   freshness: { stale: false, reasons: [], validatedAt: "2026-11-21T02:00:00Z" },
   terminalStatus: "COMPLETED",
-  proofObservation: observation,
 };
-test.each([undefined, 2])(
+const expectedCompleted = {
+  ...expected,
+  resultScope: "finding",
+  verdict: "EXPLOITABLE",
+  issueFindingCount: 1,
+  joinedValidatedIssue: false,
+  freshness: { stale: false, validatedAt: completed.freshness.validatedAt },
+  terminalStatus: "COMPLETED",
+} as const;
+test.each([undefined, 2, 3])(
   "a legacy plugin verdict only binds the original admission for a fresh CLI assessment (version %s)",
   async (schemaVersion) => {
-    await save([completed], { schemaVersion });
+    await save(
+      [
+        {
+          ...completed,
+          claimMatch: "on_target",
+          proofObservation: { kind: "execution" },
+        },
+      ],
+      { schemaVersion },
+    );
     expect((await read()).size).toBe(0);
     await saveCli([{ ...completed, submittedAt: "2026-11-21T01:20:00Z" }]);
     expect((await read()).size).toBe(0);
     await saveCli([conclusion]);
-    expect((await read()).get("occ_a")).toEqual(conclusion);
+    expect((await read()).get("occ_a")).toEqual(expected);
   },
 );
 
-test.each([1, 2])(
+test.each([1, 2, 3])(
   "v%i CLI snapshots cannot supply or mask a refreshed assessment",
   async (schemaVersion) => {
     const repositoryPath = await realpath(repo);
     const digest = (value: string) => hash("sha256", value);
     const directory = join(
       root,
-      (schemaVersion === 1 ? "cli-continuum-" : "cli-continuum-v2-") +
+      (schemaVersion === 1
+        ? "cli-continuum-"
+        : `cli-continuum-v${schemaVersion}-`) +
         digest(JSON.stringify([repositoryPath, "scan"])),
     );
     await mkdir(directory, { mode: 0o700 });
@@ -417,60 +468,8 @@ test.each([1, 2])(
     await writeFile(filename, raw);
     expect((await read()).size).toBe(0);
     await saveCli([conclusion]);
-    expect((await read()).get("occ_a")).toEqual(conclusion);
+    expect((await read()).get("occ_a")).toEqual(expected);
     expect(await readFile(filename, "utf8")).toEqual(raw);
-  },
-);
-
-test.each(["execution", "source_analysis"] as const)(
-  "preserves %s observations for the selected run",
-  async (kind) => {
-    const actual = { ...observation, kind };
-    await save([
-      { ...completed, proofObservation: { ...actual, rawScript: "excluded" } },
-    ]);
-    expect((await read()).get("occ_a")?.proofObservation).toEqual(actual);
-  },
-);
-test.each([
-  {
-    freshness: {
-      ...completed.freshness,
-      evidenceCreatedAt: "2020-01-01T00:00:00Z",
-    },
-  },
-  {
-    freshness: {
-      ...completed.freshness,
-      validatedAt: "2026-11-21T02:00:00.000001Z",
-      evidenceCreatedAt: "2026-11-21T02:00:00.000002Z",
-    },
-  },
-  { issueFindingCount: 2 },
-  { joinedValidatedIssue: true },
-  { terminalStatus: "FAILED" },
-  { freshness: { stale: true, reasons: [] } },
-  { validationArtifactId: undefined },
-  { scoringArtifactId: undefined },
-  { claimMatch: "unknown" },
-  { claimMatch: "different_flaw" },
-  { resultScope: "issue" },
-  { verdict: "UNCERTAIN" },
-  { freshness: { stale: false, reasons: [] } },
-  {
-    freshness: {
-      stale: false,
-      reasons: [],
-      validatedAt: "2020-01-01T00:00:00Z",
-    },
-  },
-])(
-  "drops unbound proof attribution while preserving status %j",
-  async (limits) => {
-    await save([{ ...completed, ...limits }]);
-    const result = (await read()).get("occ_a");
-    expect(result?.proofObservation).toBeUndefined();
-    expect(result?.verdict).toBe(limits.verdict ?? "EXPLOITABLE");
   },
 );
 
@@ -482,7 +481,7 @@ test("an explicit CLI retry supersedes a cached plugin timeout only for the same
   };
   await save([timeout], { retry: [timeout] });
   const pluginCache = await readFile(path + ".result", "utf8");
-  await saveCli([
+  const warning = await saveCli([
     { ...completed, submittedAt: "2026-11-21T01:20:00Z" },
     {
       ...completed,
@@ -490,9 +489,10 @@ test("an explicit CLI retry supersedes a cached plugin timeout only for the same
       findingArn: prefix + "/code-findings/other",
     },
   ]);
+  expect(warning).toContain("occ_a");
   expect((await read()).get("occ_a")?.verdict).toBe("UNAVAILABLE");
   await saveCli([completed]);
-  expect((await read()).get("occ_a")).toEqual(completed);
+  expect((await read()).get("occ_a")).toEqual(expectedCompleted);
   expect(await readFile(path + ".result", "utf8")).toBe(pluginCache);
 });
 
@@ -506,7 +506,7 @@ test("chooses the newest artifact from the same admission and issue across CLI a
   };
   await save([failed]);
   await saveCli([failed, completed]);
-  expect((await read()).get("occ_a")).toEqual(completed);
+  expect((await read()).get("occ_a")).toEqual(expectedCompleted);
   const newer = {
     ...failed,
     validationArtifactId: "newer",
@@ -516,22 +516,41 @@ test("chooses the newest artifact from the same admission and issue across CLI a
     },
   };
   await save([newer]);
-  expect((await read()).get("occ_a")).toEqual(newer);
+  expect((await read()).get("occ_a")).toEqual({
+    ...expected,
+    freshness: {
+      ...expected.freshness,
+      evidenceCreatedAt: newer.freshness.evidenceCreatedAt,
+    },
+  });
   await saveCli([newer]);
   await save([completed]);
-  expect((await read()).get("occ_a")).toEqual(newer);
+  expect((await read()).get("occ_a")).toEqual({
+    ...expected,
+    freshness: {
+      ...expected.freshness,
+      evidenceCreatedAt: newer.freshness.evidenceCreatedAt,
+    },
+  });
   await save([{ ...newer, validationArtifactId: "conflict" }]);
   expect((await read()).size).toBe(0);
 });
 
-test("withholds distinct terminal records without comparable lineage and times", async () => {
+test("withholds conclusions when validation times or issue identities conflict", async () => {
   await saveCli([completed]);
   await save([conclusion]);
   expect((await read()).size).toBe(0);
-  await save([
-    { ...completed, issueId: "other", issueArn: prefix + "/code-issues/other" },
-  ]);
-  expect((await read()).size).toBe(0);
+  for (const verdict of [completed.verdict, "UNAVAILABLE"]) {
+    await save([
+      {
+        ...completed,
+        verdict,
+        issueId: "other",
+        issueArn: prefix + "/code-issues/other",
+      },
+    ]);
+    expect((await read()).size).toBe(0);
+  }
 });
 
 test("retains a terminal decline that has no issue across transport failures", async () => {
@@ -546,3 +565,178 @@ test("retains a terminal decline that has no issue across transport failures", a
   await saveCli([{ ...declined, verdict: "UNAVAILABLE" }]);
   expect((await read()).get("occ_a")?.verdict).toBe("DISCARDED");
 });
+
+test("workbench bindings follow CODEX_HOME and explicit state overrides", async () => {
+  const home = join(root, "home");
+  const otherHome = join(root, "other");
+  const state = join(home, "state/plugins/codex-security");
+  await mkdir(state, { recursive: true });
+  await save([completed]);
+  await rename(dirname(path), join(state, "validation-providers"));
+  const readHome = (CODEX_HOME: string, CODEX_SECURITY_STATE_DIR?: string) =>
+    savedContinuumAssessments(
+      { CODEX_HOME, CODEX_SECURITY_STATE_DIR },
+      "scan",
+      repo,
+      ["occ_a"],
+    );
+  expect((await readHome(home)).get("occ_a")).toEqual(expectedCompleted);
+  expect((await readHome(otherHome)).size).toBe(0);
+  expect((await readHome(otherHome, state)).get("occ_a")).toEqual(
+    expectedCompleted,
+  );
+});
+
+test("changed CLI opt-in and a return to the original receipt select the requested admission", async () => {
+  await rm(path);
+  const other = {
+    ...conclusion,
+    submittedAt: "2026-11-21T01:20:00Z",
+    severityBefore: "high",
+    severityAfter: "high",
+  };
+  await saveCli([completed]);
+  for (let i = 0; i < 2; i++) {
+    await saveCliContinuumAssessments(
+      { CODEX_SECURITY_STATE_DIR: root },
+      repo,
+      "scan",
+      {
+        ...config,
+        continuum: { ...config.continuum, include_local_validation: true },
+      },
+      [other],
+    );
+    expect((await read()).get("occ_a")).toEqual(expected);
+  }
+  await saveCli([completed]);
+  expect((await read()).get("occ_a")).toEqual(expectedCompleted);
+  await saveCli([
+    {
+      ...completed,
+      findingArn: completed.findingArn.replace("123456789012", "000000000000"),
+      issueArn: completed.issueArn.replace("123456789012", "000000000000"),
+    },
+  ]);
+  expect((await read()).size).toBe(0);
+});
+
+test("a failed legacy refresh retains only the admission for a valid same-submission CLI result", async () => {
+  const legacy = {
+    ...completed,
+    claimMatch: "on_target",
+    proofObservation: { kind: "execution" },
+  };
+  const provider = () => ({
+    name: "continuum",
+    version: "1",
+    async validate() {
+      throw Error("signed out");
+    },
+  });
+  const result = await assessPluginFindings(
+    config,
+    [{ occurrenceId: "occ_a" }],
+    { repositoryPath: repo },
+    provider,
+    [],
+    [legacy],
+  );
+  expect(result.records.items[0]).toMatchObject({
+    findingArn: completed.findingArn,
+    submittedAt: completed.submittedAt,
+    claimMatch: "unknown",
+    verdict: "UNAVAILABLE",
+  });
+  expect(result.records.items[0]).not.toHaveProperty("proofObservation");
+  await save(result.records.items, { retry: result.retry });
+  await saveCli([conclusion]);
+  expect((await read()).get("occ_a")).toEqual(expected);
+});
+
+test("a pending linked score survives transport failure unless the issue changed", async () => {
+  const prior = {
+    disposition: "deferred" as const,
+    report: "Waiting for score",
+    provenance: { provider: "continuum", providerVersion: "1" },
+    record: {
+      ...completed,
+      severityBefore: "high",
+      severityAfter: "high",
+      scoringPending: true,
+    },
+  };
+  for (const issueId of [undefined, "issue-a", "issue-b"]) {
+    const provider = () => ({
+      name: "continuum",
+      version: "1",
+      async validate() {
+        if (!issueId) throw Error("signed out");
+        return {
+          ...prior,
+          unavailable: "signed out",
+          record: {
+            ...prior.record,
+            issueId,
+            issueArn: prefix + "/code-issues/" + issueId,
+            verdict: "UNAVAILABLE",
+            scoringPending: undefined,
+            terminalStatus: undefined,
+            validationArtifactId: undefined,
+          },
+        };
+      },
+    });
+    const result = await assessPluginFindings(
+      config,
+      [{ occurrenceId: "occ_a" }],
+      { repositoryPath: repo },
+      provider,
+      [prior],
+    );
+    expect(result.retry?.[0]?.record).toMatchObject(
+      issueId === "issue-b"
+        ? { issueId, verdict: "UNAVAILABLE", validationArtifactId: undefined }
+        : { ...prior.record, unavailable: "signed out" },
+    );
+  }
+});
+
+test.each([true, false])(
+  "rescoring one validation preserves the verdict and chooses the latest linked issue score (%s)",
+  async (reverse) => {
+    const first = {
+      ...completed,
+      providerSeverity: "high",
+      freshness: {
+        ...completed.freshness,
+        scoredAt: "2026-11-21T03:00:00.000001Z",
+      },
+    };
+    const second = {
+      ...first,
+      scoringArtifactId: "other-score",
+      providerSeverity: "critical",
+      freshness: {
+        ...first.freshness,
+        scoredAt: "2026-11-21T03:00:00.000002Z",
+      },
+    };
+    await save([reverse ? first : second]);
+    await saveCli([
+      reverse ? second : first,
+      { ...completed, scoringPending: true },
+    ]);
+    expect((await read()).get("occ_a")).toMatchObject({
+      verdict: completed.verdict,
+      issueSeverity: "critical",
+    });
+    await saveCli([
+      { ...second, scoringArtifactId: "conflict", providerSeverity: "low" },
+    ]);
+    expect((await read()).get("occ_a")).toEqual({
+      ...expectedCompleted,
+      scoringPending: true,
+    });
+  },
+);

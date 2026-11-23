@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { expect, spyOn, test } from "bun:test";
 import { ContinuumValidationProvider } from "../src/continuum-validation-provider.js";
@@ -8,7 +9,10 @@ import { resolvePluginPython } from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
-import { creation } from "./support/continuum-validation-fixtures.js";
+import {
+  creation,
+  registeredSource,
+} from "./support/continuum-validation-fixtures.js";
 import { setFindingIdentity } from "./support/finding-identity.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import {
@@ -16,7 +20,25 @@ import {
   workbenchCommand,
 } from "./support/workbench-command.js";
 
-async function savedEvidence() {
+function createRepository(repository: string, slug: string) {
+  execFileSync("git", ["init", "-q", repository]);
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "--allow-empty",
+    "-m",
+    slug,
+  );
+  git("remote", "add", "origin", `https://github.com/${slug}`);
+  return git("rev-parse", "HEAD");
+}
+
+async function savedEvidence(git = false) {
   const root = await temporaryDirectory("saved-finding-evidence-", true);
   const repository = join(root, "repository");
   const scanDir = join(root, "scan");
@@ -30,6 +52,9 @@ async function savedEvidence() {
   );
   try {
     await mkdir(repository);
+    const revision = git
+      ? createRepository(repository, "example/repo")
+      : undefined;
     await mkdir(scanDir, { mode: 0o700 });
     const registered = await workbench(
       scanRegistrationArguments(repository, scanDir),
@@ -40,7 +65,10 @@ async function savedEvidence() {
       await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
     ) as ScanManifest;
     manifest.scan.id = scanId;
-    manifest.scan.target.kind = "directory_snapshot";
+    manifest.scan.target.kind = revision
+      ? "git_worktree"
+      : "directory_snapshot";
+    if (revision) manifest.scan.target.revision = revision;
     manifest.scan.target.targetId = registered["targetId"] as string;
     Reflect.deleteProperty(manifest.scan, "sealedAt");
     Reflect.deleteProperty(manifest.scan, "artifacts");
@@ -125,6 +153,70 @@ async function savedEvidence() {
     throw error;
   }
 }
+
+test("saved validation polls receipts after edits but cannot upload for a replacement checkout", async () => {
+  await using fixture = await savedEvidence(true);
+  const config = join(fixture.root, "project.json");
+  const validation = {
+    provider: "continuum",
+    continuum: { environment_id: "example" },
+  };
+  await writeFile(config, JSON.stringify({ scan: { validation } }));
+  let source = "example/repo";
+  const calls: string[] = [];
+  const receipt = creation("f", "example");
+  const provider = new ContinuumValidationProvider({
+    environmentId: "example",
+    launcher: async (op) => {
+      const setup = registeredSource(op, "example", source);
+      if (setup) return setup;
+      calls.push(op);
+      if (op === "create-code-finding") return receipt;
+      if (op === "get-code-finding") return { ...receipt, status: "DISCARDED" };
+      throw new Error(`Unexpected operation ${op}`);
+    },
+  });
+  const run = provider.validateBatch.bind(provider);
+  using _batch = spyOn(
+    ContinuumValidationProvider.prototype,
+    "validateBatch",
+  ).mockImplementation(run);
+  const state = join(fixture.root, "state");
+  const current = dependencies({
+    onWorkbench: fixture.workbench,
+    environment: { CODEX_SECURITY_STATE_DIR: state },
+  });
+  delete current.readSavedFindings;
+  const args = ["validate", "--scan", fixture.scanId, "-c", config, "--json"];
+  const previous = process.env["CODEX_SECURITY_STATE_DIR"];
+  process.env["CODEX_SECURITY_STATE_DIR"] = state;
+  try {
+    const first = createCliTest(main);
+    expect(await first.runCli(args, current), first.stderr.text()).toBe(0);
+    await writeFile(join(fixture.repository, "changed.txt"), "local edit");
+    const poll = createCliTest(main);
+    expect(await poll.runCli(args, current), poll.stderr.text()).toBe(0);
+    expect(calls).toEqual([
+      "create-code-finding",
+      "get-code-finding",
+      "get-code-finding",
+    ]);
+
+    await rename(fixture.repository, join(fixture.root, "original"));
+    source = "example/replacement";
+    createRepository(fixture.repository, source);
+    calls.length = 0;
+    const swapped = createCliTest(main);
+    expect(await swapped.runCli(args, current), swapped.stderr.text()).toBe(1);
+    expect(JSON.parse(swapped.stdout.text()).items[0].unavailable).toMatch(
+      /checkout path was replaced/,
+    );
+    expect(calls).toEqual([]);
+  } finally {
+    if (previous === undefined) delete process.env["CODEX_SECURITY_STATE_DIR"];
+    else process.env["CODEX_SECURITY_STATE_DIR"] = previous;
+  }
+});
 
 test("saved patch and verification tasks receive complete sealed evidence and live workbench state", async () => {
   await using fixture = await savedEvidence();
@@ -240,14 +332,16 @@ test("saved patch and verification tasks receive complete sealed evidence and li
     ).toBe(0);
     expect(received).toHaveLength(1);
     expect(received[0]!.codeEvidence).toHaveLength(9);
+    expect(received[0]!["continuumAssessment"]).toEqual({
+      itemId: full.occurrenceId,
+      provider: "continuum",
+      verdict: assessment.verdict,
+      claimMatch: "unknown",
+      freshness: { stale: false },
+    });
     expect(received[0]).toMatchObject({
       occurrenceId: full.occurrenceId,
       findingId: full.findingId,
-      continuumAssessment: {
-        findingArn: assessment.findingArn,
-        verdict: assessment.verdict,
-        statusMessage: assessment.statusMessage,
-      },
       remediationTests: full.remediationTests,
       codeEvidence: full.codeEvidence,
       validation: full.validation,

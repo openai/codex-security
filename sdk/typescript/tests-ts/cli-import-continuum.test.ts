@@ -597,8 +597,9 @@ test("import continuum includes only the named AWS source's patches for one find
 async function collectSelectedArtifacts(
   findingIds: readonly string[],
   artifacts: { artifactId: string; artifactType: string; body: object }[],
+  links: Record<string, string> = { duplicateOfIssueId: "issue1" },
 ) {
-  const finding = { ...continuumDetail(), duplicateOfIssueId: "issue1" };
+  const finding = { ...continuumDetail(), ...links };
   const { issue } = continuumIssueExport().issues[0]!;
   const aws = mock(async (args: string[]) => {
     switch (args[1]) {
@@ -632,6 +633,29 @@ async function collectSelectedArtifacts(
   );
   return { finding, issue, capture, aws };
 }
+
+test("merged findings collect and replay proof from the destination issue", async () => {
+  const artifact = {
+    ...continuumValidationArtifact(),
+    body: { validationEvidence: { exploitable: "EXPLOITABLE" } },
+  };
+  const { issue, capture, aws } = await collectSelectedArtifacts(
+    ["one"],
+    [artifact],
+    {
+      createdIssueId: "original",
+      duplicateOfIssueId: "duplicate",
+      mergedIntoIssueId: "issue1",
+    },
+  );
+  for (const [args] of aws.mock.calls.slice(1))
+    expect(args[args.indexOf("--issue-id") + 1]).toBe(issue.issueId);
+  const { findings } = normalizeContinuumFindings(capture, continuumRepository);
+  expect(findings[0]?.evidence.source_data).toMatchObject({
+    validation_issue: { issueArn: issue.issueArn },
+    evidence_artifacts: [artifact],
+  });
+});
 
 test("a bundled validation artifact includes only the selected finding's proof and verdict alongside its patch", async () => {
   const artifact = continuumValidationArtifact();

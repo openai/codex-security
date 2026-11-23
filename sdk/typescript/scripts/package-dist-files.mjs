@@ -223,6 +223,7 @@ const distModules = [
   "skill-authentication",
   "standalone-validation-prompt",
   "validation-provider",
+  "validation-provider-report",
   "validation-providers",
   "validation-records",
   "suggest-owners",

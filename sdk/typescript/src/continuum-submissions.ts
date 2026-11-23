@@ -36,6 +36,7 @@ export async function prepareContinuumSubmissions(
   environmentId: string,
   repositoryPath: string,
   signal?: AbortSignal,
+  checkSubmissionTarget?: (signal?: AbortSignal) => Promise<void>,
 ) {
   const repository = await realpath(repositoryPath);
   if ((await gitMarkerRoot(repository, signal, "nearest")) !== repository) {
@@ -77,6 +78,7 @@ export async function prepareContinuumSubmissions(
     join(codexSecurityStateDirectory(), "continuum-submissions"),
   );
   requireOutputOutsideRepositories(roots, state, "state");
+  let checked: Promise<void> | undefined;
   return async (
     document: Record<string, unknown>,
     now: Date,
@@ -92,6 +94,10 @@ export async function prepareContinuumSubmissions(
         nullIfMissingFile,
       );
       const send = async () => {
+        // Share the expensive scan snapshot check across new and replayed
+        // requests. Accepted receipts can still be polled after a commit.
+        if (checkSubmissionTarget)
+          await (checked ??= checkSubmissionTarget(signal));
         const raw = await readFile(file, "utf8").catch(nullIfMissingFile);
         // AWS replays a token only with the identical document, including its time.
         const time =

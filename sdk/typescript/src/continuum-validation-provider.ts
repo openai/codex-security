@@ -7,14 +7,18 @@ import { repositoryFilePath } from "./scanner-import.js";
 import { compareTimestamps } from "./timestamps.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as waitFor } from "node:timers/promises";
 import { prepareContinuumAws } from "./continuum-aws.js";
-import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
+import {
+  linkedIssueId,
+  selectFindingValidationArtifact,
+} from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
+import { resourceNames } from "./validation-provider-report.js";
 import {
   type ValidationProvider,
   type ValidationProviderAssessment,
   type ValidationProviderContext,
-  type ValidationClaimMatch,
   type ValidationBasis,
   type ValidationResultScope,
   unavailableAssessment,
@@ -46,6 +50,8 @@ export interface ContinuumValidationOptions {
   environmentId: string;
   awsProfile?: string;
   awsRegion?: string;
+  /** Send each finding’s local validation method and summary to AWS. Defaults to false. */
+  includeLocalValidation?: boolean;
   waitMinutes?: number;
   consoleBaseUrl?: string;
   launcher?: ContinuumAwsLauncher;
@@ -185,10 +191,19 @@ function severityId(level: string): number {
 export function findingToOcsf(
   finding: AnyFinding,
   now = new Date(),
+  includeLocalValidation = false,
 ): Record<string, unknown> {
   const id = occurrence(finding);
   const title = text(finding["title"]) ?? id;
-  const summary = text(finding["summary"]) ?? title;
+  let summary = text(finding["summary"]) ?? title;
+  if (includeLocalValidation === true) {
+    const validation = object(finding["validation"]);
+    for (const field of ["method", "summary"]) {
+      const value = validation[field];
+      if (typeof value === "string" && /\S/u.test(value))
+        summary += `\n\nCodex local validation ${field}\n${value}`;
+    }
+  }
   const selected = locations(finding);
   if (selected.length === 0)
     throw new Error(`${id} has no code location with real lines`);
@@ -209,7 +224,7 @@ export function findingToOcsf(
       ? { cwe: { uid: firstCwe, caption: firstCwe } }
       : { advisory: { uid: id, classification: "Codex Security finding" } }),
   };
-  return {
+  const document = {
     activity_id: 1,
     category_uid: 2,
     class_uid: 2002,
@@ -230,72 +245,11 @@ export function findingToOcsf(
     type_uid: 200201,
     vulnerabilities: [vulnerability],
   };
-}
-
-function citesPrimaryLocation(details: string, finding: AnyFinding) {
-  // The first affected_code entry is the submitted sink. An entrypoint can
-  // appear in proofs for different flaws. Require the exact repo path and a
-  // citation starting inside the submitted range, excluding incidental imports.
-  const primary = locations(finding)[0];
-  if (!primary?.start) return false;
-  const path = primary.path.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const citation = new RegExp(
-    "(?:^|[\\s\\x60\"'(\\[])(?:\\./)?" +
-      path +
-      "(?::L?|#L)([1-9]\\d*)(?:[-–]L?([1-9]\\d*))?(?![\\w/–-])",
-    "gu",
-  );
-  for (const match of details.matchAll(citation)) {
-    const start = Number(match[1]);
-    const end = Number(match[2] ?? match[1]);
-    if (
-      start >= primary.start &&
-      start <= (primary.end ?? primary.start) &&
-      end >= start
-    )
-      return true;
-  }
-  return false;
-}
-
-const concepts = [
-  /\binjection\b/iu,
-  /\b(authorization|cross-user|ownership|idor)\b/iu,
-  /\b(disclosure|exposure|secrets?|credentials?)\b/iu,
-  /\b(availability|exhaust(?:ion|s|ed|ing)?|resource consumption|denial)\b/iu,
-];
-
-export function assessClaimMatch(
-  evidence: string,
-  finding: AnyFinding,
-): ValidationClaimMatch {
-  if (!citesPrimaryLocation(evidence, finding)) return "unknown";
-  return matchConcepts(evidence, finding);
-}
-
-function matchConcepts(
-  evidence: string,
-  finding: AnyFinding,
-): ValidationClaimMatch {
-  const details = locations(finding).reduce(
-    (value, { path }) => value.replaceAll(path, ""),
-    evidence,
-  );
-  const title = [
-    finding["title"],
-    finding["summary"],
-    object(finding["taxonomy"])["category"],
-  ]
-    .map(text)
-    .join(" ");
-  const claim = concepts.filter((concept) => concept.test(title));
-  const demonstrated = concepts.filter((concept) => concept.test(details));
-  if (!claim.length || !demonstrated.length) return "unknown";
-  if (!claim.some((concept) => demonstrated.includes(concept)))
-    return "different_flaw";
-  return demonstrated.every((concept) => claim.includes(concept))
-    ? "on_target"
-    : "on_target_escalated";
+  if (/^.{65537}/su.test(summary))
+    throw new Error("Continuum descriptions are limited to 65,536 characters.");
+  if (Buffer.byteLength(JSON.stringify(document)) > 256 * 1024)
+    throw new Error("Continuum OCSF document exceeds 256 KiB.");
+  return document;
 }
 
 function evidenceRows(artifact: Record<string, unknown>) {
@@ -304,101 +258,24 @@ function evidenceRows(artifact: Record<string, unknown>) {
   return Array.isArray(signals) ? signals.map(object) : [];
 }
 
-// Bind the citation to the claim in the same AWS ReasoningStep. A matching
-// path or concept elsewhere in the chain cannot supply the missing half.
-function reasoningMatch(
-  steps: unknown,
-  finding: AnyFinding,
-): ValidationClaimMatch {
-  if (!Array.isArray(steps)) return "unknown";
-  let result: ValidationClaimMatch = "unknown";
-  for (const value of steps) {
-    const { step, claim, source } = object(value);
-    if (
-      !Number.isInteger(step) ||
-      typeof claim !== "string" ||
-      typeof source !== "string" ||
-      !citesPrimaryLocation(source, finding)
-    )
-      continue;
-    const match = matchConcepts(claim, finding);
-    if (match === "on_target" || match === "on_target_escalated") return match;
-    if (match === "different_flaw") result = match;
-  }
-  return result;
-}
-
-// Project only a known effect. HTTP requests, responses, and reasoning may
-// contain sensitive data and are never copied into the assessment.
-function httpObservation(proof: Record<string, unknown>) {
-  const { effect, httpMethod, payload, targetUrl } = object(
-    proof["exploitArtifact"],
-  );
-  if (
-    typeof httpMethod !== "string" ||
-    !["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(
-      httpMethod,
-    ) ||
-    typeof payload !== "string" ||
-    !payload ||
-    typeof targetUrl !== "string" ||
-    !/^https?:\/\//iu.test(targetUrl) ||
-    !URL.canParse(targetUrl)
-  )
-    return;
-  if (
-    (proof["exploitable"] === "NOT_EXPLOITABLE" && effect === "NO_EFFECT") ||
-    (proof["exploitable"] === "EXPLOITABLE" &&
-      (effect === "DATA_LEAKED" ||
-        effect === "ERROR_REVEALED" ||
-        effect === "BEHAVIOR_CHANGED"))
-  )
-    return { kind: "execution" as const, effect };
-}
-
-function proofDetails(
-  validation: Record<string, unknown>,
-  finding: AnyFinding,
-) {
-  // The selector removes siblings and requires a unique result with a verdict.
-  const results = validation["perFindingResults"];
-  if (!Array.isArray(results) || results.length !== 1) return;
-  const proof = object(results[0]);
-  const observation = httpObservation(proof);
-  if (!observation) return;
-  return {
-    observation,
-    match: reasoningMatch(proof["reasoningChain"], finding),
-    description: "per-finding HTTP proof",
-  };
-}
-
-interface Scoring {
-  artifact: Record<string, unknown>;
-  latest: boolean;
-  rejection?: string;
-}
-
 function createdAt(artifact: Record<string, unknown>) {
   const time = text(artifact["createdAt"]) ?? "";
   return Number.isFinite(Date.parse(time)) ? time : "";
 }
 
-function scoreLimitation(
-  submittedAt: Date,
+function linkedScore(
   issue: Record<string, unknown>,
   proof: Record<string, unknown>,
   score: Record<string, unknown>,
-): string | undefined {
+): boolean {
   const validated = createdAt(proof);
   const scored = createdAt(score);
   const updated = text(issue["updatedAt"]) ?? "";
   if (!(
-    compareTimestamps(submittedAt.toISOString(), validated) <= 0 &&
     compareTimestamps(validated, scored) <= 0 &&
     compareTimestamps(scored, updated) <= 0
   ))
-    return "The timestamps do not establish a current issue score for this validation.";
+    return false;
   const rows = evidenceRows(score);
   if (
     rows.some(
@@ -407,22 +284,18 @@ function scoreLimitation(
         (subjectRef !== issue["issueId"] && subjectRef !== issue["issueArn"]),
     )
   )
-    return "The scorer does not identify the selected issue on every signal.";
+    return false;
   const signals = rows.filter((row) => row["dimension"] === "EXPLOITABILITY");
   const reference = object(signals[0]?.["exploitability"]);
-  if (
-    signals.length !== 1 ||
-    reference["sourceValidationArtifactId"] !== proof["artifactId"] ||
-    reference["verdict"] !== validationOutcome(proof).verdict
-  )
-    return "The scorer does not identify the selected validation artifact and its verdict.";
+  return (
+    signals.length === 1 &&
+    reference["sourceValidationArtifactId"] === proof["artifactId"] &&
+    reference["verdict"] === validationOutcome(proof).verdict
+  );
 }
 
-function severityFactors(
-  reasoning: unknown,
-  evidence?: Record<string, unknown>,
-): string {
-  const rows = evidence ? evidenceRows(evidence) : [];
+function severityFactors(evidence: Record<string, unknown>) {
+  const rows = evidenceRows(evidence);
   const likelihood = rows.find(
     (row) => text(row["dimension"]) === "LIKELIHOOD_ASSESSMENT",
   );
@@ -436,15 +309,7 @@ function severityFactors(
   if (likelihoodBand && impactBand)
     return `likelihood ${safeText(likelihoodBand, 80)} × impact ${safeText(impactBand, 80)}`;
 
-  const value = text(reasoning);
-  if (!value) return "likelihood and impact not returned";
-  const match =
-    /likelihood\s*=\s*([^.;]+?)\s+x\s+impact\s*=\s*([^.;]+?)(?:\s*->|[.;]|$)/iu.exec(
-      value,
-    );
-  return match
-    ? `likelihood ${safeText(match[1], 80)} × impact ${safeText(match[2], 80)}`
-    : safeText(value, 180);
+  return "likelihood and impact not returned";
 }
 
 function basisLabel(value: unknown): ValidationBasis {
@@ -456,65 +321,31 @@ function basisLabel(value: unknown): ValidationBasis {
     : safeText(raw, 80);
 }
 
-function attackerReachability(
-  artifact: Record<string, unknown>,
-): boolean | undefined {
-  const likelihood = evidenceRows(artifact).find(
+function reachability(score: Record<string, unknown>) {
+  const likelihood = evidenceRows(score).find(
     (row) => row["dimension"] === "LIKELIHOOD_ASSESSMENT",
   );
-  const value = object(
+  const row = object(
     object(likelihood?.["preconditions"])["reachableFromAttacker"],
-  )["value"];
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function evidenceSignal(artifact: Record<string, unknown>): string {
-  const body = object(artifact["body"]);
-  const prevalidation = object(body["prevalidationSignals"]);
-  const rows = evidenceRows(artifact).filter(
-    (row) => row["conclusion"] !== undefined,
   );
-  const likelihood = rows.find(
-    (row) => text(row["dimension"]) === "LIKELIHOOD_ASSESSMENT",
-  );
-  const preconditions = object(likelihood?.["preconditions"]);
-  const selectedPrecondition = [
-    "reachableFromAttacker",
-    "configurationNeeded",
-    "accessLevel",
-    "userInteractionRequired",
-  ]
-    .map((name) => [name, object(preconditions[name])] as const)
-    .find(([, row]) => row["value"] !== undefined);
-  if (selectedPrecondition) {
-    const [name, row] = selectedPrecondition;
-    const rawBasis = row["basis"];
-    const basis = basisLabel(rawBasis);
-    const reason = safeText(row["reason"], 180);
-    return `Basis: ${basis} — ${name}: ${safeText(String(row["value"]), 80)} (${reason}).`;
-  }
-
-  const preferred =
-    rows.find((row) =>
-      /barrier|enabler|precondition|reach|control/iu.test(
-        text(row["dimension"]) ?? "",
-      ),
-    ) ?? rows[0];
-  if (!preferred)
-    return "Basis: INFERRED — No likelihood precondition was returned.";
-  const rawBasis = safeText(preferred["basis"], 80);
-  const basis = basisLabel(preferred["basis"]);
-  const graphState = safeText(
-    body["graphStatus"] ?? prevalidation["graphStatus"],
-    40,
+  const value = typeof row["value"] === "boolean" ? row["value"] : undefined;
+  const basis = basisLabel(row["basis"]);
+  const body = object(score["body"]);
+  const graphState = text(
+    body["graphStatus"] ?? object(body["prevalidationSignals"])["graphStatus"],
   );
   const caution =
     basis === "GRAPH" &&
-    attackerReachability(artifact) === false &&
-    /empty|degraded|unavailable|not returned/iu.test(graphState)
-      ? " Caution: this not-reachable conclusion comes from an empty or degraded graph."
+    value === false &&
+    graphState &&
+    /empty|degraded|unavailable/iu.test(graphState)
+      ? " Continuum reports an empty or degraded graph."
       : "";
-  return `Basis: ${basis} — ${safeText(preferred["dimension"], 80)}: ${safeText(preferred["conclusion"], 180)} (${rawBasis}).${caution}`;
+  const signal =
+    row["value"] === undefined
+      ? "No issue reachability signal was returned."
+      : `Basis: ${basis} — reachableFromAttacker: ${value ?? "unknown"} (${safeText(resourceNames(text(row["reason"]) ?? ""), 180)}).${caution}`;
+  return { value, basis, signal };
 }
 
 function validationBody(artifact: Record<string, unknown>) {
@@ -553,21 +384,80 @@ function validationOutcome(
   };
 }
 
-function defaultDelay(
-  milliseconds: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+async function* issueArtifacts(
+  request: ContinuumRequest,
+  issueArgs: readonly string[],
+  kind: "VALIDATION_EVIDENCE" | "EVIDENCE",
+) {
+  const listed = await request("list-code-issue-artifacts", [
+    ...issueArgs,
+    "--artifact-type",
+    kind,
+  ]);
+  if (listed["nextToken"] || listed["NextToken"])
+    throw new Error("Expected a complete Continuum issue artifact list.");
+  const items = Array.isArray(listed["items"])
+    ? listed["items"].map(object)
+    : [];
+  items.sort((a, b) => {
+    const left = createdAt(a);
+    const right = createdAt(b);
+    if (!left) return right ? 1 : 0;
+    if (!right) return -1;
+    return compareTimestamps(right, left);
   });
+  for (const [index, candidate] of items.entries()) {
+    const id = text(candidate["artifactId"]);
+    if (!id) continue;
+    const artifact = await request("get-code-issue-artifact", [
+      ...issueArgs,
+      "--artifact-id",
+      id,
+    ]);
+    if (artifact["artifactId"] !== id || artifact["artifactType"] !== kind)
+      throw new Error("Continuum returned a different artifact while polling.");
+    const next = items[index + 1];
+    const tied =
+      next && compareTimestamps(createdAt(next), createdAt(candidate)) === 0;
+    yield { artifact, tied };
+  }
+}
+
+async function selectValidation(
+  artifacts: ReturnType<typeof issueArtifacts>,
+  findingId: string,
+) {
+  let issueFallback;
+  for await (const { artifact } of artifacts) {
+    const member = selectFindingValidationArtifact(artifact, findingId);
+    if (member?.scope === "finding")
+      return {
+        artifact,
+        outcome: validationOutcome(member.artifact),
+        scope: "finding" as const,
+      };
+    const outcome = validationOutcome(artifact);
+    if (!outcome.terminalStatus && outcome.verdict === "UNKNOWN") continue;
+    const issue = { artifact, outcome, scope: "issue" as const };
+    const results = validationBody(artifact)["perFindingResults"];
+    // Only an explicitly sibling-only bundle can be skipped. In particular,
+    // a newer failed or partial issue run supersedes earlier member results.
+    if (
+      !Array.isArray(results) ||
+      !results.length ||
+      results.some((item) => {
+        const id = text(object(item)["findingId"]);
+        return !id || id === findingId;
+      })
+    )
+      return issue;
+    issueFallback ??= issue;
+  }
+  return issueFallback;
+}
+
+function defaultDelay(milliseconds: number, signal?: AbortSignal) {
+  return waitFor(milliseconds, undefined, { signal });
 }
 
 export class ContinuumValidationProvider implements ValidationProvider {
@@ -629,11 +519,13 @@ export class ContinuumValidationProvider implements ValidationProvider {
     supplied: readonly (Finding | Record<string, unknown> | string)[],
     context: ValidationProviderContext,
   ): Promise<ValidationProviderAssessment[]> {
+    if (supplied.length === 0) return [];
     const now = this.#options.now ?? (() => new Date());
     const wait = Math.ceil((this.#options.waitMinutes ?? 45) * 60_000);
     const deadline = now().getTime() + wait;
     const delay = this.#options.delay ?? defaultDelay;
     const signal = AbortSignal.timeout(wait);
+    const timedOut = () => signal.aborted || now().getTime() >= deadline;
     context = {
       ...context,
       signal: context.signal
@@ -653,6 +545,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         this.#options.environmentId,
         context.repositoryPath,
         context.signal,
+        context.checkSubmissionTarget,
       );
       await forEachPending(pending, async (index) => {
         try {
@@ -662,7 +555,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
               "not submittable: no structured item or code location",
             );
           const time = now();
-          submissions[index] = await submit(findingToOcsf(item, time), time);
+          submissions[index] = await submit(
+            findingToOcsf(item, time, this.#options.includeLocalValidation),
+            time,
+          );
         } catch (error) {
           results[index] = unavailableAssessment(this, error);
         }
@@ -673,23 +569,45 @@ export class ContinuumValidationProvider implements ValidationProvider {
         results[index] = unavailableAssessment(this, error);
       pending = [];
     }
-    while (pending.length > 0 && now().getTime() < deadline) {
+    // A finished verdict remains useful if its linked score misses the deadline.
+    const waiting = new Map<number, ValidationProviderAssessment>();
+    while (pending.length > 0 && !timedOut()) {
       await forEachPending(pending, async (index) => {
-        const assessment = await this.#poll(
-          supplied[index] as AnyFinding,
-          submissions[index]!,
-          request,
-        );
-        if (assessment) results[index] = assessment;
+        const submission = submissions[index]!;
+        const previousIssue = submission.issueArn;
+        try {
+          const assessment = await this.#poll(
+            supplied[index] as AnyFinding,
+            submission,
+            request,
+            timedOut,
+          );
+          if (assessment?.record?.scoringPending)
+            waiting.set(index, assessment);
+          else {
+            waiting.delete(index);
+            if (assessment) results[index] = assessment;
+          }
+        } catch (error) {
+          if (timedOut() && submission.issueArn === previousIssue) {
+            const partial = waiting.get(index);
+            if (partial) {
+              results[index] = partial;
+              return;
+            }
+          }
+          results[index] = unavailableAssessment(this, error);
+        }
       });
       pending = pending.filter((index) => !results[index]);
-      if (pending.length > 0 && now().getTime() < deadline) {
+      if (pending.length > 0 && !timedOut()) {
         try {
           await delay(
             Math.min(5_000, deadline - now().getTime()),
             context.signal,
           );
         } catch (error) {
+          if (signal.aborted) break;
           for (const index of pending)
             results[index] = unavailableAssessment(this, error);
           pending = [];
@@ -697,10 +615,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
       }
     }
     for (const index of pending) {
-      results[index] = unavailableAssessment(
-        this,
-        `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
-      );
+      results[index] =
+        waiting.get(index) ??
+        unavailableAssessment(
+          this,
+          `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
+        );
     }
     return results.map((assessment, index) => {
       const item = supplied[index];
@@ -716,6 +636,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         freshness: { stale: false, reasons: [] },
         unavailable: assessment.unavailable,
       };
+      record.disposition = assessment.disposition;
       const submission = submissions[index];
       if (!submission) return { ...assessment, record };
       const { submittedAt, ...ids } = submission;
@@ -777,184 +698,101 @@ export class ContinuumValidationProvider implements ValidationProvider {
     finding: AnyFinding,
     submission: Submission,
     request: ContinuumRequest,
+    timedOut: () => boolean,
   ): Promise<ValidationProviderAssessment | undefined> {
     const { findingId, findingArn, submittedAt } = submission;
-    let issueId: string | undefined;
-    let issue: Record<string, unknown> = {};
-    let validationArtifact: Record<string, unknown> | undefined;
-    let scoring: Scoring | undefined;
-    let resultScope: ValidationResultScope = "issue";
-    let issueFindingCount: number | undefined;
-    try {
-      {
-        const current = await request("get-code-finding", [
-          "--environment-id",
-          this.#options.environmentId,
-          "--finding-id",
-          findingId,
-        ]);
-        if (current["findingArn"] !== findingArn)
-          throw new Error("Continuum returned another finding while polling.");
-        const sourceId = text(current["sourceFindingId"]);
-        if (sourceId !== undefined && sourceId !== occurrence(finding))
-          throw new Error(
-            "Continuum returned another source finding while polling.",
-          );
-        const status = text(current["status"]);
-        if (status && TERMINAL_WITHOUT_ISSUE.has(status)) {
-          const statusMessage = text(
-            current["statusMessage"] ??
-              current["discardReason"] ??
-              current["statusReason"],
-          );
-          return this.#report(finding, submittedAt, {
-            verdict: status,
-            statusMessage,
-            disposition: "not_applicable",
-          });
-        }
-        // CreateCodeFinding returns the finding identity before any issue is linked.
-        // GetCodeFinding supplies the issue association as processing progresses.
-        issueId =
-          text(current["mergedIntoIssueId"]) ??
-          text(current["duplicateOfIssueId"]) ??
-          text(current["createdIssueId"]);
-        delete submission.issueId;
-        delete submission.issueArn;
-        if (issueId) {
-          issue = await request("get-code-issue", [
-            "--environment-id",
-            this.#options.environmentId,
-            "--issue-id",
-            issueId,
-          ]);
-          const scope = findingArn.slice(
-            0,
-            -("/code-findings/" + findingId).length,
-          );
-          const issueArn = scope + "/code-issues/" + issueId;
-          if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
-            throw new Error(
-              "Continuum returned a different issue while polling.",
-            );
-          submission.issueId = issueId;
-          submission.issueArn = issueArn;
-          const ids = issue["findingIds"];
-          if (!Array.isArray(ids) || !ids.includes(findingId)) return;
-          issueFindingCount = new Set(ids).size;
-          let issueFallback: Record<string, unknown> | undefined;
-          for (const kind of ["VALIDATION_EVIDENCE", "EVIDENCE"] as const) {
-            const listed = await request("list-code-issue-artifacts", [
-              "--environment-id",
-              this.#options.environmentId,
-              "--issue-id",
-              issueId,
-              "--artifact-type",
-              kind,
-            ]);
-            const items = Array.isArray(listed["items"])
-              ? listed["items"].map(object)
-              : [];
-            items.sort((a, b) => {
-              const left = createdAt(a);
-              const right = createdAt(b);
-              if (!left) return right ? 1 : 0;
-              if (!right) return -1;
-              return compareTimestamps(right, left);
-            });
-            for (const candidate of items) {
-              const artifactId = text(candidate["artifactId"]);
-              if (!artifactId) continue;
-              const artifact = await request("get-code-issue-artifact", [
-                "--environment-id",
-                this.#options.environmentId,
-                "--issue-id",
-                issueId,
-                "--artifact-id",
-                artifactId,
-              ]);
-              if (
-                artifact["artifactId"] !== artifactId ||
-                artifact["artifactType"] !== kind
-              )
-                throw new Error(
-                  "Continuum returned a different artifact while polling.",
-                );
-              if (kind === "EVIDENCE") {
-                if (!validationArtifact) return;
-                const shared =
-                  resultScope === "finding" && issueFindingCount !== 1;
-                const rejection = shared
-                  ? "The severity applies to a shared issue."
-                  : scoreLimitation(
-                      submittedAt,
-                      issue,
-                      validationArtifact,
-                      artifact,
-                    );
-                // Prefer the newest linked score. The newest rejection explains
-                // why scoring is unavailable if none of the artifacts qualify.
-                if (!scoring || !rejection)
-                  scoring = {
-                    artifact,
-                    rejection,
-                    latest: items.every(
-                      (item) =>
-                        item === candidate ||
-                        compareTimestamps(
-                          createdAt(item),
-                          createdAt(artifact),
-                        ) < 0,
-                    ),
-                  };
-                if (
-                  shared ||
-                  !rejection ||
-                  validationOutcome(validationArtifact).disposition !==
-                    "reportable"
-                )
-                  break;
-                continue;
-              }
-              const selected = selectFindingValidationArtifact(
-                artifact,
-                findingId,
-              );
-              if (selected?.scope === "finding") {
-                validationArtifact = selected.artifact;
-                resultScope = "finding";
-                break;
-              }
-              // Keep issue proof separate. Search all histories first: an older
-              // explicit result for this finding must beat this fallback.
-              const outcome = validationOutcome(artifact);
-              if (
-                !issueFallback &&
-                artifact["artifactType"] === "VALIDATION_EVIDENCE" &&
-                (outcome.verdict !== "UNKNOWN" || outcome.terminalStatus)
-              )
-                issueFallback = artifact;
-            }
-            if (kind === "VALIDATION_EVIDENCE") {
-              validationArtifact ??= issueFallback;
-              if (!validationArtifact) return;
-            }
-          }
-        }
-      }
-      if (!validationArtifact || !issueId) return;
-      const outcome = validationOutcome(validationArtifact);
-      if (!scoring && outcome.disposition === "reportable") return;
-      return this.#report(finding, submittedAt, outcome, {
-        issue,
-        validationArtifact,
-        scoring,
-        resultScope,
-        issueFindingCount,
-      });
-    } catch (error) {
-      return unavailableAssessment(this, error);
+    const environmentArgs = ["--environment-id", this.#options.environmentId];
+    const current = await request("get-code-finding", [
+      ...environmentArgs,
+      "--finding-id",
+      findingId,
+    ]);
+    if (current["findingArn"] !== findingArn)
+      throw new Error("Continuum returned another finding while polling.");
+    const sourceId = text(current["sourceFindingId"]);
+    if (sourceId !== undefined && sourceId !== occurrence(finding))
+      throw new Error(
+        "Continuum returned another source finding while polling.",
+      );
+    const status = text(current["status"]);
+    const terminal = status && TERMINAL_WITHOUT_ISSUE.has(status);
+    const issueId = linkedIssueId(current)?.trim();
+    if (terminal || issueId !== submission.issueId) {
+      delete submission.issueId;
+      delete submission.issueArn;
     }
+    if (terminal) {
+      return this.#report(finding, submittedAt, {
+        verdict: status,
+        statusMessage: text(
+          current["statusMessage"] ??
+            current["discardReason"] ??
+            current["statusReason"],
+        ),
+        disposition: "not_applicable",
+      });
+    }
+    if (!issueId) return;
+    const issueArgs = [...environmentArgs, "--issue-id", issueId];
+    const issue = await request("get-code-issue", issueArgs);
+    const scope = findingArn.slice(0, -("/code-findings/" + findingId).length);
+    const issueArn = scope + "/code-issues/" + issueId;
+    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
+      throw new Error("Continuum returned a different issue while polling.");
+    submission.issueId = issueId;
+    submission.issueArn = issueArn;
+    const ids = issue["findingIds"];
+    if (!Array.isArray(ids) || !ids.includes(findingId)) return;
+    const validation = await selectValidation(
+      issueArtifacts(request, issueArgs, "VALIDATION_EVIDENCE"),
+      findingId,
+    );
+    if (!validation) return;
+    const { outcome, artifact, scope: resultScope } = validation;
+    const issueVerdict = validationOutcome(artifact).verdict;
+    const details = {
+      issue,
+      validationArtifact: artifact,
+      resultScope,
+      issueFindingCount: new Set(ids).size,
+      issueVerdict: resultScope === "finding" ? issueVerdict : undefined,
+    };
+    // An inconclusive or historical run cannot supply current scoring.
+    if (
+      outcome.disposition !== "reportable" ||
+      issueVerdict === "UNKNOWN" ||
+      !(compareTimestamps(createdAt(artifact), submittedAt.toISOString()) >= 0)
+    )
+      return this.#report(finding, submittedAt, outcome, details);
+
+    // A score describes the issue, even if this member has a different verdict.
+    // AWS can expose validation before publishing the corresponding score.
+    try {
+      let score: Record<string, unknown> | undefined;
+      for await (const { artifact: candidate, tied } of issueArtifacts(
+        request,
+        issueArgs,
+        "EVIDENCE",
+      )) {
+        if (linkedScore(issue, artifact, candidate)) {
+          // Two eligible scores with the same time cannot be ordered. Leave
+          // scoring pending until a newer, unambiguous score arrives.
+          if (score && score["artifactId"] !== candidate["artifactId"]) break;
+          score = candidate;
+        }
+        if (score && !tied)
+          return this.#report(finding, submittedAt, outcome, {
+            ...details,
+            score,
+          });
+      }
+    } catch (error) {
+      if (!timedOut()) throw error;
+    }
+    return this.#report(finding, submittedAt, outcome, {
+      ...details,
+      scoringPending: true,
+    });
   }
 
   #report(
@@ -970,165 +808,140 @@ export class ContinuumValidationProvider implements ValidationProvider {
     {
       issue = {},
       validationArtifact = {},
-      scoring,
+      score,
+      scoringPending,
       resultScope = "finding",
       issueFindingCount,
+      issueVerdict,
     }: {
       issue?: Record<string, unknown>;
       validationArtifact?: Record<string, unknown>;
-      scoring?: Scoring;
+      score?: Record<string, unknown>;
+      scoringPending?: boolean;
       resultScope?: ValidationResultScope;
       issueFindingCount?: number;
+      issueVerdict?: string;
     } = {},
   ): ValidationProviderAssessment {
     const conclusive = disposition === "reportable";
-    const validation = validationBody(validationArtifact);
-    const proof =
-      conclusive && resultScope === "finding"
-        ? proofDetails(validation, finding)
-        : undefined;
-    const match = proof?.match ?? "unknown";
-
     const validationArtifactId = text(validationArtifact["artifactId"]);
     const evidenceCreatedAt = createdAt(validationArtifact) || undefined;
     const validatedAt = conclusive ? evidenceCreatedAt : undefined;
     const submitted = submittedAt.toISOString();
     const olderArtifact =
-      compareTimestamps(createdAt(validationArtifact), submitted) < 0;
+      compareTimestamps(evidenceCreatedAt ?? "", submitted) < 0;
     const stale =
       olderArtifact ||
-      [
-        issue["updatedAt"] ?? issue["createdAt"],
-        scoring?.artifact["createdAt"],
-      ].some((time) => compareTimestamps(text(time) ?? "", submitted) < 0);
+      compareTimestamps(
+        text(issue["updatedAt"] ?? issue["createdAt"]) ?? "",
+        submitted,
+      ) < 0;
     const joinedValidatedIssue =
       conclusive && resultScope === "issue" && olderArtifact;
-    const proofType = proof?.description ?? "validation evidence";
-    const reason = !conclusive
-      ? (statusMessage ?? "The finding still needs validation.")
-      : resultScope === "issue"
-        ? `Continuum returned ${verdict} for the issue using ${proofType}. This is not proof for the submitted finding individually. Raw proof code, payloads, commands, and console output are intentionally omitted.`
-        : `Basis: CODE — Continuum returned ${verdict} using ${proofType}. Basis: INFERRED — The proof-to-claim comparison was ${match}. Raw proof code, payloads, commands, and console output are intentionally omitted.`;
+    const severity = severityLevel(finding);
     const providerSeverity = text(issue["severity"])?.toLowerCase();
-    const severityBefore = severityLevel(finding);
-    const matched = match === "on_target" || match === "on_target_escalated";
-    const score = scoring?.rejection ? undefined : scoring?.artifact;
-    const limitation =
-      scoring?.rejection ??
-      (scoring && !scoring.latest
-        ? "The linked scoring artifact is not established as the latest issue score. Codex severity is retained."
-        : undefined);
-    const current = score && scoring?.latest;
-    const regrade = matched && current && providerSeverity !== undefined;
-    const observation =
-      matched && score && terminalStatus === "COMPLETED"
-        ? proof?.observation
-        : undefined;
-    const severityAfter = regrade ? providerSeverity : severityBefore;
-    const severityBasis = "INFERRED";
-    const factors = severityFactors(
-      current && issue["severityReasoning"],
-      score,
-    );
-    const signal = evidenceSignal(score ?? {});
-    const reachableFromAttacker = score && attackerReachability(score);
-    const preconditions = evidenceRows(score ?? {}).flatMap((row) =>
-      Object.entries({
-        ...object(row["preconditions"]),
-        ...object(row["impactDimensions"]),
-      }).map(([name, raw]) => ({
-        basis: basisLabel(object(raw)["basis"]),
-        reason: `${name}: ${safeText(String(object(raw)["value"]), 80)} — ${safeText(object(raw)["reason"], 180)}`,
-      })),
-    );
-    const title = safeText(finding["title"], 160);
-    const summary = safeText(finding["summary"], 300);
-    const exposure =
-      reachableFromAttacker === true
-        ? "reachable from attacker"
-        : reachableFromAttacker === false
-          ? "not reachable from attacker"
-          : "exposure unknown";
-    const signalBasis = basisLabel(/^Basis: (.*?) —/u.exec(signal)?.[1]);
-    const providerResult = terminalStatus
-      ? `${verdict} (validation run ${terminalStatus})`
-      : verdict;
-    const freshness = validatedAt
-      ? `validated at ${validatedAt}${stale ? "" : ", current at submission"}`
-      : "validation time unknown";
-    const scopeDescription =
-      resultScope === "issue"
-        ? `Continuum returned an issue-level result. The issue currently lists ${issueFindingCount} ${issueFindingCount === 1 ? "finding" : "findings"}. Codex severity is retained.${joinedValidatedIssue ? " This finding joined an issue Continuum had already validated. The issue proof predates this submission." : ""}`
-        : "Continuum result for this finding.";
+    const status = terminalStatus ? ` (validation run ${terminalStatus})` : "";
+    const verdictText = `Continuum ${resultScope} verdict: ${verdict}${status}`;
+    const reasons = [{ basis: "INFERRED", reason: verdictText }];
     const report = [
-      `**Result scope:** ${scopeDescription}`,
-      "",
-      regrade
-        ? `Codex: ${severityBefore}, exposure unknown → Continuum: ${severityAfter}, ${exposure} (basis ${signalBasis}).`
-        : `Codex finding severity: ${severityBefore} (retained).${providerSeverity ? ` Continuum issue severity: ${providerSeverity}. Issue ${exposure} (basis ${signalBasis}).` : ""}`,
-      "",
-      `**What Codex said:** ${title} (${severityBefore}). ${summary}`,
-      "",
-      `**What Continuum says${resultScope === "issue" ? " for the issue" : ""}:** ${providerResult}. ${factors} (basis: ${severityBasis}).`,
-      "",
-      `**Freshness:** ${freshness}${stale ? ", possibly stale because evidence predates submission" : ""}. Deployment source identity is not compared.`,
-      "",
-      `**Claim match:** ${match} (basis: INFERRED).${match === "different_flaw" ? " Not validated: Continuum proved a related flaw. Codex severity is retained." : ""}`,
-      "",
-      `**Main barrier or enabler${resultScope === "issue" ? " for the issue" : ""}:** ${signal}`,
-      "",
-      reason,
-      "",
-      ...(terminalStatus === "FAILED" && validationArtifactId
-        ? [
-            `To investigate the failed run, ask AWS privately for worker logs for validation artifact ${validationArtifactId}${evidenceCreatedAt ? ` (created ${evidenceCreatedAt})` : ""} on the issue below.`,
-            "",
-          ]
-        : []),
-      ...(limitation ? [limitation, ""] : []),
-      ...(regrade && reachableFromAttacker === false
-        ? [
-            "This issue may be real but not reachable in the observed deployment; consider lower priority without changing its truth state.",
-            "",
-          ]
-        : []),
-    ].join("\n");
+      `**${safeText(finding["title"], 160)}**`,
+      resultScope === "issue"
+        ? "Continuum returned an issue-level result. The submitted finding has no individual verdict."
+        : "Continuum returned a result for the submitted finding.",
+      verdictText,
+      `Codex finding severity: ${severity} (retained).`,
+    ];
+    if (statusMessage) report.push(statusMessage);
+    if (validationArtifactId) {
+      report.push(
+        "Codex has not independently verified that this result reproduces the submitted flaw. Deployment source identity is not compared.",
+      );
+      if (issueVerdict)
+        report.push(`Continuum issue verdict: ${issueVerdict}.`);
+      if (providerSeverity)
+        report.push(`Continuum issue severity: ${providerSeverity}.`);
+      if (issueFindingCount)
+        report.push(`Findings in issue: ${issueFindingCount}.`);
+      report.push(
+        `Validation artifact: ${validationArtifactId} (${evidenceCreatedAt ?? "creation time unknown"}).`,
+      );
+      if (stale)
+        report.push(
+          "Evidence is possibly stale because it predates submission.",
+        );
+      if (joinedValidatedIssue)
+        report.push(
+          "This finding joined an issue Continuum had already validated. The issue proof predates this submission.",
+        );
+      if (terminalStatus === "FAILED")
+        report.push(
+          "To investigate the failed run, ask AWS privately for worker logs for this validation artifact.",
+        );
+    }
+    let reachableFromAttacker: boolean | undefined;
+    if (score) {
+      const factors = severityFactors(score);
+      const { basis: signalBasis, signal, value } = reachability(score);
+      reachableFromAttacker = value;
+      const exposure =
+        reachableFromAttacker === true
+          ? "reachable from attacker"
+          : reachableFromAttacker === false
+            ? "not reachable from attacker"
+            : "exposure unknown";
+      report.push(
+        `Issue ${exposure} (basis ${signalBasis}).`,
+        `Issue scoring at ${createdAt(score)}: ${factors}.`,
+        signal,
+      );
+      reasons.push(
+        { basis: "INFERRED", reason: factors },
+        { basis: signalBasis, reason: signal },
+        ...evidenceRows(score).flatMap((row) =>
+          Object.entries({
+            ...object(row["preconditions"]),
+            ...object(row["impactDimensions"]),
+          }).map(([name, raw]) => ({
+            basis: basisLabel(object(raw)["basis"]),
+            reason: `${name}: ${safeText(String(object(raw)["value"]), 80)} — ${safeText(object(raw)["reason"], 180)}`,
+          })),
+        ),
+      );
+    } else if (scoringPending) {
+      unavailable =
+        "Continuum timed out waiting for an unambiguous linked issue score. Retry validation to refresh the score.";
+      disposition = "deferred";
+      reasons.push({ basis: "INFERRED", reason: unavailable });
+      report.push(unavailable);
+    }
     return {
       disposition,
       ...(unavailable && { unavailable }),
-      report,
+      report: report.join("\n\n"),
       record: {
         itemId: occurrence(finding),
         provider: this.name,
         verdict,
         ...(terminalStatus && { terminalStatus }),
         validationArtifactId,
-        scoringArtifactId: text(scoring?.artifact["artifactId"]),
-        ...(observation && { proofObservation: observation }),
+        ...(score && { scoringArtifactId: text(score["artifactId"]) }),
+        ...(scoringPending && { scoringPending }),
         ...(statusMessage && { statusMessage }),
         ...(unavailable && { unavailable }),
-        severityBefore,
-        severityAfter,
+        severityBefore: severity,
+        severityAfter: severity,
         ...(providerSeverity && { providerSeverity }),
+        ...(issueVerdict && { issueVerdict }),
         resultScope,
         ...(issueFindingCount !== undefined && { issueFindingCount }),
         joinedValidatedIssue,
         ...(reachableFromAttacker !== undefined && { reachableFromAttacker }),
-        reasons: [
-          { basis: severityBasis, reason: factors },
-          { basis: signalBasis, reason: signal },
-          {
-            basis: match === "unknown" ? "INFERRED" : "CODE",
-            reason: `Continuum ${resultScope} verdict: ${providerResult}${statusMessage ? `. ${statusMessage}` : ""}`,
-          },
-          { basis: "INFERRED", reason: `Claim comparison: ${match}` },
-          ...(limitation ? [{ basis: "INFERRED", reason: limitation }] : []),
-          ...preconditions,
-        ],
-        claimMatch: match,
+        reasons,
+        claimMatch: "unknown",
         freshness: {
           ...(evidenceCreatedAt && { evidenceCreatedAt }),
           ...(validatedAt && { validatedAt }),
+          ...(score && { scoredAt: createdAt(score) }),
           stale,
           reasons: stale ? ["Evidence predates this submission."] : [],
         },
@@ -1149,6 +962,7 @@ export function continuumProviderFromConfig(
     environmentId: text(config["environment_id"]) ?? "",
     awsProfile: text(config["aws_profile"]),
     awsRegion: text(config["aws_region"]),
+    includeLocalValidation: config["include_local_validation"] === true,
     waitMinutes:
       typeof config["wait_minutes"] === "number"
         ? config["wait_minutes"]
