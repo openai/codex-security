@@ -199,6 +199,13 @@ export class WorkbenchDeepScanStore {
         run.scanId,
         result.validationProviderConfiguration as ValidationProviderConfiguration,
         startDisposition === "created",
+        input.projectConfigPath === undefined
+          ? undefined
+          : {
+              file: input.projectConfigPath,
+              target: run.targetPath,
+              mode: "deep",
+            },
       );
     }
     return run;

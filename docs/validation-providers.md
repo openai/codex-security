@@ -52,7 +52,14 @@ file in scan setup or explicitly request it.
 
 Review the destination in setup. The plugin saves the selection before the
 scan and submits the findings automatically after sealing. Rejoining keeps
-the saved settings. A standalone plugin source build has no AWS provider.
+the saved settings. If the scan opted into sending local validation text and
+you explicitly select a file on rejoin, the file must still opt in for the
+same provider, environment, Region and profile. A conflict or unreadable file
+disables automatic submission for this scan, including later completion by
+the original caller. A batch already uploading may finish. Finish
+locally and use `validate --scan` to submit the findings you review. Omit
+the file on rejoin to retain the original grant when recovering a scan.
+A standalone plugin source build has no AWS provider.
 
 ## Review a saved scan before sending
 
@@ -94,6 +101,9 @@ the exact identity, evidence, timestamps and disposition of each finding.
 | How old is the evidence?                  | See `validationArtifactId`, `scoringArtifactId` and `freshness`. `joinedValidatedIssue` indicates pre-existing issue validation. A recent timestamp does not establish the deployed revision.     |
 
 Codex checks issue membership and reads validation runs newest first.
+When applicable runs share the newest timestamp, Codex defers the verdict.
+Retry after a newer run appears. While a finding is being submitted or
+validated, older issue evidence alone does not end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from

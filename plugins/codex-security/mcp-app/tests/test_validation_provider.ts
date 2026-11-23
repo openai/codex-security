@@ -370,6 +370,67 @@ await test("explicit completion retries pending assessments and preserves termin
   }
 });
 
+await test("a conflicting rejoin blocks automatic upload by the original caller", async (t) => {
+  const root = await temporaryDirectory("plugin-consent-");
+  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  t.after(async () => {
+    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+    await rm(root, { recursive: true, force: true });
+  });
+  const enabled = {
+    ...configuration,
+    continuum: { ...configuration.continuum, include_local_validation: true },
+  };
+  const resolveProvider = t.mock.fn(() => {
+    throw new Error("unexpected upload");
+  });
+  for (const mode of ["standard", "deep"] as const) {
+    const { scan } = await sealedScan(root, root, mode);
+    const file = join(root, "project.json");
+    const selection = { file, target: root, mode };
+    await bindValidationProviderConfiguration(scan.scanId, enabled, true);
+    await writeFile(
+      file,
+      JSON.stringify({ scan: { mode, validation: enabled } }),
+    );
+    assert.equal(
+      await bindValidationProviderConfiguration(
+        scan.scanId,
+        enabled,
+        false,
+        selection,
+      ),
+      undefined,
+    );
+    // A scan-ID-only recovery keeps the original grant without reading the file.
+    await rm(file);
+    assert.equal(
+      await bindValidationProviderConfiguration(scan.scanId, enabled, false),
+      undefined,
+    );
+    await writeFile(
+      file,
+      JSON.stringify({ scan: { mode, validation: configuration } }),
+    );
+    const notice = await bindValidationProviderConfiguration(
+      scan.scanId,
+      enabled,
+      false,
+      selection,
+    );
+    assert.match(String(notice), /Automatic Continuum validation is disabled/);
+    // Neither a detached original caller nor later recovery can reuse the old grant.
+    await bindValidationProviderConfiguration(scan.scanId, enabled, true);
+    const result = await validateCompletedScan(scan, resolveProvider);
+    assert.equal(result?.status, "failed");
+    assert.equal(result?.message, notice);
+    assert.deepEqual(await readCompletedValidation(scan), result);
+  }
+  assert.equal(resolveProvider.mock.callCount(), 0);
+});
+
 await test("only the selected completed scan can start a validation batch", async (t) => {
   const root = await temporaryDirectory("plugin-seal-");
   const oldState = process.env.CODEX_SECURITY_STATE_DIR;
