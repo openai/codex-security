@@ -41,7 +41,7 @@ export const validationProviderFromConfiguration: (
 ) => unknown = unavailable;
 export const assessPluginFindings: (...args: unknown[]) => never = unavailable;
 // Source-only builds can read the protected cache written by the packaged SDK.
-export const continuumAssessmentVersion = 4;
+export const continuumAssessmentVersion = 6;
 
 // Only the SDK can run the provider or update the saved assessment.
 export function withPublicationLock<T>(
