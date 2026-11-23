@@ -14,7 +14,7 @@ import {
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
-  linkedIssueId,
+  linkedIssueIds,
   selectFindingValidationArtifact,
   singleFindingValidationIssue,
 } from "./continuum-validation-evidence.js";
@@ -235,6 +235,9 @@ export function readPatch(value: unknown) {
     patch,
     patchSha256,
     sizeBytes,
+    ...(artifact["issueArn"] !== undefined && {
+      issueArn: requiredText(artifact["issueArn"], "Continuum patch issue ARN"),
+    }),
     ...(artifact["format"] !== undefined && {
       format: requiredText(artifact["format"], "Continuum patch format"),
     }),
@@ -727,7 +730,20 @@ export function normalizeContinuumFindings(
         capture?.["patches"],
         "Continuum patches",
       ).map(readPatch);
-      const linkedIssue = linkedIssueId(row);
+      const links = linkedIssueIds(row);
+      const linkedIssue = links[0];
+      if (patches.length && linkedIssue) {
+        const expected = `${findingIdentity(row).scope}/code-issues/${linkedIssue}`;
+        // Older collectors could have fetched the patch from the original issue.
+        if (
+          patches.some(({ issueArn }) =>
+            issueArn ? issueArn !== expected : links.length > 1,
+          )
+        )
+          throw new Error(
+            "Cannot confirm the patch belongs to the destination issue. Recollect this finding with codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT before publishing.",
+          );
+      }
       let validationIssue:
         ReturnType<typeof singleFindingValidationIssue> | undefined;
       const evidenceArtifacts = issueEvidenceArtifacts(
