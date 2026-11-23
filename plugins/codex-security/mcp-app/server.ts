@@ -533,6 +533,7 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
   const deepScanCoordinators = new DeepScanCoordinatorRegistry();
+  const deepScanHost = new AbortController();
   const deepScanCompletions = new WeakMap<
     DeepScanCoordinator,
     Promise<ReturnType<typeof deepScanTerminalResult>>
@@ -547,8 +548,10 @@ export function createCodexSecurityServer(): McpServer {
       threadId: string;
     }
   >();
-  server.server.onclose = () =>
+  server.server.onclose = () => {
+    deepScanHost.abort();
     deepScanCoordinators.shutdown("mcp_transport_closed");
+  };
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
   const destructiveAnnotations = {
@@ -1014,7 +1017,7 @@ export function createCodexSecurityServer(): McpServer {
           const validation = await validateCompletedScan(
             completion.scan as JsonObject,
             undefined,
-            abortSignalFromExtra(extra),
+            deepScanHost.signal,
           );
           return deepScanTerminalResult(run, {
             ...(validation ? { validation } : {}),
