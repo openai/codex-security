@@ -131,6 +131,12 @@ Completion retries pending items and keeps finished assessments. If
 `status` is `incomplete` and `retryable` is false, check the individual
 run statuses before deciding how to proceed.
 
+A missing code location or oversized document sets `invalidInput` on the
+item. No upload was attempted for that item. Completion skips it on retry.
+Correct the input and rescan instead of editing sealed findings.
+If local validation text pushed the document over the limit, submit the
+selected occurrence with `include_local_validation` disabled.
+
 For a CLI retry, repeat `validate --scan` with the same ID, project file
 and affected occurrence IDs.
 
