@@ -284,7 +284,8 @@ def _recovery_source_digests(
                 elif frozen_sources is None:
                     frozen_sources = {}
             else:
-                include_parent = True
+                # Direct cost-stop seals retain their accepted baseline in the terminal row.
+                include_parent = not frozen_sources or manifest_scan.get("status") != scan["status"]
 
     workers = saved_deep_workers(connection, scan)
     previous_heads = checkpoint_heads

@@ -33,10 +33,12 @@ from workbench_test_support import (
     initialize_git_repository,
     load_script,
     mark_handoff_delivered,
+    read_draft_documents,
     read_review_state,
     resume_deep_scan,
     run_workbench,
     save_workspace,
+    saved_draft,
     scan_claim_command,
     scan_command,
     select_checkpoint,
@@ -436,6 +438,89 @@ def test_budget_exhaustion_rejects_changed_checkpoint_after_terminal_commit(
     saved = get_scan(state_dir, scan_id)["scan"]
     assert saved["cost"] == BUDGET_COST
     assert "Unsafe archive extraction" in saved["findings"][0]["title"]
+
+
+@pytest.mark.parametrize("removed_before_stop", [True, False])
+def test_budget_exhaustion_recovery_preserves_parent_replacement(
+    authored_budget_scan: tuple[Path, Path, str], removed_before_stop: bool
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    documents = read_draft_documents(scan_dir)
+    original = documents["findings"]["findings"][0]
+    documents["manifest"]["scan"]["complete"] = True
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    checkpoint = staged.with_suffix(".checkpoint.json")
+
+    def publish(findings: list[dict[str, Any]]) -> dict[str, str]:
+        documents["findings"]["findings"] = findings
+        if not findings:
+            documents["coverage"]["surfaces"] = []
+        staged.write_text(json.dumps(documents))
+        checkpoint.write_text(json.dumps(saved_draft(scan_id, findings=findings, complete=True)))
+        written = scan_command(
+            state_dir,
+            "write-scan-draft",
+            scan_id,
+            "--draft-path",
+            str(staged),
+            "--checkpoint-path",
+            str(checkpoint),
+        )
+        assert written["status"] == "draft_written"
+        return json.loads((scan_dir / "checkpoint-head.json").read_text())
+
+    first_head = publish([original])
+    if removed_before_stop:
+        removed_head = publish([])
+        accepted = json.loads(
+            (scan_dir / "checkpoints" / removed_head["inputCheckpoint"]).read_text()
+        )
+        assert accepted["complete"] is True
+        assert accepted["findings"] == []
+        assert accepted["publication"] == {
+            "previousCheckpoint": first_head["checkpoint"],
+            "previousInputCheckpoint": first_head["inputCheckpoint"],
+        }
+
+    stopped = complete_budget_scan(state_dir, scan_id)["scan"]
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == (0 if removed_before_stop else 1)
+    assert stopped["resultsRecoveryNeeded"] is False
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert "preservedSources" not in manifest
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        baseline = connection.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0]
+    assert json.loads(baseline)
+
+    later = {
+        **original,
+        "identity": {"anchor": "later-budget-result"},
+        "ruleId": "later.budget.result",
+        "title": "Later saved result",
+    }
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan_id, findings=[later], complete=not removed_before_stop),
+    )
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+
+    assert [finding["title"] for finding in recovered["findings"]] == [later["title"]]
+    assert recovered["findingCount"] == 1
+    assert recovered["progress"]["status"] == "failed"
+    assert recovered["cost"] == BUDGET_COST
+    assert BUDGET_WARNING in recovered["warnings"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    canonical = (scan_dir / "findings.json").read_bytes()
+    repeated = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+    assert repeated["findingCount"] == 1
+    assert repeated["resultsRecoveryNeeded"] is False
+    assert (scan_dir / "findings.json").read_bytes() == canonical
 
 
 @pytest.mark.parametrize("retry", ["preserve-scan-results", "recover-scan-results"])
