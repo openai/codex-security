@@ -45,6 +45,7 @@ import { NoPublishableFindingsError } from "../src/index.js";
 import { afterEach, expect, spyOn, test, mock } from "bun:test";
 import {
   ExternalPublicationError,
+  cloudReviewDigest,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
   type ExternalPublicationOptions,
@@ -1547,6 +1548,7 @@ async function privateUploadFixture(
     version: "original-inbox",
     formats: ["security.findings.v1"],
     recoverUpload: false,
+    sourceCheckpoint: undefined as string | undefined,
   };
   const uploads: { id: string; bytes: string }[] = [];
   const jobs: unknown[] = [];
@@ -1554,9 +1556,18 @@ async function privateUploadFixture(
   const deps = {
     ...f.deps,
     fetch: async (url: string, init: RequestInit) => {
-      const { pathname } = new URL(url);
-      if (pathname.endsWith("/finding-imports/context"))
-        return privateInboxContext(inbox.version, inbox.formats);
+      const { pathname, searchParams } = new URL(url);
+      if (pathname.endsWith("/finding-imports/context")) {
+        const exactSource =
+          searchParams.get("provider") === provider &&
+          searchParams.get("source_key") === settings.sourceKey;
+        return privateInboxContext(
+          inbox.version,
+          inbox.formats,
+          true,
+          exactSource ? inbox.sourceCheckpoint : undefined,
+        );
+      }
       if (pathname.includes("/finding-imports/file-requests/")) {
         const prior = uploads.find((upload) =>
           pathname.endsWith("/" + upload.id),
@@ -3792,6 +3803,189 @@ test("a Continuum private upload keeps every structured signal and reports confl
   expect(uploads).toHaveLength(1);
   expect(jobs).toHaveLength(1);
 });
+
+test("Continuum reimports use the reviewed source revision, including after a lost response", async () => {
+  const report = {
+    ...continuumIssueExport(),
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const { f, inbox, jobs, uploads, prepareFile } = await privateUploadFixture(
+    report,
+    "continuum",
+    continuumRepository,
+  );
+  inbox.sourceCheckpoint = "prior";
+  const prior = await prepareFile();
+  inbox.sourceCheckpoint = "first";
+  const original = await prepareFile();
+  await expect(prior.publish()).rejects.toThrow("source checkpoint changed");
+  expect(uploads).toHaveLength(0);
+  await expect(original.publish()).rejects.toThrow(
+    "Interrupted private upload",
+  );
+  inbox.sourceCheckpoint = "concurrent";
+  await expect(prior.publish()).rejects.toThrow(
+    "saved source checkpoint changed",
+  );
+
+  inbox.recoverUpload = true;
+  const resumed = await prepareFile();
+  expect(resumed.preview.privateImport?.sourceCheckpoint).toBe("first");
+  await resumed.publish();
+  expect(jobs).toMatchObject([{ source_checkpoint: "first" }]);
+
+  report.issues[0]!.issue.summary = "Updated issue evidence";
+  await writeFile(f.file, JSON.stringify(report));
+  const updated = await prepareFile();
+  expect(updated.preview.resumed).toBe(false);
+  expect(updated.preview.privateImport?.sourceCheckpoint).toBe("concurrent");
+  await expect(updated.publish()).rejects.toThrow("Interrupted private upload");
+  await (await prepareFile()).publish();
+  expect(jobs[1]).toMatchObject({ source_checkpoint: "concurrent" });
+});
+
+test("noninteractive Continuum approval requires the previewed revision and evidence", async () => {
+  const report = {
+    ...continuumIssueExport(),
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const { f, deps, inbox, jobs, uploads } = await privateUploadFixture(
+    report,
+    "continuum",
+    continuumRepository,
+  );
+  const command = [...f.command];
+  command[command.indexOf("--provider") + 1] = "continuum";
+  const invoke = (option: string) =>
+    createCliTest(main).runCli([...command, option], {
+      ...f.cliDeps,
+      cloudFetch: deps.fetch,
+    });
+  inbox.sourceCheckpoint = "first";
+  expect(await invoke("--yes")).toBe(2);
+  expect(await invoke("--dry-run")).toBe(0);
+  inbox.sourceCheckpoint = "newer";
+  expect(await invoke("--yes")).toBe(2);
+  expect(await invoke("--dry-run")).toBe(0);
+  const original = JSON.stringify(report);
+  report.issues[0]!.issue.summary = "Updated evidence";
+  const updated = JSON.stringify(report);
+  await writeFile(f.file, updated);
+  expect(await invoke("--yes")).toBe(2);
+  expect(uploads).toHaveLength(0);
+
+  expect(await invoke("--dry-run")).toBe(0);
+  expect(await invoke("--yes")).toBe(2); // Lost upload response.
+  expect(uploads).toHaveLength(1);
+  inbox.sourceCheckpoint = "later";
+
+  // Previewing the saved submission supersedes another dry run at this path.
+  await writeFile(f.file, original);
+  expect(await invoke("--dry-run")).toBe(0);
+  await writeFile(f.file, updated);
+  expect(await invoke("--dry-run")).toBe(0);
+  await writeFile(f.file, original);
+  expect(await invoke("--yes")).toBe(2);
+  expect(uploads).toHaveLength(1);
+
+  await writeFile(f.file, updated);
+  inbox.recoverUpload = true;
+  expect(await invoke("--yes")).toBe(0);
+  expect(jobs).toMatchObject([{ source_checkpoint: "newer" }]);
+});
+
+test.each(["rejected", "partial", "ambiguous", "wrong checkpoint"])(
+  "recovers a Continuum upload after the %s job response",
+  async (outcome) => {
+    const { f, deps, settings, inbox, jobs } = await privateUploadFixture(
+      { ...continuumIssueExport(), sourceRepositoryUrl: continuumRepository },
+      "continuum",
+      continuumRepository,
+    );
+    const firstJob = "import_" + "c".repeat(32);
+    const prepare = () =>
+      prepareExternalPublication(f.file, settings, {
+        ...deps,
+        fetch: async (url, init) => {
+          if (url.endsWith("/finding-imports/jobs")) {
+            const job = JSON.parse(String(init.body));
+            if (inbox.sourceCheckpoint === "original") {
+              inbox.sourceCheckpoint = "changed";
+              if (outcome === "ambiguous")
+                return new Response(null, { status: 409 });
+              if (outcome === "wrong checkpoint")
+                return Response.json({
+                  ...privateJobReceipt(job, firstJob),
+                  source_checkpoint: "changed",
+                });
+              return outcome === "partial"
+                ? Response.json(
+                    privateJobReceipt(job, firstJob, "completed", 1, 1),
+                  )
+                : Response.json(
+                    { error: { code: "version_conflict" } },
+                    { status: 409 },
+                  );
+            }
+            if (outcome === "partial" && job.source_checkpoint === "changed") {
+              inbox.sourceCheckpoint = "newest";
+              return Response.json(
+                { error: { code: "version_conflict" } },
+                { status: 409 },
+              );
+            }
+          }
+          return deps.fetch(url, init);
+        },
+      });
+    inbox.sourceCheckpoint = "original";
+    await expect((await prepare()).publish()).rejects.toThrow(
+      "Interrupted private upload",
+    );
+    inbox.recoverUpload = true;
+    const original = (await prepare()).publish();
+    if (outcome === "ambiguous" || outcome === "wrong checkpoint") {
+      await expect(original).rejects.toThrow(
+        outcome === "ambiguous" ? "409" : "different private import",
+      );
+      const resumed = await prepare();
+      expect(resumed.preview.resumed).toBe(true);
+      await resumed.publish();
+      expect(jobs).toMatchObject([{ source_checkpoint: "original" }]);
+      return;
+    }
+    if (outcome === "partial") expect((await original).status).toBe("partial");
+    else await expect(original).rejects.toThrow("version_conflict");
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(false);
+    expect(retry.preview.privateImport?.retryOfJobId).toBe(
+      outcome === "partial" ? firstJob : undefined,
+    );
+    expect(retry.preview.privateImport?.sourceCheckpoint).toBe("changed");
+    await expect(retry.publish()).rejects.toThrow("Interrupted private upload");
+    const resumed = await prepare();
+    expect(resumed.preview.resumed).toBe(true);
+    expect(cloudReviewDigest(resumed.preview, f.root)).toBe(
+      cloudReviewDigest(retry.preview, f.root),
+    );
+    if (outcome === "partial") {
+      await expect(resumed.publish()).rejects.toThrow("version_conflict");
+      const fresh = await prepare();
+      expect(fresh.preview).toMatchObject({
+        resumed: false,
+        privateImport: { retryOfJobId: firstJob, sourceCheckpoint: "newest" },
+      });
+      await expect(fresh.publish()).rejects.toThrow(
+        "Interrupted private upload",
+      );
+      expect((await (await prepare()).publish()).status).toBe("complete");
+      expect(jobs).toMatchObject([{ source_checkpoint: "newest" }]);
+      return;
+    }
+    expect((await resumed.publish()).status).toBe("complete");
+    expect(jobs).toMatchObject([{ source_checkpoint: "changed" }]);
+  },
+);
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {
   const { f, input, prepare } = await inspectorPublicationFixture();
@@ -9088,10 +9282,12 @@ function privateInboxContext(
   context_version = "generation-a",
   formats = ["security.findings.v1"],
   canCreate = true,
+  source_checkpoint?: string,
 ) {
   return Response.json({
     object: "security.finding_import_context",
     context_version,
+    source_checkpoint,
     can_read: true,
     can_upload: canCreate,
     can_create_import_jobs: canCreate,

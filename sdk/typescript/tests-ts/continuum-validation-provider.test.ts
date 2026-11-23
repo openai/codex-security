@@ -5,6 +5,7 @@ import {
   requestBody,
 } from "./support/continuum-validation-fixtures.js";
 import { describe, expect, test } from "bun:test";
+import { assessPluginFindings } from "../src/plugin-validation.js";
 import {
   ContinuumValidationProvider,
   findingToOcsf,
@@ -683,6 +684,52 @@ describe("Continuum validation provider", () => {
     });
     expect((await p.validate(finding, context)).unavailable).toBeUndefined();
     expect(elapsed).toBe(1000);
+  });
+
+  test("only retries the pending receipt alongside permanent local input errors", async () => {
+    const aws = fakeAws();
+    let polls = 0;
+    const p = provider(async (op, args, signal) => {
+      if (op === "get-code-finding" && ++polls === 1)
+        throw new Error("read interrupted");
+      return aws.launcher(op, args, signal);
+    });
+    const inputs = [
+      { occurrenceId: "no_location" },
+      { ...finding, occurrenceId: "oversize", summary: "x".repeat(65_537) },
+      finding,
+    ];
+    const batches: unknown[] = [];
+    const resolve = () => ({
+      name: p.name,
+      version: p.version,
+      validate: p.validate.bind(p),
+      validateBatch: (items: Parameters<typeof p.validateBatch>[0]) => {
+        batches.push(items);
+        return p.validateBatch(items, context);
+      },
+    });
+    const config = { provider: "continuum" };
+    const first = await assessPluginFindings(config, inputs, context, resolve);
+    expect(first.retry).not.toBeNull();
+    const next = await assessPluginFindings(
+      config,
+      inputs,
+      context,
+      resolve,
+      first.retry!,
+    );
+    expect(batches).toEqual([inputs, [finding]]);
+    expect(next.status).toBe("incomplete");
+    expect(next.retry).toBeNull();
+    for (const item of next.records.items.slice(0, 2)) {
+      expect(item.invalidInput).toBe(true);
+      expect(item.terminalStatus).toBeUndefined();
+      expect(item.unavailable).toContain("No upload attempted");
+    }
+    expect(aws.calls.filter((op) => op === "create-code-finding")).toHaveLength(
+      1,
+    );
   });
 
   test("maps sink-first code findings", () => {
