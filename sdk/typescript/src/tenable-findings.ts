@@ -8,12 +8,15 @@ import type {
 } from "./external-findings.js";
 import {
   repositoryUrlKey,
+  type ExternalImportTarget,
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import {
+  appendFinding,
   readScannerJson,
   repositoryFilePath,
   scannerSeverity,
+  text,
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
@@ -60,8 +63,12 @@ function findingLocations(rawPath?: string, rawLine?: number | string) {
   return [{ path, line }];
 }
 
-function assertRepository(claim: unknown, expected: string) {
-  const url = declaredScannerRepositoryUrl(claim, "Tenable", "local");
+function assertRepository(
+  claim: unknown,
+  expected: string,
+  target: ExternalImportTarget,
+) {
+  const url = declaredScannerRepositoryUrl(claim, "Tenable", target);
   if (repositoryUrlKey(url) !== repositoryUrlKey(expected))
     throw new CodexSecurityError(
       "Tenable repository URL does not match --source-repository-url.",
@@ -71,24 +78,37 @@ function assertRepository(claim: unknown, expected: string) {
 
 /** Verify retained identities when importing a normalized selection through the SDK. */
 export function tenableSourceRepository(
-  input: ExternalFindings,
+  input: Pick<ExternalFindings, "findings" | "report">,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
+  target: ExternalImportTarget = "local",
 ): ExternalSourceRepository {
-  const url = declaredScannerRepositoryUrl(declared, "Tenable", "local");
-  const asset = asRecord(input.report?.["asset"]);
+  const first =
+    target === "cloud" ? input.findings[0]?.evidence.source_data : undefined;
+  const header = input.report ?? first;
+  const asset = asRecord(header?.["asset"]);
   if (
-    input.report?.["format"] !== tenableReportFormat ||
+    header?.["format"] !== tenableReportFormat ||
     asset?.["asset_class"] !== "CODE_REPOSITORY" ||
-    !nonblank.safeParse(asset["asset_id"]).success
+    !(target === "cloud" ? assetId : nonblank).safeParse(asset["asset_id"])
+      .success
   )
     throw new CodexSecurityError(
       "Tenable imports require a report for one code repository asset.",
     );
-  assertRepository(input.report["repositoryUrl"], url);
-  for (const ref of references) assertRepository(ref.url, url);
+  const url = declaredScannerRepositoryUrl(
+    declared ??
+      (target === "cloud"
+        ? (input.report?.["repositoryUrl"] ?? first?.["repository_url"])
+        : undefined),
+    "Tenable",
+    target,
+  );
+  if (input.report)
+    assertRepository(input.report["repositoryUrl"], url, target);
+  for (const ref of references) assertRepository(ref.url, url, target);
   for (const { source_finding_id, evidence } of input.findings) {
-    validateExternalEvidence(evidence, "local");
+    validateExternalEvidence(evidence, target);
     const data = evidence.source_data;
     const rowAsset = asRecord(data?.["asset"]);
     const finding = asRecord(data?.["finding"]);
@@ -102,9 +122,9 @@ export function tenableSourceRepository(
       throw new CodexSecurityError(
         "Tenable findings must retain their native finding ID and one code repository asset.",
       );
-    assertRepository(data["repository_url"], url);
+    assertRepository(data["repository_url"], url, target);
     if (evidence.details?.repository?.url !== undefined)
-      assertRepository(evidence.details.repository.url, url);
+      assertRepository(evidence.details.repository.url, url, target);
   }
   const { hostname } = new URL(url);
   return {
@@ -120,20 +140,27 @@ export function tenableSourceRepository(
 export async function readTenableFindings(
   path: string,
   sourceRepositoryUrl: string,
+  target: ExternalImportTarget = "local",
 ): Promise<ExternalFindings> {
   const declared = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Tenable",
-    "local",
+    target,
   );
   const {
     asset,
     repository_url,
     findings: rows,
   } = selection.parse(await readScannerJson(path));
-  const repository = assertRepository(repository_url, declared);
+  const repository = assertRepository(repository_url, declared, target);
   const ids = new Set<string>();
-  const findings = rows.map((finding) => {
+  const result: ExternalFindings = {
+    read: rows.length,
+    report: { format: tenableReportFormat, repositoryUrl: repository, asset },
+    findings: [],
+    excluded: [],
+  };
+  for (const [index, finding] of rows.entries()) {
     if (finding.asset_id !== asset.asset_id)
       throw new Error(
         "Every Tenable finding must belong to the selected Code Repository asset.",
@@ -142,19 +169,19 @@ export async function readTenableFindings(
       throw new Error(`Duplicate Tenable finding ID: ${finding.finding_id}`);
     ids.add(finding.finding_id);
     const severity = finding.severity.trim().toLowerCase();
-    return {
-      source_finding_id: finding.finding_id,
-      evidence: validateExternalEvidence(
+    const locations = findingLocations(
+      finding.code_file_path,
+      finding.code_line_number,
+    );
+    const evidence = () =>
+      validateExternalEvidence(
         {
           title: finding.finding_name,
           severity: scannerSeverity(
             severity === "info" ? "informational" : severity,
           ),
-          description: finding.description,
-          locations: findingLocations(
-            finding.code_file_path,
-            finding.code_line_number,
-          ),
+          description: text(finding.description),
+          locations,
           source_data: {
             format: tenableReportFormat,
             repository_url,
@@ -162,14 +189,15 @@ export async function readTenableFindings(
             finding,
           },
         },
-        "local",
-      ),
-    };
-  });
-  return {
-    read: rows.length,
-    report: { format: tenableReportFormat, repositoryUrl: repository, asset },
-    findings,
-    excluded: [],
-  };
+        target,
+      );
+    if (target === "cloud")
+      appendFinding(result, index + 1, finding.finding_id, evidence);
+    else
+      result.findings.push({
+        source_finding_id: finding.finding_id,
+        evidence: evidence(),
+      });
+  }
+  return result;
 }

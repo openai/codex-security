@@ -960,11 +960,7 @@ export function distinctSourceRepositories(
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
   options: NormalizedLocalImportOptions &
-    (
-      | { provider: "tenable" }
-      | { provider: "crowdstrike" }
-      | { provider: Provider }
-    ),
+    ({ provider: "crowdstrike" } | { provider: Provider }),
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
@@ -990,6 +986,7 @@ export async function prepareLocalImport(
     "local",
     options.provider,
   );
+  const providerNames = { tenable: "Tenable", ...LOCAL_ONLY_PROVIDERS };
   for (const [provider, format] of [
     ["tenable", tenableReportFormat],
     ["crowdstrike", crowdstrikeReportFormat],
@@ -1002,7 +999,7 @@ export async function prepareLocalImport(
         ))
     )
       throw new CodexSecurityError(
-        `Retained ${LOCAL_ONLY_PROVIDERS[provider]} evidence requires the ${provider} provider.`,
+        `Retained ${providerNames[provider]} evidence requires the ${provider} provider.`,
       );
   checkTrivyReportProvider(options.provider, current.report);
   let dependabotSource: string | undefined;
@@ -1030,7 +1027,7 @@ export async function prepareLocalImport(
   // Neither report records the checkout, so check the operator's URL against its remotes.
   const requireFetchRemote = async (
     source: ExternalSourceRepository,
-    provider: keyof typeof LOCAL_ONLY_PROVIDERS,
+    provider: keyof typeof providerNames,
   ) => {
     const remotes = await hostedCheckoutRemotes(
       context.repository,
@@ -1040,7 +1037,7 @@ export async function prepareLocalImport(
     );
     if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
       throw new CodexSecurityError(
-        `${LOCAL_ONLY_PROVIDERS[provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
+        `${providerNames[provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
       );
   };
   if (options.provider === "tenable") {

@@ -391,7 +391,8 @@
             "continuum",
             "checkmarx",
             "trivy",
-            "armorcode"
+            "armorcode",
+            "tenable"
           ],
           "title": "Provider",
           "type": "string"

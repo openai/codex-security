@@ -40,7 +40,6 @@ import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
 /** Readers whose findings Cloud does not accept, with their display names. */
 export const LOCAL_ONLY_PROVIDERS = {
-  tenable: "Tenable",
   crowdstrike: "CrowdStrike",
 } as const;
 type LocalOnlyProvider = keyof typeof LOCAL_ONLY_PROVIDERS;
@@ -195,10 +194,8 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
   const url = options.sourceRepositoryUrl ?? "";
-  if (provider === "tenable") {
-    if (target === "cloud") requireCloudReader(options);
-    return { findings: await readTenableFindings(path, url) };
-  }
+  if (provider === "tenable")
+    return { findings: await readTenableFindings(path, url, target) };
   if (provider === "crowdstrike") {
     if (target === "cloud") requireCloudReader(options);
     return {

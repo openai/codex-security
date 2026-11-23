@@ -34,6 +34,8 @@ afterEach(async () => {
 });
 const repository = { id: "wiz-repository", name: "example/project" };
 const repositoryUrl = "https://github.com/example/project";
+const scannerImportMediaType =
+  "application/vnd.openai.codex-security.scanner-imports.v1+json";
 const inventory = {
   nodes: [
     {
@@ -588,12 +590,15 @@ async function cloudFixture(payload: unknown) {
   ): Promise<Response> => {
     calls.push(`${init.method} ${url}`);
     const target = new URL(url);
-    const json = (body: unknown) =>
+    const json = (body: unknown, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), {
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": scannerImportMediaType, ...headers },
       });
     if (target.pathname.endsWith("/repositories"))
-      return json({ data: [destination], has_more: false, next: null });
+      return json(
+        { data: [destination], has_more: false, next: null },
+        { "Codex-Security-Import-Scope": "personal" },
+      );
     if (target.pathname.endsWith("/source_reports")) {
       const report = reports.get(target.searchParams.get("source_finding_id")!);
       const summaries = report
@@ -1578,10 +1583,14 @@ test("Node resumes the same uncertain publication across locales and Unicode key
         credentials: async () => ({ access_token: "synthetic-token", account_id: "synthetic-account" }),
         fetch: async (url, options) => {
           if (options.method === "POST") throw new Error("Synthetic uncertain upload");
-          const body = new URL(url).pathname.endsWith("/repositories")
+          const repositories = new URL(url).pathname.endsWith("/repositories");
+          const body = repositories
             ? { data: [${JSON.stringify(f.destination)}], has_more: false, next: null }
             : { data: [], has_more: false, next: null };
-          return new Response(JSON.stringify(body));
+          return Response.json(body, { headers: {
+            "Content-Type": ${JSON.stringify(scannerImportMediaType)},
+            ...(repositories && { "Codex-Security-Import-Scope": "personal" }),
+          } });
         },
       },
     );
