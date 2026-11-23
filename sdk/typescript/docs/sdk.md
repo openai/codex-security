@@ -193,6 +193,7 @@ is no exclusions. Requested exclusions are recorded in `result.manifest.scan.sco
 | `knowledgeBasePaths`                        | Supporting text, PDF, DOCX files, or directories.                              |
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
+| `validationProvider`                        | Host-side provider configuration; pass it to `validate()` after `run()`.       |
 | `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
 | `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
@@ -215,6 +216,55 @@ model call, including when `maxCostUsd` is set. Missing hints abstain and invali
 hints produce per-finding errors. Working-tree and directory snapshots are
 unsupported. Explicit owner-only analysis remains available through `suggestOwners`
 and `suggest-owners`, sharing the same evidence validation and report code.
+
+### Use a validation provider
+
+`run()` accepts `validationProvider` configuration but does not invoke it. SDK
+callers validate sealed findings explicitly with `validate()`, which accepts
+that configuration or a `ValidationProvider` implementation:
+
+```ts
+const validationProvider = {
+  provider: "continuum",
+  continuum: { environment_id: "example" },
+};
+const result = await security.run("/path/to/repository", {
+  validationProvider,
+});
+for (const finding of result.findings.findings) {
+  const assessment = await security.validate({
+    repositoryPath: "/path/to/repository",
+    finding,
+    validationProvider,
+  });
+  console.log(assessment.report, assessment.record);
+}
+```
+
+`validate()` returns the assessment; it does not save supplemental report files.
+The CLI and plugin completion workflows save those files automatically. See
+[validation providers](../../../docs/validation-providers.md) for selection,
+outputs, and requirements. Omit the provider to keep source-only validation.
+
+Public types are `ValidationProviderSettings`, `ValidationProvider`,
+`ValidationProviderContext`, `ValidationProviderAssessment`,
+`ValidationProvenance`, `ValidationItemRecord`, `ValidationBasis`,
+`ValidationResultScope`, and `ValidationClaimMatch`. Continuum records distinguish
+finding and issue verdicts with `resultScope`. Both retain Codex severity.
+`issueFindingCount` describes membership and `providerSeverity` is the
+issue's severity. A member verdict alone cannot establish that the exact
+flaw was reproduced. `claimMatch` stays `unknown`. The `FINDING` reason
+basis indicates a statement from the submitted finding.
+
+The built-in `ContinuumValidationProvider` constructor accepts
+`ContinuumValidationOptions`. Provider authors implement `validate()` and
+optionally `validateBatch()`. External registry discovery is unsupported.
+
+Continuum returns `record.terminalStatus` alongside `record.verdict` when AWS
+supplies a run status. Check `disposition` before using a result to prioritize
+a finding. Failed and inconclusive runs are deferred. For discarded findings,
+read `record.statusMessage` for the reason. `provenance.validatedAt` and
+`record.freshness.validatedAt` are optional.
 
 ### Scan a diff
 

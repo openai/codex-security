@@ -961,6 +961,59 @@ findings or the `--fail-on-severity` decision. Validation failures exit with
 cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
 configured scan cost limit), `--dry-run`, or `--mock`.
 
+#### Host-side validation providers
+
+`scan.validation.provider` selects an optional host-side provider for the
+post-seal follow-up. Select the project file with `-c FILE` or
+`CODEX_SECURITY_PROJECT_CONFIG`. A bare `--validate` uses that selection;
+`--validate=NAME` overrides the name, retaining the project-file options.
+Without a provider, the existing Codex validator is unchanged. This setting
+does not change the inference provider selected with `--provider`.
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: example
+      aws_region: us-east-1
+      wait_minutes: 45
+```
+
+```sh
+codex-security scan . --validate -c codex-security.yaml
+```
+
+Continuum receives titles, summaries, identifiers, severities, CWEs and code
+locations. New uploads require the original checkout and scan snapshot.
+
+In Codex CLI, explicitly select the same project file when requesting a plugin
+scan. Standard, diff and Deep Scan completion runs the configured provider on
+the MCP host after sealing, and includes its supplemental report and paths in
+the existing completion result. No provider means no additional work.
+
+AWS Continuum is the first built-in adapter. It submits reported code findings
+before waiting in parallel under one deadline. Per-item rejections and timeouts
+remain visible without failing the completed scan. The existing trusted AWS
+launcher uses an optional `aws_profile` or the ordinary credential chain.
+
+Provider reports add conclusions-only `validation.json` beside `validation.md`,
+with matching suffixes on repeated runs and `validation.recordsPath` in CLI JSON.
+The versioned document shows each verdict's scope, the issue URL, evidence
+freshness and any issue severity. Only an explicit result for the submitted
+finding is labeled as its verdict. Issue evidence cannot establish that a
+specific finding or fix was validated. Codex severity stays unchanged.
+Continuum reports `terminalStatus` separately from its exploitability verdict.
+Failed or inconclusive runs and discarded findings omit
+`freshness.validatedAt`. A discard can include a `statusMessage`.
+When Continuum defers an assessment, `scan --validate --format json` reports
+`validation.status` as `incomplete`. The sealed findings still determine
+`--fail-on-severity`. Continuum verifies that its only code source matches
+a Git remote of the scanned repository root. Evidence freshness describes its age and
+leaves the deployed revision unverified.
+See [validation providers](../../../docs/validation-providers.md)
+for configuration, permissions and limits.
+
 ### Understand scan scope and follow-up work
 
 A completed scan means the requested workflow finished. It does not mean every

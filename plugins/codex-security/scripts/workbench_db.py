@@ -113,6 +113,7 @@ from workbench_setup import (
     require_scope,
     require_target,
     resolve_git_commit,
+    validation_selection,
 )
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
@@ -672,7 +673,9 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 args.mode,
                 user_context_argument(args),
                 *scan_diff_identity(diff_target or None),
-                json.dumps(inspected["deepScanConfig"]) if "deepScanConfig" in inspected else None,
+                json.dumps(inspected["deepScanConfig"])
+                if "deepScanConfig" in inspected
+                else getattr(args, "validation_project_json", None),
                 timestamp,
                 workspace["id"],
             ),
@@ -848,6 +851,15 @@ def _start_prompt_driven_scan(
     thread_id = optional_text(args.thread_id, maximum=512)
     if thread_id is None:
         raise SystemExit("thread-id is required.")
+    join_only = getattr(args, "join_only", False)
+    if join_only:
+        # A fresh selection needs its configuration before we hash the checkout.
+        target_path = str(require_target(args.target_path))
+        if not connection.execute(
+            "SELECT 1 FROM scans WHERE target_path = ? AND status = 'running' LIMIT 1",
+            (target_path,),
+        ).fetchone():
+            return {"newScanTarget": target_path}
     inspected = inspect_setup_values(
         args.target_path,
         args.scope,
@@ -950,6 +962,9 @@ def _start_prompt_driven_scan(
                     **scan_context(connection, existing["id"], model_thread_id=thread_id),
                     "startDisposition": "joined",
                 }
+            if join_only:
+                connection.rollback()
+                return {"newScanTarget": target_path}
             create_private_directory(target_root, scan_output=True)
             workspace_id = str(uuid.uuid4())
             scan_id = str(uuid.uuid4())
@@ -961,8 +976,9 @@ def _start_prompt_driven_scan(
                 INSERT INTO workspaces (
                     id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
                     default_mode, user_context, diff_target_kind, diff_base_revision,
-                    diff_head_revision, diff_content_digest, submitted, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    diff_head_revision, diff_content_digest, submitted, created_at, updated_at,
+                    deep_scan_config_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 """,
                 (
                     workspace_id,
@@ -977,6 +993,7 @@ def _start_prompt_driven_scan(
                     *diff_identity,
                     timestamp,
                     timestamp,
+                    getattr(args, "validation_project_json", None),
                 ),
             )
             workspace = require_workspace(connection, workspace_id)
@@ -2586,11 +2603,6 @@ def workspace_state(
         "mode": workspace["default_mode"],
         "scope": workspace["default_scope"],
         "setup": {"submitted": bool(workspace["submitted"])},
-        **(
-            {"deepScanConfig": json.loads(workspace["deep_scan_config_json"])}
-            if workspace["deep_scan_config_json"] is not None
-            else {}
-        ),
         "setupValidation": {"error": None, "valid": bool(workspace["submitted"])},
         "targetPath": workspace["target_path"],
         "targetSummary": workspace["target_summary"],
@@ -2598,6 +2610,11 @@ def workspace_state(
         "updatedAt": workspace["updated_at"],
         "userContext": workspace["user_context"],
     }
+    if workspace["deep_scan_config_json"] is not None:
+        snapshot = json.loads(workspace["deep_scan_config_json"])
+        if workspace["default_mode"] == "deep":
+            result["deepScanConfig"] = snapshot
+        result.update(validation_selection(snapshot))
     selected_scan_id = result_scan_id or workspace["active_scan_id"]
     if selected_scan_id:
         if result_scan is None:
@@ -2876,6 +2893,7 @@ def scan_result(
         ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
+        "sealManifestDigest": scan["seal_manifest_digest"],
         "severityCounts": severity_counts,
         "handoffClaimedAt": scan["handoff_claimed_at"],
         "handoffClaimToken": scan["handoff_claim_token"],
@@ -3495,6 +3513,12 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = finding_workflow(connection, json.load(sys.stdin), now())
         else:
             raise SystemExit(f"Unknown command: {args.command}")
+        if args.command in {"start-scan", "start-prompt-only-scan", "start-headless-standard-scan"}:
+            workspace = result.get("workspace", result)
+            if "validationProvider" in workspace and workspace["mode"] != "deep":
+                stored = require_workspace(connection, workspace["id"])
+                snapshot = json.loads(stored["deep_scan_config_json"])
+                result["validationProviderConfiguration"] = snapshot["validation"]
     print(json.dumps(result, allow_nan=False, sort_keys=True))
 
 
