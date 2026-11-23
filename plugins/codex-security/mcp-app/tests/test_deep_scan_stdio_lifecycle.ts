@@ -15,6 +15,7 @@ import { execFile, fork } from "node:child_process";
 import { once } from "node:events";
 import { text } from "node:stream/consumers";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -183,7 +184,15 @@ service_tier = "ultrafast"
   );
   await writePythonWrapper(`${pythonWrapperPath}.mjs`);
   await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
-  await buildServer(serverBundlePath, { target: "node20" });
+  await buildServer(serverBundlePath, {
+    target: "node20",
+    alias: {
+      "#validation-runtime": path.resolve(
+        mcpAppRoot,
+        "../../../sdk/typescript/src/plugin-validation.ts",
+      ),
+    },
+  });
 
   const environment = {
     ...process.env,
@@ -1239,9 +1248,18 @@ async function testDetachedTargetReplay(
   targetPath: string,
 ) {
   const threadId = "detached-headless-owner";
+  const projectConfigPath = path.join(
+    path.dirname(targetPath),
+    "provider.yaml",
+  );
+  // The fixture returns no findings, so validation never contacts AWS.
+  await writeFile(
+    projectConfigPath,
+    "scan: {validation: {provider: continuum, continuum: {environment_id: synthetic}}}\n",
+  );
   const request = toolCall(
     "start_codex_security_deep_scan",
-    { targetPath },
+    { targetPath, projectConfigPath },
     threadId,
   );
   let server = startServer(serverBundlePath, environment);
@@ -1256,6 +1274,10 @@ async function testDetachedTargetReplay(
     }, "the detached target request to finalize");
     assert.equal(server.response(2)?.result?.structuredContent, undefined);
     const { scanDir } = await getDeepScan({ environment, scanId, threadId });
+    await waitFor(
+      () => existsSync(path.join(scanDir, "validation.json")),
+      "the detached coordinator to finish supplemental validation before rejoin",
+    );
     const report = await readFile(path.join(scanDir, "report.md"), "utf8");
     const launches = await readLogLines(environment.FAKE_CODEX_START_LOG!);
     await server.stop();
