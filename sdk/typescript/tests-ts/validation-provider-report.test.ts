@@ -1,148 +1,86 @@
 import { expect, test } from "bun:test";
-import {
-  validationReport,
-  validationText,
-} from "../src/validation-provider-report.js";
-import type { ValidationProviderAssessment } from "../src/validation-provider.js";
+import { validationSummary } from "../src/validation-provider-report.js";
+import type {
+  ValidationItemRecord,
+  ValidationProviderAssessment,
+} from "../src/validation-provider.js";
 
-const assessment = (id: string): ValidationProviderAssessment => ({
-  disposition: "reportable",
-  report: "unused",
-  provenance: {
-    provider: "continuum",
-    providerVersion: "1",
-    validatedAt: "2026-01-01T00:00:00Z",
-  },
-  record: {
-    itemId: id,
-    provider: "continuum",
-    state: "validated",
-    codexSeverity: "high",
-    reasons: [],
-    issue: {
-      id: "issue-1",
-      url: "https://example.com/issues/issue-1",
-      title: "Missing ownership check",
-      severity: "critical",
+function assessment(
+  itemId: string,
+  fields: Partial<ValidationItemRecord> = {},
+): ValidationProviderAssessment {
+  return {
+    disposition: "reportable",
+    provenance: { provider: "continuum", providerVersion: "1" },
+    report: "Individual report for " + itemId,
+    record: {
+      itemId,
+      provider: "continuum",
+      resultScope: "issue",
+      findingId: "aws-" + itemId,
+      issueId: "issue",
+      issueArn:
+        "arn:aws:continuum:region:123456789012:environments/env/code-issues/issue",
+      validationArtifactId: "validation",
+      scoringArtifactId: "score",
+      severityBefore: "high",
+      severityAfter: "high",
+      providerSeverity: "low",
+      claimMatch: "unknown",
       verdict: "EXPLOITABLE",
-      findingCount: 2,
-      reachableFromAttacker: true,
-      reachabilityBasis: "GRAPH",
-      reachabilityReason: "The route accepts requests from untrusted callers.",
-      checkedBy: "executed proof",
-      validatedAt: "2026-01-01T00:00:00Z",
-      validationBeforeSubmission: true,
+      reasons: [
+        {
+          basis: "GRAPH",
+          reason:
+            "Basis: GRAPH — query_network_reachability returned EXPOSED via arn:aws:elasticloadbalancing:region:123456789012:loadbalancer/app/demo-app/opaque-id",
+        },
+      ],
+      freshness: {
+        stale: false,
+        reasons: [],
+        evidenceCreatedAt: "2026-11-13T00:00:00Z",
+        scoredAt: "2026-11-13T00:01:00Z",
+      },
+      ...fields,
     },
-  },
+  };
+}
+
+test("groups identical issue conclusions without inferring reachability or changing records", () => {
+  const items = [assessment("first"), assessment("second")];
+  const before = structuredClone(items);
+  const summary = validationSummary(items);
+  expect(summary).toContain("Items first, second");
+  expect(summary).toContain("Issue reachability: unknown.");
+  expect(summary).toContain("found public access through demo-app");
+  expect(summary).not.toContain("opaque-id");
+  expect(summary).not.toContain("\n");
+  expect(items).toEqual(before);
 });
-test("groups two occurrences under one issue with the headline first", () => {
-  const result = validationReport(
-    ["first", "second"].map((id, index) => ({
-      id,
-      title: "Ownership check is missing",
-      summary: "Another user's record is returned.",
-      locations: [{ path: "src/route.ts", startLine: index + 10 }],
-    })),
-    [assessment("first"), assessment("second")],
-  );
-  expect(result.report.match(/^## /gmu)).toHaveLength(1);
-  expect(result.report).toStartWith(
-    "## Ownership check is missing\n\n**Continuum: exploitable, Critical, reachable from an attacker.** Codex rated these occurrences High.",
-  );
-  expect(result.report).toContain("src/route.ts:10");
-  expect(result.report).toContain("src/route.ts:11");
-  expect(result.report.match(/\*\*Scope:\*\*/gu)).toHaveLength(1);
-  expect(result.report).toContain(
-    "before this submission; Continuum had already validated the issue",
-  );
-  expect(result.summary.split("\n")).toHaveLength(1);
-  expect(result.items).toHaveLength(2);
-});
-test.each(["validatedAt", "scoredAt"] as const)(
-  "grouped headline and body use the freshest issue %s regardless of occurrence order",
-  (timestamp) => {
-    const older = assessment("first");
-    older.record!.issue = {
-      ...older.record!.issue!,
-      severity: "low",
-      verdict: "NOT_EXPLOITABLE",
-      title: "Older result",
-      reachableFromAttacker: false,
-    };
-    older.record!.findingResult = { verdict: "NOT_EXPLOITABLE" };
-    const newer = assessment("second");
-    newer.record!.issue![timestamp] = "2026-01-02T00:00:00Z";
-    newer.record!.issue!.title = "Newer result";
-    for (const items of [
-      [older, newer],
-      [newer, older],
-    ]) {
-      const result = validationReport([{}, {}], items);
-      expect(result.summary).toContain("Continuum: exploitable, Critical");
-      expect(result.report).toContain("Continuum: exploitable, Critical");
-      expect(result.report).toContain("What Continuum found:** Newer result");
-      expect(result.report).not.toContain(
-        "What Continuum found:** Older result",
-      );
-      expect(result.report).toContain("For this finding specifically (first)");
-      // JSON retains dated observations, not a fabricated per-finding reassessment.
-      expect(result.items).toEqual(items.map((item) => item.record!));
-    }
+
+test.each([
+  { issueArn: "another" },
+  { resultScope: "finding" },
+  { verdict: "NOT_EXPLOITABLE" },
+  { validationArtifactId: "other-proof" },
+  { scoringArtifactId: "other-score" },
+  { freshness: { stale: true, reasons: [] } },
+  { providerSeverity: "critical" },
+] satisfies Partial<ValidationItemRecord>[])(
+  "keeps differing evidence or conclusions separate",
+  (fields) => {
+    const summary = validationSummary([
+      assessment("a"),
+      assessment("b", fields),
+    ]);
+    expect(summary.split("\n")).toHaveLength(2);
   },
 );
 
-test("a named negative finding result remains visible beside an exploitable issue", () => {
-  const item = assessment("first");
-  item.record!.findingResult = { verdict: "NOT_EXPLOITABLE" };
-  const result = validationReport([{ title: "Ownership check" }], [item]);
-  expect(result.report).toContain("Continuum: exploitable");
-  expect(result.report).toContain(
-    "For this finding specifically (first):** Continuum returned not exploitable",
-  );
-});
-test("shortens prose at boundaries without splitting a URL or ARN", () => {
-  expect(
-    validationText("One sentence. Another long sentence follows here.", 28),
-  ).toBe("One sentence…");
-  expect(
-    validationText(
-      "See https://example.com/very/long/resource/name for details.",
-      25,
-    ),
-  ).toBe("See…");
-  expect(
-    validationText(
-      "Uses arn:aws:service:region:123456789012:resources/resource-name safely.",
-      80,
-    ),
-  ).toBe("Uses resource-name safely.");
-});
-test("an unavailable occurrence does not hide another occurrence's ready issue result", () => {
-  const waiting = assessment("first");
-  waiting.record!.state = "unavailable";
-  waiting.record!.unavailable = "A read failed.";
-  const result = validationReport([{}, {}], [waiting, assessment("second")]);
-  expect(result.summary).toContain("Continuum: exploitable, Critical");
-  expect(result.report).toContain(
-    "Occurrence first:** Continuum is unavailable",
-  );
-});
-
-test("resource names and public graph reasons are readable without deriving reachability", () => {
-  expect(
-    validationText(
-      "query_network_reachability on the pod returned EXPOSED via arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/demo-app/opaque-id",
-    ),
-  ).toBe(
-    "A network reachability check on the pod found public access through demo-app",
-  );
-});
-
-test("unknown reachability is not inferred from the reason", () => {
-  const item = assessment("first");
-  delete item.record!.issue!.reachableFromAttacker;
-  item.record!.issue!.reachabilityReason = "NOT_EXPOSED cannot be established.";
-  expect(validationReport([{}], [item]).summary).toContain(
-    "reachability unknown",
-  );
+test("escapes terminal controls in summary rows", () => {
+  const summary = validationSummary([
+    assessment("id\x1b[2J", { statusMessage: "\r\nforged" }),
+  ]);
+  expect(summary).toContain("id\\u001b[2J");
+  expect(summary).toContain("\\u000d\\u000aforged");
 });

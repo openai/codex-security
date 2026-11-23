@@ -104,7 +104,7 @@ test("unknown configured provider fails explicitly without network access", () =
 });
 
 test.each(["--validate", "--validate=true", "--validate=continuum"])(
-  "%s preserves the repository positional and writes typed per-item JSON next to Markdown",
+  "%s writes the available records and reports incomplete validation for a mixed batch",
   async (flag) => {
     const root = await temporaryDirectory("provider-cli-");
     const repository = join(root, "repo"),
@@ -112,15 +112,25 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
     const record = {
       itemId: "fake-item",
       provider: "continuum",
-      state: "validated" as const,
-      codexSeverity: "high",
+      verdict: "EXPLOITABLE",
+      severityBefore: "high",
+      severityAfter: "high",
+      providerSeverity: "critical",
       reasons: [{ basis: "GRAPH" as const, reason: "Fake exposed deployment" }],
-      issue: {
-        id: "issue-1",
-        url: "https://example.invalid/issue",
-        severity: "critical",
-        verdict: "EXPLOITABLE",
-      },
+      claimMatch: "unknown" as const,
+      issueUrl: "https://example.invalid/issue",
+      freshness: { stale: false, reasons: [] },
+    };
+    const failed = {
+      itemId: "fake-failed",
+      provider: "continuum",
+      verdict: "UNCERTAIN",
+      terminalStatus: "FAILED",
+      severityBefore: "medium",
+      severityAfter: "medium",
+      reasons: [],
+      claimMatch: "unknown" as const,
+      freshness: { stale: false, reasons: [] },
     };
     const batch = spyOn(
       ContinuumValidationProvider.prototype,
@@ -136,6 +146,12 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
         },
         record,
       },
+      {
+        disposition: "deferred",
+        report: "Validation failed",
+        provenance: { provider: "continuum", providerVersion: "1" },
+        record: failed,
+      },
     ]);
     try {
       await mkdir(repository);
@@ -146,7 +162,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
         config,
         `scan:\n  validation:\n    provider: ${flag === "--validate=continuum" ? "fake-unknown" : "continuum"}\n    continuum:\n      environment_id: example\n`,
       );
-      const base = fakeResult(["high"]);
+      const base = fakeResult(["high", "medium"]);
       const result = new ScanResult({
         manifest: base.manifest,
         findings: base.findings,
@@ -167,79 +183,24 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       expect(batch).toHaveBeenCalledTimes(1);
       expect(batch.mock.calls[0]?.[1]).toMatchObject({
         repositoryPath: repository,
+        checkSubmissionTarget: expect.any(Function),
       });
       expect(
         JSON.parse(await readFile(join(scanDir, "validation.json"), "utf8")),
-      ).toEqual({ schemaVersion: 2, items: [record] });
+      ).toEqual({ schemaVersion: 1, items: [record, failed] });
       expect(await readFile(join(scanDir, "validation.md"), "utf8")).toContain(
-        "Continuum: exploitable, Critical",
+        "Fake supplemental report",
       );
-      expect(JSON.parse(cli.stdout.text()).validation.recordsPath).toBe(
-        join(scanDir, "validation.json"),
-      );
+      expect(JSON.parse(cli.stdout.text()).validation).toMatchObject({
+        status: "incomplete",
+        recordsPath: join(scanDir, "validation.json"),
+      });
     } finally {
       batch.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   },
 );
-
-test("escapes model-authored provider headlines before terminal progress", async () => {
-  const root = await temporaryDirectory("provider-terminal-");
-  const batch = spyOn(ContinuumValidationProvider.prototype, "validateBatch");
-  try {
-    const scanDir = join(root, "scan");
-    await mkdir(scanDir);
-    const config = join(root, "security.json");
-    await writeFile(
-      config,
-      JSON.stringify({ scan: { validation: configured } }),
-    );
-    const base = fakeResult(["high"]);
-    const title = "Synthetic\u001b[2J\u001b]52;c;ZmFrZQ==\u0007 title";
-    batch.mockResolvedValue([
-      {
-        disposition: "reportable",
-        report: "Synthetic result",
-        provenance: {
-          provider: "continuum",
-          providerVersion: "1",
-          validatedAt: "2026-01-01",
-        },
-      },
-    ]);
-    const cli = createCliTest(main);
-    expect(
-      await cli.runCli(
-        ["scan", "--validate", ".", "-c", config, "--headless"],
-        dependencies({
-          currentDirectory: root,
-          result: new ScanResult({
-            manifest: base.manifest,
-            findings: {
-              ...base.findings,
-              findings: [{ ...base.findings.findings[0]!, title }],
-            },
-            review: base.review,
-            mode: base.mode,
-            scanDir,
-            threadId: base.threadId,
-            turnResult: base.turnResult,
-          }),
-        }),
-      ),
-      cli.stderr.text(),
-    ).toBe(0);
-    expect(cli.stderr.text()).toContain(
-      "Synthetic\\u001b[2J\\u001b]52;c;ZmFrZQ==\\u0007 title: Synthetic result",
-    );
-    expect(cli.stderr.text()).not.toContain("\u001b[2J");
-    expect(cli.stderr.text()).not.toContain("\u001b]52;");
-  } finally {
-    batch.mockRestore();
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test.each(["--validate", "--validate=false"])(
   "no configured provider preserves boolean flag behavior for %s",

@@ -1,3 +1,9 @@
+import {
+  continuumTestRepository,
+  registeredSource,
+  creation,
+  requestBody,
+} from "./support/continuum-validation-fixtures.js";
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
@@ -12,21 +18,33 @@ const recorded = JSON.parse(
     "utf8",
   ),
 );
-const finding: Record<string, unknown> & { severity: { level: string } } = {
+const context = continuumTestRepository();
+
+const finding: Record<string, unknown> & {
+  severity: { level: string };
+  occurrenceId: string;
+} = {
   ...(Object.values(recorded.findings)[0] as Record<string, unknown>),
   severity: { level: "high" },
-  occurrenceId: "recorded-shape-item",
+  occurrenceId: recorded.findings[recorded.issue.findingIds[0]].sourceFindingId,
 };
 
-/** Only the AWS transport is faked. Admission is synthetic, responses have recorded shape. */
+/** Admission and the external producer identity are synthetic. Issue evidence has the recorded shape. */
 function transport(fixture = structuredClone(recorded)): ContinuumAwsLauncher {
   return async (operation, args) => {
+    const setup = registeredSource(operation, recorded.environmentId);
+    if (setup) return setup;
     if (operation === "create-code-finding")
-      return {
-        findingId: (Object.values(fixture.findings)[0] as any).findingId,
-      };
+      return creation(
+        (Object.values(fixture.findings)[0] as any).findingId,
+        recorded.environmentId,
+      );
     if (operation === "get-code-finding")
-      return { ...(Object.values(fixture.findings)[0] as object) };
+      return {
+        ...(Object.values(fixture.findings)[0] as object),
+        source: "Codex Security",
+        sourceFindingId: finding["occurrenceId"],
+      };
     if (operation === "get-code-issue") return structuredClone(fixture.issue);
     if (operation === "list-code-issue-artifacts")
       return structuredClone(fixture.artifactLists[args.at(-1)!]);
@@ -40,12 +58,18 @@ function provider(launcher = transport()) {
   return new ContinuumValidationProvider({
     environmentId: recorded.environmentId,
     launcher,
+    waitMinutes: 1,
     now: () => new Date(Date.parse("2026-11-06T15:20:00Z") + elapsed),
     delay: async (ms) => {
       elapsed += ms;
     },
   });
 }
+function validation(fixture: typeof recorded) {
+  const { artifactId } = fixture.artifactLists.VALIDATION_EVIDENCE.items[0];
+  return fixture.artifacts[artifactId].body.validationEvidence;
+}
+
 function reachability(fixture: typeof recorded) {
   const evidence = Object.values(fixture.artifacts).find(
     (a: any) => a.artifactType === "EVIDENCE",
@@ -55,24 +79,81 @@ function reachability(fixture: typeof recorded) {
   ).preconditions.reachableFromAttacker;
 }
 
+// The recorded issue has no finding-specific result. Supply independent
+// synthetic AWS PerFindingResult data to exercise the positive path.
+const step = {
+  step: 1,
+  claim: "PRIVATE_CLAIM: Evaluating supplied template text permits injection.",
+  source: "src/templates.py:23",
+};
+const httpProof = {
+  httpMethod: "POST",
+  targetUrl: "https://example.invalid/PRIVATE_PATH",
+  payload: "PRIVATE_PAYLOAD",
+  responseStatus: 200,
+  responseSnippet: "PRIVATE_RESPONSE",
+  effect: "BEHAVIOR_CHANGED",
+};
+
+function withObservation(
+  proof: Record<string, unknown> = {
+    reasoningChain: [step],
+    exploitArtifact: httpProof,
+  },
+) {
+  const fixture = structuredClone(recorded);
+  validation(fixture).perFindingResults = [
+    {
+      findingId: finding["findingId"],
+      exploitable: "EXPLOITABLE",
+      ...structuredClone(proof),
+    },
+  ];
+  return fixture;
+}
+
+const proofId = recorded.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+const scoreId = recorded.artifactLists.EVIDENCE.items[0].artifactId;
+const summary = "Template injection in src/templates.py:23.";
+
+function scoringFixture() {
+  const fake = withObservation();
+  const proof = fake.artifacts[proofId];
+  const score = fake.artifacts[scoreId];
+  const signal = score.body.prevalidationSignals.signals[0];
+  return {
+    fake,
+    issue: fake.issue,
+    proof,
+    score,
+    signal,
+    exploitability: signal.exploitability,
+  };
+}
+
 describe("recorded shape, anonymised replay", () => {
-  test("projects the real nested GRAPH exposure and critical severity through the adapter", async () => {
-    const result = await provider().validate(finding, {
-      repositoryPath: "/not-used",
-    });
+  test("keeps the recorded singleton's verdict, GRAPH exposure and severity on the issue", async () => {
+    const result = await provider().validate(finding, context);
     expect(result.report).toContain(
-      "Continuum: exploitable, Critical, reachable from an attacker.",
+      "Issue reachable from attacker (basis GRAPH)",
+    );
+    expect(result.report).toContain("likelihood HIGH × impact HIGH");
+    expect(result.report).toContain(
+      "Deployment source identity is not compared",
     );
     expect(result.record).toMatchObject({
-      state: "validated",
-      codexSeverity: "high",
-      issue: {
-        verdict: "EXPLOITABLE",
-        severity: "critical",
-        validationBeforeSubmission: false,
-      },
+      verdict: "EXPLOITABLE",
+      terminalStatus: "COMPLETED",
+      severityBefore: "high",
+      severityAfter: "high",
+      providerSeverity: "critical",
+      resultScope: "issue",
+      issueFindingCount: 1,
+      claimMatch: "unknown",
+      reachableFromAttacker: true,
+      freshness: { stale: false },
     });
-    expect(result.record?.issue?.url).toContain(recorded.issueId);
+    expect(result.record?.issueUrl).toContain(recorded.issueId);
     expect(result.record?.reasons).toContainEqual(
       expect.objectContaining({
         basis: "GRAPH",
@@ -96,22 +177,279 @@ describe("recorded shape, anonymised replay", () => {
 });
 
 describe("explicitly fake outcome variations", () => {
-  test("lowers supplemental severity for a NOT_EXPOSED graph answer", async () => {
+  test.each([
+    ["FAILED", "UNCERTAIN", true],
+    ["NO_SOURCE_AVAILABLE", "UNCERTAIN", true],
+    ["PARTIAL", "EXPLOITABLE", false],
+    ["COMPLETED", "UNCERTAIN", false],
+    ["COMPLETED", undefined, false],
+  ] as const)(
+    "keeps %s distinct from verdict %s and retains the finding's severity",
+    async (terminalStatus, exploitable, failed) => {
+      const fake = withObservation();
+      validation(fake).terminalStatus = terminalStatus;
+      validation(fake).exploitable = exploitable;
+      validation(fake).perFindingResults[0].exploitable = exploitable;
+      fake.issue.severity = "LOW";
+      reachability(fake).value = false;
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.disposition).toBe("deferred");
+      expect(result.record).not.toHaveProperty("proofObservation");
+      expect(result.record).toMatchObject({
+        terminalStatus,
+        verdict: exploitable ?? "UNKNOWN",
+        severityBefore: "high",
+        severityAfter: "high",
+        providerSeverity: "low",
+        claimMatch: "unknown",
+      });
+      expect(result.record?.freshness.validatedAt).toBeUndefined();
+      expect(result.provenance.validatedAt).toBeUndefined();
+      expect(Boolean(result.unavailable)).toBe(failed);
+      expect(result.record?.unavailable).toBe(result.unavailable);
+      expect(result.report).toContain(terminalStatus);
+      expect(result.report).not.toMatch(/validated at|lower priority/iu);
+    },
+  );
+
+  test("returns a failed bundle immediately with its selected verdict even without scoring", async () => {
     const fake = structuredClone(recorded);
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    fake.artifacts[id].body.validationEvidence = {
+      terminalStatus: "FAILED",
+      exploitable: "UNCERTAIN",
+      perFindingResults: [
+        { findingId: "another-finding", exploitable: "NOT_EXPLOITABLE" },
+        {
+          findingId: finding["findingId"],
+          exploitable: "EXPLOITABLE",
+          reasoningChain: [step],
+          exploitArtifact: httpProof,
+        },
+      ],
+    };
+    fake.artifactLists.EVIDENCE.items = [];
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.unavailable).toContain("FAILED");
+    expect(result.report).toContain(id);
+    expect(result.report).toContain(fake.artifacts[id].createdAt);
+    expect(result.record).toMatchObject({
+      terminalStatus: "FAILED",
+      verdict: "EXPLOITABLE",
+      resultScope: "finding",
+      severityAfter: "high",
+      claimMatch: "unknown",
+    });
+    expect(result.record?.freshness.validatedAt).toBeUndefined();
+  });
+
+  test("does not synthesize a timestamp when the validation artifact omits it", async () => {
+    const fake = structuredClone(recorded);
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    delete fake.artifacts[id].createdAt;
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record?.verdict).toBe("EXPLOITABLE");
+    expect(result.provenance.validatedAt).toBeUndefined();
+    expect(result.record?.freshness.validatedAt).toBeUndefined();
+    expect(result.report).not.toContain("current at submission");
+  });
+
+  test("keeps issue exposure separate from finding severity", async () => {
+    const fake = withObservation();
     fake.issue.severity = "LOW";
     Object.assign(reachability(fake), {
       value: false,
       basis: "GRAPH",
       reason: "NOT_EXPOSED: the observed deployment has no public ingress.",
     });
-    const result = await provider(transport(fake)).validate(finding, {
-      repositoryPath: "/not-used",
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record).toMatchObject({
+      resultScope: "finding",
+      providerSeverity: "low",
+      severityAfter: "high",
     });
-    expect(result.record?.issue?.severity).toBe("low");
-    expect(result.record?.codexSeverity).toBe("high");
-    expect(result.report).toContain("not reachable from an attacker");
+    expect(result.report).toContain(
+      "not reachable from attacker (basis GRAPH)",
+    );
+    expect(result.report).not.toContain("lower priority");
     expect(finding.severity.level).toBe("high");
   });
+
+  test.each(["issueId", "issueArn"])(
+    "applies linked scoring signals identified by %s",
+    async (key) => {
+      const fake = withObservation();
+      const score =
+        fake.artifacts[fake.artifactLists.EVIDENCE.items[0].artifactId];
+      for (const signal of score.body.prevalidationSignals.signals)
+        signal.subjectRef = fake.issue[key];
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        validationArtifactId:
+          fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId,
+        scoringArtifactId: fake.artifactLists.EVIDENCE.items[0].artifactId,
+        reachableFromAttacker: true,
+        resultScope: "finding",
+        freshness: { scoredAt: score.createdAt },
+        severityAfter: "high",
+        claimMatch: "unknown",
+      });
+      expect(JSON.stringify(result)).not.toContain("PRIVATE_");
+    },
+  );
+
+  test.each([
+    "related caption",
+    "issue-level proof",
+    "conflicting entries",
+    "missing verdict",
+  ])("an issue's %s leaves the finding match unknown", async (scenario) => {
+    const fake = structuredClone(recorded);
+    if (scenario === "related caption") {
+      fake.issue.name = "Resource exhaustion and denial";
+      fake.issue.synopsis = "Resource exhaustion in src/templates.py";
+    } else if (scenario === "issue-level proof") {
+      validation(fake).executedProof = {
+        code: {
+          proofCode: [{ content: "Template injection in src/templates.py:23" }],
+        },
+        observedEffect: "BEHAVIOR_CHANGED",
+      };
+      validation(fake).reasoningChain = [step];
+      validation(fake).exploitArtifact = httpProof;
+    } else if (scenario === "conflicting entries") {
+      validation(fake).perFindingResults = [
+        { findingId: finding["findingId"], exploitable: "NOT_EXPLOITABLE" },
+        { findingId: finding["findingId"], exploitable: "UNCERTAIN" },
+      ];
+    } else {
+      validation(fake).perFindingResults = [
+        { findingId: finding["findingId"] },
+      ];
+    }
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record).toMatchObject({
+      verdict: "EXPLOITABLE",
+      resultScope: "issue",
+      claimMatch: "unknown",
+      severityAfter: "high",
+      providerSeverity: "critical",
+    });
+    expect(result.record).not.toHaveProperty("proofObservation");
+    expect(result.report).not.toContain("findings false-positive");
+  });
+
+  test("reports issue scoring for a conclusive legacy verdict without run status", async () => {
+    const fake = withObservation();
+    const id = fake.artifactLists.VALIDATION_EVIDENCE.items[0].artifactId;
+    delete fake.artifacts[id].body.validationEvidence.terminalStatus;
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.disposition).toBe("reportable");
+    expect(result.record).toMatchObject({
+      verdict: "EXPLOITABLE",
+      claimMatch: "unknown",
+      severityAfter: "high",
+    });
+    expect(result.record?.terminalStatus).toBeUndefined();
+    expect(result.record).not.toHaveProperty("proofObservation");
+  });
+
+  test("omits ambiguous issue scoring without delaying the verdict", async () => {
+    const { fake, score } = scoringFixture();
+    fake.artifactLists.EVIDENCE.items.push({
+      artifactId: "another-score",
+      createdAt: score.createdAt,
+    });
+    let polls = 0;
+    const result = await provider((op, args) => {
+      if (op === "get-code-finding") polls++;
+      return transport(fake)(op, args);
+    }).validate(finding, context);
+    expect(polls).toBe(1);
+    expect(result.disposition).toBe("reportable");
+    expect(result.record?.verdict).toBe("EXPLOITABLE");
+    expect(result.record?.scoringArtifactId).toBeUndefined();
+    expect(result.record?.reachableFromAttacker).toBeUndefined();
+  });
+
+  test.each([1, 2])(
+    "keeps a bundled proof separate with %i current members",
+    async (members) => {
+      const fake = structuredClone(recorded);
+      if (members === 2) fake.issue.findingIds.push("sibling");
+      const validation = fake.artifacts[proofId].body.validationEvidence;
+      validation.executedProof = {
+        observedEffect: "BEHAVIOR_CHANGED",
+        code: { proofCode: [{ content: summary }] },
+      };
+      validation.perFindingResults = [
+        { findingId: "sibling", exploitable: "EXPLOITABLE" },
+        {
+          findingId: finding["findingId"],
+          exploitable: "EXPLOITABLE",
+          exploitArtifact: {
+            effect: "DATA_LEAKED",
+            payload: summary,
+            targetUrl: "https://example.test/",
+            httpMethod: "POST",
+          },
+        },
+      ];
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        resultScope: "finding",
+        verdict: "EXPLOITABLE",
+        claimMatch: "unknown",
+        severityAfter: "high",
+      });
+      expect(result.record).not.toHaveProperty("proofObservation");
+      expect(result.record?.reachableFromAttacker).toBe(true);
+      expect(result.report).toContain("Issue reachable");
+    },
+  );
+
+  test.each([
+    ["proof", "createdAt", "2026-11-01T00:00:00Z"],
+    ["proof", "createdAt", "invalid"],
+    ["score", "createdAt", undefined],
+    ["score", "createdAt", "2026-11-06T16:40:18.536989+01:00"],
+    ["issue", "updatedAt", "2026-11-06T10:42:53.583051-05:00"],
+    ["issue", "updatedAt", recorded.artifacts[proofId].createdAt],
+    ["exploitability", "sourceValidationArtifactId", "other-proof"],
+    ["exploitability", "sourceValidationArtifactId", undefined],
+    ["exploitability", "verdict", "NOT_EXPLOITABLE"],
+    ["signal", "subjectRef", "other-issue"],
+    ["signal", "subjectRef", undefined],
+    [
+      "signal",
+      "subjectRef",
+      recorded.issue.issueArn.replace(
+        recorded.environmentId,
+        "other-environment",
+      ),
+    ],
+  ] as const)(
+    "rejects scoring when %s.%s is %s",
+    async (record, field, value) => {
+      const fixture = scoringFixture();
+      fixture[record][field] = value;
+      reachability(fixture.fake).reason = "PRIVATE_PRECONDITION";
+      fixture.issue.severityReasoning = "PRIVATE_FACTORS";
+      const result = await provider(transport(fixture.fake)).validate(
+        finding,
+        context,
+      );
+      expect(result.record).toMatchObject({
+        severityAfter: "high",
+        providerSeverity: "critical",
+      });
+      expect(result.record).not.toHaveProperty("proofObservation");
+      expect(result.record?.reachableFromAttacker).toBeUndefined();
+      expect(JSON.stringify(result)).not.toMatch(
+        /PRIVATE_PRECONDITION|PRIVATE_FACTORS|likelihood HIGH × impact HIGH/,
+      );
+    },
+  );
 
   test.each([
     "No complete deployment reachability answer was returned.",
@@ -124,22 +462,37 @@ describe("explicitly fake outcome variations", () => {
       basis: "INFERRED",
       reason,
     });
-    const result = await provider(transport(fake)).validate(finding, {
-      repositoryPath: "/not-used",
-    });
-    expect(result.report).toContain("reachability unknown");
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.report).toContain("exposure unknown (basis INFERRED)");
     expect(result.report).not.toContain("lower priority");
   });
 
-  test("reports on-target not exploitable without changing the sealed finding", async () => {
+  test("distinguishes a member verdict from the issue verdict referenced by the scorer", async () => {
     const fake = structuredClone(recorded);
-    for (const a of Object.values(fake.artifacts) as any[])
-      if (a.artifactType === "VALIDATION_EVIDENCE")
-        a.body.validationEvidence.exploitable = "NOT_EXPLOITABLE";
-    const result = await provider(transport(fake)).validate(finding, {
-      repositoryPath: "/not-used",
-    });
-    expect(result.record?.issue?.verdict).toBe("NOT_EXPLOITABLE");
+    validation(fake).perFindingResults = [
+      {
+        findingId: finding["findingId"],
+        exploitable: "NOT_EXPLOITABLE",
+        exploitArtifact: { ...httpProof, effect: "NO_EFFECT" },
+        reasoningChain: [
+          {
+            step: 1,
+            claim: "Template injection was blocked by the sandbox.",
+            source: "src/templates.py:23",
+          },
+        ],
+      },
+    ];
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record?.verdict).toBe("NOT_EXPLOITABLE");
+    expect(result.record?.resultScope).toBe("finding");
+    expect(result.record?.claimMatch).toBe("unknown");
+    expect(result.record?.issueVerdict).toBe("EXPLOITABLE");
+    expect(result.record?.scoringArtifactId).toBe(scoreId);
+    expect(result.report).toContain("finding verdict: NOT_EXPLOITABLE");
+    expect(result.report).toContain("issue verdict: EXPLOITABLE");
+    expect(result.record?.severityAfter).toBe("high");
+    expect(result.record).not.toHaveProperty("proofObservation");
     expect(finding.severity.level).toBe("high");
   });
 
@@ -147,20 +500,24 @@ describe("explicitly fake outcome variations", () => {
     let milliseconds = Date.parse("2026-11-06T15:20:00Z");
     const p = new ContinuumValidationProvider({
       environmentId: recorded.environmentId,
-      waitMinutes: 0.001,
+      waitMinutes: 1,
       launcher: async (op, args, signal) => {
         if (op === "create-code-finding") {
-          const id = JSON.parse(args[1]!).ocsfDocument.finding_info.uid;
+          const id = JSON.parse(requestBody(args)).ocsfDocument.finding_info
+            .uid;
           if (id === "rejected") throw new Error("Fake submission rejected");
-          return {
-            findingId:
-              id === finding["occurrenceId"]
-                ? (Object.values(recorded.findings)[0] as any).findingId
-                : id,
-          };
+          return creation(
+            id === finding["occurrenceId"]
+              ? (Object.values(recorded.findings)[0] as any).findingId
+              : id,
+            recorded.environmentId,
+          );
         }
         if (op === "get-code-finding" && args.at(-1) === "waiting")
-          return { status: "SUBMITTED" };
+          return {
+            status: "SUBMITTED",
+            ...creation("waiting", recorded.environmentId),
+          };
         return transport()(op, args, signal);
       },
       now: () => new Date(milliseconds),
@@ -175,34 +532,83 @@ describe("explicitly fake outcome variations", () => {
         { ...finding, occurrenceId: "rejected" },
         { ...finding, occurrenceId: "waiting" },
       ],
-      { repositoryPath: "/not-used" },
+      context,
     );
-    expect(results[0]?.record?.issue?.verdict).toBe("EXPLOITABLE");
+    expect(results[0]?.record?.verdict).toBe("EXPLOITABLE");
     expect(results[1]?.record?.unavailable).toContain("rejected");
-    expect(results[2]?.record?.unavailable).toMatch(/waiting period/u);
+    expect(results[2]?.record?.unavailable).toMatch(/timed out|deadline/u);
     expect(results.map((r) => r.record?.itemId)).toEqual([
-      "recorded-shape-item",
+      finding["occurrenceId"],
       "rejected",
       "waiting",
     ]);
   });
-
-  test("waits for BOTH scorer and validation artifacts until the deadline", async () => {
-    let milliseconds = 0;
-    const p = new ContinuumValidationProvider({
-      environmentId: recorded.environmentId,
-      waitMinutes: 0.001,
-      launcher: async (op, args, signal) =>
-        op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE"
-          ? { items: [] }
-          : transport()(op, args, signal),
-      now: () => new Date(milliseconds),
-      delay: async (ms) => {
-        milliseconds += ms;
-      },
-    });
-    expect(
-      (await p.validate(finding, { repositoryPath: "/not-used" })).unavailable,
-    ).toContain("waiting period");
-  });
 });
+
+test.each(["EVIDENCE", "VALIDATION_EVIDENCE"])(
+  "rejects %s returned for another requested ID",
+  async (kind) => {
+    const fake = withObservation();
+    fake.artifacts[fake.artifactLists[kind].items[0].artifactId].artifactId =
+      "other";
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record?.verdict).toBe("UNAVAILABLE");
+    expect(result.record).not.toHaveProperty("proofObservation");
+  },
+);
+
+test("negated same-line evidence cannot authorize a regrade", async () => {
+  const fake = withObservation({
+    reasoningChain: [
+      {
+        ...step,
+        claim:
+          "Template injection is impossible because the template is static.",
+      },
+      {
+        ...step,
+        step: 2,
+        claim:
+          "The actual flaw is credential disclosure in the debug response.",
+      },
+    ],
+    exploitArtifact: { ...httpProof, effect: "DATA_LEAKED" },
+  });
+  const { record } = await provider(transport(fake)).validate(finding, context);
+  expect(record?.claimMatch).not.toStartWith("on_target");
+  expect(record?.severityAfter).toBe("high");
+  expect(record).not.toHaveProperty("proofObservation");
+});
+
+test.each(["FAILED", "PARTIAL", "COMPLETED"])(
+  "a newer %s issue run supersedes an earlier finding verdict",
+  async (terminalStatus) => {
+    const fake = withObservation();
+    const newer = {
+      ...fake.artifacts[proofId],
+      artifactId: "failed-newer",
+      createdAt: "2026-11-06T20:00:00Z",
+      body: {
+        validationEvidence: {
+          terminalStatus,
+          exploitable: "UNCERTAIN",
+        },
+      },
+    };
+    fake.artifacts[newer.artifactId] = newer;
+    fake.artifactLists.VALIDATION_EVIDENCE.items.unshift(newer);
+    fake.issue.updatedAt = "2026-11-06T20:01:00Z";
+    fake.issue.severity = "LOW";
+    const { record } = await provider(transport(fake)).validate(
+      finding,
+      context,
+    );
+    expect(record?.severityAfter).toBe("high");
+    expect(record?.terminalStatus).toBe(terminalStatus);
+    expect(record?.disposition).toBe("deferred");
+    expect(record?.resultScope).toBe("issue");
+    expect(record?.validationArtifactId).toBe(newer.artifactId);
+    expect(record?.scoringArtifactId).toBeUndefined();
+    expect(record).not.toHaveProperty("proofObservation");
+  },
+);

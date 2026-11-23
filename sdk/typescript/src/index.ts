@@ -45,6 +45,10 @@ export type {
   ProjectConfigInput,
   ProjectScope,
 } from "./project-config-schema.js";
+export type {
+  DependencyEndpointConfiguration,
+  DependencyRuntimeSelector,
+} from "./dependency-caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
 export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
@@ -103,10 +107,9 @@ export type {
   ValidationProviderContext,
   ValidationProvenance,
   ValidationItemRecord,
-  ValidationState,
-  ValidationReason,
-  ValidationIssueResult,
+  ValidationResultScope,
   ValidationBasis,
+  ValidationClaimMatch,
 } from "./validation-provider.js";
 export { ContinuumValidationProvider } from "./continuum-validation-provider.js";
 export type { ContinuumValidationOptions } from "./continuum-validation-provider.js";

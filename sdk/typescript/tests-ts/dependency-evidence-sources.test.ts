@@ -23,7 +23,10 @@ test("an investigator can cite only completed calls to its selected evidence too
     arguments: { service: "example" },
     result: { content: [{ type: "text", text: "Running revision 123" }] },
   };
-  const capture = createDependencyEvidenceCapture(servers);
+  const failures: unknown[] = [];
+  const capture = createDependencyEvidenceCapture(servers, (failed) =>
+    failures.push(failed),
+  );
   const record = (item: unknown) => capture({ type: "item.completed", item });
   const captured = record(call);
   expect(captured).toEqual({
@@ -41,10 +44,18 @@ test("an investigator can cite only completed calls to its selected evidence too
     { ...call, tool: "unlisted" },
     { ...call, tool: "retired" },
     { ...call, status: "failed" },
+    { ...call, status: "failed", server: "other" },
+    { ...call, status: "failed", tool: "retired" },
     { ...call, result: { ...call.result, isError: true } },
     { type: "command_execution", aggregated_output: JSON.stringify(call) },
   ])
     expect(record(item)).toBeUndefined();
+  const failed = {
+    server: call.server,
+    tool: call.tool,
+    arguments: call.arguments,
+  };
+  expect(failures).toEqual([failed, failed]);
 });
 
 test("selecting an unknown or disabled server gives a configuration error", () => {

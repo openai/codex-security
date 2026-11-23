@@ -323,8 +323,7 @@ jobs:
         uses: ./.github/actions/setup-tools
         with:
           cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
-      - name: Install dependencies
-        run: pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - *install-dependencies
       - name: Install ripgrep
         run: .github/scripts/install-ripgrep.sh
       - *download-package-for-this-commit
@@ -479,6 +478,12 @@ jobs:
         run: |
           node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
           ln -s ../../plugins/codex-security sdk/typescript/_bundled_plugin
+      - name: Test dependency reachability eval contracts
+        run: |
+          node --test evals/dependency-reachability/test-eval.mjs
+          node --experimental-strip-types --test evals/package-application-mapping/test_grade.mts
+          python3 -B -m unittest discover -s evals/dependency-reachability/upstream/fixtures/zip -p test_catalog.py
+          node evals/dependency-reachability/run.mjs contracts --cli sdk/typescript/bin/codex-security.mjs
       - name: Test Standard time-budget eval contracts
         run: node --experimental-strip-types --test evals/standard-time-budget/test_*.mts
       - name: Test workflow routing eval contracts

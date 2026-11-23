@@ -5,43 +5,61 @@ export interface ValidationProvenance {
   providerVersion: string;
   referenceId?: string;
   referenceUrl?: string;
-  validatedAt: string;
+  validatedAt?: string;
 }
 
 /** Known provenance categories, or a future category preserved as reported. */
 export type ValidationBasis =
   "GRAPH" | "CODE" | "FINDING" | "INFERRED" | (string & {});
-export type ValidationState =
-  "validated" | "declined" | "pending" | "unavailable";
-export interface ValidationReason {
-  basis: ValidationBasis;
-  reason: string;
-}
-export interface ValidationIssueResult {
-  id: string;
-  url: string;
-  title?: string;
-  severity?: string;
-  verdict?: string;
-  reachableFromAttacker?: boolean;
-  reachabilityBasis?: ValidationBasis;
-  reachabilityReason?: string;
-  findingCount?: number;
-  checkedBy?: "executed proof" | "source analysis" | "validation evidence";
-  validatedAt?: string;
-  validationBeforeSubmission?: boolean;
-  scoredAt?: string;
-  scoringBeforeSubmission?: boolean;
-}
-/** Conclusions only. Proof bodies, payloads and console output are not fields. */
+export type ValidationResultScope = "finding" | "issue";
+export type ValidationClaimMatch =
+  "on_target" | "on_target_escalated" | "different_flaw" | "unknown";
+
+/** Conclusions only. Proof bodies and console output are not report fields. */
 export interface ValidationItemRecord {
   itemId: string;
+  /** External identities for an accepted submission, including while validation is pending. */
+  findingId?: string;
+  findingArn?: string;
+  issueId?: string;
+  issueArn?: string;
+  validationArtifactId?: string;
+  scoringArtifactId?: string;
+  /** True when a completed validation is still waiting for a linked issue score. */
+  scoringPending?: boolean;
+  disposition?: ValidationProviderAssessment["disposition"];
+  submittedAt?: string;
   provider: string;
-  state: ValidationState;
-  codexSeverity: string;
-  issue?: ValidationIssueResult;
-  findingResult?: { verdict: string };
-  reasons: ValidationReason[];
+  verdict: string;
+  /** How the external validation run ended, independently of its verdict. */
+  terminalStatus?: string;
+  /** Provider explanation when it declined the submission. */
+  statusMessage?: string;
+  severityBefore: string;
+  severityAfter: string;
+  /** Issue-level severity, independent of the local finding's severity. */
+  providerSeverity?: string;
+  /** Overall verdict on the same validation artifact as an explicit member result. */
+  issueVerdict?: string;
+  /** Scope of the provider verdict. */
+  resultScope?: ValidationResultScope;
+  issueFindingCount?: number;
+  /** Structured attacker reachability from the provider's scoring evidence. */
+  reachableFromAttacker?: boolean;
+  /** Issue validation evidence existed before this finding was submitted. */
+  joinedValidatedIssue?: boolean;
+  reasons: Array<{ basis: ValidationBasis; reason: string }>;
+  claimMatch: ValidationClaimMatch;
+  issueUrl?: string;
+  freshness: {
+    /** Creation time of the returned validation artifact, including inconclusive results. */
+    evidenceCreatedAt?: string;
+    validatedAt?: string;
+    /** Creation time of the linked issue score, if available. */
+    scoredAt?: string;
+    stale: boolean;
+    reasons: string[];
+  };
   unavailable?: string;
 }
 
@@ -56,6 +74,8 @@ export interface ValidationProviderAssessment {
 export interface ValidationProviderContext {
   repositoryPath: string;
   signal?: AbortSignal;
+  /** Verify a saved scan's target before a new external submission. */
+  checkSubmissionTarget?: (signal?: AbortSignal) => Promise<void>;
   /** Use the hosting plugin's path protection instead of locating an SDK bundle. */
   resolveHostPaths?: (
     cwd: string,
@@ -85,6 +105,26 @@ export type ValidationProviderConfiguration = {
   [provider: string]: unknown;
 };
 
+/** Failed validation runs are terminal. A missing score or transport failure can resume. */
+export function retryableAssessment(
+  item: ValidationProviderAssessment,
+): boolean {
+  return Boolean(
+    item.record?.scoringPending ||
+    (item.unavailable && !item.record?.terminalStatus),
+  );
+}
+
+export function supplementalValidationStatus(
+  provider: ValidationProvider | undefined,
+  assessments: readonly ValidationProviderAssessment[] | undefined,
+): "complete" | "incomplete" {
+  return provider?.name === "continuum" &&
+    assessments?.some((item) => item.disposition === "deferred")
+    ? "incomplete"
+    : "complete";
+}
+
 export function unavailableAssessment(
   provider: Pick<ValidationProvider, "name" | "version">,
   reason: unknown,
@@ -99,7 +139,6 @@ export function unavailableAssessment(
     provenance: {
       provider: provider.name,
       providerVersion: provider.version,
-      validatedAt: new Date().toISOString(),
     },
     report: `Unavailable: ${message}`,
   };

@@ -1,210 +1,111 @@
+import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import type {
   ValidationItemRecord,
   ValidationProviderAssessment,
 } from "./validation-provider.js";
 
-/** Shorten narrative at a boundary; resource identifiers are shortened deliberately. */
-export function validationText(value: unknown, limit = 320): string {
-  let text =
-    typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
-  text = text.replace(/arn:[^\s)]+/gu, (arn) => {
-    const parts = arn.split("/");
-    return arn.includes(":loadbalancer/")
-      ? (parts.at(-2) ?? "load balancer")
-      : (parts.at(-1) ?? "AWS resource");
-  });
-  text = text
-    .replace(/\bquery_network_reachability\b/gu, "A network reachability check")
-    .replace(/returned EXPOSED via/gu, "found public access through")
+/** Shorten AWS resource names in narrative only. IDs and links remain intact. */
+export function resourceNames(reason: string): string {
+  return reason
+    .replace(/\barn:aws[\w-]*:[^\s),]+/gu, (arn) => {
+      const parts = arn.split("/");
+      const name =
+        arn.includes(":loadbalancer/") && parts.length >= 4
+          ? parts.at(-2)
+          : parts.at(-1);
+      return name || arn;
+    })
     .replaceAll("network://aws/internet", "the internet")
+    .replaceAll("query_network_reachability", "A network reachability check")
+    .replaceAll("returned EXPOSED via", "found public access through")
     .replaceAll(" -> ", " → ");
-  if (text.length <= limit) return text;
-  const tokens = text.split(" ");
-  let shortened = "";
-  for (const token of tokens) {
-    if ((shortened + " " + token).trim().length > limit) break;
-    shortened = (shortened + " " + token).trim();
-  }
-  const sentence = shortened.match(/^(.+[.!?])\s/u)?.[1];
-  return `${(sentence ?? (shortened || "Details omitted")).replace(/[.!?]$/u, "")}…`;
 }
 
-function severity(value?: string): string {
-  return value
-    ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase()
-    : "severity not returned";
-}
-function verdict(value?: string): string {
-  return value?.toLowerCase().replaceAll("_", " ") ?? "verdict not returned";
-}
-/** Keep each occurrence's observation, but present the newest completed issue snapshot. */
-function freshestIssueRecord(
-  records: readonly ValidationItemRecord[],
-): ValidationItemRecord {
-  const completed = records.filter((record) => record.state === "validated");
-  return completed.reduce((latest, record) => {
-    const timestamp = (item: ValidationItemRecord) =>
-      Math.max(
-        ...[item.issue?.validatedAt, item.issue?.scoredAt].map((value) => {
-          const parsed = Date.parse(value ?? "");
-          return Number.isNaN(parsed) ? 0 : parsed;
-        }),
+function itemConclusion(record: ValidationItemRecord, ids: string[]): string {
+  const verdict = record.terminalStatus
+    ? `${record.verdict} (validation run ${record.terminalStatus})`
+    : record.verdict;
+  const severity =
+    record.severityBefore === record.severityAfter
+      ? `Codex severity ${record.severityBefore} retained`
+      : `${record.severityBefore} → ${record.severityAfter}`;
+  const bases = [...new Set(record.reasons.map((reason) => reason.basis))];
+  const items =
+    ids.length === 1 ? `Item ${record.itemId}` : `Items ${ids.join(", ")}`;
+  const lines = [`${items}: ${severity}.`];
+  if (record.issueId) lines.push(`Issue ${record.issueId}.`);
+  if (record.issueFindingCount !== undefined)
+    lines.push(`Findings in issue: ${record.issueFindingCount}.`);
+  if (record.resultScope === "issue") {
+    lines.push(
+      `Issue-level verdict: ${verdict}; issue severity: ${record.providerSeverity ?? "not returned"}.`,
+      "Not individually validated.",
+    );
+  } else {
+    lines.push(`Verdict: ${verdict}.`);
+    if (record.issueVerdict)
+      lines.push(`Issue-level verdict: ${record.issueVerdict}.`);
+    if (record.providerSeverity)
+      lines.push(`Issue severity: ${record.providerSeverity}.`);
+    if (record.resultScope === "finding" && record.validationArtifactId)
+      lines.push(
+        "This provider verdict does not establish that the submitted flaw was reproduced.",
       );
-    return timestamp(record) >= timestamp(latest) ? record : latest;
-  }, completed[0] ?? records[0]!);
+  }
+  if (record.statusMessage) lines.push(record.statusMessage);
+  if (record.resultScope === "issue" || record.issueId) {
+    const exposure =
+      record.reachableFromAttacker === true
+        ? "reachable from attacker"
+        : record.reachableFromAttacker === false
+          ? "not reachable from attacker"
+          : "unknown";
+    lines.push(`Issue reachability: ${exposure}.`);
+    const context = record.reasons.find((reason) =>
+      reason.reason.startsWith("Basis:"),
+    );
+    if (context) lines.push(`Context: ${resourceNames(context.reason)}`);
+  }
+  if (record.joinedValidatedIssue)
+    lines.push("This finding joined an issue Continuum had already validated.");
+  if (bases.length) lines.push(`Reason bases: ${bases.join(", ")}.`);
+  if (record.freshness.stale) lines.push("Evidence predates this submission.");
+  if (record.unavailable) lines.push(record.unavailable);
+  return lines.join(" ");
 }
 
-export function validationHeadline(
-  records: readonly ValidationItemRecord[],
-): string {
-  const first = freshestIssueRecord(records);
-  const ratings = [
-    ...new Set(records.map((record) => severity(record.codexSeverity))),
-  ].join(" and ");
-  if (first.state === "declined")
-    return `Continuum declined this finding. Codex rated it ${ratings}.`;
-  if (first.state === "pending")
-    return `Continuum has not finished. Codex rated it ${ratings}.`;
-  if (first.state === "unavailable")
-    return `Continuum is unavailable. Codex rated it ${ratings}.`;
-  const issue = first.issue!;
-  const reachability =
-    issue.reachableFromAttacker === true
-      ? "reachable from an attacker"
-      : issue.reachableFromAttacker === false
-        ? "not reachable from an attacker"
-        : "reachability unknown";
-  return `Continuum: ${verdict(issue.verdict)}, ${severity(issue.severity)}, ${reachability}. Codex rated ${records.length === 1 ? "it" : "these occurrences"} ${ratings}.`;
-}
-function basis(value?: string): string {
-  return (
-    (
-      {
-        GRAPH: "from the deployment graph",
-        CODE: "from the code",
-        FINDING: "stated in the finding, not independently checked",
-        INFERRED: "inferred",
-      } as Record<string, string>
-    )[value ?? "INFERRED"] ?? "as reported by Continuum"
-  );
-}
-function date(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime())
-    ? "date not returned"
-    : parsed.toLocaleString("en-US", {
-        timeZone: "UTC",
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      }) + " UTC";
-}
-export function validationBody(
-  records: readonly ValidationItemRecord[],
-): string {
-  const first = freshestIssueRecord(records);
-  const issue = first.issue;
-  const headline = validationHeadline(records);
-  const split = headline.indexOf(" Codex");
-  const lines = [`**${headline.slice(0, split)}**${headline.slice(split)}`];
-  if (first.state !== "validated") {
-    lines.push(
-      `**Why:** ${validationText(first.unavailable ?? first.reasons[0]?.reason) || "No answer was returned."}`,
-    );
-  } else if (issue) {
-    lines.push(
-      `**What Continuum found:** ${validationText(issue.title) || "The issue has no title or synopsis."}`,
-    );
-    lines.push(
-      `**Why:** ${validationText(issue.reachabilityReason) || "No reachability reason was returned."} (${basis(issue.reachabilityBasis)} [${issue.reachabilityBasis ?? "INFERRED"}]).`,
-    );
-    lines.push(
-      `**How it was checked:** ${issue.checkedBy ?? "validation evidence"}.`,
-    );
-  }
-  if (issue) {
-    const count = issue.findingCount;
-    lines.push(
-      `**Scope:** This result is for the Continuum issue the ${records.length === 1 ? "finding was" : "findings were"} filed under, not individual finding validation.${count === undefined ? " The number of findings in the issue was not returned." : ` The issue holds ${count} ${count === 1 ? "finding" : "findings"}.`}`,
-    );
-    if (issue.validatedAt)
-      lines.push(
-        `**When:** ${date(issue.validatedAt)} — ${issue.validationBeforeSubmission ? "before this submission; Continuum had already validated the issue" : "after this submission"}.${issue.scoringBeforeSubmission ? ` Scoring was also written before this submission${issue.scoredAt ? ` (${date(issue.scoredAt)})` : ""}.` : ""}`,
-      );
-    lines.push(`**Issue:** ${issue.url}`);
-  }
-  for (const record of records) {
-    if (record !== first && record.state !== "validated")
-      lines.push(
-        `**Occurrence ${record.itemId}:** ${record.state === "pending" ? "Continuum has not finished" : "Continuum is unavailable"}. ${validationText(record.unavailable)}`,
-      );
-    if (record.findingResult)
-      lines.push(
-        `**For this finding specifically (${record.itemId}):** Continuum returned ${verdict(record.findingResult.verdict)}.`,
-      );
-  }
-  return lines.join("\n\n");
-}
-
-/** Both hosts use the same grouping and wording; no issue result is duplicated. */
-export function validationReport(
-  findings: readonly Record<string, unknown>[],
+/** Combine identical issue conclusions only. Preserve every detailed report and record. */
+export function validationSummary(
   assessments: readonly ValidationProviderAssessment[],
-): { report: string; summary: string; items: ValidationItemRecord[] } {
-  const groups = new Map<string, number[]>();
-  assessments.forEach((assessment, index) => {
+) {
+  const groups = new Map<
+    string | number,
+    { assessment: ValidationProviderAssessment; ids: string[] }
+  >();
+  for (const [index, assessment] of assessments.entries()) {
     const record = assessment.record;
-    const key = record?.issue
-      ? `${record.provider}:${record.issue.url}`
-      : `item:${index}`;
-    const indices = groups.get(key) ?? [];
-    indices.push(index);
-    groups.set(key, indices);
-  });
-  const sections: string[] = [];
-  const summaries: string[] = [];
-  for (const indices of groups.values()) {
-    const first = indices[0]!;
-    const finding = findings[first] ?? {};
-    const records = indices.flatMap((index) =>
-      assessments[index]?.record ? [assessments[index]!.record!] : [],
-    );
-    const title = validationText(finding["title"], 180) || "Submitted finding";
-    const body = records.length
-      ? validationBody(records)
-      : assessments[first]!.report;
-    const occurrences = indices.map((index) => {
-      const item = findings[index] ?? {};
-      const locations = Array.isArray(item["locations"])
-        ? item["locations"]
-        : [];
-      const evidence = Array.isArray(item["codeEvidence"])
-        ? item["codeEvidence"]
-        : [];
-      const paths = [
-        ...new Set(
-          [...locations, ...evidence].map((raw) => {
-            const row = raw as Record<string, unknown>;
-            return `${String(row["path"] ?? row["filePath"] ?? "location not returned")}${typeof row["startLine"] === "number" ? `:${row["startLine"]}${typeof row["endLine"] === "number" && row["endLine"] !== row["startLine"] ? `–${row["endLine"]}` : ""}` : ""}`;
-          }),
-        ),
-      ];
-      return `- ${String(item["occurrenceId"] ?? item["id"] ?? `occurrence ${index + 1}`)}: ${paths.join(", ") || validationText(item["location"]) || "location not returned"}${item["title"] !== finding["title"] ? ` — ${validationText(item["title"], 180)}` : ""}`;
-    });
-    sections.push(
-      `## ${title}\n\n${body}\n\n**Codex's finding:** ${validationText(finding["summary"], 500) || title}\n\n**${indices.length === 1 ? "Occurrence" : "Occurrences"}:**\n${occurrences.join("\n")}\n`,
-    );
-    summaries.push(
-      `${title}: ${records.length ? validationHeadline(records) : assessments[first]!.report}`,
-    );
+    let key: string | number = index;
+    if (
+      record?.provider === "continuum" &&
+      record.resultScope === "issue" &&
+      record.issueArn &&
+      record.validationArtifactId &&
+      record.freshness.evidenceCreatedAt &&
+      assessment.disposition === "reportable" &&
+      !assessment.unavailable
+    ) {
+      // Exclude only submission identity. In particular, evidence IDs,
+      // freshness, severity, reasons, and status must all agree.
+      const { itemId, findingId, findingArn, submittedAt, ...issue } = record;
+      key = JSON.stringify(issue);
+    }
+    const group = groups.get(key) ?? { assessment, ids: [] as string[] };
+    if (record) group.ids.push(record.itemId);
+    groups.set(key, group);
   }
-  return {
-    report: sections.join("\n---\n\n"),
-    summary: summaries.join("\n"),
-    items: assessments.flatMap((assessment) =>
-      assessment.record ? [assessment.record] : [],
-    ),
-  };
+  return Array.from(groups.values(), ({ assessment, ids }) =>
+    assessment.record
+      ? escapeTerminalText(itemConclusion(assessment.record, ids))
+      : escapeTerminalText(assessment.report, true),
+  ).join("\n");
 }
