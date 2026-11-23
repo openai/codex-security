@@ -246,8 +246,10 @@ the collector and the saved import use the destination issue. When a finding
 lists different issue IDs, each collected patch records the destination
 `issueArn`. Import excludes the finding if a patch has a different ARN or
 lacks one in such a capture. Publishing a locally stored finding to Cloud
-applies the same check. If a patch is ambiguous, recollect the finding using
-the command above and import the new capture before publishing.
+applies the same check. For normalized SDK input, a fresh Cloud publication
+rejects the selection if a retained patch fails this check. Recollect the
+finding using the command above before publishing. An interrupted normalized
+submission keeps its previously approved bytes when resumed.
 
 When AWS supplies `perFindingResults`, the collector looks for
 exactly one entry matching the selected `findingId` with a verdict of `EXPLOITABLE`,

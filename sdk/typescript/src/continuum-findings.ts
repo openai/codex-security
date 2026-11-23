@@ -250,7 +250,14 @@ export function readPatch(value: unknown) {
   };
 }
 
-export function findingPatchDestination(
+export function checkRetainedContinuumPatches(
+  data: ExternalFinding["evidence"]["source_data"],
+) {
+  if (isRecord(data?.["finding"]) && Array.isArray(data["patches"]))
+    findingPatchDestination(data["finding"], data["patches"]);
+}
+
+function findingPatchDestination(
   finding: Record<string, unknown>,
   patches: readonly unknown[],
 ) {
