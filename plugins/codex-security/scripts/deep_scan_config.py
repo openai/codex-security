@@ -130,14 +130,10 @@ def resolve_deep_scan_setup(
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
-    """Return an integer at least minimum, accepting integral floats and raising SystemExit for invalid counts."""
+    """Accept integral floats and require a count within the SDK's safe integer range."""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not minimum <= value <= MAX_SAFE_INTEGER
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         qualifier = (
             "a non-negative integer"
             if minimum == 0
@@ -146,6 +142,8 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
             else f"an integer of at least {minimum}"
         )
         raise SystemExit(f"{label} must be {qualifier}.")
+    if value > MAX_SAFE_INTEGER:
+        raise SystemExit(f"{label} must be no greater than {MAX_SAFE_INTEGER}.")
     return value
 
 

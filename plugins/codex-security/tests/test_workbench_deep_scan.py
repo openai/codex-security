@@ -1610,6 +1610,11 @@ def assert_rejected_config(tmp_path: Path, setting: str, value: str, requirement
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
 
 
+@pytest.mark.parametrize("count", (str(2**53), "1e30"))
+def test_unsafe_discovery_count_fails_before_scan_creation(tmp_path: Path, count: str) -> None:
+    assert_rejected_config(tmp_path, "max_discovery_runs", count, f"no greater than {2**53 - 1}")
+
+
 @pytest.mark.parametrize("invalid_threshold", ("0", "-1", "true", '"2"'))
 def test_invalid_discovery_error_threshold_fails_before_scan_creation(
     tmp_path: Path, invalid_threshold: str
