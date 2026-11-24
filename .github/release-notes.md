@@ -1,13 +1,16 @@
-<!-- release-version: 0.10.1 -->
+<!-- release-version: 0.11.0 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-- **Exclude paths from scans.** Run `cs scan . --exclude-path examples/` to exclude a directory from review in Standard, Deep, or diff scans. Repeat the flag for more paths, or set `scan.exclude_paths` in your project configuration. Paths are literal and relative to the repository. The scanner can still read excluded files for context and filters out findings whose locations all fall under excluded paths.
-- **Import scanner findings.** Use `cs import continuum` to collect AWS Continuum code issues with their supporting evidence. Attack-path analysis can use observations from the tested target when assessing reachability and severity. You can also import saved CrowdStrike Falcon Cloud Security IaC reports into your local workbench.
-- **Deep Scan.** When Codex blocks a worker request because of a misalignment policy violation, Deep Scan now stops and reports the refusal without retrying the request.
-- **Threat modeling.** When a route appears in a test or on a deleted line, the threat-modeling instructions now ask the scanner to verify that the application still serves it.
+Codex Security 0.11.0 adds two opt-in ways to investigate a finding. You can check whether a dependency advisory applies to your code or ask AWS Continuum to assess a code finding in a deployed environment.
+
+- **Dependency investigations.** Set `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` and run `cs exploitability check "$CVE_ID" --format html` from your checkout. You can also supply captured call stacks. The check asks an independent reviewer to verify the evidence. The report shows which advisory conditions are met and where the evidence is incomplete. [Experimental CLI guide](https://github.com/openai/codex-security/blob/npm-v0.11.0/sdk/typescript/docs/cli.md#experimental-dependency-investigations)
+- **AWS Continuum validation.** Select a trusted project file that configures Continuum. The CLI sends findings to AWS when you request validation. The packaged plugin submits them automatically after a Standard, Deep, or diff scan with that file. Check the destination first. Finding details can contain sensitive information. Local validation notes stay on the host by default. Codex severity and `--fail-on-severity` stay unchanged. [Choose what to send and resume a check](https://github.com/openai/codex-security/blob/npm-v0.11.0/docs/validation-providers.md)
+- **Patch and verify.** On the original host, `cs patch` and `cs verify-fix` can reuse current Continuum evidence. They distinguish issue-wide results from findings assessed individually and evaluate the fix independently. If a finding moves to another issue, rerun `cs validate --scan` with the original options to refresh it. Disputed verdicts and scores require newer evidence.
+- **Deep Scan on Windows.** Deep Scan retries a heartbeat or receipt update when another process briefly holds the file open. If the write fails, the previous file stays intact.
+- **Workbench.** Listing global findings no longer hangs when a legacy finding links scans across worktrees.
 
 <!-- release-section: highlights:end -->
 
@@ -15,6 +18,10 @@
 
 ## Upgrade notes
 
-If you used the bundled AWS Continuum helper `collect_continuum.py`, switch to `cs import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root /absolute/checkout --format json`. For environments with multiple Git repositories or an S3 source, supply `--repository-name` with the AWS source name. Existing saved finding exports and patch captures remain compatible. [Collect a finding with patches](https://github.com/openai/codex-security/blob/npm-v0.10.1/docs/scanner-imports/continuum.md#collect-a-finding-with-patches)
+The experimental CLI change requires no migration from 0.10.1. If a development build script called `cs exploitability run read-stacks`, switch to `cs exploitability run next --state "$STATE"` and read `workItem` and `receiptId` from its JSON output.
+
+If a saved Continuum assessment shows `outdated`, keep the original state directory and repeat plugin completion or rerun the saved CLI validation on the same host before using the assessment for remediation.
+
+Static verification asks Codex to skip running the code. If you also pass `--assess-patch-risk`, the separate risk assessment may run local tests. [Patch verification guide](https://github.com/openai/codex-security/blob/npm-v0.11.0/sdk/typescript/docs/cli.md#patch-existing-findings)
 
 <!-- release-section: upgrades:end -->
