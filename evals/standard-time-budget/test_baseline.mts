@@ -1,840 +1,253 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
-  BASELINE_SCHEMA_VERSION,
   compareBaselines,
   createReleaseBaseline,
   hashSnapshotMap,
   loadBaseline,
   validateReleaseBaseline,
-  type SavedExperiment,
 } from "./baseline.mts";
-import { hashText, type RunRecord, type Variant } from "./experiment.mts";
+import { hashText, type RunRecord } from "./experiment.mts";
 import { createFixture, type Fixture, type SourceCase } from "./fixtures.mts";
-import { gradeResult, type Result, type SourceLocation } from "./grade.mts";
+import { gradeResult, type Result } from "./grade.mts";
 
-const baselineScript = fileURLToPath(
-  new URL("./baseline.mts", import.meta.url),
-);
+const fixture = createFixture();
+const metadata = {
+  pair: 1,
+  variant: "baseline",
+  startedAt: "2026-10-01T00:00:00Z",
+  elapsedMs: 100,
+  advisoryBudgetMinutes: null,
+  promptSha256: null,
+  usage: null,
+} as const;
+const failed: RunRecord = {
+  ...metadata,
+  variant: "time-aware",
+  status: "failed",
+  error: "Failed in /synthetic/run-2",
+};
 
-function findingFor(
-  fixture: Fixture,
-  expected: SourceCase,
-  role = "root_control",
+function finding(
+  f: Fixture,
+  { id, path, line, cwes }: SourceCase,
 ): Result["findings"][number] {
   return {
-    title: expected.id,
-    taxonomy: { cwe: [expected.cwes[0]!] },
-    locations: [
-      { path: expected.path, startLine: expected.line, role },
-    ] as SourceLocation[],
+    title: id,
+    taxonomy: { cwe: [cwes[0]!] },
+    locations: [{ path, startLine: line, role: "root_control" }],
     codeEvidence: [
-      {
-        path: expected.path,
-        startLine: expected.line,
-        code: fixture.files[expected.path]!.split("\n")[expected.line - 1]!,
-      },
+      { path, startLine: line, code: f.files[path]!.split("\n")[line - 1]! },
     ],
   };
 }
-
-function makeSavedExperiment(
-  fixture: Fixture,
-  overrides: Partial<SavedExperiment> = {},
-): SavedExperiment {
-  const source = Object.fromEntries(
-    Object.entries(fixture.files).map(([path, content]) => [
-      path,
-      hashText(content),
-    ]),
-  );
+function completed(
+  f: Fixture,
+  found = f.positives,
+  extra: Result["findings"] = [],
+) {
   return {
-    model: "gpt-5.6-sol",
-    pairs: 1,
-    budgetMinutes: 5,
-    reasoningEffort: "xhigh",
-    evaluator: {
-      "fixtures.mts": hashText("fixtures-rev"),
-      "grade.mts": hashText("grade-rev"),
-    },
-    source,
-    plugin: { "SKILL.md": hashText("skill-rev") },
-    sdk: { "api.js": hashText("sdk-rev") },
-    packageVersions: {
-      "@openai/codex": "0.167.1",
-      "@openai/codex-sdk": "0.167.1",
-      "@openai/codex-security": "0.10.0",
-    },
-    codexExecutable: {
-      command: "/local/host/bin/codex",
-      files: [
-        { path: "/local/host/libexec/codex-native", sha256: hashText("bin") },
-      ],
-    },
-    ...overrides,
-  };
-}
-
-function completedRun(
-  fixture: Fixture,
-  pair: number,
-  variant: Variant,
-  matchedIds: string[],
-  options: {
-    extraFindings?: Result["findings"];
-    usage?: RunRecord["usage"];
-    elapsedMs?: number;
-  } = {},
-): RunRecord {
-  const positiveSet = new Set(matchedIds);
-  const findings: Result["findings"] = [
-    ...fixture.positives
-      .filter((entry) => positiveSet.has(entry.id))
-      .map((entry) => findingFor(fixture, entry)),
-    ...(options.extraFindings ?? []),
-  ];
-  return {
-    pair,
-    variant,
-    startedAt: "2026-10-01T00:00:00.000Z",
-    advisoryBudgetMinutes: variant === "time-aware" ? 5 : null,
-    promptSha256: hashText(`prompt-${pair}-${variant}`),
-    status: "completed",
-    elapsedMs: options.elapsedMs ?? 1200,
-    usage:
-      options.usage === undefined
-        ? { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 200 }
-        : options.usage,
+    ...metadata,
+    status: "completed" as const,
+    usage: { input_tokens: 100, output_tokens: 20 },
     report: {
-      ...gradeResult({ findings }, fixture),
-      scanId: `scan-${pair}-${variant}`,
-      scanDir: `/local/host/reports/run-1/pair-${pair}-${variant}/scan`,
-      reportPath: `/local/host/reports/run-1/pair-${pair}-${variant}/scan/report.md`,
+      ...gradeResult(
+        { findings: [...found.map((c) => finding(f, c)), ...extra] },
+        f,
+      ),
+      scanDir: "/local/scan",
+      reportPath: "/local/scan/report.md",
     },
   };
 }
-
-function createFiveCaseFixture(): Fixture {
-  const full = createFixture();
-  const excludedFiles = new Set(["src/statements.py", "src/grants.py"]);
-  const excludedCaseIds = new Set([
-    "statement-tenant-selection",
-    "report-unverified-grant",
-    "statement-session-tenant",
-    "statement-contained-path",
-    "report-verified-grant",
-  ]);
-  const files = Object.fromEntries(
-    Object.entries(full.files)
-      .filter(([path]) => !excludedFiles.has(path))
-      .map(([path, text]) => {
-        if (path === "README.md") return [path, `${text}\n# 5-case revision\n`];
-        if (path === "src/app.py") {
-          return [
-            path,
-            text
-              .replace("from .statements import statements\n", "")
-              .replace("from .grants import grants\n", ""),
-          ];
-        }
-        return [path, text];
-      }),
+function saved(f: Fixture, runs: RunRecord[] = [completed(f)], pairs = 1) {
+  const source = Object.fromEntries(
+    Object.entries(f.files).map(([name, text]) => [name, hashText(text)]),
   );
-  return {
-    files,
-    positives: full.positives.filter((entry) => !excludedCaseIds.has(entry.id)),
-    controls: full.controls.filter((entry) => !excludedCaseIds.has(entry.id)),
+  const experiment = {
+    model: "synthetic-model",
+    pairs,
+    budgetMinutes: 5,
+    reasoningEffort: "high",
+    source,
+    evaluator: { "fixtures.mts": hashText(JSON.stringify(f.positives)) },
+    codexExecutable: {
+      command: "/local/cli",
+      files: [{ path: "/local/cli", sha256: hashText("bin") }],
+    },
   };
+  return { experiment, fixture: f, runs };
 }
 
-test("snapshot digests order paths independently of the host locale", () => {
-  const digest = hashText("fixture");
+test("snapshot digests use code unit order across locales", () => {
+  const digest = hashText("source");
   assert.equal(
-    hashSnapshotMap({ "ä.py": digest, "z.py": digest }),
+    hashSnapshotMap({ ä: digest, z: digest }),
     hashText(
       JSON.stringify([
-        ["z.py", digest],
-        ["ä.py", digest],
+        ["z", digest],
+        ["ä", digest],
       ]),
     ),
   );
 });
 
-test("export strips host paths and raw source while round-tripping comparison results", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "baseline-export-"));
+test("CLI round-trips saved runs, omits source and host fields, and preserves failure diagnostics", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "baseline-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const runDir = join(root, "run-1");
-  await mkdir(runDir, { recursive: true });
-  const fixture = createFixture();
-  const experiment = makeSavedExperiment(fixture);
-  const runs: RunRecord[] = [
-    completedRun(
-      fixture,
-      1,
-      "time-aware",
-      fixture.positives.map((entry) => entry.id),
-    ),
-    completedRun(
-      fixture,
-      1,
-      "baseline",
-      fixture.positives.map((entry) => entry.id),
-    ),
-  ];
-  await Promise.all([
-    writeFile(join(runDir, "experiment.json"), JSON.stringify(experiment)),
-    writeFile(join(runDir, "fixture.json"), JSON.stringify(fixture)),
-    writeFile(join(runDir, "runs.json"), JSON.stringify(runs)),
-  ]);
-
-  const exported = await loadBaseline(runDir);
-  const serialized = JSON.stringify(exported);
-  assert.equal(exported.schemaVersion, BASELINE_SCHEMA_VERSION);
-  assert.equal(serialized.includes("/local/host/"), false);
-  assert.equal(serialized.includes("scanDir"), false);
-  assert.equal(serialized.includes("reportPath"), false);
-  assert.equal(serialized.includes("requests.head"), false);
-  assert.equal(serialized.includes("URLSafeTimedSerializer"), false);
-  assert.deepEqual(exported.experiment.digests.codexExecutableSha256, [
+  const inputs = saved(fixture, [completed(fixture), failed]);
+  for (const [name, content] of Object.entries(inputs))
+    await writeFile(join(root, name + ".json"), JSON.stringify(content));
+  const cli = (...args: string[]) =>
+    spawnSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        join(import.meta.dirname, "baseline.mts"),
+        ...args,
+      ],
+      { encoding: "utf8" },
+    );
+  const file = join(root, "baseline.json");
+  const exported = cli("export", root, file);
+  assert.equal(exported.status, 0, exported.stderr);
+  const text = await readFile(file, "utf8");
+  assert.doesNotMatch(text, /\/local\/|scanDir|reportPath|requests\.head/);
+  const baseline = await loadBaseline(file);
+  assert.deepEqual(baseline, createReleaseBaseline(inputs));
+  assert.deepEqual(baseline.experiment.digests.codexExecutableSha256, [
     hashText("bin"),
   ]);
+  const compared = cli("compare", file, root);
+  assert.equal(compared.status, 0, compared.stderr);
+  const result = JSON.parse(compared.stdout);
+  assert.equal(result.provenance.fixtureIdentical, true);
   assert.equal(
-    exported.experiment.digests.fixturesModuleSha256,
-    experiment.evaluator["fixtures.mts"],
+    result.arms["time-aware"].baseline.failures[0].error,
+    failed.error,
   );
-  assert.deepEqual(
-    exported.runs.map((run) => [run.pair, run.variant]),
-    [
-      [1, "baseline"],
-      [1, "time-aware"],
-    ],
-  );
-
-  const exportPath = join(root, "baseline.json");
-  await writeFile(exportPath, serialized);
-  const reloaded = await loadBaseline(exportPath);
-  assert.deepEqual(reloaded, exported);
-  assert.deepEqual(
-    compareBaselines(reloaded, exported),
-    compareBaselines(exported, exported),
-  );
+  assert.notEqual(cli("compare", file, root, file).status, 0);
+  assert.equal(await readFile(file, "utf8"), text);
+  assert.match(cli("compare", file).stderr, /Usage/);
 });
 
-test("export omits structured host path fields while keeping synthetic failure host-path diagnostics verbatim", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "baseline-failure-diagnostic-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const runDir = join(root, "run-1");
-  await mkdir(runDir, { recursive: true });
-  const fixture = createFixture();
-  const experiment = makeSavedExperiment(fixture);
-  const failureDiagnostic =
-    "spawn /local/host/worktrees/scan-state/worker failed: ENOENT (synthetic token=keep-verbatim)";
-  const runs: RunRecord[] = [
-    completedRun(
+test("added cases cannot mask a regression on shared cases", () => {
+  const smaller = { ...fixture, positives: fixture.positives.slice(0, -2) };
+  const before = createReleaseBaseline(saved(smaller));
+  const compare = (found: SourceCase[]) =>
+    compareBaselines(
+      before,
+      createReleaseBaseline(saved(fixture, [completed(fixture, found)])),
+    );
+  const same = compare(smaller.positives);
+  assert.equal(same.corpus.positives.added.length, 2);
+  assert.equal(same.provenance.digests.fixturesModuleSha256.changed, true);
+  assert.equal(same.arms.baseline.delta.comparableRecall, 0);
+  assert.ok(same.arms.baseline.delta.rawRecall! < 0);
+  const masked = compare(fixture.positives.slice(1)).arms.baseline;
+  assert.ok(masked.candidate.rawFoundCount! > masked.baseline.rawFoundCount!);
+  assert.ok(masked.delta.comparableRecall! < 0);
+  assert.deepEqual(masked.flags.regressedCases, [smaller.positives[0]!.id]);
+});
+
+test("source or span changes break comparability, unlike reordered CWEs or explicit single-line spans", () => {
+  const f = createFixture();
+  const [edited, moved, same] = f.positives;
+  f.files[edited!.path] += "\n";
+  moved!.line++;
+  same!.cwes.reverse();
+  same!.endLine = same!.line;
+  const removed = f.positives.pop()!;
+  const result = compareBaselines(
+    createReleaseBaseline(saved(fixture)),
+    createReleaseBaseline(saved(f)),
+  );
+  assert.deepEqual(result.corpus.sourceFiles.changed, [edited!.path]);
+  assert.deepEqual(result.corpus.positives.changed, [edited!.id, moved!.id]);
+  assert.deepEqual(result.corpus.positives.removed, [removed.id]);
+  assert.ok(result.corpus.positives.comparable.includes(same!.id));
+  assert.deepEqual(result.arms.baseline.flags.regressedCases, []);
+});
+
+test("quality, missing runs and unknown usage stay visible across unequal corpora", () => {
+  const smaller = { ...fixture, controls: fixture.controls.slice(0, 1) };
+  const before = createReleaseBaseline(saved(smaller));
+  const extras = [
+    finding(fixture, fixture.positives[0]!),
+    ...fixture.controls.slice(0, 2).map((c) => finding(fixture, c)),
+    { ...finding(fixture, fixture.positives[1]!), codeEvidence: [] },
+  ];
+  const after = createReleaseBaseline(
+    saved(
       fixture,
-      1,
-      "baseline",
-      fixture.positives.map((entry) => entry.id),
+      [
+        completed(fixture, fixture.positives, extras),
+        { ...failed, variant: "baseline", pair: 2 },
+      ],
+      3,
     ),
-    {
-      pair: 1,
-      variant: "time-aware",
-      startedAt: "2026-10-01T00:02:00.000Z",
-      advisoryBudgetMinutes: 5,
-      promptSha256: null,
-      status: "failed",
-      error: failureDiagnostic,
-      elapsedMs: 350,
-      usage: null,
-    },
-  ];
-  await Promise.all([
-    writeFile(join(runDir, "experiment.json"), JSON.stringify(experiment)),
-    writeFile(join(runDir, "fixture.json"), JSON.stringify(fixture)),
-    writeFile(join(runDir, "runs.json"), JSON.stringify(runs)),
-  ]);
-
-  const exportPath = join(root, "baseline.json");
-  const exportRun = spawnSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      baselineScript,
-      "export",
-      runDir,
-      exportPath,
-    ],
-    { encoding: "utf8" },
   );
-  assert.equal(exportRun.status, 0, exportRun.stderr);
-
-  const exportedText = await readFile(exportPath, "utf8");
-  assert.equal(exportedText.includes("/local/host/bin/codex"), false);
-  assert.equal(
-    exportedText.includes("/local/host/libexec/codex-native"),
-    false,
-  );
-  assert.equal(exportedText.includes("/local/host/reports/run-1/"), false);
-  assert.equal(exportedText.includes("scanDir"), false);
-  assert.equal(exportedText.includes("reportPath"), false);
-  assert.equal(exportedText.includes(failureDiagnostic), true);
-
-  const reloaded = await loadBaseline(exportPath);
-  const failedAttempt = reloaded.runs.find(
-    (run) => run.pair === 1 && run.variant === "time-aware",
-  );
-  assert.equal(failedAttempt?.status, "failed");
-  assert.equal(failedAttempt.error, failureDiagnostic);
-
-  const comparisonPath = join(root, "comparison.json");
-  const compareRun = spawnSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      baselineScript,
-      "compare",
-      exportPath,
-      exportPath,
-      comparisonPath,
-    ],
-    { encoding: "utf8" },
-  );
-  assert.equal(compareRun.status, 0, compareRun.stderr);
-  const comparison = JSON.parse(await readFile(comparisonPath, "utf8"));
-  assert.deepEqual(comparison.arms["time-aware"].baseline.failures, [
-    { pair: 1, error: failureDiagnostic },
-  ]);
-  assert.deepEqual(comparison.arms["time-aware"].candidate.failures, [
-    { pair: 1, error: failureDiagnostic },
-  ]);
-  assert.equal(comparison.arms["time-aware"].flags.hasRunFailures, true);
+  const { arms } = compareBaselines(before, after);
+  const { baseline, candidate, flags } = arms.baseline;
+  assert.equal(baseline.usage.totals.total_tokens, 120);
+  assert.equal(baseline.usage.totals.cached_input_tokens, null);
+  assert.equal(candidate.usage.totals.total_tokens, null);
+  assert.equal(candidate.usage.missingUsageRuns, 2);
+  assert.equal(candidate.missing, 1);
+  assert.equal(candidate.successRate, 1 / 2);
+  assert.equal(candidate.completionRate, 1 / 3);
+  assert.equal(candidate.safeControlFindings, 2);
+  assert.equal(candidate.comparableSafeControlFindings, 1);
+  assert.equal(candidate.duplicateFindings, 1);
+  assert.equal(candidate.unmatchedFindings, 1);
+  assert.equal(flags.hasRunFailures, true);
+  assert.equal(flags.needsAdjudication, true);
+  assert.equal(flags.evidenceErrorsIncreased, true);
+  assert.equal(flags.comparableControlAccusationsIncreased, true);
+  assert.equal(arms["time-aware"].cases.comparable[0]!.status, "unmeasured");
 });
 
-test("corpus expansion scores comparable cases without false regressions and catches masked drops", () => {
-  const fiveCase = createFiveCaseFixture();
-  const sevenCase = createFixture();
-  const fiveIds = fiveCase.positives.map((entry) => entry.id);
-
-  const baseline = createReleaseBaseline({
-    experiment: makeSavedExperiment(fiveCase),
-    fixture: fiveCase,
-    runs: [
-      completedRun(fiveCase, 1, "baseline", fiveIds),
-      completedRun(fiveCase, 1, "time-aware", fiveIds),
-    ],
-  });
-
-  // Candidate matches all 5 shared cases and misses the 2 newly added cases.
-  const expandedSameShared = createReleaseBaseline({
-    experiment: makeSavedExperiment(sevenCase, {
-      evaluator: {
-        "fixtures.mts": hashText("fixtures-rev-2"),
-        "grade.mts": hashText("grade-rev"),
-      },
-    }),
-    fixture: sevenCase,
-    runs: [
-      completedRun(sevenCase, 1, "baseline", fiveIds),
-      completedRun(sevenCase, 1, "time-aware", fiveIds),
-    ],
-  });
-
-  const noRegression = compareBaselines(baseline, expandedSameShared);
-  assert.equal(noRegression.provenance.fixtureIdentical, false);
-  assert.equal(
-    noRegression.provenance.digests.fixturesModuleSha256.changed,
-    true,
-  );
-  assert.deepEqual(noRegression.corpus.positives.comparable, fiveIds);
-  assert.deepEqual(noRegression.corpus.positives.added, [
-    "statement-tenant-selection",
-    "report-unverified-grant",
-  ]);
-  assert.deepEqual(noRegression.corpus.controls.added, [
-    "statement-session-tenant",
-    "statement-contained-path",
-    "report-verified-grant",
-  ]);
-  assert.deepEqual(noRegression.corpus.sourceFiles.changed, [
-    "README.md",
-    "src/app.py",
-  ]);
-  assert.equal(noRegression.arms.baseline.delta.comparableRecall, 0);
-  assert.ok(
-    Math.abs(noRegression.arms.baseline.delta.rawRecall! - -2 / 7) < 1e-12,
-  );
-  assert.deepEqual(noRegression.arms.baseline.flags.regressedCases, []);
-  assert.equal(noRegression.arms.baseline.flags.corpusChanged, true);
-
-  // Candidate misses SSRF on shared corpus while finding both newly added cases (6/7 > 5/5 raw count).
-  const maskedRegressionIds = [
-    ...fiveIds.filter((id) => id !== "partner-status-ssrf"),
-    "statement-tenant-selection",
-    "report-unverified-grant",
-  ];
-  const expandedMaskedDrop = createReleaseBaseline({
-    experiment: makeSavedExperiment(sevenCase),
-    fixture: sevenCase,
-    runs: [
-      completedRun(sevenCase, 1, "baseline", maskedRegressionIds),
-      completedRun(sevenCase, 1, "time-aware", fiveIds),
-    ],
-  });
-
-  const masked = compareBaselines(baseline, expandedMaskedDrop);
-  assert.equal(masked.arms.baseline.candidate.rawFoundCount, 6);
-  assert.equal(masked.arms.baseline.baseline.rawFoundCount, 5);
-  assert.ok(
-    Math.abs(masked.arms.baseline.delta.comparableRecall! - -0.2) < 1e-12,
-  );
-  assert.deepEqual(masked.arms.baseline.flags.regressedCases, [
-    "partner-status-ssrf",
-  ]);
-});
-
-test("changed case definitions and removed cases are excluded from comparable recall, while CWE order and single-line endLine stay comparable", () => {
-  const baseFixture = createFixture();
-  const baseIds = baseFixture.positives.map((entry) => entry.id);
-  const baseline = createReleaseBaseline({
-    experiment: makeSavedExperiment(baseFixture),
-    fixture: baseFixture,
-    runs: [
-      completedRun(baseFixture, 1, "baseline", baseIds),
-      completedRun(baseFixture, 1, "time-aware", baseIds),
-    ],
-  });
-
-  const updated = createFixture();
-  updated.files["src/invoices.py"] =
-    `${updated.files["src/invoices.py"]}\n# comment\n`;
-  updated.positives = updated.positives
-    .filter((entry) => entry.id !== "preview-reflected-html")
-    .map((entry) => {
-      if (entry.id === "export-path-traversal") {
-        // Reordered mixed-case CWEs + redundant single-line endLine keep definition equivalent.
-        return {
-          ...entry,
-          endLine: entry.line,
-          cwes: ["CWE-73", "cwe-36", "cwe-23", "CWE-22"],
-        };
-      }
-      if (entry.id === "catalog-sql-injection") {
-        return { ...entry, line: entry.line + 1 };
-      }
-      return entry;
-    });
-
-  const candIds = updated.positives.map((entry) => entry.id);
-  const candidate = createReleaseBaseline({
-    experiment: makeSavedExperiment(updated),
-    fixture: updated,
-    runs: [
-      completedRun(
-        updated,
-        1,
-        "baseline",
-        candIds.filter((id) => id !== "catalog-sql-injection"),
-      ),
-      completedRun(updated, 1, "time-aware", candIds),
-    ],
-  });
-
-  const comparison = compareBaselines(baseline, candidate);
-  assert.deepEqual(comparison.corpus.positives.removed, [
-    "preview-reflected-html",
-  ]);
-  assert.deepEqual(comparison.corpus.positives.changed, [
-    "invoice-tenant-isolation",
-    "catalog-sql-injection",
-  ]);
-  assert.equal(
-    comparison.corpus.positives.comparable.includes("export-path-traversal"),
-    true,
-  );
-  assert.deepEqual(
-    candidate.corpus.positives.find((c) => c.id === "export-path-traversal")
-      ?.cwes,
-    ["CWE-73", "CWE-36", "CWE-23", "CWE-22"],
-  );
-  assert.equal(
-    comparison.arms.baseline.cases.comparable.find(
-      (c) => c.id === "export-path-traversal",
-    )?.status,
-    "unchanged",
-  );
-  // Missing changed case catalog-sql-injection must not trigger a comparable recall regression.
-  assert.equal(comparison.arms.baseline.delta.comparableRecall, 0);
-  assert.deepEqual(comparison.arms.baseline.flags.regressedCases, []);
-  assert.deepEqual(
-    comparison.arms.baseline.cases.changed.map((entry) => ({
-      id: entry.id,
-      baseRecall: entry.baseline.recall,
-      candRecall: entry.candidate.recall,
-    })),
-    [
-      { id: "invoice-tenant-isolation", baseRecall: 1, candRecall: 1 },
-      { id: "catalog-sql-injection", baseRecall: 1, candRecall: 0 },
-    ],
-  );
-  assert.deepEqual(comparison.arms.baseline.cases.removed, [
-    {
-      id: "preview-reflected-html",
-      baseline: { foundRuns: 1, completedRuns: 1, recall: 1 },
-    },
-  ]);
-});
-
-test("failures, missing interrupted runs, unknown token usage, duplicates, and adjudication remain explicit", () => {
-  const fiveCase = createFiveCaseFixture();
-  const sevenCase = createFixture();
-  const fiveIds = fiveCase.positives.map((entry) => entry.id);
-
-  const baseline = createReleaseBaseline({
-    experiment: makeSavedExperiment(fiveCase, { pairs: 2 }),
-    fixture: fiveCase,
-    runs: [
-      completedRun(fiveCase, 1, "baseline", fiveIds, {
-        usage: {
-          input_tokens: 100,
-          cached_input_tokens: 40,
-          output_tokens: 20,
-        },
-        elapsedMs: 1000,
-      }),
-      completedRun(fiveCase, 2, "baseline", fiveIds, {
-        usage: {
-          input_tokens: 200,
-          cached_input_tokens: 60,
-          output_tokens: 40,
-        },
-        elapsedMs: 1400,
-      }),
-      completedRun(fiveCase, 1, "time-aware", fiveIds),
-      completedRun(fiveCase, 2, "time-aware", fiveIds),
-    ],
-  });
-
-  // Candidate has pairs=3: pair 1 completes with overlap + duplicate + unmatched + evidence error,
-  // pair 2 fails verbatim, pair 3 was interrupted (missing=1).
-  const dupFinding = findingFor(sevenCase, sevenCase.positives[0]!);
-  const compControl = findingFor(
-    sevenCase,
-    sevenCase.controls.find((c) => c.id === "invoice-scoped-query")!,
-  );
-  const newControl = findingFor(
-    sevenCase,
-    sevenCase.controls.find((c) => c.id === "statement-session-tenant")!,
-  );
-  const unmatched = {
-    ...findingFor(sevenCase, sevenCase.positives[1]!),
-    taxonomy: { cwe: ["CWE-400"] },
+test("equivalent rates across pair counts have zero delta and retain the range", () => {
+  const sample = (pairs: number) => {
+    const runs = Array.from({ length: pairs }, (_, i) => ({
+      ...completed(fixture, i % 3 ? fixture.positives : []),
+      pair: i + 1,
+    }));
+    return createReleaseBaseline(saved(fixture, runs, pairs));
   };
-  const badEvidence = {
-    ...findingFor(sevenCase, sevenCase.positives[2]!),
-    codeEvidence: [{ path: "src/downloads.py", startLine: 1, code: "wrong" }],
-  };
-
-  const candidate = createReleaseBaseline({
-    experiment: makeSavedExperiment(sevenCase, { pairs: 3 }),
-    fixture: sevenCase,
-    runs: [
-      completedRun(sevenCase, 1, "baseline", fiveIds, {
-        extraFindings: [
-          dupFinding,
-          compControl,
-          newControl,
-          unmatched,
-          badEvidence,
-        ],
-        // cached_input_tokens omitted; total_tokens should still equal 120 + 30 = 150.
-        usage: { input_tokens: 120, output_tokens: 30 },
-        elapsedMs: 1500,
-      }),
-      {
-        pair: 2,
-        variant: "baseline",
-        startedAt: "2026-10-01T00:05:00.000Z",
-        advisoryBudgetMinutes: null,
-        promptSha256: null,
-        status: "failed",
-        error: "worker exited 1: synthetic diagnostic token=keep-verbatim",
-        elapsedMs: 500,
-        usage: null,
-      },
-      completedRun(sevenCase, 1, "time-aware", fiveIds, {
-        // Missing cached_input_tokens must not hide known input + output totals.
-        usage: {
-          input_tokens: 300,
-          output_tokens: 50,
-        },
-      }),
-      completedRun(sevenCase, 2, "time-aware", fiveIds, {
-        usage: {
-          input_tokens: 300,
-          cached_input_tokens: 100,
-          output_tokens: 50,
-        },
-      }),
-      completedRun(sevenCase, 3, "time-aware", fiveIds, {
-        usage: {
-          input_tokens: 300,
-          cached_input_tokens: 100,
-          output_tokens: 50,
-        },
-      }),
-    ],
-  });
-
-  const comparison = compareBaselines(baseline, candidate);
-  const baseArm = comparison.arms.baseline;
-  assert.equal(baseArm.baseline.usage.totals.total_tokens, 360);
-  assert.equal(baseArm.baseline.usage.meanPerRun.total_tokens, 180);
-  assert.equal(baseArm.candidate.configured, 3);
-  assert.equal(baseArm.candidate.attempted, 2);
-  assert.equal(baseArm.candidate.completed, 1);
-  assert.equal(baseArm.candidate.failed, 1);
-  assert.equal(baseArm.candidate.missing, 1);
-  assert.equal(baseArm.candidate.successRate, 0.5);
-  assert.equal(baseArm.candidate.completionRate, 1 / 3);
-  assert.deepEqual(baseArm.candidate.failures, [
-    {
-      pair: 2,
-      error: "worker exited 1: synthetic diagnostic token=keep-verbatim",
-    },
-  ]);
-  assert.equal(baseArm.candidate.safeControlFindings, 2);
-  assert.equal(baseArm.candidate.comparableSafeControlFindings, 1);
-  assert.equal(baseArm.candidate.duplicateFindings, 1);
-  assert.equal(baseArm.candidate.unmatchedFindings, 2);
-  assert.equal(baseArm.candidate.evidenceErrors, 2);
-  assert.equal(baseArm.candidate.adjudicationRequiredRuns, 1);
-  assert.equal(baseArm.candidate.usage.missingUsageRuns, 2);
-  assert.equal(baseArm.candidate.usage.totals.total_tokens, null);
-  assert.equal(baseArm.delta.meanUsage.total_tokens, null);
-  assert.equal(baseArm.flags.hasRunFailures, true);
-  assert.equal(baseArm.flags.hasMissingRuns, true);
-  assert.equal(baseArm.flags.hasUnknownUsage, true);
-  assert.equal(baseArm.flags.needsAdjudication, true);
-  assert.equal(baseArm.flags.duplicatesIncreased, true);
-  assert.equal(baseArm.flags.evidenceErrorsIncreased, true);
-  assert.equal(baseArm.flags.comparableControlAccusationsIncreased, true);
-
-  // time-aware arm compares full input/output totals across unequal pair counts (2 vs 3)
-  // even when cached_input_tokens is missing on one run.
-  const timedArm = comparison.arms["time-aware"];
-  assert.equal(timedArm.baseline.usage.meanPerRun.total_tokens, 1200);
-  assert.equal(timedArm.candidate.usage.meanPerRun.total_tokens, 350);
-  assert.equal(timedArm.delta.meanUsage.total_tokens, -850);
-  assert.equal(timedArm.candidate.usage.totals.cached_input_tokens, null);
-  assert.equal(timedArm.delta.meanUsage.cached_input_tokens, null);
-  assert.equal(timedArm.candidate.usage.missingUsageRuns, 1);
-  assert.equal(timedArm.flags.hasRunFailures, false);
-  assert.equal(timedArm.flags.hasMissingRuns, false);
-  assert.equal(timedArm.flags.hasUnknownUsage, true);
+  const { candidate, delta, cases } = compareBaselines(sample(3), sample(6))
+    .arms.baseline;
+  assert.deepEqual(candidate.comparableRecall, { mean: 2 / 3, min: 0, max: 1 });
+  assert.equal(cases.comparable[0]!.recallDelta, 0);
+  assert.equal(delta.comparableRecall, 0);
 });
 
-test("multi-pair variability reports min/max/mean and uses exact rational comparison", () => {
-  const fixture = createFixture();
-  const allIds = fixture.positives.map((entry) => entry.id);
-  const partialIds = allIds.slice(0, 5);
-
-  const baseline = createReleaseBaseline({
-    experiment: makeSavedExperiment(fixture, { pairs: 3 }),
-    fixture,
-    runs: [
-      completedRun(fixture, 1, "baseline", allIds),
-      completedRun(fixture, 2, "baseline", allIds),
-      completedRun(fixture, 3, "baseline", partialIds),
-      completedRun(fixture, 1, "time-aware", allIds),
-      completedRun(fixture, 2, "time-aware", allIds),
-      completedRun(fixture, 3, "time-aware", allIds),
-    ],
-  });
-  const candidate = createReleaseBaseline({
-    experiment: makeSavedExperiment(fixture, { pairs: 6 }),
-    fixture,
-    runs: [
-      completedRun(fixture, 1, "baseline", allIds),
-      completedRun(fixture, 2, "baseline", allIds),
-      completedRun(fixture, 3, "baseline", allIds),
-      completedRun(fixture, 4, "baseline", allIds),
-      completedRun(fixture, 5, "baseline", partialIds),
-      completedRun(fixture, 6, "baseline", partialIds),
-      ...Array.from({ length: 6 }, (_, i) =>
-        completedRun(fixture, i + 1, "time-aware", allIds),
-      ),
-    ],
-  });
-
-  const comparison = compareBaselines(baseline, candidate);
-  const baseArm = comparison.arms.baseline;
-  // Last case was found 2/3 in baseline and 4/6 in candidate => exact 0 delta despite 1/3 floating point.
-  const lastCase = baseArm.cases.comparable.at(-1)!;
-  assert.equal(lastCase.baseline.foundRuns, 2);
-  assert.equal(lastCase.candidate.foundRuns, 4);
-  assert.equal(lastCase.recallDelta, 0);
-  assert.equal(lastCase.status, "unchanged");
-  assert.equal(baseArm.delta.comparableRecall, 0);
-  assert.equal(baseArm.candidate.comparableRecall.min, 5 / 7);
-  assert.equal(baseArm.candidate.comparableRecall.max, 1);
-  assert.equal(baseArm.candidate.comparableRecall.mean, (4 * 7 + 2 * 5) / 42);
-});
-
-test("rejects cross-artifact mismatches, duplicate runs, and unsupported schemas", () => {
-  const fixture = createFixture();
-  const allIds = fixture.positives.map((entry) => entry.id);
-  const experiment = makeSavedExperiment(fixture);
-
-  const mismatchedFixture = createFixture();
-  mismatchedFixture.files["src/invoices.py"] += "\n";
+test("rejects mismatched samples, duplicate attempts and altered snapshot metadata", () => {
+  const inputs = saved(fixture);
+  const run = inputs.runs[0]!;
+  assert.throws(
+    () => createReleaseBaseline({ ...inputs, runs: [run, run] }),
+    /Duplicate run/,
+  );
+  const other = { ...fixture, positives: fixture.positives.slice(1) };
+  assert.throws(
+    () => createReleaseBaseline({ ...inputs, fixture: other }),
+    /corpus positives/,
+  );
   assert.throws(
     () =>
-      createReleaseBaseline({
-        experiment,
-        fixture: mismatchedFixture,
-        runs: [completedRun(fixture, 1, "baseline", allIds)],
-      }),
-    /do not match fixture\.files/,
+      createReleaseBaseline({ ...inputs, fixture: { ...fixture, files: {} } }),
+    /fixture\.files/,
   );
-
-  const fiveCase = createFiveCaseFixture();
-  assert.throws(
-    () =>
-      createReleaseBaseline({
-        experiment,
-        fixture,
-        runs: [
-          completedRun(
-            fiveCase,
-            1,
-            "baseline",
-            fiveCase.positives.map((entry) => entry.id),
-          ),
-        ],
-      }),
-    /do not match corpus positives/,
-  );
-
-  assert.throws(
-    () =>
-      createReleaseBaseline({
-        experiment,
-        fixture,
-        runs: [
-          completedRun(fixture, 1, "baseline", allIds),
-          completedRun(fixture, 1, "baseline", allIds),
-        ],
-      }),
-    /Duplicate run for pair 1\/baseline/,
-  );
-
-  const valid = createReleaseBaseline({
-    experiment,
-    fixture,
-    runs: [completedRun(fixture, 1, "baseline", allIds)],
-  });
+  const valid = createReleaseBaseline(inputs);
   assert.throws(
     () => validateReleaseBaseline({ ...valid, schemaVersion: 2 }),
-    /Unsupported ReleaseBaseline schemaVersion/,
+    /schemaVersion/,
   );
-
-  assert.throws(
-    () => hashSnapshotMap({ "a.py": "not-a-sha256" }),
-    /SHA-256 hex digest/,
-  );
-});
-
-test("CLI export and compare commands support run directories, baseline JSON files, and usage errors", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "baseline-cli-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-
-  const fiveCase = createFiveCaseFixture();
-  const sevenCase = createFixture();
-  const baseDir = join(root, "run-base");
-  const candDir = join(root, "run-cand");
-  await Promise.all([
-    mkdir(baseDir, { recursive: true }),
-    mkdir(candDir, { recursive: true }),
-  ]);
-  const fiveIds = fiveCase.positives.map((entry) => entry.id);
-
-  await Promise.all([
-    writeFile(
-      join(baseDir, "experiment.json"),
-      JSON.stringify(makeSavedExperiment(fiveCase)),
-    ),
-    writeFile(join(baseDir, "fixture.json"), JSON.stringify(fiveCase)),
-    writeFile(
-      join(baseDir, "runs.json"),
-      JSON.stringify([completedRun(fiveCase, 1, "baseline", fiveIds)]),
-    ),
-    writeFile(
-      join(candDir, "experiment.json"),
-      JSON.stringify(makeSavedExperiment(sevenCase)),
-    ),
-    writeFile(join(candDir, "fixture.json"), JSON.stringify(sevenCase)),
-    writeFile(
-      join(candDir, "runs.json"),
-      JSON.stringify([
-        completedRun(sevenCase, 1, "baseline", fiveIds.slice(0, 4)),
-      ]),
-    ),
-  ]);
-
-  const exportedFile = join(root, "baseline.json");
-  const exportRun = spawnSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      baselineScript,
-      "export",
-      baseDir,
-      exportedFile,
-    ],
-    { encoding: "utf8" },
-  );
-  assert.equal(exportRun.status, 0, exportRun.stderr);
-
-  const exportStdout = spawnSync(
-    process.execPath,
-    ["--experimental-strip-types", baselineScript, "export", baseDir],
-    { encoding: "utf8" },
-  );
-  assert.equal(exportStdout.status, 0, exportStdout.stderr);
-  assert.equal(exportStdout.stdout, await readFile(exportedFile, "utf8"));
-
-  const comparisonFile = join(root, "comparison.json");
-  const compareRun = spawnSync(
-    process.execPath,
-    [
-      "--experimental-strip-types",
-      baselineScript,
-      "compare",
-      exportedFile,
-      candDir,
-      comparisonFile,
-    ],
-    { encoding: "utf8" },
-  );
-  assert.equal(compareRun.status, 0, compareRun.stderr);
-  const parsed = JSON.parse(await readFile(comparisonFile, "utf8"));
-  assert.ok(
-    Math.abs(parsed.arms.baseline.delta.comparableRecall - -0.2) < 1e-12,
-  );
-  assert.deepEqual(parsed.arms.baseline.flags.regressedCases, [
-    "partner-status-ssrf",
-  ]);
-
-  const badRun = spawnSync(
-    process.execPath,
-    ["--experimental-strip-types", baselineScript, "unknown"],
-    { encoding: "utf8" },
-  );
-  assert.equal(badRun.status, 1);
-  assert.match(badRun.stderr, /Usage:/);
+  valid.experiment.digests.sourceSha256 = hashText("other");
+  assert.throws(() => validateReleaseBaseline(valid), /digest mismatch/);
 });

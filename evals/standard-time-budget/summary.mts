@@ -31,7 +31,7 @@ function totalTokens(record: Pick<RunRecord, "usage">) {
   return input === null || output === null ? null : input + output;
 }
 
-function sumKnown(values: (number | null)[]) {
+export function sumKnown(values: (number | null)[]) {
   return values.length &&
     values.every((value): value is number => value !== null)
     ? values.reduce((total, value) => total + value, 0)

@@ -133,7 +133,9 @@ cached input is a subset of input tokens, and no dollar cost is inferred.
 
 ## Release baselines
 
-Export a portable baseline (`schemaVersion: 1`) from a saved run directory, or compare two runs or exported baseline files offline:
+Export a portable baseline from a saved run directory or compare two runs
+or exported baselines offline. Both commands print JSON unless the last
+argument names a new output file. Existing files are preserved.
 
 ```sh
 node --experimental-strip-types evals/standard-time-budget/baseline.mts export evals/standard-time-budget/reports/run-baseline baseline.json

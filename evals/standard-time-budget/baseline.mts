@@ -1,456 +1,297 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { join, posix, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import {
   hashText,
   validateExperiment,
   type ExperimentConfig,
   type RunRecord,
-  type RunReport,
   type Variant,
 } from "./experiment.mts";
 import type { Fixture, SourceCase } from "./fixtures.mts";
-import { mean, summarizeUsage, usageFields, variants } from "./summary.mts";
+import {
+  mean,
+  sumKnown,
+  summarizeUsage,
+  usageFields,
+  variants,
+} from "./summary.mts";
 
-export const BASELINE_SCHEMA_VERSION = 1 as const;
-
-type UsageField = (typeof usageFields)[number];
-const sha256Pattern = /^[a-f0-9]{64}$/u;
-
-export interface BaselineCase extends SourceCase {
-  fileSha256: string;
-}
-
+export const BASELINE_SCHEMA_VERSION = 1;
+type Snapshot = Record<string, string>;
 export interface SavedExperiment extends ExperimentConfig {
   reasoningEffort?: string | null;
-  execution?: string;
-  order?: string;
-  evaluator: Record<string, string>;
-  source: Record<string, string>;
-  plugin?: Record<string, string>;
-  sdk?: Record<string, string>;
+  evaluator: Snapshot;
+  source: Snapshot;
+  plugin?: Snapshot;
+  sdk?: Snapshot;
   packageVersions?: Record<string, string>;
   codexExecutable?: {
     command?: string;
-    files: Array<{ path?: string; sha256: string }>;
+    files: { path?: string; sha256: string }[];
   };
 }
 
-export interface BaselineUsage {
-  input_tokens: number | null;
-  cached_input_tokens: number | null;
-  output_tokens: number | null;
+function check(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
 }
 
-export interface BaselineCompletedReport {
-  passed: boolean;
-  recall: number;
-  foundCount: number;
-  expectedCount: number;
-  matchedIds: string[];
-  cases: Array<{ id: string; found: boolean }>;
-  duplicateFindings: number;
-  safeControlFindings: number;
-  safeControlAccusations: string[][];
-  unmatchedFindingsCount: number;
-  evidenceErrorsCount: number;
-  needsAdjudication: boolean;
-}
-
-export type BaselineAttempt = {
-  pair: number;
-  variant: Variant;
-  startedAt: string;
-  advisoryBudgetMinutes: number | null;
-  promptSha256: string | null;
-  elapsedMs: number;
-  usage: BaselineUsage | null;
-} & (
-  | { status: "completed"; report: BaselineCompletedReport; error?: never }
-  | {
-      status: "failed";
-      /** Preserved verbatim from RunRecord.error; review for local paths, command output, or secrets before distribution. */
-      error: string;
-      report?: never;
-    }
-);
-
-export interface ReleaseBaseline {
-  schemaVersion: typeof BASELINE_SCHEMA_VERSION;
-  experiment: {
-    model: string;
-    pairs: number;
-    budgetMinutes: number;
-    reasoningEffort: string | null;
-    packageVersions: Record<string, string>;
-    digests: {
-      fixturesModuleSha256: string | null;
-      evaluatorSha256: string;
-      sourceSha256: string;
-      pluginSha256: string | null;
-      sdkSha256: string | null;
-      codexExecutableSha256: string[];
-    };
-    evaluator: Record<string, string>;
-    source: Record<string, string>;
-  };
-  corpus: { positives: BaselineCase[]; controls: BaselineCase[] };
-  runs: BaselineAttempt[];
-}
-
-export interface CaseRate {
-  foundRuns: number;
-  completedRuns: number;
-  recall: number | null;
-}
-
-export type ArmSummary = ReturnType<typeof summarizeArm>["summary"];
-export type ArmComparison = ReturnType<typeof compareArm>;
-
-function assertSha256(value: unknown, label: string): string {
-  if (typeof value !== "string" || !sha256Pattern.test(value)) {
-    throw new Error(
-      `${label} must be a lowercase 64-character SHA-256 hex digest.`,
-    );
-  }
+function digest(value: string) {
+  check(
+    typeof value === "string" && /^[\da-f]{64}$/u.test(value),
+    "Expected SHA-256 hex digest.",
+  );
   return value;
 }
 
-function normalizeRelativePath(path: string, label: string): string {
-  const normalized = posix.normalize(path);
-  if (
-    !path.trim() ||
-    posix.isAbsolute(normalized) ||
-    normalized === "." ||
-    normalized === ".." ||
-    normalized.startsWith("../")
-  ) {
-    throw new Error(
-      `${label} must be a relative path inside the fixture: ${path}`,
-    );
-  }
-  return normalized;
-}
-
-function sortRecord<T>(record: Record<string, T>): Record<string, T> {
-  return Object.fromEntries(
-    Object.keys(record)
-      .sort()
-      .map((key) => [key, record[key]!]),
-  );
-}
-
-export function hashSnapshotMap(files: Record<string, string>): string {
-  if (typeof files !== "object" || files === null || Array.isArray(files)) {
-    throw new Error("Snapshot map must be an object.");
-  }
-  const sorted = Object.keys(files)
+export function hashSnapshotMap(files: Snapshot) {
+  // Stable across host locales and insertion order.
+  const entries = Object.keys(files)
     .sort()
-    .map((key) => {
-      if (!key.trim()) throw new Error("Snapshot map keys must be non-empty.");
-      return [key, assertSha256(files[key], `Snapshot digest for ${key}`)];
-    });
-  return hashText(JSON.stringify(sorted));
+    .map((path) => [path, digest(files[path]!)]);
+  return hashText(JSON.stringify(entries));
 }
 
-function normalizeSnapshotMap(
-  files: Record<string, string> | undefined,
-  label: string,
-  normalizeKeys = false,
-): Record<string, string> {
-  if (typeof files !== "object" || files === null || Array.isArray(files)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  const normalized: Record<string, string> = {};
-  for (const [key, digest] of Object.entries(files)) {
-    const cleanKey = normalizeKeys
-      ? normalizeRelativePath(key, `${label} path`)
-      : key;
-    if (!cleanKey.trim() || cleanKey in normalized) {
-      throw new Error(`${label} has invalid or duplicate key: ${key}`);
-    }
-    normalized[cleanKey] = assertSha256(
-      digest,
-      `${label} digest for ${cleanKey}`,
+function stringMap(values: Snapshot): Snapshot {
+  check(
+    !!values && typeof values === "object" && !Array.isArray(values),
+    "Expected a snapshot map.",
+  );
+  for (const [key, value] of Object.entries(values))
+    check(
+      !!key.trim() && !win32.isAbsolute(key) && typeof value === "string",
+      "Invalid snapshot entry.",
     );
-  }
-  return sortRecord(normalized);
+  return values;
 }
 
-function normalizeUsage(value: unknown): BaselineUsage | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Run usage must be an object or null.");
-  }
-  const record = value as Record<string, unknown>;
-  const result = {} as BaselineUsage;
-  for (const field of usageFields) {
-    const raw = record[field];
-    if (raw === undefined || raw === null) result[field] = null;
-    else if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
-      result[field] = raw;
-    } else {
-      throw new Error(
-        `Run usage.${field} must be a non-negative finite number or null.`,
-      );
-    }
-  }
-  return result;
+function sourceDigests(evaluator: Snapshot, source: Snapshot) {
+  return {
+    evaluatorSha256: hashSnapshotMap(evaluator),
+    fixturesModuleSha256: evaluator["fixtures.mts"] ?? null,
+    sourceSha256: hashSnapshotMap(source),
+  };
 }
 
-function normalizeCorpus(
-  entries: Array<SourceCase & { fileSha256?: string }>,
-  kind: "positive" | "control",
-  sourceHashes: Record<string, string>,
-  requireFileSha256: boolean,
-): BaselineCase[] {
-  if (!Array.isArray(entries)) {
-    throw new Error(`Corpus ${kind} cases must be an array.`);
-  }
-  if (kind === "positive" && entries.length === 0) {
-    throw new Error("Corpus requires at least one positive case.");
-  }
-  const seen = new Set<string>();
-  return entries.map((entry) => {
-    if (!entry?.id?.trim() || seen.has(entry.id)) {
-      throw new Error(`Invalid or duplicate ${kind} case ID: ${entry?.id}`);
-    }
-    seen.add(entry.id);
-    const path = normalizeRelativePath(entry.path, `Case ${entry.id} path`);
-    const fileSha256 = sourceHashes[path];
-    if (!fileSha256) {
-      throw new Error(
-        `Case ${entry.id} references unknown source file ${path}.`,
-      );
-    }
-    if (requireFileSha256 || entry.fileSha256 !== undefined) {
-      if (
-        assertSha256(entry.fileSha256, `Case ${entry.id} fileSha256`) !==
-        fileSha256
-      ) {
-        throw new Error(
-          `Case ${entry.id} fileSha256 does not match source hash.`,
-        );
-      }
-    }
-    if (!Number.isSafeInteger(entry.line) || entry.line < 1) {
-      throw new Error(
-        `Case ${entry.id} requires a positive integer start line.`,
-      );
-    }
-    if (
-      entry.endLine !== undefined &&
-      (!Number.isSafeInteger(entry.endLine) || entry.endLine < entry.line)
-    ) {
-      throw new Error(`Case ${entry.id} endLine must be >= line.`);
-    }
-    const cwes = [
-      ...new Set(
-        (entry.cwes ?? [])
-          .map((cwe) => String(cwe).trim().toUpperCase())
-          .filter(Boolean),
-      ),
-    ];
-    if (cwes.length === 0)
-      throw new Error(`Case ${entry.id} requires at least one CWE.`);
+type BaselineCase = SourceCase & { fileSha256: string };
+function corpusCases(entries: BaselineCase[], source: Snapshot) {
+  const ids = new Set<string>();
+  return entries.map(({ id, path, line, endLine = line, cwes, fileSha256 }) => {
+    check(!!id.trim() && !ids.has(id), `Invalid or duplicate case ID: ${id}`);
+    ids.add(id);
+    check(
+      Object.hasOwn(source, path) && source[path] === fileSha256,
+      `Case ${id} source mismatch.`,
+    );
+    check(
+      Number.isSafeInteger(line) &&
+        line > 0 &&
+        Number.isSafeInteger(endLine) &&
+        endLine >= line,
+      `Invalid case span: ${id}`,
+    );
+    const accepted = [...new Set(cwes.map((cwe) => cwe.trim().toUpperCase()))];
+    check(!!accepted.length && !accepted.includes(""), `Missing CWE: ${id}`);
     return {
-      id: entry.id,
+      id,
       path,
-      line: entry.line,
-      ...(entry.endLine !== undefined && entry.endLine > entry.line
-        ? { endLine: entry.endLine }
-        : {}),
-      cwes,
+      line,
+      ...(endLine > line ? { endLine } : {}),
+      cwes: accepted,
       fileSha256,
     };
   });
 }
 
-function normalizeRuns(
-  rawRuns: Array<RunRecord | BaselineAttempt>,
+// Both input forms pass through checkedRuns, which selects the portable fields.
+function projectRun(run: RunRecord) {
+  if (run.status === "failed") return run;
+  const { safeControlDetails, unmatchedFindings, evidenceErrors, ...scores } =
+    run.report;
+  return {
+    ...run,
+    report: {
+      ...scores,
+      safeControlAccusations: safeControlDetails.map(
+        (entry) => entry.controlIds,
+      ),
+      unmatchedFindingsCount: unmatchedFindings.length,
+      evidenceErrorsCount: evidenceErrors.length,
+    },
+  };
+}
+
+type ProjectedRun = ReturnType<typeof projectRun>;
+type Score = Extract<ProjectedRun, { status: "completed" }>["report"];
+
+function count(value: number) {
+  check(
+    Number.isSafeInteger(value) && value >= 0,
+    "Expected a nonnegative integer count.",
+  );
+  return value;
+}
+
+function checkedReport(
+  report: Score,
+  positives: BaselineCase[],
+  controls: Set<string>,
+) {
+  const {
+    expectedCount,
+    foundCount,
+    passed,
+    needsAdjudication,
+    safeControlAccusations,
+    safeControlFindings,
+  } = report;
+  const cases = report.cases.map(({ id, found }) => ({ id, found }));
+  check(
+    expectedCount === positives.length &&
+      cases.length === expectedCount &&
+      cases.every(
+        (entry, i) =>
+          entry.id === positives[i]!.id && typeof entry.found === "boolean",
+      ),
+    "Run cases do not match corpus positives.",
+  );
+  const matchedIds = cases
+    .filter((entry) => entry.found)
+    .map((entry) => entry.id);
+  check(
+    isDeepStrictEqual(matchedIds, report.matchedIds) &&
+      foundCount === matchedIds.length,
+    "Run matches disagree with cases.",
+  );
+  check(
+    safeControlFindings === safeControlAccusations.length &&
+      safeControlAccusations.every(
+        (ids) =>
+          Array.isArray(ids) &&
+          ids.length > 0 &&
+          ids.every((id) => controls.has(id)),
+      ),
+    "Invalid safe-control accusations.",
+  );
+  const unmatchedFindingsCount = count(report.unmatchedFindingsCount);
+  check(
+    typeof passed === "boolean" &&
+      typeof needsAdjudication === "boolean" &&
+      (needsAdjudication || !(safeControlFindings || unmatchedFindingsCount)),
+    "Invalid grading status.",
+  );
+  return {
+    passed,
+    needsAdjudication,
+    cases,
+    matchedIds,
+    foundCount,
+    expectedCount,
+    recall: foundCount / expectedCount,
+    duplicateFindings: count(report.duplicateFindings),
+    safeControlFindings,
+    safeControlAccusations,
+    unmatchedFindingsCount,
+    evidenceErrorsCount: count(report.evidenceErrorsCount),
+  };
+}
+
+function runUsage(usage: unknown) {
+  if (usage == null) return null;
+  check(
+    typeof usage === "object" && !Array.isArray(usage),
+    "Invalid token usage.",
+  );
+  return Object.fromEntries(
+    usageFields.map((field) => {
+      const value = (usage as Record<string, number | null>)[field];
+      return [field, value == null ? null : count(value)];
+    }),
+  );
+}
+
+function checkedRuns(
+  runs: ProjectedRun[],
   pairs: number,
   positives: BaselineCase[],
   controls: BaselineCase[],
-  fromSavedRun: boolean,
-): BaselineAttempt[] {
-  if (!Array.isArray(rawRuns)) throw new Error("Runs must be an array.");
+) {
   const controlIds = new Set(controls.map((entry) => entry.id));
   const seen = new Set<string>();
-  const normalized = rawRuns.map((record, index): BaselineAttempt => {
-    const label = `runs[${index}]`;
-    if (record.variant !== "baseline" && record.variant !== "time-aware") {
-      throw new Error(`${label}.variant must be "baseline" or "time-aware".`);
-    }
-    if (
-      !Number.isSafeInteger(record.pair) ||
-      record.pair < 1 ||
-      record.pair > pairs
-    ) {
-      throw new Error(
-        `${label}.pair must be an integer between 1 and ${pairs}.`,
-      );
-    }
-    const key = `${record.pair}/${record.variant}`;
-    if (seen.has(key)) throw new Error(`Duplicate run for pair ${key}`);
+  const checked = runs.map((run) => {
+    const {
+      pair,
+      variant,
+      startedAt,
+      elapsedMs,
+      advisoryBudgetMinutes = null,
+      promptSha256,
+    } = run;
+    const key = `${pair}/${variant}`;
+    check(
+      variants.includes(variant) &&
+        Number.isSafeInteger(pair) &&
+        pair > 0 &&
+        pair <= pairs,
+      `Invalid pair/variant: ${key}`,
+    );
+    check(!seen.has(key), `Duplicate run for pair ${key}`);
     seen.add(key);
-    if (
-      typeof record.elapsedMs !== "number" ||
-      !Number.isFinite(record.elapsedMs) ||
-      record.elapsedMs < 0
-    ) {
-      throw new Error(
-        `${label}.elapsedMs must be a non-negative finite number.`,
-      );
-    }
-    if (
-      typeof record.startedAt !== "string" ||
-      !record.startedAt.trim() ||
-      (record.advisoryBudgetMinutes !== undefined &&
-        record.advisoryBudgetMinutes !== null &&
-        (typeof record.advisoryBudgetMinutes !== "number" ||
-          !Number.isFinite(record.advisoryBudgetMinutes) ||
-          record.advisoryBudgetMinutes <= 0))
-    ) {
-      throw new Error(
-        `${label} has invalid startedAt or advisoryBudgetMinutes.`,
-      );
-    }
-    const base = {
-      pair: record.pair,
-      variant: record.variant,
-      startedAt: record.startedAt,
-      advisoryBudgetMinutes: record.advisoryBudgetMinutes ?? null,
-      promptSha256:
-        record.promptSha256 === null
-          ? null
-          : assertSha256(record.promptSha256, `${label}.promptSha256`),
-      elapsedMs: record.elapsedMs,
-      usage: normalizeUsage(record.usage),
+    check(
+      !!startedAt.trim() &&
+        Number.isFinite(elapsedMs) &&
+        elapsedMs >= 0 &&
+        (advisoryBudgetMinutes === null ||
+          (Number.isFinite(advisoryBudgetMinutes) &&
+            advisoryBudgetMinutes > 0)),
+      `Invalid timing: ${key}`,
+    );
+    const metadata = {
+      pair,
+      variant,
+      startedAt,
+      elapsedMs,
+      advisoryBudgetMinutes,
+      promptSha256: promptSha256 === null ? null : digest(promptSha256),
+      usage: runUsage(run.usage),
     };
-    if (record.status === "failed") {
-      if (typeof record.error !== "string") {
-        throw new Error(`${label}.error must be a string.`);
-      }
-      return { ...base, status: "failed", error: record.error };
+    if (run.status === "failed") {
+      check(typeof run.error === "string", "Missing failure diagnostic.");
+      return { ...metadata, status: run.status, error: run.error };
     }
-    if (record.status !== "completed" || !record.report) {
-      throw new Error(
-        `${label} must have status "completed" with report, or "failed".`,
-      );
-    }
-    const report = record.report as RunReport | BaselineCompletedReport;
-    const cases: Array<{ id: string; found: boolean }> = report.cases;
-    if (
-      report.expectedCount !== positives.length ||
-      cases.length !== positives.length ||
-      !cases.every(
-        (entry, i) =>
-          entry.id === positives[i]!.id && typeof entry.found === "boolean",
-      )
-    ) {
-      throw new Error(`${label}.report.cases do not match corpus positives.`);
-    }
-    const expectedMatched = cases
-      .filter((entry) => entry.found)
-      .map((entry) => entry.id);
-    const matchedIds: string[] = report.matchedIds;
-    const matchedSet = new Set(matchedIds);
-    if (
-      matchedSet.size !== expectedMatched.length ||
-      matchedIds.length !== expectedMatched.length ||
-      !expectedMatched.every((id) => matchedSet.has(id)) ||
-      report.foundCount !== expectedMatched.length
-    ) {
-      throw new Error(
-        `${label}.report.matchedIds/foundCount disagree with cases.`,
-      );
-    }
-    const safeControlAccusations = fromSavedRun
-      ? (report as RunReport).safeControlDetails.map(
-          (detail) => detail.controlIds,
-        )
-      : (report as BaselineCompletedReport).safeControlAccusations;
-    for (const ids of safeControlAccusations) {
-      if (
-        !Array.isArray(ids) ||
-        ids.length === 0 ||
-        ids.some((id) => !controlIds.has(id))
-      ) {
-        throw new Error(`${label}.report references unknown safe-control ID.`);
-      }
-    }
-    if (
-      !Number.isSafeInteger(report.duplicateFindings) ||
-      report.duplicateFindings < 0 ||
-      !Number.isSafeInteger(report.safeControlFindings) ||
-      report.safeControlFindings < 0
-    ) {
-      throw new Error(
-        `${label}.report finding counts must be non-negative integers.`,
-      );
-    }
-    if (report.safeControlFindings !== safeControlAccusations.length) {
-      throw new Error(
-        `${label}.report.safeControlFindings disagrees with accusation list.`,
-      );
-    }
-    const unmatchedFindingsCount = fromSavedRun
-      ? (report as RunReport).unmatchedFindings.length
-      : (report as BaselineCompletedReport).unmatchedFindingsCount;
-    const evidenceErrorsCount = fromSavedRun
-      ? (report as RunReport).evidenceErrors.length
-      : (report as BaselineCompletedReport).evidenceErrorsCount;
-    if (
-      !Number.isSafeInteger(unmatchedFindingsCount) ||
-      unmatchedFindingsCount < 0 ||
-      !Number.isSafeInteger(evidenceErrorsCount) ||
-      evidenceErrorsCount < 0
-    ) {
-      throw new Error(`${label}.report counts must be non-negative integers.`);
-    }
-    const needsAdjudication =
-      Boolean(report.needsAdjudication) ||
-      unmatchedFindingsCount > 0 ||
-      safeControlAccusations.length > 0;
-    if (!fromSavedRun && needsAdjudication && !report.needsAdjudication) {
-      throw new Error(
-        `${label}.report.needsAdjudication must be true when adjudication is pending.`,
-      );
-    }
+    check(run.status === "completed", "Invalid run status.");
     return {
-      ...base,
-      status: "completed",
-      report: {
-        passed: Boolean(report.passed),
-        recall: expectedMatched.length / positives.length,
-        foundCount: report.foundCount,
-        expectedCount: report.expectedCount,
-        matchedIds: [...matchedIds],
-        cases: cases.map((entry) => ({ id: entry.id, found: entry.found })),
-        duplicateFindings: report.duplicateFindings,
-        safeControlFindings: report.safeControlFindings,
-        safeControlAccusations: safeControlAccusations.map((ids) => [...ids]),
-        unmatchedFindingsCount,
-        evidenceErrorsCount,
-        needsAdjudication,
-      },
+      ...metadata,
+      status: run.status,
+      report: checkedReport(run.report, positives, controlIds),
     };
   });
-  return normalized.sort(
+  return checked.sort(
     (a, b) =>
       a.pair - b.pair ||
       variants.indexOf(a.variant) - variants.indexOf(b.variant),
   );
 }
 
-/**
- * Build a portable baseline snapshot omitting structured host path fields
- * (`scanDir`, `reportPath`, executable paths) and raw fixture source text.
- * Failed attempts retain `record.error` verbatim (and `compareBaselines`
- * surfaces those strings in `failures`), so review exported baselines and
- * comparison outputs for local paths, command output, or secrets before
- * sharing or publishing them.
- */
+function projectExperiment(experiment: SavedExperiment) {
+  const { source, evaluator, plugin, sdk, codexExecutable } = experiment;
+  return {
+    ...validateExperiment(experiment),
+    evaluator,
+    source,
+    reasoningEffort: experiment.reasoningEffort ?? null,
+    packageVersions: experiment.packageVersions ?? {},
+    digests: {
+      ...sourceDigests(evaluator, source),
+      pluginSha256: plugin ? hashSnapshotMap(plugin) : null,
+      sdkSha256: sdk ? hashSnapshotMap(sdk) : null,
+      codexExecutableSha256:
+        codexExecutable?.files.map((file) => file.sha256) ?? [],
+    },
+  };
+}
+
 export function createReleaseBaseline({
   experiment,
   fixture,
@@ -459,633 +300,417 @@ export function createReleaseBaseline({
   experiment: SavedExperiment;
   fixture: Fixture;
   runs: RunRecord[];
-}): ReleaseBaseline {
-  const config = validateExperiment(experiment);
-  const evaluator = normalizeSnapshotMap(
-    experiment.evaluator,
-    "experiment.evaluator",
+}) {
+  const files = Object.fromEntries(
+    Object.entries(fixture.files).map(([path, text]) => [path, hashText(text)]),
   );
-  const source = normalizeSnapshotMap(
-    experiment.source,
-    "experiment.source",
-    true,
+  check(
+    isDeepStrictEqual(files, experiment.source),
+    "Experiment hashes do not match fixture.files.",
   );
-  if (!fixture?.files || typeof fixture.files !== "object") {
-    throw new Error("fixture.files must be an object.");
-  }
-  const fixtureFiles: Record<string, string> = {};
-  for (const [path, contents] of Object.entries(fixture.files)) {
-    const clean = normalizeRelativePath(path, "fixture.files path");
-    if (clean in fixtureFiles)
-      throw new Error(`Duplicate fixture path: ${clean}`);
-    fixtureFiles[clean] = contents;
-  }
-  if (
-    Object.keys(source).length !== Object.keys(fixtureFiles).length ||
-    !Object.entries(fixtureFiles).every(
-      ([path, text]) => hashText(text) === source[path],
-    )
-  ) {
-    throw new Error("experiment.source hashes do not match fixture.files.");
-  }
-  const positives = normalizeCorpus(
-    fixture.positives,
-    "positive",
-    source,
-    false,
-  );
-  const controls = normalizeCorpus(fixture.controls, "control", source, false);
-  return {
+  const cases = (entries: SourceCase[]) =>
+    entries.map((entry) => ({ ...entry, fileSha256: files[entry.path] }));
+  return validateReleaseBaseline({
     schemaVersion: BASELINE_SCHEMA_VERSION,
-    experiment: {
-      ...config,
-      reasoningEffort: experiment.reasoningEffort ?? null,
-      packageVersions: sortRecord(experiment.packageVersions ?? {}),
-      digests: {
-        fixturesModuleSha256: evaluator["fixtures.mts"] ?? null,
-        evaluatorSha256: hashSnapshotMap(evaluator),
-        sourceSha256: hashSnapshotMap(source),
-        pluginSha256: experiment.plugin
-          ? hashSnapshotMap(
-              normalizeSnapshotMap(experiment.plugin, "experiment.plugin"),
-            )
-          : null,
-        sdkSha256: experiment.sdk
-          ? hashSnapshotMap(
-              normalizeSnapshotMap(experiment.sdk, "experiment.sdk"),
-            )
-          : null,
-        codexExecutableSha256: (experiment.codexExecutable?.files ?? []).map(
-          (file, i) =>
-            assertSha256(file.sha256, `codexExecutable.files[${i}].sha256`),
-        ),
-      },
-      evaluator,
-      source,
+    experiment: projectExperiment(experiment),
+    corpus: {
+      positives: cases(fixture.positives),
+      controls: cases(fixture.controls),
     },
-    corpus: { positives, controls },
-    runs: normalizeRuns(runs, config.pairs, positives, controls, true),
-  };
+    runs: runs.map(projectRun),
+  });
 }
 
-export function validateReleaseBaseline(value: unknown): ReleaseBaseline {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("ReleaseBaseline must be a JSON object.");
-  }
-  const candidate = value as ReleaseBaseline;
-  if (candidate.schemaVersion !== BASELINE_SCHEMA_VERSION) {
-    throw new Error(
-      `Unsupported ReleaseBaseline schemaVersion: ${String(candidate.schemaVersion)}.`,
+export type ReleaseBaseline = ReturnType<typeof validateReleaseBaseline>;
+
+export function validateReleaseBaseline(input: unknown) {
+  const value = input as {
+    schemaVersion: number;
+    experiment: ReturnType<typeof projectExperiment>;
+    corpus: { positives: BaselineCase[]; controls: BaselineCase[] };
+    runs: ProjectedRun[];
+  };
+  check(
+    value?.schemaVersion === BASELINE_SCHEMA_VERSION,
+    "Unsupported ReleaseBaseline schemaVersion.",
+  );
+  const config = validateExperiment(value.experiment);
+  const { digests, reasoningEffort, packageVersions } = value.experiment;
+  check(
+    reasoningEffort === null || typeof reasoningEffort === "string",
+    "Invalid reasoning effort.",
+  );
+  const source = stringMap(value.experiment.source);
+  for (const path of Object.keys(source))
+    check(
+      path !== "." &&
+        path !== ".." &&
+        !path.startsWith("../") &&
+        posix.normalize(path) === path,
+      "Invalid fixture file path.",
     );
-  }
-  const config = validateExperiment(candidate.experiment);
-  const evaluator = normalizeSnapshotMap(
-    candidate.experiment.evaluator,
-    "evaluator",
-  );
-  const source = normalizeSnapshotMap(
-    candidate.experiment.source,
-    "source",
-    true,
-  );
-  const { digests } = candidate.experiment ?? {};
-  if (
-    !digests ||
-    typeof digests !== "object" ||
-    !Array.isArray(digests.codexExecutableSha256) ||
-    !candidate.corpus ||
-    typeof candidate.corpus !== "object"
-  ) {
-    throw new Error(
-      "ReleaseBaseline is missing required experiment.digests or corpus fields.",
-    );
-  }
-  if (
-    digests.fixturesModuleSha256 !== (evaluator["fixtures.mts"] ?? null) ||
-    assertSha256(digests.evaluatorSha256, "digests.evaluatorSha256") !==
-      hashSnapshotMap(evaluator) ||
-    assertSha256(digests.sourceSha256, "digests.sourceSha256") !==
-      hashSnapshotMap(source)
-  ) {
-    throw new Error(
-      "ReleaseBaseline digests do not match evaluator/source snapshots.",
-    );
-  }
-  const positives = normalizeCorpus(
-    candidate.corpus.positives,
-    "positive",
-    source,
-    true,
-  );
-  const controls = normalizeCorpus(
-    candidate.corpus.controls,
-    "control",
-    source,
-    true,
-  );
-  return {
-    schemaVersion: BASELINE_SCHEMA_VERSION,
-    experiment: {
-      ...config,
-      reasoningEffort: candidate.experiment.reasoningEffort ?? null,
-      packageVersions: sortRecord(candidate.experiment.packageVersions ?? {}),
-      digests: {
-        fixturesModuleSha256: digests.fixturesModuleSha256,
-        evaluatorSha256: digests.evaluatorSha256,
-        sourceSha256: digests.sourceSha256,
-        pluginSha256:
-          digests.pluginSha256 === null
-            ? null
-            : assertSha256(digests.pluginSha256, "digests.pluginSha256"),
-        sdkSha256:
-          digests.sdkSha256 === null
-            ? null
-            : assertSha256(digests.sdkSha256, "digests.sdkSha256"),
-        codexExecutableSha256: digests.codexExecutableSha256.map((digest, i) =>
-          assertSha256(digest, `digests.codexExecutableSha256[${i}]`),
-        ),
-      },
-      evaluator,
-      source,
-    },
-    corpus: { positives, controls },
-    runs: normalizeRuns(
-      candidate.runs,
-      config.pairs,
-      positives,
-      controls,
-      false,
+  const evaluator = stringMap(value.experiment.evaluator);
+  const hashes = sourceDigests(evaluator, source);
+  check(
+    Object.entries(hashes).every(
+      ([key, hash]) => digests[key as keyof typeof hashes] === hash,
     ),
+    "Baseline snapshot digest mismatch.",
+  );
+  const positives = corpusCases(value.corpus.positives, source);
+  const controls = corpusCases(value.corpus.controls, source);
+  check(positives.length > 0, "Missing positive cases.");
+  return {
+    schemaVersion: BASELINE_SCHEMA_VERSION,
+    experiment: {
+      ...config,
+      source,
+      evaluator,
+      reasoningEffort,
+      packageVersions: stringMap(packageVersions),
+      digests: {
+        ...hashes,
+        pluginSha256:
+          digests.pluginSha256 === null ? null : digest(digests.pluginSha256),
+        sdkSha256:
+          digests.sdkSha256 === null ? null : digest(digests.sdkSha256),
+        codexExecutableSha256: digests.codexExecutableSha256.map(digest),
+      },
+    },
+    corpus: { positives, controls },
+    runs: checkedRuns(value.runs, config.pairs, positives, controls),
   };
 }
 
-export async function loadBaseline(
-  targetPath: string,
-): Promise<ReleaseBaseline> {
-  const info = await stat(targetPath);
-  if (info.isDirectory()) {
-    const [experiment, fixture, runs] = await Promise.all(
-      ["experiment.json", "fixture.json", "runs.json"].map(async (file) =>
-        JSON.parse(await readFile(join(targetPath, file), "utf8")),
-      ),
-    );
-    return createReleaseBaseline({
-      experiment: experiment as SavedExperiment,
-      fixture: fixture as Fixture,
-      runs: runs as RunRecord[],
-    });
-  }
-  if (info.isFile()) {
-    return validateReleaseBaseline(
-      JSON.parse(await readFile(targetPath, "utf8")),
-    );
-  }
-  throw new Error(`Unsupported baseline path: ${targetPath}`);
+export async function loadBaseline(path: string) {
+  const json = async (file: string) => JSON.parse(await readFile(file, "utf8"));
+  if (!(await stat(path)).isDirectory())
+    return validateReleaseBaseline(await json(path));
+  return createReleaseBaseline({
+    experiment: await json(join(path, "experiment.json")),
+    fixture: await json(join(path, "fixture.json")),
+    runs: await json(join(path, "runs.json")),
+  });
 }
 
-function sameCaseDefinition(a: BaselineCase, b: BaselineCase): boolean {
-  if (
-    a.path !== b.path ||
-    a.line !== b.line ||
-    (a.endLine ?? a.line) !== (b.endLine ?? b.line) ||
-    a.fileSha256 !== b.fileSha256
-  ) {
-    return false;
-  }
-  const cwesA = new Set(a.cwes);
-  const cwesB = new Set(b.cwes);
-  return cwesA.size === cwesB.size && [...cwesA].every((cwe) => cwesB.has(cwe));
-}
-
-function diffCases(baseCases: BaselineCase[], candCases: BaselineCase[]) {
-  const baseById = new Map(baseCases.map((entry) => [entry.id, entry]));
-  const candById = new Map(candCases.map((entry) => [entry.id, entry]));
+function diffEntries<T>(before: Map<string, T>, after: Map<string, T>) {
   const comparable: string[] = [];
   const changed: string[] = [];
   const removed: string[] = [];
-  for (const entry of baseCases) {
-    const cand = candById.get(entry.id);
-    if (!cand) removed.push(entry.id);
-    else if (sameCaseDefinition(entry, cand)) comparable.push(entry.id);
-    else changed.push(entry.id);
+  for (const [id, value] of before) {
+    if (!after.has(id)) removed.push(id);
+    else if (isDeepStrictEqual(value, after.get(id))) comparable.push(id);
+    else changed.push(id);
   }
-  const added = candCases
-    .filter((entry) => !baseById.has(entry.id))
-    .map((entry) => entry.id);
+  const added = [...after.keys()].filter((id) => !before.has(id));
   return { comparable, added, removed, changed };
 }
 
-function diffSourceFiles(
-  baseSource: Record<string, string>,
-  candSource: Record<string, string>,
+function diffCorpus(base: ReleaseBaseline, cand: ReleaseBaseline) {
+  const byId = (cases: BaselineCase[]) =>
+    new Map(cases.map((c) => [c.id, { ...c, cwes: new Set(c.cwes) }]));
+  const files = (s: Snapshot) =>
+    new Map(
+      Object.keys(s)
+        .sort()
+        .map((name) => [name, s[name]]),
+    );
+  const { comparable, ...changes } = diffEntries(
+    files(base.experiment.source),
+    files(cand.experiment.source),
+  );
+  return {
+    positives: diffEntries(
+      byId(base.corpus.positives),
+      byId(cand.corpus.positives),
+    ),
+    controls: diffEntries(
+      byId(base.corpus.controls),
+      byId(cand.corpus.controls),
+    ),
+    sourceFiles: { unchanged: comparable, ...changes },
+  };
+}
+
+type Corpus = ReturnType<typeof diffCorpus>;
+type ScoreReport = ReturnType<typeof checkedReport>;
+
+function rate(numerator: number | null, denominator: number) {
+  return numerator === null || denominator === 0
+    ? null
+    : numerator / denominator;
+}
+
+function delta(base: number | null, cand: number | null) {
+  return base === null || cand === null ? null : cand - base;
+}
+
+function recall(counts: number[], size: number) {
+  const found = size ? sumKnown(counts) : null;
+  const expected = counts.length * size || null;
+  return {
+    found,
+    expected,
+    // Divide once so equivalent fractions yield identical rates across runs.
+    score: {
+      mean: rate(found, expected ?? 0),
+      min: expected ? Math.min(...counts) / size : null,
+      max: expected ? Math.max(...counts) / size : null,
+    },
+  };
+}
+
+const tokenFields = [...usageFields, "total_tokens"] as const;
+function tokenMetrics(
+  fn: (field: (typeof tokenFields)[number]) => number | null,
 ) {
-  const unchanged: string[] = [];
-  const added: string[] = [];
-  const removed: string[] = [];
-  const changed: string[] = [];
-  const keys = [
-    ...new Set([...Object.keys(baseSource), ...Object.keys(candSource)]),
-  ].sort();
-  for (const key of keys) {
-    if (!(key in baseSource)) added.push(key);
-    else if (!(key in candSource)) removed.push(key);
-    else if (baseSource[key] === candSource[key]) unchanged.push(key);
-    else changed.push(key);
-  }
-  return { unchanged, added, removed, changed };
-}
-
-function compareRatios(
-  baseNum: number | null,
-  baseDen: number,
-  candNum: number | null,
-  candDen: number,
-): -1 | 0 | 1 | null {
-  if (baseNum === null || candNum === null || baseDen <= 0 || candDen <= 0) {
-    return null;
-  }
-  const left = candNum * baseDen;
-  const right = baseNum * candDen;
-  return left === right ? 0 : left > right ? 1 : -1;
-}
-
-function ratioDelta(
-  baseNum: number | null,
-  baseDen: number,
-  candNum: number | null,
-  candDen: number,
-): number | null {
-  const cmp = compareRatios(baseNum, baseDen, candNum, candDen);
-  if (cmp === null) return null;
-  return cmp === 0 ? 0 : candNum! / candDen - baseNum! / baseDen;
-}
-
-function nullableDelta(
-  base: number | null,
-  cand: number | null,
-): number | null {
-  if (base === null || cand === null) return null;
-  return cand === base ? 0 : cand - base;
+  return Object.fromEntries(tokenFields.map((k) => [k, fn(k)])) as Record<
+    (typeof tokenFields)[number],
+    number | null
+  >;
 }
 
 function summarizeArm(
   baseline: ReleaseBaseline,
   variant: Variant,
-  comparablePositiveIds: string[],
-  comparableControlIds: string[],
+  corpus: Corpus,
 ) {
   const configured = baseline.experiment.pairs;
   const attempts = baseline.runs.filter((run) => run.variant === variant);
-  const completedRuns = attempts.filter(
-    (run): run is Extract<BaselineAttempt, { status: "completed" }> =>
-      run.status === "completed",
+  const finished = attempts.filter((run) => run.status === "completed");
+  const failures = attempts
+    .filter((run) => run.status === "failed")
+    .map(({ pair, error }) => ({ pair, error }));
+  const reports = finished.map((run) => run.report);
+  const completed = reports.length;
+  const comparable = new Set(corpus.positives.comparable);
+  const controls = new Set(corpus.controls.comparable);
+  const found = new Map<string, number>();
+  const shared = recall(
+    reports.map(({ matchedIds }) => {
+      let sharedCount = 0;
+      for (const id of matchedIds) {
+        found.set(id, (found.get(id) ?? 0) + 1);
+        if (comparable.has(id)) sharedCount++;
+      }
+      return sharedCount;
+    }),
+    comparable.size,
   );
-  const failedRuns = attempts.filter(
-    (run): run is Extract<BaselineAttempt, { status: "failed" }> =>
-      run.status === "failed",
+  const raw = recall(
+    reports.map((r) => r.foundCount),
+    baseline.corpus.positives.length,
   );
-  const completed = completedRuns.length;
-  const comparableSet = new Set(comparablePositiveIds);
-  const comparableControlSet = new Set(comparableControlIds);
-
-  const rawRecalls = completedRuns.map((run) => run.report.recall);
-  const rawFoundCount =
-    completed > 0
-      ? completedRuns.reduce((s, r) => s + r.report.foundCount, 0)
-      : null;
-  const rawExpectedCount =
-    completed > 0
-      ? completedRuns.reduce((s, r) => s + r.report.expectedCount, 0)
-      : null;
-
-  let comparableFoundCount: number | null = null;
-  let comparableExpectedCount: number | null = null;
-  let comparableRecall: Record<"mean" | "min" | "max", number | null> = {
-    mean: null,
-    min: null,
-    max: null,
-  };
-  if (completed > 0 && comparablePositiveIds.length > 0) {
-    const perRunFound = completedRuns.map(
-      (run) =>
-        run.report.cases.filter((c) => c.found && comparableSet.has(c.id))
-          .length,
-    );
-    const perRunRecalls = perRunFound.map(
-      (n) => n / comparablePositiveIds.length,
-    );
-    comparableFoundCount = perRunFound.reduce((s, n) => s + n, 0);
-    comparableExpectedCount = completed * comparablePositiveIds.length;
-    comparableRecall = {
-      mean: comparableFoundCount / comparableExpectedCount,
-      min: Math.min(...perRunRecalls),
-      max: Math.max(...perRunRecalls),
-    };
-  }
-
-  const countCompleted = (fn: (r: BaselineCompletedReport) => number) =>
-    completed > 0
-      ? completedRuns.reduce((s, run) => s + fn(run.report), 0)
-      : null;
-  const meanCompleted = (total: number | null) =>
-    total !== null && completed > 0 ? total / completed : null;
-
-  const duplicateFindings = countCompleted((r) => r.duplicateFindings);
-  const safeControlFindings = countCompleted((r) => r.safeControlFindings);
-  const comparableSafeControlFindings =
-    completed > 0 && comparableControlIds.length > 0
-      ? completedRuns.reduce(
-          (sum, run) =>
-            sum +
-            run.report.safeControlAccusations.filter((ids) =>
-              ids.some((id) => comparableControlSet.has(id)),
-            ).length,
-          0,
-        )
-      : null;
-  const unmatchedFindings = countCompleted((r) => r.unmatchedFindingsCount);
-  const evidenceErrors = countCompleted((r) => r.evidenceErrorsCount);
-  const adjudicationRequiredRuns = completedRuns.filter(
-    (run) => run.report.needsAdjudication,
+  const sum = (fn: (r: ScoreReport) => number) => sumKnown(reports.map(fn));
+  const duplicateFindings = sum((r) => r.duplicateFindings);
+  const safeControlFindings = sum((r) => r.safeControlFindings);
+  const comparableSafeControlFindings = controls.size
+    ? sum(
+        (r) =>
+          r.safeControlAccusations.filter((ids) =>
+            ids.some((id) => controls.has(id)),
+          ).length,
+      )
+    : null;
+  const unmatchedFindings = sum((r) => r.unmatchedFindingsCount);
+  const evidenceErrors = sum((r) => r.evidenceErrorsCount);
+  const adjudicationRequiredRuns = reports.filter(
+    (r) => r.needsAdjudication,
   ).length;
-
   const { missingUsageRuns, ...totals } = summarizeUsage(attempts);
-  const meanPerRun = Object.fromEntries(
-    Object.entries(totals).map(([k, v]) => [
-      k,
-      v !== null && attempts.length > 0 ? v / attempts.length : null,
-    ]),
-  ) as Record<UsageField | "total_tokens", number | null>;
-
   return {
-    completedRuns,
+    caseRate(id: string) {
+      const foundRuns = found.get(id) ?? 0;
+      return {
+        foundRuns,
+        completedRuns: completed,
+        recall: rate(foundRuns, completed),
+      };
+    },
+    accusations(id: string) {
+      const counts = reports.map(
+        (r) =>
+          r.safeControlAccusations.filter((ids) => ids.includes(id)).length,
+      );
+      return {
+        runs: counts.filter((n) => n > 0).length,
+        findings: sumKnown(counts) ?? 0,
+      };
+    },
     summary: {
       configured,
       attempted: attempts.length,
       completed,
-      failed: failedRuns.length,
-      missing: Math.max(0, configured - attempts.length),
-      successRate: attempts.length > 0 ? completed / attempts.length : null,
-      completionRate: configured > 0 ? completed / configured : null,
-      failures: failedRuns.map((run) => ({ pair: run.pair, error: run.error })),
-      comparableRecall,
-      comparableFoundCount,
-      comparableExpectedCount,
-      rawRecall: {
-        mean: mean(rawRecalls),
-        min: rawRecalls.length > 0 ? Math.min(...rawRecalls) : null,
-        max: rawRecalls.length > 0 ? Math.max(...rawRecalls) : null,
-      },
-      rawFoundCount,
-      rawExpectedCount,
+      failed: failures.length,
+      missing: configured - attempts.length,
+      successRate: rate(completed, attempts.length),
+      completionRate: completed / configured,
+      failures,
+      comparableRecall: shared.score,
+      comparableFoundCount: shared.found,
+      comparableExpectedCount: shared.expected,
+      rawRecall: raw.score,
+      rawFoundCount: raw.found,
+      rawExpectedCount: raw.expected,
       duplicateFindings,
-      meanDuplicateFindings: meanCompleted(duplicateFindings),
+      meanDuplicateFindings: rate(duplicateFindings, completed),
       safeControlFindings,
-      meanSafeControlFindings: meanCompleted(safeControlFindings),
+      meanSafeControlFindings: rate(safeControlFindings, completed),
       comparableSafeControlFindings,
-      meanComparableSafeControlFindings: meanCompleted(
+      meanComparableSafeControlFindings: rate(
         comparableSafeControlFindings,
+        completed,
       ),
       unmatchedFindings,
-      meanUnmatchedFindings: meanCompleted(unmatchedFindings),
+      meanUnmatchedFindings: rate(unmatchedFindings, completed),
       evidenceErrors,
-      meanEvidenceErrors: meanCompleted(evidenceErrors),
+      meanEvidenceErrors: rate(evidenceErrors, completed),
       adjudicationRequiredRuns,
-      adjudicationRate:
-        completed > 0 ? adjudicationRequiredRuns / completed : null,
+      adjudicationRate: rate(adjudicationRequiredRuns, completed),
       meanElapsedMs: mean(attempts.map((r) => r.elapsedMs)),
-      meanCompletedElapsedMs: mean(completedRuns.map((r) => r.elapsedMs)),
+      meanCompletedElapsedMs: mean(finished.map((r) => r.elapsedMs)),
       usage: {
         totals,
-        meanPerRun,
         missingUsageRuns,
+        meanPerRun: tokenMetrics((field) =>
+          rate(totals[field], attempts.length),
+        ),
       },
     },
-  };
-}
-
-function caseRate(
-  completedRuns: Array<Extract<BaselineAttempt, { status: "completed" }>>,
-  caseId: string,
-): CaseRate {
-  const completedRunsCount = completedRuns.length;
-  const foundRuns = completedRuns.filter((run) =>
-    run.report.cases.some((entry) => entry.id === caseId && entry.found),
-  ).length;
-  return {
-    foundRuns,
-    completedRuns: completedRunsCount,
-    recall: completedRunsCount > 0 ? foundRuns / completedRunsCount : null,
   };
 }
 
 function compareArm(
-  baseline: ReleaseBaseline,
-  candidate: ReleaseBaseline,
+  base: ReleaseBaseline,
+  cand: ReleaseBaseline,
   variant: Variant,
-  corpus: {
-    positives: ReturnType<typeof diffCases>;
-    controls: ReturnType<typeof diffCases>;
-    sourceFiles: ReturnType<typeof diffSourceFiles>;
-  },
-  fixtureIdentical: boolean,
+  corpus: Corpus,
+  corpusChanged: boolean,
 ) {
-  const baseArm = summarizeArm(
-    baseline,
-    variant,
-    corpus.positives.comparable,
-    corpus.controls.comparable,
-  );
-  const candArm = summarizeArm(
-    candidate,
-    variant,
-    corpus.positives.comparable,
-    corpus.controls.comparable,
-  );
-  const base = baseArm.summary;
-  const cand = candArm.summary;
-  const perCompletedDelta = (b: number | null, c: number | null) =>
-    ratioDelta(b, base.completed, c, cand.completed);
-  const increasedPerCompleted = (b: number | null, c: number | null) =>
-    compareRatios(b, base.completed, c, cand.completed) === 1;
-
-  const comparableCases = corpus.positives.comparable.map((id) => {
-    const baseRate = caseRate(baseArm.completedRuns, id);
-    const candRate = caseRate(candArm.completedRuns, id);
-    const recallDelta = ratioDelta(
-      baseRate.foundRuns,
-      baseRate.completedRuns,
-      candRate.foundRuns,
-      candRate.completedRuns,
-    );
-    const cmp = compareRatios(
-      baseRate.foundRuns,
-      baseRate.completedRuns,
-      candRate.foundRuns,
-      candRate.completedRuns,
-    );
+  const before = summarizeArm(base, variant, corpus);
+  const after = summarizeArm(cand, variant, corpus);
+  const b = before.summary;
+  const c = after.summary;
+  const pair = (id: string) => ({
+    id,
+    baseline: before.caseRate(id),
+    candidate: after.caseRate(id),
+  });
+  const comparable = corpus.positives.comparable.map((id) => {
+    const rates = pair(id);
+    const recallDelta = delta(rates.baseline.recall, rates.candidate.recall);
     const status =
-      cmp === null
+      recallDelta === null
         ? "unmeasured"
-        : cmp > 0
+        : recallDelta > 0
           ? "improved"
-          : cmp < 0
+          : recallDelta < 0
             ? "regressed"
             : "unchanged";
-    return {
-      id,
-      baseline: baseRate,
-      candidate: candRate,
-      recallDelta,
-      status,
-    } as const;
+    return { ...rates, recallDelta, status };
   });
-
-  const controls = corpus.controls.comparable.map((id) => {
-    const count = (runs: typeof baseArm.completedRuns) => ({
-      accusedRuns: runs.filter((r) =>
-        r.report.safeControlAccusations.some((ids) => ids.includes(id)),
-      ).length,
-      findings: runs.reduce(
-        (s, r) =>
-          s +
-          r.report.safeControlAccusations.filter((ids) => ids.includes(id))
-            .length,
-        0,
-      ),
-    });
-    const b = count(baseArm.completedRuns);
-    const c = count(candArm.completedRuns);
-    return {
-      id,
-      baselineAccusedRuns: b.accusedRuns,
-      candidateAccusedRuns: c.accusedRuns,
-      baselineFindings: b.findings,
-      candidateFindings: c.findings,
-    };
-  });
-
+  const changes = {
+    comparableRecall: delta(b.comparableRecall.mean, c.comparableRecall.mean),
+    rawRecall: delta(b.rawRecall.mean, c.rawRecall.mean),
+    successRate: delta(b.successRate, c.successRate),
+    completionRate: delta(b.completionRate, c.completionRate),
+    meanElapsedMs: delta(b.meanElapsedMs, c.meanElapsedMs),
+    meanCompletedElapsedMs: delta(
+      b.meanCompletedElapsedMs,
+      c.meanCompletedElapsedMs,
+    ),
+    meanDuplicateFindings: delta(
+      b.meanDuplicateFindings,
+      c.meanDuplicateFindings,
+    ),
+    meanSafeControlFindings: delta(
+      b.meanSafeControlFindings,
+      c.meanSafeControlFindings,
+    ),
+    meanComparableSafeControlFindings: delta(
+      b.meanComparableSafeControlFindings,
+      c.meanComparableSafeControlFindings,
+    ),
+    meanUnmatchedFindings: delta(
+      b.meanUnmatchedFindings,
+      c.meanUnmatchedFindings,
+    ),
+    meanEvidenceErrors: delta(b.meanEvidenceErrors, c.meanEvidenceErrors),
+    meanUsage: tokenMetrics((k) =>
+      delta(b.usage.meanPerRun[k], c.usage.meanPerRun[k]),
+    ),
+  };
   return {
-    baseline: base,
-    candidate: cand,
-    delta: {
-      comparableRecall: ratioDelta(
-        base.comparableFoundCount,
-        base.comparableExpectedCount ?? 0,
-        cand.comparableFoundCount,
-        cand.comparableExpectedCount ?? 0,
-      ),
-      rawRecall: ratioDelta(
-        base.rawFoundCount,
-        base.rawExpectedCount ?? 0,
-        cand.rawFoundCount,
-        cand.rawExpectedCount ?? 0,
-      ),
-      successRate: ratioDelta(
-        base.completed,
-        base.attempted,
-        cand.completed,
-        cand.attempted,
-      ),
-      completionRate: ratioDelta(
-        base.completed,
-        base.configured,
-        cand.completed,
-        cand.configured,
-      ),
-      meanElapsedMs: nullableDelta(base.meanElapsedMs, cand.meanElapsedMs),
-      meanCompletedElapsedMs: nullableDelta(
-        base.meanCompletedElapsedMs,
-        cand.meanCompletedElapsedMs,
-      ),
-      meanDuplicateFindings: perCompletedDelta(
-        base.duplicateFindings,
-        cand.duplicateFindings,
-      ),
-      meanComparableSafeControlFindings:
-        corpus.controls.comparable.length > 0
-          ? perCompletedDelta(
-              base.comparableSafeControlFindings,
-              cand.comparableSafeControlFindings,
-            )
-          : null,
-      meanSafeControlFindings: perCompletedDelta(
-        base.safeControlFindings,
-        cand.safeControlFindings,
-      ),
-      meanUnmatchedFindings: perCompletedDelta(
-        base.unmatchedFindings,
-        cand.unmatchedFindings,
-      ),
-      meanEvidenceErrors: perCompletedDelta(
-        base.evidenceErrors,
-        cand.evidenceErrors,
-      ),
-      meanUsage: Object.fromEntries(
-        ([...usageFields, "total_tokens"] as const).map((field) => [
-          field,
-          nullableDelta(
-            base.usage.meanPerRun[field],
-            cand.usage.meanPerRun[field],
-          ),
-        ]),
-      ) as Record<UsageField | "total_tokens", number | null>,
-    },
+    baseline: b,
+    candidate: c,
+    delta: changes,
     cases: {
-      comparable: comparableCases,
+      comparable,
       added: corpus.positives.added.map((id) => ({
         id,
-        candidate: caseRate(candArm.completedRuns, id),
+        candidate: after.caseRate(id),
       })),
       removed: corpus.positives.removed.map((id) => ({
         id,
-        baseline: caseRate(baseArm.completedRuns, id),
+        baseline: before.caseRate(id),
       })),
-      changed: corpus.positives.changed.map((id) => ({
-        id,
-        baseline: caseRate(baseArm.completedRuns, id),
-        candidate: caseRate(candArm.completedRuns, id),
-      })),
+      changed: corpus.positives.changed.map(pair),
     },
-    controls,
+    controls: corpus.controls.comparable.map((id) => {
+      const b = before.accusations(id);
+      const c = after.accusations(id);
+      return {
+        id,
+        baselineAccusedRuns: b.runs,
+        candidateAccusedRuns: c.runs,
+        baselineFindings: b.findings,
+        candidateFindings: c.findings,
+      };
+    }),
     flags: {
-      regressedCases: comparableCases
-        .filter((entry) => entry.status === "regressed")
-        .map((entry) => entry.id),
-      improvedCases: comparableCases
-        .filter((entry) => entry.status === "improved")
-        .map((entry) => entry.id),
-      hasRunFailures: base.failed > 0 || cand.failed > 0,
-      hasMissingRuns: base.missing > 0 || cand.missing > 0,
+      corpusChanged,
+      regressedCases: comparable
+        .filter((r) => r.status === "regressed")
+        .map((r) => r.id),
+      improvedCases: comparable
+        .filter((r) => r.status === "improved")
+        .map((r) => r.id),
+      hasRunFailures: b.failed > 0 || c.failed > 0,
+      hasMissingRuns: b.missing > 0 || c.missing > 0,
       hasUnknownUsage:
-        base.usage.missingUsageRuns > 0 || cand.usage.missingUsageRuns > 0,
+        b.usage.missingUsageRuns > 0 || c.usage.missingUsageRuns > 0,
       needsAdjudication:
-        base.adjudicationRequiredRuns > 0 || cand.adjudicationRequiredRuns > 0,
-      corpusChanged: !fixtureIdentical,
-      evidenceErrorsIncreased: increasedPerCompleted(
-        base.evidenceErrors,
-        cand.evidenceErrors,
-      ),
-      duplicatesIncreased: increasedPerCompleted(
-        base.duplicateFindings,
-        cand.duplicateFindings,
-      ),
+        b.adjudicationRequiredRuns > 0 || c.adjudicationRequiredRuns > 0,
+      evidenceErrorsIncreased: (changes.meanEvidenceErrors ?? 0) > 0,
+      duplicatesIncreased: (changes.meanDuplicateFindings ?? 0) > 0,
       comparableControlAccusationsIncreased:
-        corpus.controls.comparable.length > 0 &&
-        increasedPerCompleted(
-          base.comparableSafeControlFindings,
-          cand.comparableSafeControlFindings,
-        ),
+        (changes.meanComparableSafeControlFindings ?? 0) > 0,
     },
   };
 }
 
-function fieldDiff<T>(
-  baseline: T,
-  candidate: T,
-  equals: (a: T, b: T) => boolean = (a, b) => a === b,
-) {
-  return { baseline, candidate, changed: !equals(baseline, candidate) };
+function diffFields<T extends Record<string, unknown>>(before: T, after: T) {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return Object.fromEntries(
+    [...keys].sort().map((key) => {
+      const baseline = Object.hasOwn(before, key) ? before[key] : null;
+      const candidate = Object.hasOwn(after, key) ? after[key] : null;
+      return [
+        key,
+        {
+          baseline,
+          candidate,
+          changed: !isDeepStrictEqual(baseline, candidate),
+        },
+      ];
+    }),
+  ) as {
+    [K in keyof T]: {
+      baseline: T[K] | null;
+      candidate: T[K] | null;
+      changed: boolean;
+    };
+  };
 }
 
 export function compareBaselines(
@@ -1094,142 +719,57 @@ export function compareBaselines(
 ) {
   const baseline = validateReleaseBaseline(baselineInput);
   const candidate = validateReleaseBaseline(candidateInput);
-  const positives = diffCases(
-    baseline.corpus.positives,
-    candidate.corpus.positives,
+  const corpus = diffCorpus(baseline, candidate);
+  const fixtureIdentical = Object.values(corpus).every(
+    ({ added, removed, changed }) =>
+      !added.length && !removed.length && !changed.length,
   );
-  const controls = diffCases(
-    baseline.corpus.controls,
-    candidate.corpus.controls,
-  );
-  const sourceFiles = diffSourceFiles(
-    baseline.experiment.source,
-    candidate.experiment.source,
-  );
-  const corpus = { positives, controls, sourceFiles };
-  const fixtureIdentical =
-    baseline.experiment.digests.sourceSha256 ===
-      candidate.experiment.digests.sourceSha256 &&
-    [
-      positives.added,
-      positives.removed,
-      positives.changed,
-      controls.added,
-      controls.removed,
-      controls.changed,
-      sourceFiles.added,
-      sourceFiles.removed,
-      sourceFiles.changed,
-    ].every((list) => list.length === 0);
-
-  const packageKeys = [
-    ...new Set([
-      ...Object.keys(baseline.experiment.packageVersions),
-      ...Object.keys(candidate.experiment.packageVersions),
-    ]),
-  ].sort();
-
+  const config = ({
+    model,
+    pairs,
+    budgetMinutes,
+    reasoningEffort,
+  }: ReleaseBaseline["experiment"]) => ({
+    model,
+    pairs,
+    budgetMinutes,
+    reasoningEffort,
+  });
+  const b = baseline.experiment;
+  const c = candidate.experiment;
+  const arm = (variant: Variant) =>
+    compareArm(baseline, candidate, variant, corpus, !fixtureIdentical);
   return {
     schemaVersion: BASELINE_SCHEMA_VERSION,
     provenance: {
       fixtureIdentical,
-      model: fieldDiff(baseline.experiment.model, candidate.experiment.model),
-      reasoningEffort: fieldDiff(
-        baseline.experiment.reasoningEffort,
-        candidate.experiment.reasoningEffort,
-      ),
-      pairs: fieldDiff(baseline.experiment.pairs, candidate.experiment.pairs),
-      budgetMinutes: fieldDiff(
-        baseline.experiment.budgetMinutes,
-        candidate.experiment.budgetMinutes,
-      ),
-      packageVersions: Object.fromEntries(
-        packageKeys.map((name) => [
-          name,
-          fieldDiff(
-            baseline.experiment.packageVersions[name] ?? null,
-            candidate.experiment.packageVersions[name] ?? null,
-          ),
-        ]),
-      ),
-      digests: {
-        fixturesModuleSha256: fieldDiff(
-          baseline.experiment.digests.fixturesModuleSha256,
-          candidate.experiment.digests.fixturesModuleSha256,
-        ),
-        evaluatorSha256: fieldDiff(
-          baseline.experiment.digests.evaluatorSha256,
-          candidate.experiment.digests.evaluatorSha256,
-        ),
-        sourceSha256: fieldDiff(
-          baseline.experiment.digests.sourceSha256,
-          candidate.experiment.digests.sourceSha256,
-        ),
-        pluginSha256: fieldDiff(
-          baseline.experiment.digests.pluginSha256,
-          candidate.experiment.digests.pluginSha256,
-        ),
-        sdkSha256: fieldDiff(
-          baseline.experiment.digests.sdkSha256,
-          candidate.experiment.digests.sdkSha256,
-        ),
-        codexExecutableSha256: fieldDiff(
-          baseline.experiment.digests.codexExecutableSha256,
-          candidate.experiment.digests.codexExecutableSha256,
-          (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
-        ),
-      },
+      ...diffFields(config(b), config(c)),
+      packageVersions: diffFields(b.packageVersions, c.packageVersions),
+      digests: diffFields(b.digests, c.digests),
     },
     corpus,
-    arms: {
-      baseline: compareArm(
-        baseline,
-        candidate,
-        "baseline",
-        corpus,
-        fixtureIdentical,
-      ),
-      "time-aware": compareArm(
-        baseline,
-        candidate,
-        "time-aware",
-        corpus,
-        fixtureIdentical,
-      ),
-    },
+    arms: { baseline: arm("baseline"), "time-aware": arm("time-aware") },
   };
 }
 
-export type BaselineComparison = ReturnType<typeof compareBaselines>;
-
-async function main(argv: string[]) {
-  const [command, ...args] = argv;
-  if (command === "export" && (args.length === 1 || args.length === 2)) {
-    const [sourcePath, outputPath] = args;
-    const formatted =
-      JSON.stringify(await loadBaseline(sourcePath!), null, 2) + "\n";
-    if (outputPath !== undefined)
-      await writeFile(outputPath, formatted, "utf8");
-    else process.stdout.write(formatted);
+async function main([command, ...args]: string[]) {
+  const inputs = command === "export" ? 1 : command === "compare" ? 2 : 0;
+  if (!inputs || args.length < inputs || args.length > inputs + 1) {
+    process.stderr.write(
+      "Usage:\n  baseline.mts export <run-dir> [output.json]\n  baseline.mts compare <baseline-path> <candidate-path> [output.json]\n",
+    );
+    process.exitCode = 1;
     return;
   }
-  if (command === "compare" && (args.length === 2 || args.length === 3)) {
-    const [baselinePath, candidatePath, outputPath] = args;
-    const [baseline, candidate] = await Promise.all([
-      loadBaseline(baselinePath!),
-      loadBaseline(candidatePath!),
-    ]);
-    const formatted =
-      JSON.stringify(compareBaselines(baseline, candidate), null, 2) + "\n";
-    if (outputPath !== undefined)
-      await writeFile(outputPath, formatted, "utf8");
-    else process.stdout.write(formatted);
-    return;
-  }
-  process.stderr.write(
-    "Usage:\n  baseline.mts export <run-dir> [output.json]\n  baseline.mts compare <baseline-path> <candidate-path> [output.json]\n",
-  );
-  process.exitCode = 1;
+  const baseline = await loadBaseline(args[0]!);
+  const result =
+    inputs === 1
+      ? baseline
+      : compareBaselines(baseline, await loadBaseline(args[1]!));
+  const text = JSON.stringify(result, null, 2) + "\n";
+  const output = args[inputs];
+  if (output === undefined) process.stdout.write(text);
+  else await writeFile(output, text, { flag: "wx" });
 }
 
 if (
