@@ -262,6 +262,11 @@ def _read_saved_result(
         for finding in draft["findings"]:
             if isinstance(finding, dict) and isinstance(finding.get("provenance"), dict):
                 finding["provenance"].pop("deepScanRepairGroups", None)
+                identity = finding["provenance"].pop("deepScanPublicationIdentity", None)
+                if isinstance(identity, dict):
+                    if "identity" in finding and finding["identity"] != identity:
+                        finding["provenance"].setdefault("preservedIdentity", finding["identity"])
+                    finding["identity"] = identity
     if normalize_review and "coverage" in draft and "reviewState" not in draft:
         draft["reviewState"] = draft.pop("coverage")
     return draft, digest, metadata.st_mtime_ns

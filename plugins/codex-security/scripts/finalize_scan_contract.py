@@ -17,7 +17,7 @@ import re
 import stat
 import struct
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -1786,6 +1786,32 @@ def path_within_scope(path: str, scope: str) -> bool:
     return candidate.is_relative_to(requested)
 
 
+def location_paths_within_scope(
+    paths: Iterable[str], scope: Sequence[tuple[str, bool]] | None, exclusions: Sequence[str] = ()
+) -> bool:
+    return any(
+        not any(path_within_scope(candidate, path) for path in exclusions)
+        and (
+            scope is None
+            or any(
+                PurePosixPath(candidate) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(candidate, path)
+                for path, is_file in scope
+            )
+        )
+        for candidate in paths
+    )
+
+
+def finding_within_scope(
+    finding: dict[str, Any], scope: Sequence[tuple[str, bool]] | None, exclusions: Sequence[str]
+) -> bool:
+    return location_paths_within_scope(
+        (loc["path"] for loc in finding["locations"]), scope, exclusions
+    )
+
+
 def _validate_finding(finding: dict[str, Any], context: str) -> None:
     for key in ("findingId", "occurrenceId", "ruleId", "title", "summary", "remediation"):
         _require_str(finding, key, context)
@@ -3240,19 +3266,7 @@ def _prepare_scan_finalization(
         scoped_findings = []
         excluded_findings = []
         for finding in findings["findings"]:
-            in_scope = any(
-                not any(path_within_scope(location["path"], path) for path in requested_exclusions)
-                and (
-                    finding_scope is None
-                    or any(
-                        PurePosixPath(location["path"]) == PurePosixPath(path)
-                        if is_file
-                        else path_within_scope(location["path"], path)
-                        for path, is_file in finding_scope
-                    )
-                )
-                for location in finding["locations"]
-            )
+            in_scope = finding_within_scope(finding, finding_scope, requested_exclusions)
             (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
             label = "Deep scan" if finding_scope is not None else "scan"

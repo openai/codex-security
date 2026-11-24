@@ -32,7 +32,7 @@ Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in 
 
 ### Compact Deep And Workbench-Backed Diff Discovery
 
-Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Workbench-backed diff scans use the compact artifacts described below.
+Workbench-owned and SDK-owned Standard scans submit findings and coverage through the bound `record_codex_security_scan_draft` tool. SDK scans without the bound tool use the [file handoff](../skills/security-scan/references/sdk-files.md). Workbench-backed diff scans use the compact artifacts described below.
 
 Deep Scan runs Standard audits. Each worker saves findings and pending review work with `complete: false`, then submits its final result through `record_codex_security_scan_draft`. Worker checkpoints survive retries, cancellation and failure.
 
@@ -107,7 +107,9 @@ The current manifest stores additional excluded paths in `scan.review.excludedPa
 
 ### Draft submission and retrieval
 
-Workbench-owned Standard scans and workbench-backed diff scans submit drafts through `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`. Bound Deep workers submit their findings and review state through the same tool. The Deep coordinator writes the aggregated parent draft. SDK-owned Standard scans write unsealed manifest and findings files in the SDK-provided scan directory.
+Standard scans with a bound draft tool and workbench-backed diff scans submit drafts through `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`. Bound Deep workers submit their findings and review state through the same tool. The Deep coordinator writes the aggregated parent draft. SDK-owned Standard scans with the file handoff write unsealed manifest and findings files in the SDK-provided scan directory.
+
+Observers can read `list_codex_security_finding_updates` with the scan ID. Standard and Diff publish accepted review checkpoints. Deep publishes the coordinator's merged findings after each committed batch. Completion reconciles the feed with the sealed findings.
 
 For Deep, workbench-backed diff, or explicitly requested Standard completed results, call `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`.
 Its optional `validation` field returns the last supplemental assessment from host state, including individual findings in `items`. When `validation.retryable` is true and the user asks to resume validation, call `complete_codex_security_scan` with the same scan identity. Continuum reuses accepted submissions from the same host.

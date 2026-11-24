@@ -149,6 +149,15 @@ try {
       await client.close();
     }
   });
+  for (const target of [
+    "standard",
+    "commit",
+    "range",
+    "working_tree",
+  ] as const) {
+    await test(`shipped: a resumed findings feed reflects final changes to a ${target} scan`, () =>
+      testResumedFindingsFeed(shipped, target));
+  }
   await test("shipped: registered scan uses its attached thread", () =>
     testRegisteredScanOwner(shipped));
   await test("shipped: semantic scan draft completion", () =>
@@ -172,6 +181,20 @@ async function createScanFixture(label: string) {
   };
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   return { repoRoot, environment };
+}
+
+function fixtureGit(repoRoot: string) {
+  return (...args: string[]) =>
+    gitText(
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        ...args,
+      ],
+      { cwd: repoRoot },
+    ).trim();
 }
 
 async function testRegisteredScanOwner(bundle: string) {
@@ -328,6 +351,148 @@ async function testLargeScanDraftCheckpoints(
   }
 }
 
+async function testResumedFindingsFeed(
+  bundle: string,
+  target: "standard" | "working_tree" | "range" | "commit",
+) {
+  const { repoRoot, environment } = await createScanFixture(
+    `finding-updates-${target}`,
+  );
+  const file = "src/example.ts";
+  await writeFile(
+    path.join(repoRoot, file),
+    "// Synthetic fixture\n// Second line\n",
+  );
+  let diffTarget;
+  if (target !== "standard") {
+    const git = fixtureGit(repoRoot);
+    git("init", "-q");
+    git("commit", "--allow-empty", "-qm", "baseline");
+    const baseRevision = git("rev-parse", "HEAD");
+    git("add", ".");
+    if (target === "working_tree") {
+      diffTarget = { kind: target, baseRevision };
+    } else {
+      git("commit", "-qm", "selected changes");
+      diffTarget = {
+        kind: target,
+        baseRevision,
+        headRevision: git("rev-parse", "HEAD"),
+      };
+    }
+  }
+  const client = await startClient(bundle, environment);
+  const call = toolCaller(client, "findings-feed");
+  async function replay(scanId: string, status: string, cursor = 0) {
+    const observer = await startClient(bundle, environment);
+    try {
+      const read = findingUpdateReader(toolCaller(observer, null), scanId, 1);
+      const updates = [];
+      for (;;) {
+        const page = await read(cursor);
+        assert.equal(page.status, status);
+        assert.equal(page.updates.length, 1);
+        assert.ok(page.nextCursor > cursor);
+        updates.push(...page.updates);
+        cursor = page.nextCursor;
+        if (!page.hasMore) break;
+      }
+      assert.deepEqual((await read(cursor)).updates, []);
+      return { updates, cursor };
+    } finally {
+      await observer.close();
+    }
+  }
+  try {
+    const { workspace } = requireSuccessfulTool<WorkspaceResult>(
+      await call("start_codex_security_prompt_only_scan", {
+        targetPath: repoRoot,
+        scope: ".",
+        mode: target === "standard" ? "standard" : "diff",
+        diffTarget,
+      }),
+    );
+    const { scanId } = workspace.results;
+    const save = async (draft: Record<string, unknown>) =>
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", draft),
+      );
+    const validation = {
+      method: "Static source review",
+      summary: "Reviewed the source location and its caller.",
+    };
+    const kept = { ...finding("kept", file), validation };
+    const removed = {
+      ...finding("removed", file),
+      validation,
+      provenance: { source: "local_plugin", candidateId: "removed" },
+    };
+    const checkpoint = {
+      ...workerDraft([kept, removed]),
+      scanId,
+      complete: false,
+    };
+    await save(checkpoint);
+    const { updates: initial, cursor } = await replay(scanId, "running");
+    assert.deepEqual(
+      initial.map((update) => update.kind),
+      ["reviewed", "reviewed"],
+    );
+    const keptId = initial.find(
+      (update) => update.title === kept.title,
+    )!.findingId;
+    const withdrawnId = initial.find(
+      (update) => update.title === removed.title,
+    )!.findingId;
+    const revision = {
+      ...checkpoint,
+      findings: [{ ...kept, severity: { level: "medium" } }],
+      reviewState: {
+        ...checkpoint.reviewState,
+        surfaces: [
+          {
+            label: "Reviewed second observation",
+            disposition: "rejected",
+            candidateId: "removed",
+            notes: "The second observation was rejected after review.",
+          },
+        ],
+      },
+    };
+    await save(revision);
+    await save(revision); // Retrying the checkpoint must not duplicate an update.
+    await save({ ...revision, complete: true });
+    requireSuccessfulTool(
+      await call("complete_codex_security_scan", { scanId }),
+    );
+    const { updates: changes } = await replay(scanId, "complete", cursor);
+    const keptChanges = changes.filter((update) => update.findingId === keptId);
+    assert.deepEqual(
+      keptChanges.map(({ kind, severity }) => [kind, severity]),
+      [
+        ["updated", "medium"],
+        ["finalized", "medium"],
+      ],
+    );
+    assert.deepEqual(
+      changes
+        .filter((update) => update.findingId === withdrawnId)
+        .map((update) => update.kind),
+      ["withdrawn"],
+    );
+    assert.deepEqual(keptChanges[0].changedFields, ["severity"]);
+    const result = requireSuccessfulTool<CompletedResult>(
+      await call("get_codex_security_completed_scan", { scanId }),
+    );
+    assert.deepEqual(
+      result.findings.findings.map((finding) => finding.findingId),
+      [keptId],
+    );
+  } finally {
+    await client.close();
+  }
+}
+
 async function testCompactDiffScanCompletion(
   bundle: string,
   runtimeLabel: string,
@@ -335,17 +500,7 @@ async function testCompactDiffScanCompletion(
   const { repoRoot, environment } = await createScanFixture(
     `compact-diff-${runtimeLabel}`,
   );
-  const git = (...arguments_: string[]) =>
-    gitText(
-      [
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.com",
-        ...arguments_,
-      ],
-      { cwd: repoRoot },
-    ).trim();
+  const git = fixtureGit(repoRoot);
   git("init", "-q");
   await writeFile(path.join(repoRoot, "src", "guard.py"), "allowed = True\n");
   await writeFile(path.join(repoRoot, "src", "handler.py"), "value = 1\n");
@@ -506,6 +661,14 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: record the compact diff validation`,
     );
+    const read = findingUpdateReader(
+      toolCaller(client, "independent-reader"),
+      scanId,
+    );
+    const live = await read();
+    assert.equal(live.status, "running");
+    assert.deepEqual(live.updates, []);
+    assert.equal(live.nextCursor, 0);
     requireSuccessfulTool(
       await call("record_candidate_attack_paths", {
         scanId,
@@ -576,6 +739,7 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(completed.manifest.scan.mode, "branch_diff");
     assert.equal(completed.findings.findings.length, 0);
+    assert.deepEqual(await read(), { ...live, status: "complete" });
   } finally {
     await client.close();
   }
@@ -1373,6 +1537,37 @@ function requireSuccessfulTool<Result = Record<string, unknown>>(
   return result.structuredContent as Result;
 }
 
+function findingUpdateReader(
+  call: ReturnType<typeof toolCaller>,
+  scanId: string,
+  limit?: number,
+) {
+  return async (afterCursor?: number) => {
+    const result = await call("list_codex_security_finding_updates", {
+      scanId,
+      afterCursor,
+      limit,
+    });
+    const page = requireSuccessfulTool<{
+      status: string;
+      nextCursor: number;
+      hasMore: boolean;
+      updates: {
+        findingId: string;
+        kind: string;
+        title: string;
+        severity: string;
+        changedFields?: string[];
+      }[];
+    }>(result);
+    assert.deepEqual(
+      JSON.parse((result.content as TextContent[])[0].text),
+      page,
+    );
+    return page;
+  };
+}
+
 function requireToolError(
   result: ToolResponse,
   expected: RegExp,
@@ -1428,6 +1623,7 @@ async function testParentToolList(bundle: string) {
       "record_codex_security_candidate_validations",
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
+      "list_codex_security_finding_updates",
       "get_codex_security_completed_scan",
     ];
     for (const name of [
@@ -1461,6 +1657,10 @@ async function testParentToolList(bundle: string) {
       assertNoArtifactDestination(tool);
       if (tool.name === "record_codex_security_scan_draft")
         assertSemanticInputProperties(tool.inputSchema);
+      if (tool.name === "list_codex_security_finding_updates") {
+        assert.equal(tool.annotations?.readOnlyHint, true);
+        assert.deepEqual(tool._meta?.ui, { visibility: ["app", "model"] });
+      }
     }
 
     const deepScanTool = tools.find(

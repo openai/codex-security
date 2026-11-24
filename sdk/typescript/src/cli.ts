@@ -5669,7 +5669,7 @@ export async function main(
         { args: { repository: "." }, options: { diff: "origin/main" } },
         { args: { repository: "." }, options: { mode: "deep" } },
       ],
-      hint: "Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
+      hint: "Local Standard, Diff, and Deep scans show reviewed findings and subsequent changes on stderr. Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({
@@ -12470,6 +12470,8 @@ async function executeScan(
   let firstSignalAt = 0;
   let progress: Progress | null = null;
   let dashboard: ScanDashboard | null = null;
+  // The alternate-screen dashboard is cleared when the scan ends.
+  const dashboardFindingUpdates: string[] = [];
   let lastWorkerUpdate = "";
   let lastProgressUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
@@ -13097,6 +13099,26 @@ async function executeScan(
         scanInput.isTTY === true
           ? dashboard?.recordDetails.bind(dashboard)
           : undefined,
+      onFindingUpdate: (update) => {
+        const location = update.locations[0];
+        const details = [
+          `Finding ${update.kind}`,
+          update.findingId,
+          `[${update.severity}] ${update.title}`,
+        ];
+        if (location) details.push(`${location.file}:${location.line}`);
+        if (update.changedFields?.length)
+          details.push(`Changed: ${update.changedFields.join(", ")}`);
+        if (update.kind === "updated")
+          details.push(...[update.validation, update.summary].filter(Boolean));
+        const message = diagnosticValue(details.join(" · "));
+        if (dashboard !== null) {
+          dashboardFindingUpdates.push(message);
+          dashboard.note(message);
+        } else {
+          writeAboveProgress(() => progress?.stage(message));
+        }
+      },
       onProgress: (update) => {
         const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}:${update.reviewItems?.completed}:${update.reviewItems?.total}`;
         if (key === lastProgressUpdate) return;
@@ -13425,6 +13447,15 @@ async function executeScan(
     failure = error;
   } finally {
     stopPresentation();
+    if (dashboardFindingUpdates.length > 0) {
+      try {
+        errorOutput.write(
+          `\n  FINDING UPDATES\n  ${dashboardFindingUpdates.join("\n  ")}\n`,
+        );
+      } catch {
+        // Finding updates are optional progress output.
+      }
+    }
     if (security !== null) {
       diagnostic("runtime.cleanup.started");
       await security.close().then(

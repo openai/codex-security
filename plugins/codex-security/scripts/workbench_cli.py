@@ -301,6 +301,10 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_repositories.add_argument("--offset", type=non_negative_int, default=0)
     list_repositories.add_argument("--limit", type=positive_int)
 
+    updates = add_command("list-finding-updates", "--scan-id")
+    updates.add_argument("--after-cursor", type=non_negative_int, default=0)
+    updates.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
+
     list_findings = add_command("list-findings", "--scan-id")
     list_findings.add_argument("--query")
     list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)

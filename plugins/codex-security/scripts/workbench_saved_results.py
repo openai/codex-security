@@ -75,6 +75,7 @@ from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )
+from workbench_finding_updates import record_checkpoint_updates
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
@@ -1150,7 +1151,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         for filename, contents in documents.items():
             write_scan_local_bytes(scan_dir, filename, contents)
         _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
-        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+        deep_parent = scan["mode"] == "deep" and manifest["scan"].get("complete") is not False
+        if deep_parent:
             # Select the accepted final publication before releasing the write lock.
             with connection:
                 connection.execute(
@@ -1181,6 +1183,13 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             and not coverage.get("surfaces")
             and not coverage.get("deferred")
         )
+        if not model_only_checkpoint and (scan["mode"] != "deep" or deep_parent):
+            try:
+                with connection:
+                    scope = db.requested_finding_scope(scan) if scan["mode"] == "deep" else None
+                    record_checkpoint_updates(connection, scan, manifest, findings, scope)
+            except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+                print(f"Could not record live finding updates: {exc}", file=sys.stderr)
         if scan["mode"] == "standard" and not model_only_checkpoint:
             phase = "discovery" if manifest["scan"].get("complete") is False else "reporting"
             earlier = PHASES[: PHASES.index(phase)]

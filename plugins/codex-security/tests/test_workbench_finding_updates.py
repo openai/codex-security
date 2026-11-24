@@ -1,0 +1,408 @@
+"""Local scans expose only accepted reviewed checkpoints and reconcile them at completion."""
+
+import copy
+import json
+import sqlite3
+import uuid
+from functools import partial
+from pathlib import Path
+
+import pytest
+from test_workbench_completion_binding import _start_diff_scan_with_draft
+from workbench_test_support import (
+    empty_target_scan,
+    read_draft_documents,
+    scan_command,
+    write_completed_contract,
+)
+
+
+def publish_draft(state, scan_id, directory, documents, *extra, **kwargs):
+    staged = directory / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    return scan_command(
+        state, "write-scan-draft", scan_id, "--draft-path", str(staged), *extra, **kwargs
+    )
+
+
+def finding_updates(state, scan_id, after=None, *, limit=None, **kwargs):
+    args = [] if after is None else ["--after-cursor", str(after)]
+    if limit is not None:
+        args.extend(["--limit", str(limit)])
+    return scan_command(state, "list-finding-updates", scan_id, *args, **kwargs)
+
+
+@pytest.mark.parametrize("kind", ["commit", "range", "working_tree"])
+def test_diff_finding_feed_matches_the_sealed_snapshot(tmp_path: Path, kind: str) -> None:
+    state, _, scan = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, directory = scan["scanId"], Path(scan["scanDir"])
+    docs = read_draft_documents(directory)
+    docs["manifest"]["scan"]["complete"] = False
+    publish = partial(publish_draft, state, scan_id, directory, docs)
+    read = partial(finding_updates, state, scan_id)
+
+    publish()
+    page = read(0)
+    assert page["status"] == "running"
+    [reviewed] = page["updates"]
+    assert reviewed["kind"] == "reviewed" and reviewed["locations"][0]["file"] == "README.md"
+    docs["findings"]["findings"][0]["severity"]["level"] = "medium"
+    docs["manifest"]["scan"]["complete"] = True
+    publish()
+    revised = read(page["nextCursor"])
+    [updated] = revised["updates"]
+    assert updated["kind"] == "updated" and updated["changedFields"] == ["severity"]
+    scan_command(state, "complete-scan", scan_id)
+    terminal = read(revised["nextCursor"])
+    [final] = terminal["updates"]
+    [sealed] = json.loads((directory / "findings.json").read_text())["findings"]
+    assert terminal["status"] == "complete" and final["kind"] == "finalized"
+    assert final["severity"] == sealed["severity"]["level"] == "medium"
+    assert (
+        final["findingId"] == updated["findingId"] == reviewed["findingId"] == sealed["findingId"]
+    )
+    assert read(terminal["nextCursor"])["updates"] == []
+
+
+def test_live_finding_update_replay(tmp_path):
+    state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    contract = tmp_path / "fixture"
+    contract.mkdir()
+    write_completed_contract(contract, scan_id, target)
+    documents = read_draft_documents(contract)
+    documents["manifest"]["scan"]["complete"] = False
+    findings = documents["findings"]
+    finding = findings["findings"][0]
+    finding["provenance"]["candidateId"] = "candidate-a"
+    retired = copy.deepcopy(finding)
+    retired["identity"]["instance"] = "second"
+    retired["provenance"]["candidateId"] = "candidate-b"
+    findings["findings"].append(retired)
+    publish = partial(publish_draft, state, scan_id, scan_dir, documents)
+    feed = partial(finding_updates, state, scan_id)
+
+    documents["manifest"]["scan"]["scope"]["validationMode"] = "custom_pending"
+    publish()
+    assert feed()["updates"] == []
+    del documents["manifest"]["scan"]["scope"]["validationMode"]
+    rejected = publish("--expected-draft-digest", "0" * 64, check=False)
+    assert "scan_draft_conflict" in rejected["stderr"]
+    assert feed()["updates"] == []
+    publish()
+    publish()
+    first = feed(limit=1)
+    assert first["status"] == "running"
+    assert first["hasMore"] and first["nextCursor"] == 1
+    first_id = first["updates"][0]["findingId"]
+    assert first["updates"][0]["kind"] == "reviewed"
+    assert first["updates"][0]["locations"] == [{"file": "src/extract.py", "line": 41}]
+    second = feed(1)
+    assert not second["hasMore"] and second["updates"][0]["kind"] == "reviewed"
+    second_id = second["updates"][0]["findingId"]
+    assert second_id != first_id
+
+    # Explicitly reject a finding in one checkpoint, then let fresh
+    # evidence re-admit it. A plain omission of its sibling should do nothing.
+    findings["findings"] = []
+    surfaces = documents["coverage"]["surfaces"]
+    surfaces.append(
+        {
+            "id": "surface-b",
+            "candidateId": "candidate-b",
+            "disposition": "rejected",
+            "label": "Second candidate ruled out",
+            "receiptRefs": [],
+        }
+    )
+    publish()
+    rejected_event = feed(2)["updates"]
+    assert [(u["kind"], u["findingId"]) for u in rejected_event] == [("withdrawn", second_id)]
+    surfaces.pop()
+    findings["findings"] = [retired]
+    publish()
+    assert [u["kind"] for u in feed(3)["updates"]] == ["reviewed"]
+    findings["findings"] = []
+    publish()
+    assert feed(4)["updates"] == []
+    finding["remediation"] = "Changed remediation"
+    findings["findings"] = [finding]
+    publish()
+    changed = feed(4)["updates"]
+    assert len(changed) == 1 and changed[0]["changedFields"] == ["remediation"]
+    assert changed[0]["kind"] == "updated" and changed[0]["findingId"] == first_id
+
+    finding["provenance"]["candidateId"] = "new-source-reference"
+    publish()
+    provenance = feed(5)["updates"]
+    assert [(u["kind"], u["changedFields"]) for u in provenance] == [("updated", ["provenance"])]
+
+    documents["manifest"]["scan"]["complete"] = True
+    publish()
+    scan_command(state, "complete-scan", scan_id)
+    terminal = feed(6)
+    assert terminal["status"] == "complete"
+    assert [(u["kind"], u["findingId"]) for u in terminal["updates"]][-2:] == [
+        ("finalized", first_id),
+        ("withdrawn", second_id),
+    ]
+    sealed = json.loads((scan_dir / "findings.json").read_text())
+    assert [f["findingId"] for f in sealed["findings"]] == [first_id]
+    assert feed(terminal["nextCursor"])["updates"] == []
+
+
+@pytest.mark.parametrize("kind", ["standard", "commit", "range", "working_tree"])
+def test_corrected_finding_identities_withdraw_only_their_prior_versions(tmp_path, kind):
+    if kind == "standard":
+        state, target, scan_id, directory = empty_target_scan(tmp_path)
+        contract = tmp_path / "fixture"
+        contract.mkdir()
+        write_completed_contract(contract, scan_id, target)
+        documents = read_draft_documents(contract)
+    else:
+        state, _, scan = _start_diff_scan_with_draft(tmp_path, kind)
+        scan_id, directory = scan["scanId"], Path(scan["scanDir"])
+        documents = read_draft_documents(directory)
+    documents["manifest"]["scan"]["complete"] = False
+    original = documents["findings"]["findings"][0]
+    original["provenance"]["candidateId"] = "shared-candidate"
+    original["provenance"]["previousFindings"] = "legacy metadata"
+    sibling = copy.deepcopy(original)
+    sibling["identity"]["instance"] = "independent"
+    documents["findings"]["findings"].append(sibling)
+    publish = partial(publish_draft, state, scan_id, directory, documents)
+    feed = partial(finding_updates, state, scan_id)
+    publish()
+    first = feed()
+    original_id, sibling_id = [event["findingId"] for event in first["updates"]]
+    original["provenance"]["previousFindings"] = [copy.deepcopy(original)]
+    publish()
+    assert feed(first["nextCursor"])["updates"] == []
+
+    corrected = copy.deepcopy(original)
+    corrected["identity"]["anchor"] += "-corrected"
+    corrected["provenance"]["previousFindings"] = [original]
+    corrected["provenance"]["sourceFindings"] = [sibling]
+    documents["findings"]["findings"] = [corrected]
+    publish()
+    correction = feed(first["nextCursor"])
+    reviewed, withdrawn = correction["updates"]
+    corrected_id = reviewed["findingId"]
+    assert reviewed["kind"] == "reviewed" and corrected_id != original_id
+    assert (withdrawn["kind"], withdrawn["findingId"]) == ("withdrawn", original_id)
+    assert correction["status"] == "running"
+    publish()
+    assert feed(correction["nextCursor"])["updates"] == []
+
+    # A later accepted correction can outlive a failed journal append. Its next
+    # revision must retire the last visible identity through the retained history.
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("""CREATE TRIGGER fail_feed_append BEFORE INSERT ON scan_finding_updates
+                      BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END""")
+    intermediate = copy.deepcopy(corrected)
+    intermediate["identity"]["anchor"] += "-intermediate"
+    intermediate["provenance"]["previousFindings"] = [corrected]
+    documents["findings"]["findings"] = [intermediate]
+    publish()
+    assert feed(correction["nextCursor"])["updates"] == []
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("DROP TRIGGER fail_feed_append")
+    another_version = copy.deepcopy(intermediate)
+    another_version["summary"] = "Revised source proof for the same identity."
+    latest = copy.deepcopy(intermediate)
+    latest["identity"]["anchor"] += "-latest"
+    latest["provenance"]["previousFindings"] = [intermediate, another_version]
+    documents["findings"]["findings"] = [latest]
+    publish()
+    recovered = feed(correction["nextCursor"])
+    reviewed, withdrawn = recovered["updates"]
+    assert reviewed["kind"] == "reviewed" and reviewed["findingId"] != corrected_id
+    assert (withdrawn["kind"], withdrawn["findingId"]) == ("withdrawn", corrected_id)
+    publish()
+    assert feed(recovered["nextCursor"])["updates"] == []
+    # History cannot withdraw an identity still present in the accepted set.
+    latest["provenance"]["previousFindings"].append(sibling)
+    documents["findings"]["findings"] = [latest, sibling]
+    publish()
+    assert feed(recovered["nextCursor"])["updates"] == []
+    active = set()
+    for event in feed()["updates"]:
+        if event["kind"] == "withdrawn":
+            active.remove(event["findingId"])
+        else:
+            active.add(event["findingId"])
+    assert active == {sibling_id, reviewed["findingId"]}
+
+
+def test_direct_files_and_historical_index_are_replayed(tmp_path):
+    state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    assert not finding_updates(state, scan_id)["updates"]
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("""CREATE TRIGGER fail_feed_append BEFORE INSERT ON scan_finding_updates
+                      BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END""")
+    scan_command(state, "complete-scan", scan_id)
+    page = finding_updates(state, scan_id)
+    [final] = page["updates"]
+    assert final["kind"] == "finalized"
+
+    # Old completed scans had no feed, and the oldest indexed rows had no details_json.
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        assert (
+            "feed unavailable"
+            in db.execute(
+                "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0]
+        )
+        db.execute("UPDATE scans SET completion_warnings_json = '[]' WHERE id = ?", (scan_id,))
+        db.execute(
+            "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
+        )
+    old = finding_updates(state, scan_id)
+    assert old["updates"] == [{**final, "validation": ""}]
+    assert not finding_updates(state, scan_id, 1)["updates"]
+
+    # Scans completed before migration 8 have valid seals without a pinned digest.
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
+    assert finding_updates(state, scan_id) == old
+    (scan_dir / "findings.json").write_text("{}")
+    assert finding_updates(state, scan_id)["updates"] == []
+
+
+def test_completed_custom_pending_source_discovery_cannot_replay_as_reviewed(tmp_path):
+    state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["scope"]["validationMode"] = "custom_pending"
+    manifest_path.write_text(json.dumps(manifest))
+    scan_command(state, "complete-scan", scan_id)
+    page = finding_updates(state, scan_id)
+    assert page["status"] == "complete"
+    assert page["updates"] == []
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
+    assert finding_updates(state, scan_id) == page
+
+
+def test_feed_append_failure_preserves_completion_and_replays_its_terminal_changes(tmp_path):
+    state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    documents = read_draft_documents(scan_dir)
+    findings = documents["findings"]["findings"]
+    removed = copy.deepcopy(findings[0])
+    removed["identity"]["instance"] = "removed"
+    findings.append(removed)
+    publish_draft(state, scan_id, scan_dir, documents)
+    before = finding_updates(state, scan_id)
+    kept_id, removed_id = [entry["findingId"] for entry in before["updates"]]
+    # A direct-file final handoff revises a finding and drops its sibling.
+    # Reject the *second* journal insert to exercise rollback of the first.
+    final_file = scan_dir / "findings.json"
+    final = json.loads(final_file.read_text())
+    final["findings"].pop()
+    final["findings"][0]["severity"]["level"] = "low"
+    final_file.write_text(json.dumps(final))
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("""CREATE TRIGGER fail_feed_append BEFORE INSERT ON scan_finding_updates
+                      WHEN NEW.kind = 'finalized' BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END""")
+
+    scan_command(state, "complete-scan", scan_id)
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        status, warnings = db.execute(
+            "SELECT status, completion_warnings_json FROM scans WHERE id=?", (scan_id,)
+        ).fetchone()
+        assert status == "complete"
+        assert "feed unavailable" in warnings
+        assert (
+            db.execute(
+                "SELECT count(*) FROM scan_finding_updates WHERE scan_id=?", (scan_id,)
+            ).fetchone()[0]
+            == 2
+        )
+
+    cursor = before["nextCursor"]
+    replay = []
+
+    read_page = partial(finding_updates, state, scan_id, limit=1)
+    for _ in range(3):
+        page = read_page(cursor)
+        assert page["status"] == "complete" and page == read_page(cursor)
+        replay.extend(page["updates"])
+        cursor = page["nextCursor"]
+    assert [u["cursor"] for u in replay] == [3, 4, 5]
+    assert [(u["kind"], u["findingId"]) for u in replay] == [
+        ("updated", kept_id),
+        ("finalized", kept_id),
+        ("withdrawn", removed_id),
+    ]
+    assert "severity" in replay[0]["changedFields"] and replay[1]["severity"] == "low"
+    assert finding_updates(state, scan_id, cursor)["updates"] == []
+
+
+@pytest.fixture
+def scan_before_finding_updates(tmp_path):
+    state, _, scan_id, _ = empty_target_scan(tmp_path)
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("DROP TABLE scan_finding_updates")
+        db.execute("DELETE FROM schema_migrations WHERE version = 87")
+    return state, scan_id
+
+
+def test_finding_updates_move_original_journal_receipt(tmp_path):
+    state, _, scan_id, _ = empty_target_scan(tmp_path)
+    database = state / "workbench.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "UPDATE schema_migrations SET version = 73, applied_at = 'preview-time' WHERE version = 87"
+        )
+    assert finding_updates(state, scan_id)["updates"] == []
+    with sqlite3.connect(database) as db:
+        assert db.execute(
+            "SELECT version, applied_at FROM schema_migrations WHERE name = ?",
+            ("Standard scan reviewed finding updates",),
+        ).fetchall() == [(87, "preview-time")]
+
+
+def test_finding_updates_reject_conflicting_migration_without_changes(scan_before_finding_updates):
+    state, scan_id = scan_before_finding_updates
+    database = state / "workbench.sqlite3"
+    name = "unrecognized preview"
+    with sqlite3.connect(database) as db:
+        db.execute("INSERT INTO schema_migrations VALUES (87, ?, 'preview-time')", (name,))
+        before = list(db.iterdump())
+
+    failure = finding_updates(state, scan_id, check=False)
+    assert failure["returncode"] != 0
+    assert "Unsupported workbench migration 87" in failure["stderr"]
+    assert name in failure["stderr"]
+    assert "Standard scan reviewed finding updates" in failure["stderr"]
+    with sqlite3.connect(database) as db:
+        assert list(db.iterdump()) == before
+
+
+@pytest.mark.parametrize("has_history_preview", [False, True])
+def test_finding_updates_upgrade_without_a_journal_receipt(
+    scan_before_finding_updates, has_history_preview
+):
+    state, scan_id = scan_before_finding_updates
+    database = state / "workbench.sqlite3"
+    if has_history_preview:
+        with sqlite3.connect(database) as db:
+            db.execute("ALTER TABLE finding_decisions ADD COLUMN decision_sequence INTEGER")
+            db.execute(
+                "INSERT INTO schema_migrations VALUES (73, ?, 'preview-time')",
+                ("preserve finding decision append chronology",),
+            )
+
+    for _ in range(2):
+        assert finding_updates(state, scan_id)["updates"] == []
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT name FROM schema_migrations WHERE version = 87").fetchone() == (
+            "Standard scan reviewed finding updates",
+        )
+        if has_history_preview:
+            assert db.execute(
+                "SELECT applied_at FROM schema_migrations WHERE version = 73"
+            ).fetchone() == ("preview-time",)

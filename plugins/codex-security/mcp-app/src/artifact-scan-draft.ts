@@ -3195,7 +3195,10 @@ function buildScope(
   };
 }
 
-function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+export function buildFindings(
+  findings: JsonObject[],
+  mode?: string,
+): JsonObject[] {
   const anchorCounts = new Map<string, number>();
   const anchors = findings.map((finding, index) => {
     const identitySource =

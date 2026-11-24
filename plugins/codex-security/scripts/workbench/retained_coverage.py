@@ -7,7 +7,7 @@ import hashlib
 import os
 from collections import Counter, deque
 from functools import partial
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from finalize_scan_contract import (
@@ -85,9 +85,10 @@ from workbench_coverage_receipts import (
     receipt_checkpoints,
     resolve_coverage_receipts,
     retain_recorded_receipt_ownership,
+    saved_finding_within_scope,
 )
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import javascript_utf8, path_within_scope
+from workbench_validation import javascript_utf8
 
 
 def merge_saved_results(
@@ -492,9 +493,10 @@ def merge_saved_results(
 
     # Keep frozen source digests over the original data, before discarding markers
     # that never passed through the worker draft writer.
-    retain_recorded_receipt_ownership(
-        sources, _digest, binding["scope"]["includePaths"], finding_scope
-    )
+    include_paths = binding["scope"]["includePaths"]
+    if finding_scope is None:
+        finding_scope = [(path, False) for path in include_paths]
+    retain_recorded_receipt_ownership(sources, _digest, include_paths, finding_scope)
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     # A frozen model capture supplies context without replacing earlier findings.
     model_path = frozen_model_source or canonical_model_source
@@ -1206,24 +1208,6 @@ def merge_saved_results(
             finding.setdefault("identity", normalized["identity"])
         else:
             _ensure_finding_identity(finding)
-
-    def finding_within_scope(finding: dict[str, Any]) -> bool:
-        locations = finding.get("locations", [])
-        return isinstance(locations, list) and any(
-            isinstance(location, dict)
-            and isinstance(location.get("path"), str)
-            and any(
-                PurePosixPath(location["path"]) == PurePosixPath(path)
-                if is_file
-                else path_within_scope(location["path"], path)
-                for path, is_file in (
-                    finding_scope
-                    if finding_scope is not None
-                    else [(path, False) for path in binding["scope"]["includePaths"]]
-                )
-            )
-            for location in locations
-        )
 
     valid_findings: dict[bytes, bool] = {}
 
@@ -1945,7 +1929,10 @@ def merge_saved_results(
             for sibling in draft["findings"]
             if isinstance(sibling, dict)
             and isinstance(sibling.get("identity"), dict)
-            and ((relative == "parent" and parent_is_canonical) or finding_within_scope(sibling))
+            and (
+                (relative == "parent" and parent_is_canonical)
+                or saved_finding_within_scope(sibling, finding_scope)
+            )
         )
         pending = []
         for index, value in enumerate(draft["findings"]):
@@ -1955,7 +1942,7 @@ def merge_saved_results(
                 or not valid_finding(value)
                 or (
                     not (relative == "parent" and parent_is_canonical)
-                    and not finding_within_scope(value)
+                    and not saved_finding_within_scope(value, finding_scope)
                 )
             ):
                 continue
@@ -2454,7 +2441,7 @@ def merge_saved_results(
                 continue
             for key in ("findingId", "occurrenceId", "fingerprints"):
                 finding.pop(key, None)
-            if not finding_within_scope(finding):
+            if not saved_finding_within_scope(finding, finding_scope):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
                 continue
             provenance = finding.setdefault("provenance", {"source": "local_plugin"})
