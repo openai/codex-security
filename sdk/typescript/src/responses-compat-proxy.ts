@@ -222,14 +222,19 @@ function unfinished({ status }: Item) {
   return status != null && status !== "completed";
 }
 
+function unfinishedCall(item: Item) {
+  return item["type"] === "function_call" && unfinished(item);
+}
+
 function restoreOutput(response: unknown, restore: RestoreTool) {
   if (!isRecord(response)) throw new Error("Invalid xAI response.");
   // An unfinished response can contain truncated JSON in a tool's arguments.
   // Keep that evidence and the provider's failure or interruption reason.
   if (!unfinished(response) && Array.isArray(response["output"])) {
-    response["output"] = response["output"].map((item: unknown) =>
-      isRecord(item) ? restore(item) : item,
-    );
+    response["output"] = response["output"].flatMap((item: unknown) => {
+      if (!isRecord(item)) return [item];
+      return unfinishedCall(item) ? [] : [restore(item)];
+    });
   }
   return response;
 }
@@ -247,8 +252,7 @@ async function* translateEvents(
       if (isRecord(item)) {
         // Codex dispatches done items even when the call is marked incomplete.
         const done = type === "response.output_item.done";
-        if (done && item["type"] === "function_call" && unfinished(item))
-          continue;
+        if (done && unfinishedCall(item)) continue;
         event["item"] = restore(item, done);
       }
       if (type === "response.completed")

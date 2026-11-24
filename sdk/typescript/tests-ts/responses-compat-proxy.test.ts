@@ -276,6 +276,28 @@ test("unfinished calls cannot dispatch or mask the reason a response stopped", a
   expect(await (await proxy.post()).json()).toEqual(incomplete);
 });
 
+test("completed responses keep finished parallel calls and omit unfinished ones", async () => {
+  const response = {
+    status: "completed",
+    output: [
+      { ...flat[0], status: "completed" },
+      { ...flat[1], call_id: "3", arguments: "{", status: "in_progress" },
+      flat[1],
+    ],
+  };
+  const expected = {
+    ...response,
+    output: [{ ...call, status: "completed" }, edit],
+  };
+  await using json = await fixture(() => Response.json(response));
+  expect(await (await json.post()).json()).toEqual(expected);
+  const type = "response.completed";
+  await using sse = await fixture(() => stream([{ type, response }]));
+  expect(await readEvents(await sse.post())).toEqual([
+    { type, response: expected },
+  ]);
+});
+
 test("unknown tools fail the stream", async () => {
   await using proxy = await fixture(() =>
     stream([
