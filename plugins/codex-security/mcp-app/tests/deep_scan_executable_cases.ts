@@ -18,6 +18,7 @@ import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 import {
   CodexSdkWorkerExecutor,
+  type FakeCodexFixture,
   fakeCodexFixture,
   resolveCodexPath,
   workerRequest,
@@ -440,7 +441,7 @@ export async function testExecutorExecutablePinning() {
 
   async function withWorkerFixture(
     action: (
-      fixture: Awaited<ReturnType<typeof fakeCodexFixture>>,
+      fixture: FakeCodexFixture,
       promptPath: string,
       workingDirectory: string,
     ) => Promise<void>,
