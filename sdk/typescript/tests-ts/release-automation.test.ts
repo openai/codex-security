@@ -15,7 +15,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { publishGitHubRelease } from "../scripts/publish-github-release.mjs";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { bashCommand, runCommand, writeSource } from "./support/shell.js";
-import { workflow } from "./support/workflow.js";
+import { workflow, workflowSource } from "./support/workflow.js";
 
 import {
   type ReleaseMetadata,
@@ -74,7 +74,6 @@ function runPublisher({
     stdout: JSON.stringify({ body: generatedNotes }),
     stderr: "",
   },
-
   latestTag = "npm-v0.1.3",
   makeLatest = false,
   releaseConfiguration = true,
@@ -305,43 +304,14 @@ const integrity =
   "sha512-" + createHash("sha512").update(archive).digest("base64");
 const sha512 = createHash("sha512").update(archive).digest("hex");
 const digest = "sha256:" + createHash("sha256").update(archive).digest("hex");
-const protectedReleaseWorkflow = readFileSync(
-  new URL("../../../.github/workflows/node-release.yml", import.meta.url),
-  "utf8",
-);
-const darwinSigningWorkflow = readFileSync(
-  new URL(
-    "../../../.github/workflows/sign-darwin-release.yml",
-    import.meta.url,
-  ),
-  "utf8",
-);
-const releaseCutWorkflow = readFileSync(
-  new URL("../../../.github/workflows/node-release-cut.yml", import.meta.url),
-  "utf8",
-);
-const githubReleaseWorkflow = readFileSync(
-  new URL(
-    "../../../.github/workflows/node-github-release.yml",
-    import.meta.url,
-  ),
-  "utf8",
-);
-const releaseLabelsWorkflow = readFileSync(
-  new URL(
-    "../../../.github/workflows/node-release-labels.yml",
-    import.meta.url,
-  ),
-  "utf8",
-);
-const nodeCiWorkflow = readFileSync(
-  new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
-  "utf8",
-);
-const titleWorkflow = readFileSync(
-  new URL("../../../.github/workflows/validate-pr-title.yml", import.meta.url),
-  "utf8",
-);
+const protectedReleaseWorkflow = workflowSource("node-release");
+const darwinSigningWorkflow = workflowSource("sign-darwin-release");
+const releaseCutWorkflow = workflowSource("node-release-cut");
+const githubReleaseWorkflow = workflowSource("node-github-release");
+const releaseLabelsWorkflow = workflowSource("node-release-labels");
+const nodeCiWorkflow = workflowSource("node-ci");
+const titleWorkflow = workflowSource("validate-pr-title");
+
 function publishedMetadata(): ReleaseMetadata {
   return {
     name: "@openai/codex-security",
@@ -562,11 +532,12 @@ type WorkflowContract = {
   >;
 };
 
-function workflowStepShell(workflow: string, stepName: string): string {
-  const parsed = Bun.YAML.parse(workflow) as {
-    jobs: Record<string, { steps?: { name?: string; run?: string }[] }>;
-  };
-  const step = Object.values(parsed.jobs)
+function parseReleaseWorkflow(source: string) {
+  return Bun.YAML.parse(source) as WorkflowContract;
+}
+
+function workflowStepShell(source: string, stepName: string): string {
+  const step = Object.values(parseReleaseWorkflow(source).jobs)
     .flatMap((job) => job.steps ?? [])
     .find((step) => step.name === stepName);
   if (step === undefined) {
@@ -1991,7 +1962,7 @@ ${workflowStepShell(releaseCutWorkflow, "Resolve the stable package version")}
   test("only builds a release tag whose exact commit is on protected main", async () => {
     const { cwd, env, qualified, candidate } =
       await createReleaseAncestryFixture();
-    const { jobs } = Bun.YAML.parse(darwinSigningWorkflow) as WorkflowContract;
+    const { jobs } = parseReleaseWorkflow(darwinSigningWorkflow);
     const validation = jobs["validate"]!.steps!;
     expect(validation[0]?.with?.["ref"]).toBe("refs/heads/main");
     const validate = workflowStepShell(
@@ -2658,10 +2629,8 @@ ${validate}`,
   );
 
   test("binds signing to both verified Darwin builds and packaging to the signed artifact", () => {
-    const { jobs } = Bun.YAML.parse(
-      protectedReleaseWorkflow,
-    ) as WorkflowContract;
-    const signing = Bun.YAML.parse(darwinSigningWorkflow) as WorkflowContract;
+    const { jobs } = parseReleaseWorkflow(protectedReleaseWorkflow);
+    const signing = parseReleaseWorkflow(darwinSigningWorkflow);
     expect(jobs["sign-darwin"]?.needs).toBe("eligibility");
     expect(jobs["sign-darwin"]?.if).toBe(
       "needs.eligibility.outputs.mode == 'publish'",
@@ -2753,9 +2722,7 @@ ${validate}`,
   });
 
   test("publication and recovery select only their own successful native build", async () => {
-    const { jobs } = Bun.YAML.parse(
-      protectedReleaseWorkflow,
-    ) as WorkflowContract;
+    const { jobs } = parseReleaseWorkflow(protectedReleaseWorkflow);
     const native = jobs["native"]!;
     const select = native.steps!.find(
       (step) =>
@@ -2802,9 +2769,7 @@ ${validate}`,
   });
 
   test("requires the protected signing workflow before signing and consuming addons from this attempt", async () => {
-    const { jobs } = Bun.YAML.parse(
-      protectedReleaseWorkflow,
-    ) as WorkflowContract;
+    const { jobs } = parseReleaseWorkflow(protectedReleaseWorkflow);
     const steps = jobs["native"]!.steps!;
     const select = steps.findIndex(
       (step) =>
@@ -2947,9 +2912,7 @@ ${steps[record]!.run}`;
   ])(
     "gates the Developer ID signer on $scenario",
     async ({ replaced, missingId }) => {
-      const { jobs } = Bun.YAML.parse(
-        darwinSigningWorkflow,
-      ) as WorkflowContract;
+      const { jobs } = parseReleaseWorkflow(darwinSigningWorkflow);
       const steps = jobs["sign"]!.steps!;
       const step = steps.find((step) => step.name === "Sign Darwin addons")!;
       expect(step.env).toMatchObject({
@@ -3117,9 +3080,7 @@ ${steps[record]!.run}`;
   });
 
   test("requires every release test shard before protected publication", () => {
-    const { jobs } = Bun.YAML.parse(
-      protectedReleaseWorkflow,
-    ) as WorkflowContract;
+    const { jobs } = parseReleaseWorkflow(protectedReleaseWorkflow);
     expect(jobs["test"]?.strategy?.matrix["suite"]).toEqual([1, 2, 3, "mcp"]);
     expect(jobs["test"]?.strategy?.["fail-fast"]).toBe(false);
     expect(jobs["test"]?.permissions).toEqual({ contents: "read" });
@@ -3160,18 +3121,8 @@ ${steps[record]!.run}`;
   });
 
   test("isolates optional release comments from verification and publishing", () => {
-    const { jobs } = Bun.YAML.parse(
-      protectedReleaseWorkflow,
-    ) as WorkflowContract;
-    const progress = Bun.YAML.parse(
-      readFileSync(
-        new URL(
-          "../../../.github/workflows/release-progress.yml",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
-    ) as WorkflowContract;
+    const { jobs } = parseReleaseWorkflow(protectedReleaseWorkflow);
+    const progress = parseReleaseWorkflow(workflowSource("release-progress"));
     expect(jobs["verify"]?.permissions).toEqual({ contents: "read" });
     expect(jobs["native"]?.permissions).toEqual({ actions: "read" });
     expect(progress.jobs["report"]?.["continue-on-error"]).toBe(true);
@@ -3206,9 +3157,7 @@ ${steps[record]!.run}`;
     expect(
       progress.jobs["watch"]?.steps?.at(-1)?.env?.["RELEASE_PROGRESS_WATCH"],
     ).toBe("true");
-    const publication = (
-      Bun.YAML.parse(githubReleaseWorkflow) as WorkflowContract
-    ).jobs;
+    const publication = parseReleaseWorkflow(githubReleaseWorkflow).jobs;
     expect(publication["installed"]?.needs).toBe("release");
   });
 
@@ -3314,13 +3263,7 @@ ${steps[record]!.run}`;
 
   test.each([
     {
-      workflow: readFileSync(
-        new URL(
-          "../../../.github/workflows/container-release.yml",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
+      workflow: workflowSource("container-release"),
       step: "Dispatch the coordinator on protected main",
       target: "node-github-release.yml",
       fields: ["-f", "ref=main", "-f", "inputs[tag]=npm-v0.1.2"],
@@ -3381,7 +3324,7 @@ ${steps[record]!.run}`;
       const failed = await runShell(`gh() { return 1; }\n${script}`, env);
       expect(failed.status).toBe(1);
       expect(readFileSync(output, "utf8")).toBe("");
-      const parsed = Bun.YAML.parse(workflow) as WorkflowContract;
+      const parsed = parseReleaseWorkflow(workflow);
       const notification = Object.values(parsed.jobs)
         .flatMap((job) => job.steps ?? [])
         .find((step) => step.name === "Start release progress observer");
@@ -3967,301 +3910,199 @@ ${steps[record]!.run}`;
     },
   );
 
+  const latestLookupError =
+    "Unable to resolve the current Latest GitHub Release.";
+  const retargetedTagError =
+    "GitHub release tag must still point to the verified commit.";
   test.each([
     {
       description: "empty",
       existingNotes: "",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "manually written",
       existingNotes: "Manually written release notes",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "stale generated notes with a marked historical summary",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\n## Highlights\nPreserved historical summary\n<!-- codex-security-release-summary:end -->\n\nStale generated notes",
       expectedSummary: "Preserved historical summary",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "CRLF historical summary marker block",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\r\nPreserved historical summary\r\n<!-- codex-security-release-summary:end -->\r\n\r\nStale generated notes",
       expectedSummary: "Preserved historical summary",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "CRLF marker-only body with a terminal line ending",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\r\nPreserved historical summary\r\n<!-- codex-security-release-summary:end -->\r\n",
       expectedSummary: "Preserved historical summary",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "inline marker-like substrings in generated notes",
       existingNotes:
         "* fix: <!-- codex-security-release-summary:start -->Unreviewed injected highlight<!-- codex-security-release-summary:end --> by @contributor",
       excludedSummary: "Unreviewed injected highlight",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "standalone marker pair outside the canonical prefix",
       existingNotes:
         "* fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
       excludedSummary: "Unreviewed injected highlight",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "duplicate standalone marker pair after a blank line",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nFirst\n<!-- codex-security-release-summary:end -->\n\n<!-- codex-security-release-summary:start -->\nSecond\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary markers are malformed.",
-      updated: false,
-      latestUpdated: false,
-      status: 1,
     },
     {
       description: "NUL-bearing historical summary",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nReviewed\u0000summary\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary is empty.",
-      updated: false,
-      latestUpdated: false,
-      status: 1,
     },
     {
       description: "NUL-bearing tagged summary",
       releaseSummary: "<!-- release-version: 0.1.2 -->\nReviewed\0summary",
       expectedError: "include a reviewed summary",
-      updated: false,
-      latestUpdated: false,
-      status: 1,
     },
     {
       description: "generated notes without its tagged reviewed summary",
       releaseSummary:
         "<!-- release-version: 0.1.2 -->\n## Highlights\nReviewed tagged summary",
       expectedSummary: "Reviewed tagged summary",
-      updated: true,
-      latestUpdated: false,
-      status: 0,
+      edit: "notes",
     },
     {
       description: "malformed historical summary markers",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nIncomplete summary",
       expectedError: "Existing release summary markers are malformed.",
-      updated: false,
-      latestUpdated: false,
-      status: 1,
     },
     {
       description: "already current",
-      updated: false,
-      latestUpdated: false,
-      status: 0,
     },
     {
       description: "already current with trailing line feeds",
       existingNotes: "Generated release notes\n\n",
-      updated: false,
-      latestUpdated: false,
-      status: 0,
     },
     {
       description: "already current with CRLF-equivalent generated notes",
       existingNotes: "Generated release notes\r\n",
       generatedNotes: "Generated release notes\r\n",
-      updated: false,
-      latestUpdated: false,
-      status: 0,
     },
     {
       description: "already current with NUL-bearing generated notes",
       existingNotes: "Generated release notes\u0000",
       generatedNotes: "Generated release notes\0",
-      updated: false,
-      latestUpdated: false,
-      status: 0,
     },
     {
       description: "different strings encoding to the same UTF-8 bytes",
       existingNotes: "\ud800",
       generatedNotes: "\ufffd",
-      updated: false,
-      latestUpdated: false,
-      status: 0,
     },
     {
       description: "empty generated notes",
       generatedNotes: "",
       expectedError: "Generated GitHub release notes must not be empty.",
-      updated: false,
-      latestUpdated: false,
-      status: 1,
     },
     {
       description:
         "already current on a release predating release-note configuration",
-      updated: false,
       latestTag: "npm-v0.1.2",
       makeLatest: true,
-      latestUpdated: false,
       releaseConfiguration: false,
-      status: 0,
     },
     {
       description:
         "already current on a newest release incorrectly marked non-Latest",
-      updated: false,
       latestTag: "npm-v0.1.1",
       makeLatest: true,
-      latestUpdated: true,
-      status: 0,
+      edit: "latest",
     },
     {
       description: "already current when no GitHub release is marked Latest",
-      updated: false,
       latestTag: "__missing__",
       makeLatest: true,
-      latestUpdated: true,
-      status: 0,
+      edit: "latest",
     },
     {
       description: "already current when the Latest lookup fails unexpectedly",
-      updated: false,
       latestTag: "__error__",
       makeLatest: true,
-      latestUpdated: false,
-      status: 1,
+      expectedError: latestLookupError,
     },
     {
       description:
         "already current when the Latest lookup has no HTTP response",
-      updated: false,
       latestTag: "__network__",
       makeLatest: true,
-      latestUpdated: false,
-      status: 1,
+      expectedError: latestLookupError,
     },
     {
       description: "already current when the Latest 404 response is malformed",
-      updated: false,
       latestTag: "__malformed_missing__",
       makeLatest: true,
-      latestUpdated: false,
-      status: 1,
+      expectedError: latestLookupError,
     },
     {
       description:
         "already current on a historical release incorrectly marked Latest",
-      updated: false,
       latestTag: "npm-v0.1.2",
-      latestUpdated: true,
+      edit: "latest",
       tagType: "tag",
       tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       peeledCommit: releaseCommit,
-      status: 0,
     },
     {
       description: "stale when its lightweight release tag was retargeted",
       existingNotes: "Manually written release notes",
-      updated: false,
-      latestUpdated: false,
       tagObject: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      status: 1,
+      expectedError: retargetedTagError,
     },
     {
       description: "stale when its annotated release tag was retargeted",
       existingNotes: "Manually written release notes",
-      updated: false,
-      latestUpdated: false,
       tagType: "tag",
       tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       peeledCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      status: 1,
+      expectedError: retargetedTagError,
     },
   ])(
     "reconciles $description notes on an existing verified GitHub release",
-    async ({
-      existingNotes = "Generated release notes",
-      generatedNotes = "Generated release notes\n",
-
-      updated,
-      latestTag = "npm-v0.1.3",
-      makeLatest = false,
-      latestUpdated,
-      releaseConfiguration = true,
-      releaseSummary = "__missing__",
-      expectedSummary,
-      excludedSummary,
-      expectedError,
-      tagType = "commit",
-      tagObject = releaseCommit,
-      peeledCommit = "",
-      status,
-    }) => {
-      const result = runPublisher({
-        existingNotes,
-        generatedNotes,
-
-        latestTag,
-        makeLatest,
-        releaseConfiguration,
-        releaseSummary,
-        tagType,
-        tagObject,
-        peeledCommit,
-      });
+    ({ edit, expectedSummary, excludedSummary, expectedError, ...options }) => {
+      const result = runPublisher(options);
 
       expect(
         result.calls.some(
           (call) => call[1] === "release" && call[2] === "edit",
         ),
-      ).toBe(updated || latestUpdated);
-      if (updated || latestUpdated) {
+      ).toBe(edit !== undefined);
+      if (edit !== undefined) {
         expect(result.calls.at(-2)).toContain(
-          tagType === "tag"
-            ? `repos/test/codex-security/git/tags/${tagObject}`
+          options.tagType === "tag"
+            ? `repos/test/codex-security/git/tags/${options.tagObject}`
             : "repos/test/codex-security/git/ref/tags/npm-v0.1.2",
         );
       }
-      expect(result.status).toBe(status);
+      expect(result.status).toBe(expectedError === undefined ? 0 : 1);
       expect(result.stdout).toContain(`"digest":"${digest}"`);
-      if (status !== 0) {
-        if (expectedError !== undefined) {
-          expect(result.stderr).toContain(expectedError);
-          return;
-        }
-        const latestLookupFailed = [
-          "__error__",
-          "__network__",
-          "__malformed_missing__",
-        ].includes(latestTag);
-        expect(result.stderr).toContain(
-          latestLookupFailed
-            ? "Unable to resolve the current Latest GitHub Release."
-            : "GitHub release tag must still point to the verified commit.",
-        );
+      if (expectedError !== undefined) {
+        expect(result.stderr).toContain(expectedError);
         return;
       }
-      if (updated) {
+      if (edit === "notes") {
         if (excludedSummary !== undefined) {
           expect(result.stdout).not.toContain(excludedSummary);
         }
@@ -4276,9 +4117,11 @@ ${steps[record]!.run}`;
         expect(result.stdout).toContain(
           "Updated existing GitHub Release with reviewed and generated notes.",
         );
-      } else if (latestUpdated) {
+      } else if (edit === "latest") {
         expect(result.stdout).not.toContain("updated release notes:");
-        expect(result.stdout).toContain(`updated latest: ${makeLatest}`);
+        expect(result.stdout).toContain(
+          `updated latest: ${options.makeLatest ?? false}`,
+        );
         expect(result.stdout).toContain(
           "Updated existing GitHub Release Latest status.",
         );
@@ -4312,7 +4155,7 @@ ${steps[record]!.run}`;
       [protectedReleaseWorkflow, "publish"],
       [githubReleaseWorkflow, "release"],
     ] as const) {
-      const { jobs } = Bun.YAML.parse(workflow) as WorkflowContract;
+      const { jobs } = parseReleaseWorkflow(workflow);
       expect(jobs[job]?.steps?.map((step) => step.uses)).toContain(action);
     }
     const manifest = new URL(`../../../${action}/action.yml`, import.meta.url);

@@ -1,13 +1,8 @@
-import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
 import { renderProgress } from "../../../.github/scripts/release-progress.mjs";
+import { workflow as readWorkflow } from "./support/workflow.js";
 
-const workflow = Bun.YAML.parse(
-  readFileSync(
-    new URL("../../../.github/workflows/release-progress.yml", import.meta.url),
-    "utf8",
-  ),
-) as {
+const workflow = readWorkflow("release-progress") as {
   on: { workflow_run: { workflows: string[]; types: string[] } };
   concurrency: { group: string };
   jobs: {
@@ -83,12 +78,7 @@ function identify(
 }
 
 test("release verification reports a failed Darwin signer when publication is skipped", () => {
-  const release = Bun.YAML.parse(
-    readFileSync(
-      new URL("../../../.github/workflows/node-release.yml", import.meta.url),
-      "utf8",
-    ),
-  ) as {
+  const release = readWorkflow("node-release") as {
     jobs: Record<string, { name?: string }>;
   };
   const jobName = release.jobs["sign-darwin"]?.name ?? "sign-darwin";
@@ -121,15 +111,7 @@ test("main CI completions report independently of cutting a release", () => {
     workflows: ["node-release", "node-github-release"],
     types: ["in_progress", "completed"],
   });
-  const cut = Bun.YAML.parse(
-    readFileSync(
-      new URL(
-        "../../../.github/workflows/node-release-cut.yml",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  ) as {
+  const cut = readWorkflow("node-release-cut") as {
     on: Record<string, unknown>;
     jobs: {
       progress: { if: string; uses: string };

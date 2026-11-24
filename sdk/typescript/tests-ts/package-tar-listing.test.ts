@@ -254,6 +254,24 @@ function checkPackage(
   );
 }
 
+async function checkFixtureArchive(
+  prefix: string,
+  name: string,
+  contents: Buffer,
+  environment?: NodeJS.ProcessEnv,
+) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    const archivePath = join(root, name);
+    writeFileSync(archivePath, contents);
+    const contractPath = join(root, "plugin contract.json");
+    writeFileSync(contractPath, JSON.stringify(pluginContract));
+    return await checkPackage(root, archivePath, contractPath, environment);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+}
+
 function runPackageCommand(
   root: string,
   command: string,
@@ -433,87 +451,63 @@ describe("npm package tar listings", () => {
   ])(
     "rejects CRLF in the packaged POSIX MCP launcher's %s",
     async (_part, script) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-launcher-"));
-      try {
-        const path =
-          "package/_bundled_plugin/scripts/launch_codex_security_mcp";
-        const launcher = tarRecord(Buffer.from(script), {
-          name: path,
-          mode: 0o755,
-        });
-        const archivePath = join(root, "launcher.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(packageTar({ overrides: new Map([[path, launcher]]) })),
-        );
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const result = await checkPackage(root, archivePath, contractPath);
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain("POSIX MCP launcher contains CRLF");
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      const path = "package/_bundled_plugin/scripts/launch_codex_security_mcp";
+      const launcher = tarRecord(Buffer.from(script), {
+        name: path,
+        mode: 0o755,
+      });
+
+      const result = await checkFixtureArchive(
+        "codex-package-launcher-",
+        "launcher.tgz",
+        gzipSync(packageTar({ overrides: new Map([[path, launcher]]) })),
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("POSIX MCP launcher contains CRLF");
     },
   );
 
   test.each([false, true])(
     "rejects invalid package paths before Brotli expansion, complete=%p",
     async (complete) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-path-order-"));
-      try {
-        const archivePath = join(root, "unexpected-brotli.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(
-            Buffer.concat([
-              ...(complete ? [packageTar()] : []),
-              tarRecord(Buffer.from("Malformed compressed bytes."), {
-                name: "package/unexpected.br",
-              }),
-            ]),
-          ),
-        );
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const result = await checkPackage(root, archivePath, contractPath);
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain(
-          complete
-            ? "unexpected file: package/unexpected.br"
-            : "missing package/package.json",
-        );
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
-    },
-  );
-
-  test("escapes terminal controls in unexpected archive path diagnostics", async () => {
-    const root = mkdtempSync(join(tmpdir(), "codex-package-terminal-path-"));
-    try {
-      const archivePath = join(root, "unexpected-path.tgz");
-      writeFileSync(
-        archivePath,
+      const result = await checkFixtureArchive(
+        "codex-package-path-order-",
+        "unexpected-brotli.tgz",
         gzipSync(
           Buffer.concat([
-            packageTar(),
-            tarRecord(Buffer.from("fixture"), {
-              name: "package/unexpected\u001b]52;c;synthetic\u0007\u009b",
+            ...(complete ? [packageTar()] : []),
+            tarRecord(Buffer.from("Malformed compressed bytes."), {
+              name: "package/unexpected.br",
             }),
           ]),
         ),
       );
-      const contractPath = join(root, "plugin contract.json");
-      writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const result = await checkPackage(root, archivePath, contractPath);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("unexpected file: package/unexpected");
-      expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
-      expect(result.stderr).toContain("synthetic");
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
+      expect(result.stderr).toContain(
+        complete
+          ? "unexpected file: package/unexpected.br"
+          : "missing package/package.json",
+      );
+    },
+  );
+
+  test("escapes terminal controls in unexpected archive path diagnostics", async () => {
+    const result = await checkFixtureArchive(
+      "codex-package-terminal-path-",
+      "unexpected-path.tgz",
+      gzipSync(
+        Buffer.concat([
+          packageTar(),
+          tarRecord(Buffer.from("fixture"), {
+            name: "package/unexpected\u001b]52;c;synthetic\u0007\u009b",
+          }),
+        ]),
+      ),
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("unexpected file: package/unexpected");
+    expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
+    expect(result.stderr).toContain("synthetic");
   });
 
   const paddedTar = {
@@ -544,29 +538,20 @@ describe("npm package tar listings", () => {
   ])(
     "accepts bounded gzip representation $name",
     async ({ name, tar, gzip }) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
-      try {
-        const contents = gzipSync(packageTar(tar), gzip);
-        if (name === "default")
-          expect(contents.length).toBeLessThan(1024 * 1024);
-        if (name === "level-0")
-          expect(contents.length).toBeGreaterThan(MAX_EXPANDED_ASSET_BYTES);
-        const archivePath = join(root, `${name}.tgz`);
-        writeFileSync(archivePath, contents);
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const environment: NodeJS.ProcessEnv = { ...process.env };
-        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        const result = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        expect(result).toEqual({ status: 0, stderr: "" });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      const contents = gzipSync(packageTar(tar), gzip);
+      if (name === "default") expect(contents.length).toBeLessThan(1024 * 1024);
+      if (name === "level-0")
+        expect(contents.length).toBeGreaterThan(MAX_EXPANDED_ASSET_BYTES);
+
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      const result = await checkFixtureArchive(
+        "codex-package-gzip-test-",
+        `${name}.tgz`,
+        contents,
+        environment,
+      );
+      expect(result).toEqual({ status: 0, stderr: "" });
     },
   );
 
@@ -894,44 +879,32 @@ describe("npm package tar listings", () => {
   test.each([0x78, 0x67])(
     "preserves inherited character locale for Unicode pax owners, type=%i",
     async (type) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-owner-test-"));
-      try {
-        const archivePath = join(root, "unicode owner.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(
-            Buffer.concat([
-              tarRecord(
-                paxRecords({
-                  uname: "Synthetic é owner",
-                  gname: "Synthetic é group",
-                }),
-                { name: "OwnerHead", type },
-              ),
-              packageTar(),
-            ]),
-          ),
-        );
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const environment: NodeJS.ProcessEnv = { ...process.env };
-        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        if (process.platform !== "win32")
-          environment["LC_ALL"] =
-            process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
-        const result = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        expect({ status: result.status, stderr: result.stderr }).toEqual({
-          status: 0,
-          stderr: "",
-        });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      if (process.platform !== "win32")
+        environment["LC_ALL"] =
+          process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+      const result = await checkFixtureArchive(
+        "codex-package-owner-test-",
+        "unicode owner.tgz",
+        gzipSync(
+          Buffer.concat([
+            tarRecord(
+              paxRecords({
+                uname: "Synthetic é owner",
+                gname: "Synthetic é group",
+              }),
+              { name: "OwnerHead", type },
+            ),
+            packageTar(),
+          ]),
+        ),
+        environment,
+      );
+      expect({ status: result.status, stderr: result.stderr }).toEqual({
+        status: 0,
+        stderr: "",
+      });
     },
   );
 

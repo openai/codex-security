@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { runWorkflowScript } from "./support/workflow-script.js";
+import { workflow as readWorkflow } from "./support/workflow.js";
 
 type Step = {
   name: string;
@@ -28,15 +29,9 @@ type Job = {
   needs?: string[];
   outputs?: Record<string, string>;
 };
-const workflow = Bun.YAML.parse(
-  readFileSync(
-    new URL(
-      "../../../.github/workflows/node-github-release.yml",
-      import.meta.url,
-    ),
-    "utf8",
-  ),
-) as { jobs: Record<string, Job> };
+const workflow = readWorkflow("node-github-release") as {
+  jobs: Record<string, Job>;
+};
 
 function step(job: string, name: string) {
   const value = workflow.jobs[job]?.steps.find((step) => step.name === name);

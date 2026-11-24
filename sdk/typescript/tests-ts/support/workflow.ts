@@ -24,13 +24,15 @@ interface WorkflowJob {
   steps?: WorkflowStep[];
 }
 
+export function workflowSource(name: string) {
+  return readFileSync(
+    new URL(`../../../../.github/workflows/${name}.yml`, import.meta.url),
+    "utf8",
+  );
+}
+
 export function workflow(name: string) {
-  return Bun.YAML.parse(
-    readFileSync(
-      new URL(`../../../../.github/workflows/${name}.yml`, import.meta.url),
-      "utf8",
-    ),
-  ) as {
+  return Bun.YAML.parse(workflowSource(name)) as {
     on: Record<string, unknown>;
     env?: Record<string, unknown>;
     concurrency?: { group: string; queue?: string };
