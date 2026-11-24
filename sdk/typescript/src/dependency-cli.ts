@@ -145,7 +145,7 @@ function registerDependencyCheck(
   group.command("check", {
     description:
       "Investigate a CVE or package in this checkout, optionally using a supplied stack capture.",
-    hint: "Read the summary on stdout, use --format md for the full text or --json for the structured result. --format html saves a browser view and prints its path.",
+    hint: "By default, check prints a summary. Use --format json for the structured result or --format md for the full Markdown report. --format html saves a browser view and prints its path.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
