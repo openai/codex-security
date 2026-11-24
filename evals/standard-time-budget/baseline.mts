@@ -11,6 +11,7 @@ import {
 } from "./experiment.mts";
 import type { Fixture, SourceCase } from "./fixtures.mts";
 import {
+  mapFields,
   mean,
   sumKnown,
   summarizeUsage,
@@ -215,12 +216,10 @@ function runUsage(usage: unknown) {
     typeof usage === "object" && !Array.isArray(usage),
     "Invalid token usage.",
   );
-  return Object.fromEntries(
-    usageFields.map((field) => {
-      const value = (usage as Record<string, number | null>)[field];
-      return [field, value == null ? null : count(value)];
-    }),
-  );
+  return mapFields(usageFields, (field) => {
+    const value = (usage as Record<string, number | null>)[field];
+    return value == null ? null : count(value);
+  });
 }
 
 function checkedRuns(
@@ -473,14 +472,6 @@ function recall(counts: number[], size: number) {
 }
 
 const tokenFields = [...usageFields, "total_tokens"] as const;
-function tokenMetrics(
-  fn: (field: (typeof tokenFields)[number]) => number | null,
-) {
-  return Object.fromEntries(tokenFields.map((k) => [k, fn(k)])) as Record<
-    (typeof tokenFields)[number],
-    number | null
-  >;
-}
 
 function summarizeArm(
   baseline: ReleaseBaseline,
@@ -584,7 +575,7 @@ function summarizeArm(
       usage: {
         totals,
         missingUsageRuns,
-        meanPerRun: tokenMetrics((field) =>
+        meanPerRun: mapFields(tokenFields, (field) =>
           rate(totals[field], attempts.length),
         ),
       },
@@ -624,31 +615,21 @@ function compareArm(
   const changes = {
     comparableRecall: delta(b.comparableRecall.mean, c.comparableRecall.mean),
     rawRecall: delta(b.rawRecall.mean, c.rawRecall.mean),
-    successRate: delta(b.successRate, c.successRate),
-    completionRate: delta(b.completionRate, c.completionRate),
-    meanElapsedMs: delta(b.meanElapsedMs, c.meanElapsedMs),
-    meanCompletedElapsedMs: delta(
-      b.meanCompletedElapsedMs,
-      c.meanCompletedElapsedMs,
+    ...mapFields(
+      [
+        "successRate",
+        "completionRate",
+        "meanElapsedMs",
+        "meanCompletedElapsedMs",
+        "meanDuplicateFindings",
+        "meanSafeControlFindings",
+        "meanComparableSafeControlFindings",
+        "meanUnmatchedFindings",
+        "meanEvidenceErrors",
+      ],
+      (key) => delta(b[key], c[key]),
     ),
-    meanDuplicateFindings: delta(
-      b.meanDuplicateFindings,
-      c.meanDuplicateFindings,
-    ),
-    meanSafeControlFindings: delta(
-      b.meanSafeControlFindings,
-      c.meanSafeControlFindings,
-    ),
-    meanComparableSafeControlFindings: delta(
-      b.meanComparableSafeControlFindings,
-      c.meanComparableSafeControlFindings,
-    ),
-    meanUnmatchedFindings: delta(
-      b.meanUnmatchedFindings,
-      c.meanUnmatchedFindings,
-    ),
-    meanEvidenceErrors: delta(b.meanEvidenceErrors, c.meanEvidenceErrors),
-    meanUsage: tokenMetrics((k) =>
+    meanUsage: mapFields(tokenFields, (k) =>
       delta(b.usage.meanPerRun[k], c.usage.meanPerRun[k]),
     ),
   };
@@ -703,20 +684,15 @@ function compareArm(
 
 function diffFields<T extends Record<string, unknown>>(before: T, after: T) {
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
-  return Object.fromEntries(
-    [...keys].sort().map((key) => {
-      const baseline = Object.hasOwn(before, key) ? before[key] : null;
-      const candidate = Object.hasOwn(after, key) ? after[key] : null;
-      return [
-        key,
-        {
-          baseline,
-          candidate,
-          changed: !isDeepStrictEqual(baseline, candidate),
-        },
-      ];
-    }),
-  ) as {
+  return mapFields([...keys].sort(), (key) => {
+    const baseline = Object.hasOwn(before, key) ? before[key] : null;
+    const candidate = Object.hasOwn(after, key) ? after[key] : null;
+    return {
+      baseline,
+      candidate,
+      changed: !isDeepStrictEqual(baseline, candidate),
+    };
+  }) as {
     [K in keyof T]: {
       baseline: T[K] | null;
       candidate: T[K] | null;
@@ -736,16 +712,11 @@ export function compareBaselines(
     ({ added, removed, changed }) =>
       !added.length && !removed.length && !changed.length,
   );
-  const config = ({
-    model,
-    pairs,
-    budgetMinutes,
-    reasoningEffort,
-  }: ReleaseBaseline["experiment"]) => ({
-    model,
-    pairs,
-    budgetMinutes,
-    reasoningEffort,
+  const config = (experiment: ReleaseBaseline["experiment"]) => ({
+    model: experiment.model,
+    pairs: experiment.pairs,
+    budgetMinutes: experiment.budgetMinutes,
+    reasoningEffort: experiment.reasoningEffort,
   });
   const b = baseline.experiment;
   const c = candidate.experiment;
@@ -758,8 +729,6 @@ export function compareBaselines(
     corpusChanged: !fixtureIdentical,
     graderChanged: grader.baseline && grader.candidate ? grader.changed : null,
   };
-  const arm = (variant: Variant) =>
-    compareArm(baseline, candidate, variant, corpus, revision);
   return {
     schemaVersion: BASELINE_SCHEMA_VERSION,
     provenance: {
@@ -769,7 +738,9 @@ export function compareBaselines(
       digests,
     },
     corpus,
-    arms: { baseline: arm("baseline"), "time-aware": arm("time-aware") },
+    arms: mapFields(variants, (variant) =>
+      compareArm(baseline, candidate, variant, corpus, revision),
+    ),
   };
 }
 

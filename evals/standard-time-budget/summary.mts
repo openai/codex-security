@@ -13,6 +13,16 @@ export const usageFields = [
 ] as const;
 type UsageField = (typeof usageFields)[number];
 
+export function mapFields<K extends string, V>(
+  fields: readonly K[],
+  value: (field: K) => V,
+) {
+  return Object.fromEntries(fields.map((key) => [key, value(key)])) as Record<
+    K,
+    V
+  >;
+}
+
 export function mean(values: number[]) {
   return values.length
     ? values.reduce((total, value) => total + value, 0) / values.length
@@ -40,12 +50,9 @@ export function sumKnown(values: (number | null)[]) {
 
 export function summarizeUsage(records: Pick<RunRecord, "usage">[]) {
   return {
-    ...(Object.fromEntries(
-      usageFields.map((field) => [
-        field,
-        sumKnown(records.map((record) => usageValue(record, field))),
-      ]),
-    ) as Record<UsageField, number | null>),
+    ...mapFields(usageFields, (field) =>
+      sumKnown(records.map((record) => usageValue(record, field))),
+    ),
     total_tokens: sumKnown(records.map(totalTokens)),
     missingUsageRuns: records.filter((record) =>
       usageFields.some((field) => usageValue(record, field) === null),
@@ -111,11 +118,8 @@ export function summarizeRuns(records: RunRecord[]) {
       : null;
   };
   return {
-    arms: Object.fromEntries(
-      variants.map((variant) => [
-        variant,
-        summarizeArm(records.filter((record) => record.variant === variant)),
-      ]),
+    arms: mapFields(variants, (variant) =>
+      summarizeArm(records.filter((record) => record.variant === variant)),
     ),
     paired: {
       totalPairs: pairs.size,
@@ -134,12 +138,9 @@ export function summarizeRuns(records: RunRecord[]) {
         evidenceErrors: meanDelta(
           (record) => record.report.evidenceErrors.length,
         ),
-        ...(Object.fromEntries(
-          usageFields.map((field) => [
-            field,
-            meanDelta((record) => usageValue(record, field)),
-          ]),
-        ) as Record<UsageField, number | null>),
+        ...mapFields(usageFields, (field) =>
+          meanDelta((record) => usageValue(record, field)),
+        ),
         total_tokens: meanDelta(totalTokens),
       },
     },
