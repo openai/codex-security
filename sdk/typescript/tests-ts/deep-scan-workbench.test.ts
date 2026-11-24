@@ -4,7 +4,10 @@ import type { CoverageDocument } from "../src/models.js";
 import { loadContract } from "../src/contract.js";
 import { readReviewState } from "./support/review-state.js";
 import { afterEach, describe, expect, test } from "bun:test";
-import { workbenchCommand as workbench } from "./support/workbench-command.js";
+import {
+  scanRegistrationArguments,
+  workbenchCommand as workbench,
+} from "./support/workbench-command.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { fileURLToPath } from "node:url";
 import { importSource } from "../../../plugins/codex-security/mcp-app/tests/import-module.ts";
@@ -304,20 +307,9 @@ describe("deep scan workbench ownership", () => {
         [join(PLUGIN_ROOT, "scripts", "workbench_db.py"), ...args],
         { env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir } },
       );
-    const registered = command([
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
-        config: {},
-        mode: "deep",
-        repository,
-        target: { kind: "repository", paths: [] },
-      }),
-    ]);
+    const registered = command(
+      scanRegistrationArguments(repository, scanDir, "deep"),
+    );
     expect(
       registered.exitCode,
       new TextDecoder().decode(registered.stderr),
@@ -756,20 +748,9 @@ describe("deep scan workbench ownership", () => {
       CODEX_SECURITY_STATE_DIR: stateDir,
       CODEX_HOME: codexHome,
     }));
-    const registration = await command([
-      "register-cli-scan",
-      "--repository",
-      repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
-        config: {},
-        mode: "deep",
-        repository,
-        target: { kind: "repository", paths: [] },
-      }),
-    ]);
+    const registration = await command(
+      scanRegistrationArguments(repository, scanDir, "deep"),
+    );
     const scanId = registration["scanId"] as string;
     const targetId = registration["targetId"] as string;
     const begun = (
