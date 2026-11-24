@@ -698,7 +698,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Request Codex Security User Input",
       description:
-        "Fallback for interactive Codex Security workflows when the host-native request_user_input tool is unavailable. Presents one to three non-sensitive multiple-choice questions through standard MCP form elicitation and waits for the user's response. Never call this tool in headless, automation, or other non-interactive sessions.",
+        "Use only in interactive sessions when the host's question tool is unavailable. Ask one to three non-sensitive multiple-choice questions via an MCP form and wait for the reply.",
       inputSchema: requestUserInputSchema,
       annotations: { ...readingAnnotations, idempotentHint: false },
       _meta: modelActionMeta,
