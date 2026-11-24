@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -10,6 +11,15 @@ import {
 } from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
+  matchesSavedCoverageSource,
+  comparableSavedCoverageSource,
+  surfaceNormalization,
+  normalizedSurfacePair,
+  type SurfaceNormalization,
+  readAcceptedWorkerCheckpoints,
+  recordedScanReceiptRefs,
+  reconcileAcceptedWorkerHistory,
+  readArchivedWorkerCheckpoints,
   scanDraftInputSchema,
   retainRecordedReceiptOwnership,
   workerCoverageReceiptLocation,
@@ -57,17 +67,38 @@ export function parseScanUnion(input: unknown): ScanUnion {
   return parsed;
 }
 
+type WorkerAdmission = "new" | "previously-accepted";
+type WorkerScope = Pick<
+  ArtifactContext,
+  "scope" | "includePaths" | "filePaths" | "excludePaths"
+>;
+
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
 export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths" | "excludePaths"
-  > = {},
-  admission: "new" | "previously-accepted" = "new",
+  boundScope: WorkerScope = {},
+  admission: WorkerAdmission = "new",
 ): Promise<ScanDraftInput> {
+  const { context, result } = await readWorkerDraft(
+    artifacts,
+    resultPath,
+    expectedScanId,
+    boundScope,
+    admission,
+  );
+  await validateWorkerReceipts(artifacts.workersRoot, context, result);
+  return result;
+}
+
+async function readWorkerDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+  boundScope: WorkerScope,
+  admission: WorkerAdmission,
+) {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
   const context = {
@@ -114,12 +145,20 @@ export async function validateDiscoveryArtifacts(
       closed.add(id);
     }
   }
+  return { context, result };
+}
+
+async function validateWorkerReceipts(
+  workersRoot: string,
+  context: ArtifactContext,
+  result: ScanDraftInput,
+) {
   const receiptPaths = new Map<string, string>();
   for (const row of result.reviewState.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
       const location = workerCoverageReceiptLocation(context, row, ref);
       const normalized = relative(
-        artifacts.workersRoot,
+        workersRoot,
         join(location.context.root, ...location.components),
       );
       const key = normalized.toLowerCase();
@@ -137,14 +176,201 @@ export async function validateDiscoveryArtifacts(
       );
     }
   }
-  return result;
+}
+
+// Discard worker claims about host-assigned origins before reconciling occurrences.
+function clearWorkerOriginClaims(coverage: ScanDraftInput["reviewState"]) {
+  for (const field of [
+    "surfaces",
+    "deferred",
+    "explicitExclusions",
+    "openQuestions",
+    "resolvedDeferred",
+  ] as const) {
+    for (const value of coverage[field] ?? []) {
+      const row = asRecord(value);
+      const provenance = asRecord(row?.provenance);
+      if (!row || !provenance) continue;
+      for (const key of ["workerId", "attempt", "sourceId", "candidateId"])
+        delete provenance[key];
+      if (!Object.keys(provenance).length) delete row.provenance;
+    }
+  }
+}
+
+export async function readAcceptedDiscovery(
+  artifacts: DeepScanArtifacts,
+  worker: Omit<AcceptedDiscovery, "result" | "coverage">,
+  scanId: string,
+  boundScope: WorkerScope = {},
+  admission: WorkerAdmission = "new",
+): Promise<AcceptedDiscovery> {
+  const draft = await readWorkerDraft(
+    artifacts,
+    worker.resultPath,
+    scanId,
+    boundScope,
+    admission,
+  );
+  const { context } = draft;
+  let result = draft.result;
+  let deferredSurfaceTargets = new Map<number, (number | undefined)[]>();
+  const surfaceIdentities = [
+    ...surfaceNormalization(result.reviewState.surfaces).values(),
+  ];
+  clearWorkerOriginClaims(result.reviewState);
+  function usableCheckpoint({ input }: { input: ScanDraftInput }) {
+    try {
+      if (admission === "new") validateWorkerReport(input);
+      validateRetainedCoverage(input.reviewState);
+    } catch {
+      return false;
+    }
+    clearWorkerOriginClaims(input.reviewState);
+    return true;
+  }
+  const archived = (
+    await readArchivedWorkerCheckpoints(context, true).catch(() => [])
+  ).filter(usableCheckpoint);
+  const current = (await readAcceptedWorkerCheckpoints(context, result)).filter(
+    usableCheckpoint,
+  );
+  const snapshots = [...current, ...archived];
+  // Same-thread retries copy saved files without creating a new observation.
+  // Match the raw file's copy time separately from a later head selection.
+  const history = snapshots.filter(
+    (source, index) =>
+      source.snapshot === undefined ||
+      !snapshots.some(
+        (earlier, earlierIndex) =>
+          earlierIndex > index &&
+          earlier.attempt !== source.attempt &&
+          (earlier.result ?? false) === (source.result ?? false) &&
+          sameCheckpointCopyTime(
+            source.sourceModifiedMs,
+            earlier.sourceModifiedMs,
+          ) &&
+          (source.modifiedMs <= earlier.modifiedMs ||
+            sameCheckpointCopyTime(source.modifiedMs, earlier.modifiedMs)) &&
+          isDeepStrictEqual(source.snapshot, earlier.snapshot),
+      ),
+  );
+  const receiptDigests = new Map<string, string>();
+  if (history.length) {
+    const sources = [result, ...history.map(({ input }) => input)];
+    for (const surface of sources.flatMap(
+      ({ reviewState }) => reviewState.surfaces,
+    )) {
+      for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
+        const ref = posix.normalize(value);
+        const shared = recordedScanReceiptRefs(surface).includes(ref);
+        const key = JSON.stringify([shared, ref]);
+        if (receiptDigests.has(key)) continue;
+        try {
+          const location = workerCoverageReceiptLocation(context, surface, ref);
+          const path = await artifactSourcePath(
+            location.context,
+            location.components,
+            "Saved discovery receipt",
+          );
+          const digest = createHash("sha256");
+          for await (const chunk of createReadStream(path))
+            digest.update(chunk);
+          receiptDigests.set(key, digest.digest("hex"));
+        } catch {
+          // Missing evidence cannot establish an earlier receipt origin.
+        }
+      }
+    }
+    const reconciled = await reconcileAcceptedWorkerHistory(
+      context,
+      result,
+      history,
+      receiptDigests,
+      admission === "previously-accepted",
+    );
+    result = reconciled.result;
+    deferredSurfaceTargets = reconciled.deferredSurfaceTargets;
+    if (admission === "new") validateWorkerReport(result);
+    validateRetainedCoverage(result.reviewState);
+  }
+  await validateWorkerReceipts(artifacts.workersRoot, context, result);
+  const accepted = { ...worker, result };
+  return {
+    ...accepted,
+    coverage: scanCoverage(
+      accepted,
+      artifacts.scanDir,
+      archived.flatMap(({ input, attempt, result, surfaceIdentities }) => {
+        const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
+        return number === undefined
+          ? []
+          : [
+              {
+                attempt: Number(number),
+                coverage: input.reviewState,
+                result,
+                surfaceIdentities,
+              },
+            ];
+      }),
+      receiptDigests,
+      [
+        { coverage: draft.result.reviewState, surfaceIdentities },
+        ...current.map(({ input, surfaceIdentities }) => ({
+          coverage: input.reviewState,
+          surfaceIdentities,
+        })),
+      ],
+      deferredSurfaceTargets,
+    ),
+  };
+}
+
+function sameCheckpointCopyTime(left?: number, right?: number): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    (left === right ||
+      left === copiedCheckpointTime(right) ||
+      right === copiedCheckpointTime(left))
+  );
+}
+
+function copiedCheckpointTime(modifiedMs: number): number {
+  // fs.cp passes a rounded Date through the platform's utimes conversion.
+  const seconds = Math.round(modifiedMs) / 1000;
+  if (process.platform === "win32") {
+    const epoch = 116_444_736_000_000_000;
+    const ticks = Math.trunc(seconds * 10_000_000 + epoch) - epoch;
+    return (
+      Math.trunc(ticks / 10_000_000) * 1000 + (ticks % 10_000_000) / 10_000
+    );
+  }
+  const whole = Math.trunc(seconds);
+  const nanos = Math.trunc((seconds - whole) * 1_000_000_000);
+  return whole * 1000 + Math.trunc(nanos / 1000) / 1000;
 }
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
-  additionalModel?: ScanDraftInput["threatModel"],
+  archived: {
+    attempt: number;
+    coverage: ScanDraftInput["reviewState"];
+    result?: boolean;
+    surfaceIdentities?: SurfaceNormalization[];
+  }[] = [],
+  receiptDigests: ReadonlyMap<string, string> = new Map(),
+  currentSources: {
+    coverage: ScanDraftInput["reviewState"];
+    surfaceIdentities?: SurfaceNormalization[];
+  }[] = [{ coverage: worker.result.reviewState }],
+  deferredSurfaceTargets: ReadonlyMap<
+    number,
+    readonly (number | undefined)[]
+  > = new Map(),
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -156,7 +382,216 @@ export function scanCoverage(
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
-  const project = <T extends Record<string, unknown>>(item: T): T => {
+  const reviews = [provenance];
+  const namedFirst = (left: JsonObject, right: JsonObject) =>
+    Number(right.id !== undefined) - Number(left.id !== undefined);
+  const matchingCoverage = (
+    coverage: ScanDraftInput["reviewState"],
+  ): ScanDraftInput["reviewState"] => ({
+    ...coverage,
+    // Consume explicitly named rows before an otherwise identical anonymous row.
+    surfaces: [...coverage.surfaces].sort(namedFirst),
+    deferred: [...coverage.deferred].sort(namedFirst),
+  });
+  const authored = currentSources.map(({ coverage, surfaceIdentities }) => ({
+    coverage: matchingCoverage(coverage),
+    surfaces: surfaceNormalization(coverage.surfaces, surfaceIdentities),
+  }));
+  const normalizedOutput = surfaceNormalization(coverage.surfaces);
+  const history = [...archived].sort(
+    // Admission projects the direct result before retained checkpoint rows.
+    (left, right) =>
+      left.attempt - right.attempt ||
+      Number(right.result ?? false) - Number(left.result ?? false),
+  );
+  const matchedRows = new Map<
+    string,
+    Map<ScanDraftInput["reviewState"], Set<number>>
+  >();
+  type Origin = {
+    row: JsonObject;
+    attempt: number;
+    surface?: SurfaceNormalization;
+  };
+  const origins = new Map<string, Origin[]>();
+  const comparableRows = new Map<
+    string,
+    Map<unknown, JsonObject | undefined>
+  >();
+  const comparable = (field: string, row: unknown) => {
+    let rows = comparableRows.get(field);
+    if (rows === undefined) {
+      rows = new Map();
+      comparableRows.set(field, rows);
+    }
+    if (!rows.has(row))
+      rows.set(
+        row,
+        comparableSavedCoverageSource(
+          field,
+          row,
+          artifactPrefix,
+          receiptDigests,
+        ),
+      );
+    return rows.get(row);
+  };
+  const matchesOrigin = (
+    field: string,
+    item: JsonObject,
+    origin: Origin,
+    reserved: Set<unknown>,
+    form: "raw" | "normalized" | "group",
+    currentSurface: SurfaceNormalization | undefined,
+  ) => {
+    let previous = comparable(field, origin.row)!;
+    if (form !== "raw") {
+      const pair = normalizedSurfacePair(
+        previous,
+        item,
+        origin.surface,
+        currentSurface,
+        form,
+      );
+      if (pair === undefined) return false;
+      [previous, item] = pair;
+    }
+    if (
+      item.id === undefined &&
+      typeof previous.id === "string" &&
+      !reserved.has(previous.id) &&
+      (field === "surfaces" ||
+        (field === "deferred" &&
+          !["candidateId", "candidate", "finding"].some((key) => key in item)))
+    )
+      item = { ...item, id: previous.id };
+    return matchesSavedCoverageSource(item, previous);
+  };
+  const findOrigin = (
+    field: string,
+    item: JsonObject,
+    occurrences: Origin[],
+    reserved: Set<unknown>,
+    currentSurface: SurfaceNormalization | undefined,
+  ) => {
+    const forms =
+      field === "surfaces"
+        ? (["raw", "normalized", "group"] as const)
+        : (["raw"] as const);
+    for (const named of [true, false]) {
+      for (const form of forms) {
+        const index = occurrences.findIndex(
+          (origin) =>
+            (typeof origin.row.id === "string") === named &&
+            matchesOrigin(field, item, origin, reserved, form, currentSurface),
+        );
+        if (index >= 0) return index;
+      }
+    }
+    return -1;
+  };
+  const savedOrigins = (field: string): Origin[] => {
+    const cached = origins.get(field);
+    if (cached !== undefined) return cached;
+    const occurrences: Origin[] = [];
+    for (const saved of history) {
+      const normalized =
+        field === "surfaces"
+          ? surfaceNormalization(
+              saved.coverage.surfaces,
+              saved.surfaceIdentities,
+            )
+          : undefined;
+      const rows = ((saved.coverage[field] as unknown[] | undefined) ?? []).map(
+        (row) =>
+          typeof row === "string" ? { question: row } : (asRecord(row) ?? {}),
+      );
+      const reserved = new Set(rows.map((row) => row.id));
+      // Preserve each snapshot's occurrence count before assigning its later names.
+      const unmatched = [...occurrences];
+      const added: Origin[] = [];
+      for (const row of rows) {
+        const index = findOrigin(
+          field,
+          comparable(field, row)!,
+          unmatched,
+          reserved,
+          normalized?.get(row),
+        );
+        if (index < 0)
+          added.push({
+            row,
+            attempt: saved.attempt,
+            surface: normalized?.get(row),
+          });
+        else {
+          const [origin] = unmatched.splice(index, 1);
+          if (row.id !== undefined) {
+            origin!.row = row;
+            origin!.surface = normalized?.get(row);
+          }
+        }
+      }
+      occurrences.push(...added);
+    }
+    origins.set(field, occurrences);
+    return occurrences;
+  };
+  const project = <T extends Record<string, unknown>>(
+    field: string,
+    item: T,
+  ): T => {
+    const matchedHistory = matchedRows.get(field) ?? new Map();
+    matchedRows.set(field, matchedHistory);
+    const match = (coverage: ScanDraftInput["reviewState"]) => {
+      const matched = matchedHistory.get(coverage) ?? new Set<number>();
+      const rows = (coverage[field] as unknown[] | undefined) ?? [];
+      const index = rows.findIndex(
+        (row, index) =>
+          !matched.has(index) &&
+          matchesSavedCoverageSource(
+            comparable(field, item),
+            comparable(field, row),
+          ),
+      );
+      if (index < 0) return undefined;
+      matched.add(index);
+      matchedHistory.set(coverage, matched);
+      return asRecord(rows[index]) ?? {};
+    };
+    let source: Record<string, unknown> | undefined;
+    let sourceSurface = normalizedOutput.get(item);
+    let reserved = new Set<unknown>();
+    for (const { coverage, surfaces } of authored) {
+      const row = match(coverage);
+      if (source === undefined && row !== undefined) {
+        source = row;
+        sourceSurface = surfaces.get(row);
+        reserved = new Set(
+          ((coverage[field] as JsonObject[] | undefined) ?? []).map(
+            (row) => row.id,
+          ),
+        );
+      }
+    }
+    let origin = provenance;
+    const previous = savedOrigins(field);
+    const comparison = { ...comparable(field, item)! };
+    if (source !== undefined && source.id === undefined) delete comparison.id;
+    const index = findOrigin(
+      field,
+      comparison,
+      previous,
+      reserved,
+      sourceSurface,
+    );
+    if (index >= 0) {
+      const [saved] = previous.splice(index, 1);
+      origin = { workerId: worker.id, attempt: saved!.attempt };
+      source ??= saved!.row;
+    }
+    if (!reviews.some((review) => review.attempt === origin.attempt))
+      reviews.push(origin);
     const result = structuredClone(item);
     const projected = asRecord(result.provenance) ?? {};
     for (const key of [
@@ -167,12 +602,13 @@ export function scanCoverage(
       "scanReceiptRefs",
     ])
       delete projected[key];
+    const sourceId = (source ?? item).id;
     return {
       ...result,
       provenance: {
         ...projected,
-        ...provenance,
-        ...(item.id === undefined ? {} : { sourceId: item.id }),
+        ...origin,
+        ...(sourceId === undefined ? {} : { sourceId }),
         ...(item.candidateId === undefined
           ? {}
           : { candidateId: item.candidateId }),
@@ -190,7 +626,7 @@ export function scanCoverage(
       string[] | undefined;
     const scanRefs = new Set(shared);
     return {
-      ...project(surface),
+      ...project("surfaces", surface),
       id,
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
         (receipt) => {
@@ -205,37 +641,46 @@ export function scanCoverage(
     };
   });
   return {
-    reviews: [
-      additionalModel
-        ? { ...provenance, threatModel: additionalModel }
-        : provenance,
-    ],
+    reviews,
     surfaces,
-    explicitExclusions: coverage.explicitExclusions.map(project),
+    explicitExclusions: coverage.explicitExclusions.map((item) =>
+      project("explicitExclusions", item),
+    ),
     deferred: coverage.deferred.map((item, index) => ({
-      ...project(item),
+      ...project("deferred", item),
       id: `${prefix}-deferred-${index + 1}`,
       ...(item.surfaceIds === undefined
         ? {}
         : {
-            surfaceIds: (item.surfaceIds as string[]).map(
-              (id) => surfaceIds.get(id) ?? id,
-            ),
+            surfaceIds: (item.surfaceIds as string[]).map((id, linkIndex) => {
+              const target = deferredSurfaceTargets.get(index)?.[linkIndex];
+              return target === undefined
+                ? (surfaceIds.get(id) ?? id)
+                : surfaces[target]!.id;
+            }),
           }),
     })),
     ...(coverage.resolvedDeferred === undefined
       ? {}
       : {
-          resolvedDeferred: coverage.resolvedDeferred.map(({ id, reason }) => ({
-            id: `${prefix}-resolved-${id}`,
-            reason,
-          })),
+          resolvedDeferred: coverage.resolvedDeferred.map((item) => {
+            const projected = project("resolvedDeferred", item);
+            const origin = (projected as Record<string, unknown>)
+              .provenance as Record<string, unknown>;
+            return {
+              id: `${worker.id}-attempt-${origin.attempt ?? "unknown"}-resolved-${item.id}`,
+              reason: item.reason,
+            };
+          }),
         }),
     ...(coverage.openQuestions === undefined
       ? {}
       : {
           openQuestions: coverage.openQuestions.map((question) =>
-            project(typeof question === "string" ? { question } : question),
+            project(
+              "openQuestions",
+              typeof question === "string" ? { question } : question,
+            ),
           ),
         }),
   };
@@ -252,10 +697,23 @@ export function addScanCoverage(
     model && !isDeepStrictEqual(model, aggregate.threatModel)
       ? model
       : undefined;
-  const coverage = scanCoverage(worker, scanDir, additionalModel);
+  const projected = worker.coverage ?? scanCoverage(worker, scanDir);
+  const coverage =
+    additionalModel && Array.isArray(projected.reviews)
+      ? {
+          ...projected,
+          reviews: projected.reviews.map((review, index) =>
+            index === 0
+              ? { ...asRecord(review), threatModel: additionalModel }
+              : review,
+          ),
+        }
+      : projected;
   const previous = aggregate.sourceCoverage;
   if (!previous) {
-    aggregate.sourceCoverage = coverage;
+    aggregate.sourceCoverage = worker.coverage
+      ? structuredClone(coverage)
+      : coverage;
     return;
   }
   for (const field of [

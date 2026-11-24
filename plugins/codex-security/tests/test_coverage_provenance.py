@@ -1,0 +1,2144 @@
+from __future__ import annotations
+
+import copy
+import json
+import os
+import uuid
+from argparse import Namespace
+from pathlib import Path
+
+import pytest
+from workbench_test_support import (
+    interrupt_publication,
+    read_review_state,
+    select_checkpoint,
+    write_checkpoint,
+)
+
+
+def test_changed_coverage_matches_each_snapshot_without_replaying_prefixes(
+    workbench_api, tmp_path, monkeypatch
+):
+    from workbench.saved_coverage import SavedCoverageOrigins
+
+    count = 40
+    worker = {"id": "synthetic-worker", "attempt": 2}
+    worker_root = "artifacts/deep_discovery/workers/synthetic-worker"
+    old_path = f"{worker_root}/attempts/attempt-1/result.json"
+    current_path = f"{worker_root}/output/result.json"
+    snapshots = [
+        {
+            "surfaces": [
+                {
+                    "id": f"surface-{index}",
+                    "label": f"{label} review {index}",
+                    "disposition": "no_issue_found",
+                    "receiptRefs": [],
+                }
+                for index in range(count)
+            ]
+        }
+        for label in ("Old", "Current")
+    ]
+    sources = [
+        (path, {"reviewState": coverage}, worker["id"])
+        for path, coverage in zip((old_path, current_path), snapshots)
+    ]
+    original = copy.deepcopy(sources)
+    origins = SavedCoverageOrigins(
+        sources,
+        set(),
+        {f"{worker_root}/attempts/attempt-1": (worker["id"], 1)},
+        lambda relative, row, owner: row.get("receiptRefs", []),
+        tmp_path,
+    )
+    comparisons = 0
+    same_row = origins.same_row
+
+    def compare(*args):
+        nonlocal comparisons
+        comparisons += 1
+        return same_row(*args)
+
+    monkeypatch.setattr(origins, "same_row", compare)
+    for index in range(count, 0, -1):
+        assert origins.attempt("surfaces", index, worker, snapshots[1]) == 2
+    assert comparisons <= count * count
+    first_pass = comparisons
+    for index in range(1, count + 1):
+        assert origins.attempt("surfaces", index, worker, snapshots[1]) == 2
+    assert comparisons == first_pass
+    assert sources == original
+
+
+def add_discovery_attempt(connection, scan, attempt, *, canonical_output=True):
+    result = scan.add_worker(connection)
+    worker_id = result.parent.name
+    if canonical_output:
+        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ?, attempt = ? WHERE id = ?",
+            (str(result.parent), str(result), attempt, worker_id),
+        )
+    return worker_id, result
+
+
+def publish_review_projection(
+    workbench_api, connection, scan, coverage, *, findings=None, complete=None
+):
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    documents = {
+        "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
+        "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
+        "findings": {"findings": [] if findings is None else findings},
+        "reviewState": coverage,
+    }
+    if complete is not None:
+        documents["manifest"]["scan"]["complete"] = complete
+    staged = scan.scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    saved = workbench_api["saved_results"]
+    saved.write_scan_draft(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        connection,
+        Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            draft_path=str(staged),
+            checkpoint_path=None,
+            expected_draft_digest=None,
+        ),
+    )
+
+
+def stop_and_recover_projection(workbench_api, connection, scan, monkeypatch, retry):
+    saved = workbench_api["saved_results"]
+    with monkeypatch.context() as interrupted:
+        if retry:
+            interrupted.setattr(saved, "_write_prepared_scan_finalization", interrupt_publication)
+        scan.fail()
+    scan.recover()
+    published = read_review_state(connection, scan.scan_dir)
+    scan.recover()
+    assert read_review_state(connection, scan.scan_dir) == published
+    return published
+
+
+@pytest.mark.parametrize(
+    ("missing_surface", "retry_publication", "with_receipt", "accepted_attempt"),
+    [
+        (missing, retry, receipt, 1)
+        for missing in (False, True)
+        for retry in (False, True)
+        for receipt in (False, True)
+    ]
+    + [(False, False, True, 2), (False, True, True, 2)],
+)
+def test_retry_recovery_restores_original_attempt_and_retained_deferral(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    missing_surface,
+    retry_publication,
+    with_receipt,
+    accepted_attempt,
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2, canonical_output=with_receipt)
+    surface = {
+        "id": "first-surface",
+        "label": "First attempt evidence",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/review.txt"] if with_receipt else [],
+    }
+    deferred = {
+        "id": "first-gap",
+        "reason": "First attempt still needs validation.",
+        "surfaceIds": [surface["id"]],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [deferred],
+        },
+    }
+    archived = (
+        (result.parent.parent if result.parent.name == "output" else result.parent)
+        / "attempts"
+        / "attempt-1"
+        / "result.json"
+    )
+    archived.parent.mkdir(parents=True)
+    if with_receipt:
+        for root in (result.parent, archived.parent):
+            receipt = root / "artifacts/review.txt"
+            receipt.parent.mkdir(exist_ok=True)
+            receipt.write_text("Original synthetic review evidence.\n")
+    archived.write_text(json.dumps({**draft, "complete": False}))
+    result.write_text(json.dumps(draft))
+    prefix = f"{worker_id}-attempt-{accepted_attempt}"
+    projected_surface = {
+        **surface,
+        "id": f"{prefix}-surface-1",
+        "receiptRefs": [
+            result.relative_to(scan.scan_dir).parent.as_posix() + "/artifacts/review.txt"
+        ]
+        if with_receipt
+        else [],
+        "provenance": {
+            "workerId": worker_id,
+            "attempt": accepted_attempt,
+            "sourceId": surface["id"],
+        },
+    }
+    projected_deferred = {
+        **deferred,
+        "id": f"{prefix}-deferred-1",
+        "surfaceIds": [projected_surface["id"]],
+        "provenance": {
+            "workerId": worker_id,
+            "attempt": accepted_attempt,
+            "sourceId": deferred["id"],
+        },
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                "surfaces": [] if missing_surface else [projected_surface],
+                "deferred": [projected_deferred],
+                "reviews": [
+                    {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                    for attempt in (1, 2)
+                ],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in (result, archived)}
+    coverage = stop_and_recover_projection(
+        workbench_api, workbench_db, scan, monkeypatch, retry_publication
+    )
+    if missing_surface:
+        projected_surface["id"] = f"{worker_id}-attempt-2-surface-1"
+        projected_deferred["surfaceIds"] = [projected_surface["id"]]
+    assert coverage["surfaces"] == [projected_surface]
+    tasks = [row for row in coverage["deferred"] if row.get("reason") == deferred["reason"]]
+    assert tasks == [projected_deferred]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("archived_id", "archived_origin", "receipt_state"),
+    [
+        (None, False, "none"),
+        ("separate-review", False, "none"),
+        (None, True, "none"),
+        ("separate-review", True, "none"),
+        (None, False, "copied"),
+        (None, False, "changed"),
+    ],
+)
+def test_recovered_surface_with_assigned_id_keeps_legacy_attempt(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    archived_id,
+    archived_origin,
+    receipt_state,
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    surface = {
+        "label": "Synthetic surface",
+        "disposition": "no_issue_found",
+        "receiptRefs": [] if receipt_state == "none" else ["artifacts/review.txt"],
+    }
+    old_surface = dict(surface)
+    if archived_id is not None:
+        old_surface["id"] = archived_id
+    if archived_origin:
+        old_surface["provenance"] = {
+            "workerId": "stale-worker",
+            "attempt": 9,
+            "sourceId": "stale-source",
+            "candidateId": "stale-candidate",
+        }
+    coverage = {"completeness": "complete", "explicitExclusions": [], "deferred": []}
+    archived = result.parent.parent / "attempts/attempt-01"
+    archived.mkdir(parents=True)
+    if receipt_state != "none":
+        for directory in (archived, result.parent):
+            receipt = directory / "artifacts/review.txt"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                "Synthetic changed evidence.\n"
+                if receipt_state == "changed" and directory == result.parent
+                else "Synthetic original evidence.\n"
+            )
+    draft = {"scanId": scan.scan_id, "findings": []}
+    old = {**draft, "complete": False, "coverage": {**coverage, "surfaces": [old_surface]}}
+    (archived / "result.json").write_text(json.dumps(old))
+    checkpoint = write_checkpoint(archived / "checkpoints", old)
+    (archived / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    current = {**surface, "id": "surface-d148c73d937026e2"}
+    accepted = {**draft, "complete": True, "reviewState": {**coverage, "surfaces": [current]}}
+    result.write_text(json.dumps(accepted))
+    originals = {path: path.read_bytes() for path in (result, archived / "result.json", checkpoint)}
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    (retained,) = recovered["surfaces"]
+    expected = 1 if archived_id is None and receipt_state != "changed" else 2
+    assert retained["provenance"] == {
+        "workerId": worker_id,
+        "attempt": expected,
+        "sourceId": current["id"],
+    }
+    assert {review["attempt"] for review in recovered["reviews"]} == (
+        {1, 2} if expected == 1 else {2}
+    )
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("malformed_id", [[], {}], ids=["list", "object"])
+@pytest.mark.parametrize("malformed_current", [False, True], ids=["historical", "current"])
+def test_recovered_malformed_surface_ids_preserve_valid_coverage(
+    workbench_api, workbench_db, publication_scan, monkeypatch, malformed_id, malformed_current
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    surface = {"disposition": "no_issue_found", "receiptRefs": []}
+    old = {
+        **surface,
+        "id": "old-review" if malformed_current else malformed_id,
+        "label": "Historical review",
+    }
+    current = [{**surface, "id": "current-review", "label": "Current review"}]
+    if malformed_current:
+        current.insert(0, {**surface, "id": malformed_id, "label": "Malformed review"})
+    draft = {"scanId": scan.scan_id, "findings": []}
+    coverage = {"explicitExclusions": [], "deferred": []}
+    archived = result.parent.parent / "attempts/attempt-01/result.json"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(
+        json.dumps({**draft, "complete": False, "reviewState": {**coverage, "surfaces": [old]}})
+    )
+    result.write_text(
+        json.dumps({**draft, "complete": True, "reviewState": {**coverage, "surfaces": current}})
+    )
+    originals = {path: path.read_bytes() for path in (archived, result)}
+
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    (retained,) = [row for row in recovered["surfaces"] if row["label"] == "Current review"]
+    assert retained["provenance"] == {
+        "workerId": worker_id,
+        "attempt": 2,
+        "sourceId": "current-review",
+    }
+    assert all(isinstance(row["id"], str) for row in recovered["surfaces"])
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("history_variant", "named_history"),
+    [("plain", False), ("origin", False), ("receipt", False), ("origin", True), ("receipt", True)],
+)
+def test_recovered_legacy_surface_occurrence_is_consumed_once(
+    workbench_api, workbench_db, publication_scan, monkeypatch, history_variant, named_history
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    surface = {
+        "label": "Synthetic surface",
+        "disposition": "no_issue_found",
+        "receiptRefs": ["artifacts/review.txt"] if history_variant == "receipt" else [],
+    }
+    old_surfaces = [dict(surface)]
+    if history_variant == "origin":
+        old_surfaces[0]["provenance"] = {"workerId": "stale-worker", "attempt": 9}
+    if named_history:
+        old_surfaces.append({**surface, "id": "surface-beta"})
+    coverage = {"completeness": "complete", "explicitExclusions": [], "deferred": []}
+    archived = result.parent.parent / "attempts/attempt-01"
+    archived.mkdir(parents=True)
+    if history_variant == "receipt":
+        for directory in (archived, result.parent):
+            receipt = directory / "artifacts/review.txt"
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text("Synthetic same evidence.\n")
+    draft = {"scanId": scan.scan_id, "findings": []}
+    old = {**draft, "complete": False, "coverage": {**coverage, "surfaces": old_surfaces}}
+    (archived / "result.json").write_text(json.dumps(old))
+    checkpoint = write_checkpoint(archived / "checkpoints", old)
+    (archived / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    identities = (
+        ("surface-beta", "surface-alpha") if named_history else ("surface-alpha", "surface-beta")
+    )
+    current = [{**surface, "id": identity} for identity in identities]
+    accepted = {**draft, "complete": True, "reviewState": {**coverage, "surfaces": current}}
+    result.write_text(json.dumps(accepted))
+    originals = {path: path.read_bytes() for path in (result, archived / "result.json", checkpoint)}
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    assert len(recovered["surfaces"]) == len(current)
+    assert {
+        row["provenance"]["sourceId"]: row["provenance"]["attempt"] for row in recovered["surfaces"]
+    } == {"surface-alpha": 1, "surface-beta": 1 if named_history else 2}
+    assert {review["attempt"] for review in recovered["reviews"]} == {1, 2}
+    assert all(row["provenance"]["workerId"] == worker_id for row in recovered["surfaces"])
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "receipt_state",
+    [
+        "copied",
+        "changed",
+        "changed-retained-parent",
+        "copied-archive-path-retained-parent",
+        "changed-archive-path-retained-parent",
+        "copied-nested-archive-path-retained-parent",
+        "changed-nested-archive-path-retained-parent",
+        "missing-archive",
+        "shared-archive",
+        "shared-archive-missing",
+        "copied-mixed-shared",
+        "copied-mixed-shared-missing",
+        "changed-mixed-shared-missing",
+        "copied-malformed-receipt",
+    ],
+)
+def test_reconstructed_retry_surface_compares_receipt_bytes(
+    workbench_api, workbench_db, publication_scan, monkeypatch, receipt_state, retry
+):
+    scan = publication_scan()
+    current_attempt = 3 if "nested" in receipt_state else 2
+    worker_id, result = add_discovery_attempt(workbench_db, scan, current_attempt)
+    output = result.parent
+    archived = output.parent / "attempts" / "attempt-01" / "result.json"
+    archived.parent.mkdir(parents=True)
+    surface = {
+        "id": "review",
+        "label": "Synthetic source evidence",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/review.txt"],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [
+                {"id": "gap", "reason": "Validate this source.", "surfaceIds": ["review"]}
+            ],
+        },
+    }
+    shared_receipt = scan.scan_dir / "artifacts/shared.txt"
+    if "mixed-shared" in receipt_state:
+        shared_receipt.parent.mkdir(exist_ok=True)
+        shared_receipt.write_text("Shared synthetic evidence.\n")
+        surface["receiptRefs"].append("artifacts/shared.txt")
+        surface["provenance"] = {"scanReceiptRefs": ["artifacts/shared.txt"]}
+    if receipt_state == "copied-malformed-receipt":
+        surface["receiptRefs"].append(None)
+    result.write_text(json.dumps(draft))
+    archived.write_text(json.dumps({**draft, "complete": False}))
+    saved_sources = [result, archived]
+    if "mixed-shared" in receipt_state:
+        for path in (result, archived):
+            checkpoint = write_checkpoint(path.parent / "checkpoints", json.loads(path.read_text()))
+            head = path.parent / "checkpoint-head.json"
+            head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+            saved_sources.extend([checkpoint, head])
+    for directory in (output, archived.parent):
+        receipt = directory / "artifacts/review.txt"
+        receipt.parent.mkdir()
+        receipt.write_text("Original synthetic evidence.\n")
+    if receipt_state in {"changed", "changed-mixed-shared-missing"}:
+        (output / "artifacts/review.txt").write_text("Changed synthetic evidence.\n")
+    if receipt_state in {"missing-archive", "shared-archive-missing"}:
+        (archived.parent / "artifacts/review.txt").unlink()
+    if receipt_state.startswith("shared-archive"):
+        draft["reviewState"]["surfaces"][0]["receiptRefs"] = [
+            (archived.parent / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
+        ]
+        result.write_text(json.dumps(draft))
+    current_receipt = output / "artifacts/review.txt"
+    if "archive-path" in receipt_state:
+        current_receipt = output / "artifacts/archived-receipts/attempt-01/artifacts/review.txt"
+        current_receipt.parent.mkdir(parents=True)
+        current_receipt.write_bytes((archived.parent / "artifacts/review.txt").read_bytes())
+        draft["reviewState"]["surfaces"][0]["receiptRefs"] = [
+            current_receipt.relative_to(output).as_posix()
+        ]
+        result.write_text(json.dumps(draft))
+    if "nested" in receipt_state:
+        second_archive = output.parent / "attempts/attempt-02/result.json"
+        second_archive.parent.mkdir(parents=True)
+        second_archive.write_text(json.dumps({**draft, "complete": False}))
+        saved_sources.append(second_archive)
+        second_receipt = second_archive.parent / current_receipt.relative_to(output)
+        second_receipt.parent.mkdir(parents=True)
+        second_receipt.write_bytes(current_receipt.read_bytes())
+        nested_receipt = (
+            output / "artifacts/archived-receipts/attempt-02" / current_receipt.relative_to(output)
+        )
+        nested_receipt.parent.mkdir(parents=True)
+        nested_receipt.write_bytes(current_receipt.read_bytes())
+        current_receipt = nested_receipt
+        draft["reviewState"]["surfaces"][0]["receiptRefs"] = [
+            current_receipt.relative_to(output).as_posix()
+        ]
+        result.write_text(json.dumps(draft))
+    retained_parent = receipt_state.endswith("retained-parent")
+    parent_identity_attempt = current_attempt if "nested" in receipt_state else 1
+    parent_surface = {
+        **surface,
+        "id": f"{worker_id}-attempt-{parent_identity_attempt}-surface-1",
+        "receiptRefs": [current_receipt.relative_to(scan.scan_dir).as_posix()],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [parent_surface] if retained_parent else [],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in range(1, current_attempt + 1)
+            ],
+        },
+    )
+    if receipt_state.startswith("changed") and retained_parent:
+        current_receipt.write_text("Changed synthetic evidence.\n")
+    if receipt_state.endswith("mixed-shared-missing"):
+        shared_receipt.unlink()
+    originals = {path: path.read_bytes() for path in saved_sources}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    expected_attempt = (
+        1 if receipt_state.startswith(("copied", "shared-archive")) else current_attempt
+    )
+    if receipt_state.startswith("changed") and retained_parent:
+        assert parent_surface in coverage["surfaces"]
+        current_surfaces = [row for row in coverage["surfaces"] if row != parent_surface]
+        assert len(current_surfaces) == 1
+        retained = current_surfaces[0]
+    else:
+        assert len(coverage["surfaces"]) == 1
+        retained = coverage["surfaces"][0]
+    assert retained["provenance"]["attempt"] == expected_attempt
+    if retained_parent and receipt_state.startswith("copied"):
+        assert retained["id"] == parent_surface["id"]
+    else:
+        assert retained["id"].startswith(f"{worker_id}-attempt-{current_attempt}-surface-1")
+        if retained_parent:
+            assert retained["id"] != parent_surface["id"]
+    if receipt_state == "shared-archive-missing":
+        assert retained["receiptRefs"] == []
+        assert retained["disposition"] == "needs_follow_up"
+        assert "completeness" not in coverage
+    else:
+        expected_receipts = [
+            (
+                archived.parent / "artifacts/review.txt"
+                if receipt_state.startswith("shared-archive")
+                else current_receipt
+            )
+            .relative_to(scan.scan_dir)
+            .as_posix()
+        ]
+        if receipt_state == "copied-mixed-shared":
+            expected_receipts.append("artifacts/shared.txt")
+        assert retained["receiptRefs"] == expected_receipts
+    gap = next(row for row in coverage["deferred"] if row.get("reason") == "Validate this source.")
+    assert gap["surfaceIds"] == [retained["id"]]
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+@pytest.mark.parametrize(
+    ("field", "archived", "projection"),
+    [
+        ("openQuestionStrings", True, "none"),
+        ("openQuestionStrings", True, "partial"),
+        ("deferred", False, "full"),
+    ],
+)
+def test_recovery_preserves_non_surface_occurrence_origins(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, field, archived, projection
+):
+    string_questions = field == "openQuestionStrings"
+    if string_questions:
+        field = "openQuestions"
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(
+        workbench_db, scan, 2 if archived else 1, canonical_output=archived
+    )
+    row = {
+        "deferred": {"reason": "Synthetic repeated remaining review."},
+        "explicitExclusions": {"pattern": "vendor/**", "reason": "Review separately."},
+        "openQuestions": {"question": "Which synthetic deployment controls apply?"},
+    }[field]
+    saved_row = row["question"] if string_questions else row
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {**scan.coverage, "completeness": "partial", field: [saved_row, saved_row]},
+    }
+    result.write_text(json.dumps(draft))
+    originals = {result: result.read_bytes()}
+    if archived:
+        archive = result.parent.parent / "attempts/attempt-1/result.json"
+        archive.parent.mkdir(parents=True)
+        prior = copy.deepcopy(draft)
+        prior["reviewState"][field] = prior["reviewState"][field][:1]
+        if not string_questions:
+            prior["reviewState"][field][0]["provenance"] = {
+                "workerId": "stale",
+                "attempt": 9,
+                "sourceId": "stale",
+                "candidateId": "stale",
+            }
+        archive.write_text(json.dumps(prior))
+        originals[archive] = archive.read_bytes()
+    projected = []
+    for index in (1, 2):
+        attempt = index if archived else 1
+        projected.append(
+            {
+                **row,
+                **(
+                    {"id": f"{worker_id}-attempt-{attempt}-deferred-{index}"}
+                    if field == "deferred"
+                    else {}
+                ),
+                "provenance": {"workerId": worker_id, "attempt": attempt},
+            }
+        )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            field: projected
+            if projection == "full"
+            else projected[:1]
+            if projection == "partial"
+            else [],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in ((1, 2) if archived else (1,))
+            ],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    rows = [row for row in coverage[field] if row.get("id") != "scan-stopped"]
+    assert len(rows) == 2
+    assert [row["provenance"]["attempt"] for row in rows] == ([1, 2] if archived else [1, 1])
+    if field == "deferred":
+        assert len({row["id"] for row in rows}) == 2
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+def test_selected_parent_projection_consumes_each_occurrence_once(
+    workbench_api, workbench_db, publication_scan, monkeypatch, complete, retry
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = ? WHERE scan_id = ?",
+            ("deep-scan-mcp/v1", scan.scan_id),
+        )
+    result = scan.add_worker(workbench_db)
+    worker_id = result.parent.name
+    task = {"reason": "Synthetic repeated accepted review."}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "reviewState": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "deferred": [task, task],
+                },
+            }
+        )
+    )
+    original = result.read_bytes()
+    projected = [
+        {
+            **task,
+            "id": identity,
+            "provenance": {"workerId": worker_id, "attempt": 1},
+        }
+        for identity in ("retained-first", "retained-second")
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "deferred": copy.deepcopy(projected),
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+        complete=complete,
+    )
+    accepted = read_review_state(workbench_db, scan.scan_dir)
+    assert accepted["deferred"] == projected
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    retained = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
+    assert result.read_bytes() == original
+    assert retained == projected
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "retained_parent_null",
+        "raw_null",
+        "raw_many_null_rows",
+        "parent_attempt_list",
+        "parent_attempt_object",
+    ],
+)
+def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
+    workbench_api, workbench_db, publication_scan, monkeypatch, case
+):
+    scan = publication_scan()
+    result = scan.add_worker(workbench_db)
+    worker_id = result.parent.name
+    surface = {
+        "id": "source-surface",
+        "label": "Source review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    deferred = {
+        "id": "pending-check",
+        "reason": "Validation remains unresolved.",
+        "candidateId": "pending-candidate",
+        "surfaceIds": [surface["id"]],
+    }
+    projected_surface = {
+        **surface,
+        "id": f"{worker_id}-attempt-1-surface-1",
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": surface["id"]},
+    }
+    raw = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [deferred],
+        },
+    }
+    parent = {
+        **scan.coverage,
+        "completeness": "partial",
+        "surfaces": [projected_surface],
+        "deferred": [],
+        "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+    }
+    if case == "retained_parent_null":
+        parent["surfaces"] = None
+        parent["deferred"] = [
+            {
+                **deferred,
+                "id": f"{worker_id}-attempt-1-deferred-1",
+                "candidateId": f"{worker_id}-attempt-1-candidate-1",
+                "surfaceIds": [projected_surface["id"]],
+                "provenance": {
+                    "workerId": worker_id,
+                    "attempt": 1,
+                    "sourceId": deferred["id"],
+                    "candidateId": deferred["candidateId"],
+                },
+            }
+        ]
+    elif case == "raw_null":
+        raw["reviewState"]["surfaces"] = None
+    elif case == "raw_many_null_rows":
+        raw["reviewState"]["deferred"] = [None] * 30 + [deferred]
+    else:
+        projected_surface["provenance"]["attempt"] = [] if case.endswith("list") else {}
+    result.write_text(json.dumps(raw))
+    original = result.read_bytes()
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(parent))
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    assert isinstance(coverage["surfaces"], list)
+    assert "completeness" not in coverage
+    pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
+    assert len(pending) == 1
+    assert pending[0]["provenance"]["workerId"] == worker_id
+    assert pending[0]["provenance"]["attempt"] == 1
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_retained_surface_occurrences_match_each_receipt(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 1)
+    surfaces, projected = [], []
+    for name in ("first", "second"):
+        receipt = result.parent / "artifacts" / f"{name}.txt"
+        receipt.parent.mkdir(exist_ok=True)
+        receipt.write_text(f"Synthetic {name} source evidence.\n")
+        surface = {
+            "id": "review",
+            "label": "Synthetic source review",
+            "disposition": "needs_follow_up",
+            "receiptRefs": [f"artifacts/{name}.txt"],
+        }
+        surfaces.append(surface)
+        projected.append(
+            {
+                **surface,
+                "id": f"retained-{name}",
+                "receiptRefs": [receipt.relative_to(scan.scan_dir).as_posix()],
+                "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+            }
+        )
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "reviewState": {**scan.coverage, "surfaces": surfaces},
+            }
+        )
+    )
+    original = result.read_bytes()
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": projected,
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert coverage["surfaces"] == projected
+    assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("tampered", [False, True])
+@pytest.mark.parametrize("local_collision", [False, True])
+def test_canonical_shared_receipt_keeps_authenticated_owner_on_retry(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, tampered, local_collision
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    output = result.parent
+    ref = "artifacts/01_context/synthetic-evidence.txt"
+    shared, local = scan.scan_dir / ref, output / ref
+    for receipt, contents in (
+        (shared, "Synthetic shared evidence.\n"),
+        (local, "Different synthetic retry evidence.\n"),
+    ):
+        if receipt == local and not local_collision:
+            continue
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(contents)
+    surface = {
+        "id": "review",
+        "label": "Synthetic shared review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [ref],
+        "provenance": {"scanReceiptRefs": [ref]},
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [surface],
+            "deferred": [
+                {"id": "gap", "reason": "Validate the shared source.", "surfaceIds": ["review"]}
+            ],
+        },
+    }
+    archived = output.parent / "attempts/attempt-01/result.json"
+    archived.parent.mkdir(parents=True)
+    archived_draft = {**draft, "complete": False}
+    archived.write_text(json.dumps(archived_draft))
+    checkpoints = [
+        write_checkpoint(archived.parent / "checkpoints", archived_draft),
+        write_checkpoint(output / "checkpoints", draft),
+    ]
+    if tampered:
+        # The surface still matches, but the complete payload no longer does.
+        draft["reviewState"]["openQuestions"] = ["Additional synthetic review context."]
+    result.write_text(json.dumps(draft))
+    parent = {
+        **surface,
+        "id": f"{worker_id}-attempt-2-surface-1",
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [parent],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
+    )
+    originals = {
+        path: path.read_bytes()
+        for path in [result, archived, shared, local, *checkpoints]
+        if path.is_file()
+    }
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    if tampered:
+        assert parent in coverage["surfaces"]
+        current = [row for row in coverage["surfaces"] if row != parent]
+        assert len(current) == 1
+        assert current[0]["provenance"]["attempt"] == 2
+        selected = local if local_collision else shared
+        assert current[0]["receiptRefs"] == [selected.relative_to(scan.scan_dir).as_posix()]
+    else:
+        assert coverage["surfaces"] == [parent]
+        pending = next(
+            row
+            for row in coverage["deferred"]
+            if row.get("reason") == "Validate the shared source."
+        )
+        assert pending["surfaceIds"] == [parent["id"]]
+    assert all("scanReceiptRefs" not in row.get("provenance", {}) for row in coverage["surfaces"])
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "change",
+    ["unchanged", "changed-copy", "other-owner", "changed-closure", "new-closure", "receipt-only"],
+)
+def test_third_retry_receipt_repair_preserves_bound_canonical_identity(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, change
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    output = result.parent
+    original = "artifacts/original.md"
+    replacement = "artifacts/replacement.md"
+    first_copy = f"artifacts/archived-receipts/attempt-01/{original}"
+    second_copy = f"artifacts/archived-receipts/attempt-02/{replacement}"
+    nested_copy = f"artifacts/archived-receipts/attempt-02/{first_copy}"
+    first = output.parent / "attempts/attempt-01"
+    second = output.parent / "attempts/attempt-02"
+    for directory, refs in (
+        (first, [original]),
+        (second, [replacement, first_copy]),
+        (output, [replacement, first_copy, second_copy, nested_copy]),
+    ):
+        for ref in refs:
+            receipt = directory / ref
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                "Synthetic original evidence.\n"
+                if ref.endswith("original.md")
+                else "Synthetic replacement evidence.\n"
+            )
+    prefix = output.relative_to(scan.scan_dir).as_posix()
+    surface = {"id": "api", "label": "Synthetic API", "disposition": "no_issue_found"}
+    closure = {"id": "review", "reason": "Synthetic review completed."}
+    for directory, refs, pending in (
+        (first, ["artifacts/missing.md", f"{prefix}/{original}"], True),
+        (second, [f"{prefix}/{replacement}", f"{prefix}/{first_copy}"], False),
+        (
+            output,
+            [f"{prefix}/{ref}" for ref in (replacement, first_copy, second_copy, nested_copy)],
+            False,
+        ),
+    ):
+        if change == "receipt-only":
+            pending = False
+            if directory != first:
+                refs = [f"{prefix}/{replacement}"]
+        coverage = {
+            **scan.coverage,
+            "completeness": "partial" if pending else "complete",
+            "surfaces": [
+                {
+                    **surface,
+                    "disposition": "needs_follow_up" if pending else "no_issue_found",
+                    "receiptRefs": refs,
+                }
+            ],
+            "deferred": (
+                [{"id": "review", "reason": "Synthetic review pending.", "surfaceIds": ["api"]}]
+                if pending
+                else []
+            ),
+            **({} if pending or change == "receipt-only" else {"resolvedDeferred": [closure]}),
+        }
+        if directory == output and change in {"changed-closure", "new-closure"}:
+            coverage["resolvedDeferred"] = [
+                {
+                    "id": "review" if change == "changed-closure" else "new-review",
+                    "reason": "Synthetic new review outcome.",
+                }
+            ]
+        draft = {"scanId": scan.scan_id, "complete": True, "findings": [], "reviewState": coverage}
+        (directory / "result.json").write_text(json.dumps(draft))
+        checkpoint = write_checkpoint(directory / "checkpoints", draft)
+        (directory / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    source = json.loads(result.read_text())["reviewState"]["surfaces"][0]
+    parent_owner = "other-worker" if change == "other-owner" else worker_id
+    parent = {
+        **source,
+        "id": f"{parent_owner}-attempt-3-surface-1",
+        "provenance": {"workerId": parent_owner, "attempt": 2, "sourceId": "api"},
+    }
+    accepted_closure = {
+        **closure,
+        "id": f"{worker_id}-attempt-2-resolved-review",
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [parent],
+            "deferred": [],
+            "resolvedDeferred": [] if change == "receipt-only" else [accepted_closure],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "complete"}
+                for attempt in (2, 3)
+            ],
+        },
+    )
+    if change == "changed-copy":
+        (output / second_copy).write_text("Synthetic changed copy evidence.\n")
+    originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    if change not in {"changed-copy", "other-owner"}:
+        assert len(coverage["surfaces"]) == 1
+        retained = coverage["surfaces"][0]
+        assert retained["id"] == parent["id"]
+        assert retained["provenance"] == parent["provenance"]
+    else:
+        assert parent in coverage["surfaces"]
+        current = [row for row in coverage["surfaces"] if row != parent]
+        assert len(current) == 1
+        retained = current[0]
+        assert retained["provenance"]["workerId"] == worker_id
+        assert retained["provenance"]["attempt"] == (3 if change == "changed-copy" else 2)
+        assert retained["id"] != parent["id"]
+    assert retained["disposition"] == "no_issue_found"
+    assert not any(ref.endswith("/missing.md") for ref in retained["receiptRefs"])
+    assert all((scan.scan_dir / ref).is_file() for ref in retained["receiptRefs"])
+    expected_closures = [] if change == "receipt-only" else [accepted_closure]
+    if change in {"changed-closure", "new-closure"}:
+        current_closure = {
+            "id": f"{worker_id}-attempt-3-resolved-"
+            + ("review" if change == "changed-closure" else "new-review"),
+            "reason": "Synthetic new review outcome.",
+        }
+        expected_closures = (
+            [current_closure]
+            if change == "changed-closure"
+            else [accepted_closure, current_closure]
+        )
+    if change == "new-closure":
+        assert current_closure in coverage["resolvedDeferred"]
+        assert all(
+            row["id"] != accepted_closure["id"] or row == accepted_closure
+            for row in coverage["resolvedDeferred"]
+        )
+    else:
+        assert sorted(coverage.get("resolvedDeferred", []), key=lambda row: row["id"]) == sorted(
+            expected_closures, key=lambda row: row["id"]
+        )
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("archived_named", [False, True])
+def test_generated_candidate_id_keeps_accepted_origin_after_recovery(
+    workbench_api, workbench_db, publication_scan, monkeypatch, archived_named
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    task = {"candidateId": "candidate", "reason": "Validate synthetic candidate evidence."}
+    current = {**task, "id": "candidate"}
+    archived = result.parent.parent / "attempts/attempt-01/result.json"
+    archived.parent.mkdir(parents=True)
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {**scan.coverage, "surfaces": [], "deferred": [current]},
+    }
+    archived.write_text(
+        json.dumps(
+            {
+                **draft,
+                "complete": False,
+                "reviewState": {
+                    **draft["reviewState"],
+                    "deferred": [current if archived_named else task],
+                },
+            }
+        )
+    )
+    result.write_text(json.dumps(draft))
+    projected = {
+        **current,
+        "id": f"{worker_id}-attempt-2-deferred-1",
+        "candidateId": "published-candidate",
+        "provenance": {
+            "workerId": worker_id,
+            "attempt": 1,
+            "sourceId": "candidate",
+            "candidateId": "candidate",
+        },
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [],
+                "deferred": [projected],
+                "reviews": [{"workerId": worker_id, "attempt": attempt} for attempt in (1, 2)],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in (result, archived)}
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    assert [row for row in recovered["deferred"] if row.get("reason") == task["reason"]] == [
+        projected
+    ]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("selected_head", [False, True])
+@pytest.mark.parametrize(
+    ("local_shadow", "still_pending"), [(False, False), (True, False), (True, True)]
+)
+def test_recovered_closeout_keeps_accepted_shared_receipt_union(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    selected_head,
+    local_shadow,
+    still_pending,
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    shared, local = "artifacts/shared.txt", "artifacts/local.txt"
+    for path, contents in (
+        (scan.scan_dir / shared, "Shared evidence"),
+        (result.parent / local, "Local evidence"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+    if local_shadow:
+        (result.parent / shared).write_text("Different local shadow")
+    surface = {
+        "id": "scope",
+        "label": "Synthetic scope",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [shared],
+        "provenance": {"scanReceiptRefs": [shared]},
+    }
+    task = {"id": "task", "reason": "Complete synthetic review", "surfaceIds": ["scope"]}
+    remaining = {"id": "remaining", "reason": "Remaining synthetic review", "surfaceIds": ["scope"]}
+    checkpoint = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "findings": [],
+            "complete": False,
+            "reviewState": {
+                **scan.coverage,
+                "surfaces": [surface],
+                "deferred": [task, remaining] if still_pending else [task],
+            },
+        },
+        mtime_ns=1_000_000_000,
+    )
+    if selected_head:
+        select_checkpoint(result.parent, checkpoint, mtime_ns=1_000_000_000)
+    current = {
+        "id": "scope",
+        "label": "Synthetic scope",
+        "disposition": "no_issue_found",
+        "receiptRefs": [local, shared] if still_pending else [local],
+    }
+    closure = {"id": "task", "reason": "Synthetic review completed"}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "findings": [],
+                "complete": True,
+                "reviewState": {
+                    **scan.coverage,
+                    "surfaces": [current],
+                    "deferred": [remaining] if still_pending else [],
+                    "resolvedDeferred": [closure],
+                },
+            }
+        )
+    )
+    os.utime(result, ns=(3_000_000_000, 3_000_000_000))
+    projected = {
+        **current,
+        "id": f"{worker_id}-attempt-2-surface-1",
+        "disposition": "needs_follow_up" if still_pending else "no_issue_found",
+        "receiptRefs": [
+            (result.parent.relative_to(scan.scan_dir) / local).as_posix(),
+            (result.parent.relative_to(scan.scan_dir) / shared).as_posix()
+            if still_pending
+            else shared,
+        ],
+        "provenance": {"workerId": worker_id, "attempt": 2, "sourceId": "scope"},
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [projected],
+                "deferred": [
+                    {
+                        **remaining,
+                        "id": f"{worker_id}-attempt-2-deferred-1",
+                        "surfaceIds": [projected["id"]],
+                        "provenance": {
+                            "workerId": worker_id,
+                            "attempt": 2,
+                            "sourceId": "remaining",
+                        },
+                    }
+                ]
+                if still_pending
+                else [],
+                "resolvedDeferred": [{**closure, "id": f"{worker_id}-attempt-2-resolved-task"}],
+                "reviews": [{"workerId": worker_id, "attempt": 2}],
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in result.parent.rglob("*") if path.is_file()}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    if still_pending:
+        projected["receiptRefs"].append(shared)
+    assert coverage["surfaces"] == [projected]
+    assert [(scan.scan_dir / ref).read_text() for ref in projected["receiptRefs"]] == (
+        ["Local evidence", "Different local shadow", "Shared evidence"]
+        if still_pending
+        else ["Local evidence", "Shared evidence"]
+    )
+    pending = [row for row in coverage["deferred"] if row.get("reason") == remaining["reason"]]
+    assert len(pending) == int(still_pending)
+    if still_pending:
+        assert pending[0]["surfaceIds"] == [projected["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("changed_copy", [False, True])
+def test_recovery_matches_receipts_from_another_owned_archive(
+    workbench_api, workbench_db, publication_scan, monkeypatch, changed_copy
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    output = result.parent
+    receipt = "artifacts/review.md"
+    first = output.parent / "attempts/attempt-01"
+    second = output.parent / "attempts/attempt-02"
+    historical = first / receipt
+    copied = output / f"artifacts/archived-receipts/attempt-01/{receipt}"
+    for path in (historical, copied):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Synthetic saved evidence.\n")
+    second.mkdir(parents=True)
+    surface = {"id": "api", "label": "Synthetic review", "disposition": "no_issue_found"}
+    for directory, path in ((second, historical), (output, copied)):
+        draft = {
+            "scanId": scan.scan_id,
+            "complete": True,
+            "findings": [],
+            "reviewState": {
+                **scan.coverage,
+                "surfaces": [
+                    {**surface, "receiptRefs": [path.relative_to(scan.scan_dir).as_posix()]}
+                ],
+            },
+        }
+        (directory / "result.json").write_text(json.dumps(draft))
+    parent = {
+        **surface,
+        "id": "accepted-surface",
+        "receiptRefs": [copied.relative_to(scan.scan_dir).as_posix()],
+        "provenance": {"workerId": worker_id, "attempt": 2, "sourceId": "api"},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": [parent],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "complete"}
+                for attempt in (2, 3)
+            ],
+        },
+    )
+    if changed_copy:
+        copied.write_text("Synthetic changed evidence.\n")
+    originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, True)
+    assert parent in coverage["surfaces"]
+    assert len(coverage["surfaces"]) == (2 if changed_copy else 1)
+    if changed_copy:
+        current = next(row for row in coverage["surfaces"] if row != parent)
+        assert current["provenance"] == {"workerId": worker_id, "attempt": 3, "sourceId": "api"}
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("parent", "change", "attempt", "retry"),
+    [
+        ("missing", "unchanged", 2, False),
+        ("missing", "unchanged", 2, True),
+        ("empty", "unchanged", 2, True),
+        ("accepted", "unchanged", 2, True),
+        ("accepted", "unchanged", 3, True),
+        ("missing", "reason", 2, True),
+        ("missing", "id", 2, True),
+    ],
+)
+def test_closure_only_recovery_preserves_verified_origin_and_accepted_identity(
+    workbench_api, workbench_db, publication_scan, monkeypatch, parent, change, attempt, retry
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, attempt)
+    closure = {"id": "review", "reason": "Synthetic review completed."}
+    current = {
+        "id": "other-review" if change == "id" else closure["id"],
+        "reason": closure["reason"] if change == "unchanged" else "Synthetic new conclusion.",
+    }
+    for source_attempt in range(1, attempt + 1):
+        path = (
+            result
+            if source_attempt == attempt
+            else result.parent.parent / f"attempts/attempt-{source_attempt:02}/result.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "reviewState": {
+                        **scan.coverage,
+                        "resolvedDeferred": [current if source_attempt == attempt else closure],
+                    },
+                }
+            )
+        )
+        os.utime(path, ns=(source_attempt * 100, source_attempt * 100))
+    accepted = {**closure, "id": f"{worker_id}-attempt-2-resolved-review"}
+    if parent == "missing":
+        (scan.scan_dir / "coverage.json").unlink()
+    else:
+        publish_review_projection(
+            workbench_api,
+            workbench_db,
+            scan,
+            {
+                **scan.coverage,
+                "resolvedDeferred": [accepted] if parent == "accepted" else [],
+                "reviews": [{"workerId": worker_id, "attempt": 2, "completeness": "complete"}]
+                if parent == "accepted"
+                else [],
+            },
+        )
+    originals = {
+        path: path.read_bytes() for path in result.parent.parent.rglob("*") if path.is_file()
+    }
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    expected_attempt = 2 if parent == "accepted" or change != "unchanged" else 1
+    expected = {
+        **current,
+        "id": f"{worker_id}-attempt-{expected_attempt}-resolved-{current['id']}",
+    }
+    closures = coverage["resolvedDeferred"]
+    assert expected in closures
+    assert len(closures) == (2 if change == "id" else 1)
+    if change == "id":
+        assert {**closure, "id": f"{worker_id}-attempt-1-resolved-review"} in closures
+    assert any(
+        review.get("workerId") == worker_id and review.get("attempt") == expected_attempt
+        for review in coverage["reviews"]
+    )
+    if parent == "accepted":
+        assert not any(
+            review.get("workerId") == worker_id and review.get("attempt") == 1
+            for review in coverage["reviews"]
+        )
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("field", "anonymous_intermediate", "checkpoint_names"),
+    [
+        ("surfaces", False, False),
+        ("surfaces", True, False),
+        ("surfaces", False, True),
+        ("deferred", False, False),
+    ],
+)
+def test_recovery_keeps_established_named_lineage(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    field,
+    anonymous_intermediate,
+    checkpoint_names,
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    item = (
+        {"label": "Synthetic review", "disposition": "no_issue_found", "receiptRefs": []}
+        if field == "surfaces"
+        else {"reason": "Complete the synthetic review"}
+    )
+    alpha, beta = ({**item, "id": identity} for identity in ("alpha", "beta"))
+    coverage = {"completeness": "partial", "surfaces": [], "explicitExclusions": [], "deferred": []}
+    originals = {}
+    for attempt, rows in (
+        (1, [alpha] if anonymous_intermediate else [item]),
+        (2, [item] if anonymous_intermediate else [alpha, beta]),
+        (
+            3,
+            [alpha]
+            if anonymous_intermediate
+            else [alpha, beta]
+            if checkpoint_names
+            else [beta, alpha],
+        ),
+    ):
+        target = (
+            result
+            if attempt == 3
+            else result.parent.parent / f"attempts/attempt-0{attempt}/result.json"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        draft = {
+            "scanId": scan.scan_id,
+            "findings": [],
+            "complete": attempt == 3,
+            "reviewState": {**coverage, field: rows},
+        }
+        if checkpoint_names and attempt == 2:
+            for saved_rows in ([alpha], [beta, alpha]):
+                checkpoint = write_checkpoint(
+                    target.parent / "checkpoints",
+                    {
+                        **draft,
+                        "reviewState": {**coverage, field: saved_rows},
+                    },
+                )
+                os.utime(checkpoint, (100, 100))
+                originals[checkpoint] = checkpoint.read_bytes()
+            head = target.parent / "checkpoint-head.json"
+            head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+            os.utime(head, (300, 300))
+            originals[head] = head.read_bytes()
+            draft["reviewState"][field] = []
+        target.write_text(json.dumps(draft))
+        if checkpoint_names and attempt == 2:
+            os.utime(target, (200, 200))
+        originals[target] = target.read_bytes()
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    rows = [
+        row for row in recovered[field] if row.get("provenance", {}).get("workerId") == worker_id
+    ]
+    expected = (
+        {"alpha": 1}
+        if anonymous_intermediate
+        else {"alpha": 2, "beta": 1}
+        if checkpoint_names
+        else {"alpha": 1, "beta": 2}
+    )
+    assert len(rows) == len(expected)
+    assert {
+        row["provenance"].get("sourceId"): row["provenance"]["attempt"] for row in rows
+    } == expected
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("changed", [False, True])
+def test_recovery_retains_accepted_exclusion_occurrences(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, count, changed
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    row = {"pattern": "vendor/**", "reason": "Reviewed separately"}
+    prior = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "explicitExclusions": [row] * count,
+        },
+    }
+    archive = result.parent.parent / "attempts/attempt-1/result.json"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(json.dumps(prior))
+    current = copy.deepcopy(prior)
+    if changed:
+        current["reviewState"]["explicitExclusions"] = [
+            {**row, "reason": "Changed review boundary"}
+        ]
+    result.write_text(json.dumps(current))
+    originals = {path: path.read_bytes() for path in (archive, result)}
+    published = [{**row, "provenance": {"workerId": worker_id, "attempt": 2}} for _ in range(count)]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "explicitExclusions": published,
+            "reviews": [{"workerId": worker_id, "attempt": 2, "completeness": "partial"}],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    expected = published + (
+        [
+            {
+                **row,
+                "reason": "Changed review boundary",
+                "provenance": {"workerId": worker_id, "attempt": 2},
+            }
+        ]
+        if changed
+        else []
+    )
+    rows = coverage["explicitExclusions"]
+    assert rows[:count] == published
+    assert [{key: value for key, value in row.items() if key != "id"} for row in rows] == expected
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "observation", ["selected", "unselected", "twice", "reselected", "registered-result"]
+)
+def test_recovery_preserves_copied_checkpoint_observation_order(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, observation
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    attempt = 3 if observation == "twice" else 2
+    worker_id, result = add_discovery_attempt(workbench_db, scan, attempt)
+    task = {"id": "task", "reason": "Complete the synthetic review"}
+    closure = {"id": "task", "reason": "Synthetic review completed"}
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {**scan.coverage, "surfaces": [], "deferred": []},
+    }
+    pending = copy.deepcopy(draft)
+    pending["complete"] = False
+    pending["reviewState"]["deferred"] = [task]
+    originals = {}
+    for number in range(1, attempt):
+        archive = result.parent.parent / f"attempts/attempt-{number:02}"
+        checkpoint = write_checkpoint(archive / "checkpoints", pending, mtime_ns=1_000_000_000)
+        head = select_checkpoint(archive, checkpoint, mtime_ns=2_000_000_000)
+        prior = copy.deepcopy(draft)
+        if number == 1:
+            prior["reviewState"]["resolvedDeferred"] = [closure]
+        prior_result = archive / "result.json"
+        prior_result.write_text(json.dumps(prior))
+        os.utime(prior_result, ns=(3_000_000_000 + number, 3_000_000_000 + number))
+        originals.update({path: path.read_bytes() for path in (checkpoint, head, prior_result)})
+    checkpoint = write_checkpoint(result.parent / "checkpoints", pending, mtime_ns=1_000_249_999)
+    if observation != "unselected":
+        selected_at = 6_000_000_000 if observation == "reselected" else 2_000_249_999
+        head = select_checkpoint(result.parent, checkpoint, mtime_ns=selected_at)
+        originals[head] = head.read_bytes()
+    result.write_text(json.dumps(draft))
+    os.utime(result, ns=(5_000_000_000, 5_000_000_000))
+    originals.update({path: path.read_bytes() for path in (checkpoint, result)})
+    if observation == "registered-result":
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+                (str(checkpoint), worker_id),
+            )
+    published_closure = {**closure, "id": f"{worker_id}-attempt-1-resolved-task"}
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **draft["reviewState"],
+            "resolvedDeferred": [published_closure],
+            "reviews": [
+                {"workerId": worker_id, "attempt": number} for number in range(1, attempt + 1)
+            ],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    remaining = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
+    if observation in {"reselected", "registered-result"}:
+        assert len(remaining) == 1
+        assert remaining[0]["reason"] == task["reason"]
+        assert not coverage.get("resolvedDeferred")
+    else:
+        assert remaining == []
+        assert coverage["resolvedDeferred"] == [published_closure]
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("closure", ["copied", "republished", "current"])
+def test_recovery_keeps_reopened_work_after_copied_result(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, closure
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    task = {"id": "task", "reason": "Complete the synthetic review"}
+    closed = {"id": "task", "reason": "Synthetic review completed"}
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {**scan.coverage, "surfaces": [], "deferred": []},
+    }
+    pending = copy.deepcopy(draft)
+    pending["complete"] = False
+    pending["reviewState"]["deferred"] = [task]
+    completed = copy.deepcopy(draft)
+    completed["reviewState"]["resolvedDeferred"] = [closed]
+    originals = {}
+    for number in (1, 2, 3):
+        directory = (
+            result.parent if number == 3 else result.parent.parent / f"attempts/attempt-{number:02}"
+        )
+        checkpoint = write_checkpoint(directory / "checkpoints", pending, mtime_ns=2_000_000_000)
+        head = select_checkpoint(directory, checkpoint, mtime_ns=2_000_000_000)
+        saved_result = directory / "result.json"
+        saved_result.write_text(
+            json.dumps(draft if number == 3 and closure != "current" else completed)
+        )
+        observed = 4_000_000_000 if number == 3 else 1_000_000_000
+        if number == 2 and closure == "republished":
+            observed = 3_000_000_000
+        os.utime(saved_result, ns=(observed, observed))
+        originals.update({path: path.read_bytes() for path in (checkpoint, head, saved_result)})
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **completed["reviewState"],
+            "resolvedDeferred": []
+            if closure == "copied"
+            else [{**closed, "id": f"{worker_id}-attempt-1-resolved-task"}],
+            "deferred": [
+                {
+                    **task,
+                    "id": f"{worker_id}-attempt-3-deferred-1",
+                    "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": task["id"]},
+                }
+            ]
+            if closure == "copied"
+            else [],
+            "reviews": [{"workerId": worker_id, "attempt": number} for number in (1, 2, 3)],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    remaining = [row for row in coverage["deferred"] if row.get("id") != "scan-stopped"]
+    assert [row["reason"] for row in remaining] == ([task["reason"]] if closure == "copied" else [])
+    assert len(coverage.get("resolvedDeferred", [])) == (0 if closure == "copied" else 1)
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("with_current_surface", [False, True])
+def test_recovery_preserves_accepted_links_across_attempts(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, with_current_surface
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    previous = {
+        "id": "api",
+        "label": "API review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    current = {
+        "id": "auth",
+        "label": "Authentication review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    task = {
+        "id": "additional-review",
+        "reason": "Additional synthetic validation remains.",
+        "surfaceIds": [previous["id"]] + ([current["id"]] if with_current_surface else []),
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [previous],
+            "deferred": [],
+        },
+    }
+    archived = result.parent.parent / "attempts/attempt-1/result.json"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(json.dumps(draft))
+    result.write_text(
+        json.dumps(
+            {
+                **draft,
+                "reviewState": {
+                    **draft["reviewState"],
+                    "surfaces": [current] if with_current_surface else [],
+                    "deferred": [task],
+                },
+            }
+        )
+    )
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-{attempt}-surface-1",
+            "provenance": {"workerId": worker_id, "attempt": attempt, "sourceId": row["id"]},
+        }
+        for row, attempt in [(previous, 1)] + ([(current, 2)] if with_current_surface else [])
+    ]
+    published_task = {
+        **task,
+        "id": f"{worker_id}-attempt-2-deferred-1",
+        "surfaceIds": [surface["id"] for surface in surfaces],
+        "provenance": {"workerId": worker_id, "attempt": 2, "sourceId": task["id"]},
+    }
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "deferred": [published_task],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
+    )
+    original = {path: path.read_bytes() for path in (archived, result)}
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert [row for row in coverage["deferred"] if row.get("reason") == task["reason"]] == [
+        published_task
+    ]
+    assert coverage["surfaces"] == surfaces
+    assert all(path.read_bytes() == data for path, data in original.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("duplicate_ids", [False, True])
+def test_recovery_preserves_matched_surface_task_links(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, duplicate_ids
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    first = {
+        "id": "api",
+        "label": "First synthetic review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    second = {**first, "id": "api-2", "label": "Second synthetic review"}
+    task = {"id": "later", "reason": "Synthetic follow-up", "surfaceIds": ["api-2"]}
+    current = [{**second, "id": "api" if duplicate_ids else "api-2"}, first]
+    archive = result.parent.parent / "attempts/attempt-01/result.json"
+    archive.parent.mkdir(parents=True)
+    for target, rows, tasks in ((archive, [first, second], [task]), (result, current, [])):
+        target.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "reviewState": {
+                        **scan.coverage,
+                        "completeness": "partial",
+                        "surfaces": rows,
+                        "deferred": tasks,
+                    },
+                }
+            )
+        )
+    checkpoint_draft = json.loads(archive.read_text())
+    checkpoint_draft["complete"] = True
+    for directory in (archive.parent, result.parent):
+        checkpoint = write_checkpoint(directory / "checkpoints", checkpoint_draft)
+        select_checkpoint(directory, checkpoint, mtime_ns=100_000_000_000)
+        os.utime(checkpoint, ns=(100_000_000_000, 100_000_000_000))
+    os.utime(archive, ns=(100_000_000_000, 100_000_000_000))
+    os.utime(result, ns=(200_000_000_000, 200_000_000_000))
+    original = {
+        target: target.read_bytes()
+        for target in result.parent.parent.rglob("*")
+        if target.is_file()
+    }
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-2-surface-{index}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate(current, 1)
+    ]
+    published_task = {
+        **task,
+        "id": f"{worker_id}-attempt-2-deferred-1",
+        "surfaceIds": [surfaces[0]["id"]],
+        "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "later"},
+    }
+    prior_surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-1-surface-{index}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate((first, second), 1)
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": prior_surfaces,
+            "deferred": [
+                {
+                    **published_task,
+                    "id": f"{worker_id}-attempt-1-deferred-1",
+                    "surfaceIds": [prior_surfaces[1]["id"]],
+                }
+            ],
+            "reviews": [{"workerId": worker_id, "attempt": 1}],
+        },
+    )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": surfaces,
+            "deferred": [published_task],
+            "reviews": [{"workerId": worker_id, "attempt": attempt} for attempt in (1, 2)],
+        },
+    )
+    head = scan.scan_dir / "checkpoint-head.json"
+    checkpoint = scan.scan_dir / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    observed_at = checkpoint.stat().st_mtime_ns + 1_000_000
+    os.utime(head, ns=(observed_at, observed_at))
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert [row for row in recovered["deferred"] if row.get("reason") == task["reason"]] == [
+        published_task
+    ]
+    assert recovered["surfaces"] == surfaces
+    assert all(target.read_bytes() == data for target, data in original.items())
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("identical", [False, True])
+def test_recovery_reuses_accepted_legacy_task_occurrences(
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, identical
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    first = {"id": "api", "label": "First", "disposition": "needs_follow_up", "receiptRefs": []}
+    second = {**first, "id": "api-2", "label": "First" if identical else "Second"}
+    old_tasks = [
+        {"id": "legacy", "reason": "Legacy follow-up", "surfaceIds": [row["id"]]}
+        for row in (first, second)
+    ]
+    current = [{**row, "id": "api"} for row in ((first, second) if identical else (second, first))]
+    current_task = {"id": "current", "reason": "Current follow-up", "surfaceIds": ["api"]}
+    archive = result.parent.parent / "attempts/attempt-01/result.json"
+    archive.parent.mkdir(parents=True)
+    for target, rows, tasks in (
+        (archive, [first, second], old_tasks),
+        (result, current, [current_task]),
+    ):
+        target.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "reviewState": {**scan.coverage, "surfaces": rows, "deferred": tasks},
+                }
+            )
+        )
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-2-surface-{index}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": row["id"]},
+        }
+        for index, row in enumerate(current, 1)
+    ]
+    tasks = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-2-deferred-{index}",
+            "surfaceIds": [surfaces[target]["id"]],
+            "provenance": {"workerId": worker_id, "attempt": attempt, "sourceId": row["id"]},
+        }
+        for index, (row, target, attempt) in enumerate(
+            [(current_task, 0, 2)]
+            + [(row, target, 1) for row, target in zip(old_tasks, (0, 1) if identical else (1, 0))],
+            1,
+        )
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "surfaces": surfaces,
+            "deferred": tasks,
+            "reviews": [{"workerId": worker_id, "attempt": attempt} for attempt in (1, 2)],
+        },
+    )
+    originals = {path: path.read_bytes() for path in (archive, result)}
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert recovered["surfaces"] == surfaces
+    assert [row for row in recovered["deferred"] if row.get("id") != "scan-stopped"] == tasks
+    assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["unchanged", "reordered", "reserved", "roundtrip", "mixed_origins", "priority", "outer_proto"],
+)
+def test_recovery_preserves_writer_normalized_surface_origins(
+    workbench_api, workbench_db, publication_scan, monkeypatch, variant
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 3)
+    first = {
+        "id": "api",
+        "label": "First synthetic review",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    second = {**first, "label": "Second synthetic review"}
+    if variant == "mixed_origins":
+        second = first.copy()
+    raw = [first, second]
+    normalized = [first, {**second, "id": "api-2"}]
+    if variant == "reserved":
+        reserved = {**first, "id": "api-2", "label": "Reserved synthetic review"}
+        raw.append(reserved)
+        normalized = [first, {**second, "id": "api-3"}, reserved]
+    elif variant == "reordered":
+        normalized = [second, {**first, "id": "api-2"}]
+    current = raw if variant == "roundtrip" else normalized
+    histories = [(1, raw[:1] if variant == "mixed_origins" else raw)]
+    if variant in ("mixed_origins", "roundtrip"):
+        histories.append((2, raw if variant == "mixed_origins" else normalized))
+    attempts = [1, 2] if variant == "mixed_origins" else [1] * len(current)
+    if variant == "priority":
+        anonymous = {key: value for key, value in first.items() if key != "id"}
+        histories = [(1, [anonymous]), (2, [anonymous, first, first])]
+        current = [first, {**first, "id": "api-2"}, {**anonymous, "id": "surface-48521adab43e8a78"}]
+        attempts = [2, 2, 1]
+    elif variant == "outer_proto":
+        anonymous = {
+            "label": "Anonymous synthetic review",
+            "disposition": "no_issue_found",
+            "receiptRefs": [],
+            "__proto__": {"synthetic_outer": True},
+            "extra": {"__proto__": {"synthetic_nested": True}},
+        }
+        histories = [(1, [anonymous])]
+        current = [
+            {
+                **{key: value for key, value in anonymous.items() if key != "__proto__"},
+                "id": "surface-86d506280d65162d",
+            }
+        ]
+        attempts = [1]
+    original = {}
+    for attempt, rows in [*histories, (3, current)]:
+        target = (
+            result
+            if attempt == 3
+            else result.parent.parent / f"attempts/attempt-{attempt}/result.json"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "scanId": scan.scan_id,
+                    "complete": True,
+                    "findings": [],
+                    "reviewState": {
+                        **scan.coverage,
+                        "completeness": "partial",
+                        "surfaces": rows,
+                        "deferred": [],
+                    },
+                }
+            )
+        )
+        original[target] = target.read_bytes()
+    surfaces = [
+        {
+            **row,
+            "id": f"{worker_id}-attempt-{attempt}-surface-{index}",
+            "provenance": {
+                "workerId": worker_id,
+                "attempt": attempt,
+                "sourceId": row["id"],
+            },
+        }
+        for index, (row, attempt) in enumerate(zip(current, attempts), 1)
+    ]
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": surfaces,
+            "deferred": [],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2, 3)
+            ],
+        },
+    )
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, True)
+    assert recovered["surfaces"] == surfaces
+    assert all(path.read_bytes() == data for path, data in original.items())
+
+
+def test_saved_surface_comparison_ids_match_writer_fixtures(workbench_api):
+    from workbench.saved_coverage import saved_surface_views
+
+    cases = json.loads((Path(__file__).parent / "fixtures/surface-normalization.json").read_text())
+    for case in cases:
+        draft = {"reviewState": {"surfaces": case["surfaces"]}}
+        original = copy.deepcopy(draft)
+        views = saved_surface_views([("result.json", draft, "synthetic-worker")])
+        assert [identity for identity, _ in views["result.json"]] == case["ids"], case["case"]
+        assert draft == original

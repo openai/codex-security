@@ -2116,6 +2116,7 @@ def test_selected_terminal_coverage_has_root_worker_parity(
 @pytest.mark.parametrize("current_terminal", [False, True])
 @pytest.mark.parametrize("registered", [False, True])
 @pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("current_checkpoint_time", [50, 300])
 def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
     workbench_api,
     workbench_db,
@@ -2125,6 +2126,7 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
     current_terminal,
     registered,
     interrupted,
+    current_checkpoint_time,
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
@@ -2167,7 +2169,7 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
     current = write_checkpoint(
         directory / "checkpoints",
         saved_draft(scan.scan_id, complete=current_terminal),
-        mtime_ns=300,
+        mtime_ns=current_checkpoint_time,
     )
     select_checkpoint(directory, current, mtime_ns=300)
 
