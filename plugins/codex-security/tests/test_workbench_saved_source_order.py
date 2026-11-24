@@ -13,18 +13,19 @@ from test_workbench_checkpoint_heads import drafts
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
     deep_scan_fixture,
-    standard_finding,
 )
 from workbench_test_support import (
+    archive_finding,
     cancel_scan,
     fail_deep_scan,
     get_scan,
-    merge_interrupted_results,
+    merge_interrupted,
     preserve_scan_results,
+    retained_source_json,
+    review_surface,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
-    saved_surface,
     scan_command,
     select_checkpoint,
     write_checkpoint,
@@ -55,8 +56,8 @@ def test_latest_iteration_uses_its_number_when_completion_times_tie() -> None:
 def test_stopped_scan_prefers_latest_iteration_over_older_reducer_checkpoint(
     tmp_path: Path,
 ) -> None:
-    state, home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    finding = standard_finding(tmp_path, scan_id, target)
+    state, home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    finding = archive_finding("app.py")
     # An upgraded scan can contain both a legacy reducer checkpoint and a host iteration.
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         for label, worker_id in (("dedup-0009", "z"), ("dedup-0010", "a")):
@@ -102,14 +103,12 @@ def recovered_review_state(state, scan_dir, scan_id):
         workers = connection.execute(
             "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
         ).fetchall()
-    return saved.merge_saved_results(
+    return merge_interrupted(
+        saved,
         scan_dir,
         scan_id,
         workbench_db.workbench_completion_binding(scan, workbench_db.now()),
         workers,
-        [],
-        stopped=True,
-        reason="interrupted",
         frozen_source_digests=manifest["scan"]["preservedSources"],
     )[2]
 
@@ -163,11 +162,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
             ),
         )
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        frozen = json.loads(
-            connection.execute(
-                "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
-            ).fetchone()[0]
-        )
+        frozen = json.loads(retained_source_json(connection, scan_id))
     sources = frozen.get("sources", frozen)
     assert result.relative_to(scan_dir).as_posix() in sources
 
@@ -186,14 +181,7 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
                     "standard-worker-thread",
                 )
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
-            assert (
-                json.loads(
-                    connection.execute(
-                        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
-                    ).fetchone()[0]
-                )
-                == frozen
-            )
+            assert json.loads(retained_source_json(connection, scan_id)) == frozen
 
     result.write_bytes(result.read_bytes())
     os.utime(result, ns=(300, 300))
@@ -317,7 +305,7 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
     binding = saved_binding("deep_repository", repository="synthetic")
 
     def merge(frozen=None):
-        return merge_interrupted_results(
+        return merge_interrupted(
             saved, tmp_path, scan_id, binding, workers, frozen_source_digests=frozen
         )
 
@@ -355,20 +343,20 @@ def test_order_metadata_is_not_new_evidence(tmp_path: Path) -> None:
 @pytest.mark.parametrize("head_time", [100, 200, 500], ids=["older", "tied", "newer"])
 def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: int) -> None:
     scan_id = "restored-observation"
-    finding = standard_finding(tmp_path, scan_id, tmp_path)
+    finding = archive_finding("app.py")
     finding.setdefault("extensions", {})["candidateId"] = "candidate-a"
     reported = saved_draft(
         scan_id,
         findings=[finding],
         complete=True,
         surfaces=[
-            saved_surface("candidate-a", "Candidate", "reported", candidate_id="candidate-a")
+            review_surface("candidate-a", "Candidate", "reported", candidate_id="candidate-a")
         ],
     )
     rejected = saved_draft(
         scan_id,
         surfaces=[
-            saved_surface("candidate-a", "Candidate", "rejected", candidate_id="candidate-a")
+            review_surface("candidate-a", "Candidate", "rejected", candidate_id="candidate-a")
         ],
         complete=True,
     )
@@ -388,17 +376,15 @@ def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: 
     workers = [saved_discovery_worker(output)]
     binding = saved_binding("deep_repository", repository="synthetic")
     binding["target"]["targetId"] = "synthetic-target"
-    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
+    first = merge_interrupted(saved, tmp_path, scan_id, binding, workers)
     for _ in range(2):
         assert len(first[1]["findings"]) == int(head_time < 200)
-        first = saved.merge_saved_results(
+        first = merge_interrupted(
+            saved,
             tmp_path,
             scan_id,
             binding,
             workers,
-            [],
-            stopped=True,
-            reason="interrupted",
             frozen_source_digests=first[0]["scan"]["preservedSources"],
             checkpoint_heads=first[0]["scan"]["preservedCheckpointHeads"],
         )
@@ -409,16 +395,16 @@ def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: 
 def test_first_stop_freezes_sources_before_report_preparation(
     tmp_path: Path, termination: str
 ) -> None:
-    state, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
-    finding = standard_finding(tmp_path, scan_id, target)
+    finding = archive_finding("app.py")
     finding.setdefault("extensions", {})["candidateId"] = "candidate-a"
     reported = saved_draft(
         scan_id,
         findings=[finding],
         complete=True,
         surfaces=[
-            saved_surface("candidate-a", "Candidate", "reported", candidate_id="candidate-a")
+            review_surface("candidate-a", "Candidate", "reported", candidate_id="candidate-a")
         ],
     )
     write_result_draft(result, reported, mtime_ns=100)
@@ -434,15 +420,13 @@ def test_first_stop_freezes_sources_before_report_preparation(
     stopped = get_scan(state, scan_id)["scan"]
     assert any("report.md: expected a regular file" in warning for warning in stopped["warnings"])
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        frozen = connection.execute(
-            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
-        ).fetchone()[0]
+        frozen = retained_source_json(connection, scan_id)
     assert frozen is not None
     report.rmdir()
     rejection = saved_draft(
         scan_id,
         surfaces=[
-            saved_surface("candidate-a", "Candidate", "rejected", candidate_id="candidate-a")
+            review_surface("candidate-a", "Candidate", "rejected", candidate_id="candidate-a")
         ],
         complete=True,
     )

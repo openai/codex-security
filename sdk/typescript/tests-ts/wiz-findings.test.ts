@@ -1,3 +1,5 @@
+import { readSubprocess } from "./support/shell.js";
+import { buildNodeModule } from "./support/test-subprocess.js";
 import { hash } from "node:crypto";
 import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -117,6 +119,15 @@ const iac = {
   },
   fileRemediation: { filePath: "infra/main.tf" },
 };
+
+function sastInventory<T>(record: unknown, nodes: T[]) {
+  return {
+    data: {
+      sastFindings: { nodes: [record] },
+      versionControlResources: { nodes },
+    },
+  };
+}
 
 function envelope(root: string, nodes: unknown[], withInventory = true) {
   return {
@@ -707,6 +718,7 @@ async function cloudFixture(payload: unknown) {
     "--format",
     "json",
   ];
+  const deps = { environment, fetch: transport };
   return {
     ...f,
     posts,
@@ -717,7 +729,8 @@ async function cloudFixture(payload: unknown) {
     options,
     command,
     environment,
-    deps: { environment, fetch: transport },
+    prepare: (repository = options.repository) =>
+      prepareExternalPublication(f.file, { ...options, repository }, deps),
     cliDeps: { ...dependencies(), environment, cloudFetch: transport },
   };
 }
@@ -741,16 +754,14 @@ for (const [root, record, kind] of [
     const first = f.reports.get(`${kind}:occurrence-1`)!;
     expect(first.assessment).toEqual({ state: "not_assessed" });
     expect(first.evidence.source_data).toEqual(record);
-    const replay = await prepareExternalPublication(f.file, f.options, f.deps);
+    const replay = await f.prepare();
     expect((await replay.publish()).counts.unchanged).toBe(1);
     expect(f.reports.get(`${kind}:occurrence-1`)!.canonical_finding_id).toBe(
       first.canonical_finding_id,
     );
     const changed = { ...record, status: "RESOLVED" };
     await writeFile(f.file, JSON.stringify(envelope(root, [changed])));
-    await (
-      await prepareExternalPublication(f.file, f.options, f.deps)
-    ).publish();
+    await (await f.prepare()).publish();
     expect(f.reports.get(`${kind}:occurrence-1`)!.assessment).toEqual({
       state: "not_assessed",
     });
@@ -798,16 +809,14 @@ test("a wrong source repository stops raw and normalized imports before source l
     repository: { ...repository, url: "https://github.com/example/other" },
   };
   const f = await cloudFixture(envelope("sastFindings", [other], false));
-  await expect(
-    prepareExternalPublication(f.file, f.options, f.deps),
-  ).rejects.toThrow("does not match the selected Cloud repository");
+  await expect(f.prepare()).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
   expect(f.calls).toHaveLength(1);
   expect(f.posts).toEqual([]);
   const normalized = (await readVendorFindings(f.file)).findings;
   await writeFile(f.file, JSON.stringify(normalized));
-  await expect(
-    prepareExternalPublication(f.file, f.options, f.deps),
-  ).rejects.toThrow("does not match");
+  await expect(f.prepare()).rejects.toThrow("does not match");
   expect(f.posts).toEqual([]);
   expect(
     await readdir(join(f.root, "state")).catch(() => undefined),
@@ -1068,9 +1077,7 @@ test.each([
         ? Buffer.concat([Buffer.from(contents), Buffer.from([0xff])])
         : contents,
     );
-    await expect(
-      prepareExternalPublication(f.file, f.options, f.deps),
-    ).rejects.toThrow();
+    await expect(f.prepare()).rejects.toThrow();
     expect(f.posts).toEqual([]);
   },
 );
@@ -1093,9 +1100,7 @@ test.each([false, true])(
         f.file,
         JSON.stringify((await readVendorFindings(f.file)).findings),
       );
-    await expect(
-      prepareExternalPublication(f.file, f.options, f.deps),
-    ).rejects.toThrow("does not match");
+    await expect(f.prepare()).rejects.toThrow("does not match");
     expect(f.posts).toEqual([]);
     expect(f.calls.filter((call) => call.includes("/source_reports"))).toEqual(
       [],
@@ -1125,7 +1130,6 @@ for (const normalized of [false, true]) {
     async (source, destination, matches) => {
       const f = await cloudFixture({});
       f.destination.url = `${destination}/example/project`;
-      const options = { ...f.options, repository: f.destination.id };
       const rows = ["csv-occurrence-1", "csv-occurrence-2"].map((ID) => ({
         ...csvRow,
         ID,
@@ -1140,17 +1144,13 @@ for (const normalized of [false, true]) {
             .join("\n"),
         );
       if (matches) {
-        const prepared = await prepareExternalPublication(
-          f.file,
-          options,
-          f.deps,
-        );
+        const prepared = await f.prepare(f.destination.id);
         expect(prepared.preview.findings).toHaveLength(2);
         expect(prepared.preview.excluded).toEqual([]);
       } else {
-        await expect(
-          prepareExternalPublication(f.file, options, f.deps),
-        ).rejects.toThrow("does not match");
+        await expect(f.prepare(f.destination.id)).rejects.toThrow(
+          "does not match",
+        );
         expect(
           f.calls.filter((call) => call.includes("/source_reports")),
         ).toEqual([]);
@@ -1164,20 +1164,20 @@ test("Wiz CSV retries retain acknowledged requests across column reordering and 
   const f = await cloudFixture({});
   const rows = [csvRow, { ...csvRow, ID: "csv-occurrence-2" }];
   await writeFile(f.file, csvReport(rows));
-  const original = await prepareExternalPublication(f.file, f.options, f.deps);
+  const original = await f.prepare();
   expect(f.posts).toEqual([]);
   f.state.failReadback = true;
   await expect(original.publish()).rejects.toBeInstanceOf(
     ExternalPublicationError,
   );
   await writeFile(f.file, csvReport(rows, Object.keys(csvRow).reverse()));
-  const resumed = await prepareExternalPublication(f.file, f.options, f.deps);
+  const resumed = await f.prepare();
   expect(resumed.preview.resumed).toBe(true);
   expect(resumed.preview.requests).toEqual(original.preview.requests);
   f.state.failReadback = false;
   expect((await resumed.publish()).verified).toBe(2);
   expect(f.posts).toHaveLength(1);
-  const repeated = await prepareExternalPublication(f.file, f.options, f.deps);
+  const repeated = await f.prepare();
   const result = await repeated.publish();
   expect(result.verified).toBe(2);
   expect(result.receipts[0]!.counts.unchanged).toBe(2);
@@ -1189,15 +1189,14 @@ test("Wiz CSV retries retain acknowledged requests across column reordering and 
 
 test("saved typed requests resume by repository ID after a repository rename", async () => {
   const f = await cloudFixture(envelope("sastFindings", [sast]));
-  const options = { ...f.options, repository: f.destination.id };
   f.state.failReadback = true;
-  await expect(
-    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-  ).rejects.toThrow("Readback unavailable");
+  await expect((await f.prepare(f.destination.id)).publish()).rejects.toThrow(
+    "Readback unavailable",
+  );
   expect(f.posts).toHaveLength(1);
   f.destination.url = "https://github.com/example/renamed";
   f.state.failReadback = false;
-  const resumed = await prepareExternalPublication(f.file, options, f.deps);
+  const resumed = await f.prepare(f.destination.id);
   expect(resumed.preview.resumed).toBe(true);
   expect(resumed.preview.destination.url).toBe(f.destination.url);
   expect((await resumed.publish()).verified).toBe(1);
@@ -1224,11 +1223,7 @@ for (const golden of roundtripFixtures) {
     f.state.readbackDetails = structuredClone(golden.expected) as NonNullable<
       ExternalFindingEvidence["details"]
     >;
-    const prepared = await prepareExternalPublication(
-      f.file,
-      f.options,
-      f.deps,
-    );
+    const prepared = await f.prepare();
     expect(prepared.preview.findings[0]!.evidence.details).toEqual(
       f.state.readbackDetails,
     );
@@ -1320,19 +1315,14 @@ test.each([
     const record = { ...sast, repository: { ...repository, url: sourceUrl } };
     const f = await cloudFixture(envelope("sastFindings", [record], false));
     f.destination.url = destinationUrl;
-    const options = { ...f.options, repository: f.destination.id };
     if (matches) {
-      const publication = await prepareExternalPublication(
-        f.file,
-        options,
-        f.deps,
-      );
+      const publication = await f.prepare(f.destination.id);
       expect((await publication.publish()).verified).toBe(1);
       expect(f.posts[0]!.items[0]!.evidence.source_data).toEqual(record);
     } else {
-      await expect(
-        prepareExternalPublication(f.file, options, f.deps),
-      ).rejects.toThrow("does not match");
+      await expect(f.prepare(f.destination.id)).rejects.toThrow(
+        "does not match",
+      );
       expect(f.posts).toEqual([]);
     }
   },
@@ -1345,13 +1335,8 @@ test.each(["github.com", "example.ghe.com", "github.example.test"])(
     const record = { ...sast, repository: { ...repository, url } };
     const f = await cloudFixture(envelope("sastFindings", [record], false));
     f.destination.url = url;
-    const prepared = await prepareExternalPublication(
-      f.file,
-      {
-        ...f.options,
-        repository: "HTTPS://" + host.toUpperCase() + "/Example/PROJECT.git/",
-      },
-      f.deps,
+    const prepared = await f.prepare(
+      "HTTPS://" + host.toUpperCase() + "/Example/PROJECT.git/",
     );
     expect(prepared.preview.destination.id).toBe(f.destination.id);
     expect(f.posts).toEqual([]);
@@ -1374,11 +1359,7 @@ test("custom GitHub Enterprise binding preserves branch case and exact source ev
   const f = await cloudFixture(envelope("sastFindings", [record], false));
   f.destination.url = "https://github.example.test/team/project";
   f.destination.repo_connector_id = "custom-github";
-  const prepared = await prepareExternalPublication(
-    f.file,
-    { ...f.options, repository: f.destination.id },
-    f.deps,
-  );
+  const prepared = await f.prepare(f.destination.id);
   expect((await prepared.publish()).verified).toBe(1);
   const evidence = f.posts[0]!.items[0]!.evidence;
   expect(evidence.branch).toBe(record.repositoryBranch.name);
@@ -1419,11 +1400,7 @@ test.each([
           : { ...sast, repository: sourceRepository, repositoryBranch: branch };
     const f = await cloudFixture(envelope(collection!, [record], false));
     f.destination.url = "https://github.example.test/team/project";
-    const prepared = await prepareExternalPublication(
-      f.file,
-      { ...f.options, repository: f.destination.id },
-      f.deps,
-    );
+    const prepared = await f.prepare(f.destination.id);
     expect((await prepared.publish()).verified).toBe(1);
     const evidence = f.posts[0]!.items[0]!.evidence;
     expect(evidence.branch).toBe(branch.name);
@@ -1440,22 +1417,17 @@ test("unidentified source hosts still require exact supplied and inventory URL p
       url: "https://code.example.test/Team/Project",
     },
   };
-  const parsed = await parse({
-    data: {
-      sastFindings: { nodes: [record] },
-      versionControlResources: {
-        nodes: [
-          {
-            id: "unidentified-branch",
-            repository: {
-              ...repository,
-              url: "https://code.example.test/team/project",
-            },
-          },
-        ],
+  const parsed = await parse(
+    sastInventory(record, [
+      {
+        id: "unidentified-branch",
+        repository: {
+          ...repository,
+          url: "https://code.example.test/team/project",
+        },
       },
-    },
-  });
+    ]),
+  );
   expect(parsed.findings).toEqual([]);
   expect(parsed.excluded[0]!.reason).toContain("conflicting repository URLs");
 });
@@ -1512,29 +1484,18 @@ test.each(["named collection", "normalized JSONL"])(
     }));
   `,
     );
-    const built = await Bun.build({
-      entrypoints: [runner],
-      outdir: bundle,
-      target: "node",
-      format: "esm",
-      packages: "external",
-    });
-    expect(built.success).toBe(true);
+    const modulePath = await buildNodeModule(runner, bundle);
     const child = Bun.spawn(
       [
         Bun.which("node")!,
         ...(format === "normalized JSONL" ? ["--max-old-space-size=256"] : []),
-        built.outputs[0]!.path,
+        modulePath,
         f.file,
         format,
       ],
       { stdout: "pipe", stderr: "pipe" },
     );
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
+    const { status: exitCode, stdout, stderr } = await readSubprocess(child);
     expect(exitCode, stderr).toBe(0);
     expect(JSON.parse(stdout)).toEqual({
       read: count,
@@ -1595,27 +1556,13 @@ test("Node resumes the same uncertain publication across locales and Unicode key
     }
     `,
   );
-  const built = await Bun.build({
-    entrypoints: [runner],
-    outdir: bundle,
-    target: "node",
-    format: "esm",
-    packages: "external",
-  });
-  expect(built.success).toBe(true);
+  const modulePath = await buildNodeModule(runner, bundle);
   const run = async (locale: string) => {
-    const child = Bun.spawn(
-      [Bun.which("node")!, built.outputs[0]!.path, locale],
-      {
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
+    const child = Bun.spawn([Bun.which("node")!, modulePath, locale], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const { status: exitCode, stdout, stderr } = await readSubprocess(child);
     expect(exitCode, stderr).toBe(0);
     return JSON.parse(stdout) as {
       locale: string;
@@ -1838,25 +1785,20 @@ test.each([false, true])(
       withHint ? "GITHUB" : undefined,
       "https://github.example.test/Example/Project",
     );
-    const payload = {
-      data: {
-        sastFindings: {
-          nodes: [{ ...sast, repository: { id: repository.id } }],
-        },
-        versionControlResources: { nodes: [inventory] },
-      },
-    };
+    const payload = sastInventory(
+      { ...sast, repository: { id: repository.id } },
+      [inventory],
+    );
     const f = await cloudFixture(payload);
     f.destination.url = enterpriseUrl;
-    const options = { ...f.options, repository: f.destination.id };
-    const original = await prepareExternalPublication(f.file, options, f.deps);
+    const original = await f.prepare(f.destination.id);
     f.state.failReadback = true;
     await expect(original.publish()).rejects.toBeInstanceOf(
       ExternalPublicationError,
     );
     inventory.platform = withHint ? undefined : "GITHUB";
     await writeFile(f.file, JSON.stringify(payload));
-    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    const retry = await f.prepare(f.destination.id);
     expect(retry.preview.findings).toEqual(original.preview.findings);
     expect(retry.preview.resumed).toBe(true);
     expect(retry.preview.requests).toEqual(original.preview.requests);
@@ -1886,12 +1828,7 @@ test.each(["project", "project/component"])(
       repository: { ...repository, url: repositoryUrl, name },
     }));
     for (const selected of [nodes, [...nodes].reverse()]) {
-      const parsed = await parse({
-        data: {
-          sastFindings: { nodes: [record] },
-          versionControlResources: { nodes: selected },
-        },
-      });
+      const parsed = await parse(sastInventory(record, selected));
       expect(parsed.excluded).toEqual([]);
       expect(parsed.findings[0]!.evidence.branch).toBe(
         `${alias.toUpperCase()}/Feature/Parser`,
@@ -1910,23 +1847,18 @@ test("repository display names do not remove literal branch components", async (
       name: "project/component/Feature",
     },
   };
-  const parsed = await parse({
-    data: {
-      sastFindings: { nodes: [record] },
-      versionControlResources: {
-        nodes: [
-          {
-            ...inventoryNode("GITHUB", repositoryUrl),
-            repository: {
-              ...repository,
-              url: repositoryUrl,
-              name: "project/component",
-            },
-          },
-        ],
+  const parsed = await parse(
+    sastInventory(record, [
+      {
+        ...inventoryNode("GITHUB", repositoryUrl),
+        repository: {
+          ...repository,
+          url: repositoryUrl,
+          name: "project/component",
+        },
       },
-    },
-  });
+    ]),
+  );
   expect(parsed.excluded).toEqual([]);
   expect(parsed.findings[0]!.evidence.branch).toBe("project/component/Feature");
 });
@@ -1979,11 +1911,7 @@ for (const kind of ["sast", "secret", "iac"] as const) {
         },
       });
       f.destination.url = enterpriseUrl;
-      const publication = await prepareExternalPublication(
-        f.file,
-        { ...f.options, repository: f.destination.id },
-        f.deps,
-      );
+      const publication = await f.prepare(f.destination.id);
       expect((await publication.publish()).verified).toBe(1);
       const evidence = f.posts[0]!.items[0]!.evidence;
       expect(evidence.branch).toBe(branch.name);
@@ -2007,12 +1935,9 @@ test.each(["GITLAB", "github"])(
         url: "https://github.example.test/Example/Project",
       },
     };
-    const parsed = await parse({
-      data: {
-        sastFindings: { nodes: [record] },
-        versionControlResources: { nodes: [inventoryNode(platform)] },
-      },
-    });
+    const parsed = await parse(
+      sastInventory(record, [inventoryNode(platform)]),
+    );
     expect(parsed.findings).toEqual([]);
     expect(parsed.excluded[0]!.reason).toContain("conflicting repository URLs");
   },
@@ -2037,12 +1962,7 @@ test.each([0, 1, 2])(
         name: "EXAMPLE/PROJECT/Feature/Parser",
       },
     };
-    const parsed = await parse({
-      data: {
-        sastFindings: { nodes: [record] },
-        versionControlResources: { nodes },
-      },
-    });
+    const parsed = await parse(sastInventory(record, nodes));
     expect(parsed.excluded).toEqual([]);
     expect(parsed.findings[0]!.evidence.branch).toBe(
       record.repositoryBranch.name,
@@ -2072,21 +1992,16 @@ test("equivalent inventory rows preserve publication identity when reordered", a
       repository: { ...repository, url: repositoryUrl },
     },
   ];
-  const payload = {
-    data: {
-      sastFindings: { nodes: [record] },
-      versionControlResources: { nodes },
-    },
-  };
+  const payload = sastInventory(record, nodes);
   const f = await cloudFixture(payload);
-  const prepared = await prepareExternalPublication(f.file, f.options, f.deps);
+  const prepared = await f.prepare();
   f.state.failReadback = true;
   await expect(prepared.publish()).rejects.toBeInstanceOf(
     ExternalPublicationError,
   );
   nodes.reverse();
   await writeFile(f.file, JSON.stringify(payload));
-  const retry = await prepareExternalPublication(f.file, f.options, f.deps);
+  const retry = await f.prepare();
   expect(retry.preview.findings).toEqual(prepared.preview.findings);
   expect(retry.preview.findings[0]!.evidence.source_data).toEqual(record);
   expect(retry.preview.resumed).toBe(true);
@@ -2114,11 +2029,7 @@ test.each(["raw", "normalized"])(
     const input =
       kind === "raw" ? envelope("sastFindings", [record]) : [normalized];
     const f = await cloudFixture(input);
-    const original = await prepareExternalPublication(
-      f.file,
-      f.options,
-      f.deps,
-    );
+    const original = await f.prepare();
     f.state.failReadback = true;
     await expect(original.publish()).rejects.toBeInstanceOf(
       ExternalPublicationError,
@@ -2127,7 +2038,7 @@ test.each(["raw", "normalized"])(
       record.repositoryBranch.name = "example/project/changed";
     else normalized.evidence.branch = "changed";
     await writeFile(f.file, JSON.stringify(input));
-    const changed = await prepareExternalPublication(f.file, f.options, f.deps);
+    const changed = await f.prepare();
     expect(changed.preview.resumed).toBe(false);
     expect(changed.preview.requests[0]!.request_id).not.toBe(
       original.preview.requests[0]!.request_id,
@@ -2143,16 +2054,12 @@ test.each([
   ["GITLAB", "GITHUB"],
 ])("inventory platform conflicts reject %s before %s", async (first, last) => {
   await expect(
-    parse({
-      data: {
-        sastFindings: { nodes: [sast] },
-        versionControlResources: {
-          nodes: [first, undefined, last].map((platform) =>
-            inventoryNode(platform),
-          ),
-        },
-      },
-    }),
+    parse(
+      sastInventory(
+        sast,
+        [first, undefined, last].map((platform) => inventoryNode(platform)),
+      ),
+    ),
   ).rejects.toThrow("conflicting platforms");
 });
 
@@ -2160,69 +2067,52 @@ test.each([undefined, "GITLAB"])(
   "inventory duplicate URLs stay strict without GITHUB provenance: %j",
   async (platform) => {
     await expect(
-      parse({
-        data: {
-          sastFindings: { nodes: [sast] },
-          versionControlResources: {
-            nodes: [
-              inventoryNode(
-                platform,
-                "https://github.example.test/Example/Project",
-              ),
-              inventoryNode(platform),
-            ],
-          },
-        },
-      }),
+      parse(
+        sastInventory(sast, [
+          inventoryNode(
+            platform,
+            "https://github.example.test/Example/Project",
+          ),
+          inventoryNode(platform),
+        ]),
+      ),
     ).rejects.toThrow("conflicting URLs");
   },
 );
 
 test("GITHUB inventory provenance does not permit a different repository URL", async () => {
   await expect(
-    parse({
-      data: {
-        sastFindings: { nodes: [sast] },
-        versionControlResources: {
-          nodes: [
-            inventoryNode("GITHUB"),
-            inventoryNode(
-              "GITHUB",
-              "https://github.example.test/example/other",
-            ),
-          ],
-        },
-      },
-    }),
+    parse(
+      sastInventory(sast, [
+        inventoryNode("GITHUB"),
+        inventoryNode("GITHUB", "https://github.example.test/example/other"),
+      ]),
+    ),
   ).rejects.toThrow("conflicting URLs");
 });
 
 test("resuming a Wiz upload requires the original projected inventory evidence", async () => {
-  const payload = {
-    data: {
-      sastFindings: { nodes: [{ ...sast, repository: { id: repository.id } }] },
-      versionControlResources: {
-        nodes: [
-          {
-            ...inventoryNode("GITHUB"),
-            repository: {
-              ...repository,
-              url: repositoryUrl,
-              name: "original-display-name",
-            },
-          },
-        ],
+  const payload = sastInventory(
+    { ...sast, repository: { id: repository.id } },
+    [
+      {
+        ...inventoryNode("GITHUB"),
+        repository: {
+          ...repository,
+          url: repositoryUrl,
+          name: "original-display-name",
+        },
       },
-    },
-  };
+    ],
+  );
   const f = await cloudFixture(payload);
-  const original = await prepareExternalPublication(f.file, f.options, f.deps);
+  const original = await f.prepare();
   f.state.failReadback = true;
   await expect(original.publish()).rejects.toThrow("Readback unavailable");
   payload.data.versionControlResources.nodes[0]!.repository.name =
     "updated-display-name";
   await writeFile(f.file, JSON.stringify(payload));
-  const changed = await prepareExternalPublication(f.file, f.options, f.deps);
+  const changed = await f.prepare();
   expect(changed.preview.resumed).toBe(false);
   expect(changed.preview.findings).not.toEqual(original.preview.findings);
   expect(f.posts).toHaveLength(1);
@@ -2230,7 +2120,7 @@ test("resuming a Wiz upload requires the original projected inventory evidence",
   payload.data.versionControlResources.nodes[0]!.repository.name =
     "original-display-name";
   await writeFile(f.file, JSON.stringify(payload));
-  const resumed = await prepareExternalPublication(f.file, f.options, f.deps);
+  const resumed = await f.prepare();
   expect(resumed.preview.resumed).toBe(true);
   expect(resumed.preview.requests).toEqual(original.preview.requests);
   expect(resumed.preview.findings[0]!.evidence).toEqual(

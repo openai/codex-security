@@ -9,9 +9,10 @@ import os
 import pytest
 from publication_fixtures import worker_finding
 from workbench_test_support import (
+    pending_review,
     read_review_state,
+    review_surface,
     saved_draft,
-    saved_surface,
     select_checkpoint,
     write_checkpoint,
 )
@@ -52,7 +53,7 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
         complete=marker,
         findings=[sibling],
         surfaces=[
-            saved_surface(
+            review_surface(
                 "rejected-outcome",
                 "Rejected after review",
                 "rejected",
@@ -142,13 +143,13 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
         complete=True,
         findings=[malformed, sibling],
         surfaces=[
-            saved_surface(
+            review_surface(
                 "reported-outcome",
                 "Unverified finding",
                 "reported",
                 candidate_id="malformed-worker-finding",
             ),
-            saved_surface(
+            review_surface(
                 "rejected-outcome",
                 "Rejected after review",
                 "rejected",
@@ -271,7 +272,7 @@ def test_deadline_applies_existing_nonblank_surface_label_contract(
     checkpoint = scan.checkpoint(
         output,
         findings=[worker_finding(scan, "worker-label-finding")],
-        surfaces=[{"id": "entry", "label": label, "disposition": "reported", "receiptRefs": []}],
+        surfaces=[review_surface("entry", label, "reported")],
     )
     original = checkpoint.read_bytes()
 
@@ -308,9 +309,7 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
     if field == "finding":
         finding["summary"] = text
     elif field == "surfaces":
-        draft["coverage"][field] = [
-            {"id": "entry", "label": text, "disposition": "reported", "receiptRefs": []}
-        ]
+        draft["coverage"][field] = [review_surface("entry", text, "reported")]
     elif field == "openQuestions":
         draft["coverage"][field] = [text]
     elif field == "explicitExclusions":
@@ -320,7 +319,9 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
     if field == "resolvedDeferred":
         draft["complete"] = True
         scan.checkpoint(
-            output, deferred=[{"id": "review", "reason": "Review pending."}], mtime_ns=100
+            output,
+            deferred=[{"id": "review", "reason": "Review pending."}],
+            mtime_ns=100,
         )
     checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=200)
     if field == "resolvedDeferred":
@@ -442,13 +443,13 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     finding = worker_finding(scan, "earlier-worker-finding")
     rejected = worker_finding(scan, "rejected-sibling")
     rejected["provenance"]["candidateId"] = "rejected-sibling"
-    surface = saved_surface("entry", "Unfinished review", "needs_follow_up")
+    surface = review_surface("entry", "Unfinished review")
     checkpoint = scan.checkpoint(
         output,
         findings=[finding, rejected],
         surfaces=[surface],
         deferred=[
-            {"id": "review", "reason": "Review remains.", "surfaceIds": ["entry"]},
+            pending_review("review", "Review remains.", "entry"),
             {"id": "finished", "reason": "Separate review remains."},
         ],
         mtime_ns=100,
@@ -472,7 +473,7 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
         complete=True,
         findings=[finding] if terminal_findings else [],
         surfaces=[
-            saved_surface(
+            review_surface(
                 "sibling-outcome", "Sibling reviewed", "rejected", candidate_id="rejected-sibling"
             ),
             *([invalid_surface] if malformed not in (None, "closure") else []),

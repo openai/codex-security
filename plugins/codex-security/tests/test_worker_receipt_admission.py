@@ -14,9 +14,10 @@ from test_partial_coverage_projection import stop_and_recover_projection
 from test_partial_coverage_projection import stop_scan as stop_scan
 from test_saved_deferred_identity import recover, save_worker
 from workbench_test_support import (
+    pending_review,
     read_review_state,
+    review_surface,
     saved_draft,
-    saved_surface,
     select_checkpoint,
     write_checkpoint,
 )
@@ -29,7 +30,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
 ):
     import workbench_saved_results as saved
 
-    surface = saved_surface("api", "API boundary", "needs_follow_up")
+    surface = review_surface("api", "API boundary")
     surfaces = (
         [{**surface, "id": "other", "label": "Other boundary"}, surface] if reordered else [surface]
     )
@@ -47,9 +48,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
     if changed_notes:
         for row in pending["coverage"]["surfaces"]:
             row["notes"] = "Additional review context"
-    pending["coverage"]["deferred"] = [
-        {"id": "task", "reason": "Check boundary", "surfaceIds": ["api"]}
-    ]
+    pending["coverage"]["deferred"] = [pending_review("task", "Check boundary", "api")]
     write_checkpoint(output / "checkpoints", pending, mtime_ns=2_000_000_000)
     originals = {path: path.read_bytes() for path in output.rglob("*.json")}
     worker.update(status="succeeded", result_manifest_path=str(result_path))

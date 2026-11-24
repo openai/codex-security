@@ -22,6 +22,7 @@ from workbench_test_support import (
     SCRIPT,
     RemediationRequest,
     begin_deep_scan,
+    close_finding,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
@@ -29,14 +30,18 @@ from workbench_test_support import (
     empty_target_scan,
     fail_scan,
     get_scan,
+    git_in,
     initialize_git_repository,
     load_script,
     mark_handoff_delivered,
     read_review_state,
+    register_scan,
+    repository_recipe,
     resume_deep_scan,
+    review_surface,
     run_workbench,
+    save_commit_diff,
     save_workspace,
-    saved_surface,
     scan_claim_command,
     scan_command,
     set_triage,
@@ -48,6 +53,7 @@ from workbench_test_support import (
     update_progress,
     workspace_command,
     write_completed_contract,
+    write_deep_contract,
     write_remediation_patch,
 )
 
@@ -154,26 +160,11 @@ def budget_scan_fixture(
     (target / "app.py").write_text("value = request.args['value']\n")
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
-    registered = run_workbench(
+    registered = register_scan(
         state_dir,
-        "register-cli-scan",
-        "--scan-dir",
-        str(scan_dir),
-        "--repository",
-        str(target),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": mode,
-                "repository": str(target),
-                "target": {
-                    "kind": "paths" if paths else "repository",
-                    "paths": paths or [],
-                },
-                "maxCostUsd": 0.005,
-            }
-        ),
+        target,
+        scan_dir,
+        recipe={**repository_recipe(target, mode, paths or None), "maxCostUsd": 0.005},
     )
     scan_id = str(registered["scanId"])
     if mode != "deep":
@@ -295,13 +286,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
     state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
-    )
+    write_deep_contract(scan_dir, scan_id, target, relative_path="app.py")
 
     manifest_path = scan_dir / "scan-manifest.json"
     draft = json.loads(manifest_path.read_text())
@@ -369,17 +354,11 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
 def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -> None:
     candidate = budget_candidate(validation={"disposition": "suppressed"})
     state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path, candidates=[candidate])
-    write_completed_contract(
-        scan_dir,
-        scan_id,
-        target,
-        relative_path="app.py",
-        coverage_mode="deep_repository",
-    )
+    write_deep_contract(scan_dir, scan_id, target, relative_path="app.py")
     coverage_path = scan_dir / "coverage.json"
     coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(
-        saved_surface("candidate-candidate-1", "Already dismissed candidate", "rejected")
+        review_surface("candidate-candidate-1", "Already dismissed candidate", "rejected")
     )
     coverage_path.write_text(json.dumps(coverage))
 
@@ -1010,7 +989,7 @@ def test_reviewed_patch_matches_unversioned_checkout_bytes(
         "patch_digest": f"sha256:{hashlib.sha256(patch.read_bytes()).hexdigest()}",
     }
     assert workbench_api["require_scan_relative_file"](scan, patch_name) == patch_name
-    subprocess.run(["git", "apply", "--no-index", str(patch)], cwd=target, check=True)
+    git_in(target, "apply", "--no-index", str(patch))
     _, applied = workbench_api["remediation_checkout_snapshot"](scan)
     assert applied != original
     assert workbench_api["require_reviewed_patch_applied"](scan, remediation, patch_name) == applied
@@ -1031,14 +1010,8 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
     assert completed["findings"][0]["triage"] == {"status": "open"}
     assert completed["findings"][0]["remediationState"] == {"state": "idle"}
 
-    closed = set_triage(
-        state_dir,
-        occurrence_id,
-        "closed",
-        "--close-reason",
-        "already_fixed",
-        "--note",
-        "Patched before this scan completed.",
+    closed = close_finding(
+        state_dir, occurrence_id, "already_fixed", "Patched before this scan completed."
     )["scan"]
     assert closed["findings"][0]["triage"] | {"updatedAt": None} == {
         "closeReason": "already_fixed",
@@ -1046,15 +1019,7 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
         "status": "closed",
         "updatedAt": None,
     }
-    set_triage(
-        state_dir,
-        occurrence_id,
-        "closed",
-        "--close-reason",
-        "already_fixed",
-        "--note",
-        "Patched before this scan completed.",
-    )
+    close_finding(state_dir, occurrence_id, "already_fixed", "Patched before this scan completed.")
 
     request = RemediationRequest(state_dir, occurrence_id)
     generation_token = str(uuid.uuid4())
@@ -1180,11 +1145,7 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
         recovery_token, "3", "applied", "--base-revision", "unversioned", check=False
     )
     assert "checkout is unchanged" in str(unchanged_apply["stderr"])
-    subprocess.run(
-        ["git", "apply", "--no-index", str(patch_path)],
-        cwd=target,
-        check=True,
-    )
+    git_in(target, "apply", "--no-index", str(patch_path))
     applied_source = source.read_bytes()
     unrelated = target / "unrelated.txt"
     unrelated.write_text("not part of the reviewed patch\n")
@@ -1306,8 +1267,8 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
     assert remounted["findings"][0]["locations"][0]["absolutePath"] == str(target / "README.md")
 
     (target / "README.md").write_text("new revision\n")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Advance checkout"], cwd=target, check=True)
+    git_in(target, "add", "README.md")
+    git_in(target, "commit", "-qm", "Advance checkout")
     refreshed = get_scan(state_dir, scan_id)["scan"]
 
     assert refreshed["remediationAvailable"] is False
@@ -1433,7 +1394,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
     target = repository / "nested-target"
     target.mkdir()
     (target / "README.md").write_text("fixture\n")
-    subprocess.run(["git", "add", "nested-target/README.md"], cwd=repository, check=True)
+    git_in(repository, "add", "nested-target/README.md")
     subprocess.run(
         ["git", "commit", "-m", "add nested target"],
         cwd=repository,
@@ -1490,11 +1451,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
     (target / "README.md").write_text("fixture\n")
     apply_token = str(uuid.uuid4())
     request.request_action("2", "apply", apply_token)
-    subprocess.run(
-        ["git", "apply", "--directory=nested-target", str(patch_path)],
-        cwd=repository,
-        check=True,
-    )
+    git_in(repository, "apply", "--directory=nested-target", str(patch_path))
     ignored = target / "ignored-cache"
     ignored.mkdir()
     with (repository / ".git" / "info" / "exclude").open("a") as exclude:
@@ -1638,40 +1595,16 @@ def test_workbench_derives_git_branch_revision_and_detached_head(tmp_path: Path)
         "shortRevision": revision[:7],
     }
 
-    saved = save_workspace(
-        state_dir,
-        workspace_id,
-        str(target),
-        ".",
-        "diff",
-        "--target-summary",
-        "Latest commit",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        revision,
-    )
+    saved = save_commit_diff(state_dir, workspace_id, target, revision, summary="Latest commit")
     assert saved["mode"] == "diff"
     assert saved["targetSummary"] == "Latest commit"
     assert saved["diffTarget"]["kind"] == "commit"
     assert saved["diffTarget"]["headRevision"] == revision
 
-    relabeled = save_workspace(
-        state_dir,
-        workspace_id,
-        str(target),
-        ".",
-        "diff",
-        "--target-summary",
-        "",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        revision,
-    )
+    relabeled = save_commit_diff(state_dir, workspace_id, target, revision, summary="")
     assert relabeled["targetSummary"] == f"Commit {revision[:7]}"
 
-    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=target, check=True)
+    git_in(target, "checkout", "-q", "--detach", "HEAD")
     detached = workspace_command(state_dir, "get-workspace", workspace_id)
     assert detached["targetMetadata"]["branch"] is None
     assert detached["targetMetadata"]["detachedHead"] is True
@@ -1686,7 +1619,7 @@ def test_workbench_git_inspection_ignores_repository_environment(tmp_path: Path)
     nested_target.mkdir()
     foreign = tmp_path / "foreign"
     initialize_git_repository(foreign)
-    subprocess.run(["git", "branch", "-M", "foreign"], cwd=foreign, check=True)
+    git_in(foreign, "branch", "-M", "foreign")
 
     inspected = run_workbench(
         state_dir,
@@ -1713,18 +1646,7 @@ def test_workbench_rejects_nested_git_target_for_review_changes(tmp_path: Path) 
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
 
-    failed = save_workspace(
-        state_dir,
-        workspace_id,
-        str(nested_target),
-        ".",
-        "diff",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        revision,
-        check=False,
-    )
+    failed = save_commit_diff(state_dir, workspace_id, nested_target, revision, check=False)
 
     assert failed["returncode"] != 0
     assert "repository root" in str(failed["stderr"])
@@ -1796,7 +1718,7 @@ def test_workbench_scans_codebase_without_git_on_path(tmp_path: Path) -> None:
 def test_workbench_scans_unborn_git_repository_as_codebase(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    git_in(target, "init", "-q")
     (target / "app.py").write_text("print('fixture')\n")
 
     metadata = assert_unversioned_codebase_scan_starts(tmp_path / "state", target)
@@ -2097,63 +2019,45 @@ def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path, is
         ).fetchone() == (stable_target_id(target), 0)
 
 
+def inspect_commit_diff(
+    state_dir: Path, target: Path, head: str, *, base: str | None = None, check: bool = True
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "inspect-setup",
+        "--target-path",
+        str(target),
+        "--scope",
+        ".",
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        "commit",
+        *(["--diff-base-revision", base] if base is not None else []),
+        "--diff-head-revision",
+        head,
+        check=check,
+    )
+
+
 def test_workbench_resolves_structured_diff_target(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
-    inspected = run_workbench(
-        state_dir,
-        "inspect-setup",
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        "HEAD",
-    )
+    inspected = inspect_commit_diff(state_dir, target, "HEAD")
     assert inspected["diffTarget"]["kind"] == "commit"
     assert inspected["diffTarget"]["headRevision"] == revision
     assert inspected["diffTarget"]["baseRevision"]
 
-    inspected_again = run_workbench(
+    inspected_again = inspect_commit_diff(
         state_dir,
-        "inspect-setup",
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "commit",
-        "--diff-base-revision",
-        inspected["diffTarget"]["baseRevision"],
-        "--diff-head-revision",
+        target,
         inspected["diffTarget"]["headRevision"],
+        base=inspected["diffTarget"]["baseRevision"],
     )
     assert inspected_again["diffTarget"] == inspected["diffTarget"]
 
-    rejected = run_workbench(
-        state_dir,
-        "inspect-setup",
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "commit",
-        "--diff-base-revision",
-        revision,
-        "--diff-head-revision",
-        revision,
-        check=False,
-    )
+    rejected = inspect_commit_diff(state_dir, target, revision, base=revision, check=False)
     assert rejected["returncode"] == 1
     assert "must match the selected commit's parent" in rejected["stderr"]
 
@@ -2207,8 +2111,8 @@ def test_workbench_rejects_working_tree_target_after_head_moves(tmp_path: Path) 
     assert saved["targetSummary"] == "Uncommitted changes"
 
     (target / "README.md").write_text("second commit\n")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Second commit"], cwd=target, check=True)
+    git_in(target, "add", "README.md")
+    git_in(target, "commit", "-qm", "Second commit")
 
     failed = start_scan_command(state_dir, workspace_id, check=False)
     assert failed["returncode"] != 0
@@ -2236,8 +2140,8 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
     (target / "README.md").write_text("committed source\n" * 50)
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    git_in(target, "add", "README.md")
+    git_in(target, "commit", "-qm", "Add source fixture")
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -2291,8 +2195,8 @@ def test_workbench_warns_after_working_tree_head_changes(
     )
 
     (target / "new-file.txt").write_text("new committed content\n")
-    subprocess.run(["git", "add", "new-file.txt"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Move HEAD"], cwd=target, check=True)
+    git_in(target, "add", "new-file.txt")
+    git_in(target, "commit", "-qm", "Move HEAD")
 
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
@@ -2381,29 +2285,15 @@ def test_workbench_rejects_commit_with_missing_shallow_parent(tmp_path: Path) ->
     source = tmp_path / "source"
     initialize_git_repository(source)
     (source / "README.md").write_text("second commit\n")
-    subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-qm", "Second commit"], cwd=source, check=True)
+    git_in(source, "add", "README.md")
+    git_in(source, "commit", "-qm", "Second commit")
     shallow = tmp_path / "shallow"
     subprocess.run(
         ["git", "clone", "-q", "--depth", "1", source.as_uri(), str(shallow)],
         check=True,
     )
 
-    failed = run_workbench(
-        tmp_path / "state",
-        "inspect-setup",
-        "--target-path",
-        str(shallow),
-        "--scope",
-        ".",
-        "--mode",
-        "diff",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        "HEAD",
-        check=False,
-    )
+    failed = inspect_commit_diff(tmp_path / "state", shallow, "HEAD", check=False)
     assert failed["returncode"] != 0
     assert "Commit parent does not resolve" in str(failed["stderr"])
 
@@ -2425,17 +2315,7 @@ def test_workbench_populates_completed_manifest_with_exact_diff_target(tmp_path:
         "--diff-head-revision",
         revision,
     )
-    saved = save_workspace(
-        state_dir,
-        workspace_id,
-        str(target),
-        ".",
-        "diff",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        revision,
-    )
+    saved = save_commit_diff(state_dir, workspace_id, target, revision)
     diff_target = saved["diffTarget"]
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
     write_completed_contract(
@@ -2565,19 +2445,7 @@ def test_workbench_starts_diff_without_presentation_label(tmp_path: Path) -> Non
     (target / "checkout-only.py").write_text("untracked = True\n")
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
-    save_workspace(
-        state_dir,
-        workspace_id,
-        str(target),
-        ".",
-        "diff",
-        "--target-summary",
-        "Latest commit",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        revision,
-    )
+    save_commit_diff(state_dir, workspace_id, target, revision, summary="Latest commit")
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE workspaces SET target_summary = NULL WHERE id = ?", (workspace_id,)
@@ -2641,7 +2509,7 @@ def test_review_changes_rejects_unborn_and_bare_git_repositories(tmp_path: Path)
     state_dir = tmp_path / "state"
     unborn = tmp_path / "unborn"
     unborn.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=unborn, check=True)
+    git_in(unborn, "init", "-q")
     bare = tmp_path / "bare.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
 
@@ -2927,8 +2795,8 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         + "\n"
         + "x" * (1024 * 1024)
     )
-    subprocess.run(["git", "-c", "core.longpaths=true", "add", "."], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=repository, check=True)
+    git_in(repository, "-c", "core.longpaths=true", "add", ".")
+    git_in(repository, "commit", "-qm", "Add source fixture")
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target,
@@ -2969,10 +2837,8 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         assert excerpt.endswith("47  source line 47")
 
     source_path.write_text("replacement source\n")
-    subprocess.run(
-        ["git", "-c", "core.longpaths=true", "add", "--", relative_path], cwd=target, check=True
-    )
-    subprocess.run(["git", "commit", "-qm", "Replace source fixture"], cwd=target, check=True)
+    git_in(target, "-c", "core.longpaths=true", "add", "--", relative_path)
+    git_in(target, "commit", "-qm", "Replace source fixture")
     refreshed = get_scan(state_dir, scan_id)
     if long_path:
         assert "sourceExcerpt" not in refreshed["scan"]["findings"][0]
@@ -2984,8 +2850,8 @@ def commit_source_fixture(target: Path, source: bytes) -> str:
     initialize_git_repository(target)
     (target / "README.md").write_bytes(source)
     # Stage the bytes verbatim so hosts that enable core.autocrlf keep the fixture line endings.
-    subprocess.run(["git", "-c", "core.autocrlf=false", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    git_in(target, "-c", "core.autocrlf=false", "add", "README.md")
+    git_in(target, "commit", "-qm", "Add source fixture")
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target,

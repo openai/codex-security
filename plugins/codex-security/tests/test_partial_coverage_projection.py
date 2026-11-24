@@ -11,8 +11,9 @@ from argparse import Namespace
 
 import pytest
 from workbench_test_support import (
+    pending_review,
     read_review_state,
-    saved_surface,
+    review_surface,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
@@ -57,9 +58,7 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
             "UPDATE deep_scan_workers SET attempt = ? WHERE id = ?", (attempt, worker_id)
         )
     candidate = "pending-candidate"
-    surface = saved_surface(
-        "worker-surface", "Worker follow-up", "needs_follow_up", candidate_id=candidate
-    )
+    surface = review_surface("worker-surface", "Worker follow-up", candidate_id=candidate)
     task = {"id": "worker-task", "candidateId": candidate, "reason": "Validate worker evidence."}
     draft = scan.worker_draft(completeness="partial", surfaces=[surface], deferred=[task])
     write_result_draft(result, draft, mtime_ns=300)
@@ -123,7 +122,7 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
             (merge_state, worker_id),
         )
     surfaces = [
-        saved_surface("shared-surface", label, disposition)
+        review_surface("shared-surface", label, disposition)
         for label, disposition in (
             ("Archive route", "needs_follow_up"),
             ("Archive settings", "no_issue_found"),
@@ -131,11 +130,7 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     ]
     if tagged_surface:
         surfaces[0]["candidateId"] = "source-candidate"
-    deferred = {
-        "id": "pending",
-        "reason": "Verify entry boundaries.",
-        "surfaceIds": ["shared-surface"],
-    }
+    deferred = pending_review("pending", "Verify entry boundaries.", "shared-surface")
     result.write_text(
         json.dumps(
             scan.worker_draft(completeness="partial", surfaces=surfaces, deferred=[deferred])
@@ -167,11 +162,11 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
                 "completeness": "partial",
                 "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
                 "deferred": [
-                    {
-                        "id": f"{worker_id}-attempt-1-deferred-1",
-                        "reason": "Parent requested different proof.",
-                        "surfaceIds": [projected[0]["id"]],
-                    }
+                    pending_review(
+                        f"{worker_id}-attempt-1-deferred-1",
+                        "Parent requested different proof.",
+                        projected[0]["id"],
+                    )
                 ]
                 if parent_surfaces == "edited"
                 else [],
@@ -275,11 +270,8 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
                 **scan.coverage,
                 "completeness": "partial",
                 "surfaces": [
-                    saved_surface(
-                        "prior-surface",
-                        "Prior unfinished review",
-                        "needs_follow_up",
-                        receipts=["artifacts/prior.txt"],
+                    review_surface(
+                        "prior-surface", "Prior unfinished review", receipts=["artifacts/prior.txt"]
                     )
                 ],
                 "deferred": [{"reason": "Prior proof gap.", "surfaceIds": ["prior-surface"]}],
@@ -337,15 +329,9 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
         coverage = {
             **scan.coverage,
             "completeness": "partial",
-            "surfaces": [
-                saved_surface(f"{label}-surface", f"{label} source review", "needs_follow_up")
-            ],
+            "surfaces": [review_surface(f"{label}-surface", f"{label} source review")],
             "deferred": [
-                {
-                    "id": f"{label}-gap",
-                    "reason": f"{label} source needs proof.",
-                    "surfaceIds": [f"{label}-surface"],
-                }
+                pending_review(f"{label}-gap", f"{label} source needs proof.", f"{label}-surface")
             ],
             "explicitExclusions": [
                 {
@@ -419,7 +405,7 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
     idless_surface,
 ):
     scan = publication_scan()
-    surface = saved_surface("source-surface", "Source review", "needs_follow_up")
+    surface = review_surface("source-surface", "Source review")
     deferred = {
         "id": "pending-check",
         "reason": "Validation remains unresolved.",
@@ -628,7 +614,7 @@ def test_rejected_retry_preserves_original_finding_history(
             }
         )
     )
-    surface = saved_surface("review", "Rejected candidate", "rejected", candidate_id=candidate_id)
+    surface = review_surface("review", "Rejected candidate", "rejected", candidate_id=candidate_id)
     result.write_text(json.dumps(scan.worker_draft(surfaces=[surface])))
     with workbench_db:
         workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
@@ -852,7 +838,7 @@ def test_matching_accepted_checkpoint_preserves_receipt_path(
         completeness="complete",
         deferred=[],
         surfaces=[
-            saved_surface(
+            review_surface(
                 "source-review",
                 "Accepted source review",
                 "no_issue_found",
@@ -1002,7 +988,7 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
         os.utime(checkpoint, ns=(300, 300))
         os.utime(head, ns=(300, 300))
         originals = {path: path.read_bytes() for path in (result, checkpoint, head)}
-    rejection = saved_surface(
+    rejection = review_surface(
         "parent-review", "Parent candidate assessment", "rejected", candidate_id="source-candidate"
     )
     if claimed_worker:
@@ -1037,12 +1023,8 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
     scan = publication_scan()
     result = scan.add_worker()
     worker_id = result.parent.name
-    surface = saved_surface("source-surface", "Source follow-up", "needs_follow_up")
-    task = {
-        "id": "source-task",
-        "reason": "Complete source follow-up.",
-        "surfaceIds": [surface["id"]],
-    }
+    surface = review_surface("source-surface", "Source follow-up")
+    task = pending_review("source-task", "Complete source follow-up.", surface["id"])
     draft = scan.worker_draft(completeness="partial", surfaces=[surface], deferred=[task])
     result.write_text(json.dumps(draft))
     projected_surface = {
@@ -1122,9 +1104,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     result = scan.add_worker()
     worker_id = result.parent.name
     candidate = "source-candidate"
-    surface = saved_surface(
-        "source-surface", "Candidate follow-up", "needs_follow_up", candidate_id=candidate
-    )
+    surface = review_surface("source-surface", "Candidate follow-up", candidate_id=candidate)
     task = {
         "id": "source-task",
         "candidateId": candidate,
@@ -1230,12 +1210,8 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     worker_id = result.parent.name
     prefix = f"{worker_id}-attempt-1"
     candidate = "source-candidate"
-    surface = saved_surface("source-surface", "Source follow-up", "needs_follow_up")
-    task = {
-        "id": "source-task",
-        "reason": "Complete source follow-up.",
-        "surfaceIds": [surface["id"]],
-    }
+    surface = review_surface("source-surface", "Source follow-up")
+    task = pending_review("source-task", "Complete source follow-up.", surface["id"])
     surfaces, deferred = [surface], [task]
     if change == "candidate id fallback":
         task.update(id=candidate, candidate=copy.deepcopy(scan.findings[0]))
@@ -1407,12 +1383,12 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             }
         assert len({row["id"] for row in coverage["surfaces"]}) == len(coverage["surfaces"])
     elif change in {"closed sibling candidate", "mixed receipts"}:
-        retained_surface = next(
+        saved_surface = next(
             row for row in coverage["surfaces"] if row.get("label") == surface["label"]
         )
-        assert retained_surface["disposition"] == "no_issue_found", json.dumps(retained_surface)
+        assert saved_surface["disposition"] == "no_issue_found", json.dumps(saved_surface)
         if change == "mixed receipts":
-            assert set(retained_surface["receiptRefs"]) == {
+            assert set(saved_surface["receiptRefs"]) == {
                 (result.parent / "artifacts" / f"{name}.txt").relative_to(scan.scan_dir).as_posix()
                 for name in ("old", "new")
             }
@@ -1484,9 +1460,7 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
     receipt = output / "artifacts" / "review.txt"
     receipt.parent.mkdir()
     receipt.write_text("Synthetic completed review.\n")
-    surface = saved_surface(
-        "source-surface", "Source review", "needs_follow_up", receipts=["artifacts/review.txt"]
-    )
+    surface = review_surface("source-surface", "Source review", receipts=["artifacts/review.txt"])
     draft = scan.worker_draft(completeness="partial", surfaces=[surface], deferred=[])
     result.write_text(json.dumps(draft))
     projected = {
@@ -1510,7 +1484,7 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
     selected = copy.deepcopy(draft)
     selected["complete"] = False
     selected["coverage"]["deferred"] = [
-        {"id": "pending", "reason": "Verify accepted source review.", "surfaceIds": [surface["id"]]}
+        pending_review("pending", "Verify accepted source review.", surface["id"])
     ]
     if spelling == "equivalent":
         selected["coverage"]["surfaces"][0]["receiptRefs"] = ["artifacts/./review.txt"]
@@ -1588,7 +1562,7 @@ def test_recovery_projects_receipts_from_their_source_directory(
     if source == "worker-scan-relative":
         ref = receipt.relative_to(scan.scan_dir).as_posix()
     source_ref = ref.replace("artifacts/", "artifacts/./", 1) if equivalent else ref
-    surface = saved_surface(
+    surface = review_surface(
         "review", "Completed source review", "no_issue_found", receipts=[source_ref]
     )
     worker_coverage = {**scan.coverage, "surfaces": [surface], "deferred": []}
@@ -1640,11 +1614,10 @@ def test_deferred_projection_preserves_each_referenced_source_surface(
     result = scan.add_worker()
     worker_id = result.parent.name
     surfaces = [
-        saved_surface(f"source-{index}", f"Source boundary {index}", "needs_follow_up")
-        for index in range(12)
+        review_surface(f"source-{index}", f"Source boundary {index}") for index in range(12)
     ]
     deferred = [
-        {"id": f"task-{index}", "reason": f"Verify source {index}.", "surfaceIds": [surface["id"]]}
+        pending_review(f"task-{index}", f"Verify source {index}.", surface["id"])
         for index, surface in enumerate(surfaces)
     ]
     draft = scan.worker_draft(completeness="partial", surfaces=surfaces, deferred=deferred)

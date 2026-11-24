@@ -1,3 +1,4 @@
+import { apiSurface, reviewSurface } from "./scan-draft-fixture.ts";
 import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
@@ -18,7 +19,6 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { reviewSurface } from "./scan-draft-fixture.ts";
 import {
   draftApi,
   fixture,
@@ -348,6 +348,8 @@ for (const layout of ["standard", "diff", "deep"] as const) {
           },
         ];
       await writeJson(path.join(f.root, name), document);
+      // On a timestamp tie the head wins over the oldest canonical file.
+      await utimes(path.join(f.root, "checkpoint-head.json"), 1, 1);
       // An empty tool update retains file-authored canonical history. Repeating
       // it also reads the checkpoint produced by the first reconciliation.
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -692,7 +694,7 @@ for (const updateSavedSurface of [false, true]) {
       remediation: "Complete the independent review.",
     };
     const surfaces: (Record<string, unknown> & { id: string })[] = [
-      reviewSurface("api", "API", "needs_follow_up"),
+      apiSurface("needs_follow_up", []),
       {
         id: "new-finding",
         candidateId: "new-finding",
@@ -1249,7 +1251,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   for (const submittedId of [undefined, "api", "other-api"]) {
     test(`${layout}: surface closeout requires matching ID ${submittedId ?? "omitted"}`, async (t) => {
       const f = await fixture(t, layout);
-      const surface = reviewSurface("api", "API", "needs_follow_up", [
+      const surface = apiSurface("needs_follow_up", [
         "artifacts/api-review.md",
       ]);
       const other = {
@@ -1357,9 +1359,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     test(`${layout}: explicit surface follow-up survives ${observation} checkpoint recovery`, async (t) => {
       const f = await fixture(t, layout);
       const pending = { id: "api-review", ...generic, surfaceIds: ["api"] };
-      const surface = reviewSurface("api", "API", "needs_follow_up", [
-        "artifacts/original.md",
-      ]);
+      const surface = apiSurface("needs_follow_up", ["artifacts/original.md"]);
       await f.writeReviewState({ deferred: [pending], surfaces: [surface] });
       const closed = f.draft(
         {
@@ -1587,9 +1587,7 @@ for (const layout of ["standard", "diff"] as const) {
 for (const layout of ["standard", "diff"] as const) {
   test(`${layout}: a staged explicit surface closeout survives omitted and repeated retries`, async (t) => {
     const f = await fixture(t, layout);
-    const surface = reviewSurface("api", "API", "needs_follow_up", [
-      "artifacts/api-review.md",
-    ]);
+    const surface = apiSurface("needs_follow_up", ["artifacts/api-review.md"]);
     await f.writeReviewState({
       surfaces: [surface],
       deferred: [{ id: "review", ...generic, surfaceIds: [surface.id] }],
@@ -2368,7 +2366,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
 for (const additional of ["none", "surface", "task", "completed-surface"]) {
   test(`worker: resolved linked candidate replay preserves completion (${additional})`, async (t) => {
     const f = await fixture(t, "worker");
-    const surface = reviewSurface("api", "API", "needs_follow_up");
+    const surface = apiSurface("needs_follow_up", []);
     const progress = f.draft({
       surfaces: [surface],
       deferred: [

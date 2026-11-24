@@ -20,14 +20,14 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     begin_deep_scan,
-    cancel_scan,
     create_saved_workspace,
-    fail_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    register_scan,
     repository_recipe,
     run_workbench,
     scan_command,
+    scan_cost,
     start_delivered_scan,
     upsert_deep_worker,
     write_completed_contract,
@@ -74,9 +74,7 @@ class ScanFixture:
         )
 
     def fail(self, *arguments: str, message: str = "Fixture failure.") -> dict[str, Any]:
-        return fail_scan(
-            self.state_dir, self.scan_id, message, *arguments, environment=self.environment
-        )
+        return self.command("fail-scan", "--message", message, *arguments)
 
 
 def _worker_usage_directory(fixture: ScanFixture) -> Path:
@@ -855,14 +853,9 @@ def test_scan_usage_timestamp_handles_utc_boundaries(
 def test_scan_cost_preserves_diagnostics_for_overflowing_amount(
     workbench_api, amount: int, measured: bool
 ) -> None:
-    cost = {
-        "model": "fixture-model",
-        "inputTokens": 120,
-        "cachedInputTokens": 30,
-        "cacheWriteInputTokens": 12,
-        "outputTokens": 15,
-        "estimatedUsd": amount,
-    }
+    cost = scan_cost(
+        "fixture-model", input_tokens=120, cached=30, cache_write=12, output_tokens=15, usd=amount
+    )
     value = (
         {
             "usage": {
@@ -1610,20 +1603,8 @@ def test_completion_preserves_large_legacy_cost(tmp_path: Path, delayed_cache_co
             _allowance_event(counted, 6),
         ]
     )
-    cost = {
-        "model": "gpt-5.6-sol",
-        "inputTokens": 15,
-        "cachedInputTokens": 4,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 6,
-        "estimatedUsd": 0.002,
-    }
-    write_completed_contract(
-        fixture.scan_dir, fixture.scan_id, fixture.target, relative_path="app.py"
-    )
-    completed = fixture.command("complete-scan", "--cost-json", json.dumps(cost) + " " * 8192)[
-        "scan"
-    ]
+    cost = scan_cost("gpt-5.6-sol", input_tokens=15, cached=4, output_tokens=6, usd=0.002)
+    completed = _complete_scan(fixture, "--cost-json", json.dumps(cost) + " " * 8192)["scan"]
     assert completed["cost"] == cost
     assert completed["usage"]["accountRateLimits"][0]["primary"]["usedPercent"] == 6
     if delayed_cache_counts:
@@ -1664,14 +1645,7 @@ def test_completion_reconciles_supplied_usage_with_native_evidence(
         "coverageScope": ["thread:scan-parent"],
         **_counts(15, 0, 6),
     }
-    cost = {
-        "model": "gpt-5.6-sol",
-        "inputTokens": 15,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 6,
-        "estimatedUsd": 0.002,
-    }
+    cost = scan_cost("gpt-5.6-sol", input_tokens=15, output_tokens=6, usd=0.002)
     arguments = ["--cost-json", json.dumps({"usage": runtime, "cost": cost})]
     if native_state == "unavailable-turn":
         arguments.extend(["--thread-id", "scan-parent", "--turn-id", "completion-turn"])
@@ -2021,24 +1995,7 @@ def test_cli_completion_refresh_preserves_native_detail_and_sdk_subtotal(
         "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
         "CODEX_STATE_DB": "",
     }
-    registration = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "repository": str(target),
-                "target": {"kind": "repository", "paths": []},
-                "mode": "standard",
-                "config": {},
-            }
-        ),
-        environment=environment,
-    )
+    registration = register_scan(state_dir, target, scan_dir, environment=environment)
     scan_id = registration["scanId"]
     thread_id = str(uuid.uuid4())
     turn_id = "completion-turn"
@@ -2377,9 +2334,7 @@ def test_stopped_scan_retains_measured_usage(tmp_path: Path, outcome: str) -> No
     if outcome == "failed":
         fixture.fail()
     else:
-        cancel_scan(
-            fixture.state_dir, fixture.scan_id, "scan-parent", environment=fixture.environment
-        )
+        fixture.command("cancel-scan", "--thread-id", "scan-parent")
     stopped = fixture.command("get-scan")["scan"]
     assert stopped["progress"]["status"] == outcome
     assert stopped["usage"]["totalTokens"] == 29
@@ -2398,14 +2353,7 @@ def test_failed_scan_reconciles_runtime_subtotals_without_double_counting(tmp_pa
         "cacheWriteInputTokensReported": False,
         **_counts(40, 0, 5),
     }
-    cost = {
-        "model": "fixture-model",
-        "inputTokens": 40,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 5,
-        "estimatedUsd": 0.01,
-    }
+    cost = scan_cost("fixture-model", input_tokens=40, output_tokens=5, usd=0.01)
     for _ in range(2):
         failed = fixture.fail("--cost-json", json.dumps({"usage": runtime, "cost": cost}))["scan"]
         assert failed["usage"] == runtime
@@ -2652,14 +2600,7 @@ def test_stopped_scan_preserves_incomparable_scope_uncertainty(tmp_path: Path) -
         "observedAt": counted.isoformat(),
         **_counts(1_000, 0, 0),
     }
-    cost = {
-        "model": "fixture-model",
-        "inputTokens": 1_000,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 0,
-        "estimatedUsd": 0.01,
-    }
+    cost = scan_cost("fixture-model", input_tokens=1_000, output_tokens=0, usd=0.01)
     stopped = fixture.fail("--cost-json", json.dumps({"usage": runtime, "cost": cost}))["scan"]
     usage = stopped["usage"]
     assert usage["totalTokens"] == 1_200
@@ -3030,14 +2971,7 @@ def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
 
 def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
-    cost = {
-        "model": "fixture-model",
-        "inputTokens": 40,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 5,
-        "estimatedUsd": 0.01,
-    }
+    cost = scan_cost("fixture-model", input_tokens=40, output_tokens=5, usd=0.01)
     with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ?", (json.dumps(cost), fixture.scan_id)
@@ -3223,17 +3157,13 @@ def test_completion_recovers_replaced_deep_worker_threads(
         fixture.scan_dir.rename(archived)
         fixture.scan_dir.mkdir(mode=0o700)
         archived_arguments = ["--archived-scan-dir", str(archived)]
-    run_workbench(
+    register_scan(
         fixture.state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(fixture.target),
-        "--scan-dir",
-        str(fixture.scan_dir),
+        fixture.target,
+        fixture.scan_dir,
         "--archive-existing",
         *archived_arguments,
-        "--recipe-json",
-        json.dumps(repository_recipe(fixture.target, mode="deep")),
+        recipe=repository_recipe(fixture.target, "deep"),
         environment=fixture.environment,
     )
     if legacy_archive:

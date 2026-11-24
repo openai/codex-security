@@ -12,9 +12,10 @@ import pytest
 from deep_deadline_crash import interrupt_finish_before_commit
 from publication_fixtures import worker_finding
 from workbench_test_support import (
+    pending_review,
     read_review_state,
+    review_surface,
     saved_draft,
-    saved_surface,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
@@ -49,20 +50,11 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     completed = scan.complete()
 
     assert completed["progress"]["status"] == "complete"
-    assert (
-        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
-        == "complete"
-    )
+    assert scan.scan_row()["status"] == "complete"
     coverage = read_review_state(workbench_db, scan.scan_dir)
     assert task in coverage[task_state]
     assert coverage["surfaces"] == []
-    assert (
-        workbench_db.execute(
-            "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?",
-            (scan.scan_id,),
-        ).fetchone()[0]
-        == 0
-    )
+    assert scan.run_row()["terminal_reviewed_surface_count"] == 0
     if task_state == "resolvedDeferred":
         assert coverage[task_state] == [task]
     assert any(
@@ -86,14 +78,16 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
 
 def test_discarded_worker_finding_leaves_its_review_pending(workbench_db, deadline_scan):
     scan = deadline_scan
-    canonical = saved_surface("accepted", "Accepted review", "reported")
+    canonical = review_surface("accepted", "Accepted review", "reported")
     scan.coverage["surfaces"] = [canonical]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     worker_id, output = scan.canceled_discovery_output()
     invalid = worker_finding(scan, "incomplete-worker-finding")
     invalid.pop("remediation")
     checkpoint = scan.checkpoint(
-        output, findings=[invalid], surfaces=[saved_surface("entry", "Worker review", "reported")]
+        output,
+        findings=[invalid],
+        surfaces=[review_surface("entry", "Worker review", "reported")],
     )
     original = checkpoint.read_bytes()
 
@@ -201,12 +195,9 @@ def test_deadline_keeps_canonical_coverage_validation_strict(workbench_db, deadl
         "invalid"
         if invalid == "surfaces"
         else [
-            {
-                "id": "accepted",
-                "label": "Accepted review",
-                "disposition": "no_issue_found",
-                "receiptRefs": ["artifacts/missing.txt"],
-            }
+            review_surface(
+                "accepted", "Accepted review", "no_issue_found", receipts=["artifacts/missing.txt"]
+            )
         ]
     )
     coverage_file = scan.scan_dir / "coverage.json"
@@ -219,12 +210,7 @@ def test_deadline_keeps_canonical_coverage_validation_strict(workbench_db, deadl
         scan.finish(terminal_reason="capped")
 
     assert coverage_file.read_bytes() == original
-    assert (
-        workbench_db.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-        == "running"
-    )
+    assert scan.run_row()["status"] == "running"
 
 
 @pytest.mark.parametrize("worker_writeup_exists", [False, True], ids=["missing", "present"])
@@ -317,7 +303,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     worker_id, output = scan.canceled_discovery_output(connection)
     surface_id = f"{worker_id}/entry" if worker_like_id else "entry"
     surfaces = [
-        saved_surface(
+        review_surface(
             surface_id, "Worker review", "no_issue_found" if reviewed else "needs_follow_up"
         )
     ]
@@ -329,9 +315,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
         findings=[]
         if reviewed
         else [worker_finding(scan, "saved-before-crash"), copy.deepcopy(scan.findings[0])],
-        deferred=[]
-        if reviewed
-        else [{"id": "review", "reason": "Review pending.", "surfaceIds": [surface_id]}],
+        deferred=[] if reviewed else [pending_review("review", "Review pending.", surface_id)],
     )
     connection.close()
     interrupt_finish_before_commit(database, scan, 1)

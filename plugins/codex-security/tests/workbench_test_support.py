@@ -21,14 +21,27 @@ from types import ModuleType
 from typing import Any
 from unittest import TestCase, mock
 
-BUDGET_COST = {
-    "model": "gpt-5.6-sol",
-    "inputTokens": 1250,
-    "cachedInputTokens": 200,
-    "cacheWriteInputTokens": 0,
-    "outputTokens": 30,
-    "estimatedUsd": 0.00625,
-}
+
+def scan_cost(
+    model: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    usd: int | float,
+    cached: int = 0,
+    cache_write: int = 0,
+) -> dict[str, object]:
+    return {
+        "model": model,
+        "inputTokens": input_tokens,
+        "cachedInputTokens": cached,
+        "cacheWriteInputTokens": cache_write,
+        "outputTokens": output_tokens,
+        "estimatedUsd": usd,
+    }
+
+
+BUDGET_COST = scan_cost("gpt-5.6-sol", input_tokens=1250, cached=200, output_tokens=30, usd=0.00625)
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 SNAPSHOT_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "snapshot_sqlite.py"
@@ -44,6 +57,12 @@ def load_script(name: str, *, module_name: str | None = None) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def retained_source_json(connection: sqlite3.Connection, scan_id: str) -> str | None:
+    return connection.execute(
+        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+    ).fetchone()[0]
 
 
 def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> dict[str, Any]:
@@ -163,14 +182,20 @@ def interrupt_publication(*args, **kwargs):
     raise OSError("Synthetic publication interruption")
 
 
-def saved_surface(surface_id, label, disposition, *, candidate_id=None, receipts=()):
+def review_surface(
+    identity, label, disposition="needs_follow_up", *, receipts=(), candidate_id=None
+):
     return {
-        "id": surface_id,
+        "id": identity,
         **({"candidateId": candidate_id} if candidate_id is not None else {}),
         "label": label,
         "disposition": disposition,
         "receiptRefs": list(receipts),
     }
+
+
+def pending_review(identity, reason, surface_id="entry"):
+    return {"id": identity, "reason": reason, "surfaceIds": [surface_id]}
 
 
 def saved_coverage(*, deferred=(), surfaces=()):
@@ -201,6 +226,12 @@ def saved_draft(
     }
 
 
+def write_draft_checkpoint(output: Path, scan_id: str, *, mtime_ns=None, **draft) -> Path:
+    return write_checkpoint(
+        output / "checkpoints", saved_draft(scan_id, **draft), mtime_ns=mtime_ns
+    )
+
+
 def saved_binding(coverage_mode="repository", *, repository="test", status="interrupted"):
     return {
         "status": status,
@@ -223,18 +254,18 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
     }
 
 
-def merge_interrupted_results(
-    module, scan_dir, scan_id, binding, workers=None, *, stopped=True, frozen_source_digests=None
+def merge_interrupted(
+    module, scan_dir, scan_id, binding, workers=None, warnings=None, *, stopped=True, **options
 ):
     return module.merge_saved_results(
         scan_dir,
         scan_id,
         binding,
         [] if workers is None else workers,
-        [],
+        [] if warnings is None else warnings,
         stopped=stopped,
         reason="interrupted",
-        frozen_source_digests=frozen_source_digests,
+        **options,
     )
 
 
@@ -242,7 +273,7 @@ def replay_saved_results(
     module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
 ):
     """Rebuild the interrupted result using the source digests frozen in the supplied manifest."""
-    return merge_interrupted_results(
+    return merge_interrupted(
         module,
         scan_dir,
         scan_id,
@@ -334,6 +365,39 @@ def run_workbench(
     return json.loads(completed.stdout)
 
 
+def repository_recipe(
+    repository: Path, mode: str = "standard", paths: list[str] | None = None
+) -> dict[str, object]:
+    return {
+        "config": {},
+        "mode": mode,
+        "repository": str(repository),
+        "target": {"kind": "repository" if paths is None else "paths", "paths": paths or []},
+    }
+
+
+def register_scan(
+    state_dir: Path,
+    repository: Path,
+    scan_dir: Path,
+    *arguments: str,
+    recipe: dict[str, object] | None = None,
+    **options: Any,
+) -> dict[str, object]:
+    return run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(repository),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        json.dumps(repository_recipe(repository) if recipe is None else recipe),
+        *arguments,
+        **options,
+    )
+
+
 def begin_deep_scan(
     state_dir: Path, thread_id: str, *extra: str, **options: Any
 ) -> dict[str, object]:
@@ -384,16 +448,6 @@ def upsert_deep_worker(
     )
 
 
-def read_fixture_deep_scan(state_dir: Path, scan_id: str, environment: dict[str, str] | None):
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
-        owner = db.execute(
-            """SELECT COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id)
-               FROM scans JOIN workspaces ON scans.workspace_id = workspaces.id WHERE scans.id = ?""",
-            (scan_id,),
-        ).fetchone()[0]
-    return get_deep_scan(state_dir, scan_id, owner, environment=environment)
-
-
 def seed_legacy_reducer(
     state_dir: Path,
     scan_id: str,
@@ -421,14 +475,8 @@ def seed_legacy_reducer(
 
 
 def seal_legacy_reducer(
-    state_dir: Path,
-    scan_id: str,
-    worker_id: str,
-    result: str,
-    new_count: int,
-    *,
-    environment: dict[str, str] | None = None,
-) -> dict[str, object]:
+    state_dir: Path, scan_id: str, worker_id: str, result: str, new_count: int
+) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
         db.execute(
             """UPDATE deep_scan_workers SET status = 'succeeded', result_manifest_path = ?,
@@ -445,7 +493,6 @@ def seal_legacy_reducer(
                CASE WHEN ? > 0 THEN 0 ELSE consecutive_no_new + ? END, phase = 'discovery' WHERE scan_id = ?""",
             (new_count, inputs, scan_id),
         )
-    return read_fixture_deep_scan(state_dir, scan_id, environment)
 
 
 def finish_deep_scan(
@@ -484,6 +531,10 @@ def set_triage(
         *extra,
         **options,
     )
+
+
+def close_finding(state_dir: Path, occurrence_id: str, reason: str, note: str) -> dict[str, object]:
+    return set_triage(state_dir, occurrence_id, "closed", "--close-reason", reason, "--note", note)
 
 
 def mark_handoff_delivered(
@@ -659,6 +710,30 @@ class RemediationRequest:
         return self._run("release-finding-remediation-claim", "--action-token", token)
 
 
+def save_commit_diff(
+    state_dir: Path,
+    workspace_id: str,
+    target: Path,
+    revision: str,
+    *,
+    summary: str | None = None,
+    check: bool = True,
+) -> dict[str, object]:
+    return save_workspace(
+        state_dir,
+        workspace_id,
+        str(target),
+        ".",
+        "diff",
+        *(["--target-summary", summary] if summary is not None else []),
+        "--diff-target-kind",
+        "commit",
+        "--diff-head-revision",
+        revision,
+        check=check,
+    )
+
+
 def save_workspace(
     state_dir: Path,
     workspace_id: str,
@@ -763,15 +838,25 @@ def empty_target_scan(tmp_path: Path) -> tuple[Path, Path, str, Path]:
     return state_dir, target, scan_id, scan_dir
 
 
+def git_in(directory: Path, *arguments: str) -> None:
+    subprocess.run(["git", *arguments], cwd=directory, check=True)
+
+
+def add_detached_worktree(repository: Path, linked: Path) -> None:
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+
+
 def initialize_git_repository(target: Path) -> str:
     target.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
-    subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=target, check=True)
-    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=target, check=True)
+    git_in(target, "init", "-q")
+    git_in(target, "config", "user.email", "fixture@example.com")
+    git_in(target, "config", "user.name", "Fixture")
     (target / "README.md").write_text("fixture\n")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Initial commit"], cwd=target, check=True)
-    subprocess.run(["git", "branch", "-M", "main"], cwd=target, check=True)
+    git_in(target, "add", "README.md")
+    git_in(target, "commit", "-qm", "Initial commit")
+    git_in(target, "branch", "-M", "main")
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target,
@@ -782,20 +867,7 @@ def initialize_git_repository(target: Path) -> str:
 
 
 def configure_git_command(target: Path, key: str, script: Path) -> None:
-    subprocess.run(
-        ["git", "config", key, shlex.join([sys.executable, str(script)])],
-        cwd=target,
-        check=True,
-    )
-
-
-def repository_recipe(repository: Path, *, mode: str) -> dict[str, Any]:
-    return {
-        "config": {},
-        "mode": mode,
-        "repository": str(repository),
-        "target": {"kind": "repository", "paths": []},
-    }
+    git_in(target, "config", key, shlex.join([sys.executable, str(script)]))
 
 
 def create_saved_workspace(
@@ -865,11 +937,70 @@ def mark_deep_coordinator_succeeded(state_dir: Path, scan_id: str, scan_dir: Pat
     return manifest
 
 
-def read_draft_documents(scan_dir: Path) -> dict:
+def write_deep_contract(scan_dir: Path, scan_id: str, target: Path, *, relative_path: str) -> dict:
+    return write_completed_contract(
+        scan_dir, scan_id, target, relative_path=relative_path, coverage_mode="deep_repository"
+    )
+
+
+ARCHIVE_ANCHOR = "archive-entry-write-without-containment"
+
+
+def archive_finding(relative_path: str, identity_anchor: str = ARCHIVE_ANCHOR) -> dict:
     return {
-        "manifest": json.loads((scan_dir / "scan-manifest.json").read_text()),
-        "findings": json.loads((scan_dir / "findings.json").read_text()),
-        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+        "ruleId": "path-traversal.archive-extraction",
+        "identity": {"anchor": identity_anchor},
+        "title": "Unsafe archive extraction can escape the output directory",
+        "summary": "An attacker-controlled path reaches a filesystem write.",
+        "severity": {
+            "level": "high",
+            "rationale": "The reachable write can escape the extraction root.",
+        },
+        "confidence": {"level": "high", "rationale": "Direct source trace."},
+        "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
+        "locations": [{"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}],
+        "codeEvidence": [
+            {
+                "id": "archive-write",
+                "label": "Unchecked archive write",
+                "path": relative_path,
+                "startLine": 41,
+                "endLine": 44,
+                "language": "python",
+                "code": "destination.write_bytes(entry.read())",
+                "explanation": "The destination is written before containment is checked.",
+            }
+        ],
+        "validation": {
+            "method": "archive extraction test",
+            "summary": "A crafted entry wrote outside the extraction root.",
+            "evidenceRefs": ["archive-write"],
+            "assertions": ["The archive entry controls the destination path."],
+            "limitations": ["The test used a temporary extraction directory."],
+        },
+        "rootCause": {
+            "summary": "The archive destination is written before containment is enforced.",
+            "evidenceRefs": ["archive-write"],
+        },
+        "evidenceExcerpt": "destination.write_bytes(entry.read())",
+        "attackPath": {
+            "dataflow": "archive entry -> destination path -> filesystem write",
+            "reachability": "An archive uploader can supply the crafted entry.",
+            "evidenceRefs": ["archive-write"],
+            "impact": {
+                "level": "high",
+                "why": "The write can replace files outside the extraction root.",
+            },
+            "likelihood": {
+                "level": "high",
+                "why": "No containment check blocks the crafted path.",
+            },
+            "limitations": ["Writable targets depend on process permissions."],
+        },
+        "preventiveControls": ["Use a containment-checking extraction helper."],
+        "remediation": "Reject archive entries that escape the extraction root.",
+        "remediationTests": ["Reject traversal entries during extraction."],
+        "provenance": {"source": "local_plugin"},
     }
 
 
@@ -878,7 +1009,8 @@ def write_completed_contract(
     scan_id: str,
     target: Path,
     *,
-    identity_anchor: str = "archive-entry-write-without-containment",
+    write_report: bool = True,
+    identity_anchor: str = ARCHIVE_ANCHOR,
     include_paths: list[str] | None = None,
     relative_path: str = "src/extract.py",
     target_kind: str = "directory_snapshot",
@@ -888,8 +1020,8 @@ def write_completed_contract(
     snapshot_digest: str | None = None,
     coverage_mode: str = "repository",
     inventory_strategy: str = "repository",
-) -> None:
-    include_paths = include_paths or ["."]
+) -> dict:
+    include_paths = list(include_paths or ["."])
     target_contract = {
         "kind": target_kind,
         "targetId": stable_target_id(target),
@@ -911,65 +1043,7 @@ def write_completed_contract(
         "documentType": "codex-security.findings",
         "schemaVersion": "1.0",
         "scanId": scan_id,
-        "findings": [
-            {
-                "ruleId": "path-traversal.archive-extraction",
-                "identity": {"anchor": identity_anchor},
-                "title": "Unsafe archive extraction can escape the output directory",
-                "summary": "An attacker-controlled path reaches a filesystem write.",
-                "severity": {
-                    "level": "high",
-                    "rationale": "The reachable write can escape the extraction root.",
-                },
-                "confidence": {"level": "high", "rationale": "Direct source trace."},
-                "taxonomy": {"category": "path-traversal", "cwe": ["CWE-22"]},
-                "locations": [
-                    {"path": relative_path, "startLine": 41, "endLine": 44, "role": "sink"}
-                ],
-                "codeEvidence": [
-                    {
-                        "id": "archive-write",
-                        "label": "Unchecked archive write",
-                        "path": relative_path,
-                        "startLine": 41,
-                        "endLine": 44,
-                        "language": "python",
-                        "code": "destination.write_bytes(entry.read())",
-                        "explanation": "The destination is written before containment is checked.",
-                    }
-                ],
-                "validation": {
-                    "method": "archive extraction test",
-                    "summary": "A crafted entry wrote outside the extraction root.",
-                    "evidenceRefs": ["archive-write"],
-                    "assertions": ["The archive entry controls the destination path."],
-                    "limitations": ["The test used a temporary extraction directory."],
-                },
-                "rootCause": {
-                    "summary": "The archive destination is written before containment is enforced.",
-                    "evidenceRefs": ["archive-write"],
-                },
-                "evidenceExcerpt": "destination.write_bytes(entry.read())",
-                "attackPath": {
-                    "dataflow": "archive entry -> destination path -> filesystem write",
-                    "reachability": "An archive uploader can supply the crafted entry.",
-                    "evidenceRefs": ["archive-write"],
-                    "impact": {
-                        "level": "high",
-                        "why": "The write can replace files outside the extraction root.",
-                    },
-                    "likelihood": {
-                        "level": "high",
-                        "why": "No containment check blocks the crafted path.",
-                    },
-                    "limitations": ["Writable targets depend on process permissions."],
-                },
-                "preventiveControls": ["Use a containment-checking extraction helper."],
-                "remediation": "Reject archive entries that escape the extraction root.",
-                "remediationTests": ["Reject traversal entries during extraction."],
-                "provenance": {"source": "local_plugin"},
-            }
-        ],
+        "findings": [archive_finding(relative_path, identity_anchor)],
     }
     coverage = {
         "documentType": "codex-security.coverage",
@@ -979,7 +1053,9 @@ def write_completed_contract(
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
         "excludePaths": [],
-        "surfaces": [saved_surface("surface_archive_extraction", "Archive extraction", "reported")],
+        "surfaces": [
+            review_surface("surface_archive_extraction", "Archive extraction", "reported")
+        ],
         "explicitExclusions": [],
         "deferred": [],
     }
@@ -996,7 +1072,7 @@ def write_completed_contract(
             "startedAt": "2026-06-02T18:00:00Z",
             "completedAt": "2026-06-02T18:09:00Z",
             "target": target_contract,
-            "scope": {"includePaths": include_paths, "excludePaths": []},
+            "scope": {"includePaths": include_paths.copy(), "excludePaths": []},
             "coverageRef": "coverage.json",
             "findingsRef": "findings.json",
         },
@@ -1004,7 +1080,9 @@ def write_completed_contract(
     (scan_dir / "findings.json").write_text(json.dumps(findings))
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
     (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-    (scan_dir / "report.md").write_text("# Fixture report\n")
+    if write_report:
+        (scan_dir / "report.md").write_text("# Fixture report\n")
+    return {"manifest": manifest, "findings": findings, "coverage": coverage}
 
 
 def windows_file_backend() -> mock.Mock:

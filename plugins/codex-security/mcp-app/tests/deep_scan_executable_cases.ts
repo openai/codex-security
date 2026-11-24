@@ -21,10 +21,10 @@ import {
   type FakeCodexFixture,
   fakeCodexFixture,
   resolveCodexPath,
+  workerRequest,
 } from "./deep_scan_executor_fixture.ts";
 import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
-import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
+import { restoreEnv } from "./support/fake-codex-source.ts";
 
 export async function testExecutorExecutablePinning() {
   const originalSpawn = childProcess.spawn;
@@ -466,7 +466,7 @@ export async function testExecutorExecutablePinning() {
 }
 
 function runTurn(
-  executor: WorkerExecutor,
+  executor: InstanceType<typeof CodexSdkWorkerExecutor>,
   promptPath: string,
   cwd: string,
   turn: "discovery" | "resume" | "compare",
@@ -485,24 +485,4 @@ function runTurn(
       turn === "resume" ? { resumeThreadId: "fixture-resumed-thread" } : {},
     ),
   );
-}
-
-function workerRequest(
-  promptPath: string,
-  workingDirectory: string,
-  options: Partial<CodexWorkerRequest> = {},
-): CodexWorkerRequest {
-  return {
-    kind: "discovery",
-    promptPath,
-    workingDirectory,
-    subagents: 0,
-    signal: new AbortController().signal,
-    ...options,
-  };
-}
-
-function restoreEnv(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
 }

@@ -7,7 +7,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import read_review_state
+from workbench_test_support import (
+    read_review_state,
+    review_surface,
+)
 
 
 @pytest.mark.parametrize(
@@ -34,15 +37,7 @@ def test_stopped_scan_requires_valid_rejection_evidence_before_sealing(
     scan.coverage["surfaces"] = (
         []
         if label is None
-        else [
-            {
-                "id": "rejection",
-                "candidateId": "candidate-a",
-                "label": label,
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
-        ]
+        else [review_surface("rejection", label, "rejected", candidate_id="candidate-a")]
     )
     coverage_path = scan.scan_dir / "coverage.json"
     coverage_path.write_text(json.dumps(scan.coverage))
@@ -120,9 +115,7 @@ def test_standard_completion_requires_valid_closure_evidence_before_sealing(
         assert completed["warnings"] == []
 
     assert checkpoint.read_bytes() == checkpoint_bytes
-    status = workbench_db.execute(
-        "SELECT status FROM scans WHERE id = ?", (scan.scan_id,)
-    ).fetchone()[0]
+    status = scan.scan_row()["status"]
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     if invalid:
         assert status == "running"

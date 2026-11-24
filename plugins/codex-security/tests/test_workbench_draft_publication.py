@@ -11,21 +11,18 @@ from pathlib import Path
 import pytest
 from test_workbench_standard_deep_results import deep_scan_fixture
 from workbench_test_support import (
-    read_draft_documents,
     read_review_state,
+    register_scan,
     repository_recipe,
     run_workbench,
-    write_completed_contract,
+    write_deep_contract,
 )
 
 
 def stage_model_draft(tmp_path, scan_dir, scan_id, target, model, *, complete=True):
     contract_dir = tmp_path / "contract"
     contract_dir.mkdir()
-    write_completed_contract(
-        contract_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
-    )
-    documents = read_draft_documents(contract_dir)
+    documents = write_deep_contract(contract_dir, scan_id, target, relative_path="app.py")
     documents["manifest"] = {
         "scan": {
             **{key: documents["manifest"]["scan"][key] for key in ("target", "scope")},
@@ -127,15 +124,8 @@ def test_deep_setup_draft_before_orchestration(
         target.mkdir()
         (target / "app.py").write_text("value = request.args['value']\n")
         scan_dir.mkdir(mode=0o700)
-        registered = run_workbench(
-            state_dir,
-            "register-cli-scan",
-            "--scan-dir",
-            str(scan_dir),
-            "--repository",
-            str(target),
-            "--recipe-json",
-            json.dumps(repository_recipe(target, mode="deep")),
+        registered = register_scan(
+            state_dir, target, scan_dir, recipe=repository_recipe(target, "deep")
         )
         scan_id = str(registered["scanId"])
     model = {"format": "markdown", "content": "# Supplied setup model\n"}

@@ -251,7 +251,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           : receiptSpelling === "scan"
             ? archivedRef
             : `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/prior.txt`;
-    if (receiptOwnershipRetry) {
+    if (receiptOwnershipRetry || closeRetriedSurface) {
       await recordWorkerDraft(artifactDir, {
         complete: false,
         findings: [],
@@ -299,29 +299,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                     ],
                   },
                 ],
-        },
-      });
-      return;
-    }
-    if (closeRetriedSurface) {
-      await recordWorkerDraft(artifactDir, {
-        complete: false,
-        findings: [],
-        reviewState: {
-          completeness: "partial",
-          surfaces: [
-            reviewSurface("current", "Current review", "needs_follow_up", [
-              receiptRef,
-            ]),
-          ],
-          explicitExclusions: [],
-          deferred: [
-            {
-              id: "prior-gap",
-              reason: "Verify the earlier boundary.",
-              surfaceIds: ["current"],
-            },
-          ],
         },
       });
       return;
@@ -557,23 +534,16 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     }
     const activeReceiptRef = closeRetriedSurface
       ? closureReceiptRef
-      : sameNamedNewSurface
+      : sameNamedNewSurface || sharedReceipt
         ? sharedRef
-        : sharedReceipt
-          ? sharedRef
-          : activeReceiptSpelling === "worker"
-            ? "artifacts/review.md"
-            : activeReceiptSpelling === "scan"
-              ? activeQualifiedRef
-              : activeQualifiedRef.replace("artifacts/", "artifacts/./");
+        : activeReceiptSpelling === "worker"
+          ? "artifacts/review.md"
+          : activeReceiptSpelling === "scan"
+            ? activeQualifiedRef
+            : activeQualifiedRef.replace("artifacts/", "artifacts/./");
     const resultPath = path.join(artifactDir, "result.json");
     if (receiptOwnershipRetry) {
-      const newRef = receiptCollision
-        ? receiptSpelling === "shared scan"
-          ? sharedRef
-          : "artifacts/prior.txt"
-        : "artifacts/review.md";
-      const local = path.join(artifactDir, newRef);
+      const local = path.join(artifactDir, closureReceiptRef);
       await writeReceipt(local, "Synthetic review evidence.\n");
       const current = {
         id: "current",
@@ -583,7 +553,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         ...(receiptOwnershipRetry === "candidate"
           ? { candidateId: "prior-candidate" }
           : {}),
-        receiptRefs: [newRef],
+        receiptRefs: [closureReceiptRef],
       };
       if (receiptOwnershipRetry === "unrelated") {
         current.receiptRefs = [
@@ -602,7 +572,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             ...(receiptOwnershipRetry === "unrelated"
               ? [
                   reviewSurface("closed", "Separate review", "no_issue_found", [
-                    newRef,
+                    closureReceiptRef,
                   ]),
                 ]
               : []),

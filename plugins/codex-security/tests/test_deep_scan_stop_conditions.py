@@ -10,9 +10,10 @@ import sqlite3
 import pytest
 from publication_fixtures import assert_published_aggregate
 from workbench_test_support import (
+    pending_review,
     read_review_state,
+    review_surface,
     saved_draft,
-    saved_surface,
     select_checkpoint,
     write_checkpoint,
 )
@@ -101,12 +102,7 @@ def test_deadline_does_not_recover_invalid_reduced_findings(workbench_db, deadli
         scan.finish(terminal_reason="capped")
 
     assert findings_path.read_bytes() == original
-    assert (
-        workbench_db.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-        == "running"
-    )
+    assert scan.run_row()["status"] == "running"
 
 
 def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(deadline_scan):
@@ -162,12 +158,12 @@ def test_deadline_does_not_turn_invalid_worker_receipts_into_parent_artifacts(
     scan.checkpoint(
         output,
         surfaces=[
-            {
-                "id": "entry",
-                "label": "Unverified review",
-                "disposition": "no_issue_found",
-                "receiptRefs": ["notes.txt", "../review.txt", "/artifacts/review.txt"],
-            }
+            review_surface(
+                "entry",
+                "Unverified review",
+                "no_issue_found",
+                receipts=["notes.txt", "../review.txt", "/artifacts/review.txt"],
+            )
         ],
     )
 
@@ -220,9 +216,9 @@ def test_deadline_preserves_worker_receipts_and_surface_links(
         checkpoint = scan.checkpoint(
             source,
             surfaces=[
-                saved_surface("entry", label, "no_issue_found", receipts=["artifacts/review.txt"])
+                review_surface("entry", label, "no_issue_found", receipts=["artifacts/review.txt"])
             ],
-            deferred=[{"id": "follow-up", "reason": label, "surfaceIds": ["entry"]}],
+            deferred=[pending_review("follow-up", label, "entry")],
         )
         expected[label] = (worker_id, receipt, checkpoint, checkpoint.read_bytes())
 
@@ -321,7 +317,7 @@ def test_unfinished_checkpoints_after_a_completed_reduction(workbench_db, satura
         result.parent,
         findings=[recovered, duplicate],
         deferred=[pending],
-        surfaces=[saved_surface("upload", "Upload handler", "needs_follow_up")],
+        surfaces=[review_surface("upload", "Upload handler")],
     )
     source_bytes = checkpoint.read_bytes()
     # Earlier parent, discovery, and reducer drafts must not undo reduction.
@@ -508,12 +504,7 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
         name: ((scan.scan_dir / name).read_bytes(), (scan.scan_dir / name).stat().st_mtime_ns)
         for name in artifacts
     } == artifacts
-    assert (
-        workbench_db.execute(
-            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-        == "running"
-    )
+    assert scan.run_row()["status"] == "running"
     with workbench_db:
         workbench_db.execute("DROP TRIGGER reject_deadline_commit")
     assert scan.finish(terminal_reason="capped")["status"] == "succeeded"
@@ -550,9 +541,9 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
             result.parent,
             complete=False,
             surfaces=[
-                saved_surface("api", name, "no_issue_found", receipts=["artifacts/review.md"])
+                review_surface("api", name, "no_issue_found", receipts=["artifacts/review.md"])
             ],
-            deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+            deferred=[pending_review("review", "Review remains.", "api")],
         )
         head = select_checkpoint(result.parent, checkpoint)
         workers[worker_id] = receipt

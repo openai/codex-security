@@ -11,8 +11,8 @@ from argparse import Namespace
 import pytest
 from workbench_test_support import (
     read_review_state,
+    review_surface,
     saved_draft,
-    saved_surface,
     select_checkpoint,
     sort_checkpoint_entries,
     write_checkpoint,
@@ -30,7 +30,7 @@ def canonical_disposition(scan, disposition, complete_marker):
     coverage = {
         **scan.coverage,
         "surfaces": [
-            saved_surface(
+            review_surface(
                 "reviewed-surface",
                 "Reviewed surface",
                 disposition.removeprefix("provenance-"),
@@ -92,9 +92,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
             patch.setattr(saved, "_write_prepared_scan_finalization", publish)
             scan.fail()
         if flow == "interrupted-stop":
-            row = workbench_db.execute(
-                "SELECT * FROM scans WHERE id = ?", (scan.scan_id,)
-            ).fetchone()
+            row = scan.scan_row()
             assert row["retained_source_digests_json"]
             assert row["seal_manifest_digest"] is None
             # A retry must make the same choice from frozen sources, even after a
@@ -331,7 +329,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
         scan.scan_id,
         complete=True,
         surfaces=[
-            saved_surface(
+            review_surface(
                 "reviewed-surface", "Reviewed surface", "rejected", candidate_id="candidate-review"
             )
         ],
@@ -480,7 +478,7 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
         scan.scan_id,
         complete=True,
         surfaces=[
-            saved_surface(
+            review_surface(
                 "reviewed-surface", "Reviewed surface", "rejected", candidate_id="candidate-review"
             )
         ],

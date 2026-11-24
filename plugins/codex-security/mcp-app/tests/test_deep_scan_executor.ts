@@ -11,6 +11,7 @@ import {
   assertWorkerPermissionProfile,
   captureWorkerLaunches,
   workerLaunchForModel,
+  workerPermissionProfileOverride,
   assertWorkerSubagentPolicy,
 } from "./deep_scan_executor_fixture.ts";
 import {
@@ -906,11 +907,11 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
             bundledTools,
           );
           assert.equal(invocation.bundledTool, "synthetic bundled search");
-          assert.equal(
-            preflight.gitEnvironment.PATH,
-            invocation.runtimeEnvironment.PATH,
-          );
         }
+        assert.equal(
+          preflight.gitEnvironment.PATH,
+          invocation.runtimeEnvironment.PATH,
+        );
         assert.equal(process.env.CODEX_HOME, relativeHome);
         assert.deepEqual(preflight.requests, [
           { method: "config/read", cwd: workingDirectory },
@@ -1267,6 +1268,11 @@ env_key = "CODEX_API_KEY"
         parentSandbox: trustedParentSandbox,
       });
       for (const resumeThreadId of [undefined, "fixture-resume"]) {
+        if (resumeThreadId) {
+          runtimeEnvironment.RUNNER_TRACKING_ID = "synthetic-resumed-job";
+          process.env.RUNNER_TRACKING_ID =
+            runtimeEnvironment.RUNNER_TRACKING_ID;
+        }
         await executor.run(
           workerRequest(promptPath, fixture.root, { resumeThreadId }),
         );
@@ -1275,6 +1281,14 @@ env_key = "CODEX_API_KEY"
             ? await readJson(fixture.preflightMarkerPath)
             : nativePreflight!;
         const invocation = await readJson(fixture.markerPath);
+        assertReadOnlyWorkerPolicy(invocation.argv);
+        assert.equal(
+          workerPermissionProfileOverride(preflight.argv),
+          workerPermissionProfileOverride(invocation.argv),
+        );
+        if (resumeThreadId)
+          assertFlagPair(invocation.argv, "resume", resumeThreadId);
+        else assert.equal(invocation.argv.includes("resume"), false);
         assert.equal(preflight.codexHome, fixture.root);
         assert.equal(
           preflight.runnerTrackingId,
