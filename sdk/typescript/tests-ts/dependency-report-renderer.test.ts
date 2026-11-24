@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
+import { renderDependencyCode } from "../src/dependency-report-audit.js";
 import { renderDependencyReport } from "../src/dependency-report-renderer.js";
 import {
   broadReport,
@@ -55,6 +56,43 @@ function panel(html: string, id: string) {
   if (!article) throw new Error("Missing finding: " + id);
   return article;
 }
+test("renders untrusted source as escaped, numbered lines", () => {
+  const source =
+    'const item = "<img src=x onerror=alert(1)> & data";\r\n\nreturn item;\n';
+  const html = renderDependencyCode(source, "worker.ts", 17, new Set([19]));
+  expect(html).not.toContain("<img");
+  expect(html).toContain("&lt;img src=x onerror=alert(1)&gt; &amp; data");
+  expect(html).toContain("&#13;");
+  expect(attributes(html, ".code-row", "data-line")).toEqual([
+    "17",
+    "18",
+    "19",
+    "20",
+  ]);
+  expect(attributes(html, "[data-highlighted]", "data-line")).toEqual(["19"]);
+  expect(elements(html, ".tok-keyword").map((t) => t.text)).toEqual([
+    "const",
+    "return",
+  ]);
+  const plain = renderDependencyCode(source, "notes.txt", 17);
+  expect(plain).not.toContain("<img");
+  expect(plain).not.toContain("tok-");
+});
+
+test("marks only unambiguous expressions on the cited line and escapes syntax inside the mark", () => {
+  const listing = (line: string, argument: string) =>
+    renderDependencyCode(line, "src.ts", 3, new Set([3]), {
+      line: 3,
+      expression: argument,
+    });
+  expect(listing("run(a, a)", "a")).not.toContain("<mark");
+  expect(listing("run(payload)", "load")).not.toContain("<mark");
+  const marked = listing('read(doc["<main>"])', 'doc["<main>"]');
+  expect(marked).toContain(
+    '<mark class="trace-argument">doc[<span class="tok-string">&quot;&lt;main&gt;&quot;</span>]</mark>',
+  );
+});
+
 describe("call site report", () => {
   test("walks retained frames, opens the exact caller line, and does not pass caller code off as dependency code", () => {
     const raw = stackReport(),

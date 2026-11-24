@@ -1,7 +1,5 @@
-import {
-  escapeHtml as esc,
-  renderDependencyCode,
-} from "./dependency-report-code.js";
+import Prism from "prismjs";
+import loadLanguages from "prismjs/components/index.js";
 import {
   captureLimits,
   citationKey,
@@ -18,6 +16,133 @@ import {
 import { asRecord, isRecord } from "./record.js";
 import type { DependencyClaimReference } from "./dependency-stack-claims.js";
 import { claimKey, walkClaims } from "./dependency-report-reader.js";
+
+// Only these bundled grammars can be loaded. File paths never select a module.
+const languages = {
+  javascript: "js mjs cjs jsx",
+  typescript: "ts mts cts tsx",
+  python: "py pyi",
+  go: "go",
+  rust: "rs",
+  cpp: "c h cc hh cpp hpp cxx hxx",
+  java: "java",
+  csharp: "cs",
+  swift: "swift",
+  kotlin: "kt kts",
+  json: "json jsonc",
+  yaml: "yaml yml",
+  bash: "sh bash zsh ksh fish bashrc zshrc profile",
+};
+loadLanguages(Object.keys(languages));
+const grammarByExtension = new Map(
+  Object.entries(languages).flatMap(([name, extensions]) =>
+    extensions.split(" ").map((ext) => [ext, Prism.languages[name]] as const),
+  ),
+);
+const tokenStyles = new Map([
+  ["comment", "comment"],
+  ["keyword", "keyword"],
+  ["string", "string"],
+  ["template-string", "string"],
+  ["char", "string"],
+  ["number", "number"],
+  ["boolean", "literal"],
+  ["null", "literal"],
+  ["property", "property"],
+  ["key", "property"],
+]);
+
+const escapes: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+  "\r": "&#13;",
+};
+export const esc = (text: string) =>
+  text.replace(/[&<>"'\r]/gu, (character) => escapes[character]!);
+
+/** Match an explicitly reported expression once, in the original text before escaping. */
+function argumentRange(line: string | undefined, expression: string) {
+  if (!line || !expression) return;
+  const start = line.indexOf(expression);
+  if (start < 0 || start !== line.lastIndexOf(expression)) return;
+  const end = start + expression.length;
+  const word = /[$\p{ID_Continue}]/u;
+  if (word.test(line[start - 1] ?? "") && word.test(expression[0]!)) return;
+  if (word.test(line[end] ?? "") && word.test(expression.at(-1)!)) return;
+  return { start, end };
+}
+
+export function renderDependencyCode(
+  text: string,
+  path: string,
+  firstLine: number,
+  highlightedLines?: ReadonlySet<number>,
+  argument?: { line: number; expression: string },
+  follow = false,
+  relatedLines?: ReadonlySet<number>,
+): string {
+  const extension = /\.([a-z\d]+)$/iu.exec(path)?.[1]?.toLowerCase() ?? "";
+  const grammar = grammarByExtension.get(extension);
+  const lines = [""];
+  const argumentLine = argument && argument.line - firstLine;
+  const range =
+    argument && argumentLine !== undefined
+      ? argumentRange(text.split("\n")[argumentLine], argument.expression)
+      : undefined;
+  let column = 0;
+  function append(value: string, token?: string) {
+    for (const [index, part] of value.split("\n").entries()) {
+      if (index) {
+        lines.push("");
+        column = 0;
+      }
+      if (!part) continue;
+      const row = lines.length - 1;
+      const styled = (s: string) =>
+        s && token ? `<span class="tok-${token}">${esc(s)}</span>` : esc(s);
+      if (
+        range &&
+        row === argumentLine &&
+        column < range.end &&
+        column + part.length > range.start
+      ) {
+        const from = Math.max(range.start - column, 0);
+        const to = Math.min(range.end - column, part.length);
+        lines[row] += styled(part.slice(0, from));
+        if (column + from === range.start)
+          lines[row] += '<mark class="trace-argument">';
+        lines[row] += styled(part.slice(from, to));
+        if (column + to === range.end) lines[row] += "</mark>";
+        lines[row] += styled(part.slice(to));
+      } else {
+        lines[row] += styled(part);
+      }
+      column += part.length;
+    }
+  }
+
+  // Use token lengths and fixed CSS classes. Only escaped original text enters the report.
+  let offset = 0;
+  for (const token of grammar ? Prism.tokenize(text, grammar) : [text]) {
+    const end = offset + token.length;
+    append(
+      text.slice(offset, end),
+      typeof token === "string" ? undefined : tokenStyles.get(token.type),
+    );
+    offset = end;
+  }
+  const rows = lines
+    .map((line, index) => {
+      const number = firstLine + index;
+      const highlighted = highlightedLines?.has(number);
+      return `<span class="code-row" data-line="${number}"${highlighted ? " data-highlighted" : relatedLines?.has(number) ? ' data-related title="Another step in this path"' : ""}><span class="code-number" aria-hidden="true">${number}</span><span class="code-text">${line}</span>${follow && highlighted ? '<button type="button" data-follow data-js hidden aria-label="Next recorded frame" title="Next recorded frame">→</button>' : ""}</span>`;
+    })
+    .join("");
+  return `<pre class="code-listing"><code>${rows}</code></pre>`;
+}
 
 export const code = (value: string) => `<code>${esc(value)}</code>`;
 const n = (count: number, noun: string) =>

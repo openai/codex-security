@@ -20,16 +20,14 @@ import {
 } from "./dependency-report-path.js";
 import {
   code,
+  esc,
   findingAudit,
   para,
   prose,
+  renderDependencyCode,
   safeLink,
   sectionAudit,
 } from "./dependency-report-audit.js";
-import {
-  escapeHtml as esc,
-  renderDependencyCode,
-} from "./dependency-report-code.js";
 import { reportInteractions, reportStyles } from "./dependency-report-ui.js";
 
 type State = keyof typeof labels;

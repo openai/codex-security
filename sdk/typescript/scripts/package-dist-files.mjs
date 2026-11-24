@@ -39,7 +39,6 @@ const distModules = [
   "dependency-investigation-session",
   "dependency-linked-resources",
   "dependency-report-audit",
-  "dependency-report-code",
   "dependency-report-text",
   "dependency-report-model",
   "dependency-report-path",
