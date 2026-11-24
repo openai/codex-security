@@ -4,11 +4,11 @@
   "sections": {
     "highlights": {
       "generatedHash": "14a1631a5668a6802d4a2cdf483443b58a20a1d72f09f621415d1f727512a5b3",
-      "humanOwned": false
+      "humanOwned": true
     },
     "upgrades": {
       "generatedHash": "86ec81d818a02c3a5dc6cf5728e110253cba86fa1e1e11ca6184266e6211f9c4",
-      "humanOwned": false
+      "humanOwned": true
     }
   }
 }
