@@ -28,7 +28,6 @@ import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
   reviewScopes,
-  reference,
   reportedUse,
   verifyProposedUse,
   type Claim,
@@ -48,9 +47,14 @@ import {
   type RepositoryDiscovery,
 } from "../src/dependency-discovery";
 
-function approvedReview(
-  claims: (PremiseRef & { availableEvidenceKeys: string[] })[],
-) {
+type ReviewClaim = PremiseRef & { availableEvidenceKeys: string[] };
+
+// Echo the received identity independently so a host reference bug cannot cancel itself out.
+function reference({ id, revision, hash }: PremiseRef) {
+  return { id, revision, hash };
+}
+
+function approvedReview(claims: ReviewClaim[]) {
   return JSON.stringify({
     decisions: claims.map((claim) => ({
       ...reference(claim),
@@ -62,6 +66,15 @@ function approvedReview(
 }
 
 const signal = new AbortController().signal;
+
+function checkInput(
+  directory: string,
+  subject: string,
+  vulnDescription: string,
+) {
+  return { directory, subject, vulnDescription, signal };
+}
+
 async function fixture(extraFiles: Record<string, string> = {}) {
   const path = await mkdtemp(join(tmpdir(), "dependency-reviewed-test-"));
   const git = (...args: string[]) =>
@@ -212,12 +225,7 @@ test("repository investigators share pinned source notes without promoting asser
   let noteId = "";
   let reviewerRead = false;
   const result = await runReviewedDependencyCheck(
-    {
-      directory: f.path,
-      subject: "npm:fixture-parser",
-      vulnDescription: "Parser issue",
-      signal,
-    },
+    checkInput(f.path, "npm:fixture-parser", "Parser issue"),
     {
       discover: async ({ revision }) => {
         expect(revision).toBe(f.revision);
@@ -457,12 +465,7 @@ test.each(["incomplete", "complete"] as const)(
     const tool = "update_codex_security_graph";
     let reviewedLimitations: string[] = [];
     const result = await runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Parser issue",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Parser issue"),
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -530,11 +533,15 @@ test.each(["incomplete", "complete"] as const)(
           await expect(query(next)).rejects.toThrow(
             "changed since this cursor",
           );
-          await record({
+          const examine = {
             operation: "record_examined",
             partitionId: "first",
-            paths: [paths[0]],
-          });
+          };
+          // Reject the whole batch without marking any of the valid paths.
+          await expect(record({ ...examine, paths })).rejects.toThrow(
+            "outside the source partition",
+          );
+          await record({ ...examine, paths: [paths[0]] });
           expect(
             await query({
               partitionId: "first",
@@ -705,12 +712,7 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
   await using f = await fixture();
   await expect(
     runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Incorrect length validation.",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Incorrect length validation."),
       {
         lookupPackage: async () => {
           throw Error("Unexpected registry lookup");
@@ -730,12 +732,7 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
   ).rejects.toThrow("running workload");
   await expect(
     runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Incorrect length validation.",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Incorrect length validation."),
       {
         discover: async () => f.discovery,
         runAgent: async () => {
@@ -1004,9 +1001,7 @@ test("replacing an approved premise invalidates transitive users and preserves i
       [c],
       [
         {
-          id: c.id,
-          revision: c.revision,
-          hash: c.hash,
+          ...reference(c),
           approved: true,
           reason: "Verified.",
           evidenceKeys,
@@ -1020,14 +1015,9 @@ test("replacing an approved premise invalidates transitive users and preserves i
       "select the deciding evidence",
     );
     approve(base, [evidence]);
-    const ref = (c: Claim) => ({
-      id: c.id,
-      revision: c.revision,
-      hash: c.hash,
-    });
-    const parent = submit("caller", [ref(base)], []);
+    const parent = submit("caller", [reference(base)], []);
     approve(parent, [premiseKey(base)]);
-    const leaf = submit("service", [ref(parent)], []);
+    const leaf = submit("service", [reference(parent)], []);
     approve(leaf, [premiseKey(parent)]);
     const sibling = submit("other-service", [], [evidence]);
     approve(sibling, [evidence]);
@@ -1046,7 +1036,7 @@ test("replacing an approved premise invalidates transitive users and preserves i
         store,
         [sibling, rejected],
         [sibling, rejected].map((c) => ({
-          ...ref(c),
+          ...reference(c),
           approved: c.id === sibling.id,
           reason: "Check the scoped evidence.",
           evidenceKeys: [evidence],
@@ -1103,12 +1093,11 @@ test("host feedback repairs a bad citation and an independent rejection requires
   let investigations = 0,
     reviews = 0;
   const report = await runReviewedDependencyCheck(
-    {
-      directory: f.path,
-      subject: "npm:fixture-parser",
-      vulnDescription: "Untrusted input reaches the parser.",
-      signal,
-    },
+    checkInput(
+      f.path,
+      "npm:fixture-parser",
+      "Untrusted input reaches the parser.",
+    ),
     {
       discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
@@ -1116,19 +1105,15 @@ test("host feedback repairs a bad citation and an independent rejection requires
         if (input.claims) {
           reviews++;
           return JSON.stringify({
-            decisions: input.claims.map(
-              (claim: Claim & { availableEvidenceKeys: string[] }) => ({
-                evidenceKeys: claim.availableEvidenceKeys,
-                id: claim.id,
-                revision: claim.revision,
-                hash: claim.hash,
-                approved: reviews > 1 || claim.id === "coverage",
-                reason:
-                  reviews === 1
-                    ? "Explain the observed data flow more precisely."
-                    : "Checked the revised citation.",
-              }),
-            ),
+            decisions: input.claims.map((claim: ReviewClaim) => ({
+              evidenceKeys: claim.availableEvidenceKeys,
+              ...reference(claim),
+              approved: reviews > 1 || claim.id === "coverage",
+              reason:
+                reviews === 1
+                  ? "Explain the observed data flow more precisely."
+                  : "Checked the revised citation.",
+            })),
           });
         }
         investigations++;
@@ -1159,12 +1144,7 @@ test.each(["corrected", "exhausted"] as const)(
     let coordinatorStarts = 0;
     let submissions = 0;
     const result = runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Parser input",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Parser input"),
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -1256,12 +1236,7 @@ test("bind discovered owners to their own source and retain uncovered callers", 
     project: "notes",
   });
   const report = await runReviewedDependencyCheck(
-    {
-      directory: f.path,
-      subject: "npm:fixture-parser",
-      vulnDescription: "Parser failure.",
-      signal,
-    },
+    checkInput(f.path, "npm:fixture-parser", "Parser failure."),
     {
       discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
@@ -1675,19 +1650,15 @@ test("a package continues with independent advisories after a scoped block or ex
         if (!input.claims)
           return JSON.stringify({ uses: [f.use], limitations: [] });
         return JSON.stringify({
-          decisions: input.claims.map(
-            (claim: Claim & { availableEvidenceKeys: string[] }) => ({
-              id: claim.id,
-              revision: claim.revision,
-              hash: claim.hash,
-              evidenceKeys: claim.availableEvidenceKeys,
-              approved: input.issue.id !== ids[2],
-              reason:
-                input.issue.id === ids[2]
-                  ? "No proof for this release."
-                  : "Verified.",
-            }),
-          ),
+          decisions: input.claims.map((claim: ReviewClaim) => ({
+            ...reference(claim),
+            evidenceKeys: claim.availableEvidenceKeys,
+            approved: input.issue.id !== ids[2],
+            reason:
+              input.issue.id === ids[2]
+                ? "No proof for this release."
+                : "Verified.",
+          })),
         });
       },
     },
@@ -2004,9 +1975,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
       (row) => row.evidenceKeys ?? [row.sha256],
     );
     const decision = {
-      id: claim.id,
-      revision: claim.revision,
-      hash: claim.hash,
+      ...reference(claim),
       reason: "Checked the selected facts.",
       approved: true,
     };
@@ -2123,15 +2092,10 @@ test("native investigators share asynchronous reviews, immutable premises and pa
     },
   };
   const receipt = { ...largeReply, sha256: dependencyRecordHash(largeReply) };
-  type Ref = { id: string; revision: number; hash: string };
-  type State = Ref & { state: string };
-  type ReviewInput = {
-    id: string;
-    revision: number;
-    hash: string;
-    availableEvidenceKeys: string[];
+  type State = PremiseRef & { state: string };
+  type ReviewInput = ReviewClaim & {
     sources: { id: string }[];
-    dependencies: Ref[];
+    dependencies: PremiseRef[];
   };
   const counts = new Map<string, number>();
   const waiting = Promise.withResolvers<void>(),
@@ -2191,9 +2155,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
           }
           return JSON.stringify({
             decisions: input.claims.map((c: ReviewInput) => ({
-              id: c.id,
-              revision: c.revision,
-              hash: c.hash,
+              ...reference(c),
               approved: true,
               reason: "Verified each selected reference.",
               // Only the returned build record decided this premise. Its source is supporting context.
@@ -2574,12 +2536,7 @@ test.each([
     const batches: string[][] = [];
     let coordinators = 0;
     const run = runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Parser behavior",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Parser behavior"),
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -2588,12 +2545,8 @@ test.each([
             return JSON.stringify({ uses: [f.use], limitations: [] });
           }
           const packet = JSON.parse(req.prompt.split("\n\n").at(-1)!);
-          const rows = (
-            packet.claims as (Claim & { availableEvidenceKeys: string[] })[]
-          ).map((c) => ({
-            id: c.id,
-            revision: c.revision,
-            hash: c.hash,
+          const rows = (packet.claims as ReviewClaim[]).map((c) => ({
+            ...reference(c),
             approved: true,
             reason: "Verified the exact claim.",
             evidenceKeys: c.availableEvidenceKeys,
@@ -2892,31 +2845,22 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
     const reviewCounts = new Map<string, number>();
     let rounds = 0;
     const result = runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Parser behavior",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Parser behavior"),
       {
         discover: async () => f.discovery,
         async runAgent(req) {
           const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
           if (!req.coordinator) {
             return JSON.stringify({
-              decisions: input.claims.map(
-                (c: Claim & { availableEvidenceKeys: string[] }) => {
-                  reviewCounts.set(c.id, (reviewCounts.get(c.id) ?? 0) + 1);
-                  return {
-                    id: c.id,
-                    revision: c.revision,
-                    hash: c.hash,
-                    evidenceKeys: c.availableEvidenceKeys,
-                    reason: "Checked source and workload.",
-                    approved: true,
-                  };
-                },
-              ),
+              decisions: input.claims.map((c: ReviewClaim) => {
+                reviewCounts.set(c.id, (reviewCounts.get(c.id) ?? 0) + 1);
+                return {
+                  ...reference(c),
+                  evidenceKeys: c.availableEvidenceKeys,
+                  reason: "Checked source and workload.",
+                  approved: true,
+                };
+              }),
             });
           }
           rounds++;
@@ -3008,20 +2952,13 @@ test("a correction in a live review batch preserves its independent sibling appr
   const seen: string[][] = [];
   const previous = new Map<string, string[]>();
   await runReviewedDependencyCheck(
-    {
-      directory: f.path,
-      subject: "npm:fixture-parser",
-      vulnDescription: "Parser issue",
-      signal,
-    },
+    checkInput(f.path, "npm:fixture-parser", "Parser issue"),
     {
       discover: async () => f.discovery,
       async runAgent(req) {
         const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
         if (!req.coordinator) {
-          const rows = input.claims as (PremiseRef & {
-            availableEvidenceKeys: string[];
-          })[];
+          const rows = input.claims as ReviewClaim[];
           seen.push(rows.map(premiseKey));
           for (const c of rows) {
             previous.set(
@@ -3035,9 +2972,7 @@ test("a correction in a live review batch preserves its independent sibling appr
           }
           return JSON.stringify({
             decisions: rows.map((c) => ({
-              id: c.id,
-              revision: c.revision,
-              hash: c.hash,
+              ...reference(c),
               evidenceKeys: c.availableEvidenceKeys,
               approved: true,
               reason: "Verified",
@@ -3075,13 +3010,10 @@ test("a correction in a live review batch preserves its independent sibling appr
         expect(seen).toHaveLength(2);
         expect(seen[0]).toHaveLength(2);
         expect(seen[1]).toHaveLength(1);
-        const ref = ({ id, revision, hash }: PremiseRef) => ({
-          id,
-          revision,
-          hash,
-        });
         await call("submit_dependency_claims", {
-          claims: [{ ...submit("derived"), dependencies: [ref(claims[0]!)] }],
+          claims: [
+            { ...submit("derived"), dependencies: [reference(claims[0]!)] },
+          ],
         });
         const derived = (await call("query_dependency_claims", {
           ids: ["premise:derived"],
@@ -3092,7 +3024,7 @@ test("a correction in a live review batch preserves its independent sibling appr
             {
               id: "selected",
               expectedRevision: 0,
-              use: { ...f.use, premises: [ref(derived[0]!)] },
+              use: { ...f.use, premises: [reference(derived[0]!)] },
             },
           ],
         });
@@ -3144,12 +3076,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
     let coverageRefs: PremiseRef[] = [];
     const reviewedReplacements: number[] = [];
     const checked = await runReviewedDependencyCheck(
-      {
-        directory: f.path,
-        subject: "npm:fixture-parser",
-        vulnDescription: "Parser issue",
-        signal,
-      },
+      checkInput(f.path, "npm:fixture-parser", "Parser issue"),
       {
         discover: async () => ({
           ...f.discovery,
@@ -3202,12 +3129,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
             }
             return JSON.stringify({
               decisions: packet.claims.map(
-                (
-                  c: PremiseRef & {
-                    payload: Claim["value"];
-                    availableEvidenceKeys: string[];
-                  },
-                ) => ({
+                (c: ReviewClaim & { payload: Claim["value"] }) => ({
                   ...reference(c),
                   approved:
                     c.id !== target ||
@@ -3487,39 +3409,28 @@ test("independently verifies candidate dispositions and publishes their selected
         const { call } = await req.investigationTools!();
         if (!req.coordinator)
           return JSON.stringify({
-            decisions: packet.claims.map(
-              (c: {
-                id: string;
-                revision: number;
-                hash: string;
-                availableEvidenceKeys: string[];
-              }) => {
-                if (c.id === "disposition:handoff") {
-                  expect(c.availableEvidenceKeys.length).toBe(3);
-                  if (c.revision === 1) {
-                    return {
-                      id: c.id,
-                      revision: c.revision,
-                      hash: c.hash,
-                      approved: true,
-                      reason: "The catalog row was checked.",
-                      evidenceKeys: c.availableEvidenceKeys.filter((key) =>
-                        key.startsWith("receipt:"),
-                      ),
-                    };
-                  }
+            decisions: packet.claims.map((c: ReviewClaim) => {
+              if (c.id === "disposition:handoff") {
+                expect(c.availableEvidenceKeys.length).toBe(3);
+                if (c.revision === 1) {
+                  return {
+                    ...reference(c),
+                    approved: true,
+                    reason: "The catalog row was checked.",
+                    evidenceKeys: c.availableEvidenceKeys.filter((key) =>
+                      key.startsWith("receipt:"),
+                    ),
+                  };
                 }
-                return {
-                  id: c.id,
-                  revision: c.revision,
-                  hash: c.hash,
-                  approved: true,
-                  reason:
-                    "Verified this candidate, checkout and original catalog row.",
-                  evidenceKeys: c.availableEvidenceKeys,
-                };
-              },
-            ),
+              }
+              return {
+                ...reference(c),
+                approved: true,
+                reason:
+                  "Verified this candidate, checkout and original catalog row.",
+                evidenceKeys: c.availableEvidenceKeys,
+              };
+            }),
           });
         req.onEvidence!(receipt);
         const submit = (id: string, disposition: unknown) =>

@@ -775,46 +775,36 @@ export function localProvider(
   }
 
   async function snapshotFingerprint(
-    analyzer: "manifest" | "opengrep",
-    contents: Uint8Array<ArrayBuffer>,
+    scope: TraceScope,
     signal: AbortSignal,
-    scope?: TraceScope,
+    analyzer: "manifest" | "opengrep",
+    inputs: Buffer<ArrayBuffer>[],
   ) {
-    if (analyzer === "opengrep" && !scope?.rules?.length) return undefined;
+    if (!inputs.length) return "[]";
+    if (analyzer === "opengrep" && !scope.rules?.length) return undefined;
     const versionKey =
       analyzer === "manifest"
         ? "manifest-declarations-v1"
         : await opengrepVersion(signal).catch(() => undefined);
     signal.throwIfAborted();
     if (!versionKey) return undefined;
-    const digest = await webcrypto.subtle.digest("SHA-256", contents);
+    const digests = await Promise.all(
+      inputs.map((contents) => webcrypto.subtle.digest("SHA-256", contents)),
+    );
     // The scope key already contains the package, symbol, version and path.
-    return JSON.stringify([
+    const prefix = [
       "intrafile-rules-v3",
       versionKey,
       ...(analyzer === "opengrep"
-        ? [
-            configIdentity(executedConfig(scope!)).sha256,
-            taintIntrafile(scope!),
-          ]
+        ? [configIdentity(executedConfig(scope)).sha256, taintIntrafile(scope)]
         : []),
-      Buffer.from(digest).toString("hex"),
-    ]);
-  }
-
-  async function batchFingerprint(
-    inputs: readonly { file: string; contents: Buffer<ArrayBuffer> }[],
-    signal: AbortSignal,
-    scope: TraceScope,
-  ) {
-    const fingerprints = await Promise.all(
-      inputs.map(({ contents }) =>
-        snapshotFingerprint("opengrep", contents, signal, scope),
-      ),
+    ];
+    const fingerprints = digests.map((digest) =>
+      JSON.stringify([...prefix, Buffer.from(digest).toString("hex")]),
     );
-    return fingerprints.every((fingerprint) => fingerprint !== undefined)
+    return scope.kind === "source_batch"
       ? JSON.stringify(fingerprints)
-      : undefined;
+      : fingerprints[0];
   }
 
   async function sourceSnapshot(file: string) {
@@ -837,19 +827,16 @@ export function localProvider(
     let ruleExecution: RuleExecution | undefined;
     try {
       const language = languages[extname(inputs[0].file)];
-      const config = executedConfig(scope);
-      const identity = configIdentity(config);
-      if (scope.rules !== undefined) {
-        const engine = await opengrepVersion(signal);
-        const taint = taintIntrafile(scope);
-        ruleExecution = {
-          id: configIdentity([identity.sha256, engine, taint]).sha256,
-          configSha256: identity.sha256,
-          config: JSON.parse(identity.text),
-          engine: engine!,
-          taintIntrafile: taint,
-        };
-      }
+      const identity = configIdentity(executedConfig(scope));
+      const engine = await opengrepVersion(signal);
+      const taint = taintIntrafile(scope);
+      ruleExecution = {
+        id: configIdentity([identity.sha256, engine, taint]).sha256,
+        configSha256: identity.sha256,
+        config: JSON.parse(identity.text),
+        engine: engine!,
+        taintIntrafile: taint,
+      };
       const filenames = inputs.map(({ file }, index) => {
         const extension = extname(file);
         return (
@@ -875,7 +862,7 @@ export function localProvider(
           // Per-rule engine limit. Process RSS also includes the runtime.
           "--max-memory",
           "256",
-          ...(taintIntrafile(scope) ? ["--taint-intrafile"] : []),
+          ...(taint ? ["--taint-intrafile"] : []),
           "--json",
           "-c",
           "rules.json",
@@ -909,6 +896,10 @@ export function localProvider(
         output.paths?.scanned?.map((file) => resolve(directory, file)),
       );
       const needle = leaf(scope);
+      const ruleExecutionId = ruleExecution.id;
+      const batch = scope.kind === "source_batch";
+      const followCallers =
+        !scope.source_symbol && !(batch && scope.source_terms);
       return inputs.map(({ file, contents }, index) => {
         const path = join(directory, filenames[index]);
         const findings = byFile.get(path) ?? [];
@@ -919,18 +910,15 @@ export function localProvider(
           if (name && identifier.test(name))
             callers.set(finding.start.offset, name);
         }
-        const matches = findings;
         const evidence: TraceEvidence[] = [];
         const callerNames = new Set<string>();
         const ruleLeads: TextMatch[] = [];
-        for (const { start, end, extra, check_id } of matches) {
-          const provenance = ruleExecution
-            ? { ruleExecutionId: ruleExecution.id, nativeRuleId: check_id }
-            : {};
-          if (
-            scope.rules !== undefined &&
-            extra.metadata?.evidence_kind === "unresolved_lead"
-          ) {
+        for (const { start, end, extra, check_id } of findings) {
+          const provenance = {
+            ruleExecutionId,
+            nativeRuleId: check_id,
+          };
+          if (extra.metadata?.evidence_kind === "unresolved_lead") {
             ruleLeads.push({
               source: file,
               line: start.line,
@@ -943,7 +931,7 @@ export function localProvider(
           const from = caller
             ? { kind: "symbol", name: caller, scope: file }
             : fileEntity;
-          if (!scope.source_symbol && caller && caller !== needle)
+          if (followCallers && caller && caller !== needle)
             callerNames.add(caller);
           let calleeText = extra.metavars?.["$ALIAS"]?.abstract_content;
           if (calleeText === undefined && !extra.metavars?.["$RECEIVER"]) {
@@ -972,10 +960,11 @@ export function localProvider(
             },
           });
         }
-        const next = [...callerNames].map((symbol) => ({
+        const next = [...callerNames].map((symbol): TraceScope => ({
           ...scope,
           symbol,
-          ...(scope.rules === undefined ? {} : { rules: undefined }),
+          rules: undefined,
+          ...(batch && { kind: "file", files: undefined, path: file }),
         }));
         const reason =
           [
@@ -1001,12 +990,12 @@ export function localProvider(
                 contents,
                 needle,
                 scope.source_terms,
-                new Set(matches.map(({ start }) => start.line)),
+                new Set(findings.map(({ start }) => start.line)),
               )
             : []),
         ];
         return {
-          ...(ruleExecution && { ruleExecution }),
+          ruleExecution,
           evidence,
           next,
           complete: !reason,
@@ -1044,19 +1033,16 @@ export function localProvider(
     async fingerprint(scope, signal) {
       if (scope.kind === "source_batch") {
         if (!scope.rules?.length) return undefined;
-        const inputs = await Promise.all(
-          scope.files!.map(async (file) => ({
-            file,
-            contents: await sourceSnapshot(file),
-          })),
-        );
-        return batchFingerprint(inputs, signal, scope);
+        const inputs = await Promise.all(scope.files!.map(sourceSnapshot));
+        return snapshotFingerprint(scope, signal, "opengrep", inputs);
       }
       if (scope.kind !== "file") return undefined;
       const { path } = await target(scope);
       const analyzer = fileAnalyzer(scope, path);
       if (!analyzer) return undefined;
-      return snapshotFingerprint(analyzer, await snapshot(path), signal, scope);
+      return snapshotFingerprint(scope, signal, analyzer, [
+        await snapshot(path),
+      ]);
     },
     async run(scope, signal): Promise<ScopeResult> {
       try {
@@ -1113,27 +1099,22 @@ export function localProvider(
           const textMatches = results.flatMap(
             (result) => result.textMatches ?? [],
           );
+          const ruleExecution = scanned.find(
+            (result) => result.ruleExecution,
+          )?.ruleExecution;
           return {
             ...(complete && {
-              fingerprint: await batchFingerprint(inputs, signal, scope),
+              fingerprint: await snapshotFingerprint(
+                scope,
+                signal,
+                "opengrep",
+                inputs.map(({ contents }) => contents),
+              ),
             }),
-            ...(scanned.find((result) => result.ruleExecution)
-              ?.ruleExecution && {
-              ruleExecution: scanned.find((result) => result.ruleExecution)!
-                .ruleExecution,
-            }),
+            ...(ruleExecution && { ruleExecution }),
             evidence: results.flatMap((result) => result.evidence),
             ...(textMatches.length > 0 && { textMatches }),
-            next: scope.source_terms
-              ? []
-              : results.flatMap((result, index) =>
-                  result.next.map((next) => ({
-                    ...next,
-                    kind: "file" as const,
-                    files: undefined,
-                    path: inputs[index].file,
-                  })),
-                ),
+            next: results.flatMap((result) => result.next),
             complete,
             ...(!complete && { reason: [...reasons].join(" ") }),
           };
@@ -1384,34 +1365,24 @@ export function localProvider(
           );
         const contents = await snapshot(path);
         const file = relative(canonicalRoot, path).split(sep).join("/");
-        if (analyzer === "manifest") {
-          const evidence = dependencyEvidence(
-            contents.toString("utf8"),
-            file,
-            scope.package,
-          );
-          return {
-            evidence,
-            next: [],
-            complete: true,
-            fingerprint: await snapshotFingerprint(
-              analyzer,
-              contents,
-              signal,
-              scope,
-            ),
-          };
-        }
-        const [result] = await scanCalls(scope, [{ file, contents }], signal);
+        const result =
+          analyzer === "manifest"
+            ? {
+                evidence: dependencyEvidence(
+                  contents.toString("utf8"),
+                  file,
+                  scope.package,
+                ),
+                next: [],
+                complete: true,
+              }
+            : (await scanCalls(scope, [{ file, contents }], signal))[0];
         return result.complete
           ? {
               ...result,
-              fingerprint: await snapshotFingerprint(
-                analyzer,
+              fingerprint: await snapshotFingerprint(scope, signal, analyzer, [
                 contents,
-                signal,
-                scope,
-              ),
+              ]),
             }
           : result;
       } catch (error) {
