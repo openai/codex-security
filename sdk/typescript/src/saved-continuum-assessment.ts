@@ -66,6 +66,14 @@ const binding = z.object({
   }),
 });
 type Destination = z.infer<typeof binding>["continuum"];
+// A failed assessment may have no record. Reports omit those positions.
+const retryItem = z
+  .object({
+    record: z.object({ itemId: id }),
+    disputes: z.record(z.string(), z.unknown()).optional(),
+  })
+  .nullable()
+  .catch(null);
 const cached = z.object({
   schemaVersion: z
     .literal([2, 3, 4, 5, 6, continuumAssessmentVersion])
@@ -77,7 +85,7 @@ const cached = z.object({
     schemaVersion: z.literal(1),
     items: z.array(z.looseObject({ itemId: id })),
   }),
-  retry: z.array(z.unknown()).nullable().optional(),
+  retry: z.array(retryItem).nullable().optional(),
 });
 
 function scopeOf(record: Admission, destination?: Destination) {
@@ -238,17 +246,19 @@ const disputedScore = z.object({
   reconfirmAfter: z.number(),
   record: conclusion,
 });
-function pendingScore(plugin: Conclusion | undefined, retry: unknown) {
+function pendingScore(
+  plugin: Conclusion | undefined,
+  retries?: z.infer<typeof retryItem>[],
+) {
   if (
     !plugin?.issueArn ||
     plugin.verdict !== "UNKNOWN" ||
-    plugin.validationArtifactId
+    plugin.validationArtifactId ||
+    retries?.length !== 1
   )
     return;
-  const saved = retry as { disputes?: Record<string, unknown> } | undefined;
-  const pending = disputedScore.safeParse(
-    saved?.disputes?.[plugin.issueArn],
-  ).data;
+  const raw = retries[0]?.disputes?.[plugin.issueArn];
+  const pending = disputedScore.safeParse(raw).data;
   const tied = pending?.record;
   if (
     tied?.scoringPending &&
@@ -263,11 +273,11 @@ function pendingScore(plugin: Conclusion | undefined, retry: unknown) {
 }
 
 /** CLI requests establish membership in start order. Only compare artifacts
- * within one issue. The workbench has no common ordering with CLI requests. */
+ * within one issue. Require the workbench and CLI to agree on membership. */
 function selectConclusion(
   cli: { item: Conclusion; requestedAt: number | undefined }[],
   plugin: Conclusion | undefined,
-  retry: unknown,
+  pending: z.infer<typeof disputedScore> | undefined,
 ) {
   const issue = cli.findLast(({ item }) => item.issueArn || item.issueUnlinked)
     ?.item.issueArn;
@@ -276,36 +286,37 @@ function selectConclusion(
       item.issueUnlinked || (item.issueArn && item.issueArn !== issue),
   );
   if (plugin?.issueUnlinked && issue) return;
+  if (!change && !pending) {
+    const records = cli.map(({ item }) => item);
+    if (plugin) records.unshift(plugin);
+    return selectEvidence(records);
+  }
   if (change && plugin?.issueArn && plugin.issueArn !== issue) return;
 
-  const pending = pendingScore(plugin, retry);
+  // Before a move, evidence can only expose conflicts. Missing or equal
+  // request times cannot confirm a link.
   const cutoff = Math.max(
-    change ? (change.requestedAt ?? Infinity) : -Infinity,
-    pending?.reconfirmAfter ?? -Infinity,
+    change ? (change.requestedAt ?? Infinity) : 0,
+    pending?.reconfirmAfter ?? 0,
   );
   const records: Conclusion[] = [];
   const historical: Conclusion[] = [];
-  for (const entry of cli) {
+  for (const { item, requestedAt } of cli) {
     if (
-      (!change && !pending) ||
-      (entry === change && !issue) ||
-      (entry.requestedAt !== undefined && entry.requestedAt > cutoff)
+      (item === change?.item && !issue) ||
+      (requestedAt !== undefined && requestedAt > cutoff)
     )
-      records.push(entry.item);
-    // Only dated evidence from an earlier visit can establish a tie.
-    else if (issue && entry.item.issueArn === issue && evidenceTime(entry.item))
-      historical.push(entry.item);
+      records.push(item);
+    else if (issue && item.issueArn === issue && evidenceTime(item))
+      historical.push(item);
   }
-  // A failed issue read can reveal a move but cannot confirm membership.
   if (
-    (change || pending) &&
     issue &&
     !records.some(
       (item) => item.issueArn === issue && item.verdict !== "UNAVAILABLE",
     )
   )
     return;
-  // A matching workbench result might also predate the move.
   if (pending && issue === pending.record.issueArn)
     historical.push(pending.record);
   else if (change && plugin?.issueArn) historical.push(plugin);
@@ -315,7 +326,7 @@ function selectConclusion(
 
 /** Older visits to the same issue can reveal a dispute, but cannot supply
  * a verdict or score after membership changes. */
-function selectEvidence(records: Conclusion[], historical: Conclusion[]) {
+function selectEvidence(records: Conclusion[], historical: Conclusion[] = []) {
   const terminal = records.filter((item) => item.verdict !== "UNAVAILABLE");
   if (!terminal.length) return records.at(-1);
   // A failed artifact read can still confirm that the finding changed issues.
@@ -388,7 +399,11 @@ async function readAssessments(
   )
     return assessments;
   const items = saved?.records.items ?? [];
-  const grouped = Map.groupBy(items.keys(), (index) => items[index]!.itemId);
+  const grouped = Map.groupBy(items, ({ itemId }) => itemId);
+  const retries = Map.groupBy(
+    saved?.retry ?? [],
+    (item) => item?.record.itemId,
+  );
   const legacy =
     saved && saved.schemaVersion !== continuumAssessmentVersion
       ? verifiedAdmissions(items, config)
@@ -402,8 +417,7 @@ async function readAssessments(
     const group = grouped.get(occurrence);
     const entries = snapshots.get(occurrence);
     if ((group && group.length !== 1) || entries === null) continue;
-    const index = group?.[0];
-    const item = index === undefined ? undefined : items[index];
+    const item = group?.[0];
     if (item?.["admissionConflict"]) continue;
     const plugin =
       !legacy && destination && item ? project(item, destination) : undefined;
@@ -434,7 +448,7 @@ async function readAssessments(
     const active = selectConclusion(
       candidates.filter(({ item }) => sameAdmission(item, selected)),
       plugin,
-      index === undefined ? undefined : saved?.retry?.[index],
+      pendingScore(plugin, retries.get(occurrence)),
     );
     if (active) assessments.set(occurrence, active);
   }

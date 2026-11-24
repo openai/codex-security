@@ -9,6 +9,7 @@ import {
   supplementalValidationStatus,
   retryableAssessment,
   unavailableAssessment,
+  type ValidationItemRecord,
   type ValidationProviderAssessment,
   type ValidationProviderConfiguration,
   type ValidationProviderContext,
@@ -21,127 +22,118 @@ export { savedContinuumAssessments } from "./saved-continuum-assessment.js";
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };
 
-// Keep disputed results from detached issues only in the private retry list.
-type Disputes = Record<
-  string,
-  ValidationProviderAssessment & { reconfirmAfter?: number }
->;
-type PluginRetry = ValidationProviderAssessment & { disputes?: Disputes };
+// While membership is uncertain, keep the disputed evidence in private retry
+// state. Previously saved full assessments also have these fields.
+type Dispute = { record: ValidationItemRecord; reconfirmAfter?: number };
+type PluginRetry = ValidationProviderAssessment & {
+  disputes?: Record<string, Dispute>;
+};
 
-/** A replica returning just one of two tied artifacts cannot settle a dispute. */
-function resolveDispute(
-  { reconfirmAfter, ...dispute }: Disputes[string],
+/** Update a single poll. Only an unresolved, detached score needs a separate
+ * record. All other disputes can be recovered from the assessment itself. */
+function reconcileDispute(
+  { record: tied, reconfirmAfter }: Dispute,
   update: ValidationProviderAssessment,
-  disputes: Disputes,
-  prior: ValidationProviderAssessment["record"],
-): ValidationProviderAssessment {
-  const tied = dispute.record!;
+  prior?: ValidationItemRecord,
+) {
   const current = update.record!;
-  const linked =
-    prior && prior.issueArn === current.issueArn && !prior.issueUnlinked;
-  const stillConfirmed =
-    linked && prior.validationArtifactId === tied.validationArtifactId;
-  const validation = compareTimestamps(
-    evidenceTime(current),
-    evidenceTime(tied),
-  );
-  // Membership and issue severity change independently of the evidence.
-  const live = {
-    issueFindingCount: current.issueFindingCount,
-    providerSeverity: current.providerSeverity,
-    issueUrl: current.issueUrl,
+  const time = evidenceTime(tied);
+  const delta = compareTimestamps(evidenceTime(current), time);
+  const linked = prior?.issueArn === current.issueArn && !prior?.issueUnlinked;
+
+  // Carry the disputed evidence with live issue metadata, never a previous
+  // lookup error in place of the current reason for deferral.
+  const defer = (unavailable: string, record = tied) => {
+    update.disposition = "deferred";
+    update.unavailable = unavailable;
+    update.provenance = {
+      ...update.provenance,
+      validatedAt: record.freshness.validatedAt,
+    };
+    update.record = {
+      ...record,
+      disposition: "deferred",
+      unavailable,
+      issueFindingCount: current.issueFindingCount,
+      providerSeverity: current.providerSeverity,
+      issueUrl: current.issueUrl,
+      reasons: record.reasons.map((item) =>
+        item.reason === record.unavailable
+          ? { ...item, reason: unavailable }
+          : item,
+      ),
+    };
+    update.report = validationSummary([update]);
   };
   if (!tied.scoringPending) {
-    if (validation > 0) return update;
-    const held = { ...dispute, record: { ...tied, ...live } };
-    return { ...held, report: validationSummary([held]) };
+    if (!(delta > 0))
+      defer(tied.unavailable ?? "Retry when a newer validation is available.");
+    return;
   }
 
+  const scoreConflict =
+    "Continuum has not returned a newer score to resolve the earlier conflict. Retry validation.";
   if (current.validationArtifactId === tied.validationArtifactId) {
     const scoredAt = tied.freshness.scoredAt!;
     if (compareTimestamps(current.freshness.scoredAt ?? "", scoredAt) > 0)
-      return update;
-    if (current.scoringPending) {
-      current.freshness.scoredAt = scoredAt;
-      return update;
-    }
-    if (!current.scoringArtifactId) return update;
-  } else if (!(stillConfirmed && validation < 0)) {
-    // A newer run supersedes the score dispute. A tie in validation
-    // itself takes precedence over a tie in scoring at the same time.
-    if (validation > 0 || (validation === 0 && !current.validationArtifactId))
-      return update;
-    // Distinct validations at the same time are ambiguous even across
-    // polls. An older run also cannot re-establish the disputed verdict.
-    if (validation !== 0)
-      disputes[current.issueArn!] = {
-        ...dispute,
-        reconfirmAfter:
-          linked && reconfirmAfter !== undefined
-            ? reconfirmAfter
-            : performance.timeOrigin + performance.now(),
-      };
-    const unavailable =
-      validation === 0
-        ? `Continuum returned conflicting validations (${tied.validationArtifactId}, ${current.validationArtifactId}). Retry when a newer validation is available.`
-        : "Continuum returned older validation evidence. Retry to confirm the current validation.";
-    const { validatedAt, ...provenance } = update.provenance;
-    return {
-      disposition: "deferred",
-      report: unavailable,
-      unavailable,
-      provenance,
-      record: {
-        itemId: current.itemId,
-        provider: current.provider,
-        submittedAt: current.submittedAt,
-        findingId: current.findingId,
-        findingArn: current.findingArn,
-        issueId: current.issueId,
-        issueArn: current.issueArn,
-        ...live,
-        severityBefore: current.severityBefore,
-        severityAfter: current.severityAfter,
-        verdict: "UNKNOWN",
-        disposition: "deferred",
-        claimMatch: "unknown",
-        resultScope: "issue",
-        freshness: {
-          stale: tied.freshness.stale,
-          reasons: tied.freshness.reasons,
-          evidenceCreatedAt: evidenceTime(tied),
-        },
-        reasons: [],
-        unavailable,
-      },
-    };
+      return;
+    if (current.scoringPending) current.freshness.scoredAt = scoredAt;
+    else if (current.scoringArtifactId) defer(scoreConflict);
+    return;
   }
-  // An older replica cannot undo a still-linked validation. Refresh the
-  // diagnostic in case the saved retry also carries a lookup error.
+
+  // A newer validation or a provider-reported validation tie takes precedence.
+  if (delta > 0 || (delta === 0 && !current.validationArtifactId)) return;
+  if (
+    delta < 0 &&
+    linked &&
+    prior?.validationArtifactId === tied.validationArtifactId
+  ) {
+    defer(scoreConflict);
+    return;
+  }
+
+  // When neither artifact supplies a verdict, keep only the submission and issue.
   const unavailable =
-    "Continuum has not returned a newer score to resolve the earlier conflict. Retry validation.";
-  const deferred = {
-    ...dispute,
-    unavailable,
-    record: {
-      ...tied,
-      ...live,
-      unavailable,
-      reasons: tied.reasons.map((reason) =>
-        reason.reason === tied.unavailable
-          ? { ...reason, reason: unavailable }
-          : reason,
-      ),
+    delta === 0
+      ? `Continuum returned conflicting validations (${tied.validationArtifactId}, ${current.validationArtifactId}). Retry when a newer validation is available.`
+      : "Continuum returned older validation evidence. Retry to confirm the current validation.";
+  defer(unavailable, {
+    itemId: current.itemId,
+    provider: current.provider,
+    submittedAt: current.submittedAt,
+    findingId: current.findingId,
+    findingArn: current.findingArn,
+    issueId: current.issueId,
+    issueArn: current.issueArn,
+    severityBefore: current.severityBefore,
+    severityAfter: current.severityAfter,
+    verdict: "UNKNOWN",
+    claimMatch: "unknown",
+    resultScope: "issue",
+    freshness: {
+      stale: tied.freshness.stale,
+      reasons: tied.freshness.reasons,
+      evidenceCreatedAt: time,
     },
-  };
-  return { ...deferred, report: validationSummary([deferred]) };
+    reasons: [],
+  });
+  // Equal-time validations need a newer run. After a move, a fresh poll
+  // can instead reconfirm the original validation and settle its score.
+  if (delta !== 0)
+    return {
+      record: tied,
+      reconfirmAfter:
+        linked && reconfirmAfter !== undefined
+          ? reconfirmAfter
+          : performance.timeOrigin + performance.now(),
+    };
 }
 
 /** One admission can visit several issues while a retry is pending. */
 function retainDisputes(saved: PluginRetry, update: PluginRetry) {
-  const { disputes: detached, ...last } = saved;
-  const disputes = { ...detached };
-  const prior = last.record;
+  const disputes = { ...saved.disputes };
+  const prior = saved.record;
   if (
     prior?.issueArn &&
     ((prior.verdict === "UNKNOWN" &&
@@ -149,7 +141,7 @@ function retainDisputes(saved: PluginRetry, update: PluginRetry) {
       prior.freshness.evidenceCreatedAt) ||
       (prior.scoringPending && prior.freshness.scoredAt))
   )
-    disputes[prior.issueArn] ??= last;
+    disputes[prior.issueArn] ??= { record: prior };
 
   const current = update.record;
   const issue = current?.issueArn;
@@ -158,12 +150,12 @@ function retainDisputes(saved: PluginRetry, update: PluginRetry) {
     if (current.verdict === "UNAVAILABLE") {
       if (prior?.issueArn !== issue) current.issueUnlinked = true;
     } else {
-      delete disputes[issue];
-      update = resolveDispute(dispute, update, disputes, prior);
+      const detached = reconcileDispute(dispute, update, prior);
+      if (detached) disputes[issue] = detached;
+      else delete disputes[issue];
     }
   }
   if (Object.keys(disputes).length) update.disputes = disputes;
-  return update;
 }
 
 export async function assessPluginFindings(
@@ -199,7 +191,7 @@ export async function assessPluginFindings(
   const assessments = findings.map((finding, index) => {
     const saved = previous[index];
     if (saved && !retryableAssessment(saved)) return saved;
-    let update = updates[next++]!;
+    const update = { ...updates[next++]! };
     const prior = saved?.record;
     const current = update.record;
     const sameAdmission =
@@ -207,7 +199,7 @@ export async function assessPluginFindings(
       prior.findingArn === current?.findingArn &&
       prior.submittedAt === current.submittedAt;
     if (saved && (sameAdmission || !current?.findingArn))
-      update = retainDisputes(saved, update);
+      retainDisputes(saved, update);
     // A failed lookup cannot undo acceptance or a confirmed change of issue.
     // A successful lookup with no issue must drop the previous issue's verdict.
     if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {

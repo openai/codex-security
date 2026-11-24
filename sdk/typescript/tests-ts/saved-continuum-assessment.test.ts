@@ -19,10 +19,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import * as gitMetadata from "../src/local-git-metadata.js";
-import type {
-  ValidationItemRecord,
-  ValidationProviderAssessment,
-} from "../src/validation-provider.js";
+import type { ValidationItemRecord } from "../src/validation-provider.js";
 import { continuumAssessmentVersion } from "../src/continuum-assessment-store.js";
 import {
   saveCliContinuumAssessments,
@@ -246,8 +243,10 @@ async function cliDirectory() {
   return join(root, name);
 }
 
+type Item = Omit<ValidationItemRecord, "severityBefore" | "severityAfter">;
+
 function saveCli(
-  items: Omit<ValidationItemRecord, "severityBefore" | "severityAfter">[],
+  items: Item[],
   environment = "env",
   state = root,
   requestedAt?: number,
@@ -595,13 +594,14 @@ test("concurrent CLI validations select by request order across receipt switches
   expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
 });
 
+const scored = {
+  ...completed,
+  providerSeverity: "critical",
+  reachableFromAttacker: true,
+  freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
+};
+
 test("a tied provider score withholds older cached scoring until a newer linked score", async () => {
-  const scored = {
-    ...completed,
-    providerSeverity: "critical",
-    reachableFromAttacker: true,
-    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
-  };
   await save([scored]);
   const tie = {
     ...completed,
@@ -829,17 +829,21 @@ test.each(["duplicate", "invalid"])(
   },
 );
 
-const moved = {
+const pendingScore = {
   ...completed,
-  issueId: "next",
-  issueArn: prefix + "/code-issues/next",
-  verdict: "NOT_EXPLOITABLE" as const,
   scoringArtifactId: undefined,
   scoringPending: true,
+};
+const moved = {
+  ...pendingScore,
+  issueId: "next",
+  issueArn: prefix + "/code-issues/next",
+  verdict: "NOT_EXPLOITABLE",
   freshness: { ...completed.freshness, validatedAt: "2026-11-21T01:30:00Z" },
 };
 const validationTie = {
   ...completed,
+  unavailable: "Conflicting validation artifacts (first, second)",
   verdict: "UNKNOWN",
   terminalStatus: undefined,
   resultScope: "issue" as const,
@@ -852,14 +856,24 @@ const validationTie = {
   },
 };
 
+const unlinked = {
+  ...validationTie,
+  verdict: "UNAVAILABLE",
+  unavailable: "Association pending",
+  issueUnlinked: true as const,
+  freshness: { stale: false, reasons: [] },
+};
+const newerValidation = {
+  ...completed,
+  validationArtifactId: "resolved",
+  freshness: {
+    ...completed.freshness,
+    validatedAt: "2026-11-21T02:00:00.000001Z",
+  },
+};
+
 test("a confirmed issue move supersedes the old verdict and score in CLI request order", async () => {
   await rm(path);
-  const scored = {
-    ...completed,
-    providerSeverity: "critical",
-    reachableFromAttacker: true,
-    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
-  };
   // The old poll finishes late and has newer evidence for a different issue.
   await saveCli([moved], "env", root, 2);
   expect(await saveCli([scored], "env", root, 1)).toContain("occ_a");
@@ -871,12 +885,7 @@ test("a confirmed issue move supersedes the old verdict and score in CLI request
   // A failed lookup on the way back cannot revive either verdict.
   await saveCli([{ ...completed, verdict: "UNAVAILABLE" }], "env", root, 3);
   expect((await read()).size).toBe(0);
-  const back = {
-    ...completed,
-    scoringArtifactId: undefined,
-    scoringPending: true,
-  };
-  expect(await saveCli([back], "env", root, 4)).toBeUndefined();
+  expect(await saveCli([pendingScore], "env", root, 4)).toBeUndefined();
   expect((await read()).get("occ_a")).toEqual({
     ...expectedCompleted,
     scoringPending: true,
@@ -891,20 +900,13 @@ test("returning to an issue does not settle a disputed verdict", async () => {
   await saveCli([moved]);
   await saveCli([completed]);
   expect((await read()).size).toBe(0);
-  const newer = {
-    ...completed,
-    validationArtifactId: "resolved",
-    freshness: { ...completed.freshness, validatedAt: "2026-11-21T02:01:00Z" },
-  };
-  await saveCli([newer]);
+  await saveCli([newerValidation]);
   expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
 });
 
 test("undated evidence from a detached issue cannot mask a dated confirmation", async () => {
   await saveCli([{ ...completed, freshness: { stale: false, reasons: [] } }]);
-  await saveCli([
-    { ...completed, verdict: "UNAVAILABLE", issueUnlinked: true },
-  ]);
+  await saveCli([unlinked]);
   await saveCli([completed]);
   expect((await read()).get("occ_a")).toEqual(expectedCompleted);
 });
@@ -920,20 +922,6 @@ test("issue moves require ordered CLI evidence and agreement with the workbench"
 });
 
 test("a confirmed unlink suppresses previous verdicts until the issue is established again", async () => {
-  const unlinked = {
-    itemId: completed.itemId,
-    provider: completed.provider,
-    findingId: completed.findingId,
-    findingArn: completed.findingArn,
-    submittedAt: completed.submittedAt,
-    claimMatch: completed.claimMatch,
-    reasons: [],
-    freshness: { stale: false, reasons: [] },
-    verdict: "UNAVAILABLE",
-    issueId: completed.issueId,
-    issueArn: completed.issueArn,
-    issueUnlinked: true as const,
-  };
   await saveCli([completed]);
   await save([unlinked]);
   expect((await read()).size).toBe(0);
@@ -944,200 +932,160 @@ test("a confirmed unlink suppresses previous verdicts until the issue is establi
   expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
 });
 
-function pluginRetries(disputed: ValidationProviderAssessment) {
-  let previous = [disputed];
-  return async (update: ValidationProviderAssessment) => {
-    const result = await assessPluginFindings(
-      config,
-      [{ occurrenceId: completed.itemId }],
-      { repositoryPath: repo },
-      () => ({
-        name: "continuum",
-        version: "1",
-        async validate() {
-          return update;
-        },
-      }),
-      previous,
-    );
-    if (result.retry) previous = JSON.parse(JSON.stringify(result.retry));
-    return result;
-  };
+async function pollPlugin(item: Item, occurrences = [item.itemId]) {
+  const file = Bun.file(path + ".result");
+  const previous = (await file.exists()) ? (await file.json()).retry : null;
+  const result = await assessPluginFindings(
+    config,
+    occurrences.map((occurrenceId) => ({ occurrenceId })),
+    { repositoryPath: repo },
+    () => ({
+      name: "continuum",
+      version: "1",
+      async validate({ occurrenceId }: Record<string, unknown>) {
+        if (occurrenceId !== item.itemId) throw Error("Submission failed");
+        return {
+          disposition:
+            item.unavailable || item.scoringPending ? "deferred" : "reportable",
+          report: item.unavailable ?? item.verdict,
+          unavailable: item.unavailable,
+          provenance: { provider: "continuum", providerVersion: "1" },
+          record: {
+            severityBefore: "high",
+            severityAfter: "high",
+            ...structuredClone(item),
+          },
+        };
+      },
+    }),
+    previous ?? [],
+  );
+  await save(result.records.items, { retry: result.retry });
+  return result;
 }
 
-test("plugin retries require newer validation to resolve a dispute on the same issue", async () => {
-  const disputedAt = completed.freshness.validatedAt;
-  const record = {
-    ...completed,
-    severityBefore: "high",
-    severityAfter: "high",
-  };
-  const diagnostic = "Conflicting validation artifacts (first, second)";
-  const disputed: ValidationProviderAssessment = {
-    disposition: "deferred",
-    report: diagnostic,
-    unavailable: diagnostic,
-    provenance: { provider: "continuum", providerVersion: "1" },
-    record: { ...record, ...validationTie, unavailable: diagnostic },
-  };
-  const retry = pluginRetries(disputed);
-  const resolved = (
-    evidenceCreatedAt: string,
-    issueId = record.issueId,
-  ): ValidationProviderAssessment => ({
-    disposition: "reportable",
-    report: record.verdict,
-    provenance: disputed.provenance,
-    record: {
-      ...record,
-      issueId,
-      issueArn: prefix + "/code-issues/" + issueId,
+test("a validation dispute survives unlinking until a newer validation arrives", async () => {
+  await pollPlugin(validationTie);
+  await pollPlugin(unlinked);
+  for (const validatedAt of [
+    completed.freshness.validatedAt,
+    "2026-11-21T01:59:00Z",
+  ]) {
+    const result = await pollPlugin({
+      ...completed,
       issueFindingCount: 3,
       providerSeverity: "high",
-      freshness: {
-        ...record.freshness,
-        evidenceCreatedAt,
-        validatedAt: evidenceCreatedAt,
-      },
-    },
-  });
-  await retry({
-    ...disputed,
-    unavailable: "Association pending",
-    record: {
-      ...record,
-      verdict: "UNAVAILABLE",
-      terminalStatus: undefined,
-      issueUnlinked: true,
-    },
-  });
-  for (const time of [disputedAt, "2026-11-21T01:59:00Z"]) {
-    const result = await retry(resolved(time));
+      freshness: { ...completed.freshness, validatedAt },
+    });
     expect(result.status).toBe("incomplete");
     expect(result.records.items[0]).toMatchObject({
       verdict: "UNKNOWN",
       issueFindingCount: 3,
       providerSeverity: "high",
     });
-    expect(result.report).toContain(diagnostic);
-    expect(result.report).not.toContain(record.verdict);
+    expect(result.report).toContain(validationTie.unavailable);
+    expect(result.report).not.toContain(completed.verdict);
   }
-  expect((await retry(resolved("2026-11-21T02:00:00.000001Z"))).status).toBe(
-    "complete",
-  );
-  expect((await retry(resolved(disputedAt, "issue-b"))).status).toBe(
-    "complete",
-  );
+  expect((await pollPlugin(newerValidation)).status).toBe("complete");
 });
 
-test("plugin retries require a strictly newer score after a dispute", async () => {
-  const pending = {
-    disposition: "deferred" as const,
-    report: "Score lookup failed",
-    provenance: { provider: "continuum", providerVersion: "1" },
-    record: {
-      ...completed,
-      severityBefore: "high",
-      severityAfter: "high",
-      scoringPending: true,
-      scoringArtifactId: undefined,
-      freshness: { ...completed.freshness },
-    },
-  };
-  const disputed = {
-    ...pending,
-    report: "Conflicting scores",
-    record: {
-      ...pending.record,
-      freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
-    },
-  };
-  const disputedAt = disputed.record.freshness.scoredAt;
-  const retry = pluginRetries(disputed);
-  const scored = (scoredAt: string): ValidationProviderAssessment => ({
-    ...pending,
-    disposition: "reportable",
-    record: {
-      ...pending.record,
-      scoringPending: undefined,
-      scoringArtifactId: "score",
-      providerSeverity: "critical",
-      reachableFromAttacker: true,
-      freshness: { ...completed.freshness, scoredAt },
-    },
+test("a validation dispute does not block a different issue", async () => {
+  await pollPlugin(validationTie);
+  const result = await pollPlugin({
+    ...completed,
+    issueId: moved.issueId,
+    issueArn: moved.issueArn,
   });
+  expect(result.status).toBe("complete");
+});
 
-  const failed = await retry({
-    ...pending,
-    unavailable: pending.report,
-    record: {
-      ...pending.record,
-      reasons: [{ basis: "INFERRED", reason: pending.report }],
-      unavailable: pending.report,
-      freshness: { ...completed.freshness },
-    },
+const scoreTie = { ...pendingScore, freshness: scored.freshness };
+const newerScore = {
+  ...scored,
+  freshness: { ...scored.freshness, scoredAt: "2026-11-21T03:00:00.000001Z" },
+};
+const olderValidation = {
+  ...pendingScore,
+  validationArtifactId: "earlier",
+  freshness: { ...completed.freshness, validatedAt: "2026-11-21T01:30:00Z" },
+};
+
+test("a failed score lookup preserves the dispute but its error clears on retry", async () => {
+  await pollPlugin(scoreTie);
+  const unavailable = "Score lookup failed";
+  const failed = await pollPlugin({
+    ...pendingScore,
+    unavailable,
+    reasons: [{ basis: "INFERRED", reason: unavailable }],
   });
-  expect(failed.report).toContain(pending.report);
-  expect(failed.records.items[0]?.freshness.scoredAt).toBe(disputedAt);
-  const recovered = await retry(scored("2026-11-21T02:59:00Z"));
-  expect(recovered.report).toContain("newer score");
-  expect(JSON.stringify(recovered.records)).not.toContain(pending.report);
+  expect(failed.report).toContain(unavailable);
+  expect(failed.records.items[0]?.freshness.scoredAt).toBe(
+    scored.freshness.scoredAt,
+  );
+  const retry = await pollPlugin({
+    ...scored,
+    freshness: { ...scored.freshness, scoredAt: "2026-11-21T02:59:00Z" },
+  });
+  expect(retry.report).toContain("newer score");
+  expect(JSON.stringify(retry.records)).not.toContain(unavailable);
+});
 
-  const older = {
-    ...pending,
-    record: {
-      ...pending.record,
-      validationArtifactId: "earlier",
-      freshness: {
-        ...completed.freshness,
-        validatedAt: "2026-11-21T01:30:00Z",
-      },
-    },
-  };
-  expect((await retry(older)).records.items[0]?.verdict).toBe(
+test("returning to an issue requires confirming its validation and resolving its score dispute", async () => {
+  await pollPlugin(scoreTie);
+  expect((await pollPlugin(olderValidation)).records.items[0]?.verdict).toBe(
     completed.verdict,
   );
-  await retry({ ...pending, record: { ...pending.record, ...moved } });
-  const returned = await retry(older);
-  expect(returned.records.items[0]?.verdict).toBe("UNKNOWN");
-  const tied = await retry(scored(disputedAt));
-  expect(tied.retry).not.toBeNull();
-  await save(tied.records.items, { retry: tied.retry });
-  const assessment = (await read()).get("occ_a");
-  expect(assessment?.verdict).toBe("EXPLOITABLE");
-  expect(assessment?.freshness.scoredAt).toBe(disputedAt);
-  expect(assessment?.issueSeverity).toBeUndefined();
-  expect(assessment?.issueReachableFromAttacker).toBeUndefined();
+  await pollPlugin(moved);
+  expect((await pollPlugin(olderValidation)).records.items[0]?.verdict).toBe(
+    "UNKNOWN",
+  );
 
-  const newer = await retry(scored("2026-11-21T03:00:00.000001Z"));
-  expect(newer.retry).toBeNull();
-  await save(newer.records.items);
+  expect((await pollPlugin(scored)).retry).not.toBeNull();
+  expect((await read()).get("occ_a")).toEqual({
+    ...expectedCompleted,
+    scoringPending: true,
+    freshness: {
+      ...expectedCompleted.freshness,
+      scoredAt: scored.freshness.scoredAt,
+    },
+  });
+  expect((await pollPlugin(newerScore)).retry).toBeNull();
   expect((await read()).get("occ_a")).toMatchObject({
     verdict: "EXPLOITABLE",
     issueSeverity: "critical",
     issueReachableFromAttacker: true,
   });
+});
 
-  // A CLI confirmation must start after the workbench saw the issue return.
-  await save(returned.records.items, { retry: returned.retry });
-  await saveCli(newer.records.items, "env", root, 1);
+test("only a CLI request started after the plugin saw the issue return can confirm its score", async () => {
+  // A failed first submission leaves a retry without a corresponding record.
+  const retry = (item: Item) => pollPlugin(item, ["occ_b", "occ_a"]);
+  await retry(scoreTie);
+  await retry(moved);
+  await retry(olderValidation);
+  await saveCli([newerScore], "env", root, 1);
   expect((await read()).get("occ_a")?.issueSeverity).toBeUndefined();
-  await saveCli(newer.records.items);
+  await saveCli([scored]);
+  expect((await read()).get("occ_a")).toEqual({
+    ...expectedCompleted,
+    scoringPending: true,
+  });
+  await saveCli([newerScore]);
   expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
-  const again = await pluginRetries(returned.retry![0]!)(older);
-  await save(again.records.items, { retry: again.retry });
+  await retry(olderValidation);
   expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
+});
 
-  const split = pluginRetries(disputed);
-  const opposite = scored(disputedAt);
-  opposite.record!.validationArtifactId = "other";
-  opposite.record!.verdict = "NOT_EXPLOITABLE";
-  const ambiguous = await split(opposite);
-  expect(ambiguous.records.items[0]?.verdict).toBe("UNKNOWN");
-  expect(ambiguous.records.items[0]?.validationArtifactId).toBeUndefined();
-  expect((await split(scored("2026-11-21T03:01:00Z"))).status).toBe(
-    "incomplete",
-  );
+test("a newer score cannot resolve conflicting validations at the same time", async () => {
+  await pollPlugin(scoreTie);
+  const conflict = await pollPlugin({
+    ...scored,
+    validationArtifactId: "other",
+    verdict: "NOT_EXPLOITABLE",
+  });
+  expect(conflict.records.items[0]?.verdict).toBe("UNKNOWN");
+  expect(conflict.records.items[0]?.validationArtifactId).toBeUndefined();
+  expect((await pollPlugin(newerScore)).status).toBe("incomplete");
 });
 
 test("a pending linked score survives transport failure unless the issue changed", async () => {
