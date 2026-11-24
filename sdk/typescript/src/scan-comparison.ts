@@ -427,6 +427,7 @@ export async function matchScanFindingsInternal(
             .replace(/^Error running remote compact task: /u, "");
           if (
             nativeMessage.startsWith("Error loading configuration:") ||
+            nativeMessage.startsWith("Error loading rules:") ||
             nativeMessage.startsWith("failed to load bootstrap configuration")
           )
             throw new ConfigurationError(error.message, { cause: error });

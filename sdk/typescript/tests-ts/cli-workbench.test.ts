@@ -1612,6 +1612,11 @@ describe("CLI workbench", () => {
             "Error loading configuration: invalid synthetic matcher setting",
           ],
           [
+            "rules configuration",
+            "exit",
+            "Error loading rules:\nsynthetic.rules:2: starlark error: error: Parse error: unexpected new line, expected expression (problem is on or around line 2)",
+          ],
+          [
             "bootstrap configuration",
             "exit",
             "Error: failed to load bootstrap configuration",
@@ -1713,7 +1718,7 @@ describe("CLI workbench", () => {
           1,
         );
         expect(stderr.text()).toContain("unexpected status 503");
-        expect(stderr.text().trim().split("\n").at(-1)).toContain(fatalMessage);
+        expect(stderr.text().trimEnd()).toEndWith(fatalMessage);
       },
     );
 
