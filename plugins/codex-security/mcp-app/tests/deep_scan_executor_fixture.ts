@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import childProcess, { type SpawnOptions } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import path from "node:path";
+import { parse as parseToml } from "smol-toml";
 import type { CodexSdkWorkerExecutor as Executor } from "../src/deep-scan/executor.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { assertConfigOverrides } from "./assertions.ts";
@@ -21,6 +25,84 @@ export const fakeCodexFixture = createFakeCodexFixture.bind(
   null,
   temporaryDirectories,
 );
+
+export type FakeCodexFixture = Awaited<ReturnType<typeof fakeCodexFixture>>;
+
+interface WorkerLaunch {
+  command: string;
+  args: readonly string[];
+  environment: NodeJS.ProcessEnv;
+  markerPath: string;
+}
+
+// The caller restores spawn after all configurations. Never wrap a previous recorder.
+export function captureWorkerLaunches(
+  originalSpawn: typeof childProcess.spawn,
+  fixture: FakeCodexFixture,
+  permissionProfile?: (configPath: string | undefined) => object,
+) {
+  const launches: WorkerLaunch[] = [];
+  childProcess.spawn = ((
+    command: string,
+    args: readonly string[],
+    options: SpawnOptions,
+  ) => {
+    const markerPath = path.join(
+      fixture.root,
+      `invocation-${launches.length}.json`,
+    );
+    const environment: NodeJS.ProcessEnv = {
+      ...options.env,
+      FAKE_CODEX_MARKER: markerPath,
+      FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
+    };
+    if (permissionProfile)
+      environment.FAKE_CODEX_PREFLIGHT_PROFILE = JSON.stringify(
+        permissionProfile(options.env?.CODEX_SECURITY_CONFIG_PATH),
+      );
+    launches.push({ command, args, environment, markerPath });
+    return originalSpawn(
+      command,
+      command === process.execPath ||
+        command === path.toNamespacedPath(process.execPath)
+        ? [fixture.executablePath, ...args]
+        : args,
+      { ...options, env: environment },
+    );
+  }) as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  return launches;
+}
+
+export function workerLaunchForModel(
+  launches: WorkerLaunch[],
+  model: string | undefined,
+) {
+  const launch = launches.find(({ args }) =>
+    model === undefined
+      ? !args.includes("--model")
+      : args[args.indexOf("--model") + 1] === model,
+  );
+  assert.ok(launch, `missing worker launch for ${model}`);
+  assert.equal(
+    launch.command,
+    process.platform === "win32"
+      ? path.toNamespacedPath(process.execPath)
+      : process.execPath,
+  );
+  assert.equal(launch.environment.CODEX_CLI_PATH, process.execPath);
+  return launch;
+}
+
+export function assertWorkerPermissionProfile(
+  args: readonly string[],
+  expected: object,
+) {
+  const { permissions } = parseToml(workerPermissionProfileOverride(args));
+  assert.deepEqual(JSON.parse(JSON.stringify(permissions)), {
+    codex_security_deep_scan_worker: expected,
+  });
+}
 
 export function workerRequest(
   promptPath: string,

@@ -28,7 +28,6 @@ import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
   reviewScopes,
-  reference,
   reportedUse,
   verifyProposedUse,
   type Claim,
@@ -49,6 +48,11 @@ import {
 } from "../src/dependency-discovery";
 
 type ReviewClaim = PremiseRef & { availableEvidenceKeys: string[] };
+
+// Echo the received identity independently so a host reference bug cannot cancel itself out.
+function reference({ id, revision, hash }: PremiseRef) {
+  return { id, revision, hash };
+}
 
 function approvedReview(claims: ReviewClaim[]) {
   return JSON.stringify({
@@ -519,11 +523,15 @@ test.each(["incomplete", "complete"] as const)(
           await expect(query(next)).rejects.toThrow(
             "changed since this cursor",
           );
-          await record({
+          const examine = {
             operation: "record_examined",
             partitionId: "first",
-            paths: [paths[0]],
-          });
+          };
+          // Reject the whole batch without marking any of the valid paths.
+          await expect(record({ ...examine, paths })).rejects.toThrow(
+            "outside the source partition",
+          );
+          await record({ ...examine, paths: [paths[0]] });
           expect(
             await query({
               partitionId: "first",
@@ -1943,9 +1951,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
       (row) => row.evidenceKeys ?? [row.sha256],
     );
     const decision = {
-      id: claim.id,
-      revision: claim.revision,
-      hash: claim.hash,
+      ...reference(claim),
       reason: "Checked the selected facts.",
       approved: true,
     };
