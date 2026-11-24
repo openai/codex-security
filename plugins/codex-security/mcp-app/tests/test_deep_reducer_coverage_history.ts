@@ -647,6 +647,142 @@ for (const copy of [
   });
 }
 
+for (const history of ["live", "archived", "copied", "reader"] as const) {
+  for (const complete of history === "reader" ? [true] : [false, true]) {
+    test(`unbound receipt history retains independent work (${history}, complete=${complete})`, async (t) => {
+      const f = await workerHistoryFixture(t, history === "live" ? 1 : 2);
+      const unbound = "artifacts/unbound.txt";
+      const local = "artifacts/retained.txt";
+      await writeFile(path.join(f.scanRoot, unbound), "scan-owned evidence");
+      await mkdir(path.dirname(path.join(f.output, local)), {
+        recursive: true,
+      });
+      await writeFile(path.join(f.output, local), "worker-owned evidence");
+      const retained = finding("retained", "src/example.ts");
+      const pending = {
+        id: "pending-review",
+        reason: "Synthetic pending review.",
+      };
+      const linked = {
+        id: "linked-review",
+        reason: "Synthetic retained follow-up.",
+        surfaceIds: ["retained-review"],
+      };
+      const prior = reviewDraft(
+        true,
+        {
+          surfaces: [
+            {
+              id: "unbound-review",
+              label: "Synthetic unbound review",
+              disposition: "no_issue_found",
+              receiptRefs: [unbound],
+            },
+            {
+              id: "retained-review",
+              label: "Synthetic retained review",
+              disposition: "needs_follow_up",
+              receiptRefs: [local],
+            },
+          ],
+          deferred: [pending, linked],
+        },
+        [retained],
+      );
+      await writeFile(f.resultPath, JSON.stringify(prior));
+      await assert.rejects(f.validate(), /artifact is unavailable/);
+      if (history !== "live") await f.archive();
+      if (history === "copied") {
+        await cp(path.join(f.workerRoot, "attempts/attempt-01"), f.output, {
+          recursive: true,
+        });
+      }
+      const retry = reviewDraft(complete);
+      if (history === "reader")
+        await writeFile(f.resultPath, JSON.stringify(retry));
+      else await f.record(retry);
+      const before = await artifactTree(f.scanRoot);
+      const result =
+        history === "reader"
+          ? (await f.readAccepted()).result
+          : JSON.parse(await readFile(f.resultPath, "utf8"));
+      assert.deepEqual(result.findings, [retained]);
+      assert.equal(result.complete, complete);
+      assert.deepEqual(
+        result.reviewState.deferred.map(
+          (row: { reason: string }) => row.reason,
+        ),
+        [pending.reason, linked.reason],
+      );
+      assert.equal(result.reviewState.surfaces.length, 1);
+      const surface = result.reviewState.surfaces[0];
+      assert.equal(surface.label, "Synthetic retained review");
+      assert.deepEqual(result.reviewState.deferred[1].surfaceIds, [surface.id]);
+      assert.equal(surface.receiptRefs.includes(unbound), false);
+      if (complete) {
+        const accepted = await f.readAccepted();
+        assert.equal(accepted.coverage.surfaces[0].provenance.attempt, 1);
+      } else {
+        await assert.rejects(f.readAccepted(), /only a checkpoint/);
+      }
+      assert.deepEqual(await artifactTree(f.scanRoot), before);
+      assert.equal(
+        await readFile(path.join(f.scanRoot, unbound), "utf8"),
+        "scan-owned evidence",
+      );
+    });
+  }
+}
+
+test("unbound receipt history does not retarget a pending link to a reused ID", async (t) => {
+  const f = await workerHistoryFixture(t, 2);
+  const unbound = "artifacts/unbound.txt";
+  const local = "artifacts/retained.txt";
+  await writeFile(path.join(f.scanRoot, unbound), "scan-owned evidence");
+  await mkdir(path.dirname(path.join(f.output, local)), { recursive: true });
+  await writeFile(path.join(f.output, local), "worker-owned evidence");
+  const reason = "Synthetic follow-up on the first review.";
+  await writeFile(
+    f.resultPath,
+    JSON.stringify(
+      reviewDraft(true, {
+        surfaces: [
+          {
+            id: "review",
+            label: "Synthetic unbound review",
+            disposition: "no_issue_found",
+            receiptRefs: [unbound],
+          },
+          {
+            id: "review",
+            label: "Synthetic retained review",
+            disposition: "needs_follow_up",
+            receiptRefs: [local],
+          },
+        ],
+        deferred: [
+          { id: "pending", reason, surfaceIds: ["review", "unknown"] },
+        ],
+      }),
+    ),
+  );
+  await assert.rejects(f.validate(), /artifact is unavailable/);
+  await f.archive();
+  await writeFile(f.resultPath, JSON.stringify(reviewDraft(true)));
+  const before = await artifactTree(f.scanRoot);
+  const accepted = await f.readAccepted();
+  assert.equal(accepted.coverage.surfaces.length, 1);
+  assert.equal(
+    accepted.coverage.surfaces[0].label,
+    "Synthetic retained review",
+  );
+  assert.equal(accepted.coverage.surfaces[0].provenance.attempt, 1);
+  assert.equal(accepted.coverage.deferred.length, 1);
+  assert.equal(accepted.coverage.deferred[0].reason, reason);
+  assert.deepEqual(accepted.coverage.deferred[0].surfaceIds, ["unknown"]);
+  assert.deepEqual(await artifactTree(f.scanRoot), before);
+});
+
 for (const local of [false, true]) {
   test(`archiving a direct result preserves its receipt owner, local=${local}`, async (t) => {
     const f = await workerHistoryFixture(t, 2);

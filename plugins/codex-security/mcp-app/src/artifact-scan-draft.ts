@@ -740,8 +740,8 @@ async function qualifyWorkerReceipts(
   input: ScanDraftInput,
   retainedSurface?: (surface: JsonObject) => JsonObject | undefined,
   canBindShared = true,
-): Promise<boolean> {
-  let qualified = true;
+): Promise<Set<JsonObject>> {
+  const unbound = new Set<JsonObject>();
   const workerPrefix = workerReceiptPrefix(context);
   const activePrefix = `${workerPrefix}output/`;
   const archivePrefix = `${workerPrefix}attempts/`;
@@ -799,7 +799,7 @@ async function qualifyWorkerReceipts(
           canBindShared,
         );
         if (fallback === "shared") shared.add(ref);
-        if (fallback === "unbound") qualified = false;
+        if (fallback === "unbound") unbound.add(surface);
         return ref;
       }),
     );
@@ -808,7 +808,32 @@ async function qualifyWorkerReceipts(
       (surface.receiptRefs as string[]).filter((ref) => shared.has(ref)),
     );
   }
-  return qualified;
+  return unbound;
+}
+
+function omitUnboundReceiptSurfaces(
+  draft: SavedScanDraft,
+  unbound: ReadonlySet<JsonObject>,
+) {
+  if (!unbound.size) return;
+  const surfaces = draft.input.reviewState.surfaces;
+  for (const pending of draft.input.reviewState.deferred as JsonObject[]) {
+    if (!Array.isArray(pending.surfaceIds)) continue;
+    pending.surfaceIds = pending.surfaceIds.filter((id) => {
+      // A reused ID still refers to its original first occurrence.
+      const owner = surfaces.find((surface) => surface.id === id);
+      return owner === undefined || !unbound.has(owner);
+    });
+  }
+  if (draft.surfaceIdentities)
+    draft.surfaceIdentities = draft.surfaceIdentities.filter(
+      (_, index) => !unbound.has(surfaces[index]!),
+    );
+  draft.input.reviewState.surfaces = surfaces.filter(
+    (surface) => !unbound.has(surface),
+  );
+  // Rejected coverage cannot establish that a direct result completed its audit.
+  draft.input.complete = false;
 }
 
 async function selectedReceiptPaths(
@@ -1009,19 +1034,17 @@ async function preserveScanDraft(
     }
   }
   if (context.layout === "worker") {
-    const eligible: SavedScanDraft[] = [];
     for (const source of current) {
-      if (
+      omitUnboundReceiptSurfaces(
+        source,
         await qualifyWorkerReceipts(
           context,
           source.input,
           (surface) => surface,
           source.input !== previous,
-        )
-      )
-        eligible.push(source);
+        ),
+      );
     }
-    current = eligible;
   }
   const currentReceipts = new Set(
     current.flatMap(({ input }) =>
@@ -2896,7 +2919,7 @@ export async function readArchivedWorkerCheckpoints(
         right.name.localeCompare(left.name),
     );
     for (const draft of drafts) {
-      let unboundSharedReceipt = false;
+      const unbound = new Set<JsonObject>();
       // Archive moves receipts with their attempt; preserve the checkpoint bytes.
       for (const surface of draft.input.reviewState.surfaces as JsonObject[]) {
         if (!Array.isArray(surface.receiptRefs)) continue;
@@ -2922,7 +2945,7 @@ export async function readArchivedWorkerCheckpoints(
                 !draft.result,
               );
               if (fallback === "unbound") {
-                unboundSharedReceipt = true;
+                unbound.add(surface);
                 return ref;
               }
               if (fallback === "shared") {
@@ -2939,8 +2962,8 @@ export async function readArchivedWorkerCheckpoints(
           refs.filter((ref) => shared.has(ref)),
         );
       }
-      if (!unboundSharedReceipt)
-        archived.push({ ...draft, attempt: attempt.name });
+      omitUnboundReceiptSurfaces(draft, unbound);
+      archived.push({ ...draft, attempt: attempt.name });
     }
     return archived;
   }
