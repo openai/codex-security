@@ -320,6 +320,7 @@ try {
     [
       ...npm.args,
       "install",
+      "--engine-strict",
       "--prefer-online",
       "--include=optional",
       "--ignore-scripts",

@@ -181,11 +181,23 @@ export class DependencyAttemptStore {
     );
   }
 
+  delete(kind: string, id: string): void {
+    this.rows("DELETE FROM records WHERE kind = ? AND id = ?", kind, id);
+  }
+
   keys(kind: string): string[] {
     return this.rows(
       "SELECT id FROM records WHERE kind = ? ORDER BY rowid",
       kind,
     ).map((row) => String(row["id"]));
+  }
+
+  size(kind: string): number {
+    return Number(
+      this.rows("SELECT COUNT(*) AS n FROM records WHERE kind = ?", kind)[0]![
+        "n"
+      ],
+    );
   }
 
   values<T>(kind: string): T[] {
