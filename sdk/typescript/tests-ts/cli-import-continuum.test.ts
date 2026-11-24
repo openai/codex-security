@@ -597,8 +597,9 @@ test("import continuum includes only the named AWS source's patches for one find
 async function collectSelectedArtifacts(
   findingIds: readonly string[],
   artifacts: { artifactId: string; artifactType: string; body: object }[],
+  links: Record<string, string> = { duplicateOfIssueId: "issue1" },
 ) {
-  const finding = { ...continuumDetail(), duplicateOfIssueId: "issue1" };
+  const finding = { ...continuumDetail(), ...links };
   const { issue } = continuumIssueExport().issues[0]!;
   const aws = mock(async (args: string[]) => {
     switch (args[1]) {
@@ -633,6 +634,74 @@ async function collectSelectedArtifacts(
   return { finding, issue, capture, aws };
 }
 
+test("merged findings collect and replay proof and patches from the destination issue", async () => {
+  const artifact = {
+    ...continuumValidationArtifact(),
+    body: { validationEvidence: { exploitable: "EXPLOITABLE" } },
+  };
+  const patch = patchArtifact("patch1", "+// example\n");
+  const { issue, capture, aws } = await collectSelectedArtifacts(
+    ["one"],
+    [
+      artifact,
+      { artifactId: patch.artifactId, artifactType: "PATCH", body: { patch } },
+    ],
+    {
+      createdIssueId: "original",
+      duplicateOfIssueId: "duplicate",
+      mergedIntoIssueId: "issue1",
+    },
+  );
+  for (const [args] of aws.mock.calls.slice(1))
+    expect(args[args.indexOf("--issue-id") + 1]).toBe(issue.issueId);
+  const patches = [{ ...patch, issueArn: issue.issueArn }];
+  expect(capture).toMatchObject({ patches });
+  for (const target of ["local", "cloud"] as const) {
+    const { findings } = normalizeContinuumFindings(
+      capture,
+      continuumRepository,
+      target,
+    );
+    expect(findings[0]?.evidence.source_data).toMatchObject({
+      validation_issue: { issueArn: issue.issueArn },
+      evidence_artifacts: [artifact],
+      patches,
+    });
+  }
+});
+
+test("requires recollection of ambiguous or misattributed saved patches after an issue merge", () => {
+  const { issue } = continuumIssueExport().issues[0]!;
+  const patch = patchArtifact("patch1", "+// example\n");
+  const finding = {
+    ...continuumDetail(),
+    createdIssueId: "original",
+    mergedIntoIssueId: issue.issueId,
+  };
+  for (const issueArn of [
+    undefined,
+    issue.issueArn.replace(/issue1$/u, "original"),
+    issue.issueArn.replace("/example/", "/elsewhere/"),
+  ]) {
+    const result = normalizeContinuumFindings(
+      { finding, patches: [{ ...patch, issueArn }] },
+      continuumRepository,
+    );
+    expect(result.findings).toHaveLength(0);
+    expect(result.excluded[0]?.reason).toMatch(/recollect/i);
+  }
+  // Repeated links to a single issue leave old captures unambiguous.
+  expect(
+    normalizeContinuumFindings(
+      {
+        finding: { ...finding, createdIssueId: issue.issueId },
+        patches: [patch],
+      },
+      continuumRepository,
+    ).findings[0]?.evidence.source_data?.["patches"],
+  ).toEqual([patch]);
+});
+
 test("a bundled validation artifact includes only the selected finding's proof and verdict alongside its patch", async () => {
   const artifact = continuumValidationArtifact();
   const validation = artifact.body.validationEvidence;
@@ -654,6 +723,7 @@ test("a bundled validation artifact includes only the selected finding's proof a
   };
   const selectedBody = {
     validationEvidence: {
+      terminalStatus: validation.terminalStatus,
       exploitable: selected.exploitable,
       perFindingResults: [selected],
     },
@@ -681,6 +751,62 @@ test("a bundled validation artifact includes only the selected finding's proof a
     patches: [patch],
     evidenceArtifacts: [{ ...artifact, body: selectedBody }],
   });
+});
+
+test("conflicting results retain only the verified issue verdict in live and saved captures", async () => {
+  const descriptor = continuumValidationArtifact();
+  const artifacts = [
+    {
+      ...descriptor,
+      body: {
+        validationEvidence: {
+          exploitable: "UNCERTAIN",
+          terminalStatus: "FAILED",
+          sourceAnalysis: { summary: "Bundled analysis" },
+          perFindingResults: [
+            { findingId: "one", exploitable: "EXPLOITABLE" },
+            { findingId: "one", exploitable: "NOT_EXPLOITABLE" },
+          ],
+        },
+      },
+    },
+  ];
+  const { finding, issue, capture } = await collectSelectedArtifacts(
+    ["one"],
+    artifacts,
+  );
+  const validationIssue = {
+    issueArn: issue.issueArn,
+    issueId: issue.issueId,
+    findingIds: ["one"],
+  };
+  expect(capture).toEqual({
+    finding,
+    validationIssue,
+    evidenceArtifacts: [
+      {
+        ...descriptor,
+        body: {
+          validationEvidence: {
+            exploitable: "UNCERTAIN",
+            terminalStatus: "FAILED",
+          },
+        },
+      },
+    ],
+  });
+  expect(
+    normalizeContinuumFindings(
+      { finding, validationIssue, evidenceArtifacts: artifacts },
+      continuumRepository,
+    ),
+  ).toEqual(normalizeContinuumFindings(capture, continuumRepository));
+  expect(
+    normalizeContinuumFindings(
+      { finding, evidenceArtifacts: artifacts },
+      continuumRepository,
+    ),
+  ).toEqual(normalizeContinuumFindings(finding, continuumRepository));
 });
 
 test.each([
@@ -726,6 +852,19 @@ test.each([
           }
         : finding,
     );
+    if (matches) {
+      const { findings } = normalizeContinuumFindings(
+        capture,
+        continuumRepository,
+      );
+      expect(findings[0]?.evidence).toMatchObject({
+        details: { scanner_verdict: finding.validation.verdict },
+        source_data: {
+          validation_issue: { issueArn: issue.issueArn },
+          evidence_artifacts: artifacts,
+        },
+      });
+    }
     expect(
       aws.mock.calls.filter(([args]) => args[1] === "get-code-issue"),
     ).toHaveLength(1);
