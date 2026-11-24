@@ -232,21 +232,22 @@ test("chunks long findings losslessly and pools vectors by token count", async (
 
 test("splits bulk requests at the provider input count limit", async () => {
   const sizes: number[] = [];
+  const embedding = vector();
   const embedder = new OpenAiFindingEmbedder(
     "synthetic-key",
     async (_url, init) => {
-      const input: number[][] = JSON.parse(String(init.body)).input;
+      const { input } = JSON.parse(String(init.body)) as { input: number[][] };
       sizes.push(input.length);
-      return Response.json({
+      const response = new Response();
+      response.json = async () => ({
         model: EMBEDDING_MODEL,
-        data: input.map((_, index) => ({ index, embedding: vector() })),
+        data: input.map((_, index) => ({ index, embedding })),
       });
+      return response;
     },
   );
-  const findings = Array.from(
-    { length: 2049 },
-    (_, index) => ({ id: `finding-${index}` }) as unknown as Finding,
-  );
+  // Small inputs reach the count limit before the token budget.
+  const findings = Array<Finding>(2049).fill({ findingId: "a" } as Finding);
   expect(await embedder.embed(findings)).toHaveLength(2049);
   expect(sizes).toEqual([2048, 1]);
 });
