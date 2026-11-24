@@ -380,44 +380,70 @@ def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutati
     assert not state.exists()
 
 
+def long_windows_store(root: PureWindowsPath, near_sqlite_limit: bool) -> PureWindowsPath:
+    # Only the filename, not its directory, crosses MAX_PATH in the ordinary case.
+    directory = root / ("state #% " + "x" * max(1, 234 - len(str(root))))
+    if near_sqlite_limit:
+        directory /= "界" * 200
+        padding = 1030 - len(str(directory / "workbench.sqlite3").encode("utf-8")) - 1
+        directory /= "x" * padding
+    path = directory / "workbench.sqlite3"
+    if near_sqlite_limit:
+        assert len(str(path).encode("utf-8")) == 1030
+    else:
+        assert len(str(directory)) < 260 <= len(str(path))
+    return path
+
+
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("root", ["C:\\", "\\\\host\\share\\"])
-@pytest.mark.parametrize("size", [265, 1030])
-def test_inspection_uses_extended_windows_paths_within_sqlite_budget(
-    tmp_path: Path, monkeypatch, root: str, size: int
+@pytest.mark.parametrize("near_sqlite_limit", [False, True])
+def test_receipt_inspection_uses_extended_windows_paths(
+    tmp_path: Path, monkeypatch, root: str, near_sqlite_limit: bool
 ) -> None:
     scan_dir, _ = source(tmp_path)
     publication = load_script("workbench_publication")
-    path = PureWindowsPath(root) / "state #% é" / "workbench.sqlite3"
-    padding = size - len(str(path).encode("utf-8"))
-    parts = [("x" * 99)] * (padding // 100)
-    path = path.parent.joinpath(*parts, "x" * (padding % 100 - 1), path.name)
-    assert len(str(path).encode("utf-8")) == size
+    path = long_windows_store(PureWindowsPath(root), near_sqlite_limit)
     extended = "\\\\?\\UNC\\" + str(path)[2:] if root.startswith("\\\\") else "\\\\?\\" + str(path)
     stat = Mock()
     connect = Mock(return_value=sqlite3.connect(":memory:"))
     monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt", stat=stat))
-    monkeypatch.setattr(publication.sqlite3, "connect", connect)
+    monkeypatch.setattr(publication, "sqlite3", SimpleNamespace(connect=connect, Row=sqlite3.Row))
     publication.finding_issues(
         SimpleNamespace(database_path=lambda: path),
         {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR},
     )
     stat.assert_called_once_with(Path(extended))
-    filename = extended if size == 265 else str(path)
+    filename = str(path) if near_sqlite_limit else extended
     connect.assert_called_once_with(f"file:{quote(filename, safe='')}?mode=ro", uri=True, timeout=5)
 
 
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows SQLite")
-def test_inspection_reads_existing_long_path_store_without_modifying_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("spelling", ["ordinary", "extended", "near-sqlite-limit"])
+def test_inspection_reads_a_long_windows_store_without_modifying_it(
+    tmp_path: Path, spelling: str
+) -> None:
     scan_dir, validated = source(tmp_path)
-    directory = tmp_path / ("state #% " + "x" * max(1, 234 - len(str(tmp_path))))
-    path = directory / "workbench.sqlite3"
-    assert len(str(path)) >= 260
+    seed = tmp_path / "seed" / "workbench.sqlite3"
+    legacy_database(seed, validated, LINEAR)
+    path = Path(long_windows_store(PureWindowsPath(tmp_path), spelling == "near-sqlite-limit"))
     native = Path(load_script("windows_scan_local_files")._extended_path(path))
-    legacy_database(native, validated, LINEAR)
-    before = native.read_bytes()
+    native.parent.mkdir(parents=True)
+    original = seed.read_bytes()
+    native.write_bytes(original)
+    if spelling == "near-sqlite-limit":
+        # This compatibility case requires a host that can open the ordinary spelling.
+        uri = load_script("snapshot_sqlite").readonly_sqlite_uri(path)
+        try:
+            sqlite3.connect(uri, uri=True).close()
+        except sqlite3.OperationalError as exc:
+            if str(exc) == "unable to open database file":
+                pytest.skip("the ordinary SQLite filename is unsupported on this host")
+            raise
+    directory = native.parent if spelling == "extended" else path.parent
     assert issues(directory, scan_dir, "inspect")["receipts"][0]["issueIdentifier"] == "SEC-101"
-    assert native.read_bytes() == before
+    assert native.read_bytes() == original
+    assert list(native.parent.iterdir()) == [native]
     native.unlink()
     assert not issues(directory, scan_dir, "inspect")["storeExists"]

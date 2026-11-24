@@ -211,17 +211,13 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "storeExists": True,
         "receipts": [],
     }
-    path = db.database_path()
-    if payload["action"] == "inspect" or require_history:
-        stat_path = path
+    inspect = payload["action"] == "inspect"
+    if inspect or require_history:
+        sqlite_path = stat_path = db.database_path()
         if os.name == "nt":
             from windows_scan_local_files import _extended_path
 
-            stat_path = Path(_extended_path(path))
-            # The default Win32 SQLite VFS allows 260 * 4 bytes including "-journal".
-            # Don't lose an otherwise usable filename to the extra prefix bytes.
-            if len(str(stat_path).encode("utf-8")) <= 260 * 4 - 8:
-                path = stat_path
+            stat_path = Path(_extended_path(sqlite_path))
         try:
             os.stat(stat_path)
         except FileNotFoundError:
@@ -234,9 +230,13 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
             return result
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
-    if payload["action"] == "inspect":
+    if inspect:
+        # The default Win32 SQLite VFS allows 260 * 4 bytes including "-journal".
+        # Keep the ordinary filename if the prefix would exhaust that budget.
+        if os.name == "nt" and len(str(stat_path).encode("utf-8")) <= 260 * 4 - 8:
+            sqlite_path = stat_path
         try:
-            connection = sqlite3.connect(readonly_sqlite_uri(path), uri=True, timeout=5)
+            connection = sqlite3.connect(readonly_sqlite_uri(sqlite_path), uri=True, timeout=5)
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True
@@ -245,11 +245,11 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     else:
         connection = db.connect()
     with closing(connection):
-        connection.execute("BEGIN" if payload["action"] == "inspect" else "BEGIN IMMEDIATE")
+        connection.execute("BEGIN" if inspect else "BEGIN IMMEDIATE")
         with connection:
             if require_history:
                 verify_publication_history(db, connection, scan_id, validated["scanDir"], findings)
-            if payload["action"] == "inspect":
+            if inspect:
                 result["receipts"] = inspect_issue_receipts(
                     connection, payload["destination"], key, list(selected)
                 )
