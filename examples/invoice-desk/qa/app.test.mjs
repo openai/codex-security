@@ -64,7 +64,12 @@ async function app(t) {
     });
     assert.equal(response.status, 200);
     const cookie = response.headers.get("set-cookie").split(";")[0];
-    return (path, options = {}) => request(path, { ...options, cookie });
+    return {
+      get: (path) => request(path, { cookie }),
+      post: (path, body = {}) =>
+        request(path, { method: "POST", body, cookie }),
+      patch: (path, body) => request(path, { method: "PATCH", body, cookie }),
+    };
   };
   return { request, login, origin };
 }
@@ -88,9 +93,9 @@ function invoiceDocument(workspaceId, amountCents = 25_000) {
 scenario("ID-001", async (t) => {
   const { login, request } = await app(t);
   const alex = await login("alex");
-  const settings = await alex("/api/integrations");
+  const settings = await alex.get("/api/integrations");
   assert.equal(settings.body.accessToken, undefined);
-  const report = await alex("/api/support-report");
+  const report = await alex.get("/api/support-report");
   assert.equal(report.status, 200);
   const token = report.body.connector.accessToken;
   assert.ok(token);
@@ -107,11 +112,11 @@ scenario("ID-002", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   assert.ok(
-    (await alex("/api/invoices")).body.every(
+    (await alex.get("/api/invoices")).body.every(
       (invoice) => invoice.workspaceId === "north",
     ),
   );
-  const other = await alex("/api/invoices/inv-cedar-1");
+  const other = await alex.get("/api/invoices/inv-cedar-1");
   assert.equal(other.status, 200);
   assert.equal(other.body.workspaceId, "cedar");
 });
@@ -120,9 +125,9 @@ scenario("ID-003", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   const sam = await login("sam");
-  const first = await alex("/api/invoices/inv-north-1/preview");
-  const second = await sam("/api/invoices/inv-cedar-1/preview");
-  const own = await sam("/api/invoices/inv-cedar-1");
+  const first = await alex.get("/api/invoices/inv-north-1/preview");
+  const second = await sam.get("/api/invoices/inv-cedar-1/preview");
+  const own = await sam.get("/api/invoices/inv-cedar-1");
   assert.equal(second.status, 200);
   assert.deepEqual(second.body, first.body);
   assert.notEqual(second.body.customer, own.body.customer);
@@ -133,21 +138,14 @@ scenario("ID-004", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   const jules = await login("jules");
-  const approved = await jules("/api/invoices/inv-north-1/approve", {
-    method: "POST",
-    body: {},
-  });
+  const approved = await jules.post("/api/invoices/inv-north-1/approve");
   assert.equal(approved.status, 200);
-  const changed = await alex("/api/invoices/inv-north-1", {
-    method: "PATCH",
-    body: { amountCents: 98_000 },
+  const changed = await alex.patch("/api/invoices/inv-north-1", {
+    amountCents: 98_000,
   });
   assert.equal(changed.status, 200);
   assert.notEqual(changed.body.version, changed.body.approval.version);
-  const sent = await alex("/api/invoices/inv-north-1/send", {
-    method: "POST",
-    body: {},
-  });
+  const sent = await alex.post("/api/invoices/inv-north-1/send");
   assert.equal(sent.status, 200);
   assert.equal(sent.body.amountCents, 98_000);
   assert.equal(sent.body.status, "sent");
@@ -157,15 +155,9 @@ scenario("ID-005", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   const document = invoiceDocument("north", 150_000);
-  assert.equal(
-    (await alex("/api/imports", { method: "POST", body: document })).status,
-    422,
-  );
+  assert.equal((await alex.post("/api/imports", document)).status, 422);
   document.schemaVersion = "2";
-  const imported = await alex("/api/imports", {
-    method: "POST",
-    body: document,
-  });
+  const imported = await alex.post("/api/imports", document);
   assert.equal(imported.status, 201);
   assert.equal(imported.body.invoice.amountCents, 150_000);
   assert.equal(imported.body.review.approved, true);
@@ -178,24 +170,24 @@ scenario("ID-006", async (t) => {
   const sam = await login("sam");
   assert.equal(
     (
-      await alex("/api/integrations/deliver", {
-        method: "POST",
-        body: { invoiceId: "inv-north-1", destination: "ledger" },
+      await alex.post("/api/integrations/deliver", {
+        invoiceId: "inv-north-1",
+        destination: "ledger",
       })
     ).status,
     201,
   );
-  assert.deepEqual((await sam("/api/integrations/inbox")).body, []);
+  assert.deepEqual((await sam.get("/api/integrations/inbox")).body, []);
   assert.equal(
     (
-      await alex("/api/integrations/deliver", {
-        method: "POST",
-        body: { invoiceId: "inv-north-1", destination: "archive" },
+      await alex.post("/api/integrations/deliver", {
+        invoiceId: "inv-north-1",
+        destination: "archive",
       })
     ).status,
     201,
   );
-  const inbox = await sam("/api/integrations/inbox");
+  const inbox = await sam.get("/api/integrations/inbox");
   assert.equal(inbox.body.length, 1);
   const account = await request("/api/ledger/account", {
     headers: { Authorization: `Bearer ${inbox.body[0].credential}` },
@@ -203,7 +195,7 @@ scenario("ID-006", async (t) => {
   assert.equal(account.status, 200);
   assert.equal(account.body.workspaceId, "north");
   assert.equal(account.body.settlementBalanceCents, 314_200);
-  assert.deepEqual((await alex("/api/integrations/inbox")).body, []);
+  assert.deepEqual((await alex.get("/api/integrations/inbox")).body, []);
 });
 
 scenario("ID-007", async (t) => {
@@ -211,27 +203,17 @@ scenario("ID-007", async (t) => {
   const jules = await login("jules");
   const sam = await login("sam");
   const document = invoiceDocument("cedar", 150_000);
+  assert.equal((await sam.post("/api/imports", document)).status, 422);
   assert.equal(
-    (await sam("/api/imports", { method: "POST", body: document })).status,
-    422,
-  );
-  assert.equal(
-    (
-      await jules("/api/import-policy", {
-        method: "PATCH",
-        body: { maxAmountCents: 200_000 },
-      })
-    ).status,
+    (await jules.patch("/api/import-policy", { maxAmountCents: 200_000 }))
+      .status,
     200,
   );
   assert.equal(
-    (await sam("/api/import-policy")).body.limits.maxAmountCents,
+    (await sam.get("/api/import-policy")).body.limits.maxAmountCents,
     200_000,
   );
-  assert.equal(
-    (await sam("/api/imports", { method: "POST", body: document })).status,
-    201,
-  );
+  assert.equal((await sam.post("/api/imports", document)).status, 201);
 });
 
 scenario("ID-008", async (t) => {
@@ -239,29 +221,21 @@ scenario("ID-008", async (t) => {
   const alex = await login("alex");
   const sam = await login("sam");
   assert.equal(
-    (
-      await alex("/api/imports", {
-        method: "POST",
-        body: invoiceDocument("cedar"),
-      })
-    ).status,
+    (await alex.post("/api/imports", invoiceDocument("cedar"))).status,
     403,
   );
   const document = invoiceDocument("north");
   document.invoice.workspaceId = "cedar";
-  const imported = await alex("/api/imports", {
-    method: "POST",
-    body: document,
-  });
+  const imported = await alex.post("/api/imports", document);
   assert.equal(imported.status, 201);
   assert.equal(imported.body.invoice.workspaceId, "cedar");
   assert.ok(
-    (await sam("/api/invoices")).body.some(
+    (await sam.get("/api/invoices")).body.some(
       (invoice) => invoice.id === imported.body.invoice.id,
     ),
   );
   assert.ok(
-    !(await alex("/api/invoices")).body.some(
+    !(await alex.get("/api/invoices")).body.some(
       (invoice) => invoice.id === imported.body.invoice.id,
     ),
   );
@@ -271,27 +245,17 @@ scenario("ID-009", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   assert.equal(
-    (
-      await alex("/api/invoices/inv-north-1/approve", {
-        method: "POST",
-        body: {},
-      })
-    ).status,
+    (await alex.post("/api/invoices/inv-north-1/approve")).status,
     403,
   );
-  const profile = await alex("/api/profile", {
-    method: "PATCH",
-    body: { name: "Alex", role: "admin" },
+  const profile = await alex.patch("/api/profile", {
+    name: "Alex",
+    role: "admin",
   });
   assert.equal(profile.status, 200);
-  assert.equal((await alex("/api/me")).body.profile.role, "admin");
+  assert.equal((await alex.get("/api/me")).body.profile.role, "admin");
   assert.equal(
-    (
-      await alex("/api/invoices/inv-north-1/approve", {
-        method: "POST",
-        body: {},
-      })
-    ).status,
+    (await alex.post("/api/invoices/inv-north-1/approve")).status,
     200,
   );
 });
@@ -302,23 +266,18 @@ scenario("ID-010", async (t) => {
   const jules = await login("jules");
   const markup = '<strong data-note="formatting">Account update</strong>';
   assert.equal(
-    (
-      await alex("/api/invoices/inv-north-1/comments", {
-        method: "POST",
-        body: { body: markup },
-      })
-    ).status,
+    (await alex.post("/api/invoices/inv-north-1/comments", { body: markup }))
+      .status,
     201,
   );
-  const page = await jules("/invoices/inv-north-1");
+  const page = await jules.get("/invoices/inv-north-1");
   assert.equal(page.status, 200);
   assert.ok(page.body.includes(`<div class="comment-body">${markup}</div>`));
-  await alex("/api/invoices/inv-north-1", {
-    method: "PATCH",
-    body: { customer: '<em data-client="name">Client</em>' },
+  await alex.patch("/api/invoices/inv-north-1", {
+    customer: '<em data-client="name">Client</em>',
   });
   assert.ok(
-    (await jules("/invoices/inv-north-1")).body.includes(
+    (await jules.get("/invoices/inv-north-1")).body.includes(
       "&lt;em data-client=&quot;name&quot;&gt;Client&lt;/em&gt;",
     ),
   );
@@ -386,15 +345,12 @@ test("invoice previews refresh when the invoice version changes", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
   assert.equal(
-    (await alex("/api/invoices/inv-north-1/preview")).body.amountCents,
+    (await alex.get("/api/invoices/inv-north-1/preview")).body.amountCents,
     48_500,
   );
-  await alex("/api/invoices/inv-north-1", {
-    method: "PATCH",
-    body: { amountCents: 49_000 },
-  });
+  await alex.patch("/api/invoices/inv-north-1", { amountCents: 49_000 });
   assert.equal(
-    (await alex("/api/invoices/inv-north-1/preview")).body.amountCents,
+    (await alex.get("/api/invoices/inv-north-1/preview")).body.amountCents,
     49_000,
   );
 });
@@ -413,7 +369,7 @@ test("health, static assets, and every ordinary page are served", async (t) => {
     "/integrations",
     "/profile",
   ]) {
-    const response = await alex(path);
+    const response = await alex.get(path);
     assert.equal(response.status, 200);
     assert.ok(response.body.includes("Invoice Desk"));
   }
@@ -472,30 +428,24 @@ test("scoped writes, previews, HTML pages, and connector deliveries reject anoth
   const { login } = await app(t);
   const alex = await login("alex");
   assert.equal(
-    (
-      await alex("/api/invoices/inv-cedar-1", {
-        method: "PATCH",
-        body: { amountCents: 1 },
-      })
-    ).status,
+    (await alex.patch("/api/invoices/inv-cedar-1", { amountCents: 1 })).status,
     404,
   );
   assert.equal(
-    (
-      await alex("/api/invoices/inv-cedar-1/comments", {
-        method: "POST",
-        body: { body: "Hello" },
-      })
-    ).status,
+    (await alex.post("/api/invoices/inv-cedar-1/comments", { body: "Hello" }))
+      .status,
     404,
   );
-  assert.equal((await alex("/api/invoices/inv-cedar-1/preview")).status, 404);
-  assert.equal((await alex("/invoices/inv-cedar-1")).status, 404);
+  assert.equal(
+    (await alex.get("/api/invoices/inv-cedar-1/preview")).status,
+    404,
+  );
+  assert.equal((await alex.get("/invoices/inv-cedar-1")).status, 404);
   assert.equal(
     (
-      await alex("/api/integrations/deliver", {
-        method: "POST",
-        body: { invoiceId: "inv-cedar-1", destination: "ledger" },
+      await alex.post("/api/integrations/deliver", {
+        invoiceId: "inv-cedar-1",
+        destination: "ledger",
       })
     ).status,
     404,
@@ -506,33 +456,17 @@ test("normal approval and delivery work, and unapproved invoices cannot be sent"
   const { login } = await app(t);
   const alex = await login("alex");
   const jules = await login("jules");
+  assert.equal((await alex.post("/api/invoices/inv-north-1/send")).status, 409);
   assert.equal(
-    (await alex("/api/invoices/inv-north-1/send", { method: "POST", body: {} }))
+    (await alex.patch("/api/import-policy", { maxAmountCents: 200_000 }))
       .status,
-    409,
-  );
-  assert.equal(
-    (
-      await alex("/api/import-policy", {
-        method: "PATCH",
-        body: { maxAmountCents: 200_000 },
-      })
-    ).status,
     403,
   );
   assert.equal(
-    (
-      await jules("/api/invoices/inv-north-1/approve", {
-        method: "POST",
-        body: {},
-      })
-    ).status,
+    (await jules.post("/api/invoices/inv-north-1/approve")).status,
     200,
   );
-  const sent = await alex("/api/invoices/inv-north-1/send", {
-    method: "POST",
-    body: {},
-  });
+  const sent = await alex.post("/api/invoices/inv-north-1/send");
   assert.equal(sent.status, 200);
   assert.equal(sent.body.version, 1);
 });
@@ -540,23 +474,19 @@ test("normal approval and delivery work, and unapproved invoices cannot be sent"
 test("normal imports remain in their workspace and settings omit server credentials", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
-  const imported = await alex("/api/imports", {
-    method: "POST",
-    body: invoiceDocument("north"),
-  });
+  const imported = await alex.post("/api/imports", invoiceDocument("north"));
   assert.equal(imported.status, 201);
   assert.equal(imported.body.invoice.workspaceId, "north");
   assert.equal(imported.body.review.approved, true);
-  assert.deepEqual(Object.keys((await alex("/api/integrations")).body).sort(), [
-    "connected",
-    "destination",
-    "destinations",
-  ]);
+  assert.deepEqual(
+    Object.keys((await alex.get("/api/integrations")).body).sort(),
+    ["connected", "destination", "destinations"],
+  );
   assert.equal(
     (
-      await alex("/api/integrations/deliver", {
-        method: "POST",
-        body: { invoiceId: "inv-north-1", destination: "unknown" },
+      await alex.post("/api/integrations/deliver", {
+        invoiceId: "inv-north-1",
+        destination: "unknown",
       })
     ).status,
     400,
@@ -566,40 +496,32 @@ test("normal imports remain in their workspace and settings omit server credenti
 test("logout revokes the current session", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
-  assert.equal(
-    (await alex("/api/logout", { method: "POST", body: {} })).status,
-    200,
-  );
-  assert.equal((await alex("/api/me")).status, 401);
+  assert.equal((await alex.post("/api/logout")).status, 200);
+  assert.equal((await alex.get("/api/me")).status, 401);
 });
 
 test("new app instances reset invoices, credentials, profiles, and import policies", async (t) => {
   const first = await app(t);
   const alex = await first.login("alex");
   const jules = await first.login("jules");
-  const token = (await alex("/api/support-report")).body.connector.accessToken;
-  await alex("/api/profile", { method: "PATCH", body: { role: "admin" } });
-  await alex("/api/invoices/inv-north-1", {
-    method: "PATCH",
-    body: { amountCents: 1 },
-  });
-  await jules("/api/import-policy", {
-    method: "PATCH",
-    body: { maxAmountCents: 200_000 },
-  });
+  const token = (await alex.get("/api/support-report")).body.connector
+    .accessToken;
+  await alex.patch("/api/profile", { role: "admin" });
+  await alex.patch("/api/invoices/inv-north-1", { amountCents: 1 });
+  await jules.patch("/api/import-policy", { maxAmountCents: 200_000 });
   const second = await app(t);
   const fresh = await second.login("alex");
-  assert.equal((await fresh("/api/me")).body.profile.role, "member");
+  assert.equal((await fresh.get("/api/me")).body.profile.role, "member");
   assert.equal(
-    (await fresh("/api/invoices/inv-north-1")).body.amountCents,
+    (await fresh.get("/api/invoices/inv-north-1")).body.amountCents,
     48_500,
   );
   assert.equal(
-    (await fresh("/api/import-policy")).body.limits.maxAmountCents,
+    (await fresh.get("/api/import-policy")).body.limits.maxAmountCents,
     100_000,
   );
   assert.notEqual(
-    (await fresh("/api/support-report")).body.connector.accessToken,
+    (await fresh.get("/api/support-report")).body.connector.accessToken,
     token,
   );
   assert.equal(

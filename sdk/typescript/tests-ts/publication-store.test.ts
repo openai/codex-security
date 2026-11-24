@@ -42,6 +42,28 @@ afterEach(cleanup);
 
 type PublicationFixture = Awaited<ReturnType<typeof publicationFixture>>;
 
+const RECEIPT_COUNT_SQL =
+  "SELECT COUNT(*) AS count FROM finding_issue_receipts";
+
+function publicationStore(
+  publication: PreparedScanPublication,
+  environment: NodeJS.ProcessEnv,
+) {
+  return {
+    publication,
+    environment,
+    record(issues: PublishedScanIssue[], selected = publication) {
+      return recordPublishedIssues(selected, issues, environment);
+    },
+    inspect(selected = publication) {
+      return inspectPublicationStore(selected, environment);
+    },
+    prepare(selected = publication) {
+      return preparePublicationStore(selected, environment);
+    },
+  };
+}
+
 async function publicationFixture(
   options: {
     count?: number;
@@ -70,7 +92,11 @@ async function publicationFixture(
     environment,
     options.count ?? 2,
   );
-  const fixture = { environment, publication, python, stateDirectory };
+  const fixture = {
+    ...publicationStore(publication, environment),
+    python,
+    stateDirectory,
+  };
   if (options.createDatabase !== false) {
     await mkdir(stateDirectory, { mode: 0o700 });
     await runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, [
@@ -176,10 +202,10 @@ async function mockStoreFixture() {
       },
     ],
   };
-  return {
-    publication,
-    environment: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDirectory },
-  };
+  return publicationStore(publication, {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  });
 }
 
 function publishedIssue(
@@ -235,9 +261,7 @@ describe("read-only publication history", () => {
       "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
       [digest, original.scanId],
     );
-    await expect(
-      inspectPublicationStore(original, fixture.environment),
-    ).resolves.toEqual([]);
+    await expect(fixture.inspect(original)).resolves.toEqual([]);
 
     const findingsPath = join(scanDirectory, "findings.json");
     const findings = JSON.parse(
@@ -279,9 +303,7 @@ describe("read-only publication history", () => {
       throw new Error("No temporary directory is available.");
     });
     try {
-      await expect(
-        inspectPublicationStore(fixture.publication, fixture.environment),
-      ).resolves.toEqual([]);
+      await expect(fixture.inspect()).resolves.toEqual([]);
     } finally {
       temporary.mockRestore();
     }
@@ -375,9 +397,9 @@ describe("read-only publication history", () => {
         },
       ]) {
         workbench.mockResolvedValue(invalidResponse);
-        await expect(
-          inspectPublicationStore(fixture.publication, fixture.environment),
-        ).rejects.toThrow(/invalid persisted Linear publication records/u);
+        await expect(fixture.inspect()).rejects.toThrow(
+          /invalid persisted Linear publication records/u,
+        );
       }
     } finally {
       workbench.mockRestore();
@@ -398,13 +420,9 @@ describe("read-only publication history", () => {
       receipts: [{ ...issue, scanId: SCAN_ID, issueIdentifier: "EXAMPLE-102" }],
     });
     try {
-      await expect(
-        recordPublishedIssues(
-          fixture.publication,
-          [issue],
-          fixture.environment,
-        ),
-      ).rejects.toThrow(/invalid persisted Linear publication records/u);
+      await expect(fixture.record([issue])).rejects.toThrow(
+        /invalid persisted Linear publication records/u,
+      );
     } finally {
       workbench.mockRestore();
     }
@@ -412,9 +430,9 @@ describe("read-only publication history", () => {
 
   test("does not create a missing database or migrate old history", async () => {
     const missing = await publicationFixture({ createDatabase: false });
-    await expect(
-      inspectPublicationStore(missing.publication, missing.environment),
-    ).rejects.toThrow(/scan-history database does not exist/u);
+    await expect(missing.inspect()).rejects.toThrow(
+      /scan-history database does not exist/u,
+    );
     expect(existsSync(missing.stateDirectory)).toBe(false);
 
     const fixture = await publicationFixture();
@@ -430,9 +448,7 @@ describe("read-only publication history", () => {
     const database = join(fixture.stateDirectory, "workbench.sqlite3");
     const before = await readFile(database);
     const mode = (await stat(database)).mode;
-    await expect(
-      inspectPublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toEqual([]);
+    await expect(fixture.inspect()).resolves.toEqual([]);
     expect(await readFile(database)).toEqual(before);
     expect((await stat(database)).mode).toBe(mode);
     expect(
@@ -476,9 +492,7 @@ describe("read-only publication history", () => {
     expect(setup.status, setup.stderr).toBe(0);
     seedPublicationScan(fixture, fixture.publication);
     const before = await readFile(database);
-    await expect(
-      inspectPublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toEqual([]);
+    await expect(fixture.inspect()).resolves.toEqual([]);
     expect(await readFile(database)).toEqual(before);
     expect(
       databaseRows(
@@ -492,33 +506,19 @@ describe("read-only publication history", () => {
     const fixture = await publicationFixture();
     const first = publishedIssue(fixture.publication, 0, "EXAMPLE-101");
     const second = publishedIssue(fixture.publication, 1, "EXAMPLE-102");
-    await recordPublishedIssues(
-      fixture.publication,
-      [second, first],
-      fixture.environment,
-    );
-    await recordPublishedIssues(
-      fixture.publication,
-      [publishedIssue(fixture.publication, 0, "EXAMPLE-201")],
-      fixture.environment,
-    );
+    await fixture.record([second, first]);
+    await fixture.record([
+      publishedIssue(fixture.publication, 0, "EXAMPLE-201"),
+    ]);
     const teamOnly: PreparedScanPublication = {
       ...fixture.publication,
       destination: { type: "linear", teamId: "team-example" },
     };
     const withoutProject = publishedIssue(teamOnly, 1, "EXAMPLE-301");
-    await recordPublishedIssues(
-      teamOnly,
-      [withoutProject],
-      fixture.environment,
-    );
+    await fixture.record([withoutProject], teamOnly);
 
-    await expect(
-      inspectPublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toEqual([first, second]);
-    await expect(
-      inspectPublicationStore(teamOnly, fixture.environment),
-    ).resolves.toEqual([withoutProject]);
+    await expect(fixture.inspect()).resolves.toEqual([first, second]);
+    await expect(fixture.inspect(teamOnly)).resolves.toEqual([withoutProject]);
     for (const destination of [
       { ...fixture.publication.destination, teamId: "another-team" },
       { ...fixture.publication.destination, projectId: "another-project" },
@@ -540,9 +540,7 @@ describe("read-only publication history", () => {
       OTHER_SCAN_ID,
     );
     seedPublicationScan(fixture, otherScan);
-    await expect(
-      inspectPublicationStore(otherScan, fixture.environment),
-    ).resolves.toEqual([]);
+    await expect(fixture.inspect(otherScan)).resolves.toEqual([]);
     const candidates = await runWorkbench(
       {
         python: fixture.python,
@@ -583,11 +581,7 @@ describe("read-only publication history", () => {
     const fixture = await publicationFixture({ count: 1 });
     const original = publishedIssue(fixture.publication, 0, "EXAMPLE-401");
     const changed = publishedIssue(fixture.publication, 0, "EXAMPLE-402");
-    await recordPublishedIssues(
-      fixture.publication,
-      [original],
-      fixture.environment,
-    );
+    await fixture.record([original]);
     const database = join(fixture.stateDirectory, "workbench.sqlite3");
     const update = runNodePython(fixture.python, [
       "-c",
@@ -605,9 +599,7 @@ describe("read-only publication history", () => {
     ]);
     expect(update.status, update.stderr).toBe(0);
     expect(existsSync(`${database}-wal`)).toBe(true);
-    await expect(
-      inspectPublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toEqual([changed]);
+    await expect(fixture.inspect()).resolves.toEqual([changed]);
   });
 });
 
@@ -627,42 +619,26 @@ describe("persisted finding publication associations", () => {
       },
     );
 
-    await expect(
-      inspectPublicationStore(selected, fixture.environment),
-    ).resolves.toEqual([]);
-    await preparePublicationStore(selected, fixture.environment);
-    await expect(
-      recordPublishedIssues(selected, [first, excluded], fixture.environment),
-    ).rejects.toThrow(/selected sealed findings/u);
-    expect(
-      databaseRows(
-        fixture,
-        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
-      ),
-    ).toEqual([{ count: 0 }]);
-    await expect(
-      recordPublishedIssues(selected, [first], fixture.environment),
-    ).resolves.toEqual([first]);
-    await expect(
-      inspectPublicationStore(selected, fixture.environment),
-    ).resolves.toEqual([first]);
+    await expect(fixture.inspect(selected)).resolves.toEqual([]);
+    await fixture.prepare(selected);
+    await expect(fixture.record([first, excluded], selected)).rejects.toThrow(
+      /selected sealed findings/u,
+    );
+    expect(databaseRows(fixture, RECEIPT_COUNT_SQL)).toEqual([{ count: 0 }]);
+    await expect(fixture.record([first], selected)).resolves.toEqual([first]);
+    await expect(fixture.inspect(selected)).resolves.toEqual([first]);
 
     databaseRows(fixture, "DELETE FROM finding_occurrences WHERE id = ?", [
       excluded.occurrenceId,
     ]);
     for (const action of [
-      () => inspectPublicationStore(selected, fixture.environment),
-      () => preparePublicationStore(selected, fixture.environment),
-      () => recordPublishedIssues(selected, [first], fixture.environment),
+      () => fixture.inspect(selected),
+      () => fixture.prepare(selected),
+      () => fixture.record([first], selected),
     ]) {
       await expect(action()).rejects.toThrow(/do not exactly match local/u);
     }
-    expect(
-      databaseRows(
-        fixture,
-        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
-      ),
-    ).toEqual([{ count: 1 }]);
+    expect(databaseRows(fixture, RECEIPT_COUNT_SQL)).toEqual([{ count: 1 }]);
   });
 
   test("reads legacy Linear receipts without migration and preserves them when preparing shared history", async () => {
@@ -704,15 +680,11 @@ describe("persisted finding publication associations", () => {
       ],
     );
     const before = await readFile(database);
-    await expect(
-      inspectPublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toEqual([original]);
+    await expect(fixture.inspect()).resolves.toEqual([original]);
     expect(await readFile(database)).toEqual(before);
 
-    await preparePublicationStore(fixture.publication, fixture.environment);
-    await expect(
-      inspectPublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toEqual([original]);
+    await fixture.prepare();
+    await expect(fixture.inspect()).resolves.toEqual([original]);
     expect(
       databaseRows(
         fixture,
@@ -735,11 +707,7 @@ describe("persisted finding publication associations", () => {
 
   test("rolls back failed migrations without losing populated scan history", async () => {
     const fixture = await publicationFixture({ count: 1 });
-    await recordPublishedIssues(
-      fixture.publication,
-      [publishedIssue(fixture.publication, 0)],
-      fixture.environment,
-    );
+    await fixture.record([publishedIssue(fixture.publication, 0)]);
     databaseRows(
       fixture,
       "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) VALUES (?, 'closed', 'false_positive', 'synthetic triage note', '2026-08-01T00:00:00Z')",
@@ -813,9 +781,7 @@ connection.close()
       [31, 32],
     );
 
-    await expect(
-      preparePublicationStore(fixture.publication, fixture.environment),
-    ).resolves.toBeUndefined();
+    await expect(fixture.prepare()).resolves.toBeUndefined();
 
     expect(
       databaseRows(
@@ -844,17 +810,15 @@ connection.close()
   test("rejects missing and non-regular publication history without initializing it", async () => {
     const fixture = await publicationFixture({ createDatabase: false });
 
-    await expect(
-      preparePublicationStore(fixture.publication, fixture.environment),
-    ).rejects.toThrow(/scan-history database does not exist/u);
+    await expect(fixture.prepare()).rejects.toThrow(
+      /scan-history database does not exist/u,
+    );
 
     expect(existsSync(fixture.stateDirectory)).toBe(false);
     await mkdir(join(fixture.stateDirectory, "workbench.sqlite3"), {
       recursive: true,
     });
-    await expect(
-      preparePublicationStore(fixture.publication, fixture.environment),
-    ).rejects.toThrow(/not a regular file/u);
+    await expect(fixture.prepare()).rejects.toThrow(/not a regular file/u);
   });
 
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
@@ -892,15 +856,10 @@ connection.close()
   test("rejects a scan absent from existing local scan history", async () => {
     const fixture = await publicationFixture({ seedScan: false });
 
-    await expect(
-      preparePublicationStore(fixture.publication, fixture.environment),
-    ).rejects.toThrow(/scan is not present in the local/u);
-    expect(
-      databaseRows(
-        fixture,
-        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
-      ),
-    ).toEqual([{ count: 0 }]);
+    await expect(fixture.prepare()).rejects.toThrow(
+      /scan is not present in the local/u,
+    );
+    expect(databaseRows(fixture, RECEIPT_COUNT_SQL)).toEqual([{ count: 0 }]);
   });
 
   test("rejects an incomplete scan before publication", async () => {
@@ -910,9 +869,7 @@ connection.close()
       SCAN_ID,
     ]);
 
-    await expect(
-      preparePublicationStore(fixture.publication, fixture.environment),
-    ).rejects.toThrow(/Only completed scans/u);
+    await expect(fixture.prepare()).rejects.toThrow(/Only completed scans/u);
   });
 
   test("rejects a selected directory that differs from its recorded scan", async () => {
@@ -947,9 +904,7 @@ connection.close()
           ["occ_000000000000000000000000", occurrenceId],
         );
       }
-      await expect(
-        preparePublicationStore(fixture.publication, fixture.environment),
-      ).rejects.toThrow(/finding|occurrence/u);
+      await expect(fixture.prepare()).rejects.toThrow(/finding|occurrence/u);
     },
   );
 
@@ -976,11 +931,7 @@ connection.close()
     const first = publishedIssue(fixture.publication, 0, "EXAMPLE-101");
     const second = publishedIssue(fixture.publication, 1, "EXAMPLE-102");
 
-    const created = await recordPublishedIssues(
-      fixture.publication,
-      [second, first],
-      fixture.environment,
-    );
+    const created = await fixture.record([second, first]);
 
     expect(created).toEqual([first, second]);
     expect(
@@ -1018,9 +969,7 @@ connection.close()
     const issue = publishedIssue(fixture.publication, 0);
     delete issue.url;
 
-    await expect(
-      recordPublishedIssues(fixture.publication, [issue], fixture.environment),
-    ).resolves.toEqual([issue]);
+    await expect(fixture.record([issue])).resolves.toEqual([issue]);
     expect(
       databaseRows(fixture, "SELECT external_url FROM finding_issue_receipts"),
     ).toEqual([{ external_url: null }]);
@@ -1038,15 +987,13 @@ connection.close()
     const first = publishedIssue(publication, 0, "EXAMPLE-411");
     const second = publishedIssue(publication, 1, "EXAMPLE-412");
 
-    await expect(
-      preparePublicationStore(publication, fixture.environment),
-    ).resolves.toBeUndefined();
-    await expect(
-      recordPublishedIssues(publication, [first], fixture.environment),
-    ).resolves.toEqual([first]);
-    await expect(
-      recordPublishedIssues(publication, [first], fixture.environment),
-    ).resolves.toEqual([first]);
+    await expect(fixture.prepare(publication)).resolves.toBeUndefined();
+    await expect(fixture.record([first], publication)).resolves.toEqual([
+      first,
+    ]);
+    await expect(fixture.record([first], publication)).resolves.toEqual([
+      first,
+    ]);
 
     expect(
       databaseRows(
@@ -1055,9 +1002,9 @@ connection.close()
       ),
     ).toEqual([{ project_id: null, external_id: first.issueIdentifier }]);
 
-    await expect(
-      recordPublishedIssues(publication, [first, second], fixture.environment),
-    ).resolves.toEqual([first, second]);
+    await expect(fixture.record([first, second], publication)).resolves.toEqual(
+      [first, second],
+    );
     expect(
       databaseRows(
         fixture,
@@ -1075,34 +1022,17 @@ connection.close()
     const replacement = publishedIssue(fixture.publication, 0, "EXAMPLE-202");
     const additional = publishedIssue(fixture.publication, 1, "EXAMPLE-203");
 
-    await expect(
-      recordPublishedIssues(
-        fixture.publication,
-        [original],
-        fixture.environment,
-      ),
-    ).resolves.toEqual([original]);
-    await expect(
-      recordPublishedIssues(
-        fixture.publication,
-        [additional, replacement],
-        fixture.environment,
-      ),
-    ).resolves.toEqual([replacement, additional]);
-    await expect(
-      recordPublishedIssues(
-        fixture.publication,
-        [additional, replacement],
-        fixture.environment,
-      ),
-    ).resolves.toEqual([replacement, additional]);
+    await expect(fixture.record([original])).resolves.toEqual([original]);
+    await expect(fixture.record([additional, replacement])).resolves.toEqual([
+      replacement,
+      additional,
+    ]);
+    await expect(fixture.record([additional, replacement])).resolves.toEqual([
+      replacement,
+      additional,
+    ]);
 
-    expect(
-      databaseRows(
-        fixture,
-        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
-      ),
-    ).toEqual([{ count: 3 }]);
+    expect(databaseRows(fixture, RECEIPT_COUNT_SQL)).toEqual([{ count: 3 }]);
     expect(
       databaseRows(
         fixture,
@@ -1124,42 +1054,24 @@ connection.close()
       [{ ...first, occurrenceId: second.occurrenceId }],
       [{ ...first, issueIdentifier: "  " }],
     ]) {
-      await expect(
-        recordPublishedIssues(
-          fixture.publication,
-          records,
-          fixture.environment,
-        ),
-      ).rejects.toThrow(/finding|occurrence|issue|association/u);
+      await expect(fixture.record(records)).rejects.toThrow(
+        /finding|occurrence|issue|association/u,
+      );
     }
-    expect(
-      databaseRows(
-        fixture,
-        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
-      ),
-    ).toEqual([{ count: 0 }]);
+    expect(databaseRows(fixture, RECEIPT_COUNT_SQL)).toEqual([{ count: 0 }]);
   });
 
   test("rolls back a receipt batch containing an occurrence outside the sealed scan", async () => {
     const fixture = await publicationFixture();
     await expect(
-      recordPublishedIssues(
-        fixture.publication,
-        [
-          publishedIssue(fixture.publication, 0, "EXAMPLE-302"),
-          {
-            ...publishedIssue(fixture.publication, 1, "EXAMPLE-303"),
-            occurrenceId: "occ_000000000000000000000000",
-          },
-        ],
-        fixture.environment,
-      ),
+      fixture.record([
+        publishedIssue(fixture.publication, 0, "EXAMPLE-302"),
+        {
+          ...publishedIssue(fixture.publication, 1, "EXAMPLE-303"),
+          occurrenceId: "occ_000000000000000000000000",
+        },
+      ]),
     ).rejects.toThrow(/finding|occurrence/u);
-    expect(
-      databaseRows(
-        fixture,
-        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
-      ),
-    ).toEqual([{ count: 0 }]);
+    expect(databaseRows(fixture, RECEIPT_COUNT_SQL)).toEqual([{ count: 0 }]);
   });
 });

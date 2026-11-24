@@ -1,5 +1,19 @@
 import { isRecord } from "./record.js";
 import { text } from "./scanner-import.js";
+import type { ValidationItemRecord } from "./validation-provider.js";
+
+export type ContinuumObservation = {
+  siblingOnly?: boolean;
+  siblingArtifacts?: string[];
+  issueChanged?: boolean;
+};
+
+// CLI and workbench receive the original record. Keep retry metadata out of
+// the public SDK result, including IDs of skipped evidence for other findings.
+export const continuumObservations = new WeakMap<
+  ValidationItemRecord,
+  ContinuumObservation
+>();
 
 /** Distinct issue links in destination-first order. */
 export function linkedIssueIds(finding: Record<string, unknown>) {
