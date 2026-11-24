@@ -1141,9 +1141,11 @@ export function createCodexSecurityServer(): McpServer {
               begun.scanId,
             );
           }
-          const terminal = joined
-            ? await coordinator.wait(signal)
-            : await coordinator.waitForInitialRequest(signal);
+          // Rejoining an expired lease starts a new coordinator for an existing scan.
+          const terminal =
+            begun.created && !joined
+              ? await coordinator.waitForInitialRequest(signal)
+              : await coordinator.wait(signal);
           result = preparation.completion.result
             ? await preparation.completion.result
             : await completeDeepScan(terminal);

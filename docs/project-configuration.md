@@ -150,6 +150,26 @@ scan ID uses that snapshot even if the selected file or global defaults change.
 The time limit bounds discovery; scans may stop sooner after novelty or review
 limits, and aggregation and reporting can continue afterward.
 
+### Cancellation from an MCP client
+
+Canceling `start_codex_security_deep_scan` normally stops the caller from
+waiting. The scan continues and the owning thread can rejoin by scan ID.
+
+A host that manages the owning Codex turn and the pending MCP request can
+forward a terminal refusal. With the TypeScript MCP SDK, create an
+`AbortController` for the request and pass
+`{ signal: controller.signal }` as the third argument to `client.callTool`.
+If the owning turn emits a `turn.failed` event in `@openai/codex-sdk` with
+a [known policy refusal](../plugins/codex-security/mcp-app/src/native-policy-refusals.ts),
+call `controller.abort(event.error.message)`. The MCP SDK sends the string
+as the reason in `notifications/cancelled`. Wrapping it in an `Error` changes
+the string and prevents an exact match.
+
+The scan stops and records the refusal only when the client sends the exact
+message on the request that created the scan and started its local coordinator.
+Canceling a rejoin leaves the scan running, even after a server restart.
+Clients that send a generic cancellation cannot trigger this behavior.
+
 ### Worker speed
 
 When the Codex host supplies the launching turn’s speed, Deep Scan uses it for

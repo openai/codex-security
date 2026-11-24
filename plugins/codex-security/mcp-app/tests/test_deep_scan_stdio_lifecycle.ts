@@ -43,6 +43,8 @@ const pluginRoot = await realpath(
 );
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
+const policyRefusal =
+  "This request has been flagged for possible cybersecurity risk.";
 const startDeepScan = toolCall.bind(null, "start_codex_security_deep_scan");
 
 if (process.platform === "win32") {
@@ -888,9 +890,10 @@ service_tier = "ultrafast"
             .some(scanEvent(resumedScanId, "coordinator_started")),
         "the resumed coordinator to start before detaching its waiter",
       );
+      // A lease takeover is still a rejoin, even if its caller forwards a refusal.
       restartedServer.notify("notifications/cancelled", {
         requestId: 2,
-        reason: "the owning response ended before coordinator completion",
+        reason: policyRefusal,
       });
       await waitFor(async () => {
         const run = await getDeepScan(resumedOwner);
@@ -1245,8 +1248,6 @@ async function testExplicitRefusalFailsScan(
   environment: NodeJS.ProcessEnv,
   targetPath: string,
 ) {
-  const refusal =
-    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
   const threadId = "deep-scan-stdio-refusal-thread";
   const logPath = environment.FAKE_CODEX_START_LOG!;
   const launches = (await readLogLines(logPath)).length;
@@ -1269,14 +1270,14 @@ async function testExplicitRefusalFailsScan(
     );
     const worker = (await waitForJsonLines(logPath, launches + 1))[launches];
     const { scanId } = discoveryPromptContext(worker.stdin);
-    parent.abort(refusal);
+    parent.abort(policyRefusal);
     await assert.rejects(pending);
     const joined = await client.callTool(startDeepScan({ scanId }, threadId));
     assert.equal(joined.isError, true);
-    assert.ok(JSON.stringify(joined.content).includes(refusal));
+    assert.ok(JSON.stringify(joined.content).includes(policyRefusal));
     const state = await getDeepScan({ environment, scanId, threadId });
     assert.equal(state.status, "failed");
-    assert.equal(state.error, refusal);
+    assert.equal(state.error, policyRefusal);
     assert.equal(state.workers.length, 1);
     assert.ok(!["queued", "running"].includes(state.workers[0].status));
     assert.throws(() => process.kill(worker.pid, 0), { code: "ESRCH" });
