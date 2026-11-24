@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import { test } from "node:test";
 import type {
   ScopeResult,
@@ -10,7 +9,7 @@ import { importSource } from "./import-module.ts";
 
 const { processTrace, createDependencyTracer, traceConcurrency } =
   (await importSource(
-    join(import.meta.dirname, "../src/dependency-trace/trace.ts"),
+    "src/dependency-trace/trace.ts",
   )) as typeof import("../src/dependency-trace/trace.ts");
 const request: TraceRequest = {
   package: "sample",

@@ -35,7 +35,7 @@ import {
   readOperationTelemetry,
   type OperationTelemetryEvent,
 } from "../src/operation-telemetry.js";
-import { preparedRuntime } from "./support/api-events.js";
+import { completedTurn, preparedRuntime } from "./support/api-events.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
@@ -51,7 +51,11 @@ import {
   stageResult,
 } from "./support/security-policy.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { writeSession } from "./support/usage-rollout.js";
+import {
+  basicUsage,
+  completedMessage,
+  writeSession,
+} from "./support/usage-rollout.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
@@ -155,24 +159,8 @@ async function* events(
 ): AsyncGenerator<ThreadEvent> {
   yield { type: "thread.started", thread_id: `policy-${stage}` };
   yield { type: "turn.started" };
-  yield {
-    type: "item.completed",
-    item: {
-      id: "result",
-      type: "agent_message",
-      text: JSON.stringify(result),
-    },
-  };
-  yield {
-    type: "turn.completed",
-    usage: {
-      input_tokens: 100,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 10,
-      reasoning_output_tokens: 0,
-    },
-  };
+  yield completedMessage("result", JSON.stringify(result));
+  yield completedTurn({ input_tokens: 100, output_tokens: 10 });
 }
 
 describe("CodexSecurity policy API", () => {
@@ -1889,10 +1877,11 @@ describe("CodexSecurity policy API", () => {
         throw signal.reason;
       },
     });
-    await writeSession(f.runtime.codexHome, "policy-architecture", {
-      input_tokens: 3_000,
-      output_tokens: 0,
-    });
+    await writeSession(
+      f.runtime.codexHome,
+      "policy-architecture",
+      basicUsage(3_000, 0),
+    );
     await writeSession(
       f.runtime.codexHome,
       "policy-worker",
@@ -2050,20 +2039,8 @@ describe("CodexSecurity policy API", () => {
           }
           yield { type: "thread.started", thread_id: "policy-failed" };
           if (response === "invalid") {
-            yield {
-              type: "item.completed",
-              item: { id: "result", type: "agent_message", text: "not JSON" },
-            };
-            yield {
-              type: "turn.completed",
-              usage: {
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_output_tokens: 0,
-              },
-            };
+            yield completedMessage("result", "not JSON");
+            yield completedTurn({ input_tokens: 0, output_tokens: 0 });
           }
         },
       });

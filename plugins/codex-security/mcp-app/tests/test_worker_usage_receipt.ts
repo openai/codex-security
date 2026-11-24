@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
-import { fileURLToPath } from "node:url";
 
 const { workerTokenUsage } = await importSource(
-  fileURLToPath(new URL("../src/deep-scan/usage-receipt.ts", import.meta.url)),
+  "src/deep-scan/usage-receipt.ts",
 );
 
 test("SDK defaulted zero remains unknown while positive native and legacy writes remain known", () => {

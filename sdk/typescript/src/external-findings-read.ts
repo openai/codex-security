@@ -8,6 +8,7 @@ import type { Provider } from "./external-import-models.js";
 import { CodexSecurityError } from "./errors.js";
 import { readTenableFindings } from "./tenable-findings.js";
 import { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
+import { readTenzaiFindings } from "./tenzai-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -42,6 +43,7 @@ import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 export const LOCAL_ONLY_PROVIDERS = {
   tenable: "Tenable",
   crowdstrike: "CrowdStrike",
+  tenzai: "Tenzai",
 } as const;
 type LocalOnlyProvider = keyof typeof LOCAL_ONLY_PROVIDERS;
 
@@ -66,6 +68,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   checkmarx: "checkmarx",
   tenable: "tenable",
   crowdstrike: "crowdstrike",
+  tenzai: "tenzai",
 } as const satisfies Record<string, LocalFindingProvider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -198,6 +201,10 @@ export async function readExternalFindings(
   if (provider === "tenable") {
     if (target === "cloud") requireCloudReader(options);
     return { findings: await readTenableFindings(path, url) };
+  }
+  if (provider === "tenzai") {
+    if (target === "cloud") requireCloudReader(options);
+    return { findings: await readTenzaiFindings(path, url) };
   }
   if (provider === "crowdstrike") {
     if (target === "cloud") requireCloudReader(options);
