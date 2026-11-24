@@ -81,16 +81,7 @@ const ipcFrameError =
 
 try {
   await test("Deep worker lifecycle", async (t) => {
-    await check(
-      t,
-      () =>
-        testWorkerCancellation({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          trustedParentSandbox,
-        }),
-      "worker cancellation",
-    );
+    await check(t, testWorkerCancellation, "worker cancellation");
     await check(t, testWorkerTerminalEvents);
     await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
     await check(t, testAbortPropagation);
@@ -107,18 +98,7 @@ try {
   await test("Deep worker runtime settings", async (t) => {
     await check(t, testLargeScopeTransport);
     await check(t, testOpenAiCredentialsReachWorker);
-    await check(
-      t,
-      () =>
-        testWorkerSelectedProfileFiles({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          workerPermissionProfileOverride,
-          assertReadOnlyWorkerPolicy,
-          assertWorkerSubagentPolicy,
-        }),
-      "selected profile files",
-    );
+    await check(t, testWorkerSelectedProfileFiles, "selected profile files");
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
@@ -152,17 +132,7 @@ try {
 
   await test("Deep worker executable selection", async (t) => {
     await check(t, testConfiguredExecutablePaths);
-    await check(
-      t,
-      () =>
-        testExecutorExecutablePinning({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          parentSandbox: trustedParentSandbox,
-          resolveCodexPath,
-        }),
-      "worker executable pinning",
-    );
+    await check(t, testExecutorExecutablePinning, "worker executable pinning");
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);

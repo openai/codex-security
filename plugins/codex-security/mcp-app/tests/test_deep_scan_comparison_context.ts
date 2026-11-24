@@ -5,9 +5,7 @@ import type { ScanUnion } from "../src/deep-scan/artifact-validation.js";
 import { standardScanDraft } from "./deep_scan_coordinator_fixture.ts";
 import { importSource } from "./import-module.ts";
 
-const { mergeBatch } = await importSource(
-  join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
-);
+const { mergeBatch } = await importSource("src/deep-scan/iteration.ts");
 
 function worker(id: string, titles: string[]) {
   const draft = standardScanDraft("fixture", "finding", id);
@@ -139,9 +137,7 @@ for (const assignment of [
 
 for (const failingPass of ["reviews", "sources"]) {
   test(`oversized disputed ${failingPass} leaves its pair separate and retains completed comparisons`, async () => {
-    const { checkSameFix } = await importSource(
-      join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
-    );
+    const { checkSameFix } = await importSource("src/deep-scan/same-fix.ts");
     const titles = ["Large", "Small", "Alias"];
     const records = titles.map(() => ({
       locations: [["file.ts", 1, 1]],
@@ -217,9 +213,7 @@ test("repeated observations are compared once without dropping distinct attack o
     validation: { evidence: "test B" },
   };
   const observed: unknown[] = [];
-  const { checkSameFix } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
-  );
+  const { checkSameFix } = await importSource("src/deep-scan/same-fix.ts");
   const groups = [
     { id: 0, worker: -1 },
     { id: 1, worker: 0 },
