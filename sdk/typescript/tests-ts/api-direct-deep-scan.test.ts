@@ -1,5 +1,4 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { hash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -94,19 +93,7 @@ test.each([undefined, "Summarize the completed scan."])(
             CODEX_SECURITY_SCAN_DIR: scanDir,
             CODEX_SECURITY_REPOSITORY: repository,
           });
-          await copyCompletedScan(root);
-          const coveragePath = join(scanDir, "coverage.json");
-          const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
-          coverage.mode = "deep_repository";
-          const coverageBytes = JSON.stringify(coverage);
-          await writeFile(coveragePath, coverageBytes);
-          const manifestPath = join(scanDir, "scan-manifest.json");
-          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-          const artifact = manifest.scan.artifacts.find(
-            (entry: { path: string }) => entry.path === "coverage.json",
-          );
-          artifact.sha256 = hash("sha256", coverageBytes);
-          await writeFile(manifestPath, JSON.stringify(manifest));
+          await copyCompletedScan(root, "deep");
           await writeSession(
             codexHome,
             "engine-session",

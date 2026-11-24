@@ -1,17 +1,19 @@
 // Explicit test-only fixtures. Production never synthesizes rules from a symbol.
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type {
   TraceStep,
   TraceEvidence,
-  TraceScope,
   NativeMatch,
 } from "../../src/dependency-trace/types.ts";
 const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-function leaf(scope: TraceScope) {
-  return (scope.symbol ?? scope.package).split(/::|\./u).at(-1)!;
-}
-function fixtureConfig(scope: TraceScope, language: string) {
-  const name = leaf(scope);
-  const pkg = scope.package;
+export function nativeRules(
+  symbol: string,
+  language = "python",
+  sourceSymbol?: string,
+  pkg = "image_lib",
+): Record<string, unknown>[] {
+  const name = (symbol ?? pkg).split(/::|\./u).at(-1)!;
   const calls: object[] = [
     { pattern: `${name}(...)` },
     { pattern: `$RECEIVER.${name}(...)` },
@@ -60,59 +62,31 @@ function fixtureConfig(scope: TraceScope, language: string) {
       },
     ],
   };
-  if (scope.source_symbol) {
-    return {
-      rules: [
-        {
-          ...base,
-          id: "flow",
-          mode: "taint",
-          message: "Candidate same-file flow",
-          "pattern-sources": [
-            { pattern: `${scope.source_symbol}(...)`, exact: true },
-          ],
-          // Disjoint sinks keep the enclosing caller when it is known, without
-          // emitting a caller finding for every untainted call in the file.
-          "pattern-sinks": [
-            withCaller,
-            {
-              patterns: [
-                match,
-                ...context.map((pattern) => ({
-                  "pattern-not-inside": pattern,
-                })),
-              ],
-            },
-          ],
-        },
-      ],
-    };
-  }
-  return {
-    rules: [
-      { ...base, id: "fixture-caller", ...withCaller },
-      {
-        ...base,
-        id: "fixture-top-level",
-        patterns: [
-          match,
-          ...context.map((pattern) => ({ "pattern-not-inside": pattern })),
-        ],
-      },
+
+  const topLevel = {
+    patterns: [
+      match,
+      ...context.map((pattern) => ({ "pattern-not-inside": pattern })),
     ],
   };
-}
-
-export function nativeRules(
-  symbol: string,
-  language = "python",
-  sourceSymbol?: string,
-  pkg = "image_lib",
-): Record<string, unknown>[] {
-  return fixtureConfig(
-    { kind: "file", package: pkg, symbol, source_symbol: sourceSymbol },
-    language,
-  ).rules;
+  if (sourceSymbol) {
+    return [
+      {
+        ...base,
+        id: "flow",
+        mode: "taint",
+        message: "Candidate same-file flow",
+        "pattern-sources": [{ pattern: `${sourceSymbol}(...)`, exact: true }],
+        // Disjoint sinks keep the enclosing caller when it is known, without
+        // emitting a caller finding for every untainted call in the file.
+        "pattern-sinks": [withCaller, topLevel],
+      },
+    ];
+  }
+  return [
+    { ...base, id: "fixture-caller", ...withCaller },
+    { ...base, id: "fixture-top-level", ...topLevel },
+  ];
 }
 
 export function sourceStep({
@@ -134,4 +108,11 @@ export function sourceEvidence(evidence: TraceEvidence[]) {
     ...item,
     step: sourceStep(step),
   }));
+}
+
+export async function available(command: string) {
+  return promisify(execFile)(command, ["--version"]).then(
+    () => true,
+    () => false,
+  );
 }

@@ -7,7 +7,6 @@ export type { StackReport, StackAssessment };
 
 import { z } from "zod";
 import type { dependencyAdvisoryDetailsSchema } from "./dependency-advisory.js";
-import { dependencyInvestigationBlockedSchema } from "./dependency-report-reader.js";
 import {
   claimKey,
   savedSnippets,
@@ -16,6 +15,7 @@ import {
 export { citationKey };
 type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
 import {
+  dependencyInvestigationBlockedSchema,
   readDependencyCheckOutput,
   reviewedDependencyCheckSchema,
   type DependencyCoverageDisposition,
@@ -48,13 +48,10 @@ export type RuntimeContext = NonNullable<
 type Anchor = {
   path: string;
   line: number;
-  endLine?: number;
-  commit?: string;
-  kind: "call" | "reference" | "last_verified";
+  kind: "call" | "reference";
 };
 type Entry = {
   id: string;
-  original: number;
   anchor?: Anchor;
   label: string;
   excerpts: Record<string, { text: string }>;
@@ -109,9 +106,6 @@ export const verdictOrder: DependencyVerdict[] = [
   "unknown",
   "ruled_out",
 ];
-const verdictRank = (verdict: DependencyVerdict) =>
-  verdictOrder.indexOf(verdict);
-const useId = (check: number, index: number) => `use-${check}-${index}`;
 
 function unwrap(value: unknown) {
   return isRecord(value) &&
@@ -272,61 +266,52 @@ export function tagsFor(finding: Finding) {
         ]
       : []),
   ].filter((name): name is string => !!name);
-  return [...new Set(names)].map((name) => ({ name }));
+  return [...new Set(names)];
 }
 function prepareCheck(check: Check, index: number) {
-  const findings: Finding[] = [
-    ...check.uses.map((item, i): Finding => ({
-      ...identity(item, item.proof),
-      id: useId(index, i + 1),
-      original: i,
-      kind: "use",
+  const findings = check.uses.map((item, i): Finding => ({
+    ...identity(item, item.proof),
+    id: `use-${index}-${i + 1}`,
+    kind: "use",
+    item,
+    proof: item.proof,
+  }));
+  const dismissed: Finding[] = [];
+  for (const [i, item] of (check.coverage ?? []).entries()) {
+    const group = item.kind === "dismissed" ? dismissed : findings;
+    group.push({
+      ...identity(item),
+      id: `coverage-${index}-${i + 1}`,
+      kind: "coverage",
       item,
-      proof: item.proof,
-    })),
-    ...(check.coverage ?? []).flatMap((item, i): Finding[] =>
-      item.kind === "unresolved"
-        ? [
-            {
-              ...identity(item),
-              id: `coverage-${index}-${i + 1}`,
-              original: i,
-              kind: "coverage",
-              item,
-            },
-          ]
-        : [],
-    ),
-  ];
-  return prepareFindings(findings);
+    });
+  }
+  return prepareFindings(findings, dismissed);
 }
-function prepareFindings(findings: Finding[]): PreparedCheck {
-  const order = (finding: Finding) =>
-    finding.kind !== "coverage" ? verdictRank(finding.item.verdict) : 2.5;
-  findings.sort(
-    (a, b) =>
-      order(a) - order(b) ||
-      a.original - b.original ||
-      a.id.localeCompare(b.id),
-  );
-  return { findings, dismissed: [] };
+function prepareFindings(
+  findings: Finding[],
+  dismissed: Finding[] = [],
+): PreparedCheck {
+  // Unresolved coverage follows unknown uses. Stable sorting keeps ties in input order.
+  const rank = (finding: Finding) =>
+    finding.kind === "coverage"
+      ? 2.5
+      : verdictOrder.indexOf(finding.item.verdict);
+  findings.sort((a, b) => rank(a) - rank(b));
+  return { findings, dismissed };
 }
 export function counts(findings: readonly Finding[]) {
   const breakdown = Object.fromEntries(
     verdictOrder.map((v) => [v, 0]),
   ) as Record<DependencyVerdict, number>;
-  let assessed = 0;
   let reviewed = 0,
     unresolved = 0;
-  for (const item of findings)
-    if (item.kind === "use") {
-      reviewed++;
-      breakdown[item.item.verdict]++;
-    } else if (item.kind === "stack") {
-      assessed++;
-      breakdown[item.item.verdict]++;
-    } else unresolved++;
-  return { reviewed, assessed, unresolved, breakdown };
+  for (const finding of findings) {
+    if (finding.kind === "use") reviewed++;
+    if (finding.kind === "coverage") unresolved++;
+    else breakdown[finding.item.verdict]++;
+  }
+  return { reviewed, unresolved, breakdown };
 }
 type Claims = NonNullable<Check["claims"]>;
 function identity(
@@ -340,30 +325,11 @@ function identity(
   const candidate =
     "locations" in item ? item.locations?.find((c) => c.line) : undefined;
   let anchor: Anchor | undefined;
-  if (site) {
-    const revisions = new Set(
-      item.evidence
-        .filter(
-          (c) =>
-            c.path === site.path &&
-            c.startLine <= site.line &&
-            c.endLine >= site.line,
-        )
-        .map((c) => c.commit),
-    );
-    const commit =
-      site.commit ?? (revisions.size === 1 ? [...revisions][0] : undefined);
-    anchor = { ...site, commit, kind: "call" };
-  } else if (candidate?.line)
+  if (site) anchor = { kind: "call", path: site.path, line: site.line };
+  else if (candidate?.line)
     anchor = { kind: "reference", path: candidate.path, line: candidate.line };
   else if (cite)
-    anchor = {
-      kind: "reference",
-      path: cite.path,
-      commit: cite.commit,
-      line: cite.startLine,
-      endLine: cite.endLine,
-    };
+    anchor = { kind: "reference", path: cite.path, line: cite.startLine };
   const label =
     item.location ?? proof?.sink?.function ?? anchor?.path ?? item.reason;
   return { anchor, label, excerpts: {} };
@@ -399,7 +365,6 @@ function stackFinding(
   return {
     ...identity(item, proof),
     id,
-    original,
     kind: "stack",
     assessment,
     item,
@@ -434,20 +399,6 @@ export function prepareDependencyReport(value: unknown): Report {
           check.advisories.includes(a.url),
         );
       section.prepared = prepareCheck(check, i + 1);
-      section.prepared.dismissed = (check.coverage ?? []).flatMap(
-        (item, j): Finding[] =>
-          item.kind === "dismissed"
-            ? [
-                {
-                  kind: "coverage",
-                  id: "coverage-" + (i + 1) + "-" + (j + 1),
-                  original: j,
-                  item,
-                  ...identity(item),
-                },
-              ]
-            : [],
-      );
     }
     if (
       section.check?.uses.some((use) => use.verdict === "unknown") ||
