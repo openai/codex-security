@@ -5,6 +5,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempDisposableSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -42,6 +43,10 @@ const { MAX_EXPANDED_ASSET_BYTES } = (await import(
 // Avoid Bun 1.3.14's stale Windows spawnSync timeout.
 // https://github.com/oven-sh/bun/issues/33932
 const execFileAsync = promisify(execFile);
+
+function temporaryDirectory(prefix: string) {
+  return mkdtempDisposableSync(join(tmpdir(), prefix));
+}
 
 const pluginContract = {
   externalOwnedExact: [".codex-plugin/plugin.json"],
@@ -234,6 +239,41 @@ async function installPackage(
       ? 60_000
       : 30_000,
   );
+}
+
+function installedPackagePath(root: string, ...parts: string[]) {
+  return join(
+    root,
+    "consumer",
+    "node_modules",
+    "@openai",
+    "codex-security",
+    ...parts,
+  );
+}
+
+function writeContract(root: string, name: string, extraFiles: string[] = []) {
+  const path = join(root, name);
+  writeFileSync(
+    path,
+    JSON.stringify({
+      ...pluginContract,
+      shippedExact: [...pluginContract.shippedExact, ...extraFiles],
+    }),
+  );
+  return path;
+}
+
+function checkArchive(
+  root: string,
+  name: string,
+  contents: Buffer,
+  environment?: NodeJS.ProcessEnv,
+) {
+  const path = join(root, name);
+  writeFileSync(path, contents);
+  const contract = writeContract(root, "plugin contract.json");
+  return checkPackage(root, path, contract, environment);
 }
 
 function checkPackage(
@@ -433,87 +473,68 @@ describe("npm package tar listings", () => {
   ])(
     "rejects CRLF in the packaged POSIX MCP launcher's %s",
     async (_part, script) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-launcher-"));
-      try {
-        const path =
-          "package/_bundled_plugin/scripts/launch_codex_security_mcp";
-        const launcher = tarRecord(Buffer.from(script), {
-          name: path,
-          mode: 0o755,
-        });
-        const archivePath = join(root, "launcher.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(packageTar({ overrides: new Map([[path, launcher]]) })),
-        );
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const result = await checkPackage(root, archivePath, contractPath);
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain("POSIX MCP launcher contains CRLF");
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      using directory = temporaryDirectory("codex-package-launcher-");
+      const root = directory.path;
+      const path = "package/_bundled_plugin/scripts/launch_codex_security_mcp";
+      const launcher = tarRecord(Buffer.from(script), {
+        name: path,
+        mode: 0o755,
+      });
+      const result = await checkArchive(
+        root,
+        "launcher.tgz",
+        gzipSync(packageTar({ overrides: new Map([[path, launcher]]) })),
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("POSIX MCP launcher contains CRLF");
     },
   );
 
   test.each([false, true])(
     "rejects invalid package paths before Brotli expansion, complete=%p",
     async (complete) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-path-order-"));
-      try {
-        const archivePath = join(root, "unexpected-brotli.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(
-            Buffer.concat([
-              ...(complete ? [packageTar()] : []),
-              tarRecord(Buffer.from("Malformed compressed bytes."), {
-                name: "package/unexpected.br",
-              }),
-            ]),
-          ),
-        );
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const result = await checkPackage(root, archivePath, contractPath);
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain(
-          complete
-            ? "unexpected file: package/unexpected.br"
-            : "missing package/package.json",
-        );
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
-    },
-  );
-
-  test("escapes terminal controls in unexpected archive path diagnostics", async () => {
-    const root = mkdtempSync(join(tmpdir(), "codex-package-terminal-path-"));
-    try {
-      const archivePath = join(root, "unexpected-path.tgz");
-      writeFileSync(
-        archivePath,
+      using directory = temporaryDirectory("codex-package-path-order-");
+      const root = directory.path;
+      const result = await checkArchive(
+        root,
+        "unexpected-brotli.tgz",
         gzipSync(
           Buffer.concat([
-            packageTar(),
-            tarRecord(Buffer.from("fixture"), {
-              name: "package/unexpected\u001b]52;c;synthetic\u0007\u009b",
+            ...(complete ? [packageTar()] : []),
+            tarRecord(Buffer.from("Malformed compressed bytes."), {
+              name: "package/unexpected.br",
             }),
           ]),
         ),
       );
-      const contractPath = join(root, "plugin contract.json");
-      writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const result = await checkPackage(root, archivePath, contractPath);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("unexpected file: package/unexpected");
-      expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
-      expect(result.stderr).toContain("synthetic");
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
+      expect(result.stderr).toContain(
+        complete
+          ? "unexpected file: package/unexpected.br"
+          : "missing package/package.json",
+      );
+    },
+  );
+
+  test("escapes terminal controls in unexpected archive path diagnostics", async () => {
+    using directory = temporaryDirectory("codex-package-terminal-path-");
+    const root = directory.path;
+    const result = await checkArchive(
+      root,
+      "unexpected-path.tgz",
+      gzipSync(
+        Buffer.concat([
+          packageTar(),
+          tarRecord(Buffer.from("fixture"), {
+            name: "package/unexpected\u001b]52;c;synthetic\u0007\u009b",
+          }),
+        ]),
+      ),
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("unexpected file: package/unexpected");
+    expect(result.stderr).not.toMatch(/[\u001b\u0007\u009b]/u);
+    expect(result.stderr).toContain("synthetic");
   });
 
   const paddedTar = {
@@ -544,82 +565,60 @@ describe("npm package tar listings", () => {
   ])(
     "accepts bounded gzip representation $name",
     async ({ name, tar, gzip }) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-gzip-test-"));
-      try {
-        const contents = gzipSync(packageTar(tar), gzip);
-        if (name === "default")
-          expect(contents.length).toBeLessThan(1024 * 1024);
-        if (name === "level-0")
-          expect(contents.length).toBeGreaterThan(MAX_EXPANDED_ASSET_BYTES);
-        const archivePath = join(root, `${name}.tgz`);
-        writeFileSync(archivePath, contents);
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const environment: NodeJS.ProcessEnv = { ...process.env };
-        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        const result = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        expect(result).toEqual({ status: 0, stderr: "" });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      using directory = temporaryDirectory("codex-package-gzip-test-");
+      const root = directory.path;
+      const contents = gzipSync(packageTar(tar), gzip);
+      if (name === "default") expect(contents.length).toBeLessThan(1024 * 1024);
+      if (name === "level-0")
+        expect(contents.length).toBeGreaterThan(MAX_EXPANDED_ASSET_BYTES);
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      const result = await checkArchive(
+        root,
+        `${name}.tgz`,
+        contents,
+        environment,
+      );
+      expect(result).toEqual({ status: 0, stderr: "" });
     },
   );
 
   test.each(["environment", "user-config"])(
     "keeps npm fixture installs local with global %s settings",
     async (configuration) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-npm-local-"));
-      try {
-        const archivePath = join(root, "package.tgz");
-        writeFileSync(archivePath, gzipSync(packageTar()));
-        const userConfig = join(root, "npmrc");
-        writeFileSync(
-          userConfig,
-          configuration === "user-config" ? "global=true\n" : "",
-        );
-        const environment: NodeJS.ProcessEnv = { ...process.env };
-        for (const key of Object.keys(environment)) {
-          if (/^npm_config_(?:global|prefix|userconfig|cache)$/iu.test(key))
-            delete environment[key];
-        }
-        const globalPrefix = join(root, "global-prefix");
-        Object.assign(environment, {
-          npm_config_cache: join(root, "npm-cache"),
-          npm_config_prefix: globalPrefix,
-          npm_config_userconfig: userConfig,
-          ...(configuration === "environment"
-            ? { npm_config_global: "true" }
-            : {}),
-        });
-        const installed = await installPackage(root, archivePath, environment);
-        expect({
-          status: installed.status,
-          stderr: installed.status === 0 ? "" : installed.stderr,
-        }).toEqual({
-          status: 0,
-          stderr: "",
-        });
-        expect(
-          existsSync(
-            join(
-              root,
-              "consumer",
-              "node_modules",
-              "@openai",
-              "codex-security",
-              "package.json",
-            ),
-          ),
-        ).toBe(true);
-        expect(existsSync(globalPrefix)).toBe(false);
-      } finally {
-        rmSync(root, { force: true, recursive: true });
+      using directory = temporaryDirectory("codex-package-npm-local-");
+      const root = directory.path;
+      const archivePath = join(root, "package.tgz");
+      writeFileSync(archivePath, gzipSync(packageTar()));
+      const userConfig = join(root, "npmrc");
+      writeFileSync(
+        userConfig,
+        configuration === "user-config" ? "global=true\n" : "",
+      );
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of Object.keys(environment)) {
+        if (/^npm_config_(?:global|prefix|userconfig|cache)$/iu.test(key))
+          delete environment[key];
       }
+      const globalPrefix = join(root, "global-prefix");
+      Object.assign(environment, {
+        npm_config_cache: join(root, "npm-cache"),
+        npm_config_prefix: globalPrefix,
+        npm_config_userconfig: userConfig,
+        ...(configuration === "environment"
+          ? { npm_config_global: "true" }
+          : {}),
+      });
+      const installed = await installPackage(root, archivePath, environment);
+      expect({
+        status: installed.status,
+        stderr: installed.status === 0 ? "" : installed.stderr,
+      }).toEqual({
+        status: 0,
+        stderr: "",
+      });
+      expect(existsSync(installedPackagePath(root, "package.json"))).toBe(true);
+      expect(existsSync(globalPrefix)).toBe(false);
     },
   );
 
@@ -640,29 +639,25 @@ describe("npm package tar listings", () => {
   ] as const)(
     "rejects %s sparse entries before invoking native tar",
     async (_label, record) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-sparse-"));
-      try {
-        const archivePath = join(root, "sparse.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(packageTar({ additionalRecords: [record] })),
-        );
-        const contractPath = join(root, "contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const environment = { ...process.env, PATH: root };
-        const checked = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        expect(checked.status).toBe(1);
-        expect(checked.stderr).toContain(
-          "npm tarball contains an unsupported sparse entry.",
-        );
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      using directory = temporaryDirectory("codex-package-sparse-");
+      const root = directory.path;
+      const archivePath = join(root, "sparse.tgz");
+      writeFileSync(
+        archivePath,
+        gzipSync(packageTar({ additionalRecords: [record] })),
+      );
+      const contractPath = writeContract(root, "contract.json");
+      const environment = { ...process.env, PATH: root };
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
+      );
+      expect(checked.status).toBe(1);
+      expect(checked.stderr).toContain(
+        "npm tarball contains an unsupported sparse entry.",
+      );
     },
   );
 
@@ -672,100 +667,83 @@ describe("npm package tar listings", () => {
     "pax-then-correct-long-name",
     "long-name-then-pax",
   ])("validates the asset path used by npm: %s", async (order) => {
-    const root = mkdtempSync(join(tmpdir(), "codex-package-npm-path-"));
-    try {
-      const logo = readFileSync(
-        new URL(
-          "../../../plugins/codex-security/assets/logo.png",
-          import.meta.url,
-        ),
-      );
-      const path = "package/_bundled_plugin/logo.png";
-      const storagePath = "package/synthetic-storage.png";
-      const wrongLongName = order === "pax-then-wrong-long-name";
-      const pax = paxExtension({ path });
-      const longName = tarRecord(
-        Buffer.from(`${wrongLongName ? storagePath : path}\0`),
-        { name: "././@LongLink", type: 0x4c },
-      );
-      const headers =
-        order === "pax-path"
-          ? [pax]
-          : order === "long-name-then-pax"
-            ? [longName, pax]
-            : [pax, longName];
-      const archivePath = join(root, "package.tgz");
-      writeFileSync(
-        archivePath,
-        gzipSync(
-          packageTar({
-            additionalRecords: [
-              ...headers,
-              tarRecord(logo, { name: storagePath }),
-            ],
-          }),
-        ),
-      );
-      const native = mkdtempSync(join(root, "native-"));
-      const contractPath = join(root, "contract.json");
-      writeFileSync(
-        contractPath,
-        JSON.stringify({
-          ...pluginContract,
-          shippedExact: [...pluginContract.shippedExact, "logo.png"],
+    using directory = temporaryDirectory("codex-package-npm-path-");
+    const root = directory.path;
+    const logo = readFileSync(
+      new URL(
+        "../../../plugins/codex-security/assets/logo.png",
+        import.meta.url,
+      ),
+    );
+    const path = "package/_bundled_plugin/logo.png";
+    const storagePath = "package/synthetic-storage.png";
+    const wrongLongName = order === "pax-then-wrong-long-name";
+    const pax = paxExtension({ path });
+    const longName = tarRecord(
+      Buffer.from(`${wrongLongName ? storagePath : path}\0`),
+      { name: "././@LongLink", type: 0x4c },
+    );
+    const headers =
+      order === "pax-path"
+        ? [pax]
+        : order === "long-name-then-pax"
+          ? [longName, pax]
+          : [pax, longName];
+    const archivePath = join(root, "package.tgz");
+    writeFileSync(
+      archivePath,
+      gzipSync(
+        packageTar({
+          additionalRecords: [
+            ...headers,
+            tarRecord(logo, { name: storagePath }),
+          ],
         }),
-      );
-      const environment: NodeJS.ProcessEnv = {
-        ...process.env,
-        npm_config_cache: join(root, "npm-cache"),
-      };
-      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-      const packageCheck = checkPackage(
-        root,
-        archivePath,
-        contractPath,
-        environment,
-      );
-      // The two readers can disagree on a final GNU long name. Extract everything in that case.
-      const extraction = execFileAsync(
-        "tar",
-        ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
-        {
-          encoding: "buffer",
-          timeout: 30_000,
-          windowsHide: true,
-        },
-      );
-      const installation = installPackage(root, archivePath, environment);
-      await Promise.allSettled([extraction, installation, packageCheck]);
-      expect((await extraction).stderr.toString()).toBe("");
-      if (!wrongLongName)
-        expect(readFileSync(join(native, path))).toEqual(logo);
-      const installed = await installation;
-      expect(installed.status, installed.stderr).toBe(0);
-      const installedPackage = join(
-        root,
-        "consumer",
-        "node_modules",
-        "@openai",
-        "codex-security",
-      );
-      if (wrongLongName)
-        expect(
-          existsSync(join(installedPackage, "_bundled_plugin", "logo.png")),
-        ).toBe(false);
-      const installedPath = wrongLongName ? storagePath : path;
+      ),
+    );
+    const native = mkdtempSync(join(root, "native-"));
+    const contractPath = writeContract(root, "contract.json", ["logo.png"]);
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      npm_config_cache: join(root, "npm-cache"),
+    };
+    delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+    const packageCheck = checkPackage(
+      root,
+      archivePath,
+      contractPath,
+      environment,
+    );
+    // The two readers can disagree on a final GNU long name. Extract everything in that case.
+    const extraction = execFileAsync(
+      "tar",
+      ["-xzf", archivePath, "-C", native, ...(wrongLongName ? [] : [path])],
+      {
+        encoding: "buffer",
+        timeout: 30_000,
+        windowsHide: true,
+      },
+    );
+    const installation = installPackage(root, archivePath, environment);
+    await Promise.allSettled([extraction, installation, packageCheck]);
+    expect((await extraction).stderr.toString()).toBe("");
+    if (!wrongLongName) expect(readFileSync(join(native, path))).toEqual(logo);
+    const installed = await installation;
+    expect(installed.status, installed.stderr).toBe(0);
+    const installedPackage = installedPackagePath(root);
+    if (wrongLongName)
       expect(
-        readFileSync(
-          join(installedPackage, installedPath.slice("package/".length)),
-        ),
-      ).toEqual(logo);
-      const checked = await packageCheck;
-      expect(checked.status, checked.stderr).toBe(wrongLongName ? 1 : 0);
-      if (!wrongLongName) expect(checked.stderr).toBe("");
-    } finally {
-      rmSync(root, { force: true, recursive: true });
-    }
+        existsSync(join(installedPackage, "_bundled_plugin", "logo.png")),
+      ).toBe(false);
+    const installedPath = wrongLongName ? storagePath : path;
+    expect(
+      readFileSync(
+        join(installedPackage, installedPath.slice("package/".length)),
+      ),
+    ).toEqual(logo);
+    const checked = await packageCheck;
+    expect(checked.status, checked.stderr).toBe(wrongLongName ? 1 : 0);
+    if (!wrongLongName) expect(checked.stderr).toBe("");
   });
 
   test.each([
@@ -775,62 +753,48 @@ describe("npm package tar listings", () => {
   ] as const)(
     "validates metadata from the PAX manifest npm installs: %s, %s",
     async (license, gitHead, error) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-npm-manifest-"));
-      try {
-        const path = "package/package.json";
-        const manifest = Buffer.from(
-          JSON.stringify({
-            name: "@openai/codex-security",
-            version: "1.0.0",
-            license,
-            gitHead,
-          }),
-        );
-        const entry = Buffer.concat([
-          paxExtension({ path }),
-          tarRecord(manifest, { name: "package/synthetic-storage.json" }),
-        ]);
-        const archivePath = join(root, "package.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(packageTar({ overrides: new Map([[path, entry]]) })),
-        );
-        const environment = {
-          ...process.env,
-          npm_config_cache: join(root, "npm-cache"),
-          CODEX_SECURITY_EXPECTED_GIT_HEAD: "a".repeat(40),
-        };
-        const contractPath = join(root, "contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const installed = await installPackage(root, archivePath, environment);
-        expect(installed.status, installed.stderr).toBe(0);
-        const installedManifest = JSON.parse(
-          readFileSync(
-            join(
-              root,
-              "consumer",
-              "node_modules",
-              "@openai",
-              "codex-security",
-              "package.json",
-            ),
-            "utf8",
-          ),
-        );
-        expect(installedManifest).toMatchObject({ license, gitHead });
-        const checked = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        if (error !== undefined) {
-          expect(checked.status).toBe(1);
-          expect(checked.stderr).toContain(error);
-        } else expect(checked).toEqual({ status: 0, stderr: "" });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      using directory = temporaryDirectory("codex-package-npm-manifest-");
+      const root = directory.path;
+      const path = "package/package.json";
+      const manifest = Buffer.from(
+        JSON.stringify({
+          name: "@openai/codex-security",
+          version: "1.0.0",
+          license,
+          gitHead,
+        }),
+      );
+      const entry = Buffer.concat([
+        paxExtension({ path }),
+        tarRecord(manifest, { name: "package/synthetic-storage.json" }),
+      ]);
+      const archivePath = join(root, "package.tgz");
+      writeFileSync(
+        archivePath,
+        gzipSync(packageTar({ overrides: new Map([[path, entry]]) })),
+      );
+      const environment = {
+        ...process.env,
+        npm_config_cache: join(root, "npm-cache"),
+        CODEX_SECURITY_EXPECTED_GIT_HEAD: "a".repeat(40),
+      };
+      const contractPath = writeContract(root, "contract.json");
+      const installed = await installPackage(root, archivePath, environment);
+      expect(installed.status, installed.stderr).toBe(0);
+      const installedManifest = JSON.parse(
+        readFileSync(installedPackagePath(root, "package.json"), "utf8"),
+      );
+      expect(installedManifest).toMatchObject({ license, gitHead });
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
+      );
+      if (error !== undefined) {
+        expect(checked.status).toBe(1);
+        expect(checked.stderr).toContain(error);
+      } else expect(checked).toEqual({ status: 0, stderr: "" });
     },
   );
 
@@ -849,120 +813,96 @@ describe("npm package tar listings", () => {
   ] as const)(
     "checks regular compressed assets: %s",
     async (_label, contents, error) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-assets-"));
-      try {
-        const name = "runtime.mjs.br";
-        const archivePath = join(root, "package.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(
-            packageTar({
-              additionalRecords: [
-                tarRecord(contents, {
-                  name: `package/_bundled_plugin/${name}`,
-                }),
-              ],
-            }),
-          ),
-        );
-        const contractPath = join(root, "contract.json");
-        writeFileSync(
-          contractPath,
-          JSON.stringify({
-            ...pluginContract,
-            shippedExact: [...pluginContract.shippedExact, name],
+      using directory = temporaryDirectory("codex-package-assets-");
+      const root = directory.path;
+      const name = "runtime.mjs.br";
+      const archivePath = join(root, "package.tgz");
+      writeFileSync(
+        archivePath,
+        gzipSync(
+          packageTar({
+            additionalRecords: [
+              tarRecord(contents, {
+                name: `package/_bundled_plugin/${name}`,
+              }),
+            ],
           }),
-        );
-        const environment = { ...process.env };
-        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        const checked = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        if (error) {
-          expect(checked.status).toBe(1);
-          expect(checked.stderr).toContain(error);
-        } else expect(checked).toEqual({ status: 0, stderr: "" });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+        ),
+      );
+      const contractPath = writeContract(root, "contract.json", [name]);
+      const environment = { ...process.env };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      const checked = await checkPackage(
+        root,
+        archivePath,
+        contractPath,
+        environment,
+      );
+      if (error) {
+        expect(checked.status).toBe(1);
+        expect(checked.stderr).toContain(error);
+      } else expect(checked).toEqual({ status: 0, stderr: "" });
     },
   );
 
   test.each([0x78, 0x67])(
     "preserves inherited character locale for Unicode pax owners, type=%i",
     async (type) => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-owner-test-"));
-      try {
-        const archivePath = join(root, "unicode owner.tgz");
-        writeFileSync(
-          archivePath,
-          gzipSync(
-            Buffer.concat([
-              tarRecord(
-                paxRecords({
-                  uname: "Synthetic é owner",
-                  gname: "Synthetic é group",
-                }),
-                { name: "OwnerHead", type },
-              ),
-              packageTar(),
-            ]),
-          ),
-        );
-        const contractPath = join(root, "plugin contract.json");
-        writeFileSync(contractPath, JSON.stringify(pluginContract));
-        const environment: NodeJS.ProcessEnv = { ...process.env };
-        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
-        if (process.platform !== "win32")
-          environment["LC_ALL"] =
-            process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
-        const result = await checkPackage(
-          root,
-          archivePath,
-          contractPath,
-          environment,
-        );
-        expect({ status: result.status, stderr: result.stderr }).toEqual({
-          status: 0,
-          stderr: "",
-        });
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      using directory = temporaryDirectory("codex-package-owner-test-");
+      const root = directory.path;
+      const environment: NodeJS.ProcessEnv = { ...process.env };
+      delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+      if (process.platform !== "win32")
+        environment["LC_ALL"] =
+          process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+      const result = await checkArchive(
+        root,
+        "unicode owner.tgz",
+        gzipSync(
+          Buffer.concat([
+            tarRecord(
+              paxRecords({
+                uname: "Synthetic é owner",
+                gname: "Synthetic é group",
+              }),
+              { name: "OwnerHead", type },
+            ),
+            packageTar(),
+          ]),
+        ),
+        environment,
+      );
+      expect({ status: result.status, stderr: result.stderr }).toEqual({
+        status: 0,
+        stderr: "",
+      });
     },
   );
 
   test.skipIf(process.platform === "win32")(
     "explains the missing tar option on Alpine",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "codex-package-tar-option-"));
-      try {
-        const tools = join(root, "tools");
-        mkdirSync(tools);
-        writeFileSync(
-          join(tools, "tar"),
-          "#!/bin/sh\necho 'tar: unrecognized option: ignore-zeros' >&2\necho 'BusyBox multi-call binary.' >&2\nexit 1\n",
-          { mode: 0o755 },
-        );
-        const path = join(root, "package.tgz");
-        writeFileSync(path, gzipSync(packageTar(), { level: 0 }));
-        const contract = join(root, "contract.json");
-        writeFileSync(contract, JSON.stringify(pluginContract));
-        const checked = await checkPackage(root, path, contract, {
-          ...process.env,
-          PATH: tools + delimiter + process.env["PATH"],
-        });
-        expect(checked.status).toBe(1);
-        expect(checked.stderr).toContain("apk add tar");
-        expect(checked.stderr).toContain(
-          "tar: unrecognized option: ignore-zeros",
-        );
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
+      using directory = temporaryDirectory("codex-package-tar-option-");
+      const root = directory.path;
+      const tools = join(root, "tools");
+      mkdirSync(tools);
+      writeFileSync(
+        join(tools, "tar"),
+        "#!/bin/sh\necho 'tar: unrecognized option: ignore-zeros' >&2\necho 'BusyBox multi-call binary.' >&2\nexit 1\n",
+        { mode: 0o755 },
+      );
+      const path = join(root, "package.tgz");
+      writeFileSync(path, gzipSync(packageTar(), { level: 0 }));
+      const contract = writeContract(root, "contract.json");
+      const checked = await checkPackage(root, path, contract, {
+        ...process.env,
+        PATH: tools + delimiter + process.env["PATH"],
+      });
+      expect(checked.status).toBe(1);
+      expect(checked.stderr).toContain("apk add tar");
+      expect(checked.stderr).toContain(
+        "tar: unrecognized option: ignore-zeros",
+      );
     },
   );
 
@@ -980,7 +920,6 @@ describe("npm package tar listings", () => {
           ? "-fixture package.tgz"
           : "-fixture: package.tgz",
       );
-      const contractPath = join(root, "plugin contract.json");
       const logPath = join(root, "tar calls.jsonl");
       const adjacentTarMarker = join(root, "archive tar ran");
       // A valid plugin inventory can exceed the Windows process command-line limit.
@@ -1000,12 +939,10 @@ describe("npm package tar listings", () => {
       });
       const archiveContents = gzipSync(tarBytes, { level: 0 });
       writeFileSync(archivePath, archiveContents);
-      writeFileSync(
-        contractPath,
-        JSON.stringify({
-          ...pluginContract,
-          shippedExact: [...pluginContract.shippedExact, ...extraFiles],
-        }),
+      const contractPath = writeContract(
+        root,
+        "plugin contract.json",
+        extraFiles,
       );
 
       const environment: NodeJS.ProcessEnv = { ...process.env };
