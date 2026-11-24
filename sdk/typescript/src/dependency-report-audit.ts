@@ -15,7 +15,7 @@ import {
   type DependencyFindingDetails,
 } from "./dependency-report-model.js";
 import { isRecord } from "./record.js";
-import { claimKey } from "./dependency-report-proof.js";
+import { claimKey, walkClaims } from "./dependency-report-proof.js";
 const esc = (value: string) =>
   value.replace(
     /[&<>"'\r]/gu,
@@ -391,19 +391,13 @@ function checkClaims(f: Finding, check: Check) {
   const refs = [...(f.item.supportingClaims ?? [])];
   if (f.item.conclusionClaim) refs.unshift(f.item.conclusionClaim);
   const entries: string[] = [];
-  const seen = new Set<string>();
-  for (const ref of refs) {
-    const key = claimKey(ref);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const claim = byKey.get(key);
+  for (const { ref, claim } of walkClaims(refs, byKey)) {
     const refHtml = `${code(ref.id)} · r${ref.revision} · ${code(ref.hash)}`;
-    if (!claim) {
-      entries.push("Missing claim: " + refHtml);
-      continue;
-    }
-    refs.push(...claim.dependencies);
-    entries.push(refHtml + para(claim.decision.reason));
+    entries.push(
+      claim
+        ? refHtml + para(claim.decision.reason)
+        : "Missing claim: " + refHtml,
+    );
   }
   return group("Claim decisions", list(entries));
 }

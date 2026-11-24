@@ -55,6 +55,26 @@ test("does not attach a different revision or hash in place of missing evidence"
   expect(path.missingClaims).toEqual(input.claims[0]!.dependencies);
 });
 
+test("displays supporting claims before shared premises and reports each gap once", () => {
+  const input = stackReport();
+  const [observed, absent] = input.assessments;
+  const copy = observed.supportingClaims[0]!;
+  const other = { ...copy, id: "other" };
+  const missing = { ...copy, revision: copy.revision + 1 };
+  const root = input.claims[0]!;
+  const path = readStackReport({
+    ...input,
+    assessments: [{ ...observed, supportingClaims: [copy, other] }, absent],
+    claims: [
+      { ...root, dependencies: [...root.dependencies, missing] },
+      { ...root, ...other, dependencies: [...root.dependencies, missing] },
+      input.claims[1],
+    ],
+  })!.assessments[0]!;
+  expect(path.claims.map((c) => c.id)).toEqual(["copy", "other", "call"]);
+  expect(path.missingClaims).toEqual([missing]);
+});
+
 test("only recognizes the stack contract and requires a nullable review", () => {
   expect(readStackReport({ schemaVersion: 2, uses: [] })).toBeUndefined();
   expect(() =>

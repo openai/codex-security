@@ -8,6 +8,7 @@ import { prepareDependencyReport } from "../src/dependency-report-model.js";
 import { renderPreparedDependencyReport } from "../src/dependency-report-renderer.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import {
+  unresolved,
   variantReport,
   reviewed,
   report,
@@ -51,6 +52,22 @@ test("failed rendering and concurrent saves preserve file publication semantics"
   await expect(save(variantReport())).rejects.toThrow();
   expect(await readFile(path, "utf8")).toBe(published);
   expect(await readdir(dir.path)).toEqual(["report.html"]);
+});
+
+test("sorting and separating dismissed coverage preserves report links", () => {
+  const data = report(
+    [reviewed(1, { verdict: "ruled_out" }), reviewed(2)],
+    [unresolved(1), unresolved(2, { kind: "dismissed" }), unresolved(3)],
+  );
+  const { findings, dismissed } =
+    prepareDependencyReport(data).sections[0]!.prepared!;
+  expect(findings.map((f) => f.id)).toEqual([
+    "use-1-2",
+    "coverage-1-1",
+    "coverage-1-3",
+    "use-1-1",
+  ]);
+  expect(dismissed.map((f) => f.id)).toEqual(["coverage-1-2"]);
 });
 
 test("excerpt follows only the cited claim revision and source commit for this use", () => {

@@ -1,4 +1,9 @@
 import {
+  publishApprovedClaims,
+  reportedUse,
+  selectedPremises,
+} from "./dependency-reviewed-publication.js";
+import {
   dependencyGraphCandidates,
   observedDependencyCandidates,
   type DependencyGraphCandidate,
@@ -24,18 +29,18 @@ import {
 } from "./dependency-investigation-session.js";
 import {
   createPremiseQueue,
+  claimDependencies,
   claimInputs,
+  claimSelections,
   currentApproval,
   dependencyPremiseRefSchema,
   premiseKey,
   retainedUse,
   assertReviewedPremises,
-  type PremiseRef,
 } from "./dependency-review-queue.js";
 import {
   dependencyFindingDetailsShape,
   type DependencySearch,
-  type DependencyReviewReference,
 } from "./dependency-reachability.js";
 import {
   DependencyInvestigationBlockedError,
@@ -88,10 +93,8 @@ import {
   type Scope,
   investigationSchema,
   reference,
-  reportedUse,
   proposedDisposition,
   verifyProposedDisposition,
-  reportedDisposition,
   type VerifiedDisposition,
   reviewSchema,
   reviewScopes,
@@ -284,6 +287,30 @@ async function verifyScopedUse(
   );
 }
 
+function coverageAt(
+  kind: "dismissed" | "unresolved",
+  scope: Scope,
+  path: string,
+  line: number,
+  reason: string,
+) {
+  return {
+    kind,
+    location: scope.location,
+    reason,
+    evidence: [
+      {
+        path,
+        commit: scope.discovery.revision,
+        startLine: line,
+        endLine: line,
+        supports: [],
+      },
+    ],
+    observations: [],
+  };
+}
+
 async function prepareDraft(
   raw: string,
   directory: string,
@@ -317,11 +344,13 @@ async function prepareDraft(
   const scopeIds = new Set(
     [...submitted, ...proposal.uses].map((u) => u.scope),
   );
+  const callerKey = (scope: string, path: string, line: number) =>
+    JSON.stringify([scope, path, line]);
   const accounted = new Set<string>();
   for (const disposition of dispositions) {
     if (disposition.locations.length) scopeIds.add(disposition.scope);
     for (const loc of disposition.locations) {
-      const key = JSON.stringify([disposition.scope, loc.path, loc.line]);
+      const key = callerKey(disposition.scope, loc.path, loc.line);
       if (accounted.has(key))
         throw new CodexSecurityError(
           "Conflicting dispositions for " + loc.path + ":" + loc.line,
@@ -398,84 +427,57 @@ async function prepareDraft(
   const limitations = [
     ...new Set([...proposal.limitations, ...exploratoryLimitations]),
   ];
-  for (const scope of omitted)
-    limitations.push(
-      `Outside caller scope (${scope.manifest}): ${explanations.get(scope.id)}`,
+  const coverage = [];
+  for (const scope of omitted) {
+    const reason = explanations.get(scope.id)!;
+    limitations.push(`Outside caller scope (${scope.manifest}): ${reason}`);
+    coverage.push(
+      coverageAt(
+        "dismissed",
+        scope,
+        scope.manifest!,
+        scope.manifestLine!,
+        reason,
+      ),
     );
+  }
   if (!uses.length)
     limitations.push(
       "No repository dependency use was established for this advisory.",
     );
 
-  const unresolved = scopes
-    .filter((scope) => !(scope.manifest && explanations.has(scope.id)))
-    .flatMap((scope) =>
-      [
-        ...new Map(
-          [
-            ...scope.discovery.callers.filter(
-              (c) => !c.manifest || c.manifest === scope.manifest,
-            ),
-            ...(graphCandidates.get(scope.id) ?? []),
-          ].map((c) => [JSON.stringify([c.path, c.line]), c]),
-        ).values(),
-      ].flatMap((c) => {
-        const covered = uses.some(
-          (u) =>
-            u.scope === scope.id &&
-            ((u.verdict === "ruled_out" && u.selectedCopyExcluded) ||
-              u.evidence.some(
-                (ref) =>
-                  ref.path === c.path &&
-                  ref.startLine <= c.line &&
-                  ref.endLine >= c.line,
-              )),
-        );
-        if (
-          covered ||
-          accounted.has(JSON.stringify([scope.id, c.path, c.line]))
-        )
-          return [];
-        const reason = `Unassessed caller in ${scope.location}: ${c.path}:${c.line}.`;
-        return [
-          {
-            kind: "unresolved" as const,
-            location: scope.location,
-            reason,
-            evidence: [
-              {
-                path: c.path,
-                commit: scope.discovery.revision,
-                startLine: c.line,
-                endLine: c.line,
-                supports: [],
-              },
-            ],
-            observations: [],
-          },
-        ];
-      }),
+  for (const scope of scopes) {
+    if (scope.manifest && explanations.has(scope.id)) continue;
+    const assessed = uses.filter((use) => use.scope === scope.id);
+    if (
+      assessed.some((u) => u.verdict === "ruled_out" && u.selectedCopyExcluded)
+    )
+      continue;
+    const evidence = assessed.flatMap((use) => use.evidence);
+    const callers = scope.discovery.callers.filter(
+      (c) => !c.manifest || c.manifest === scope.manifest,
     );
-  const dismissed = omitted.map((scope) => ({
-    kind: "dismissed" as const,
-    location: scope.location,
-    reason: explanations.get(scope.id)!,
-    evidence: [
-      {
-        path: scope.manifest!,
-        commit: scope.discovery.revision,
-        startLine: scope.manifestLine!,
-        endLine: scope.manifestLine!,
-        supports: [],
-      },
-    ],
-    observations: [],
-  }));
-  const coverage = [...dismissed, ...unresolved];
-  limitations.push(
-    ...unresolved.map((c) => c.reason),
-    ...dispositions.filter((c) => c.kind === "unresolved").map((c) => c.reason),
-  );
+    for (const { path, line } of [
+      ...callers,
+      ...(graphCandidates.get(scope.id) ?? []),
+    ]) {
+      const key = callerKey(scope.id, path, line);
+      if (accounted.has(key)) continue;
+      accounted.add(key);
+      if (
+        evidence.some(
+          (ref) =>
+            ref.path === path && ref.startLine <= line && ref.endLine >= line,
+        )
+      )
+        continue;
+      const reason = `Unassessed caller in ${scope.location}: ${path}:${line}.`;
+      coverage.push(coverageAt("unresolved", scope, path, line, reason));
+      limitations.push(reason);
+    }
+  }
+  for (const disposition of dispositions)
+    if (disposition.kind === "unresolved") limitations.push(disposition.reason);
   return { additionalUses, limitations, coverage };
 }
 function createActivityProgress(
@@ -687,56 +689,8 @@ async function investigateIssue(
       ));
     const evidenceLimitations = new Set<string>();
     const searches: DependencySearch[] = [];
-    function selectedPremises(refs: PremiseRef[]) {
-      assertReviewedPremises(store, refs);
-      const result: DependencyReviewReference[] = [];
-      const claims: PremiseRef[] = [];
-      const visited = new Set<string>();
-      function select(row: Claim) {
-        const key = premiseKey(row);
-        if (visited.has(key)) return;
-        visited.add(key);
-        claims.push(reference(row));
-        const selected = new Set(currentApproval(store, row)!.evidenceKeys);
-        const {
-          sources,
-          wholeReceiptIds,
-          selected: projections,
-          dependencies,
-        } = claimInputs(row);
-        if (row.value.kind === "premise") {
-          for (const ref of sources)
-            if (selected.has(dependencyRecordHash(ref)))
-              result.push({
-                kind: "source",
-                path: ref.path,
-                commit: ref.commit,
-                startLine: ref.startLine,
-                endLine: ref.endLine,
-              });
-          for (const projection of projections)
-            if (selected.has(selectedReceiptKey(projection)))
-              result.push(selectedReceiptReference(projection));
-          for (const id of wholeReceiptIds)
-            if (selected.has(id))
-              result.push({
-                kind: "receipt",
-                receiptId: id,
-                originalPayloadSha256: dependencyRecordHash(
-                  records.get(id)!.result,
-                ),
-              });
-        }
-        for (const dep of dependencies)
-          if (selected.has(premiseKey(dep)))
-            select(store.claim<Claim["value"]>(dep.id, dep.revision)!);
-      }
-      for (const ref of refs)
-        select(store.claim<Claim["value"]>(ref.id, ref.revision)!);
-      return { claims, evidence: result };
-    }
     const decidingPremiseEvidence: DecidingPremiseEvidence = (ref) =>
-      selectedPremises([ref]).evidence;
+      selectedPremises(store, records, [ref]).evidence;
     const recordEvidence = (record: DependencyEvidenceRecord) => {
       signal.throwIfAborted();
       block.observe(record);
@@ -864,7 +818,7 @@ async function investigateIssue(
         if (c.value.kind !== "coverage" && currentApproval(store, c))
           return false;
         try {
-          assertReviewedPremises(store, claimInputs(c).dependencies);
+          assertReviewedPremises(store, claimDependencies(c));
           if (c.value.kind === "disposition" && c.value.replacesUse)
             approvedUse(store, c.value.replacesUse);
         } catch (error) {
@@ -879,9 +833,19 @@ async function investigateIssue(
         selectedReceiptValue(records.get(row.receiptId)!, row.selection);
       const requestReview = (outstanding: Claim[], problem?: string) => {
         let previewBytes = 24_000;
+        const receiptIds = new Set<string>();
+        const projectedIds = new Set<string>();
         const supplied = outstanding.map((c) => {
-          const { sourceIds, receiptKeys, selected, dependencies } =
-            claimInputs(c);
+          const {
+            sources,
+            sourceIds,
+            receiptKeys,
+            wholeReceiptIds,
+            selected,
+            dependencies,
+          } = claimInputs(c);
+          for (const id of wholeReceiptIds) receiptIds.add(id);
+          for (const row of selected) projectedIds.add(row.receiptId);
           return {
             ...reference(c),
             payload: c.value,
@@ -915,7 +879,7 @@ async function investigateIssue(
                 };
               }),
             }),
-            sources: claimInputs(c).sources.map((source, i) => ({
+            sources: sources.map((source, i) => ({
               id: sourceIds[i],
               source,
             })),
@@ -941,21 +905,15 @@ async function investigateIssue(
           ...reviewedAssessments,
           ...queue!.approved([
             ...[...outstanding, ...reviewedAssessments].flatMap(
-              (c) => claimInputs(c).dependencies,
+              claimDependencies,
             ),
             ...supplied.flatMap(
               (c) => c.previousUse?.payload.use.premises ?? [],
             ),
           ]),
         ];
-        const receiptIds = new Set(
-          outstanding.flatMap((c) => claimInputs(c).wholeReceiptIds),
-        );
-        const projectedIds = new Set(
-          [...outstanding, ...previous].flatMap((c) =>
-            claimInputs(c).selected.map((row) => row.receiptId),
-          ),
-        );
+        for (const c of previous)
+          for (const row of claimSelections(c)) projectedIds.add(row.receiptId);
         return run(
           [
             reviewInstructions,
@@ -1376,124 +1334,28 @@ async function investigateIssue(
             "The investigation changed during final review. Check the latest assessments, evidence and outstanding callers before submitting again.",
           );
         const premises = reviewQueue.approved(
-          claims.flatMap((c) => claimInputs(c).dependencies),
+          claims.flatMap(claimDependencies),
         );
         const report = store.read(() => {
-          const approved = [...premises, ...claims].map((claim) => {
-            const decision = currentApproval(store, claim);
-            if (!decision)
-              throw new DependencyReviewRejection(
-                "Missing current approval for " + claim.id,
-              );
-            return { ...claim, review: decision };
-          });
+          const published = publishApprovedClaims(
+            store,
+            [...premises, ...claims],
+            {
+              records,
+              failures: block.failures,
+              contextHash,
+              revision,
+              subject,
+            },
+          );
           return {
             schemaVersion: 2 as const,
-            uses: approved.flatMap((claim) => {
-              if (claim.value.kind !== "use") return [];
-              const selected = selectedPremises(
-                (claim.value.use.premises ?? []).filter((ref) =>
-                  claim.review.evidenceKeys.includes(premiseKey(ref)),
-                ),
-              );
-              return [
-                reportedUse(
-                  claim.value.use,
-                  claim,
-                  claim.review.evidenceKeys,
-                  selected.evidence,
-                  selected.claims,
-                ),
-              ];
-            }),
-            claims: approved.map((claim) => {
-              const use =
-                claim.value.kind === "use" ? claim.value.use : undefined;
-              const { sourceIds, receiptKeys, dependencies } =
-                claimInputs(claim);
-              return {
-                ...reference(claim),
-                state: "approved" as const,
-                contextHash,
-                payload: claim.value,
-                scope: {
-                  revision: revision ?? null,
-                  location:
-                    use?.location ??
-                    (claim.value.kind === "disposition"
-                      ? claim.value.disposition.location
-                      : null),
-                  subject,
-                },
-                dependencies,
-                decision: {
-                  accepted: true as const,
-                  reason: claim.review.reason,
-                  evidenceKeys: claim.review.evidenceKeys,
-                  citedVersion: use?.version ?? null,
-                },
-                evidence: {
-                  sourceIds,
-                  receiptIds: receiptKeys.filter(
-                    (key) =>
-                      !key.startsWith("receipt:") ||
-                      claim.review.evidenceKeys.includes(key),
-                  ),
-                },
-              };
-            }),
-            claimEvidence: {
-              sources: Object.fromEntries(
-                approved.flatMap((c) =>
-                  claimInputs(c).sources.map((ref) => [
-                    dependencyRecordHash(ref),
-                    ref,
-                  ]),
-                ),
-              ),
-              receipts: Object.fromEntries([
-                ...records,
-                ...block.failures,
-                ...approved.flatMap((c) =>
-                  claimInputs(c)
-                    .selected.filter((row) =>
-                      c.review.evidenceKeys.includes(selectedReceiptKey(row)),
-                    )
-                    .map((row) => [
-                      selectedReceiptKey(row),
-                      {
-                        ...row,
-                        result: selectedReceiptValue(
-                          records.get(row.receiptId)!,
-                          row.selection,
-                        ),
-                      },
-                    ]),
-                ),
-              ]),
-            },
+            uses: published.uses,
+            claims: published.claims,
+            claimEvidence: published.claimEvidence,
             assumptions: [assumptions.join("\n")],
             limitations,
-            coverage: [
-              ...coverage,
-              ...approved.flatMap((claim) => {
-                if (claim.value.kind !== "disposition") return [];
-                const disposition = claim.value.disposition;
-                const selected = selectedPremises(
-                  (disposition.premises ?? []).filter((ref) =>
-                    claim.review.evidenceKeys.includes(premiseKey(ref)),
-                  ),
-                );
-                return [
-                  reportedDisposition(
-                    disposition,
-                    claim,
-                    claim.review.evidenceKeys,
-                    selected,
-                  ),
-                ];
-              }),
-            ],
+            coverage: [...coverage, ...published.dispositions],
             searches: [
               ...discoveries.map((d) => ({
                 source: "repository",

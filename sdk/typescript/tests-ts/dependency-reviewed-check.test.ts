@@ -1,3 +1,4 @@
+import { reportedUse } from "../src/dependency-reviewed-publication.js";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -29,7 +30,6 @@ import {
   approveDependencyClaims,
   reviewScopes,
   reference,
-  reportedUse,
   verifyProposedUse,
   type Claim,
   type Proposal,

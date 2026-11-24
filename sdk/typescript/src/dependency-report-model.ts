@@ -103,15 +103,16 @@ export type Report = {
   description?: string;
   sections: Section[];
 };
-export const verdictOrder: DependencyVerdict[] = [
+const findingOrder = [
   "exploitable",
   "potentially_exploitable",
   "unknown",
+  "unresolved",
   "ruled_out",
-];
-const verdictRank = (verdict: DependencyVerdict) =>
-  verdictOrder.indexOf(verdict);
-const useId = (check: number, index: number) => `use-${check}-${index}`;
+] as const;
+export const verdictOrder: DependencyVerdict[] = findingOrder.filter(
+  (state) => state !== "unresolved",
+);
 
 function unwrap(value: unknown) {
   return isRecord(value) &&
@@ -275,41 +276,36 @@ export function tagsFor(finding: Finding) {
   return [...new Set(names)].map((name) => ({ name }));
 }
 function prepareCheck(check: Check, index: number) {
-  const findings: Finding[] = [
-    ...check.uses.map((item, i): Finding => ({
-      ...identity(item, item.proof),
-      id: useId(index, i + 1),
+  const findings = check.uses.map((item, i): Finding => ({
+    ...identity(item, item.proof),
+    id: `use-${index}-${i + 1}`,
+    original: i,
+    kind: "use",
+    item,
+    proof: item.proof,
+  }));
+  const dismissed: Finding[] = [];
+  for (const [i, item] of (check.coverage ?? []).entries()) {
+    const entry: Finding = {
+      ...identity(item),
+      id: `coverage-${index}-${i + 1}`,
       original: i,
-      kind: "use",
+      kind: "coverage",
       item,
-      proof: item.proof,
-    })),
-    ...(check.coverage ?? []).flatMap((item, i): Finding[] =>
-      item.kind === "unresolved"
-        ? [
-            {
-              ...identity(item),
-              id: `coverage-${index}-${i + 1}`,
-              original: i,
-              kind: "coverage",
-              item,
-            },
-          ]
-        : [],
-    ),
-  ];
-  return prepareFindings(findings);
+    };
+    if (item.kind === "dismissed") dismissed.push(entry);
+    else findings.push(entry);
+  }
+  return prepareFindings(findings, dismissed);
 }
-function prepareFindings(findings: Finding[]): PreparedCheck {
-  const order = (finding: Finding) =>
-    finding.kind !== "coverage" ? verdictRank(finding.item.verdict) : 2.5;
-  findings.sort(
-    (a, b) =>
-      order(a) - order(b) ||
-      a.original - b.original ||
-      a.id.localeCompare(b.id),
-  );
-  return { findings, dismissed: [] };
+function prepareFindings(
+  findings: Finding[],
+  dismissed: Finding[] = [],
+): PreparedCheck {
+  const rank = (f: Finding) =>
+    findingOrder.indexOf(f.kind === "coverage" ? "unresolved" : f.item.verdict);
+  findings.sort((a, b) => rank(a) - rank(b) || a.original - b.original);
+  return { findings, dismissed };
 }
 export function counts(findings: readonly Finding[]) {
   const breakdown = Object.fromEntries(
@@ -434,20 +430,6 @@ export function prepareDependencyReport(value: unknown): Report {
           check.advisories.includes(a.url),
         );
       section.prepared = prepareCheck(check, i + 1);
-      section.prepared.dismissed = (check.coverage ?? []).flatMap(
-        (item, j): Finding[] =>
-          item.kind === "dismissed"
-            ? [
-                {
-                  kind: "coverage",
-                  id: "coverage-" + (i + 1) + "-" + (j + 1),
-                  original: j,
-                  item,
-                  ...identity(item),
-                },
-              ]
-            : [],
-      );
     }
     if (
       section.check?.uses.some((use) => use.verdict === "unknown") ||

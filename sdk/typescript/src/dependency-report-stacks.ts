@@ -3,6 +3,7 @@ import {
   type StackInvestigationReport,
 } from "./dependency-stack-assessment.js";
 import type { DependencyClaimReference } from "./dependency-stack-claims.js";
+import { claimKey, walkClaims } from "./dependency-report-proof.js";
 import { isRecord } from "./record.js";
 
 // A claim payload may be free text or structured JSON. Only project readable
@@ -63,10 +64,6 @@ export function stackFrames(
   }));
 }
 
-function key(ref: DependencyClaimReference) {
-  return JSON.stringify([ref.id, ref.revision, ref.hash]);
-}
-
 export function readStackReport(value: unknown): StackReport | undefined {
   if (
     !isRecord(value) ||
@@ -78,7 +75,7 @@ export function readStackReport(value: unknown): StackReport | undefined {
     stackInvestigationReportSchema.parse(value);
   const records = new Map<string, Claim>();
   for (const record of claims) {
-    const id = key(record);
+    const id = claimKey(record);
     if (records.has(id))
       throw new Error("Duplicate stack claim reference: " + record.id);
     records.set(id, projectClaim(record));
@@ -87,19 +84,11 @@ export function readStackReport(value: unknown): StackReport | undefined {
     report.review?.decisions.map((d) => [d.workItemId, d.reason]),
   );
   const paths = assessments.map((item): StackAssessment => {
-    const pending = [...item.supportingClaims];
-    const seen = new Set<string>();
     const claims: Claim[] = [];
     const missingClaims: DependencyClaimReference[] = [];
-    for (const ref of pending) {
-      const id = key(ref);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const record = records.get(id);
-      if (record) {
-        claims.push(record);
-        for (const dependency of record.dependencies) pending.push(dependency);
-      } else missingClaims.push(ref);
+    for (const { ref, claim } of walkClaims(item.supportingClaims, records)) {
+      if (claim) claims.push(claim);
+      else missingClaims.push(ref);
     }
     return {
       ...item,

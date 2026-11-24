@@ -61,19 +61,27 @@ export type Premise = {
   dependencies: PremiseRef[];
 };
 
+function claimFinding(value: Claim["value"]) {
+  if (value.kind === "use") return value.use;
+  if (value.kind === "disposition") return value.disposition;
+}
+
+export function claimDependencies({ value }: Claim): PremiseRef[] {
+  return value.kind === "premise"
+    ? value.dependencies
+    : (claimFinding(value)?.premises ?? []);
+}
+
+export function claimSelections({ value }: Claim) {
+  const evidence = value.kind === "premise" ? value : claimFinding(value);
+  return evidence?.boundReceipts ?? [];
+}
+
 export function claimInputs(claim: Claim) {
   const v = claim.value;
-  const finding =
-    v.kind === "use"
-      ? v.use
-      : v.kind === "disposition"
-        ? v.disposition
-        : undefined;
+  const finding = claimFinding(v);
   const sources = v.kind === "premise" ? v.sources : (finding?.evidence ?? []);
-  const selected =
-    v.kind === "premise"
-      ? (v.boundReceipts ?? [])
-      : (finding?.boundReceipts ?? []);
+  const selected = claimSelections(claim);
   const wholeReceipts =
     v.kind === "premise"
       ? v.receiptIds
@@ -82,18 +90,15 @@ export function claimInputs(claim: Claim) {
             .filter((r) => !selected.some((row) => row.receiptId === r.sha256))
             .map((r) => r.sha256)
         : [];
-  const dependencies =
-    v.kind === "premise" ? v.dependencies : (finding?.premises ?? []);
   return {
     sources,
     sourceIds: sources.map(dependencyRecordHash),
     wholeReceiptIds: [...new Set(wholeReceipts)],
-
     receiptKeys: [
       ...new Set([...wholeReceipts, ...selected.map(selectedReceiptKey)]),
     ],
     selected,
-    dependencies,
+    dependencies: claimDependencies(claim),
   };
 }
 
@@ -125,7 +130,7 @@ export function currentApproval(
     : latest;
   if (
     current?.hash === ref.hash &&
-    claimInputs(current).dependencies.every((dep) =>
+    claimDependencies(current).every((dep) =>
       currentApproval(store, dep, cache),
     )
   ) {
@@ -146,8 +151,8 @@ export function retainedUse(store: DependencyAttemptStore, id: string) {
 export function assertReviewedPremises(
   store: DependencyAttemptStore,
   refs: readonly PremiseRef[],
+  cache = new Map<string, Decision | undefined>(),
 ) {
-  const cache = new Map<string, Decision | undefined>();
   for (const ref of refs) {
     if (!ref.id.startsWith("premise:") || !currentApproval(store, ref, cache)) {
       throw new CodexSecurityError(
@@ -356,7 +361,7 @@ export function createPremiseQueue(options: {
           assertReviewedPremises(store, [r]);
           const c = store.claim<Claim["value"]>(r.id, r.revision)!;
           closure.set(premiseKey(r), c);
-          claimInputs(c).dependencies.forEach(visit);
+          claimDependencies(c).forEach(visit);
         };
         visit(ref);
       }

@@ -4,6 +4,7 @@ import type {
   Section,
   Finding,
 } from "./dependency-report-model.js";
+import type { DependencyClaimReference } from "./dependency-stack-claims.js";
 import { isRecord } from "./record.js";
 export const citationKey = ({
   path,
@@ -15,9 +16,26 @@ export const citationKey = ({
     commit ? [path, commit, startLine, endLine] : [path, startLine, endLine],
   );
 type Claims = NonNullable<Check["claims"]>;
-type ClaimRef = Pick<Claims[number], "id" | "revision" | "hash">;
-export function claimKey(ref: ClaimRef) {
+export function claimKey(ref: DependencyClaimReference) {
   return JSON.stringify([ref.id, ref.revision, ref.hash]);
+}
+
+// Visit each exact reference once, roots before premises. Keep missing
+// references in order so readers can show gaps alongside decisions.
+export function* walkClaims<
+  T extends { dependencies: DependencyClaimReference[] },
+>(roots: readonly DependencyClaimReference[], claims: ReadonlyMap<string, T>) {
+  const pending = [...roots];
+  const seen = new Set<string>();
+  for (const ref of pending) {
+    const key = claimKey(ref);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const claim = claims.get(key);
+    yield { ref, claim };
+    if (claim)
+      for (const dependency of claim.dependencies) pending.push(dependency);
+  }
 }
 
 // Only use excerpts from claims attached to this finding, including their premises.
@@ -33,16 +51,10 @@ export function savedSnippets(
         result.set(citationKey(source), source.text);
     return result;
   }
-  const pending = [...(finding.item.supportingClaims ?? [])];
-  if (finding.item.conclusionClaim) pending.push(finding.item.conclusionClaim);
-  const seen = new Set<string>();
-  for (const ref of pending) {
-    const key = claimKey(ref);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const claim = claims.get(key);
+  const roots = [...(finding.item.supportingClaims ?? [])];
+  if (finding.item.conclusionClaim) roots.push(finding.item.conclusionClaim);
+  for (const { claim } of walkClaims(roots, claims)) {
     if (!claim) continue;
-    pending.push(...claim.dependencies);
     for (const id of claim.evidence.sourceIds) {
       const source = section.check?.claimEvidence?.sources[id];
       if (!isRecord(source)) continue;
