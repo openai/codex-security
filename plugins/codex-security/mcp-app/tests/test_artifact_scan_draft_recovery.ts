@@ -1,4 +1,4 @@
-import { apiSurface } from "./scan-draft-fixture.ts";
+import { apiSurface, reviewSurface } from "./scan-draft-fixture.ts";
 import { fixturePython } from "./support/python.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import assert from "node:assert/strict";
@@ -391,12 +391,9 @@ for (const layout of ["standard", "diff"] as const) {
       path.join(f.root, "artifacts/current.md"),
       "Current review.",
     );
-    const surface = {
-      id: "api",
-      label: "API review",
-      disposition: "needs_follow_up",
-      receiptRefs: ["artifacts/original.md"],
-    };
+    const surface = reviewSurface("api", "API review", "needs_follow_up", [
+      "artifacts/original.md",
+    ]);
     await f.writeReviewState({
       surfaces: [surface],
       deferred: [
@@ -592,12 +589,7 @@ for (const observation of ["checkpoint head", "worker result"]) {
 for (const headTime of [1, 2, 3]) {
   test(`worker: stopped recovery retains accepted reviewState with head time ${headTime}`, async (t) => {
     const f = await fixture(t, "worker");
-    const surface = (id: string) => ({
-      id,
-      label: id,
-      disposition: "no_issue_found",
-      receiptRefs: [],
-    });
+    const surface = (id: string) => reviewSurface(id, id, "no_issue_found");
     await f.writeReviewState({ surfaces: [surface("existing")] }, true);
     const added = {
       surfaces: [surface("newly-reviewed")],
@@ -2179,12 +2171,11 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           ...generic,
           surfaceIds: [surfaceId],
         };
-        const followUp = {
-          id: surfaceId,
-          label: "Independent review",
-          disposition: "needs_follow_up",
-          receiptRefs: [],
-        };
+        const followUp = reviewSurface(
+          surfaceId,
+          "Independent review",
+          "needs_follow_up",
+        );
         await f.checkpoint(
           f.draft({
             deferred: [

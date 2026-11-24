@@ -26,7 +26,6 @@ from workbench_test_support import (
     select_checkpoint,
     sort_checkpoint_entries,
     write_checkpoint,
-    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -2060,7 +2059,7 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
             "UPDATE deep_scan_workers SET attempt = 2 WHERE scan_id = ?", (scan.scan_id,)
         )
     archive = directory / "attempts" / "attempt-1"
-    old = write_draft_checkpoint(archive, scan.scan_id, complete=archived_terminal, mtime_ns=50)
+    old = scan.checkpoint(archive, complete=archived_terminal, mtime_ns=50)
     select_checkpoint(archive, old, mtime_ns=100)
     accepted = saved_draft(scan.scan_id, complete=True)
     accepted["coverage"].update(
@@ -2078,9 +2077,7 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
             )
     saved = workbench_api["saved_results"]
     scan.fail()
-    current = write_draft_checkpoint(
-        directory, scan.scan_id, complete=current_terminal, mtime_ns=300
-    )
+    current = scan.checkpoint(directory, complete=current_terminal, mtime_ns=300)
     select_checkpoint(directory, current, mtime_ns=300)
 
     with monkeypatch.context() as patch:
