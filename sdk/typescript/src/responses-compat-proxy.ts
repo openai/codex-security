@@ -159,25 +159,27 @@ export function responsesCompatRequest(request: Record<string, unknown>) {
     if (value["type"] === "custom_tool_call_output")
       return { ...value, type: "function_call_output" };
     if (value["type"] === "agent_message") {
-      const content = Array.isArray(value["content"])
-        ? value["content"]
-            .flatMap((part: unknown) => {
-              if (!isRecord(part)) return [];
-              if (part["type"] === "input_text") return [part["text"]];
-              if (
-                part["type"] === "encrypted_content" &&
-                typeof part["encrypted_content"] === "string"
-              )
-                return [part["encrypted_content"]];
-              return [];
-            })
-            .join("")
-        : value["content"];
+      const { author, recipient, content } = value;
+      if (
+        typeof author !== "string" ||
+        typeof recipient !== "string" ||
+        !Array.isArray(content)
+      )
+        throw new Error("Invalid agent message in xAI replay.");
+      const blocks = content.map((part: unknown) => {
+        if (
+          !isRecord(part) ||
+          part["type"] !== "input_text" ||
+          typeof part["text"] !== "string"
+        )
+          throw new Error("xAI replay supports only plaintext agent messages.");
+        return part["text"];
+      });
       return {
         type: "message",
         role: "assistant",
         ...(typeof value["id"] === "string" ? { id: value["id"] } : {}),
-        content,
+        content: `Agent message from ${JSON.stringify(author)} to ${JSON.stringify(recipient)}\n${blocks.join("\n")}`,
       };
     }
     if (value["type"] === "reasoning" && value["content"] === null) {

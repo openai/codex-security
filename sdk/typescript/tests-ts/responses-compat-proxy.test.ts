@@ -306,9 +306,11 @@ test("rewrites replayed history: calls, agent_message, reasoning, tool_choice", 
       {
         type: "agent_message",
         id: "amsg_1",
+        author: "/root/reviewer",
+        recipient: "/root",
         content: [
-          { type: "input_text", text: "Message Type: FINAL_ANSWER\n" },
-          { type: "encrypted_content", encrypted_content: "Done." },
+          { type: "input_text", text: "Message Type: FINAL_ANSWER" },
+          { type: "input_text", text: "Done." },
         ],
       },
       { type: "reasoning", id: "rs_1", content: null },
@@ -336,7 +338,8 @@ test("rewrites replayed history: calls, agent_message, reasoning, tool_choice", 
     type: "message",
     role: "assistant",
     id: "amsg_1",
-    content: "Message Type: FINAL_ANSWER\nDone.",
+    content:
+      'Agent message from "/root/reviewer" to "/root"\nMessage Type: FINAL_ANSWER\nDone.',
   });
   expect(input[4]).toEqual({ type: "reasoning", id: "rs_1" });
   expect(input[5]).toEqual({
@@ -358,6 +361,37 @@ test("rewrites replayed history: calls, agent_message, reasoning, tool_choice", 
     namespace: "collaboration",
     arguments: '{"task":"probe"}',
   });
+});
+
+test("distinguishes agent replies and refuses to replay encrypted content as text", () => {
+  const message = {
+    type: "agent_message",
+    author: "/root/first",
+    recipient: "/root",
+    content: [{ type: "input_text", text: "Done." }],
+  };
+  const { body } = responsesCompatRequest({
+    input: [
+      message,
+      { ...message, author: "/root/second" },
+      { ...message, recipient: "/root/second" },
+    ],
+  });
+  const messages = body["input"] as { content: string }[];
+  expect(new Set(messages.map((item) => item.content)).size).toBe(3);
+  expect(() =>
+    responsesCompatRequest({
+      input: [
+        {
+          ...message,
+          content: [
+            ...message.content,
+            { type: "encrypted_content", encrypted_content: "opaque" },
+          ],
+        },
+      ],
+    }),
+  ).toThrow(/plaintext/i);
 });
 
 test("drops tool_choice when the translated request has no tools", () => {

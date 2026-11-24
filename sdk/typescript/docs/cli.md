@@ -504,8 +504,9 @@ Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
 declarations, which xAI rejects. When a private provider profile uses
 `https://api.x.ai/v1` over Responses, the SDK starts a local HTTP adapter for
 the lifetime of the profile. It translates tool declarations to functions,
-restores tool calls, and replays subagent messages as assistant text. To try it,
-use the scan command below with that base URL and set `CODEX_API_KEY` to your
+restores tool calls, and replays plaintext subagent messages as assistant text
+with the sender and recipient. It rejects encrypted subagent messages. To try
+it, use the scan command below with that base URL and set `CODEX_API_KEY` to your
 xAI key. The adapter supports HTTP Responses requests only. Live scan
 completion remains unverified.
 
