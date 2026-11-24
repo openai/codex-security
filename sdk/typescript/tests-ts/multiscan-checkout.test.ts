@@ -17,7 +17,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
@@ -27,23 +27,29 @@ import { probeCodexSandbox, runCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting } from "./support/errors.js";
+
 import {
-  type SecurityClient,
   type MultiscanOptions,
+  type SecurityClient,
   createMultiscanFixtures,
   git,
   repository,
-  completedScan,
-  completeRun,
   client,
-  options,
   results,
 } from "./support/multiscan.js";
 
-const { temporaryDirectory, fixture, repositoryFixture, cleanup } =
-  createMultiscanFixtures();
-const testPosix = process.platform === "win32" ? test.skip : test;
+const {
+  temporaryDirectory,
+  cleanup,
+  fixture,
+  repositoryFixture,
+  completedScan,
+  completeRun,
+  reseal,
+  options,
+} = createMultiscanFixtures();
 
+const testPosix = process.platform === "win32" ? test.skip : test;
 afterEach(cleanup);
 
 test("keeps literal CSV scopes at the checked out repository", async () => {
@@ -52,7 +58,13 @@ test("keeps literal CSV scopes at the checked out repository", async () => {
   const { paths, source } = await repositoryFixture("literal-scopes");
   const os = { ...(await import("node:os")) };
   mock.module("node:os", () => ({ ...os, homedir: () => source.path }));
-  const literals = ["~/src", "$HOME/src", "%HOME%/src", "space name"];
+  const literals = [
+    "~/src",
+    "$HOME/src",
+    "%HOME%/src",
+    "space name",
+    "./relative scope",
+  ];
   for (const path of literals) {
     await mkdir(join(source.path, path), { recursive: true });
     await writeFile(join(source.path, path, "app.ts"), "export {};\n");
@@ -80,24 +92,46 @@ test("keeps literal CSV scopes at the checked out repository", async () => {
     ].join("\n"),
   );
   const observed: string[] = [];
-  const summary = await runMultiscan(
-    options(
-      paths,
-      client(async (repository, scanOptions = {}) => {
-        const target = await normalizeTarget(repository, scanOptions.target!);
-        observed.push(...target.paths);
-        expect(scanOptions.target).toEqual(
-          target.paths[0] === "src"
-            ? ["src"]
-            : target.paths.map((path) => join(repository, path)),
-        );
-        return await completedScan(scanOptions.outputDir!);
-      }),
-      { scanOptionsByMode: { standard: { target: ["src"] } } },
-    ),
+  const configured = options(
+    paths,
+    client(async (repository, scanOptions = {}) => {
+      const target = await normalizeTarget(repository, scanOptions.target!);
+      observed.push(...target.paths);
+      expect(scanOptions.target).toEqual(
+        target.paths[0] === "src"
+          ? ["src"]
+          : target.paths.map((path) => join(repository, path)),
+      );
+      const scanDir = scanOptions.outputDir!;
+      const result = await completedScan(scanDir);
+      result.manifest.scan.scope.includePaths = [...target.paths];
+      result.coverage.includePaths = [...target.paths];
+      result.coverage.mode = "scoped_path";
+      result.coverage.inventoryStrategy = "scoped_path";
+      await writeFile(
+        join(scanDir, "scan-manifest.json"),
+        JSON.stringify(result.manifest),
+      );
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        JSON.stringify(result.coverage),
+      );
+      await reseal(scanDir);
+      return result;
+    }),
+    { scanOptionsByMode: { standard: { target: ["src"] } } },
   );
+  const summary = await runMultiscan(configured);
   expect(summary).toMatchObject({ completed: literals.length + 1, failed: 0 });
-  expect(observed.sort()).toEqual([...literals, "src"].sort());
+  expect(observed.sort()).toEqual(
+    [...literals.map((path) => posix.normalize(path)), "src"].sort(),
+  );
+  expect(await runMultiscan(configured)).toMatchObject({
+    completed: literals.length + 1,
+    skipped: literals.length + 1,
+    failed: 0,
+  });
+  expect(observed).toHaveLength(literals.length + 1);
 });
 
 describe("multiscan", () => {
@@ -311,6 +345,7 @@ describe("multiscan", () => {
       "recovery-checkouts",
       "stubborn",
       "attempt-2",
+      "stubborn",
     );
     const originalRm = filesystem.rm;
     const originalOpen = filesystem.open;
@@ -422,6 +457,7 @@ describe("multiscan", () => {
       "recovery-checkouts",
       "done",
       "attempt-2",
+      "done",
     );
     const ledger = join(paths.output, "results.jsonl");
     const originalRm = filesystem.rm;
@@ -443,6 +479,10 @@ describe("multiscan", () => {
       removeSpy.mockRestore();
     }
 
+    await expect(lstat(checkout)).rejects.toMatchObject({ code: "ENOENT" });
+    await mkdir(checkout);
+    const marker = join(checkout, "user-edits.txt");
+    await writeFile(marker, "User edits in the replacement checkout.");
     expect(persistedBeforeRemoval).toBeDefined();
     await writeFile(ledger, persistedBeforeRemoval!);
     expect((await results(ledger)).at(-1)).toMatchObject({
@@ -456,6 +496,73 @@ describe("multiscan", () => {
       skipped: 1,
     });
     expect(run).toHaveBeenCalledTimes(1);
+    expect(await readFile(marker, "utf8")).toBe(
+      "User edits in the replacement checkout.",
+    );
+  });
+
+  test("recovery advances past an ordinary retry interrupted during checkout allocation", async () => {
+    const { paths } = await repositoryFixture("retry-interruption");
+    await runMultiscan(
+      options(paths, client(rejecting("Initial interrupted scan")), {
+        maxAttempts: 1,
+      }),
+    );
+    const ledger = join(paths.output, "results.jsonl");
+    const before = await readFile(ledger);
+    const attemptRoot = join(
+      paths.output,
+      "recovery-checkouts",
+      "retry-interruption",
+      "attempt-2",
+    );
+    const checkout = join(attemptRoot, "retry-interruption");
+    const marker = join(checkout, "retained.txt");
+    const originalMkdir = filesystem.mkdir;
+    const runs = mock(completeRun);
+    const configured = options(paths, client(runs), { maxAttempts: 1 });
+    const create = spyOn(filesystem, "mkdir").mockImplementation((async (
+      ...args: Parameters<typeof filesystem.mkdir>
+    ) => {
+      const result = await originalMkdir(...args);
+      if (String(args[0]) === checkout) {
+        await writeFile(marker, "Retained interrupted checkout.\n");
+        throw new Error("Synthetic interruption before Git checkout");
+      }
+      return result;
+    }) as typeof filesystem.mkdir);
+    try {
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 0,
+        failed: 1,
+      });
+    } finally {
+      create.mockRestore();
+    }
+    expect((await results(ledger)).at(-1)).toMatchObject({
+      attempt: 2,
+      error: "Synthetic interruption before Git checkout",
+    });
+    expect(runs).toHaveBeenCalledTimes(0);
+    // A killed process retains its checkout but cannot append its receipt.
+    await writeFile(ledger, before);
+    const identity = await lstat(attemptRoot);
+    expect(
+      await runMultiscan({
+        ...configured,
+        recoverScan: async () => undefined,
+      }),
+    ).toMatchObject({ completed: 1, failed: 0 });
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect((await results(ledger)).at(-1)).toMatchObject({
+      attempt: 3,
+      status: "completed",
+    });
+    const retained = await lstat(attemptRoot);
+    expect([retained.dev, retained.ino]).toEqual([identity.dev, identity.ino]);
+    expect(await readFile(marker, "utf8")).toBe(
+      "Retained interrupted checkout.\n",
+    );
   });
 
   test("preserves an existing checkout directory on the first campaign attempt", async () => {
@@ -538,6 +645,49 @@ describe("multiscan", () => {
       removeSpy.mockRestore();
     }
   });
+
+  test.each([false, true])(
+    "a forged cleanup kind preserves retained work (recovered=%p)",
+    async (recover) => {
+      const { paths } = await repositoryFixture("cleanup-kind", "done");
+      const scans = mock<SecurityClient["run"]>(completeRun);
+      const configured = options(paths, client(scans), { maxAttempts: 1 });
+      if (recover) {
+        scans.mockRejectedValueOnce(new Error("Interrupted"));
+        expect((await runMultiscan(configured)).failed).toBe(1);
+      }
+      const { resultsPath } = await runMultiscan(
+        recover
+          ? { ...configured, recoverScan: async () => undefined }
+          : configured,
+      );
+      const receipts = await results(resultsPath);
+      const receipt = receipts.at(-1)!;
+      expect(receipt["status"]).toBe("completed");
+      receipt["cleanupPending"] = recover ? "checkout" : "recovery-checkout";
+      await writeFile(
+        resultsPath,
+        receipts.map((row) => JSON.stringify(row) + "\n").join(""),
+      );
+      const other = recover
+        ? join(paths.output, "checkouts", "done")
+        : join(
+            paths.output,
+            "recovery-checkouts",
+            "done",
+            `attempt-${receipt["attempt"]}`,
+          );
+      await mkdir(other, { recursive: true, mode: 0o700 });
+      const retained = join(other, "retained.txt");
+      await writeFile(retained, "Keep this work.");
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+        failed: 0,
+      });
+      expect(await readFile(retained, "utf8")).toBe("Keep this work.");
+    },
+  );
 
   test.each(["root", "task"] as const)(
     "preserves completed scans and external files when the recovery checkout %s is linked",

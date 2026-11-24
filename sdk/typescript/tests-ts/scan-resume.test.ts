@@ -32,12 +32,12 @@ import {
 import { resolvePluginSource, runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
-import { workflowDigest } from "../src/finding-workflow.js";
+import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
 import {
   OperationTelemetry,
   readOperationTelemetry,
 } from "../src/operation-telemetry.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
@@ -184,6 +184,20 @@ async function interruptedScan(
     },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
+    ...(bulk
+      ? {
+          scanRequestDigest: scanRequestDigest(
+            { codexOverrides: {} },
+            {
+              mode,
+              outputDir: scanDir,
+              knowledgeBaseSnapshot: settings.knowledgeBasePaths?.length
+                ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
+                : undefined,
+            },
+          ),
+        }
+      : {}),
     ...settings,
     ...(knowledgeSnapshot === undefined
       ? {}
@@ -1071,10 +1085,18 @@ test.each([
       ],
       deps,
     );
+    // The synthetic result is unregistered. The fresh attempt receives
+    // its own reservation after recovery verifies the saved result.
     expect(seen).toMatchObject([
       {
         resumeScanId: f.scanId,
         maxCostUsd: expected,
+        skipFindingMatching: true,
+        ownerSuggestions: false,
+      },
+      {
+        outputDir: join(f.root, "artifacts", "repo", "attempt-2"),
+        maxCostUsd: 2,
         skipFindingMatching: true,
         ownerSuggestions: false,
       },
@@ -1241,6 +1263,149 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     join(f.scanDir, "scan-manifest.json"),
   ]);
 }
+
+test.each([false, true])(
+  "bulk recovery resumes a saved budgeted Deep session without an invocation cap (approved increases: %s)",
+  async (increaseLimit) => {
+    const f = await interruptedScan("deep", true, {
+      maxCostUsd: 6,
+      ownerSuggestions: false,
+    });
+    const digest = scanRequestDigest(
+      { codexOverrides: {} },
+      {
+        mode: "deep",
+        outputDir: f.scanDir,
+        maxCostUsd: 6,
+        skipFindingMatching: true,
+        ownerSuggestions: false,
+      },
+    );
+    const updated = runPython(f.python, [
+      "-c",
+      [
+        "import sqlite3, sys, time",
+        "with sqlite3.connect(sys.argv[1]) as db:",
+        "  db.execute(\"UPDATE scans SET recipe_json = json_set(recipe_json, '$.scanRequestDigest', ?) WHERE id = ?\", (sys.argv[2], sys.argv[3]))",
+        ...(increaseLimit
+          ? [
+              "  db.execute(\"UPDATE scans SET recipe_json = json_set(recipe_json, '$.scanRequestMaxCostUsd', 6) WHERE id = ?\", (sys.argv[3],))",
+            ]
+          : []),
+        "with sqlite3.connect(sys.argv[4]) as db:",
+        "  db.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, created_at INTEGER)')",
+        "  db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT)')",
+        "  db.execute('INSERT INTO threads VALUES (?, ?, ?, ?)', (sys.argv[5], sys.argv[6], sys.argv[7], int(time.time())))",
+      ].join("\n"),
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      digest,
+      f.scanId,
+      join(f.codexHome, "state_5.sqlite"),
+      f.threadId,
+      f.sessionPath,
+      f.scanDir,
+    ]);
+    expect(updated.exitCode, new TextDecoder().decode(updated.stderr)).toBe(0);
+    if (increaseLimit) {
+      for (const limit of [12, 18])
+        await f.command([
+          "set-scan-cost-limit",
+          "--scan-id",
+          f.scanId,
+          "--max-cost-usd",
+          String(limit),
+        ]);
+      expect(
+        await f.command(["get-scan-recipe", "--scan-id", f.scanId]),
+      ).toMatchObject({
+        recipe: {
+          maxCostUsd: 18,
+          scanRequestMaxCostUsd: 6,
+          scanRequestDigest: digest,
+        },
+      });
+    }
+    const { stdout, stderr, runCli } = createCliTest(main);
+    let resumed = 0;
+    const code = await runCli(
+      ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread(threadId) {
+          expect(threadId).toBe(f.threadId);
+          resumed++;
+          return {
+            id: threadId,
+            async runStreamed() {
+              await appendFile(
+                f.sessionPath,
+                JSON.stringify({
+                  type: "event_msg",
+                  timestamp: new Date().toISOString(),
+                  payload: {
+                    type: "token_count",
+                    info: {
+                      total_token_usage: {
+                        input_tokens: 10000,
+                        cached_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        output_tokens: 2000,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 12000,
+                      },
+                    },
+                  },
+                }) + "\n",
+              );
+              await finishDiscovery(f);
+              const usage = await f.command([
+                "read-scan-usage",
+                "--scan-id",
+                f.scanId,
+                "--thread-id",
+                threadId,
+              ]);
+              expect(usage, JSON.stringify(usage)).toMatchObject({
+                coverage: "complete",
+              });
+              return { events: completedEvents(threadId) };
+            },
+          };
+        },
+      })),
+    );
+    expect(code, stderr.text()).toBe(0);
+    expect(resumed).toBe(1);
+    const result = JSON.parse(stdout.text());
+    expect(result).toMatchObject({ completed: 1, failed: 0 });
+    const receipts = await readJsonLines(result.resultsPath);
+    expect(receipts).toHaveLength(2);
+    expect(receipts[1]).toMatchObject({
+      attempt: 1,
+      outputDir: f.scanDir,
+      status: "completed",
+      scanId: f.scanId,
+    });
+    expect(await readdir(join(f.root, "artifacts", "repo"))).toEqual([
+      "attempt-1",
+    ]);
+    const repeated = createCliTest(main);
+    const repeatedCode = await repeated.runCli(
+      ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session for completed scan"),
+        resumeThread: () =>
+          fail("Unexpected resumed session for completed scan"),
+      })),
+    );
+    expect(repeatedCode, repeated.stderr.text()).toBe(0);
+    expect(JSON.parse(repeated.stdout.text())).toMatchObject({
+      completed: 1,
+      failed: 0,
+    });
+    expect(await readJsonLines(result.resultsPath)).toEqual(receipts);
+  },
+);
 
 test.each(["completed", "failed"] as const)(
   "bulk recovery retains original correlation and unpriced usage after %s without a ledger",
@@ -1503,6 +1668,7 @@ test.each([
           stderr.stream,
           {
             ...dependencies({
+              environment: f.environment,
               onRun: () => fail("A sealed scan needs no Codex invocation"),
             }),
             runWorkbench: f.command,
@@ -1526,7 +1692,10 @@ test.each([
           ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
           nextOutput.stream,
           stderr.stream,
-          { ...dependencies(), runWorkbench: f.command },
+          {
+            ...dependencies({ environment: f.environment }),
+            runWorkbench: f.command,
+          },
         ),
       ).toBe(0);
       expect(JSON.parse(nextOutput.text())).toMatchObject({
@@ -2162,18 +2331,14 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 join(f.root, "artifacts", "repo", "attempt-2"),
               );
               expect(repository).toBe(
-                join(f.root, "recovery-checkouts", "repo", "attempt-2"),
+                join(f.root, "recovery-checkouts", "repo", "attempt-2", "repo"),
               );
               expect(
                 (
                   await readFile(join(repository, "source.py"), "utf8")
                 ).replaceAll("\r\n", "\n"),
               ).toBe("# synthetic source\n");
-              return {
-                manifest: { scan: { status: "completed" } },
-                coverage: {},
-                cost: null,
-              } as unknown as import("../src/result.js").ScanResult;
+              return fakeResult();
             },
           }),
         },
