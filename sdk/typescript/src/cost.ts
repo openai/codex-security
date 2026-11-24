@@ -1412,79 +1412,47 @@ export class ScanCostTracker {
         if (occurrences === undefined) saved.set(key, [completion]);
         else occurrences.push(completion);
       }
-      const observed = new Map<string, number[]>();
-      const groups = new Map<string, { keys: string[]; members: number[] }>();
+      const evidence = new Map<
+        number,
+        { saved: SessionCompletion[]; first: number }[]
+      >();
+      const seenPersisted = new Map<string, number>();
+      const reservedFull = new Map<string, number>();
       for (let index = start; index < stop; index++) {
         const live = this.#liveParentItems[index]!;
         if (live.item?.kind !== "command") continue;
-        const keys = [
-          ...new Set([live.item.outputDigest, live.item.persistedOutputDigest]),
-        ]
-          .filter((key) => saved.has(key))
-          .sort();
-        for (const key of keys) {
-          const occurrences = observed.get(key);
-          if (occurrences === undefined) observed.set(key, [index]);
-          else occurrences.push(index);
+        const { outputDigest, persistedOutputDigest } = live.item;
+        // Only oversized outputs have two signatures. Each determines one
+        // persisted form and is too large to be any other persisted form.
+        const full =
+          outputDigest === persistedOutputDigest
+            ? undefined
+            : saved.get(outputDigest);
+        const persisted = saved.get(persistedOutputDigest);
+        const previous = seenPersisted.get(persistedOutputDigest) ?? 0;
+        const firstFull = reservedFull.get(outputDigest) ?? 0;
+        // Reserve independently for each pair of signatures. Every preceding
+        // item with this persisted form competes for a copy, except those
+        // that took an earlier copy of this particular full output.
+        const firstPersisted =
+          persisted === undefined
+            ? 0
+            : Math.min(persisted.length, previous - firstFull);
+        if (live.markers.length > 0) {
+          const candidates = [];
+          if (full !== undefined)
+            candidates.push({ saved: full, first: firstFull });
+          if (persisted !== undefined)
+            candidates.push({ saved: persisted, first: firstPersisted });
+          evidence.set(index, candidates);
         }
-        if (live.markers.length === 0) continue;
-        const key = keys.join(":");
-        const group = groups.get(key);
-        if (group === undefined) groups.set(key, { keys, members: [index] });
-        else group.members.push(index);
-      }
-      const evidence = new Map<
-        number,
-        {
-          candidates: { saved: SessionCompletion[]; first: number }[];
-          reserved: boolean;
-        }
-      >();
-      for (const { keys, members } of groups.values()) {
-        const queues = keys.map((key) => ({
-          key,
-          saved: saved.get(key)!,
-          observed: observed.get(key)!,
-          reserved: 0,
-          next: 0,
-        }));
-        let reservations = 0;
-        for (const index of members) {
-          // Reserve preceding compatible live items once for this signature
-          // group. Advancing ordered cursors is equivalent to consuming the
-          // earliest compatible item for each saved occurrence, without splice.
-          while (true) {
-            const previous = Math.min(
-              ...queues.map((queue) => queue.observed[queue.next] ?? Infinity),
-            );
-            if (previous >= index) break;
-            const item = this.#liveParentItems[previous]!.item!;
-            let selected: (typeof queues)[number] | undefined;
-            for (const queue of queues) {
-              if (queue.observed[queue.next] === previous) queue.next++;
-              if (
-                (queue.key === item.outputDigest ||
-                  queue.key === item.persistedOutputDigest) &&
-                queue.reserved < queue.saved.length &&
-                (selected === undefined ||
-                  queue.saved[queue.reserved]!.position <
-                    selected.saved[selected.reserved]!.position)
-              )
-                selected = queue;
-            }
-            if (selected !== undefined) {
-              selected.reserved++;
-              reservations++;
-            }
-          }
-          evidence.set(index, {
-            candidates: queues.map((queue) => ({
-              saved: queue.saved,
-              first: queue.reserved,
-            })),
-            reserved: reservations > 0,
-          });
-        }
+        if (persisted !== undefined)
+          seenPersisted.set(persistedOutputDigest, previous + 1);
+        if (
+          (full?.[firstFull]?.position ?? Infinity) <
+          (persisted?.[firstPersisted]?.position ?? Infinity)
+        )
+          reservedFull.set(outputDigest, firstFull + 1);
       }
       // Later complete projections constrain earlier compatible copies. A
       // bound narrows the interval without assigning a live occurrence.
@@ -1497,17 +1465,14 @@ export class ScanCostTracker {
           if (bound !== Infinity) live.after = bound;
           continue;
         }
-        const { candidates, reserved } = evidence.get(index)!;
+        const candidates = evidence.get(index)!;
         let latest: SessionCompletion | undefined;
         for (const { saved, first } of candidates) {
-          let lower = first;
-          let upper = saved.length;
-          while (lower < upper) {
-            const middle = Math.floor((lower + upper) / 2);
-            if (saved[middle]!.position < bound) lower = middle + 1;
-            else upper = middle;
-          }
-          const candidate = lower > first ? saved[lower - 1] : undefined;
+          // The bound only moves earlier. Trim these interval-local lists
+          // from the end so all remaining reservation indexes stay valid.
+          while (saved.length > 0 && saved.at(-1)!.position >= bound)
+            saved.pop();
+          const candidate = saved.length > first ? saved.at(-1) : undefined;
           if (
             candidate !== undefined &&
             (latest === undefined || candidate.position > latest.position)
@@ -1516,7 +1481,7 @@ export class ScanCostTracker {
         }
         if (
           latest === undefined &&
-          !reserved &&
+          candidates.every(({ first }) => first === 0) &&
           bound === Infinity &&
           !isInventoryProgress(progress)
         )
@@ -2482,7 +2447,6 @@ export class ScanCostTracker {
       try {
         for await (const path of sessionFiles(
           join(this.#options.codexHome, directory),
-          true,
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
@@ -3328,10 +3292,7 @@ async function readWorkerReceipts(
   return result;
 }
 
-export async function* sessionFiles(
-  directory: string,
-  compressed = false,
-): AsyncGenerator<string> {
+export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -3342,11 +3303,10 @@ export async function* sessionFiles(
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path, compressed);
+      yield* sessionFiles(path);
     } else if (
       entry.isFile() &&
-      (entry.name.endsWith(".jsonl") ||
-        (compressed && entry.name.endsWith(".jsonl.zst")))
+      (entry.name.endsWith(".jsonl") || entry.name.endsWith(".jsonl.zst"))
     ) {
       yield path;
     }
