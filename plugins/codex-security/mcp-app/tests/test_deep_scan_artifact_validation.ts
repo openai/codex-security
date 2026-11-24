@@ -1,5 +1,10 @@
 import { writeJsonLine as writeResult } from "./support/json.ts";
-import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
+import {
+  apiSurface,
+  finding,
+  scanId,
+  workerDraft as draft,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import {
@@ -19,17 +24,13 @@ import type { ScanUnion } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
 const { addScanCoverage, scanCoverage, validateDiscoveryArtifacts } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-  );
+  await importSource("src/deep-scan/artifact-validation.ts");
 
 const {
   recordCodexSecurityWorkerScanDraft,
   parseScanDraft,
   saveScanDraftCheckpoint,
-} = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-scan-draft.ts"),
-);
+} = await importSource("src/artifact-scan-draft.ts");
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
@@ -141,14 +142,7 @@ function testResolvedDeferredPublication() {
 async function testDiscoveryReceipts(root: string) {
   const result = draft([], {
     reviewState: {
-      surfaces: [
-        {
-          id: "api",
-          label: "API",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
-      ],
+      surfaces: [apiSurface("no_issue_found", ["artifacts/review.md"])],
       explicitExclusions: [],
       deferred: [],
     },
@@ -159,27 +153,19 @@ async function testDiscoveryReceipts(root: string) {
     result,
   );
   const output = path.dirname(worker.resultPath);
-  const context = {
-    root: output,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId,
-  };
+  const context = workerContext(output, root);
   await assert.rejects(
-    validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId),
+    validateWorker(worker),
     /coverage receipt.*unavailable/,
     "missing evidence must fail admission before parent publication",
   );
   await mkdir(path.join(output, "artifacts"));
   const receipt = path.join(output, "artifacts/review.md");
   await writeFile(receipt, "Original attempt review evidence.\n");
-  await validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId);
+  await validateWorker(worker);
   await rm(receipt);
   await symlink(worker.resultPath, receipt);
-  await assert.rejects(
-    validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId),
-    /safe regular file/,
-  );
+  await assert.rejects(validateWorker(worker), /safe regular file/);
   await rm(receipt);
   await writeFile(receipt, "Original attempt review evidence.\n");
   await recordCodexSecurityWorkerScanDraft(context, {
@@ -194,11 +180,7 @@ async function testDiscoveryReceipts(root: string) {
     ...draft([]),
     complete: true,
   });
-  const accepted = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const accepted = await validateWorker(worker);
   const [retained] = accepted.reviewState.surfaces;
   assert.equal(retained.id, "api");
   assert.deepEqual(retained.receiptRefs, [
@@ -221,11 +203,7 @@ async function testDiscoveryReceipts(root: string) {
     ...draft([]),
     complete: true,
   });
-  const retried = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const retried = await validateWorker(worker);
   assert.equal(retried.reviewState.surfaces.length, 1);
   for (const ref of retried.reviewState.surfaces[0].receiptRefs) {
     assert.equal(
@@ -253,11 +231,7 @@ async function testLegacyDeferredPublication(root: string) {
     "first",
     result,
   );
-  const accepted = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const accepted = await validateWorker(worker);
   const coverage = scanCoverage(
     { ...worker, result: accepted },
     worker.artifacts.scanDir,
@@ -281,12 +255,7 @@ async function testArchivedReceiptPathValidation(
   root: string,
   includeValidCheckpoint: boolean,
 ) {
-  const surface = {
-    id: "api",
-    label: "API",
-    disposition: "no_issue_found",
-    receiptRefs: ["/artifacts/review.md"],
-  };
+  const surface = apiSurface("no_issue_found", ["/artifacts/review.md"]);
   const result = draft([], {
     reviewState: {
       surfaces: [surface],
@@ -310,12 +279,7 @@ async function testArchivedReceiptPathValidation(
   await rename(output, archive);
   const archivedBytes = await readFile(path.join(archive, "result.json"));
   await mkdir(path.join(output, "artifacts"), { recursive: true });
-  const context = {
-    root: output,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId,
-  };
+  const context = workerContext(output, root);
   if (includeValidCheckpoint)
     await saveScanDraftCheckpoint(
       { ...context, root: archive },
@@ -338,11 +302,7 @@ async function testArchivedReceiptPathValidation(
     context,
     draft([], { complete: true }),
   );
-  const accepted = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const accepted = await validateWorker(worker);
   assert.equal(
     accepted.reviewState.surfaces.length,
     includeValidCheckpoint ? 1 : 0,
@@ -385,12 +345,10 @@ async function testMissingReceiptRepair(
   const missing = shared ? "artifacts/review.md" : "artifacts/missing.md";
   const existing = shared ? "artifacts/Review.md" : "artifacts/existing.md";
   const surfaces: JsonObject[] = [
-    {
-      id: "api",
-      label: "API",
-      disposition: "needs_follow_up",
-      receiptRefs: reverse ? [existing, missing] : [missing, existing],
-    },
+    apiSurface(
+      "needs_follow_up",
+      reverse ? [existing, missing] : [missing, existing],
+    ),
     ...(shared
       ? [
           {
@@ -429,12 +387,7 @@ async function testMissingReceiptRepair(
     result,
   );
   const output = path.dirname(worker.resultPath);
-  const context = {
-    root: output,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId,
-  };
+  const context = workerContext(output, root);
   await mkdir(path.join(output, "artifacts"));
   await writeFile(path.join(output, existing), "Original valid evidence.\n");
   if (
@@ -450,7 +403,7 @@ async function testMissingReceiptRepair(
     return; // A missing case variant requires a case-sensitive filesystem.
   await recordCodexSecurityWorkerScanDraft(context, result);
   await assert.rejects(
-    validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId),
+    validateWorker(worker),
     complete ? /coverage receipt.*unavailable/ : /only a checkpoint/,
   );
   const archive = path.join(path.dirname(output), "attempts/attempt-01");
@@ -480,14 +433,7 @@ async function testMissingReceiptRepair(
       reviewState: {
         explicitExclusions: [],
         deferred: [],
-        surfaces: [
-          {
-            id: "api",
-            label: "API",
-            disposition: "no_issue_found",
-            receiptRefs: ["artifacts/replacement.md"],
-          },
-        ],
+        surfaces: [apiSurface("no_issue_found", ["artifacts/replacement.md"])],
         resolvedDeferred: [
           { id: "review", reason: "Source review completed." },
         ],
@@ -521,11 +467,7 @@ async function testMissingReceiptRepair(
     context,
     replacementDraft,
   );
-  const accepted = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const accepted = await validateWorker(worker);
   assert.match(
     repaired.warnings.join("\n"),
     shared
@@ -570,11 +512,7 @@ async function testMissingReceiptRepair(
     context,
     draft([], { complete: true }),
   );
-  const retried = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const retried = await validateWorker(worker);
   assert.deepEqual(retried.reviewState.deferred, []);
   assert.equal(retried.reviewState.surfaces[0].disposition, "no_issue_found");
   assert.deepEqual(
@@ -599,12 +537,7 @@ async function testWorkerPublicationBeforeCheckpoint(root: string) {
       const workerRoot = path.join(workersRoot, "first");
       const output = path.join(workerRoot, "output");
       await mkdir(output, { recursive: true });
-      const context = {
-        root: output,
-        repoRoot: root,
-        layout: "worker" as const,
-        scanId,
-      };
+      const context = workerContext(output, root);
       const exclusion = {
         pattern: "vendor/**",
         reason: "External code.",
@@ -678,14 +611,7 @@ async function testCoveragePublicationParity(root: string) {
     reviewState: {
       explicitExclusions: [],
       deferred: [],
-      surfaces: [
-        {
-          id: "api",
-          label: "API",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
-      ],
+      surfaces: [apiSurface("no_issue_found", ["artifacts/review.md"])],
     },
   }) as ScanDraftInput & {
     reviewState: {
@@ -735,11 +661,7 @@ async function testCoveragePublicationParity(root: string) {
       },
     ];
     await writeResult(worker.resultPath, result);
-    const accepted = await validateDiscoveryArtifacts(
-      worker.artifacts,
-      worker.resultPath,
-      scanId,
-    );
+    const accepted = await validateWorker(worker);
     const coverage = scanCoverage(
       { ...worker, result: accepted },
       worker.artifacts.scanDir,
@@ -864,10 +786,7 @@ async function testCoveragePublicationParity(root: string) {
     const result = structuredClone(original);
     patch(result);
     await writeResult(worker.resultPath, result);
-    await assert.rejects(
-      validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId),
-      error,
-    );
+    await assert.rejects(validateWorker(worker), error);
   }
 }
 
@@ -875,7 +794,7 @@ async function testDiscoveryValidation(root: string) {
   const result = draft([finding("shared", "src/a.js")], {
     threatModel: { summary: "Requests reach shared code." },
   });
-  const { artifacts, ...worker } = await createWorker(
+  const worker = await createWorker(
     path.join(root, "discovery"),
     "worker-001",
     result,
@@ -883,15 +802,12 @@ async function testDiscoveryValidation(root: string) {
 
   await writeResult(worker.resultPath, { ...result, complete: false });
   await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    validateWorker(worker),
     /only a checkpoint|not complete/,
   );
   await writeResult(worker.resultPath, result);
 
-  assert.deepEqual(
-    await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    result,
-  );
+  assert.deepEqual(await validateWorker(worker), result);
 
   for (const details of [
     { code_evidence: [{ id: "legacy", code: "source()" }] },
@@ -904,17 +820,12 @@ async function testDiscoveryValidation(root: string) {
       findings: [{ ...result.findings[0], ...details }],
     });
     const original = await readFile(worker.resultPath, "utf8");
-    await assert.rejects(
-      validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    );
+    await assert.rejects(validateWorker(worker));
     assert.equal(await readFile(worker.resultPath, "utf8"), original);
   }
 
   await writeResult(worker.resultPath, { ...result, scanId: otherScanId });
-  await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /different scan/,
-  );
+  await assert.rejects(validateWorker(worker), /different scan/);
 
   await writeResult(worker.resultPath, {
     ...result,
@@ -923,11 +834,7 @@ async function testDiscoveryValidation(root: string) {
       deferred: [{ reason: "Needs follow-up." }],
     },
   });
-  const withDeferred = await validateDiscoveryArtifacts(
-    artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const withDeferred = await validateWorker(worker);
 
   assert.deepEqual(withDeferred.reviewState.deferred, [
     { reason: "Needs follow-up." },
@@ -942,11 +849,7 @@ async function testDiscoveryValidation(root: string) {
       ],
     },
   });
-  const withFollowUp = await validateDiscoveryArtifacts(
-    artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const withFollowUp = await validateWorker(worker);
 
   assert.deepEqual(withFollowUp.reviewState.surfaces, [
     { label: "Unfinished Standard review", disposition: "needs_follow_up" },
@@ -961,19 +864,16 @@ async function testDiscoveryValidation(root: string) {
       },
     ],
   });
-  await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /endLine/,
-  );
+  await assert.rejects(validateWorker(worker), /endLine/);
 
   await writeFile(worker.resultPath, "{invalid JSON");
   await assert.rejects(
-    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+    validateWorker(worker),
     /Invalid Deep Scan JSON artifact/,
   );
 
   await writeResult(worker.resultPath, draft([]));
-  await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId);
+  await validateWorker(worker);
 
   if (process.platform !== "win32") {
     const outside = path.join(root, "outside-result.json");
@@ -981,7 +881,7 @@ async function testDiscoveryValidation(root: string) {
     await rm(worker.resultPath);
     await symlink(outside, worker.resultPath, "file");
     await assert.rejects(
-      validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+      validateWorker(worker),
       /escaped its scan directory|canonical non-symlink path/,
     );
   }
@@ -998,6 +898,18 @@ async function createWorker(scanDir: string, id: string, result: unknown) {
   const resultPath = path.join(output, "result.json");
   await writeResult(resultPath, result);
   return { artifacts, id, resultPath };
+}
+
+function validateWorker(worker: Awaited<ReturnType<typeof createWorker>>) {
+  return validateDiscoveryArtifacts(
+    worker.artifacts,
+    worker.resultPath,
+    scanId,
+  );
+}
+
+function workerContext(root: string, repoRoot: string) {
+  return { root, repoRoot, layout: "worker" as const, scanId };
 }
 
 async function testSharedMissingReceiptRepairHistory(root: string) {
@@ -1042,12 +954,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
   await rename(output, archive);
   await mkdir(path.join(archive, "artifacts"));
   await mkdir(path.join(output, "artifacts"), { recursive: true });
-  const archivedContext = {
-    root: archive,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId,
-  };
+  const archivedContext = workerContext(archive, root);
   const context = { ...archivedContext, root: output };
   await saveScanDraftCheckpoint(archivedContext, broken, false);
   const previousNames = await readdir(path.join(archive, "checkpoints"));
@@ -1090,11 +997,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
       [close("reader")],
     ),
   );
-  const accepted = await validateDiscoveryArtifacts(
-    worker.artifacts,
-    worker.resultPath,
-    scanId,
-  );
+  const accepted = await validateWorker(worker);
   assert.deepEqual(accepted.reviewState.deferred, []);
   assert.equal(accepted.reviewState.surfaces.length, 2);
   for (const row of accepted.reviewState.surfaces) {
@@ -1117,7 +1020,7 @@ async function testSharedMissingReceiptRepairHistory(root: string) {
   const retainedPath = receiptPath(output, retainedWriter.receiptRefs[0]);
   await rm(retainedPath);
   await recordCodexSecurityWorkerScanDraft(context, accepted);
-  await validateDiscoveryArtifacts(worker.artifacts, worker.resultPath, scanId);
+  await validateWorker(worker);
   assert.equal(
     await readFile(retainedPath, "utf8"),
     "Previously completed writer review.\n",
@@ -1186,12 +1089,7 @@ async function testCurrentAnonymousReceiptSelection(
       readFile(receiptPath(output, ref)),
     ),
   );
-  const context = {
-    root: output,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId,
-  };
+  const context = workerContext(output, root);
   await saveScanDraftCheckpoint(context, old, false);
   const checkpoints = await readdir(path.join(output, "checkpoints"));
   const originals = await Promise.all(
@@ -1221,11 +1119,7 @@ async function testCurrentAnonymousReceiptSelection(
   });
   for (let attempt = 0; attempt < 2; attempt++) {
     await recordCodexSecurityWorkerScanDraft(context, current);
-    const accepted = await validateDiscoveryArtifacts(
-      worker.artifacts,
-      worker.resultPath,
-      scanId,
-    );
+    const accepted = await validateWorker(worker);
     assert.equal(accepted.reviewState.surfaces.length, 2);
     const selected = accepted.reviewState.surfaces.find(
       (row: JsonObject) => row.label === "Current anonymous review",
@@ -1320,7 +1214,7 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
         "Corrected selected review.\n",
       );
       await recordCodexSecurityWorkerScanDraft(
-        { root: output, repoRoot: root, layout: "worker", scanId },
+        workerContext(output, root),
         draft(
           candidate
             ? [
@@ -1352,11 +1246,7 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
           },
         ),
       );
-      const result = await validateDiscoveryArtifacts(
-        worker.artifacts,
-        worker.resultPath,
-        scanId,
-      );
+      const result = await validateWorker(worker);
       assert.deepEqual(result.reviewState.deferred, []);
       assert.equal(result.reviewState.surfaces.length, candidate ? 1 : 2);
       assert.equal(result.findings.length, candidate ? 1 : 0);

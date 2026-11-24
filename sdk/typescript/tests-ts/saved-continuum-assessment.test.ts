@@ -22,6 +22,10 @@ import * as gitMetadata from "../src/local-git-metadata.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 import { continuumAssessmentVersion } from "../src/continuum-assessment-store.js";
 import {
+  continuumObservations,
+  type ContinuumObservation,
+} from "../src/continuum-validation-evidence.js";
+import {
   saveCliContinuumAssessments,
   savedContinuumAssessments,
 } from "../src/saved-continuum-assessment.js";
@@ -243,7 +247,26 @@ async function cliDirectory() {
   return join(root, name);
 }
 
-type Item = Omit<ValidationItemRecord, "severityBefore" | "severityAfter">;
+type Item = Omit<ValidationItemRecord, "severityBefore" | "severityAfter"> &
+  ContinuumObservation;
+function observation({
+  siblingOnly,
+  siblingArtifacts,
+  issueChanged,
+  ...item
+}: Item) {
+  const record = {
+    severityBefore: "high",
+    severityAfter: "high",
+    ...structuredClone(item),
+  };
+  continuumObservations.set(record, {
+    siblingOnly,
+    siblingArtifacts,
+    issueChanged,
+  });
+  return record;
+}
 
 function saveCli(
   items: Item[],
@@ -256,11 +279,7 @@ function saveCli(
     repo,
     "scan",
     { provider: "continuum", continuum: { environment_id: environment } },
-    items.map((item) => ({
-      severityBefore: "high",
-      severityAfter: "high",
-      ...item,
-    })),
+    items.map(observation),
     requestedAt,
   );
 }
@@ -722,21 +741,8 @@ test("a failed legacy refresh retains only the admission for a valid same-submis
     claimMatch: "on_target",
     proofObservation: { kind: "execution" },
   };
-  const provider = () => ({
-    name: "continuum",
-    version: "1",
-    async validate() {
-      throw Error("signed out");
-    },
-  });
-  const result = await assessPluginFindings(
-    config,
-    [{ occurrenceId: "occ_a" }],
-    { repositoryPath: repo },
-    provider,
-    [],
-    [legacy],
-  );
+  await save([legacy], { schemaVersion: 3 });
+  const result = await pollPlugin(Error("signed out"));
   expect(result.records.items[0]).toMatchObject({
     findingArn: completed.findingArn,
     submittedAt: completed.submittedAt,
@@ -744,7 +750,6 @@ test("a failed legacy refresh retains only the admission for a valid same-submis
     verdict: "UNAVAILABLE",
   });
   expect(result.records.items[0]).not.toHaveProperty("proofObservation");
-  await save(result.records.items, { retry: result.retry });
   await saveCli([conclusion]);
   expect((await read()).get("occ_a")).toEqual(expected);
 });
@@ -772,59 +777,12 @@ test.each(["duplicate", "invalid"])(
     await save(legacy, { schemaVersion: kind === "duplicate" ? 4 : 3 });
     await saveCli([third]);
     expect((await read()).size).toBe(0);
-    const provider = () => ({
-      name: "continuum",
-      version: "1",
-      async validate() {
-        throw Error("signed out");
-      },
-    });
-    const findings = [{ occurrenceId: "occ_a" }];
-    const context = { repositoryPath: repo };
-    let result = await assessPluginFindings(
-      config,
-      findings,
-      context,
-      provider,
-      [],
-      legacy,
-    );
-    for (const again of [false, true]) {
-      if (again)
-        result = await assessPluginFindings(
-          config,
-          findings,
-          context,
-          provider,
-          result.retry!,
-        );
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await pollPlugin(Error("signed out"));
       expect(result.summary).toContain("ambiguous");
-      await save(result.records.items, { retry: result.retry });
       expect((await read()).size).toBe(0);
     }
-    const recovered = await assessPluginFindings(
-      config,
-      findings,
-      context,
-      () => ({
-        name: "continuum",
-        version: "1",
-        async validate() {
-          return {
-            disposition: "reportable",
-            report: "refreshed",
-            provenance: { provider: "continuum", providerVersion: "1" },
-            record: {
-              ...completed,
-              severityBefore: "high",
-              severityAfter: "high",
-            },
-          };
-        },
-      }),
-      result.retry!,
-    );
-    await save(recovered.records.items, { retry: recovered.retry });
+    await pollPlugin(completed);
     expect((await read()).get("occ_a")).toEqual(expectedCompleted);
   },
 );
@@ -911,6 +869,25 @@ test("undated evidence from a detached issue cannot mask a dated confirmation", 
   expect((await read()).get("occ_a")).toEqual(expectedCompleted);
 });
 
+test("a fallback for other members cannot mask a confirmed validation after relinking", async () => {
+  const fallback = { ...newerValidation, resultScope: "issue" as const };
+  await saveCli([fallback]); // Older releases did not mark other members' runs.
+  await saveCli([unlinked]);
+  await saveCli([
+    { ...completed, siblingArtifacts: [fallback.validationArtifactId] },
+  ]);
+  expect((await read()).get("occ_a")).toEqual(expectedCompleted);
+});
+
+test("a return during one CLI poll cannot restore the score from an earlier visit", async () => {
+  await saveCli([scored]);
+  await saveCli([{ ...pendingScore, issueChanged: true }]);
+  expect((await read()).get("occ_a")).toEqual({
+    ...expectedCompleted,
+    scoringPending: true,
+  });
+});
+
 test("issue moves require ordered CLI evidence and agreement with the workbench", async () => {
   await saveCli([completed, moved], "env", root, 1);
   expect((await read()).size).toBe(0);
@@ -932,9 +909,9 @@ test("a confirmed unlink suppresses previous verdicts until the issue is establi
   expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
 });
 
-async function pollPlugin(item: Item, occurrences = [item.itemId]) {
+async function pollPlugin(item: Item | Error, occurrences = ["occ_a"]) {
   const file = Bun.file(path + ".result");
-  const previous = (await file.exists()) ? (await file.json()).retry : null;
+  const previous = (await file.exists()) ? await file.json() : undefined;
   const result = await assessPluginFindings(
     config,
     occurrences.map((occurrenceId) => ({ occurrenceId })),
@@ -943,6 +920,7 @@ async function pollPlugin(item: Item, occurrences = [item.itemId]) {
       name: "continuum",
       version: "1",
       async validate({ occurrenceId }: Record<string, unknown>) {
+        if (item instanceof Error) throw item;
         if (occurrenceId !== item.itemId) throw Error("Submission failed");
         return {
           disposition:
@@ -950,17 +928,20 @@ async function pollPlugin(item: Item, occurrences = [item.itemId]) {
           report: item.unavailable ?? item.verdict,
           unavailable: item.unavailable,
           provenance: { provider: "continuum", providerVersion: "1" },
-          record: {
-            severityBefore: "high",
-            severityAfter: "high",
-            ...structuredClone(item),
-          },
+          record: observation(item),
         };
       },
     }),
-    previous ?? [],
+    previous?.retry ?? [],
+    previous?.schemaVersion === continuumAssessmentVersion
+      ? []
+      : previous?.records.items,
+    previous?.polls,
   );
-  await save(result.records.items, { retry: result.retry });
+  await save(result.records.items, {
+    retry: result.retry,
+    polls: result.polls,
+  });
   return result;
 }
 
@@ -1009,6 +990,35 @@ const olderValidation = {
   validationArtifactId: "earlier",
   freshness: { ...completed.freshness, validatedAt: "2026-11-21T01:30:00Z" },
 };
+
+test("a first association without evidence can be completed by the CLI", async () => {
+  await pollPlugin({
+    ...unlinked,
+    issueUnlinked: undefined,
+    issueChanged: true,
+  });
+  await saveCli([scored]);
+  expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
+});
+
+test("a sibling-only bundle cannot resolve a disputed issue score after a move", async () => {
+  const sibling = {
+    ...newerValidation,
+    resultScope: "issue" as const,
+    siblingOnly: true,
+  };
+  await pollPlugin({ ...scoreTie, resultScope: "issue", siblingOnly: false });
+  await pollPlugin(unlinked);
+  await pollPlugin(sibling);
+  await saveCli([sibling]);
+  expect((await read()).size).toBe(0);
+});
+
+test("a fresh score dispute also applies to an unmarked copy of the same issue fallback", async () => {
+  await saveCli([{ ...scored, resultScope: "issue" }]);
+  await saveCli([{ ...scoreTie, resultScope: "issue", siblingOnly: true }]);
+  expect((await read()).get("occ_a")?.scoringPending).toBe(true);
+});
 
 test("a failed score lookup preserves the dispute but its error clears on retry", async () => {
   await pollPlugin(scoreTie);
@@ -1070,10 +1080,58 @@ test("only a CLI request started after the plugin saw the issue return can confi
     ...expectedCompleted,
     scoringPending: true,
   });
+  await retry(pendingScore);
+  expect((await read()).get("occ_a")?.issueSeverity).toBeUndefined();
   await saveCli([newerScore]);
   expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
   await retry(olderValidation);
   expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
+});
+
+test("a fresh workbench poll can confirm a verdict before its score after a CLI-only unlink", async () => {
+  await pollPlugin(scoreTie);
+  await saveCli([unlinked]);
+  await saveCli([olderValidation]);
+  expect((await read()).size).toBe(0);
+  await pollPlugin(scored);
+  const pending = (await read()).get("occ_a");
+  expect(pending?.verdict).toBe("EXPLOITABLE");
+  expect(pending?.issueSeverity).toBeUndefined();
+  await pollPlugin(newerScore);
+  expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
+});
+
+test("a workbench batch spanning a CLI unlink cannot confirm the return", async () => {
+  await save([scored], {
+    polls: { occ_a: { requestedAt: 1, changedAt: 4 } },
+  });
+  await saveCli([unlinked], "env", root, 2);
+  await saveCli([{ ...completed, verdict: "UNAVAILABLE" }], "env", root, 3);
+  expect((await read()).size).toBe(0);
+});
+
+test.each(["move", "unlink"])(
+  "a workbench score read after a CLI %s but during an unlink cannot confirm the return",
+  async (firstResult) => {
+    // The first CLI request finishes after the second and the workbench poll.
+    await saveCli([firstResult === "move" ? moved : unlinked], "env", root, 2);
+    await pollPlugin(scored);
+    await saveCli([unlinked], "env", root, 1);
+    await saveCli([pendingScore]);
+    expect((await read()).get("occ_a")?.scoringPending).toBe(true);
+  },
+);
+
+test("a CLI verdict from before unlinking cannot return when plugin retries finish", async () => {
+  const opposite = { ...newerValidation, verdict: "NOT_EXPLOITABLE" } as const;
+  await saveCli([opposite], "env", root, 1);
+  await pollPlugin(unlinked);
+  expect((await pollPlugin(pendingScore)).retry).not.toBeNull();
+  expect((await read()).size).toBe(0);
+  expect((await pollPlugin(completed)).retry).toBeNull();
+  expect((await read()).size).toBe(0);
+  await saveCli([opposite]);
+  expect((await read()).get("occ_a")?.verdict).toBe(opposite.verdict);
 });
 
 test("a newer score cannot resolve conflicting validations at the same time", async () => {
@@ -1088,53 +1146,36 @@ test("a newer score cannot resolve conflicting validations at the same time", as
   expect((await pollPlugin(newerScore)).status).toBe("incomplete");
 });
 
-test("a pending linked score survives transport failure unless the issue changed", async () => {
-  const prior = {
-    disposition: "deferred" as const,
-    report: "Waiting for score",
-    provenance: { provider: "continuum", providerVersion: "1" },
-    record: {
-      ...completed,
-      severityBefore: "high",
-      severityAfter: "high",
-      scoringPending: true,
-    },
-  };
-  for (const issueId of [undefined, "issue-a", "issue-b"]) {
-    const provider = () => ({
-      name: "continuum",
-      version: "1",
-      async validate() {
-        if (!issueId) throw Error("signed out");
-        return {
-          ...prior,
-          unavailable: "signed out",
-          record: {
-            ...prior.record,
+test.each([undefined, "issue-a", "issue-b"])(
+  "a pending linked score survives transport failure unless the issue changed (%s)",
+  async (issueId) => {
+    const prior = { ...completed, scoringPending: true };
+    await pollPlugin(prior);
+    const result = await pollPlugin(
+      issueId
+        ? {
+            ...completed,
             issueId,
             issueArn: prefix + "/code-issues/" + issueId,
             verdict: "UNAVAILABLE",
-            scoringPending: undefined,
+            unavailable: "signed out",
             terminalStatus: undefined,
             validationArtifactId: undefined,
-          },
-        };
-      },
-    });
-    const result = await assessPluginFindings(
-      config,
-      [{ occurrenceId: "occ_a" }],
-      { repositoryPath: repo },
-      provider,
-      [prior],
+          }
+        : Error("signed out"),
     );
     expect(result.retry?.[0]?.record).toMatchObject(
       issueId === "issue-b"
         ? { issueId, verdict: "UNAVAILABLE", validationArtifactId: undefined }
-        : { ...prior.record, unavailable: "signed out" },
+        : {
+            ...prior,
+            severityBefore: "high",
+            severityAfter: "high",
+            unavailable: "signed out",
+          },
     );
-  }
-});
+  },
+);
 
 test("a change in live issue membership leaves the saved finding verdict intact", async () => {
   await save([completed]);

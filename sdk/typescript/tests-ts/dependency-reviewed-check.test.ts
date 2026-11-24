@@ -37,7 +37,6 @@ import {
 import {
   DependencyInvestigationBlockedError,
   runReviewedDependencyCheck,
-  type ReviewedCheckOptions,
 } from "../src/dependency-reviewed-check";
 import {
   createDependencyEvidenceCapture,
@@ -156,15 +155,7 @@ async function fixture(extraFiles: Record<string, string> = {}) {
     discovery,
     use,
     git,
-    check(
-      options: Omit<ReviewedCheckOptions, "directory" | "subject" | "signal">,
-      dependencies: Parameters<typeof runReviewedDependencyCheck>[1],
-    ) {
-      return runReviewedDependencyCheck(
-        { directory: path, subject: "npm:fixture-parser", signal, ...options },
-        { discover: async () => discovery, ...dependencies },
-      );
-    },
+    packageOptions: { directory: path, subject: "npm:fixture-parser", signal },
     [Symbol.asyncDispose]: () => rm(path, { recursive: true, force: true }),
   };
 }
@@ -227,8 +218,8 @@ test("repository investigators share pinned source notes without promoting asser
   const input = { ...assertion, evidence: [range] };
   let noteId = "";
   let reviewerRead = false;
-  const result = await f.check(
-    { vulnDescription: "Parser issue" },
+  const result = await runReviewedDependencyCheck(
+    { ...f.packageOptions, vulnDescription: "Parser issue" },
     {
       discover: async ({ revision }) => {
         expect(revision).toBe(f.revision);
@@ -333,8 +324,9 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
     });
     let arrive: () => Promise<void>;
     let coverageReviews = 0;
-    const checked = await f.check(
+    const checked = await runReviewedDependencyCheck(
       {
+        ...f.packageOptions,
         vulnDescription: "Check calls to the parser.",
         evidenceSources: [
           { server: "catalog", instructions: "Check deployed callers." },
@@ -460,9 +452,10 @@ test.each(["incomplete", "complete"] as const)(
     const paths = ["app.js", "package-lock.json", "secondary.js"];
     const tool = "update_codex_security_graph";
     let reviewedLimitations: string[] = [];
-    const result = await f.check(
-      { vulnDescription: "Parser issue" },
+    const result = await runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Parser issue" },
       {
+        discover: async () => f.discovery,
         async runAgent(req) {
           const { call, definitions } = await req.investigationTools!();
           if (!req.coordinator) {
@@ -602,13 +595,15 @@ test("package checks freeze each advisory independently and verify exact source 
     subject?: string;
     fields?: Record<string, unknown>;
   }[] = [];
-  const result = await f.check(
+  const result = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       onProgress(type, subject, fields) {
         events.push({ type, subject, fields });
       },
     },
     {
+      discover: async () => f.discovery,
       lookupPackage: async () =>
         ["CVE-2099-0001", "CVE-2099-0002"].map((id) => ({
           id,
@@ -698,12 +693,13 @@ test("package checks freeze each advisory independently and verify exact source 
 test("caller descriptions stay scoped and a source-only positive is blocked", async () => {
   await using f = await fixture();
   await expect(
-    f.check(
-      { vulnDescription: "Incorrect length validation." },
+    runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Incorrect length validation." },
       {
         lookupPackage: async () => {
           throw Error("Unexpected registry lookup");
         },
+        discover: async () => f.discovery,
         runAgent: async ({ prompt }) => {
           expect(prompt).toContain("Incorrect length validation.");
           return JSON.stringify({
@@ -717,9 +713,10 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
     ),
   ).rejects.toThrow("running workload");
   await expect(
-    f.check(
-      { vulnDescription: "Incorrect length validation." },
+    runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Incorrect length validation." },
       {
+        discover: async () => f.discovery,
         runAgent: async () => {
           throw Error("Model unavailable");
         },
@@ -732,12 +729,14 @@ test("a positive use requires an endpoint on each explicitly bounded side", asyn
   await using f = await fixture();
   for (const boundary of [{ sources: [] }, { sinks: [] }]) {
     await expect(
-      f.check(
+      runReviewedDependencyCheck(
         {
+          ...f.packageOptions,
           vulnDescription: "Incorrect length validation.",
           ...boundary,
         },
         {
+          discover: async () => f.discovery,
           runAgent: async () =>
             JSON.stringify({ uses: [f.use], limitations: [] }),
         },
@@ -994,6 +993,7 @@ test("replacing an approved premise invalidates transitive users and preserves i
       "select the deciding evidence",
     );
     approve(base, [evidence]);
+
     const parent = submit("caller", [reference(base)], []);
     approve(parent, [premiseKey(base)]);
     const leaf = submit("service", [reference(parent)], []);
@@ -1071,9 +1071,13 @@ test("host feedback repairs a bad citation and an independent rejection requires
   await using f = await fixture();
   let investigations = 0,
     reviews = 0;
-  const report = await f.check(
-    { vulnDescription: "Untrusted input reaches the parser." },
+  const report = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
+      vulnDescription: "Untrusted input reaches the parser.",
+    },
+    {
+      discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
         const input = agentInput(prompt);
         if (input.claims) {
@@ -1116,9 +1120,10 @@ test.each(["corrected", "exhausted"] as const)(
     await using f = await fixture();
     let coordinatorStarts = 0;
     let submissions = 0;
-    const result = f.check(
-      { vulnDescription: "Parser input" },
+    const result = runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Parser input" },
       {
+        discover: async () => f.discovery,
         async runAgent(req) {
           if (!req.coordinator) {
             const input = agentInput(req.prompt);
@@ -1207,9 +1212,10 @@ test("bind discovered owners to their own source and retain uncovered callers", 
     manifest: "package-lock.json",
     project: "notes",
   });
-  const report = await f.check(
-    { vulnDescription: "Parser failure." },
+  const report = await runReviewedDependencyCheck(
+    { ...f.packageOptions, vulnDescription: "Parser failure." },
     {
+      discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
         const input = agentInput(prompt);
         if (!input.claims)
@@ -1303,8 +1309,9 @@ test("the reviewer corrects an omitted direct access citation without repeating 
   };
   records[0] = { ...structured, sha256: dependencyRecordHash(structured) };
   let reviews = 0;
-  const result = await f.check(
+  const result = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "A parser issue.",
       evidenceSources: [
         {
@@ -1314,6 +1321,7 @@ test("the reviewer corrects an omitted direct access citation without repeating 
       ],
     },
     {
+      discover: async () => f.discovery,
       runAgent: async ({ prompt, onEvidence }) => {
         const input = agentInput(prompt);
         if (input.claims) {
@@ -1566,19 +1574,17 @@ test("a failed model invocation retains prior results and identifies unattempted
   await using f = await fixture();
   const ids = ["CVE-2099-0001", "CVE-2099-0002", "CVE-2099-0003"];
   try {
-    await f.check(
-      {},
-      {
-        lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
-        runAgent: async ({ prompt }) => {
-          const input = agentInput(prompt);
-          if (input.issue.id === ids[1]) throw Error("Model unavailable.");
-          return input.claims
-            ? approvedReview(input.claims)
-            : JSON.stringify({ uses: [f.use], limitations: [] });
-        },
+    await runReviewedDependencyCheck(f.packageOptions, {
+      discover: async () => f.discovery,
+      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+      runAgent: async ({ prompt }) => {
+        const input = agentInput(prompt);
+        if (input.issue.id === ids[1]) throw Error("Model unavailable.");
+        return input.claims
+          ? approvedReview(input.claims)
+          : JSON.stringify({ uses: [f.use], limitations: [] });
       },
-    );
+    });
     throw Error("Expected a partial package outcome.");
   } catch (error) {
     if (!(error instanceof DependencyInvestigationBlockedError)) throw error;
@@ -1604,29 +1610,27 @@ test("a package continues with independent advisories after a scoped block or ex
     affectedScope: "worker",
     evidenceReferences: ["record-1"],
   };
-  const result = f.check(
-    {},
-    {
-      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
-      runAgent: async ({ prompt }) => {
-        const input = agentInput(prompt);
-        if (input.issue.id === ids[1])
-          throw new DependencyInvestigationBlockedError(scoped, undefined);
-        if (!input.claims)
-          return JSON.stringify({ uses: [f.use], limitations: [] });
-        return JSON.stringify({
-          decisions: input.claims.map((claim: ReviewClaim) => ({
-            ...approval(claim),
-            approved: input.issue.id !== ids[2],
-            reason:
-              input.issue.id === ids[2]
-                ? "No proof for this release."
-                : "Verified.",
-          })),
-        });
-      },
+  const result = runReviewedDependencyCheck(f.packageOptions, {
+    discover: async () => f.discovery,
+    lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+    runAgent: async ({ prompt }) => {
+      const input = agentInput(prompt);
+      if (input.issue.id === ids[1])
+        throw new DependencyInvestigationBlockedError(scoped, undefined);
+      if (!input.claims)
+        return JSON.stringify({ uses: [f.use], limitations: [] });
+      return JSON.stringify({
+        decisions: input.claims.map((claim: ReviewClaim) => ({
+          ...approval(claim),
+          approved: input.issue.id !== ids[2],
+          reason:
+            input.issue.id === ids[2]
+              ? "No proof for this release."
+              : "Verified.",
+        })),
+      });
     },
-  );
+  });
   try {
     await result;
     throw Error("Expected a partial package outcome.");
@@ -2060,14 +2064,16 @@ test("native investigators share asynchronous reviews, immutable premises and pa
   const counts = new Map<string, number>();
   const waiting = Promise.withResolvers<void>(),
     release = Promise.withResolvers<void>();
-  const result = await f.check(
+  const result = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "Wrong parser input.",
       evidenceSources: [
         { server: "builds", instructions: "Inspect the recorded build." },
       ],
     },
     {
+      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         const tools = await req.investigationTools!();
@@ -2307,14 +2313,16 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
   await using f = await fixture();
   const server = "service-registry",
     tool = "lookup";
-  const result = await f.check(
+  const result = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "Parser behavior",
       evidenceSources: [
         { server, instructions: "Look up an exact checkout path." },
       ],
     },
     {
+      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         if (!req.coordinator) return approvedReview(input.claims);
@@ -2485,9 +2493,10 @@ test.each([
     await using f = await fixture();
     const batches: string[][] = [];
     let coordinators = 0;
-    const run = f.check(
-      { vulnDescription: "Parser behavior" },
+    const run = runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Parser behavior" },
       {
+        discover: async () => f.discovery,
         async runAgent(req) {
           if (req.coordinator) {
             coordinators++;
@@ -2597,8 +2606,9 @@ test("a reviewed premise retains independently selected rows of the historical m
     textBlock: 0,
     record: ["frames", i],
   }));
-  const checked = await f.check(
+  const checked = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "Review the parser.",
       evidenceSources: [
         {
@@ -2608,6 +2618,7 @@ test("a reviewed premise retains independently selected rows of the historical m
       ],
     },
     {
+      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         const tools = await req.investigationTools!();
@@ -2786,9 +2797,10 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
     const workload = (id: string) => (mode === "identical" ? "shared-job" : id);
     const reviewCounts = new Map<string, number>();
     let rounds = 0;
-    const result = f.check(
-      { vulnDescription: "Parser behavior" },
+    const result = runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Parser behavior" },
       {
+        discover: async () => f.discovery,
         async runAgent(req) {
           const input = agentInput(req.prompt);
           if (!req.coordinator) {
@@ -2887,9 +2899,10 @@ test("a correction in a live review batch preserves its independent sibling appr
   const release = Promise.withResolvers<void>();
   const seen: string[][] = [];
   const previous = new Map<string, string[]>();
-  await f.check(
-    { vulnDescription: "Parser issue" },
+  await runReviewedDependencyCheck(
+    { ...f.packageOptions, vulnDescription: "Parser issue" },
     {
+      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         if (!req.coordinator) {
@@ -2938,6 +2951,7 @@ test("a correction in a live review batch preserves its independent sibling appr
         expect(seen).toHaveLength(2);
         expect(seen[0]).toHaveLength(2);
         expect(seen[1]).toHaveLength(1);
+
         await call("submit_dependency_claims", {
           claims: [
             { ...submit("derived"), dependencies: [reference(claims[0]!)] },
@@ -3003,8 +3017,8 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
     let corrected: PremiseRef | undefined;
     let coverageRefs: PremiseRef[] = [];
     const reviewedReplacements: number[] = [];
-    const checked = await f.check(
-      { vulnDescription: "Parser issue" },
+    const checked = await runReviewedDependencyCheck(
+      { ...f.packageOptions, vulnDescription: "Parser issue" },
       {
         discover: async () => ({
           ...f.discovery,
@@ -3316,8 +3330,9 @@ test("independently verifies candidate dispositions and publishes their selected
       { id: "worker", name: "Worker", source: "catalog", evidence: [bound] },
     ],
   };
-  const checked = await f.check(
+  const checked = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "Review the parser.",
       evidenceSources: [
         { server: "catalog", instructions: "Identify the deployed consumer." },
@@ -3543,8 +3558,9 @@ test("accounts for native graph candidate lines in their pinned package and pres
   );
   const revision = git("rev-parse", "HEAD");
   await writeFile(join(f.path, "dirty.js"), "different();\n");
-  const checked = await f.check(
+  const checked = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "Check parser call paths.",
       evidenceSources: [
         { server: "catalog", instructions: "Check deployments." },
@@ -3713,8 +3729,9 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
       completeness: "error",
     },
   ];
-  const result = await f.check(
+  const result = await runReviewedDependencyCheck(
     {
+      ...f.packageOptions,
       vulnDescription: "Parser input.",
       evidenceSources: [
         { server: "inventory", instructions: "Look up deployed copies." },
@@ -3722,6 +3739,7 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
       ],
     },
     {
+      discover: async () => f.discovery,
       async runAgent(req) {
         if (req.coordinator) {
           req.onEvidenceStartup!(

@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
+import { workflowSource, type Workflow } from "./support/workflow.js";
 import {
   checkCooldown,
   cooldownDays,
@@ -328,42 +329,23 @@ test("does not substitute a tagged version for an unavailable digest or hide API
   ).rejects.toThrow("HTTP 403: read:packages permission is required");
 });
 
-test("runs the guard with package metadata access inside the existing required checks", async () => {
-  const workflow = parse(
-    await readFile(
-      new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    jobs: Record<
-      string,
-      {
-        permissions?: Record<string, string>;
-        needs?: string[];
-        steps: Array<{
-          name?: string;
-          if?: string;
-          run?: string;
-          env?: Record<string, string>;
-          with?: Record<string, unknown>;
-        }>;
-      }
-    >;
-  };
-  const job = workflow.jobs["static-checks"]!;
-  const index = job.steps.findIndex(
+test("runs the guard with package metadata access inside the existing required checks", () => {
+  const { jobs } = parse(workflowSource("node-ci")) as Workflow;
+  const job = jobs["static-checks"]!;
+  const steps = job.steps!;
+  const index = steps.findIndex(
     (step) => step.name === "Check devcontainer dependency cooldown",
   );
   expect(index).toBeGreaterThan(
-    job.steps.findIndex((step) => step.name === "Install dependencies"),
+    steps.findIndex((step) => step.name === "Install dependencies"),
   );
-  expect(job.steps[index]!.run).toContain(
+  expect(steps[index]!.run).toContain(
     "sdk/typescript/scripts/check-devcontainer-cooldown.mts",
   );
-  expect(job.steps[index]!.env).toEqual({ GH_TOKEN: "${{ github.token }}" });
+  expect(steps[index]!.env).toEqual({ GH_TOKEN: "${{ github.token }}" });
   expect(job.permissions).toEqual({ contents: "read", packages: "read" });
-  expect(job.steps[0]!.with?.["fetch-depth"]).toBe(2);
-  const gate = workflow.jobs["ci"]!;
+  expect(steps[0]!.with?.["fetch-depth"]).toBe(2);
+  const gate = jobs["ci"]!;
   expect(gate.needs).toContain("static-checks");
   expect(gate.steps).toContainEqual(
     expect.objectContaining({

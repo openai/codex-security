@@ -43,8 +43,9 @@ export type RuntimeContext = NonNullable<
 type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
 export type Site = NonNullable<DependencyReportProof["sink"]>["callSite"];
 export type StepKind = "source" | "handoff" | "sink";
-type Anchor = Site & {
-  endLine?: number;
+type Anchor = {
+  path: string;
+  line: number;
   kind: "call" | "reference";
 };
 type Entry = {
@@ -271,14 +272,13 @@ function prepareCheck(check: Check, index: number) {
   }));
   const dismissed: Finding[] = [];
   for (const [i, item] of (check.coverage ?? []).entries()) {
-    const entry: Finding = {
+    const group = item.kind === "dismissed" ? dismissed : findings;
+    group.push({
       ...identity(item),
       id: `coverage-${index}-${i + 1}`,
       kind: "coverage",
       item,
-    };
-    if (item.kind === "dismissed") dismissed.push(entry);
-    else findings.push(entry);
+    });
   }
   return prepareFindings(findings, dismissed);
 }
@@ -286,6 +286,7 @@ function prepareFindings(
   findings: Finding[],
   dismissed: Finding[] = [],
 ): PreparedCheck {
+  // Unresolved coverage follows unknown uses. Stable sorting keeps ties in input order.
   const rank = (f: Finding) =>
     findingOrder.indexOf(f.kind === "coverage" ? "unresolved" : f.item.verdict);
   findings.sort((a, b) => rank(a) - rank(b));
@@ -295,29 +296,14 @@ export function counts(findings: readonly Finding[]) {
   const breakdown = Object.fromEntries(
     verdictOrder.map((v) => [v, 0]),
   ) as Record<DependencyVerdict, number>;
-  let reviewed = 0;
-  let unresolved = 0;
+  let reviewed = 0,
+    unresolved = 0;
   for (const finding of findings) {
+    if (finding.kind === "use") reviewed++;
     if (finding.kind === "coverage") unresolved++;
-    else {
-      if (finding.kind === "use") reviewed++;
-      breakdown[finding.item.verdict]++;
-    }
+    else breakdown[finding.item.verdict]++;
   }
   return { reviewed, unresolved, breakdown };
-}
-
-function citationsAt(item: Finding["item"], kind: StepKind, site: Site) {
-  const matches = item.evidence.filter(
-    (c) =>
-      c.path === site.path &&
-      c.startLine <= site.line &&
-      site.line <= c.endLine &&
-      (c.commit === site.commit ||
-        (kind === "sink" && site.commit === undefined)),
-  );
-  const ambiguous = matches.some((c) => c.commit !== matches[0]?.commit);
-  return { matches, ambiguous };
 }
 
 type Claims = NonNullable<Check["claims"]>;
@@ -332,20 +318,11 @@ function identity(
   const candidate =
     "locations" in item ? item.locations?.find((c) => c.line) : undefined;
   let anchor: Anchor | undefined;
-  if (site) {
-    const { matches, ambiguous } = citationsAt(item, "sink", site);
-    const commit = site.commit ?? (ambiguous ? undefined : matches[0]?.commit);
-    anchor = { ...site, commit, kind: "call" };
-  } else if (candidate?.line)
+  if (site) anchor = { kind: "call", path: site.path, line: site.line };
+  else if (candidate?.line)
     anchor = { kind: "reference", path: candidate.path, line: candidate.line };
   else if (cite)
-    anchor = {
-      kind: "reference",
-      path: cite.path,
-      commit: cite.commit,
-      line: cite.startLine,
-      endLine: cite.endLine,
-    };
+    anchor = { kind: "reference", path: cite.path, line: cite.startLine };
   const label =
     item.location ?? proof?.sink?.function ?? anchor?.path ?? item.reason;
   return { anchor, label, excerpts: {} };
@@ -439,8 +416,15 @@ export function matchTraceFrame(
   site: Site,
 ): { index: number; cite: Citation } | { gap: string } {
   const { item } = finding;
-  const { matches, ambiguous } = citationsAt(item, kind, site);
-  if (ambiguous)
+  const matches = item.evidence.filter(
+    (c) =>
+      c.path === site.path &&
+      c.startLine <= site.line &&
+      site.line <= c.endLine &&
+      (c.commit === site.commit ||
+        (kind === "sink" && site.commit === undefined)),
+  );
+  if (matches.some((c) => c.commit !== matches[0]?.commit))
     return { gap: "Sink revision is ambiguous across the cited copies." };
   const cite =
     matches.find((c) => finding.excerpts[citationKey(c)]) ?? matches[0];

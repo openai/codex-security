@@ -1426,21 +1426,14 @@ function publishedFindingEvidence(
 
 type SelectedPremises = ReturnType<typeof selectedPremises>;
 
-function findingDetails({
-  services,
-  openConditions,
-  inspections,
-  inputSource,
-  runtimeContext,
-  tags,
-}: VerifiedUse | VerifiedDisposition) {
+function findingDetails(use: VerifiedUse | VerifiedDisposition) {
   return {
-    ...(services && { services }),
-    ...(openConditions && { openConditions }),
-    ...(inspections && { inspections }),
-    ...(inputSource && { inputSource }),
-    ...(runtimeContext && { runtimeContext }),
-    ...(tags && { tags }),
+    ...(use.services && { services: use.services }),
+    ...(use.openConditions && { openConditions: use.openConditions }),
+    ...(use.inspections && { inspections: use.inspections }),
+    ...(use.inputSource && { inputSource: use.inputSource }),
+    ...(use.runtimeContext && { runtimeContext: use.runtimeContext }),
+    ...(use.tags && { tags: use.tags }),
   };
 }
 
@@ -1477,12 +1470,8 @@ export function reportedUse(
     .filter((ref) => ref.supports.includes("running"))
     .map((ref) => ref.quote);
   const running = runningQuotes.length > 0;
-  const configured =
-    use.configured || use.place?.deploymentBasis === "configured";
-
-  const deployment = running
-    ? ("confirmed" as const)
-    : configured
+  const deploymentBasis =
+    use.configured || use.place?.deploymentBasis === "configured"
       ? ("configured" as const)
       : ("unknown" as const);
   return {
@@ -1491,7 +1480,7 @@ export function reportedUse(
     version: use.version,
     verdict: use.verdict,
     reason: use.reason,
-    deployment,
+    deployment: running ? ("confirmed" as const) : deploymentBasis,
     ...publishedFindingEvidence(use, new Set(evidenceKeys), selected.evidence),
     ...findingDetails(use),
     place: {
@@ -1499,8 +1488,7 @@ export function reportedUse(
       environment: null,
       artifact: null,
       observationWindow: null,
-      deploymentBasis:
-        deployment === "confirmed" ? ("observed" as const) : deployment,
+      deploymentBasis,
       deploymentDetail: running ? runningQuotes.join("\n") : null,
       dependencySelection: use.version,
       patch: null,

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
-import { importSource } from "./import-module.ts";
+import { bundledMcpUrl, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { stringifyJson } from "../src/helpers/json.ts";
 import type * as Duplicates from "../src/workbench/duplicates.ts";
@@ -242,12 +242,7 @@ test("duplicate helper requires an explicit JSON scope before accessing state", 
     await temporary.create("duplicate-scope-"),
     "state",
   );
-  const helper = fileURLToPath(
-    new URL(
-      "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-      import.meta.url,
-    ),
-  );
+  const helper = fileURLToPath(bundledMcpUrl("helpers"));
   const call = (scope: unknown) =>
     spawnSync(process.execPath, [helper, "find-potential-duplicates"], {
       input: JSON.stringify({
