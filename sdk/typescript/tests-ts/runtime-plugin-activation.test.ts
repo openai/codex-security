@@ -78,6 +78,12 @@ const fakeCli = `
   process.stdout.write(JSON.stringify({ installedPath, version: "1.2.3" }));
 `;
 
+function mockBundledExecutable(path: string) {
+  return spyOn(executable, "resolveBundledCodexExecutable").mockReturnValue(
+    path,
+  );
+}
+
 async function fixture(
   steps: Step[],
   staleMigration?: "regenerated" | "removed" | "case-preserved",
@@ -145,10 +151,7 @@ async function fixture(
 
 test("only Windows retries a rolled-back bundled plugin activation and records the selected bytes", async () => {
   const f = await fixture([{ exit: 1, stderr: denied }, {}]);
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.command);
+  using resolver = mockBundledExecutable(f.command);
   if (process.platform !== "win32") {
     await expect(f.install()).rejects.toThrow(denied);
     expect(resolver).not.toHaveBeenCalled();
@@ -187,10 +190,7 @@ test
   "accepts stale native command output that is %s during recovery",
   async (mode) => {
     const f = await fixture([{ exit: 1, stderr: denied }, {}], mode);
-    using resolver = spyOn(
-      executable,
-      "resolveBundledCodexExecutable",
-    ).mockReturnValue(f.command);
+    using resolver = mockBundledExecutable(f.command);
     const result = await f.install();
     const migration = join(".codex-plugin", "migrated-command-skills");
     expect(
@@ -223,10 +223,7 @@ test
 
 test("only the bundled installer reuses its regenerated command output", async () => {
   const f = await fixture([{}, {}, {}], "regenerated");
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.previous);
+  using resolver = mockBundledExecutable(f.previous);
   await f.install();
   expect(await f.remaining()).toHaveLength(2);
 
@@ -243,10 +240,7 @@ test("only the bundled installer reuses its regenerated command output", async (
 
 test("rechecks the full marketplace selection and the recovered installed files", async () => {
   const f = await fixture([{}, {}, {}], "regenerated");
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.command);
+  using resolver = mockBundledExecutable(f.command);
   const { installedRoot } = await f.install();
   const staleSkill = join(
     f.selected,
@@ -273,10 +267,7 @@ test("rechecks the full marketplace selection and the recovered installed files"
 
 test("preserves runtime files when the selection already contains the native command output", async () => {
   const f = await fixture([{}, {}, {}, {}]);
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.command);
+  using resolver = mockBundledExecutable(f.command);
   const { installedRoot } = await f.install();
   const migration = join(".codex-plugin", "migrated-command-skills");
   const generated = join(installedRoot, migration);
@@ -309,10 +300,7 @@ test("preserves runtime files when the selection already contains the native com
 
 test("a link replacing the installed command migration directory requires reinstall", async () => {
   const f = await fixture([{}, {}], "regenerated");
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.command);
+  using resolver = mockBundledExecutable(f.command);
   const { installedRoot } = await f.install();
   const migration = join(
     installedRoot,
@@ -348,10 +336,7 @@ test.each([
   async (damage) => {
     const absent = damage === "previously absent";
     const f = await fixture([{}, {}], absent ? "removed" : "regenerated");
-    using resolver = spyOn(
-      executable,
-      "resolveBundledCodexExecutable",
-    ).mockReturnValue(f.command);
+    using resolver = mockBundledExecutable(f.command);
     const { installedRoot } = await f.install();
     const migration = join(
       installedRoot,
@@ -421,10 +406,7 @@ test.each([
 
 test("canceling a generated skill read leaves its native receipt and caller reason intact", async () => {
   const f = await fixture([{}], "regenerated");
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.command);
+  using resolver = mockBundledExecutable(f.command);
   const { installedRoot } = await f.install();
   const generated = join(
     installedRoot,
@@ -453,10 +435,7 @@ test("canceling a generated skill read leaves its native receipt and caller reas
 
 test("checks the generated output and selected files in the same installation", async () => {
   const f = await fixture([{}, {}], "regenerated");
-  using resolver = spyOn(
-    executable,
-    "resolveBundledCodexExecutable",
-  ).mockReturnValue(f.command);
+  using resolver = mockBundledExecutable(f.command);
   const { installedRoot } = await f.install();
   const previous = join(await temporaryDirectory(), "previous");
   const original = files.realpath;
@@ -566,10 +545,7 @@ test.skipIf(process.platform !== "win32").each([
   "%s keeps the previous installation receipt",
   async (scenario, steps, message, remaining) => {
     const f = await fixture([...steps]);
-    using resolver = spyOn(
-      executable,
-      "resolveBundledCodexExecutable",
-    ).mockReturnValue(
+    using resolver = mockBundledExecutable(
       scenario === "caller executable" ? f.previous : f.command,
     );
     const error = await f.install().catch((cause: unknown) => cause);
@@ -594,10 +570,7 @@ test.skipIf(process.platform !== "win32")(
     const f = await fixture([{ exit: 1, stderr: denied }, {}]);
     const controller = new AbortController();
     const reason = new Error("synthetic canceled recovery");
-    using resolver = spyOn(
-      executable,
-      "resolveBundledCodexExecutable",
-    ).mockReturnValue(f.command);
+    using resolver = mockBundledExecutable(f.command);
     const originalDelay = timers.setTimeout;
     using delay = spyOn(timers, "setTimeout").mockImplementation((...args) => {
       if (args[2]?.signal === controller.signal) controller.abort(reason);
