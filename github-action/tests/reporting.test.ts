@@ -37,16 +37,20 @@ test('findings beyond the summary limit are counted with the matching noun', () 
   assert.ok(summarize(32).includes('2 additional findings are available in the JSON/SARIF reports.'));
 });
 
+function renderSummary(overrides: Partial<ScanResults>): string {
+  const inputs = parseInputs(() => '', '/checkout');
+  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
+  return resultSummary({
+    scanStatus:'completed', policyStatus:'passed', reportStatus:'ready', findings:[], errors:[],
+    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''}, sarifUploadReady:false,
+    ...overrides,
+  }, inputs, target);
+}
+
 test('the summary byte limit keeps finding blocks and counts omitted findings', () => {
   const finding = {severity:'low', title:'Finding', summary:'A & B < C. 😀 '.repeat(100), path:'src/app.ts', startLine:1} as const;
   const findings = Array.from({length:31}, () => finding);
-  const result: ScanResults = {
-    scanStatus:'completed', policyStatus:'passed', reportStatus:'ready', findings, errors:[],
-    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''}, sarifUploadReady:false,
-  };
-  const inputs = parseInputs(() => '', '/checkout');
-  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
-  const summary = resultSummary(result, inputs, target);
+  const summary = renderSummary({findings});
   const displayed = [...summary.matchAll(/<h3>/g)].length;
 
   assert.ok(Buffer.byteLength(summary) <= 58_000);
@@ -61,13 +65,11 @@ test('the summary byte limit keeps finding blocks and counts omitted findings', 
 
 test('long scope notes leave room for the scan status and report guidance', () => {
   const scopeLimitations = Array.from({length:4}, () => '&'.repeat(4000));
-  const result: ScanResults = {
-    scanStatus:'failed', policyStatus:'not-evaluated', reportStatus:'partial', findings:[], errors:[], scopeLimitations,
-    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''}, sarifUploadReady:false,
-  };
-  const inputs = parseInputs(() => '', '/checkout');
-  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
-  const summary = resultSummary(result, inputs, target);
+  const summary = renderSummary({
+    scanStatus:'failed', policyStatus:'not-evaluated', reportStatus:'partial', scopeLimitations,
+    errors:['Synthetic failure: ' + '&'.repeat(3900)],
+  });
+  assert.ok(summary.includes('<pre>Synthetic failure: '));
   const notes = summary.split('\n').filter(line => line.startsWith('- '));
 
   assert.ok(Buffer.byteLength(summary) <= 58_000);
@@ -79,15 +81,11 @@ test('long scope notes leave room for the scan status and report guidance', () =
 });
 
 test('the summary keeps the last finding when the complete report fits exactly', () => {
-  const result: ScanResults = {
-    scanStatus:'completed', policyStatus:'passed', reportStatus:'ready', sarifUploadReady:false,
-    paths:{resultsDirectory:'', manifestPath:'', jsonPath:'', coveragePath:'', sarifPath:''},
+  const result: Pick<ScanResults, 'findings' | 'errors'> = {
     findings:[{severity:'low', title:'Last finding', summary:'Synthetic explanation. '.repeat(12)}],
     errors:['&'.repeat(4000), '&'.repeat(4000), '&'.repeat(3300)],
   };
-  const inputs = parseInputs(() => '', '/checkout');
-  const target = {repository:'/checkout', scannedSha:'a'.repeat(40), analysisRef:'refs/heads/main', publishable:true, emptyDiff:false};
-  const summarize = () => resultSummary(result, inputs, target);
+  const summarize = () => renderSummary(result);
   const padding = 'x'.repeat(58_000 - Buffer.byteLength(summarize()) - '\n\n<pre></pre>'.length);
 
   result.errors.push(padding);

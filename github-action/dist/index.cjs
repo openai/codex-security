@@ -97602,27 +97602,27 @@ function resultSummary(result, inputs, target, artifactUrl) {
   const limit = 58e3 - Buffer.byteLength([...statusNotes, footer].join("\n\n"));
   const renderBody = (budget) => {
     let remaining = budget;
-    let summary2 = "";
-    const append = (block, separator = "\n\n") => {
-      const bytes = Buffer.byteLength(block) + separator.length;
+    const fits = (block, separatorBytes = 2) => {
+      const bytes = Buffer.byteLength(block) + separatorBytes;
       if (bytes > remaining) return false;
       remaining -= bytes;
-      summary2 += summary2 ? separator + block : block;
       return true;
     };
-    for (const part of parts) append(part);
-    for (const [index, note] of (result.scopeLimitations ?? []).entries()) {
-      const line = `- ${esc(note)}`;
-      if (!append(index === 0 ? `**Scope limitations**
-
-${line}` : line, index === 0 ? "\n\n" : "\n")) break;
-    }
-    for (const note of statusNotes) summary2 += `
-
-${note}`;
+    const blocks2 = parts.filter((part) => fits(part));
+    const errors = [];
     for (const error2 of result.errors.slice(0, 10)) {
-      if (!append(`<pre>${esc(error2)}</pre>`)) break;
+      const block = `<pre>${esc(error2)}</pre>`;
+      if (!fits(block)) break;
+      errors.push(block);
     }
+    const notes = [];
+    for (const note of result.scopeLimitations ?? []) {
+      const line = (notes.length ? "" : "**Scope limitations**\n\n") + `- ${esc(note)}`;
+      if (!fits(line, notes.length ? 1 : 2)) break;
+      notes.push(line);
+    }
+    if (notes.length) blocks2.push(notes.join("\n"));
+    blocks2.push(...statusNotes, ...errors);
     let displayed = 0;
     for (const finding of result.findings.slice(0, 30)) {
       const block = `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
@@ -97630,10 +97630,11 @@ ${note}`;
 <code>${esc(finding.path ?? "No source location")}:${finding.startLine ?? "?"}</code>
 
 <pre>${esc(finding.summary, 1200)}</pre>`;
-      if (!append(block)) break;
+      if (!fits(block)) break;
+      blocks2.push(block);
       displayed += 1;
     }
-    return { summary: summary2, displayed, remaining };
+    return { blocks: blocks2, displayed, remaining };
   };
   let body2 = renderBody(limit);
   const omitted = findingCount - body2.displayed;
@@ -97641,12 +97642,8 @@ ${note}`;
     body2 = renderBody(limit - Buffer.byteLength(omittedFindings(findingCount)) - 2);
   }
   const additional = findingCount - body2.displayed;
-  const notice2 = additional > 0 ? `
-
-${omittedFindings(additional)}` : "";
-  return `${body2.summary}${notice2}
-
-${footer}`;
+  if (additional > 0) body2.blocks.push(omittedFindings(additional));
+  return [...body2.blocks, footer].join("\n\n");
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {

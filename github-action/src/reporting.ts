@@ -54,31 +54,37 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
 
   const renderBody = (budget: number) => {
     let remaining = budget;
-    let summary = '';
-    // Counting a separator for the first block covers the one before the reserved text.
-    const append = (block: string, separator = '\n\n'): boolean => {
-      const bytes = Buffer.byteLength(block) + separator.length;
+    // Each block precedes a separator, including the one before the footer.
+    const fits = (block: string, separatorBytes = 2): boolean => {
+      const bytes = Buffer.byteLength(block) + separatorBytes;
       if (bytes > remaining) return false;
       remaining -= bytes;
-      summary += summary ? separator + block : block;
       return true;
     };
-    for (const part of parts) append(part);
-    for (const [index, note] of (result.scopeLimitations ?? []).entries()) {
-      const line = `- ${esc(note)}`;
-      if (!append(index === 0 ? `**Scope limitations**\n\n${line}` : line, index === 0 ? '\n\n' : '\n')) break;
-    }
-    for (const note of statusNotes) summary += `\n\n${note}`;
+    const blocks = parts.filter(part => fits(part));
+    // Budget diagnostics before scope notes without changing the display order.
+    const errors: string[] = [];
     for (const error of result.errors.slice(0, 10)) {
-      if (!append(`<pre>${esc(error)}</pre>`)) break;
+      const block = `<pre>${esc(error)}</pre>`;
+      if (!fits(block)) break;
+      errors.push(block);
     }
+    const notes: string[] = [];
+    for (const note of result.scopeLimitations ?? []) {
+      const line = (notes.length ? '' : '**Scope limitations**\n\n') + `- ${esc(note)}`;
+      if (!fits(line, notes.length ? 1 : 2)) break;
+      notes.push(line);
+    }
+    if (notes.length) blocks.push(notes.join('\n'));
+    blocks.push(...statusNotes, ...errors);
     let displayed = 0;
     for (const finding of result.findings.slice(0, 30)) {
       const block = `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`;
-      if (!append(block)) break;
+      if (!fits(block)) break;
+      blocks.push(block);
       displayed += 1;
     }
-    return {summary, displayed, remaining};
+    return {blocks, displayed, remaining};
   };
 
   // Try the full budget first so a summary that fits exactly keeps every block.
@@ -89,8 +95,8 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     body = renderBody(limit - Buffer.byteLength(omittedFindings(findingCount)) - 2);
   }
   const additional = findingCount - body.displayed;
-  const notice = additional > 0 ? `\n\n${omittedFindings(additional)}` : '';
-  return `${body.summary}${notice}\n\n${footer}`;
+  if (additional > 0) body.blocks.push(omittedFindings(additional));
+  return [...body.blocks, footer].join('\n\n');
 }
 
 export function emitAnnotations(result: ScanResults): void {
