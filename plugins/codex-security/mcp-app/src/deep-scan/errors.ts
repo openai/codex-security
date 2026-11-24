@@ -26,7 +26,7 @@ export class DeepScanNonRetryableError extends Error {
   }
 }
 
-const USAGE_LIMIT_MESSAGES = new Set([
+const ACCOUNT_LIMIT_MESSAGES = new Set([
   "The requested access program is not enabled.",
   "The requested access program cannot be used with this model.",
   "Quota exceeded. Check your plan and billing details.",
@@ -42,7 +42,7 @@ export function codexWorkerTurnError(message: string): Error {
   const reason = message.replace(/^Error running remote compact task: /, "");
   if (
     CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message) ||
-    USAGE_LIMIT_MESSAGES.has(reason) ||
+    ACCOUNT_LIMIT_MESSAGES.has(reason) ||
     reason.startsWith("You’ve hit your usage limit.") ||
     reason.startsWith("You’ve hit your usage limit for ")
   ) {
