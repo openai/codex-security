@@ -1248,7 +1248,6 @@ async function testExplicitRefusalFailsScan(
   const refusal =
     "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
   const threadId = "deep-scan-stdio-refusal-thread";
-  const tool = "start_codex_security_deep_scan";
   const logPath = environment.FAKE_CODEX_START_LOG!;
   const launches = (await readLogLines(logPath)).length;
   const client = await startMcpClient(
@@ -1264,7 +1263,7 @@ async function testExplicitRefusalFailsScan(
   try {
     const parent = new AbortController();
     const pending = client.callTool(
-      toolCall(tool, { targetPath }, threadId),
+      startDeepScan({ targetPath }, threadId),
       undefined,
       { signal: parent.signal },
     );
@@ -1272,7 +1271,7 @@ async function testExplicitRefusalFailsScan(
     const { scanId } = discoveryPromptContext(worker.stdin);
     parent.abort(refusal);
     await assert.rejects(pending);
-    const joined = await client.callTool(toolCall(tool, { scanId }, threadId));
+    const joined = await client.callTool(startDeepScan({ scanId }, threadId));
     assert.equal(joined.isError, true);
     assert.ok(JSON.stringify(joined.content).includes(refusal));
     const state = await getDeepScan({ environment, scanId, threadId });
