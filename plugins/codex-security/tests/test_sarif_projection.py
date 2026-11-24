@@ -32,6 +32,8 @@ class SarifProjectionTest(TestCase):
         finding = self.finding
         finding["extensions"] = {"candidateId": "candidate-example"}
         run = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
+        self.assertNotIn("automationDetails", run)
+        self.assertEqual(run["properties"]["codexSecurityScanId"], self.manifest["scan"]["id"])
         rule = run["tool"]["driver"]["rules"][0]
         result = run["results"][0]
         self.assertNotEqual(rule["name"], finding["ruleId"])
@@ -55,12 +57,6 @@ class SarifProjectionTest(TestCase):
         self.assertEqual(changed["tool"]["driver"]["rules"][0]["name"], rule["name"])
         for field in ("ruleId", "ruleIndex", "locations", "partialFingerprints", "properties"):
             self.assertEqual(changed["results"][0][field], result[field])
-
-    @pytest.mark.cross_platform
-    def test_uploaders_can_set_the_category_without_losing_the_scan_id(self) -> None:
-        run = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
-        self.assertNotIn("automationDetails", run)
-        self.assertEqual(run["properties"]["codexSecurityScanId"], self.manifest["scan"]["id"])
 
     @pytest.mark.cross_platform
     def test_sarif_merges_shared_rule_metadata_without_mixing_results(self) -> None:
