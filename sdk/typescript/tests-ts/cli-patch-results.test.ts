@@ -580,8 +580,7 @@ lines.on("line", (line) => {
     expect(started).toBe(false);
   });
 
-  test("rejects a verified saved-finding result when no files change", async () => {
-    await using fixture = await repositoryFixture();
+  function savedFinding(directory: string): FixtureOptions {
     const finding = {
       occurrenceId: "occ_1",
       findingId: "csf_1",
@@ -589,15 +588,22 @@ lines.on("line", (line) => {
       severity: { level: "high" },
       locations: [{ path: "app.ts", startLine: 1 }],
     };
-    const outcome = await fixture.patch(["--scan", "scan-1"], {
+    return {
       readSavedFindings: async () => [finding as Finding],
       onWorkbench: () => ({
         scan: {
           scanId: "scan-1",
-          targetPath: fixture.directory,
+          targetPath: directory,
           findings: [finding],
         },
       }),
+    };
+  }
+
+  test("rejects a verified saved-finding result when no files change", async () => {
+    await using fixture = await repositoryFixture();
+    const outcome = await fixture.patch(["--scan", "scan-1"], {
+      ...savedFinding(fixture.directory),
       onCodex: (_args, output) => {
         output?.stdout.write(
           JSON.stringify({
@@ -624,22 +630,8 @@ lines.on("line", (line) => {
 
   test("reports one changed file when a saved-finding patch fails", async () => {
     await using fixture = await repositoryFixture();
-    const finding = {
-      occurrenceId: "occ_1",
-      findingId: "csf_1",
-      title: "Synthetic finding",
-      severity: { level: "high" },
-      locations: [{ path: "app.ts", startLine: 1 }],
-    };
     const outcome = await fixture.patch(["--scan", "scan-1"], {
-      readSavedFindings: async () => [finding as Finding],
-      onWorkbench: () => ({
-        scan: {
-          scanId: "scan-1",
-          targetPath: fixture.directory,
-          findings: [finding],
-        },
-      }),
+      ...savedFinding(fixture.directory),
       onCodex: async () => {
         await writeFile(join(fixture.directory, "app.ts"), "fixed\n");
         return 1;
