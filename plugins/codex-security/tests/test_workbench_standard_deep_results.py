@@ -3047,8 +3047,8 @@ def test_selected_candidate_outcome_keeps_its_evidence(
         parent = copy.deepcopy(closed)
         parent["coverage"].pop("resolvedDeferred")
         write_saved_parent(tmp_path, parent, 100)
-    result = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=stopped, reason="interrupted"
+    result = merge_interrupted(
+        module, tmp_path, pending["scanId"], binding, workers, stopped=stopped
     )
     assert result is not None
     assert candidate not in result[2]["deferred"]
