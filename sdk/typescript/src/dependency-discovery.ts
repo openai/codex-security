@@ -112,14 +112,28 @@ function newlinesIn(value: string): string {
   return value.replace(/[^\n]+/gu, "");
 }
 
+// Consume even truncated literals once. Restarting at each slash or escaped
+// quote in an unfinished literal can rescan the same long suffix.
+function literalEnd(text: string, start: number, delimiter: string): number {
+  const regex = delimiter === "/";
+  let inClass = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (char === "\n") return i;
+    if (char === "\\" && (!regex || text[i + 1] !== "\n")) i++;
+    else if (regex && char === "[") inClass = true;
+    else if (regex && char === "]") inClass = false;
+    else if (char === delimiter && !inClass) return i + 1;
+  }
+  return text.length;
+}
+
 // Only package string literals survive as "@". Template expressions stay
 // visible, since they can contain real calls to require() or import().
 function javascriptCode(text: string, pkg: string): string {
-  // Consume truncated literals too, so escaped quotes never restart the scan.
   const tokens =
-    /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:\\[\s\S]|[^'\\\n])*'?|"(?:\\[\s\S]|[^"\\\n])*"?|[\w$]+|=>|\+\+|--|\s+|[^\s]/gu;
+    /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|[\w$]+|=>|\+\+|--|\.\.\.|\s+|[^\s]/gu;
   const templateChunk = /(?:\\[\s\S]|[^`\\$]|\$(?!\{))*(?:`|\$\{)?/uy;
-  const regexBody = /(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\[\n])+\/[a-z]*/uy;
   const templateDepth: number[] = [];
   let braces = 0;
   let previous = "";
@@ -135,12 +149,9 @@ function javascriptCode(text: string, pkg: string): string {
       code += token;
       continue;
     }
-    if (token === "/" && regexAllowed) {
-      regexBody.lastIndex = tokens.lastIndex;
-      if (regexBody.test(text)) {
-        tokens.lastIndex = regexBody.lastIndex;
-        token = "0";
-      }
+    if (token === "'" || token === '"' || (token === "/" && regexAllowed)) {
+      tokens.lastIndex = literalEnd(text, tokens.lastIndex, token);
+      token = token === "/" ? "0" : text.slice(match.index, tokens.lastIndex);
     }
     if (token === "`" || (token === "}" && braces === templateDepth.at(-1))) {
       if (token === "}") templateDepth.pop();
@@ -165,10 +176,13 @@ function javascriptCode(text: string, pkg: string): string {
       code += newlinesIn(token);
       regexAllowed = false;
     } else {
-      code += token;
+      // Member names can follow whitespace or comments. Spread starts a new expression.
+      if (previous === "." && (token === "require" || token === "import"))
+        token = "0";
+      code += token === "..." ? "... " : token;
       regexAllowed =
         previous !== "." &&
-        /^(?:[=(:,;!?&|{\[~*+%-]|=>|await|case|delete|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
+        /^(?:[=(:,;!?&|{\[~*+%/-]|=>|\.\.\.|await|case|delete|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
           token,
         );
     }

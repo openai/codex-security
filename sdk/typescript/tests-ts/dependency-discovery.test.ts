@@ -401,3 +401,20 @@ test("a truncated literal ends at the newline without exposing its contents", ()
     ).toEqual([2]);
   }
 });
+
+test("ignores member calls and regex literals while preserving later runtime imports", () => {
+  const text = [
+    'obj. /* method */ require("sample-codec")',
+    'obj?.\nimport("sample-codec")',
+    'const re = /[/]require("sample-codec")/g;',
+    'const ratio = 1 / /require("sample-codec")/.test(input);',
+    "const broken = " + "/[".repeat(512) + 'require("sample-codec")',
+    'const copy = {...require("sample-codec")};',
+    'const value = require("sample-codec");',
+    "const other = /[" + "\\\\/[".repeat(512) + 'require("sample-codec")]',
+  ].join("\n");
+  expect(sourceReferences("service.js", text, pkg, [])).toEqual({
+    lines: [7, 8],
+    bindings: ["value"],
+  });
+});
