@@ -1455,6 +1455,30 @@ describe("CLI authentication", () => {
     }
   });
 
+  test("keeps provider key guidance consistent when model access is denied", async () => {
+    const source = "STANDARD_COMPUTE_API_KEY";
+    const { stderr, runCli } = createCliTest(main);
+    const deps = dependencies({ environment: { [source]: "synthetic-key" } });
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          source,
+          verified: false,
+        });
+        throw new Error("403 model access denied");
+      });
+    expect(
+      await runCli(
+        ["scan", "--provider=standardcompute", "--model=standardcompute"],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(`Authentication: API key from ${source}`);
+    expect(stderr.text()).toContain(`${source} cannot access`);
+    expect(stderr.text()).not.toContain("--auth chatgpt");
+  });
+
   test("reports stored and secondary-key scan authentication on stderr", async () => {
     for (const [authentication, expected] of [
       [

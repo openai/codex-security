@@ -483,10 +483,10 @@ codex-security scan . --provider standardcompute --model standardcompute --codex
 The Standard Compute preset applies only to an explicit
 `--provider standardcompute` selection without an existing table of that name.
 The preset requires its API key. It cannot use ChatGPT authentication.
-The [provider’s Codex guide](https://docs.standardcompute.com/agents/codex)
-disables web search. These examples apply that setting explicitly and use
-[smart routing](https://docs.standardcompute.com/models). You can select
-an exact model ID instead. Live scan completion remains unverified.
+The examples disable web search to match the [vendor's Codex launcher](https://docs.standardcompute.com/agents/codex).
+The preset leaves that setting to you. Use `standardcompute` for
+[smart routing](https://docs.standardcompute.com/models) or select an exact
+model ID. Live scan completion remains unverified.
 
 Existing native tables keep their endpoint and authentication settings.
 To configure the equivalent provider in the SDK, set the same environment

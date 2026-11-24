@@ -7987,9 +7987,8 @@ export async function main(
               dependencies.environment,
             ).filter(
               (name) =>
-                ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(
-                  name.toUpperCase(),
-                ) && dependencies.environment[name]?.trim(),
+                isAccountApiKey(name.toUpperCase()) &&
+                dependencies.environment[name]?.trim(),
             );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
@@ -12759,9 +12758,10 @@ async function executeScan(
           progress?.stage(
             `Authentication: API key from ${authentication.source}.`,
           );
-          progress?.stage(
-            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
-          );
+          if (isAccountApiKey(authentication.source))
+            progress?.stage(
+              "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+            );
         } else if (authentication.method === "aws_credentials") {
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
@@ -13589,6 +13589,10 @@ function classifyScanFailure(error: unknown) {
   return classification;
 }
 
+function isAccountApiKey(name: string): boolean {
+  return name === "OPENAI_API_KEY" || name === "CODEX_API_KEY";
+}
+
 function authenticationFailureMessage(
   authentication: ScanAuthentication | null,
 ): string {
@@ -13613,8 +13617,7 @@ function authenticationFailureMessage(
   if (authentication?.method === "api_key") {
     return (
       `Authentication failed using ${authentication.source}. ` +
-      (authentication.source === "OPENAI_API_KEY" ||
-      authentication.source === "CODEX_API_KEY"
+      (isAccountApiKey(authentication.source)
         ? "Retry with '--auth chatgpt' or provide a valid API key."
         : `Provide a valid ${authentication.source} for the selected provider.`)
     );
@@ -13713,7 +13716,9 @@ function scanFailureMessage(
         return `${detail}The stored API key cannot access the configured model. Use an API key with model access.`;
       return authentication?.method === "api_key"
         ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
-            "Retry with '--auth chatgpt' or use an API key with model access."
+            (isAccountApiKey(authentication.source)
+              ? "Retry with '--auth chatgpt' or use an API key with model access."
+              : "Use a provider API key with model access.")
         : `${detail}The stored ChatGPT credentials cannot access the configured model. ` +
             "Use an account or API key with model access.";
     case "rate_limited":
