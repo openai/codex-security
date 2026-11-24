@@ -19,6 +19,13 @@ test.each([
   ["insertion into an empty file", "", "added\n", "@@ -0,0 +1 @@\n+added\n"],
   ["deletion of the entire file", "old\n", "", "@@ -1 +0,0 @@\n-old\n"],
   [
+    "offsetting the second hunk after an insertion and ending with a deletion",
+    "1\n2\n3\n4\n5\n6\n7\nremoved\n",
+    "added\n1\n2\n3\n4\n5\n6\n7\n",
+    "@@ -1,3 +1,4 @@\n+added\n 1\n 2\n 3\n" +
+      "@@ -5,4 +6,3 @@\n 5\n 6\n 7\n-removed\n",
+  ],
+  [
     "missing final newlines on both changed lines",
     "old",
     "new",

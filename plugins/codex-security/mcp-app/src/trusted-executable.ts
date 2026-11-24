@@ -1,142 +1,66 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import {
-  basename,
-  delimiter,
-  dirname,
-  extname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface TrustedExecutable {
   executable: string;
   environment: Record<string, string | undefined>;
 }
 
-export interface InspectedExecutable {
-  executable: string | null;
-  environment: Record<string, string | undefined>;
-}
+export type TraceTool = "git" | "opengrep" | "rg";
 
 export async function resolveTrustedExecutable(
-  candidate: string,
+  name: TraceTool,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string | readonly string[],
+  protectedRoot: string,
 ): Promise<TrustedExecutable | null> {
-  const inspected = await inspectTrustedExecutable(
-    candidate,
-    environment,
-    protectedRoot,
+  const root = await realpath(protectedRoot).catch(() =>
+    resolve(protectedRoot),
   );
-  return inspected.executable === null
-    ? null
-    : { executable: inspected.executable, environment: inspected.environment };
-}
-
-export async function inspectTrustedExecutable(
-  candidate: string,
-  environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string | readonly string[],
-): Promise<InspectedExecutable> {
-  const roots = await Promise.all(
-    (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
-      (root) => realpath(root).catch(() => resolve(root)),
-    ),
-  );
-  const isProtected = (path: string) =>
-    roots.some((root) => isWithin(root, path));
-  const path =
+  const windows = process.platform === "win32";
+  const searchPath =
     environment["PATH"] ??
     Object.entries(environment).find(
       ([name]) => name.toUpperCase() === "PATH",
     )?.[1];
   const entries: string[] = [];
-  for (let entry of path?.split(delimiter) ?? []) {
-    if (
-      process.platform === "win32" &&
-      entry.startsWith('"') &&
-      entry.endsWith('"')
-    ) {
+  for (let entry of searchPath?.split(delimiter) ?? []) {
+    if (windows && entry.startsWith('"') && entry.endsWith('"')) {
       entry = entry.slice(1, -1);
     }
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
-    if (canonical === null || isProtected(canonical)) continue;
+    if (canonical === null || isWithin(root, canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
-  const pathLike = candidate.includes("/") || candidate.includes("\\");
-  // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
-  // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
-  // will actually run instead of rejecting an otherwise valid Windows configuration.
-  const extensions =
-    process.platform === "win32"
-      ? /\.(?:exe|com)$/iu.test(candidate)
-        ? [{ suffix: "", runnable: true }]
-        : pathLike
-          ? extname(candidate) === ""
-            ? [{ suffix: ".exe", runnable: true }]
-            : [{ suffix: "", runnable: false }]
-          : [
-              { suffix: ".exe", runnable: true },
-              { suffix: ".com", runnable: true },
-              { suffix: ".bat", runnable: false },
-              { suffix: ".cmd", runnable: false },
-              { suffix: "", runnable: false },
-            ]
-      : [{ suffix: "", runnable: true }];
-  const candidates = pathLike
-    ? extensions.map((extension) => ({
-        entry: null,
-        path:
-          process.platform === "win32"
-            ? resolve(`${candidate}${extension.suffix}`)
-            : candidate,
-        runnable: extension.runnable,
-      }))
-    : entries.flatMap((entry) =>
-        extensions.map((extension) => ({
-          entry,
-          path: join(entry, `${candidate}${extension.suffix}`),
-          runnable: extension.runnable,
-        })),
-      );
+  // Inspect all entries, even after finding a runnable tool. Batch files and
+  // later symlinks into the checkout can still make the inherited PATH unsafe.
+  const suffixes = windows ? [".exe", ".com", ".bat", ".cmd", ""] : [""];
   const unsafeEntries = new Set<string>();
   let executable: string | null = null;
-  for (const current of candidates) {
-    const canonical = await realpath(current.path).catch(() => null);
-    if (canonical === null) continue;
-    if (isProtected(canonical)) {
-      if (current.entry !== null) unsafeEntries.add(current.entry);
-      continue;
-    }
-    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
-      continue;
-    }
-    if (!current.runnable) continue;
-    try {
-      await access(
-        canonical,
-        process.platform === "win32" ? constants.F_OK : constants.X_OK,
-      );
-      if (!(await stat(canonical)).isFile()) continue;
-      // Keep explicit virtualenv launchers, but resolve repository-local aliases
-      // to the trusted target instead of invoking them from the repository.
-      const invocationPath = pathLike
-        ? join(await realpath(dirname(current.path)), basename(current.path))
-        : current.path;
-      executable ??=
-        pathLike && (isProtected(current.path) || isProtected(invocationPath))
-          ? canonical
-          : invocationPath;
-    } catch {
-      continue;
+  for (const entry of entries) {
+    for (const suffix of suffixes) {
+      const path = join(entry, name + suffix);
+      const canonical = await realpath(path).catch(() => null);
+      if (canonical === null) continue;
+      if (isWithin(root, canonical)) {
+        unsafeEntries.add(entry);
+        continue;
+      }
+      if (windows) {
+        if (suffix !== ".exe" && suffix !== ".com") continue;
+        if (/\.(?:bat|cmd)$/iu.test(canonical)) continue;
+      }
+      try {
+        await access(canonical, windows ? constants.F_OK : constants.X_OK);
+        if ((await stat(canonical)).isFile()) executable ??= path;
+      } catch {
+        continue;
+      }
     }
   }
+  if (executable === null) return null;
 
   const sanitizedEnvironment = { ...environment };
   for (const name of Object.keys(sanitizedEnvironment)) {
