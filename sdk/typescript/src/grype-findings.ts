@@ -96,6 +96,11 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
   };
   const source = asRecord(document["source"]);
   const directory = source?.["type"] === "directory";
+  // Grype embeds whole image manifests, configs and layer lists in the target.
+  // Keep those once in the report and copy only source identifiers to each finding.
+  const target = asRecord(source?.["target"]);
+  const { config, manifest, layers, ...identifiers } = target ?? {};
+  const findingSource = target ? { ...source, target: identifiers } : source;
   return normalizeRecords(
     document["matches"],
     (value) => {
@@ -128,7 +133,7 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
           locations: paths.map((path) => ({ path, line: null })),
           source_data: structuredClone({
             ...report,
-            ...(source && { source }),
+            ...(findingSource && { source: findingSource }),
             match,
           }),
         },
@@ -145,7 +150,9 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
       ]);
     },
     "local",
-    { report },
+    {
+      report: { ...report, ...(source && { source: structuredClone(source) }) },
+    },
   );
 }
 

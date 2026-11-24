@@ -153,9 +153,22 @@ test("keeps relative and absolute image paths out of repository locations", () =
     { path: "/usr/lib/node_modules/parser/index.js" },
     { path: "app/package-lock.json" },
   ];
-  const input = report(image);
-  input.source.type = "image";
-  const finding = normalizeGrypeFindings(input).findings[0]!;
+  const source = {
+    type: "image",
+    target: {
+      imageID: "example",
+      config: "config",
+      manifest: "manifest",
+      layers: [],
+    },
+  };
+  const result = normalizeGrypeFindings({ ...report(image), source });
+  const finding = result.findings[0]!;
+  expect(result.report?.["source"]).toEqual(source);
+  expect(finding.evidence.source_data?.["source"]).toEqual({
+    type: "image",
+    target: { imageID: "example" },
+  });
   expect(finding.evidence.locations).toEqual([]);
   expect(finding.evidence.packages![0]!.manifest_path).toBeNull();
   expect(finding.source_finding_id).toBeTruthy();

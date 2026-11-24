@@ -2,7 +2,7 @@
 
 Use a saved JSON report from `grype -o json`. The reader imports each entry in
 `matches` as one dependency finding, mapping the vulnerability and its package
-onto the shared evidence contract. It works offline and does not run Grype.
+onto the shared evidence contract. It works offline.
 Grype reports support local import only.
 
 ## Create the report
@@ -40,7 +40,7 @@ with npm and Python matches.
 - `packages[0]` carries the artifact name, the PURL type as its ecosystem, the installed version, the `fix.versions` as fixed versions, and the manifest or lockfile path when exactly one reported checkout location has a recognized manifest filename.
 - `locations` lists each checkout-relative artifact location. For directory scans, a relative `accessPath` can identify the checkout file when `path` is absolute. Grype reports no line numbers. All image paths stay in `source_data` only.
 - Grype ranks Negligible below Low. A Negligible match imports as `informational`; an Unknown or missing severity imports as `unknown`.
-- `evidence.source_data` keeps the native match, the scan `source`, and the Grype version. A saved preview imports under the `grype` provider.
+- `evidence.source_data` keeps the native match, Grype version and scan source. Image configs, manifests and layer lists appear only once in the preview under `report.source`. Stored findings retain the image identifiers. Review the preview before sharing it.
 
 ## Repeat an import
 

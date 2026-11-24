@@ -50,7 +50,7 @@ test("the CLI previews the saved report without a source URL or credentials", as
   });
 });
 
-test("previews, imports, and leaves a second import unchanged", async () => {
+test("previews, replays unchanged, and updates only the changed occurrence", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
   await fixture.writeJson(report);
   const prepared = await fixture.prepare();
@@ -73,12 +73,7 @@ test("previews, imports, and leaves a second import unchanged", async () => {
     unchanged: 2,
   });
   expect(await fixture.read()).toEqual(stored);
-});
 
-test("a changed severity updates the same occurrence", async () => {
-  await using fixture = await localReportFixture("grype-report.json", source);
-  await fixture.writeJson(report);
-  await (await fixture.prepare()).import();
   const changed = structuredClone(report);
   changed.matches[0]!.vulnerability.severity = "Low";
   await fixture.writeJson(changed);
@@ -87,16 +82,15 @@ test("a changed severity updates the same occurrence", async () => {
     updated: 1,
     unchanged: 1,
   });
+  const rows = await fixture.read();
+  expect(rows).toHaveLength(2);
   const byAdvisory = (id: string) =>
-    fixture
-      .read()
-      .then((rows) =>
-        rows.find((finding) => finding.evidence.advisory_ids?.includes(id))!,
-      );
-  const updated = await byAdvisory("CVE-2099-0001");
-  expect(updated.version).toBe(2);
-  expect(updated.evidence.severity).toBe("low");
-  expect((await byAdvisory("CVE-2099-0002")).version).toBe(1);
+    rows.find((row) => row.evidence.advisory_ids?.includes(id));
+  expect(byAdvisory("CVE-2099-0001")).toMatchObject({
+    version: 2,
+    evidence: { severity: "low" },
+  });
+  expect(byAdvisory("CVE-2099-0002")?.version).toBe(1);
 });
 
 test("the reader rejects a source repository URL grype cannot corroborate", async () => {
