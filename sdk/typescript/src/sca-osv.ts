@@ -34,6 +34,7 @@ import {
   type ScaUnresolvedReference,
 } from "./sca-inputs.js";
 import { executablePathForSpawn } from "./runtime.js";
+import type { DependencyScanProgress } from "./sca.js";
 import type {
   ScaComponent,
   ScaCoverage,
@@ -51,6 +52,7 @@ import {
   validatedGitEnvironment,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { notify } from "./value.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -1252,6 +1254,7 @@ export async function runOsvScan(
     outputDir: string;
     environment?: Record<string, string | undefined>;
     signal?: AbortSignal;
+    onProgress?: (progress: DependencyScanProgress) => void;
   },
   dependencies: OsvDependencies = {},
 ): Promise<OsvScanResult> {
@@ -1267,6 +1270,20 @@ export async function runOsvScan(
   let localReferences: ScaUnresolvedReference[] = [];
   let repository = options.repositoryPath;
   let selected: ScaInput[] = [];
+  const reportMatching = (currentInput: string | null = null): void => {
+    notify(() =>
+      options.onProgress?.({
+        phase: "matching",
+        inputsTotal: selected.length,
+        inputsProcessed: scanner.invocations!.length,
+        inputsFailed: selected.filter((input) => input.status === "failed")
+          .length,
+        currentInput,
+        components: result.components.length,
+        matches: result.matches.length,
+      }),
+    );
+  };
   let pending: {
     input: ScaInput;
     invocation: NonNullable<ScaScanner["invocations"]>[number];
@@ -1324,6 +1341,7 @@ export async function runOsvScan(
   };
   try {
     options.signal?.throwIfAborted();
+    notify(() => options.onProgress?.({ phase: "discovering" }));
     repository = await normalizeRepository(
       options.repositoryPath,
       options.signal,
@@ -1341,6 +1359,7 @@ export async function runOsvScan(
     selected = result.coverage.inputs.filter(
       (input) => input.status === "scanned",
     );
+    reportMatching();
     if (selected.length === 0) {
       result.diagnostics.push(
         "No supported effective dependency lockfiles were available.",
@@ -1403,6 +1422,7 @@ export async function runOsvScan(
         writeFile(invocation.rawOutputPath, ""),
         writeFile(invocation.stderrPath, ""),
       ]);
+      reportMatching(input.path);
       scanner.invocations!.push(invocation);
       if (index === 0) scanner.argv = invocation.argv;
       pending = { input, invocation };
@@ -1490,6 +1510,7 @@ export async function runOsvScan(
         input.reason =
           "Scanner execution or matching was incomplete; inspect diagnostics and retained output.";
       }
+      reportMatching();
     }
     try {
       const current = await discoverScaInputs(
@@ -1534,11 +1555,15 @@ export async function runOsvScan(
     result.coverage.status =
       result.status === "completed" ? "complete" : result.status;
     await persistAggregate();
+    reportMatching();
     return result;
   } catch (error) {
     if (error instanceof ScaInputDiscoveryError) {
       const { localReferences, diagnostics, ...coverage } = error.discovery;
       Object.assign(result.coverage, coverage);
+      selected = result.coverage.inputs.filter(
+        (input) => input.status === "scanned",
+      );
       result.coverage.unresolvedPackages = localReferences.length;
       result.diagnostics.push(...diagnostics);
     }
@@ -1571,6 +1596,7 @@ export async function runOsvScan(
         input.status = "failed";
         input.reason = errorMessage(error);
       }
+    reportMatching();
     if (options.signal?.aborted)
       throw Object.assign(new Error(errorMessage(error), { cause: error }), {
         osvResult: result,
