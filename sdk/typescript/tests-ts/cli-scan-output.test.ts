@@ -102,6 +102,17 @@ describe("scan output schema", () => {
     expect(
       validate({
         ...output,
+        validation: {
+          status: "incomplete",
+          findings: 2,
+          reportPath: "validation.md",
+          recordsPath: "validation.json",
+        },
+      }),
+    ).toBe(true);
+    expect(
+      validate({
+        ...output,
         validation: { status: "complete", findings: "0" },
       }),
     ).toBe(false);
@@ -397,6 +408,26 @@ test("output option negation and invalid token ranges never start a scan", async
     "--unknown-option",
   ]);
   expect(plain).toBe("");
+});
+
+test("negated output flags apply to scan results and execution failures", async () => {
+  const flags = [
+    "--full-output",
+    "--no-full-output",
+    "--token-count",
+    "--no-token-count",
+  ];
+  const completed = await run(
+    ["scan", ".", ...flags],
+    outcomeOptions("completed"),
+  );
+  expect(completed.stdout).toBe("");
+  const failure = await scanJson(
+    [".", "--json", ...flags, "--codex", "bad"],
+    {},
+    2,
+  );
+  expect(failure).toMatchObject({ status: "failed", code: "SCAN_FAILED" });
 });
 
 test("recognizes scans preceded by the global JSON flag", async () => {

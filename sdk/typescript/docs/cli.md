@@ -477,8 +477,9 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
-External providers require a model selected with `--model` or native
-configuration; the built-in OpenAI model default does not apply. An explicit
+When CLI or project settings select an external provider, supply its model
+with `--model` or native configuration. A provider selected only by a native
+Codex profile file can use the default model. An explicit
 `--provider openai` selects OpenAI. Omit `--provider` to retain the configured
 provider.
 

@@ -259,7 +259,7 @@ test.each(
       await rejected.runCli(["info", "-c", input.config, "--json"], deps),
     ).toBe(2);
     expect(rejected.stderr.text()).toContain(
-      `--model is required when using --provider ${provider}`,
+      `Set codex.model or the model in the selected profile to a nonempty string for provider ${provider}.`,
     );
 
     providerConfig["model"] = "synthetic-provider-model";
@@ -274,27 +274,38 @@ test.each(
   },
 );
 
-test("info and dry-run load the project provider's model from its native file profile", async () => {
-  const input = await fixture({
-    codex: { profile: "review", model_provider: "openrouter" },
-  });
-  await writeFile(
-    join(input.root, "review.config.toml"),
-    'model = "synthetic-file-model"\n',
-  );
-  const deps = dependencies({
-    currentDirectory: input.repository,
-    environment: { CODEX_HOME: input.root, OPENROUTER_API_KEY: "synthetic" },
-  });
-  for (const args of [["info"], ["scan", "--dry-run"]]) {
-    const cli = createCliTest(main);
-    expect(
-      await cli.runCli([...args, "-c", input.config, "--json"], deps),
-      cli.stderr.text(),
-    ).toBe(0);
-    expect(JSON.parse(cli.stdout.text()).model).toBe("synthetic-file-model");
-  }
-});
+test.each([
+  {
+    source: "project",
+    settings: { model_provider: "openrouter" },
+    profile: 'model = "synthetic-file-model"\n',
+    model: "synthetic-file-model",
+  },
+  {
+    source: "native file only",
+    settings: {},
+    profile: 'model_provider = "openrouter"\n',
+    model: scanModel(DEFAULT_CODEX_CONFIG),
+  },
+])(
+  "info and dry-run resolve the model for a provider selected by $source",
+  async ({ settings, profile, model }) => {
+    const input = await fixture({ codex: { profile: "review", ...settings } });
+    await writeFile(join(input.root, "review.config.toml"), profile);
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment: { CODEX_HOME: input.root, OPENROUTER_API_KEY: "synthetic" },
+    });
+    for (const args of [["info"], ["scan", "--dry-run"]]) {
+      const cli = createCliTest(main);
+      expect(
+        await cli.runCli([...args, "-c", input.config, "--json"], deps),
+        cli.stderr.text(),
+      ).toBe(0);
+      expect(JSON.parse(cli.stdout.text()).model).toBe(model);
+    }
+  },
+);
 
 test("info ignores an external provider in an unselected profile", async () => {
   const input = await fixture({

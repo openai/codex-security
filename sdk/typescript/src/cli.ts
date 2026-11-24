@@ -236,6 +236,7 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   resolveCodexProfile,
+  selectedScanProfile,
   mergedCodexConfig,
   readCodexAuthConfig,
   readCodexFileProfile,
@@ -244,7 +245,6 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
-  selectedScanProfile,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -1367,9 +1367,10 @@ const completedScanOutput = z.looseObject({
   validation: z
     .discriminatedUnion("status", [
       z.looseObject({
-        status: z.literal("complete"),
+        status: z.enum(["complete", "incomplete"]),
         findings: z.int().nonnegative(),
         reportPath: z.string().optional(),
+        recordsPath: z.string().optional(),
       }),
       z.looseObject({ status: z.literal("skipped"), reason: z.string() }),
       z.looseObject({
@@ -2758,7 +2759,7 @@ export async function main(
   const includeFailureResults = (
     format: string,
   ): format is "json" | "jsonl" | "toon" | "yaml" =>
-    argv.includes("--full-output") &&
+    frameworkFlags.fullOutput &&
     (format === "json" ||
       format === "jsonl" ||
       format === "toon" ||
@@ -2782,7 +2783,7 @@ export async function main(
     }
     if (format === "json" || format === "jsonl") {
       const message = errorMessage(outcome.error);
-      if (!argv.includes("--full-output")) {
+      if (!frameworkFlags.fullOutput) {
         const data = { status: "failed", code, message };
         if (frameworkFlags.filters.length) unfilteredFailure = data;
         return data;
@@ -2794,7 +2795,7 @@ export async function main(
     return incurError({ code, message: outcome.error, exitCode });
   };
   const useDefaultOutput = (format: string) =>
-    format === "toon" && !argv.some((argument) => OUTPUT_OPTION.test(argument));
+    format === "toon" && !frameworkFlags.explicitOutput;
   const finishScanCommand: typeof finishScan = (
     outcome,
     format,
@@ -5701,7 +5702,7 @@ export async function main(
           maxTime: ScanSettingsSchema.shape.maxTimeMinutes,
           ...DEEP_SCAN_OPTION_SCHEMAS,
           ...modelOptions(
-            `Model ID for the selected provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}); external providers require a configured or explicit model.`,
+            `Model ID for the selected provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}); set a model when selecting an external provider in CLI or project settings.`,
           ).shape,
           provider: PROVIDER_OPTION.describe(
             "Override the configured provider; if omitted, use configured provider or openai.",
@@ -8302,7 +8303,11 @@ export async function main(
           await readCodexFileProfile(overrides, home),
           overrides,
         );
-        requireExternalProviderModel(effective, scanModelProvider(overrides));
+        requireExternalProviderModel(
+          effective,
+          scanModelProvider(overrides),
+          "info",
+        );
         const codex = await mergedCodexConfig(resolved.config, home);
         const deep =
           resolved.options.mode === "deep"
@@ -9551,6 +9556,7 @@ function parseFrameworkArguments(
     htmlReport,
     jsonFormat,
     fullOutput,
+    explicitOutput: argv.some((argument) => OUTPUT_OPTION.test(argument)),
     argumentError,
     filters,
     tokenArguments,
@@ -14429,8 +14435,8 @@ async function parseScanCodexOverrides(
   const explicit = parseCodexOverrideValues(values, model, effort);
   const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
   const selectedProvider = provider ?? scanModelProvider(overrides);
-  // A native profile can select its own provider and its default model. Require
-  // a model when the CLI or project explicitly selects the external provider.
+  // A provider selected only in a native profile file can inherit the scan
+  // model default. Validate providers selected by CLI or project settings.
   if (
     !isExternalModelProvider(selectedProvider) &&
     selectedProvider !== "amazon-bedrock"
@@ -14587,14 +14593,17 @@ function parseCodexOverrideValues(
 function requireExternalProviderModel(
   config: JsonObject,
   provider: unknown,
+  command?: "info",
 ): void {
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
     const selectedModel = scanModel(config);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
-        selectedModel === undefined
-          ? `--model is required when using --provider ${provider}`
-          : `--model must be a nonempty string when using --provider ${provider}`,
+        command === "info"
+          ? `Set codex.model or the model in the selected profile to a nonempty string for provider ${provider}.`
+          : selectedModel === undefined
+            ? `--model is required when using --provider ${provider}`
+            : `--model must be a nonempty string when using --provider ${provider}`,
       );
     }
   }

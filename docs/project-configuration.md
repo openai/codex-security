@@ -366,9 +366,9 @@ does not clear a path or committed-diff scope.
 
 Committed-diff scans require a clean, nonsparse checkout, including no untracked
 files, and the selected head must be the checked-out commit. Working-tree scans
-include staged, unstaged, and untracked changes. Neither diff scope accepts path
-filters or deep mode. Output directories must be new or empty and outside the
-enclosing Git worktree; `--archive-existing` can archive a directory selected
+include staged, unstaged, and untracked changes. Both diff scopes allow `--exclude-path` and
+`scan.exclude_paths`. Neither supports `--path` or deep mode. Output directories
+must be new or empty and outside the enclosing Git worktree. `--archive-existing` can archive a directory selected
 through `output.directory` as well as `--output-dir`.
 
 There is no general CLI reset for configured context, policy, cost limit, or scope.
@@ -469,7 +469,8 @@ that the selected scan configuration still matches the campaign.
 target, prompt-file reads, credentials checks, or runtime initialization. With no
 file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
 effective model details and native key sources without dumping raw native values.
-Configured external providers must include a model, as they do for `scan`.
+An external provider selected by the project must include a model, as for
+`scan`. Providers selected only in a native Codex profile file can use the default model.
 This is configuration inspection, not a filesystem, target, or model-availability
 check.
 
