@@ -77,11 +77,15 @@ def _text(value: Any, fallback: str) -> str:
     return _escape_markdown(normalized)
 
 
-def _paragraph(text: str) -> str:
-    # Bare markers can swallow a paragraph. Leave inline fields and authored Markdown alone.
-    if re.fullmatch(r"#{1,6}|\+|-(?: ?-)*|[0-9]{1,9}[.)]|\\[*>]", text):
+def _protect_marker(text: str) -> str:
+    # _text already escapes * and >. Only prefix markers that can still start a block.
+    if re.fullmatch(r"#{1,6}|\+|-(?: ?-)*|[0-9]{1,9}[.)]", text):
         return f"Text: {text}"
     return text
+
+
+def _paragraph(value: Any, fallback: str = "") -> str:
+    return _protect_marker(_text(value, fallback))
 
 
 def _string_values(value: Any) -> Iterator[str]:
@@ -252,7 +256,7 @@ def _hardening_portfolio_path(scan: dict[str, Any]) -> str | None:
 
 
 def _bullet_section(heading: str, items: list[str]) -> list[str]:
-    return ["", heading, *(f"- {_paragraph(item)}" for item in items)] if items else []
+    return ["", heading, *(f"- {_protect_marker(item)}" for item in items)] if items else []
 
 
 def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
@@ -442,7 +446,7 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     for index, item in enumerate(evidence):
         label = _text(item.get("label"), f"Code evidence {index + 1}")
         location = _code_evidence_location(item)
-        explanation = _text(item.get("explanation"), "")
+        explanation = _paragraph(item.get("explanation"))
         language = item.get("language") if isinstance(item.get("language"), str) else ""
         language = language if re.fullmatch(r"[A-Za-z0-9_+.-]*", language) else ""
         code = item["code"]
@@ -454,7 +458,7 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
             heading += f" — {marker}{padding}{location}{padding}{marker}"
         lines.extend(["", heading])
         if explanation:
-            lines.extend(["", _paragraph(explanation)])
+            lines.extend(["", explanation])
         lines.extend(["", f"{fence}{language}", code, fence])
     return lines
 
@@ -515,7 +519,7 @@ def _surface_notes(surface: dict[str, Any]) -> str:
 
 def _remediation_section(finding: dict[str, Any]) -> list[str]:
     remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
-    lines = ["", "#### Remediation", "", _paragraph(remediation)]
+    lines = ["", "#### Remediation", "", _protect_marker(remediation)]
     seen = {remediation}
     originals: list[tuple[str, dict[str, Any]]] = []
     pending = [("finding", finding)]
@@ -618,13 +622,13 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         )
         if (text := _text(validation.get(key), ""))
     ]
-    validation_summary = _text(
+    validation_summary = _paragraph(
         validation.get("summary"),
         "Validation outcomes are recorded below."
         if validation_outcomes
         else f"{finding['confidence']['rationale']} Validation details were not recorded separately.",
     )
-    root_cause_summary = _text(
+    root_cause_summary = _paragraph(
         raw_root_cause if isinstance(raw_root_cause, str) else root_cause.get("summary"),
         "",
     )
@@ -633,11 +637,11 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     validation_code_evidence = _section_code_evidence(catalog, validation)
     dataflow_code_evidence = _section_code_evidence(catalog, attack_path, *dataflow_sections)
     reachability_code_evidence = _section_code_evidence(catalog, reachability)
-    dataflow_summary = _text(dataflow.get("summary"), "") or (
+    dataflow_summary = _paragraph(dataflow.get("summary")) or (
         f"The canonical finding records the affected path at {_locations(finding)}, "
         "but no expanded source-to-sink narrative was recorded."
     )
-    reachability_summary = _text(reachability.get("summary"), "") or _text(
+    reachability_summary = _paragraph(reachability.get("summary")) or _paragraph(
         attack_path.get("summary"),
         "Reachability was not recorded beyond the canonical finding summary and affected locations.",
     )
@@ -645,7 +649,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         severity.get("rationale"),
         f"The scan assigned {severity['level']} severity; no separate canonical severity rationale was recorded.",
     )
-    severity_change = _text(
+    severity_change = _paragraph(
         severity.get("changeConditions"),
         "Additional runtime or deployment evidence could raise or lower this severity.",
     )
@@ -654,14 +658,14 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         "",
         "#### Summary",
         "",
-        _paragraph(_text(finding["summary"], "No canonical finding summary was recorded.")),
+        _paragraph(finding["summary"], "No canonical finding summary was recorded."),
     ]
     if root_cause_summary or root_cause_code_evidence:
         lines.extend(["", "#### Root Cause", ""])
         if root_cause_summary:
-            lines.append(_paragraph(root_cause_summary))
+            lines.append(root_cause_summary)
         lines.extend(_code_evidence_lines(root_cause_code_evidence))
-    lines.extend(["", "#### Validation", "", _paragraph(validation_summary)])
+    lines.extend(["", "#### Validation", "", validation_summary])
     if validation.get("method"):
         lines.extend(["", f"Validation method: {_text(validation['method'], 'not recorded')}"])
     if validation_outcomes:
@@ -674,7 +678,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         ("Limitations", "limitations"),
     ):
         lines.extend(_bullet_section(f"{label}:", _strings(validation.get(key))))
-    lines.extend(["", "#### Dataflow", "", _paragraph(dataflow_summary)])
+    lines.extend(["", "#### Dataflow", "", dataflow_summary])
     lines.extend(_bullet_section("Attack steps:", _strings(attack_path.get("steps"))))
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
@@ -683,7 +687,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         _bullet_section("Transformations:", [_text(value, "") for value in transformations])
     )
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
-    lines.extend(["", "#### Reachability", "", _paragraph(reachability_summary)])
+    lines.extend(["", "#### Reachability", "", reachability_summary])
     for label, key in (
         ("Attacker", "attacker"),
         ("Entry point", "entrypoint"),
@@ -714,7 +718,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             "",
             f"**{severity['level'].capitalize()}** — {severity_rationale}",
             "",
-            _paragraph(severity_change),
+            severity_change,
         ]
     )
     for label, key in (("Impact", "impact"), ("Likelihood", "likelihood")):
@@ -818,10 +822,8 @@ def build_report_markdown(
         "## Scope",
         "",
         _paragraph(
-            _text(
-                scope.get("summary"),
-                "The scan was configured for the include paths and exclusions listed below.",
-            )
+            scope.get("summary"),
+            "The scan was configured for the include paths and exclusions listed below.",
         ),
         "",
         f"- Scan mode: {coverage['mode']}",
@@ -879,18 +881,12 @@ def build_report_markdown(
     else:
         lines.append(
             _paragraph(
-                _text(
-                    threat_model.get("summary"),
-                    "No explicit canonical threat-model summary was recorded.",
-                )
+                threat_model.get("summary"),
+                "No explicit canonical threat-model summary was recorded.",
             )
         )
         for heading, key in THREAT_MODEL_SECTIONS:
-            values = _strings(threat_model.get(key))
-            if values:
-                lines.extend(
-                    ["", f"### {heading}", "", *(f"- {_paragraph(value)}" for value in values)]
-                )
+            lines.extend(_bullet_section(f"### {heading}\n", _strings(threat_model.get(key))))
     reviews = scan.get("reviewState", {}).get("reviews")
     if isinstance(reviews, list) and any(
         isinstance(review, dict) and isinstance(review.get("threatModel"), dict)
@@ -1047,9 +1043,7 @@ def build_report_markdown(
         for question in questions:
             if not isinstance(question, dict):
                 continue
-            lines.append(
-                f"- {_paragraph(_text(question.get('question'), 'Unspecified open question.'))}"
-            )
+            lines.append(f"- {_paragraph(question.get('question'), 'Unspecified open question.')}")
             prompt = _text(question.get("followUpPrompt"), "")
             if prompt:
                 lines.append(f"  - Follow-up prompt: {prompt}")

@@ -99,44 +99,23 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
     assert f"Text: {instruction}" in markdown
 
 
-@pytest.mark.parametrize(
-    ("raw_value", "expected_line"),
-    [
-        ("#", "Text: #"),
-        ("###", "Text: ###"),
-        ("-", "Text: -"),
-        ("+", "Text: +"),
-        ("*", "Text: \\*"),
-        (">", "Text: \\>"),
-        ("1.", "Text: 1."),
-        ("1)", "Text: 1)"),
-        ("---", "Text: ---"),
-        ("--", "Text: --"),
-        ("-- -", "Text: -- -"),
-    ],
-)
-def test_projection_prefixes_bare_markdown_block_markers(
-    raw_value: str, expected_line: str
-) -> None:
-    markdown = report_with_finding(remediation=raw_value, summary=raw_value)
+@pytest.mark.parametrize("marker", ["#", "######", "-", "+", "1.", "1)", "--", "---", "-- -"])
+def test_projection_keeps_marker_only_paragraphs_visible(marker: str) -> None:
+    markdown = report_with_finding(remediation=marker, summary=marker)
     for section in ("Summary", "Remediation"):
-        assert f"#### {section}\n\n{expected_line}\n" in markdown
+        assert f"#### {section}\n\nText: {marker}\n" in markdown
 
 
-@pytest.mark.parametrize("raw_value", ["--flag", "-1", "-- input", "1000000000."])
-def test_projection_does_not_prefix_non_markers(raw_value: str) -> None:
-    markdown = report_with_finding(remediation=raw_value)
-    assert f"Text: {raw_value}" not in markdown
-    assert raw_value in markdown
-
-
-def test_projection_prefixes_markers_in_lists_but_preserves_metadata() -> None:
+def test_projection_preserves_inline_fields_and_non_marker_text() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"]["revision"] = "1."
-    findings["findings"][0]["remediationTests"] = ["#"]
+    finding = findings["findings"][0]
+    finding["confidence"]["rationale"] = "#"
+    finding["remediationTests"] = ["#", "--flag", "-- input", "1000000000.", "*", ">"]
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
     assert "- Revision: 1.\n" in markdown
-    assert "- Text: #\n" in markdown
+    assert "| Confidence rationale | # |" in markdown
+    assert "- Text: #\n- --flag\n- -- input\n- 1000000000.\n- \\*\n- \\>\n" in markdown
 
 
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
