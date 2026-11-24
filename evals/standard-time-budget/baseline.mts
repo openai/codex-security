@@ -181,6 +181,18 @@ function checkedReport(
       (needsAdjudication || !(safeControlFindings || unmatchedFindingsCount)),
     "Invalid grading status.",
   );
+  check(
+    report.recall === foundCount / expectedCount,
+    "Run recall disagrees with cases.",
+  );
+  const evidenceErrorsCount = count(report.evidenceErrorsCount);
+  check(
+    !passed ||
+      (foundCount === expectedCount &&
+        !needsAdjudication &&
+        !evidenceErrorsCount),
+    "Passing run has missing cases or grading issues.",
+  );
   return {
     passed,
     needsAdjudication,
@@ -188,12 +200,12 @@ function checkedReport(
     matchedIds,
     foundCount,
     expectedCount,
-    recall: foundCount / expectedCount,
+    recall: report.recall,
     duplicateFindings: count(report.duplicateFindings),
     safeControlFindings,
     safeControlAccusations,
     unmatchedFindingsCount,
-    evidenceErrorsCount: count(report.evidenceErrorsCount),
+    evidenceErrorsCount,
   };
 }
 
@@ -585,7 +597,7 @@ function compareArm(
   cand: ReleaseBaseline,
   variant: Variant,
   corpus: Corpus,
-  corpusChanged: boolean,
+  revision: { corpusChanged: boolean; graderChanged: boolean | null },
 ) {
   const before = summarizeArm(base, variant, corpus);
   const after = summarizeArm(cand, variant, corpus);
@@ -668,7 +680,7 @@ function compareArm(
       };
     }),
     flags: {
-      corpusChanged,
+      ...revision,
       regressedCases: comparable
         .filter((r) => r.status === "regressed")
         .map((r) => r.id),
@@ -737,15 +749,24 @@ export function compareBaselines(
   });
   const b = baseline.experiment;
   const c = candidate.experiment;
+  const digests = diffFields(
+    { ...b.digests, graderSha256: b.evaluator["grade.mts"] ?? null },
+    { ...c.digests, graderSha256: c.evaluator["grade.mts"] ?? null },
+  );
+  const grader = digests.graderSha256;
+  const revision = {
+    corpusChanged: !fixtureIdentical,
+    graderChanged: grader.baseline && grader.candidate ? grader.changed : null,
+  };
   const arm = (variant: Variant) =>
-    compareArm(baseline, candidate, variant, corpus, !fixtureIdentical);
+    compareArm(baseline, candidate, variant, corpus, revision);
   return {
     schemaVersion: BASELINE_SCHEMA_VERSION,
     provenance: {
       fixtureIdentical,
       ...diffFields(config(b), config(c)),
       packageVersions: diffFields(b.packageVersions, c.packageVersions),
-      digests: diffFields(b.digests, c.digests),
+      digests,
     },
     corpus,
     arms: { baseline: arm("baseline"), "time-aware": arm("time-aware") },

@@ -154,6 +154,12 @@ source-file hash are unchanged. Check the separate lists of added, removed,
 and changed cases and files. A change to a shared context file can affect a
 case even if its own source file is unchanged.
 
+Check each arm's `flags.graderChanged` before interpreting a change in
+recall. It is `null` if either snapshot lacks the `grade.mts` hash. A changed
+grader can score identical findings differently. The comparison keeps the
+original scores. To isolate a discovery change, grade both sets of saved
+findings with the same grader.
+
 Compare completion rates alongside recall. Failed and unattempted runs do not
 contribute to recall. Token totals stay unknown when usage is missing.
 Review unmatched findings and safe-control overlaps by hand. A lower observed

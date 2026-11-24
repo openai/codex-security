@@ -154,6 +154,30 @@ test("added cases cannot mask a regression on shared cases", () => {
   assert.deepEqual(masked.flags.regressedCases, [smaller.positives[0]!.id]);
 });
 
+test("distinguishes grader changes from changes in other evaluator files", () => {
+  const sample = (grader: string, summary: string) => {
+    const inputs = saved(fixture);
+    Object.assign(inputs.experiment.evaluator, {
+      "grade.mts": hashText(grader),
+      "summary.mts": hashText(summary),
+    });
+    return createReleaseBaseline(inputs);
+  };
+  const first = sample("old", "summary");
+  const changed = compareBaselines(first, sample("new", "summary"));
+  assert.equal(changed.provenance.fixtureIdentical, true);
+  assert.equal(changed.provenance.digests.graderSha256.changed, true);
+  assert.equal(changed.arms.baseline.flags.graderChanged, true);
+  const same = compareBaselines(first, sample("old", "edited"));
+  assert.equal(same.provenance.digests.evaluatorSha256.changed, true);
+  assert.equal(same.arms.baseline.flags.graderChanged, false);
+  const unknown = compareBaselines(
+    first,
+    createReleaseBaseline(saved(fixture)),
+  );
+  assert.equal(unknown.arms.baseline.flags.graderChanged, null);
+});
+
 test("source or span changes break comparability, unlike reordered CWEs or explicit single-line spans", () => {
   const f = createFixture();
   const [edited, moved, same] = f.positives;
@@ -250,4 +274,16 @@ test("rejects mismatched samples, duplicate attempts and altered snapshot metada
   );
   valid.experiment.digests.sourceSha256 = hashText("other");
   assert.throws(() => validateReleaseBaseline(valid), /digest mismatch/);
+});
+
+test("rejects contradictory scores in saved runs and exported baselines", () => {
+  const run = completed(fixture, []);
+  const inputs = saved(fixture, [run]);
+  const snapshot = createReleaseBaseline(inputs);
+  run.report.recall = 1;
+  assert.throws(() => createReleaseBaseline(inputs), /recall/i);
+  const attempt = snapshot.runs[0]!;
+  assert.ok(attempt.status === "completed");
+  attempt.report.passed = true;
+  assert.throws(() => validateReleaseBaseline(snapshot), /passing/i);
 });
