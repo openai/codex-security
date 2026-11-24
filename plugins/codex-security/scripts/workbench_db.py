@@ -1222,7 +1222,7 @@ def complete_budget_exhausted_scan(
         candidates = (
             []
             if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
-            else budget_exhausted_candidates(scan, scan_dir)
+            else deep_scan.budget_exhausted_candidates(scan, scan_dir)
         )
         warning = optional_text(args.message)
         if warning is None:
@@ -1239,78 +1239,6 @@ def complete_budget_exhausted_scan(
             )
             connection.commit()
         return complete_scan_locked(connection, scan_id, None, cost_json)
-
-
-def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
-    artifacts = deep_scan.canonical_discovery_artifacts(scan)
-    ledger = Path(artifacts["candidateLedgerPath"])
-    try:
-        inventory = Path(artifacts["inScopeFilesPath"])
-        inventory_descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            inventory.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan in-scope inventory",
-        )
-        with os.fdopen(inventory_descriptor, "rb") as source:
-            lines = re.split(r"\r?\n", source.read().decode("utf-8"))
-            in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            ledger.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan candidate ledger",
-        )
-        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
-            candidates = [
-                json.loads(line, parse_constant=reject_non_finite_json)
-                for line in source
-                if line.strip()
-            ]
-    except (ContractError, OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
-
-    candidate_ids: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
-        candidate_id = candidate.get("candidate_id")
-        locations = candidate.get("locations")
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id.strip()
-            or candidate_id in {".", ".."}
-            or "/" in candidate_id
-            or "\\" in candidate_id
-            or candidate_id in candidate_ids
-            or not isinstance(candidate.get("summary"), str)
-            or not candidate["summary"].strip()
-            or not isinstance(candidate.get("evidence"), str)
-            or not candidate["evidence"].strip()
-            or not isinstance(locations, list)
-            or not locations
-        ):
-            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
-        candidate_ids.add(candidate_id)
-        for location in locations:
-            if not isinstance(location, dict):
-                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
-            path = location.get("path")
-            if (
-                not isinstance(path, str)
-                or not path
-                or "\\" in path
-                or "\x00" in path
-                or re.match(r"^[A-Za-z]:", path)
-                or PurePosixPath(path).is_absolute()
-                or any(part in {".", "..", ""} for part in path.split("/"))
-            ):
-                raise SystemExit(
-                    "Canonical Deep Scan candidate location must be repository-relative."
-                )
-        if not any(location["path"] in in_scope for location in locations):
-            raise SystemExit(
-                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
-            )
-    return candidates
 
 
 def budget_exhausted_draft(
