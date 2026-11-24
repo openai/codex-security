@@ -7080,10 +7080,7 @@ export function selectedScanEnvironment(
   providerEnvKey?: string,
   config?: JsonObject,
 ): ProcessEnvironment {
-  environment = standardComputeEnvironment(
-    environment,
-    config && selectedProviderTable(config, modelProvider),
-  );
+  environment = standardComputeEnvironment(environment, config, modelProvider);
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;

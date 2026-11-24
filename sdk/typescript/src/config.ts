@@ -79,9 +79,17 @@ export function isStandardComputeKey(name: unknown): boolean {
 /** Keep the Standard Compute credential only when the selected provider uses it. */
 export function standardComputeEnvironment<Value>(
   environment: Readonly<Record<string, Value>>,
-  settings?: JsonObject,
+  config?: JsonObject,
+  provider = config && scanModelProvider(config),
 ): Record<string, Value> {
   if (!Object.keys(environment).some(isStandardComputeKey)) return environment;
+  // Codex ignores custom provider tables for these built-in IDs.
+  const settings =
+    config &&
+    typeof provider === "string" &&
+    !["openai", "ollama", "lmstudio"].includes(provider)
+      ? selectedProviderTable(config, provider)
+      : undefined;
 
   if (
     isStandardComputeKey(settings?.["env_key"]) ||

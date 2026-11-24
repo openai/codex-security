@@ -101,6 +101,23 @@ describe("skill authentication configuration", () => {
     ).toThrow(/ChatGPT/);
   });
 
+  test("custom ChatGPT gateways and ignored OpenAI tables cannot forward the Standard Compute key", () => {
+    for (const provider of ["gateway", "openai"]) {
+      const skill = resolveSkillAuthentication(
+        { command: "patch", auth: provider === "gateway" ? "chatgpt" : "auto" },
+        { STANDARDCOMPUTE_API_KEY: "unused" },
+        {
+          model_provider: provider,
+          model_providers: {
+            [provider]: { env_key: "STANDARDCOMPUTE_API_KEY" },
+          },
+        },
+      );
+      expect(skill.requiresOpenAiAuth).toBe(true);
+      expect(skill.environment).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+    }
+  });
+
   test.each(
     (["override", "ambient", "profile"] as const).flatMap((source) =>
       [true, false, undefined].flatMap((requiresOpenAiAuth) =>

@@ -34,7 +34,6 @@ import {
   hasCommandAuth,
   isExternalModelProvider,
   scanProviderEnvKey,
-  selectedProviderTable,
   standardComputeEnvironment,
   isStandardComputeKey,
   mergedCodexConfig,
@@ -1320,7 +1319,7 @@ export async function comparisonEnvironment(
   if (!hasCommandAuth(config) && isStandardComputeKey(selectedKey))
     nativeKey ??= selectedKey;
   const environment = definedEnvironment(
-    standardComputeEnvironment(source, selectedProviderTable(config)),
+    standardComputeEnvironment(source, config),
   );
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
