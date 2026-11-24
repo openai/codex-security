@@ -106,6 +106,16 @@ def test_projection_keeps_marker_only_paragraphs_visible(marker: str) -> None:
         assert f"#### {section}\n\nText: {marker}\n" in markdown
 
 
+def test_projection_keeps_trailing_heading_hashes_visible() -> None:
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"]["target"]["displayName"] = "C# ##"
+    findings["findings"][0]["title"] = "#"
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "# Security Review: C# \\##\n" in markdown
+    assert "### [1] \\#\n" in markdown
+    assert "[#](#finding-1)" in markdown
+
+
 def test_projection_preserves_inline_fields_and_non_marker_text() -> None:
     manifest, findings, coverage = canonical_documents()
     manifest["scan"]["target"]["revision"] = "1."

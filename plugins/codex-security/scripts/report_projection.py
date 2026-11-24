@@ -88,6 +88,11 @@ def _paragraph(value: Any, fallback: str = "") -> str:
     return _protect_marker(_text(value, fallback))
 
 
+def _heading(value: Any, fallback: str) -> str:
+    # ATX headings discard a final, space-separated run of hashes.
+    return re.sub(r"(?<!\S)#+$", r"\\\g<0>", _text(value, fallback))
+
+
 def _string_values(value: Any) -> Iterator[str]:
     if isinstance(value, str):
         yield value
@@ -565,7 +570,7 @@ def _remediation_section(finding: dict[str, Any]) -> list[str]:
 
 def _finding_header(number: int, finding: dict[str, Any]) -> list[str]:
     cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
-    title = _text(finding["title"], "Untitled finding")
+    title = _heading(finding["title"], "Untitled finding")
     return [
         f'<a id="finding-{number}"></a>',
         "",
@@ -817,7 +822,7 @@ def build_report_markdown(
     limitations = _strings(scope.get("limitations"))
     explicit_exclusions = coverage.get("explicitExclusions", [])
     lines = [
-        f"# Security Review: {_text(target['displayName'], 'Unknown target')}",
+        f"# Security Review: {_heading(target['displayName'], 'Unknown target')}",
         "",
         "## Scope",
         "",
