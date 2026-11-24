@@ -20,32 +20,23 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 
-const io = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-io.ts"),
-);
-const contextApi = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-context.ts"),
-);
-const writerApi = await importSource(
-  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
-  {
-    plugins: [
-      {
-        name: "observe-worker-context",
-        setup(builder) {
-          builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
-            contents:
-              "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
-            loader: "js",
-          }));
-        },
+const io = await importSource("src/artifact-io.ts");
+const contextApi = await importSource("src/artifact-context.ts");
+const writerApi = await importSource("artifact-writer-main.ts", {
+  plugins: [
+    {
+      name: "observe-worker-context",
+      setup(builder) {
+        builder.onLoad({ filter: /compact-artifact-tools\.ts$/ }, () => ({
+          contents:
+            "export function registerCompactWorkerArtifactTools(server, context) { server.context = context; }",
+          loader: "js",
+        }));
       },
-    ],
-  },
-);
-const schemas = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
-);
+    },
+  ],
+});
+const schemas = await importSource("src/artifact-contracts.ts");
 const fixture = await realpath(
   await mkdtemp(path.join(tmpdir(), "codex-security-artifact-foundation-")),
 );

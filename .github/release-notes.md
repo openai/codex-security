@@ -15,6 +15,7 @@
 - avoid repeated scans when matching truncated command output ([#2839](https://github.com/openai/codex-security/pull/2839))
 - reuse equivalent option and argument schemas ([#2840](https://github.com/openai/codex-security/pull/2840))
 - index retained outcomes and share finding scope checks ([#2841](https://github.com/openai/codex-security/pull/2841))
+- simplify dependency trace tool lookup and report preparation ([#2847](https://github.com/openai/codex-security/pull/2847))
 
 </details>
 
