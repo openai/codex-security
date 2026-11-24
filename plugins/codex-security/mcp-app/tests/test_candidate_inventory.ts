@@ -4,23 +4,16 @@ import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import type { ArtifactContext } from "../src/artifact-io.js";
-import { importSource } from "./import-module.ts";
+import { bundledMcpDefine, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 const { normalizeCandidatesCommand } = await importSource(
-  path.join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
+  "src/helpers/normalize-candidates.ts",
 );
 const { recordCodexSecurityDiscoveryCandidates } = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+  "src/artifact-discovery.ts",
   {
-    define: {
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-          import.meta.url,
-        ).href,
-      ),
-    },
+    define: bundledMcpDefine("server"),
   },
 );
 const inventoryHelper = path.join(

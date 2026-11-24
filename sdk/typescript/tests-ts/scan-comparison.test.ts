@@ -1,3 +1,4 @@
+import { confirmedGroup, findingPair } from "./support/finding-matches.js";
 import { modelResponseText } from "./support/model-response-text.js";
 import { once } from "node:events";
 import * as childProcess from "node:child_process";
@@ -1242,6 +1243,147 @@ describe("semantic scan comparison", () => {
     },
   );
 
+  async function checkCommandAuth(home: string, selection: string) {
+    const commandAuth = selection !== "override-away";
+    const provider = {
+      name: "Synthetic",
+      wire_api: "responses",
+      base_url: "https://provider.example/v1",
+      auth: {
+        command: "./synthetic-auth",
+        args: ["original"],
+        refresh_interval_ms: 1234,
+      },
+    };
+    const config = {
+      ...(selection === "home-override"
+        ? { windows: { sandbox: "unelevated" } }
+        : {}),
+      model_provider:
+        selection === "overrides" ||
+        selection.startsWith("profile") ||
+        selection === "native"
+          ? "openai"
+          : "synthetic.provider",
+      model_providers: { "synthetic.provider": provider },
+    };
+    const contents = stringify(
+      selection === "profile-only" ? { model_provider: "openai" } : config,
+    );
+    await writeFile(join(home, "config.toml"), contents);
+    if (selection === "native") {
+      await writeFile(
+        join(home, "review.config.toml"),
+        'model_provider = "synthetic.provider"\n',
+      );
+    }
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: relative(process.cwd(), home),
+      OPENAI_API_KEY: "synthetic-ambient-key",
+      CODEX_API_KEY: "synthetic-other-key",
+    };
+
+    let codexOverrides: JsonObject | undefined;
+    if (selection === "overrides") {
+      codexOverrides = {
+        model_provider: "synthetic.provider",
+        model_providers: {
+          "synthetic.provider": {
+            auth: { args: ["override"], cwd: "~/helpers" },
+          },
+        },
+      };
+    } else if (selection === "override-away") {
+      codexOverrides = { model_provider: "openai" };
+    } else if (selection === "native") {
+      codexOverrides = { profile: "review" };
+    } else if (selection.startsWith("profile")) {
+      const review: JsonObject = { model_provider: "synthetic.provider" };
+      if (selection === "profile-only")
+        review["model_providers"] = { "synthetic.provider": provider };
+      if (selection === "profile-partial")
+        review["model_providers"] = {
+          "synthetic.provider": { auth: { refresh_interval_ms: 4567 } },
+        };
+      codexOverrides = { profile: "review", profiles: { review } };
+    }
+
+    let captured: CodexOptions | undefined;
+    const profileClient = captureProfileClient();
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    const startThread = observeCodexOptions(codex, (options) => {
+      captured = options;
+    });
+    try {
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          environment,
+          workingDirectory: home,
+          ...(codexOverrides ? { config: { codexOverrides } } : {}),
+        },
+      );
+      expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+      if (selection.startsWith("profile") || selection === "native") {
+        expect(captured?.config?.["model_provider"]).toBe("synthetic.provider");
+        expect(captured?.config).not.toHaveProperty("profile");
+        expect(captured?.config).not.toHaveProperty("profiles");
+      }
+      if (commandAuth) {
+        expect(captured?.config?.["windows"]).toEqual({
+          sandbox: selection === "home-override" ? "unelevated" : "elevated",
+        });
+        expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+        expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+        expect(captured?.apiKey).toBeUndefined();
+        expect(profileClient.profiles).toHaveLength(1);
+        expect(profileClient.profiles[0]!.config).toEqual({
+          model_providers: {
+            "synthetic.provider": {
+              ...provider,
+              auth: {
+                ...provider.auth,
+                cwd: selection === "overrides" ? "~/helpers" : home,
+                args: selection === "overrides" ? ["override"] : ["original"],
+                refresh_interval_ms:
+                  selection === "profile-partial" ? 4567 : 1234,
+              },
+            },
+          },
+        });
+        await expect(
+          readFile(profileClient.profiles[0]!.path, "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        expect(captured?.env?.["OPENAI_API_KEY"]).toBe("synthetic-ambient-key");
+        expect(captured?.config?.["model_provider"]).toBe("openai");
+        expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+          responses_api_metadata: {
+            codex_security_surface: "sdk",
+            codex_security_command: "compare",
+            codex_security_package_version: VERSION,
+            codex_security_provider: "openai",
+          },
+        });
+        expect(profileClient.profiles).toHaveLength(0);
+      }
+      expect(calls.threadOptions).toMatchObject({
+        workingDirectory: home,
+        approvalPolicy: "never",
+        networkAccessEnabled: false,
+      });
+      expect(calls.threadOptions?.sandboxMode).toBe(
+        commandAuth ? undefined : "read-only",
+      );
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(contents);
+    } finally {
+      profileClient.spy.mockRestore();
+      startThread.mockRestore();
+    }
+  }
+
   test.each(["home", "home-override", "profile", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
@@ -1260,144 +1402,7 @@ describe("semantic scan comparison", () => {
           'model_provider = "openai"\n',
         );
       }
-      const commandAuth = selection !== "override-away";
-      const provider = {
-        name: "Synthetic",
-        wire_api: "responses",
-        base_url: "https://provider.example/v1",
-        auth: {
-          command: "./synthetic-auth",
-          args: ["original"],
-          refresh_interval_ms: 1234,
-        },
-      };
-      const config = {
-        ...(selection === "home-override"
-          ? { windows: { sandbox: "unelevated" } }
-          : {}),
-        model_provider:
-          selection === "overrides" || selection === "profile"
-            ? "openai"
-            : "synthetic.provider",
-        model_providers: { "synthetic.provider": provider },
-      };
-      const contents = stringify(config);
-      await writeFile(join(home, "config.toml"), contents);
-      const environment = {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        CODEX_HOME: relative(process.cwd(), home),
-        OPENAI_API_KEY: "synthetic-ambient-key",
-        CODEX_API_KEY: "synthetic-other-key",
-      };
-      let captured: CodexOptions | undefined;
-      let threadOptions: ThreadOptions | undefined;
-      const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        captured = (this as unknown as { options: CodexOptions }).options;
-        threadOptions = options;
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment,
-            workingDirectory: home,
-            ...(selection === "overrides"
-              ? {
-                  config: {
-                    codexOverrides: {
-                      model_provider: "synthetic.provider",
-                      model_providers: {
-                        "synthetic.provider": {
-                          auth: { args: ["override"], cwd: "~/helpers" },
-                        },
-                      },
-                    },
-                  },
-                }
-              : selection === "override-away"
-                ? { config: { codexOverrides: { model_provider: "openai" } } }
-                : selection === "profile"
-                  ? {
-                      config: {
-                        codexOverrides: {
-                          profile: "review",
-                          profiles: {
-                            review: { model_provider: "synthetic.provider" },
-                          },
-                        },
-                      },
-                    }
-                  : {}),
-          },
-        );
-        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
-        if (selection === "profile") {
-          expect(captured?.config?.["model_provider"]).toBe(
-            "synthetic.provider",
-          );
-          expect(captured?.config).not.toHaveProperty("profile");
-          expect(captured?.config).not.toHaveProperty("profiles");
-        }
-        if (commandAuth) {
-          expect(captured?.config?.["windows"]).toEqual({
-            sandbox: selection === "home-override" ? "unelevated" : "elevated",
-          });
-          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
-          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
-          expect(captured?.apiKey).toBeUndefined();
-          expect(profileClient.profiles).toHaveLength(1);
-          expect(profileClient.profiles[0]!.config).toEqual({
-            model_providers: {
-              "synthetic.provider": {
-                ...provider,
-                auth: {
-                  ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
-                  args: selection === "overrides" ? ["override"] : ["original"],
-                },
-              },
-            },
-          });
-          await expect(
-            readFile(profileClient.profiles[0]!.path, "utf8"),
-          ).rejects.toMatchObject({ code: "ENOENT" });
-        } else {
-          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
-            "synthetic-ambient-key",
-          );
-          expect(captured?.config?.["model_provider"]).toBe("openai");
-          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
-            responses_api_metadata: {
-              codex_security_surface: "sdk",
-              codex_security_command: "compare",
-              codex_security_package_version: VERSION,
-              codex_security_provider: "openai",
-            },
-          });
-          expect(profileClient.profiles).toHaveLength(0);
-        }
-        expect(threadOptions).toMatchObject({
-          workingDirectory: home,
-          approvalPolicy: "never",
-          networkAccessEnabled: false,
-        });
-        expect(threadOptions?.sandboxMode).toBe(
-          commandAuth ? undefined : "read-only",
-        );
-        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
-          contents,
-        );
-      } finally {
-        profileClient.spy.mockRestore();
-        startThread.mockRestore();
-      }
+      await checkCommandAuth(home, selection);
     },
   );
 
@@ -1685,6 +1690,97 @@ describe("semantic scan comparison", () => {
     },
   );
 
+  async function checkDisabledMcpServers(
+    home: string,
+    overrides: JsonObject = {},
+  ) {
+    const executable = join(
+      home,
+      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+    );
+    await copyFile(resolveCodexCommand({}).command, executable);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: executable,
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let config: CodexOptions["config"];
+    let codexPath: string | undefined;
+    let codexEnvironment: CodexOptions["env"];
+    const startThread = observeCodexOptions(codex, (options) => {
+      config = options.config;
+      codexPath = options.codexPathOverride;
+      codexEnvironment = options.env;
+    });
+    try {
+      await matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        {
+          environment,
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              ...overrides,
+              mcp_servers: {
+                synthetic: {
+                  command: "synthetic-integration",
+                  enabled: true,
+                },
+              },
+            },
+          },
+        },
+      );
+      expect(config?.["mcp_servers"]).toEqual({
+        synthetic: { command: "synthetic-integration", enabled: false },
+        inherited: { enabled: false },
+      });
+      expect(codexPath).toBe(
+        process.platform === "win32"
+          ? win32.toNamespacedPath(executable)
+          : executable,
+      );
+      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
+      const effective = await runCodexCommand(
+        resolveCodexCommand(environment),
+        [
+          "-C",
+          home,
+          "-c",
+          'mcp_servers.synthetic.command="synthetic-integration"',
+          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+            "-c",
+            `mcp_servers.${name}.enabled=false`,
+          ]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        environment,
+      );
+      expect(effective.success).toBe(true);
+      expect(
+        JSON.parse(effective.stdout).map(
+          (server: { name: string; enabled: boolean }) => ({
+            name: server.name,
+            enabled: server.enabled,
+          }),
+        ),
+      ).toEqual([
+        { name: "inherited", enabled: false },
+        { name: "synthetic", enabled: false },
+      ]);
+      return config;
+    } finally {
+      startThread.mockRestore();
+    }
+  }
+
   test.each([
     ["default", {}, "elevated"],
     ["file", { profile: "selected" }, "unelevated"],
@@ -1725,93 +1821,11 @@ describe("semantic scan comparison", () => {
           '[windows]\nsandbox = "unelevated"\n',
         );
       }
-      const executable = join(
+      const config = await checkDisabledMcpServers(
         home,
-        process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+        name === "profile" || name.startsWith("file") ? homeConfig : {},
       );
-      await copyFile(resolveCodexCommand({}).command, executable);
-      const environment = {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        TEMP: process.env["TEMP"],
-        TMP: process.env["TMP"],
-        CODEX_HOME: home,
-        CODEX_CLI_PATH: executable,
-        OPENAI_API_KEY: "synthetic-key",
-      };
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      let config: CodexOptions["config"];
-      let codexPath: string | undefined;
-      let codexEnvironment: CodexOptions["env"];
-      const startThread = observeCodexOptions(codex, (options) => {
-        config = options.config;
-        codexPath = options.codexPathOverride;
-        codexEnvironment = options.env;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment,
-            workingDirectory: home,
-            config: {
-              codexOverrides: {
-                ...(name === "profile" || name.startsWith("file")
-                  ? homeConfig
-                  : {}),
-                mcp_servers: {
-                  synthetic: {
-                    command: "synthetic-integration",
-                    enabled: true,
-                  },
-                },
-              },
-            },
-          },
-        );
-        expect(config?.["mcp_servers"]).toEqual({
-          synthetic: { command: "synthetic-integration", enabled: false },
-          inherited: { enabled: false },
-        });
-        expect(config?.["windows"]).toEqual({ sandbox });
-        expect(codexPath).toBe(
-          process.platform === "win32"
-            ? win32.toNamespacedPath(executable)
-            : executable,
-        );
-        expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
-        const effective = await runCodexCommand(
-          resolveCodexCommand(environment),
-          [
-            "-C",
-            home,
-            "-c",
-            'mcp_servers.synthetic.command="synthetic-integration"',
-            ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
-              "-c",
-              `mcp_servers.${name}.enabled=false`,
-            ]),
-            "mcp",
-            "list",
-            "--json",
-          ],
-          environment,
-        );
-        expect(effective.success).toBe(true);
-        expect(
-          JSON.parse(effective.stdout).map(
-            (server: { name: string; enabled: boolean }) => ({
-              name: server.name,
-              enabled: server.enabled,
-            }),
-          ),
-        ).toEqual([
-          { name: "inherited", enabled: false },
-          { name: "synthetic", enabled: false },
-        ]);
-      } finally {
-        startThread.mockRestore();
-      }
+      expect(config?.["windows"]).toEqual({ sandbox });
     },
   );
 
@@ -2044,19 +2058,18 @@ describe("semantic scan comparison", () => {
     };
     const result = {
       matches: [
-        {
-          beforeOccurrenceIds: ["before-1"],
-          afterOccurrenceIds: ["after-1", "after-2"],
-          confidence: "high",
-          reason: "The later scan split the same vulnerable extractor.",
-        },
+        confirmedGroup(
+          ["before-1"],
+          ["after-1", "after-2"],
+          "The later scan split the same vulnerable extractor.",
+        ),
       ],
       uncertain: [
-        {
-          beforeOccurrenceId: "before-2",
-          afterOccurrenceId: "after-3",
-          reason: "A second entry point might be independently exploitable.",
-        },
+        findingPair(
+          "before-2",
+          "after-3",
+          "A second entry point might be independently exploitable.",
+        ),
       ],
     } satisfies ScanComparisonResult;
     const { codex, calls } = fakeCodex(result);
@@ -2193,19 +2206,14 @@ describe("semantic scan comparison", () => {
           });
           const response = {
             matches: [
-              {
-                beforeOccurrenceIds: ["old-dismissed"],
-                afterOccurrenceIds: ["new-renamed"],
-                confidence: "high",
-                reason: "Same dismissed root cause.",
-              },
+              confirmedGroup(
+                ["old-dismissed"],
+                ["new-renamed"],
+                "Same dismissed root cause.",
+              ),
             ],
             uncertain: [
-              {
-                beforeOccurrenceId: "old-open",
-                afterOccurrenceId: "new-renamed",
-                reason: "Possible match.",
-              },
+              findingPair("old-open", "new-renamed", "Possible match."),
             ],
           };
           return await matchScanFindings(value, {
@@ -2245,11 +2253,11 @@ describe("semantic scan comparison", () => {
     const model = fakeCodex({
       matches: [],
       uncertain: [
-        {
-          beforeOccurrenceId: latestShared.occurrenceId,
-          afterOccurrenceId: after.occurrenceId,
-          reason: "The synthetic control may have moved.",
-        },
+        findingPair(
+          latestShared.occurrenceId,
+          after.occurrenceId,
+          "The synthetic control may have moved.",
+        ),
       ],
     });
 
@@ -2357,12 +2365,11 @@ describe("semantic scan comparison", () => {
         expect(input).toEqual({ before: [later], after: [earlier] });
         return {
           matches: [
-            {
-              beforeOccurrenceIds: ["later-occurrence"],
-              afterOccurrenceIds: ["earlier-occurrence"],
-              confidence: "high",
-              reason: "Same synthetic finding.",
-            },
+            confirmedGroup(
+              ["later-occurrence"],
+              ["earlier-occurrence"],
+              "Same synthetic finding.",
+            ),
           ],
           uncertain: [],
         };
@@ -2448,12 +2455,11 @@ describe("semantic scan comparison", () => {
           : undefined;
       const model = fakeCodex({
         matches: [
-          {
-            beforeOccurrenceIds: before.map(({ occurrenceId }) => occurrenceId),
-            afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
-            confidence: "high",
-            reason: "The scan split or combined the same defective control.",
-          },
+          confirmedGroup(
+            before.map(({ occurrenceId }) => occurrenceId),
+            after.map(({ occurrenceId }) => occurrenceId),
+            "The scan split or combined the same defective control.",
+          ),
         ],
         uncertain: [],
       });
@@ -2550,43 +2556,41 @@ describe("semantic scan comparison", () => {
           const response = {
             matches: extendsKnown
               ? [
-                  {
-                    beforeOccurrenceIds: [
+                  confirmedGroup(
+                    [
                       scenario === "split"
                         ? oldA.occurrenceId
                         : oldB.occurrenceId,
                     ],
-                    afterOccurrenceIds: [
+                    [
                       scenario === "split"
                         ? newB.occurrenceId
                         : newA.occurrenceId,
                     ],
-                    confidence: "high",
-                    reason: "The same control was split or combined.",
-                  },
+                    "The same control was split or combined.",
+                  ),
                 ]
               : [],
             uncertain: extendsKnown
               ? []
               : [
-                  {
-                    beforeOccurrenceId: oldA.occurrenceId,
-                    afterOccurrenceId: newA.occurrenceId,
-                    reason: "The model omitted the proven identity.",
-                  },
+                  findingPair(
+                    oldA.occurrenceId,
+                    newA.occurrenceId,
+                    "The model omitted the proven identity.",
+                  ),
                 ],
             related:
               scenario === "resolved"
                 ? []
                 : [
-                    {
-                      beforeOccurrenceId: oldA.occurrenceId,
-                      afterOccurrenceId:
-                        scenario === "new"
-                          ? newB.occurrenceId
-                          : newA.occurrenceId,
-                      reason: "A related control.",
-                    },
+                    findingPair(
+                      oldA.occurrenceId,
+                      scenario === "new"
+                        ? newB.occurrenceId
+                        : newA.occurrenceId,
+                      "A related control.",
+                    ),
                   ],
           };
           return await matchScanFindings(input, {
@@ -2675,11 +2679,11 @@ describe("semantic scan comparison", () => {
     const modelResponse = {
       matches: [],
       uncertain: [
-        {
-          beforeOccurrenceId: "before-uncertain",
-          afterOccurrenceId: "after-shared",
-          reason: "Uncertain in another historical scan.",
-        },
+        findingPair(
+          "before-uncertain",
+          "after-shared",
+          "Uncertain in another historical scan.",
+        ),
       ],
     } satisfies ScanComparisonResult;
 
@@ -2729,20 +2733,19 @@ describe("semantic scan comparison", () => {
     };
     const response = {
       matches: [
-        {
-          beforeOccurrenceIds: ["before-known"],
-          afterOccurrenceIds: ["after-known"],
-          confidence: "high" as const,
-          reason: "Previously confirmed root cause.",
-        },
+        confirmedGroup(
+          ["before-known"],
+          ["after-known"],
+          "Previously confirmed root cause.",
+        ),
       ],
       uncertain: [],
       related: [
-        {
-          beforeOccurrenceId: "before-related",
-          afterOccurrenceId: "after-related",
-          reason: "Related controls remain independently vulnerable.",
-        },
+        findingPair(
+          "before-related",
+          "after-related",
+          "Related controls remain independently vulnerable.",
+        ),
       ],
     };
     const { codex, calls } = fakeCodex(response);
@@ -2812,11 +2815,11 @@ describe("semantic scan comparison", () => {
     const response = {
       matches: [],
       uncertain: [
-        {
-          beforeOccurrenceId: "before",
-          afterOccurrenceId: "after",
-          reason: "Incorrectly treats the same stable identity as uncertain.",
-        },
+        findingPair(
+          "before",
+          "after",
+          "Incorrectly treats the same stable identity as uncertain.",
+        ),
       ],
     };
 
@@ -2859,12 +2862,11 @@ describe("semantic scan comparison", () => {
     };
     const response = {
       matches: [
-        {
-          beforeOccurrenceIds: ["before-a"],
-          afterOccurrenceIds: ["after"],
-          confidence: "high" as const,
-          reason: "Incorrectly separates a confirmed identity.",
-        },
+        confirmedGroup(
+          ["before-a"],
+          ["after"],
+          "Incorrectly separates a confirmed identity.",
+        ),
       ],
       uncertain: [],
     };
@@ -2911,17 +2913,10 @@ describe("semantic scan comparison", () => {
     });
   });
 
-  const match = (beforeOccurrenceIds = ["before-1"]) => ({
-    beforeOccurrenceIds,
-    afterOccurrenceIds: ["after-1"],
-    confidence: "high" as const,
-    reason: "Same root cause.",
-  });
-  const uncertain = (afterOccurrenceId = "after-1") => ({
-    beforeOccurrenceId: "before-1",
-    afterOccurrenceId,
-    reason: "Possible root cause.",
-  });
+  const match = (beforeOccurrenceIds = ["before-1"]) =>
+    confirmedGroup(beforeOccurrenceIds, ["after-1"], "Same root cause.");
+  const uncertain = (afterOccurrenceId = "after-1") =>
+    findingPair("before-1", afterOccurrenceId, "Possible root cause.");
 
   test.each([
     {
@@ -3034,92 +3029,7 @@ describe("semantic scan comparison", () => {
       join(home, "config.toml"),
       '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
     );
-    const executable = join(
-      home,
-      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
-    );
-    await copyFile(resolveCodexCommand({}).command, executable);
-    const environment = {
-      PATH: process.env["PATH"],
-      SystemRoot: process.env["SystemRoot"],
-      TEMP: process.env["TEMP"],
-      TMP: process.env["TMP"],
-      CODEX_HOME: home,
-      CODEX_CLI_PATH: executable,
-      OPENAI_API_KEY: "synthetic-key",
-    };
-    const { codex } = fakeCodex({ matches: [], uncertain: [] });
-    let config: CodexOptions["config"];
-    let codexPath: string | undefined;
-    let codexEnvironment: CodexOptions["env"];
-    const startThread = spyOn(
-      Codex.prototype,
-      "startThread",
-    ).mockImplementation(function (this: Codex, options) {
-      config = (this as unknown as { options: CodexOptions }).options.config;
-      codexPath = (this as unknown as { options: CodexOptions }).options
-        .codexPathOverride;
-      codexEnvironment = (this as unknown as { options: CodexOptions }).options
-        .env;
-      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-    });
-    try {
-      await matchScanFindings(
-        { before: [finding("before")], after: [finding("after")] },
-        {
-          environment,
-          workingDirectory: home,
-          config: {
-            codexOverrides: {
-              mcp_servers: {
-                synthetic: { command: "synthetic-integration", enabled: true },
-              },
-            },
-          },
-        },
-      );
-      expect(config?.["mcp_servers"]).toEqual({
-        synthetic: { command: "synthetic-integration", enabled: false },
-        inherited: { enabled: false },
-      });
-      expect(codexPath).toBe(
-        process.platform === "win32"
-          ? win32.toNamespacedPath(executable)
-          : executable,
-      );
-      expect(codexEnvironment?.["CODEX_CLI_PATH"]).toBe(executable);
-      const effective = await runCodexCommand(
-        resolveCodexCommand(environment),
-        [
-          "-C",
-          home,
-          "-c",
-          'mcp_servers.synthetic.command="synthetic-integration"',
-          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
-            "-c",
-            `mcp_servers.${name}.enabled=false`,
-          ]),
-          "mcp",
-          "list",
-          "--json",
-        ],
-        environment,
-      );
-      expect(effective.success).toBe(true);
-      expect(
-        JSON.parse(effective.stdout).map(
-          (server: { name: string; enabled: boolean }) => ({
-            name: server.name,
-            enabled: server.enabled,
-          }),
-        ),
-      ).toEqual([
-        { name: "inherited", enabled: false },
-        { name: "synthetic", enabled: false },
-      ]);
-    } finally {
-      startThread.mockRestore();
-    }
+    await checkDisabledMcpServers(home);
   });
 
   test.each([
@@ -3136,162 +3046,7 @@ describe("semantic scan comparison", () => {
       const home = await temporaryDirectory(
         "codex-security-command-comparison-",
       );
-      const commandAuth = selection !== "override-away";
-      const provider = {
-        name: "Synthetic",
-        wire_api: "responses",
-        base_url: "https://provider.example/v1",
-        auth: {
-          command: "./synthetic-auth",
-          args: ["original"],
-          refresh_interval_ms: 1234,
-        },
-      };
-      const config = {
-        model_provider:
-          selection === "overrides" ||
-          selection.startsWith("profile") ||
-          selection === "native"
-            ? "openai"
-            : "synthetic.provider",
-        model_providers: { "synthetic.provider": provider },
-      };
-      const contents = stringify(
-        selection === "profile-only" ? { model_provider: "openai" } : config,
-      );
-      await writeFile(join(home, "config.toml"), contents);
-      if (selection === "native") {
-        await writeFile(
-          join(home, "review.config.toml"),
-          'model_provider = "synthetic.provider"\n',
-        );
-      }
-      const environment = {
-        PATH: process.env["PATH"],
-        SystemRoot: process.env["SystemRoot"],
-        CODEX_HOME: relative(process.cwd(), home),
-        OPENAI_API_KEY: "synthetic-ambient-key",
-        CODEX_API_KEY: "synthetic-other-key",
-      };
-      let captured: CodexOptions | undefined;
-      let threadOptions: ThreadOptions | undefined;
-      const profileClient = captureProfileClient();
-      const { codex } = fakeCodex({ matches: [], uncertain: [] });
-      const startThread = spyOn(
-        Codex.prototype,
-        "startThread",
-      ).mockImplementation(function (this: Codex, options) {
-        captured = (this as unknown as { options: CodexOptions }).options;
-        threadOptions = options;
-        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
-      });
-      try {
-        await matchScanFindings(
-          { before: [finding("before")], after: [finding("after")] },
-          {
-            environment,
-            workingDirectory: home,
-            ...(selection === "overrides"
-              ? {
-                  config: {
-                    codexOverrides: {
-                      model_provider: "synthetic.provider",
-                      model_providers: {
-                        "synthetic.provider": {
-                          auth: { args: ["override"], cwd: "~/helpers" },
-                        },
-                      },
-                    },
-                  },
-                }
-              : selection === "override-away"
-                ? { config: { codexOverrides: { model_provider: "openai" } } }
-                : selection.startsWith("profile")
-                  ? {
-                      config: {
-                        codexOverrides: {
-                          profile: "review",
-                          profiles: {
-                            review: {
-                              model_provider: "synthetic.provider",
-                              ...(selection === "profile-only"
-                                ? {
-                                    model_providers: {
-                                      "synthetic.provider": provider,
-                                    },
-                                  }
-                                : selection === "profile-partial"
-                                  ? {
-                                      model_providers: {
-                                        "synthetic.provider": {
-                                          auth: { refresh_interval_ms: 4567 },
-                                        },
-                                      },
-                                    }
-                                  : {}),
-                            },
-                          },
-                        },
-                      },
-                    }
-                  : selection === "native"
-                    ? { config: { codexOverrides: { profile: "review" } } }
-                    : {}),
-          },
-        );
-        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
-        if (selection.startsWith("profile") || selection === "native") {
-          expect(captured?.config).not.toHaveProperty("profile");
-          expect(captured?.config?.["model_provider"]).toBe(
-            "synthetic.provider",
-          );
-        }
-        if (commandAuth) {
-          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
-          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
-          expect(captured?.apiKey).toBeUndefined();
-          expect(profileClient.profiles[0]!.config).toEqual({
-            model_providers: {
-              "synthetic.provider": {
-                ...provider,
-                auth: {
-                  ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
-                  args: selection === "overrides" ? ["override"] : ["original"],
-                  refresh_interval_ms:
-                    selection === "profile-partial" ? 4567 : 1234,
-                },
-              },
-            },
-          });
-        } else {
-          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
-            "synthetic-ambient-key",
-          );
-          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
-            responses_api_metadata: {
-              codex_security_surface: "sdk",
-              codex_security_command: "compare",
-              codex_security_package_version: VERSION,
-              codex_security_provider: "openai",
-            },
-          });
-        }
-        expect(threadOptions).toMatchObject({
-          workingDirectory: home,
-          approvalPolicy: "never",
-          networkAccessEnabled: false,
-        });
-        expect(threadOptions?.sandboxMode).toBe(
-          commandAuth ? undefined : "read-only",
-        );
-        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
-          contents,
-        );
-      } finally {
-        profileClient.spy.mockRestore();
-        startThread.mockRestore();
-      }
+      await checkCommandAuth(home, selection);
     },
   );
 });
