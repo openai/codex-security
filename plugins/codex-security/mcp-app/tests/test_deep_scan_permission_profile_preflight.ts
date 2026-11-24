@@ -289,6 +289,24 @@ test(async function testRepeatedCatalogCursorFailsClosed() {
   );
 });
 
+test(async function testDuplicateProfileAcrossPagesFailsClosed() {
+  await withFakeCodex(
+    {
+      configResult: configReadResult(expectedProfile),
+      catalogResults: [
+        { ...catalogResult(true), nextCursor: "second-page" },
+        catalogResult(false),
+      ],
+    },
+    async ({ codexPath, cwd, callsPath }) => {
+      await assert.rejects(preflight(codexPath, cwd), unsupportedConfiguration);
+      const last = (await readJsonLines(callsPath)).at(-1);
+      assert.equal(last?.method, "permissionProfile/list");
+      assert.deepEqual(last.params, { cwd, cursor: "second-page" });
+    },
+  );
+});
+
 test(async function testDisallowedProfileGivesAdminGuidance() {
   await withFakeCodex(
     {
@@ -1052,24 +1070,20 @@ async function withFakeCodex(
   const root = await temporaryDirectory("deep-scan-profile-preflight-");
   const scriptPath = path.join(root, "fake-codex.mjs");
   let codexPath = scriptPath;
-  const argvPath = path.join(root, "argv.json");
-  const callsPath = path.join(root, "calls.jsonl");
-  const cwdPath = path.join(root, "cwd.json");
-  const envPath = path.join(root, "env.json");
-  const readyPath = path.join(root, "ready");
-  const terminatedPath = path.join(root, "terminated");
-  const descendantPidPath = path.join(root, "descendant-pid");
-  const fixture = {
-    ...scenario,
-    argvPath,
-    callsPath,
-    cwdPath,
-    envPath,
-    readyPath,
-    terminatedPath,
-    descendantPidPath,
+  const paths = {
+    argvPath: path.join(root, "argv.json"),
+    callsPath: path.join(root, "calls.jsonl"),
+    cwdPath: path.join(root, "cwd.json"),
+    envPath: path.join(root, "env.json"),
+    readyPath: path.join(root, "ready"),
+    terminatedPath: path.join(root, "terminated"),
+    descendantPidPath: path.join(root, "descendant-pid"),
   };
-  await writeFile(scriptPath, fakeCodexSource(fixture), "utf8");
+  await writeFile(
+    scriptPath,
+    fakeCodexSource({ ...scenario, ...paths }),
+    "utf8",
+  );
   await chmod(scriptPath, 0o755);
   const originalSpawn = childProcess.spawn;
   const children: ChildProcess[] = [];
@@ -1108,20 +1122,9 @@ async function withFakeCodex(
       return child;
     }) as typeof childProcess.spawn;
     syncBuiltinESMExports();
-    await callback({
-      codexPath,
-      cwd: root,
-      argvPath,
-      callsPath,
-      cwdPath,
-      envPath,
-      readyPath,
-      terminatedPath,
-      descendantPidPath,
-      children,
-    });
+    await callback({ codexPath, cwd: root, ...paths, children });
   } finally {
-    const descendantPid = await readFile(descendantPidPath, "utf8").catch(
+    const descendantPid = await readFile(paths.descendantPidPath, "utf8").catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
         return undefined;
