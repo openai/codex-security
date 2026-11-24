@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import example from "../../../examples/normalized-import/grype-report.json";
@@ -15,7 +15,11 @@ function match() {
 }
 
 function report(...matches: unknown[]) {
-  return { ...example, source: { ...example.source }, matches };
+  return { ...example, matches };
+}
+
+function findingFor(value: unknown) {
+  return normalizeGrypeFindings(report(value)).findings[0]!;
 }
 
 test("normalizes a grype match into an SCA dependency finding", () => {
@@ -45,25 +49,20 @@ test("normalizes a grype match into an SCA dependency finding", () => {
 });
 
 test("maps negligible severity to informational and unknown severity to unknown", () => {
-  const negligible = match();
-  negligible.vulnerability.severity = "Negligible";
-  const unknown = match();
-  unknown.vulnerability.severity = "Unknown";
-  expect(
-    normalizeGrypeFindings(report(negligible)).findings[0]!.evidence.severity,
-  ).toBe("informational");
-  expect(
-    normalizeGrypeFindings(report(unknown)).findings[0]!.evidence.severity,
-  ).toBe("unknown");
+  const native = match();
+  native.vulnerability.severity = "Negligible";
+  expect(findingFor(native).evidence.severity).toBe("informational");
+  native.vulnerability.severity = "Unknown";
+  expect(findingFor(native).evidence.severity).toBe("unknown");
 });
 
 test("identity is stable and ignores severity, version and fix changes", () => {
-  const first = normalizeGrypeFindings(report(match())).findings[0]!;
+  const first = findingFor(match());
   const changed = match();
   changed.vulnerability.severity = "Critical";
   changed.artifact.version = "1.0.2";
   changed.vulnerability.fix = { versions: ["1.0.3"], state: "fixed" };
-  const next = normalizeGrypeFindings(report(changed)).findings[0]!;
+  const next = findingFor(changed);
   expect(next.source_finding_id).toBe(first.source_finding_id);
   expect(next.evidence.severity).toBe("critical");
 });
@@ -77,12 +76,12 @@ test("a different advisory, package or manifest is a separate occurrence", () =>
   otherPackage.artifact.purl = "pkg:npm/%40example/other@1.0.0";
   const otherManifest = match();
   otherManifest.artifact.locations = [{ path: "nested/package-lock.json" }];
-  const ids = new Set(
-    normalizeGrypeFindings(
-      report(base, otherAdvisory, otherPackage, otherManifest),
-    ).findings.map((finding) => finding.source_finding_id),
+  const { findings } = normalizeGrypeFindings(
+    report(base, otherAdvisory, otherPackage, otherManifest),
   );
-  expect(ids.size).toBe(4);
+  expect(
+    new Set(findings.map((finding) => finding.source_finding_id)).size,
+  ).toBe(4);
 });
 
 test("location order preserves identity and different location sets stay distinct", () => {
@@ -124,12 +123,10 @@ test("directory access paths resolve from the scan root and retain occurrence id
   const native = match();
   const path = "nested/package-lock.json";
   const row = (location: { path: string; accessPath?: string }) =>
-    normalizeGrypeFindings(
-      report({
-        ...native,
-        artifact: { ...native.artifact, locations: [location] },
-      }),
-    ).findings[0]!;
+    findingFor({
+      ...native,
+      artifact: { ...native.artifact, locations: [location] },
+    });
   const id = row({ path }).source_finding_id;
   for (const location of [
     { path: `/${path}`, accessPath: `/${path}` },
@@ -176,8 +173,7 @@ test("keeps relative and absolute image paths out of repository locations", () =
 test("keeps an installed file as a location and selects only an unambiguous manifest", () => {
   const input = match();
   input.artifact.locations = [{ path: "bin/tool" }];
-  const evidence = () =>
-    normalizeGrypeFindings(report(input)).findings[0]!.evidence;
+  const evidence = () => findingFor(input).evidence;
   expect(evidence().locations).toEqual([{ path: "bin/tool", line: null }]);
   expect(evidence().packages![0]!.manifest_path).toBeNull();
   input.artifact.locations.push({ path: "package-lock.json" });
@@ -196,16 +192,14 @@ test("falls back to a plain advisory id and drops a non-HTTP data source", () =>
       urls: ["nvd:cpe", "https://example.org/advisory"],
     },
   };
-  const finding = normalizeGrypeFindings(report(sparse)).findings[0]!;
+  const finding = findingFor(sparse);
   expect(finding.evidence).toMatchObject({
     severity: "medium",
     advisory_ids: ["GHSA-aaaa-bbbb-cccc"],
     url: "https://example.org/advisory",
   });
   sparse.vulnerability.urls.pop();
-  expect(
-    normalizeGrypeFindings(report(sparse)).findings[0]!.evidence.url,
-  ).toBeNull();
+  expect(findingFor(sparse).evidence.url).toBeNull();
   expect(finding.evidence.packages![0]!.fixed_versions).toEqual([]);
 });
 
@@ -215,20 +209,17 @@ test("rejects a report that is not native grype JSON", () => {
 });
 
 test("reads native grype JSON and gzip from disk", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "grype-import-"));
-  try {
-    const fromExample = normalizeGrypeFindings(example);
-    expect(fromExample.read).toBe(2);
-    expect(fromExample.excluded).toEqual([]);
-    expect(
-      fromExample.findings.map((finding) => finding.evidence.severity),
-    ).toEqual(["high", "critical"]);
-    const path = join(directory, "grype.json");
-    await writeFile(path, JSON.stringify(example));
+  await using directory = await scopedTemporaryDirectory("grype-import-");
+  const fromExample = normalizeGrypeFindings(example);
+  expect(fromExample.read).toBe(2);
+  expect(fromExample.excluded).toEqual([]);
+  expect(
+    fromExample.findings.map((finding) => finding.evidence.severity),
+  ).toEqual(["high", "critical"]);
+  const path = join(directory.path, "grype.json");
+  const json = JSON.stringify(example);
+  for (const contents of [json, gzipSync(json)]) {
+    await writeFile(path, contents);
     expect(await readGrypeFindings(path)).toEqual(fromExample);
-    await writeFile(path, gzipSync(JSON.stringify(example)));
-    expect(await readGrypeFindings(path)).toEqual(fromExample);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
   }
 });
