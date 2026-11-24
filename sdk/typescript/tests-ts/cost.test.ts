@@ -1079,6 +1079,35 @@ describe("inventory source ordering", () => {
     };
   }
 
+  test.each([true, false])(
+    "reserves truncated copies per full output (identical=%p)",
+    async (identical) => {
+      const f = await fixture();
+      const phase = "discovery";
+      const scope: ScanProgress = { phase, filesCompleted: 0, filesTotal: 9 };
+      const marker = progressMarker(phase, 0, 9) + "\n";
+      const head = marker.padEnd(commandHead.length, "h");
+      const first = head + commandHead + commandTail;
+      const second = identical ? first : head + commandTail + commandTail;
+      const truncated = head + persistedCommandOutput.slice(commandHead.length);
+      try {
+        f.emit("live", scope, first);
+        f.emit("live", scope, second);
+        f.tracker.recordParentItem(completedCommand("saved", "done"));
+        const outputs = [first, truncated, progressMarker(phase, 0, 8), "done"];
+        const rows = outputs.map((text) => nativeCommand("saved", text));
+        await appendFile(f.parent, jsonLines(rows) + "\n");
+        await f.tracker.refresh();
+        // Only an identical second output can use both saved copies to
+        // place its inventory before the smaller one.
+        const totals = f.updates.map((update) => update.filesTotal);
+        expect(totals).toEqual(identical ? [9, 9, 8] : [9, 9]);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   test.each(
     [false, true].flatMap((workerFirst) =>
       [false, true].map((firstChanged) => ({ workerFirst, firstChanged })),
