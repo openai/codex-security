@@ -18,6 +18,13 @@ const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "This request was blocked due to a misalignment policy violation.",
 ]);
 
+export function isNativePolicyRefusal(message: unknown): message is string {
+  return (
+    typeof message === "string" &&
+    CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message)
+  );
+}
+
 /** A confirmed terminal worker failure that stops the scan without retries. */
 export class DeepScanNonRetryableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -39,7 +46,7 @@ const USAGE_LIMIT_MESSAGES = new Set([
 export function codexWorkerTurnError(message: string): Error {
   const reason = message.replace(/^Error running remote compact task: /, "");
   if (
-    CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message) ||
+    isNativePolicyRefusal(message) ||
     USAGE_LIMIT_MESSAGES.has(reason) ||
     reason.startsWith("You’ve hit your usage limit.") ||
     reason.startsWith("You’ve hit your usage limit for ")
@@ -100,31 +107,6 @@ export function abortError(reason?: unknown): Error {
   const error = new Error("Deep Scan worker was aborted.", { cause: reason });
   error.name = "AbortError";
   return error;
-}
-
-/**
- * The exact known policy refusal carried by a parent-turn abort, if any.
- * The waiter abort preserves the MCP cancellation reason as the cause of its
- * AbortError; only that reason counts, and only when it exactly matches a
- * known refusal. A worker refusal is not a parent-turn refusal, and no
- * substring or nested cause is ever classified.
- */
-export function knownPolicyRefusalFromAbort(
-  error: unknown,
-): string | undefined {
-  const reason = error instanceof Error ? error.cause : error;
-  if (typeof reason === "string")
-    return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(reason)
-      ? reason
-      : undefined;
-  if (
-    reason instanceof Error &&
-    !(reason instanceof DeepScanNonRetryableError)
-  )
-    return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(reason.message)
-      ? reason.message
-      : undefined;
-  return undefined;
 }
 
 export function errorMessage(error: unknown): string {

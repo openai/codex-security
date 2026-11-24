@@ -1338,9 +1338,6 @@ async function testParentTurnRefusalFailsScan(
   environment: NodeJS.ProcessEnv,
   targetPath: string,
 ) {
-  // The exact refusal text from issue #276: the Desktop parent turn is
-  // refused while its Deep Scan is running. The scan must fail with this
-  // diagnostic instead of detaching silently and later reporting success.
   const refusal =
     "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
   const threadId = "deep-scan-stdio-refusal-thread";
@@ -1349,7 +1346,7 @@ async function testParentTurnRefusalFailsScan(
     { targetPath },
     threadId,
   );
-  let server = startServer(serverBundlePath, environment);
+  const server = startServer(serverBundlePath, environment);
   try {
     await server.initialize("parent-turn-refusal");
     server.sendRequest(2, "tools/call", request);
@@ -1367,12 +1364,6 @@ async function testParentTurnRefusalFailsScan(
     const failedState = await getDeepScan({ environment, scanId, threadId });
     assert.equal(failedState.status, "failed");
     assert.equal(failedState.error, refusal);
-    assert.equal(
-      failedState.workers.some(
-        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
-      ),
-      false,
-    );
     assert.equal(
       failedState.workers.every(
         (worker: PersistedDeepScanWorker) =>

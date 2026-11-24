@@ -35,6 +35,7 @@ import { DeepScanWorkerRunner } from "./worker-runner.js";
 import type { AcceptedDiscovery, DiscoveryOutcome } from "./worker-runner.js";
 import {
   confirmedOwnershipChange,
+  isNativePolicyRefusal,
   errorNameWithCode,
   abortError,
   errorMessage,
@@ -125,7 +126,6 @@ export class DeepScanCoordinator {
   private canceled = false;
   private externallyFailed = false;
   private failurePersisted = false;
-  private parentRefusalFailure: string | undefined;
   private setupComplete = false;
   private discoveryDeadlineReached = false;
   private state: DeepScanRunState;
@@ -192,6 +192,27 @@ export class DeepScanCoordinator {
 
   settled(): Promise<DeepScanRunState> {
     return this.terminalResult.promise.then(cloneState);
+  }
+
+  // Only the initiating MCP request may stop the scan with a refusal.
+  async waitForParent(
+    signal: AbortSignal | undefined,
+  ): Promise<DeepScanRunState> {
+    try {
+      return await this.wait(signal);
+    } catch (error) {
+      if (
+        !this.terminal &&
+        signal?.aborted &&
+        isNativePolicyRefusal(signal.reason)
+      ) {
+        this.abortController.abort(
+          new DeepScanNonRetryableError(signal.reason),
+        );
+        this.publicationAbortController.abort(signal.reason);
+      }
+      throw error;
+    }
   }
 
   async wait(signal: AbortSignal | undefined): Promise<DeepScanRunState>;
@@ -351,53 +372,6 @@ export class DeepScanCoordinator {
     // run() waits for workers instead of rewriting it as cancellation.
   }
 
-  /**
-   * Fail the scan because the owning parent turn was refused with a known
-   * policy refusal. Terminal-state ownership stays in the coordinator: the
-   * transition is idempotent, an already-terminal, canceled, or
-   * already-failed coordinator is left alone, and a late worker completion
-   * cannot overwrite the failure with success. Returns true when this call
-   * armed the failure.
-   */
-  failOnParentRefusal(refusal: string): boolean {
-    if (
-      this.terminal ||
-      this.canceled ||
-      this.externallyFailed ||
-      this.failurePersisted ||
-      this.parentRefusalFailure !== undefined
-    )
-      return false;
-    this.parentRefusalFailure = refusal;
-    this.abortController.abort(new DeepScanNonRetryableError(refusal));
-    this.publicationAbortController.abort(refusal);
-    return true;
-  }
-
-  /**
-   * After a failure write is rejected, re-read persisted state: when the
-   * store already holds committed success, adopt it instead of resolving a
-   * local failure that persistence contradicts. Returns true when committed
-   * success was adopted.
-   */
-  private async adoptCommittedSuccessAfterRejectedFailure(): Promise<boolean> {
-    const threadId = this.options.threadId;
-    if (threadId === undefined) return false;
-    let persisted: DeepScanRunState;
-    try {
-      persisted = await this.options.store.get(this.state.scanId, threadId);
-    } catch {
-      return false;
-    }
-    if (persisted.status !== "succeeded") return false;
-    this.state = persisted;
-    this.log({
-      event: "coordinator_failure_rejected_success_committed",
-      scanId: this.state.scanId,
-    });
-    return true;
-  }
-
   private async run(): Promise<void> {
     try {
       // A replacement coordinator must honor a worker failure committed before handoff.
@@ -450,10 +424,7 @@ export class DeepScanCoordinator {
         },
       );
       if (this.canceled || this.externallyFailed) return;
-      // A parent-turn refusal that arrived during publication fails the scan
-      // instead of publishing a success the owning turn never saw.
-      if (this.parentRefusalFailure !== undefined)
-        throw new DeepScanNonRetryableError(this.parentRefusalFailure);
+      this.abortController.signal.throwIfAborted();
       const completed = await this.options.store.finish({
         scanId: this.state.scanId,
         reason: loopResult.reason,
@@ -461,23 +432,6 @@ export class DeepScanCoordinator {
         omittedWorkerIds: [],
       });
       if (this.canceled || this.externallyFailed) return;
-      // A parent-turn refusal can land while store.finish is persisting.
-      // When finish returns a committed success, that success stays
-      // authoritative: the Workbench rejects a failure write once success
-      // is committed with a manifest, so throwing here would resolve a
-      // local failure that persistence contradicts. Only fail the scan when
-      // finish did not commit success.
-      if (this.parentRefusalFailure !== undefined) {
-        if (completed.status === "succeeded") {
-          this.log({
-            event: "coordinator_parent_refusal_after_success_commit",
-            scanId: this.state.scanId,
-            reason: this.parentRefusalFailure,
-          });
-        } else {
-          throw new DeepScanNonRetryableError(this.parentRefusalFailure);
-        }
-      }
       this.state = completed;
       this.log({
         event: "coordinator_terminal",
@@ -488,14 +442,7 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) {
         return;
       }
-      // A parent-turn refusal is the terminal verdict on this scan. Do not
-      // let ownership adoption resurrect a success the refusal arrived
-      // alongside, for example when the refusal lands while store.finish is
-      // still persisting.
-      if (
-        this.parentRefusalFailure === undefined &&
-        (await this.stopAfterOwnershipChange(this.options.threadId, error))
-      ) {
+      if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
       }
       if (
@@ -533,11 +480,6 @@ export class DeepScanCoordinator {
           ))
         )
           return;
-        // A rejected failure write can mean success was already committed
-        // (for example, finish committed and then its response was lost).
-        // Never resolve a local failure when persistence holds committed
-        // success.
-        if (await this.adoptCommittedSuccessAfterRejectedFailure()) return;
         this.state = {
           ...this.state,
           status: "failed",

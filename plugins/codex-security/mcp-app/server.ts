@@ -38,7 +38,6 @@ import {
   type DeepWorkerParentSandbox,
 } from "./src/deep-scan/parent-sandbox.js";
 import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
-import { knownPolicyRefusalFromAbort } from "./src/deep-scan/errors.js";
 import {
   readDeepScanProjectConfig,
   readSelectedProjectConfig,
@@ -1149,23 +1148,11 @@ export function createCodexSecurityServer(): McpServer {
               begun.scanId,
             );
           }
-          let terminal: DeepScanRunState;
-          try {
-            terminal = await coordinator.wait(abortSignalFromExtra(extra));
-          } catch (error) {
-            // A parent turn refused with a known policy refusal ends the
-            // scan with that diagnostic instead of detaching silently. Any
-            // other abort keeps the current detach behavior. A remote
-            // coordinator is owned by another process, so only a local
-            // coordinator can be failed here.
-            const refusal = knownPolicyRefusalFromAbort(error);
-            if (
-              refusal !== undefined &&
-              coordinator instanceof DeepScanCoordinator
-            )
-              coordinator.failOnParentRefusal(refusal);
-            throw error;
-          }
+          const signal = abortSignalFromExtra(extra);
+          const terminal = await (!joined &&
+          coordinator instanceof DeepScanCoordinator
+            ? coordinator.waitForParent(signal)
+            : coordinator.wait(signal));
           result = preparation.completion.result
             ? await preparation.completion.result
             : await completeDeepScan(terminal);
