@@ -73,8 +73,8 @@ class ScanFixture:
             environment=self.environment,
         )
 
-    def fail(self, *arguments: str) -> dict[str, Any]:
-        return self.command("fail-scan", "--message", "Fixture failure.", *arguments)
+    def fail(self, *arguments: str, message: str = "Fixture failure.") -> dict[str, Any]:
+        return self.command("fail-scan", "--message", message, *arguments)
 
 
 def _worker_usage_directory(fixture: ScanFixture) -> Path:
@@ -2362,7 +2362,7 @@ def test_failed_scan_reconciles_runtime_subtotals_without_double_counting(tmp_pa
     counted = fixture.started_at + timedelta(microseconds=1)
     fixture.write_parent_rollout([_token_event(counted, 50, 8)])
     # A terminal retry can reconcile records flushed after the original stop.
-    reconciled = fixture.command("fail-scan", "--message", "Do not replace failure.")["scan"]
+    reconciled = fixture.fail(message="Do not replace failure.")["scan"]
     assert reconciled["usage"]["totalTokens"] == 58
     assert reconciled["usage"]["source"] == "codex_rollout"
     assert reconciled["usage"]["coverage"] == "complete"
@@ -2371,12 +2371,8 @@ def test_failed_scan_reconciles_runtime_subtotals_without_double_counting(tmp_pa
     assert reconciled["failureMessage"] == "Fixture failure."
     assert reconciled["progress"] == failed["progress"]
     refreshed_cost = {**cost, "inputTokens": 50, "outputTokens": 8, "estimatedUsd": 0.02}
-    reconciled = fixture.command(
-        "fail-scan",
-        "--message",
-        "Do not replace failure.",
-        "--cost-json",
-        json.dumps(refreshed_cost),
+    reconciled = fixture.fail(
+        "--cost-json", json.dumps(refreshed_cost), message="Do not replace failure."
     )["scan"]
     assert reconciled["cost"] == refreshed_cost
     assert reconciled["usage"]["coverage"] == "complete"
