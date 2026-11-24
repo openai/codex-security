@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import Ajv from "ajv";
 import { main } from "../src/cli.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import type {
@@ -111,6 +112,50 @@ async function configFixture(config: ProjectConfigInput) {
 }
 
 describe("scan dependencies CLI", () => {
+  test("advertises schemas for dependency results and CLI failures", async () => {
+    const schemaCli = createCliTest(main);
+    expect(
+      await schemaCli.runCli(
+        ["scan", "dependencies", "--schema", "--json"],
+        dependencies(),
+      ),
+      schemaCli.stderr.text(),
+    ).toBe(0);
+    const schema = JSON.parse(schemaCli.stdout.text());
+    const validate = new Ajv({ strict: false }).compile(schema.output);
+
+    for (const status of ["completed", "partial", "failed"] as const) {
+      const result = dependencyResult(status);
+      addMatch(result);
+      const cli = createCliTest(main);
+      expect(
+        await cli.runCli(
+          ["scan", "dependencies", "--json"],
+          dependencies({ onScanDependencies: async () => result }),
+        ),
+        cli.stderr.text(),
+      ).toBe(status === "completed" ? 0 : 2);
+      expect(
+        validate(JSON.parse(cli.stdout.text())),
+        JSON.stringify(validate.errors),
+      ).toBe(true);
+    }
+
+    const failed = createCliTest(main);
+    expect(
+      await failed.runCli(
+        ["scan", "dependencies", "--json"],
+        dependencies({
+          onScanDependencies: throwing("Synthetic scanner unavailable"),
+        }),
+      ),
+    ).toBe(2);
+    expect(
+      validate(JSON.parse(failed.stdout.text())),
+      JSON.stringify(validate.errors),
+    ).toBe(true);
+  });
+
   test.each([
     ["local JSON shortcut", ["scan", "dependencies", "--json"]],
     ["global JSON shortcut", ["--json", "scan", "dependencies"]],
