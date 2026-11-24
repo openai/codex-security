@@ -1005,6 +1005,72 @@ describe("multiscan", () => {
     },
   );
 
+  test("preserves unrelated lock files and SQLite journals", async () => {
+    const { paths } = await repositoryFixture("occupied");
+    await mkdir(paths.output, { mode: 0o700 });
+    for (const suffix of ["", "-journal"]) {
+      const file = join(paths.output, ".lock.sqlite3" + suffix);
+      await writeFile(file, "keep");
+      await expect(
+        runMultiscan(options(paths, client(completeRun))),
+      ).rejects.toThrow("Invalid multiscan lock file");
+      expect(await readFile(file, "utf8")).toBe("keep");
+      await rm(file);
+    }
+  });
+
+  test("defers expired lease takeover during checkout removal and receipt writes", async () => {
+    const { paths } = await repositoryFixture("busy");
+    const settings = options(paths, client(completeRun));
+    const owner = join(paths.output, ".lock", "owner.json");
+    const checked: string[] = [];
+    let contending = false;
+    const contend = async (operation: string) => {
+      if (contending) return;
+      contending = true;
+      const current = await readFile(owner, "utf8");
+      // Present a stale lease from another process while this write is pending.
+      await writeFile(
+        owner,
+        JSON.stringify({ ...JSON.parse(current), hostname: "expired" }),
+      );
+      await utimes(owner, 1, 1);
+      try {
+        await expect(runMultiscan(settings)).rejects.toThrow(
+          "A multiscan supervisor is already running.",
+        );
+        checked.push(operation);
+      } finally {
+        contending = false;
+        await writeFile(owner, current);
+      }
+    };
+    const remove = filesystem.rm;
+    using _remove = spyOn(filesystem, "rm").mockImplementation(
+      async (...args) => {
+        if (args[0] === join(paths.output, "checkouts", "busy"))
+          await contend("remove");
+        return remove(...args);
+      },
+    );
+    const open = filesystem.open;
+    using _open = spyOn(filesystem, "open").mockImplementation(
+      async (...args) => {
+        const file = await open(...args);
+        if (args[0] === join(paths.output, "results.jsonl")) {
+          const write = file.writeFile.bind(file);
+          file.writeFile = async (...args) => {
+            await contend("write");
+            return write(...args);
+          };
+        }
+        return file;
+      },
+    );
+    expect(await runMultiscan(settings)).toMatchObject({ completed: 1 });
+    expect(checked).toEqual(["remove", "write"]);
+  });
+
   test.each(["before", "during"])(
     "does not reserve another attempt when the lock is lost %s recovery",
     async (when) => {
