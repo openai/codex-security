@@ -16,7 +16,6 @@ from workbench_test_support import (
     saved_draft,
     select_checkpoint,
     write_checkpoint,
-    write_draft_checkpoint,
 )
 
 
@@ -31,9 +30,7 @@ def test_deadline_preserves_optional_reduced_writeup_behavior(deadline_scan, mis
         report.parent.mkdir(parents=True)
         report.write_text("# Reduced finding\n")
     _, output = scan.canceled_discovery_output()
-    write_draft_checkpoint(
-        output, scan.scan_id, deferred=[{"reason": "Review the remaining upload paths."}]
-    )
+    scan.checkpoint(output, deferred=[{"reason": "Review the remaining upload paths."}])
 
     scan.finish(terminal_reason="capped")
     completed = scan.complete()
@@ -66,9 +63,7 @@ def test_deadline_recovers_valid_findings_from_an_invalid_archived_retry(
         json.dumps(saved_draft(scan.scan_id, complete=True, findings=[valid, invalid]))
     )
     original = result.read_bytes()
-    write_draft_checkpoint(
-        output, scan.scan_id, deferred=[{"reason": "Retry review remains unfinished."}]
-    )
+    scan.checkpoint(output, deferred=[{"reason": "Retry review remains unfinished."}])
 
     scan.finish(terminal_reason="capped")
     completed = scan.complete()
@@ -101,7 +96,7 @@ def test_deadline_does_not_recover_invalid_reduced_findings(workbench_db, deadli
     findings_path.write_text(json.dumps({"findings": scan.findings}))
     original = findings_path.read_bytes()
     _, output = scan.canceled_discovery_output()
-    write_draft_checkpoint(output, scan.scan_id)
+    scan.checkpoint(output)
 
     with pytest.raises(ContractError, match="remediation|reportPath"):
         scan.finish(terminal_reason="capped")
@@ -125,7 +120,7 @@ def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(de
     second["locations"] = [{"path": "src/second.py", "startLine": 1}]
     malformed = copy.deepcopy(first)
     malformed.pop("remediation")
-    write_draft_checkpoint(output, scan.scan_id, findings=[no_identity, first, second, malformed])
+    scan.checkpoint(output, findings=[no_identity, first, second, malformed])
 
     scan.finish(terminal_reason="capped")
     completed = scan.complete()
@@ -141,9 +136,7 @@ def test_deadline_preserves_worker_findings_with_optional_and_shared_identity(de
 def test_deadline_resolves_worker_local_deferred_ids_before_scoping(workbench_db, deadline_scan):
     scan = deadline_scan
     _, output = scan.canceled_discovery_output()
-    write_draft_checkpoint(
-        output, scan.scan_id, deferred=[{"id": "review", "reason": "Review pending."}], mtime_ns=100
-    )
+    scan.checkpoint(output, deferred=[{"id": "review", "reason": "Review pending."}], mtime_ns=100)
     current = saved_draft(scan.scan_id, complete=True)
     current["coverage"]["resolvedDeferred"] = [{"id": "review", "reason": "Review completed."}]
     latest = write_checkpoint(output / "checkpoints", current, mtime_ns=200)
@@ -162,9 +155,8 @@ def test_deadline_does_not_turn_invalid_worker_receipts_into_parent_artifacts(
     scan = deadline_scan
     _, output = scan.canceled_discovery_output()
     (output / "notes.txt").write_text("Not a worker receipt under artifacts/.\n")
-    write_draft_checkpoint(
+    scan.checkpoint(
         output,
-        scan.scan_id,
         surfaces=[
             review_surface(
                 "entry",
@@ -221,9 +213,8 @@ def test_deadline_preserves_worker_receipts_and_surface_links(
             current_receipt = output / "artifacts" / "review.txt"
             current_receipt.parent.mkdir(parents=True)
             current_receipt.write_text("Different current-attempt evidence.\n")
-        checkpoint = write_draft_checkpoint(
+        checkpoint = scan.checkpoint(
             source,
-            scan.scan_id,
             surfaces=[
                 review_surface("entry", label, "no_issue_found", receipts=["artifacts/review.txt"])
             ],
@@ -322,9 +313,8 @@ def test_unfinished_checkpoints_after_a_completed_reduction(workbench_db, satura
         "paths": ["subdir/extract.py"],
         "surfaceIds": ["upload"],
     }
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         result.parent,
-        scan.scan_id,
         findings=[recovered, duplicate],
         deferred=[pending],
         surfaces=[review_surface("upload", "Upload handler")],
@@ -338,7 +328,7 @@ def test_unfinished_checkpoints_after_a_completed_reduction(workbench_db, satura
         scan.scan_dir / "workers" / scan.completed_worker_id,
         scan.scan_dir / "workers" / scan.reducer_id,
     ):
-        discarded_checkpoint = write_draft_checkpoint(directory, scan.scan_id, findings=[discarded])
+        discarded_checkpoint = scan.checkpoint(directory, findings=[discarded])
         if directory == scan.scan_dir:
             head = select_checkpoint(directory, discarded_checkpoint)
             observed = (
@@ -472,11 +462,9 @@ def test_rejected_deadline_publication_does_not_leave_parent_observations(
     pending = {"id": "authorization-review", "reason": "Review the remaining authorization path."}
     if with_reduction:
         result = scan.add_worker(status="canceled")
-        write_draft_checkpoint(result.parent, scan.scan_id, deferred=[pending])
+        scan.checkpoint(result.parent, deferred=[pending])
     if existing_head:
-        checkpoint = write_draft_checkpoint(
-            scan.scan_dir, scan.scan_id, findings=scan.findings, deferred=[pending]
-        )
+        checkpoint = scan.checkpoint(scan.scan_dir, findings=scan.findings, deferred=[pending])
         head = select_checkpoint(scan.scan_dir, checkpoint)
         for path in (checkpoint, head):
             os.utime(path, ns=(2_000_000_000, 2_000_000_000))
@@ -549,9 +537,8 @@ def test_zero_accepted_deadline_preserves_worker_checkpoint_links_and_receipts(
         receipt = result.parent / "artifacts" / "review.md"
         receipt.parent.mkdir()
         receipt.write_text(f"Synthetic {name} source review.\n")
-        checkpoint = write_draft_checkpoint(
+        checkpoint = scan.checkpoint(
             result.parent,
-            scan.scan_id,
             complete=False,
             surfaces=[
                 review_surface("api", name, "no_issue_found", receipts=["artifacts/review.md"])
