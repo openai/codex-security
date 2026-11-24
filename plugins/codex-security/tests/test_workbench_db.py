@@ -38,6 +38,7 @@ from workbench_test_support import (
     register_scan,
     repository_recipe,
     resume_deep_scan,
+    review_surface,
     run_workbench,
     save_commit_diff,
     save_workspace,
@@ -357,12 +358,7 @@ def test_budget_exhaustion_preserves_existing_terminal_surface(tmp_path: Path) -
     coverage_path = scan_dir / "coverage.json"
     coverage = read_review_state(state_dir, scan_dir)
     coverage["surfaces"].append(
-        {
-            "id": "candidate-candidate-1",
-            "label": "Already dismissed candidate",
-            "disposition": "rejected",
-            "receiptRefs": [],
-        }
+        review_surface("candidate-candidate-1", "Already dismissed candidate", "rejected")
     )
     coverage_path.write_text(json.dumps(coverage))
 

@@ -27,7 +27,7 @@ function hideForbiddenFields(value: unknown): void {
   // is equivalent JSON Schema; the original validator remains unchanged.
   const forbidden: string[] = [];
   for (const [name, property] of Object.entries(properties)) {
-    if (property === false || isDeepStrictEqual(property, { not: {} })) {
+    if (forbiddenProperty(property)) {
       forbidden.push(name);
       delete properties[name];
     }
@@ -38,4 +38,8 @@ function hideForbiddenFields(value: unknown): void {
     value.propertyNames === undefined
       ? names
       : { allOf: [value.propertyNames, names] };
+}
+
+export function forbiddenProperty(value: unknown): boolean {
+  return value === false || isDeepStrictEqual(value, { not: {} });
 }
