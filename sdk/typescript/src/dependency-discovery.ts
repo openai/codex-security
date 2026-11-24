@@ -60,7 +60,8 @@ function literalEnd(text: string, start: number, delimiter: string): number {
   let inClass = false;
   for (let i = start; i < text.length; i++) {
     const char = text[i];
-    if (char === "\n") return i;
+    if (char === "\n" && delimiter !== "`") return i;
+    if (delimiter === "`" && char === "$" && text[i + 1] === "{") return i + 2;
     if (char === "\\" && (!regex || text[i + 1] !== "\n")) i++;
     else if (regex && char === "[") inClass = true;
     else if (regex && char === "]") inClass = false;
@@ -74,7 +75,6 @@ function literalEnd(text: string, start: number, delimiter: string): number {
 function javascriptCode(text: string, pkg: string): string {
   const tokens =
     /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|[\w$]+|=>|\+\+|--|\.\.\.|\s+|[^\s]/gu;
-  const templateChunk = /(?:\\[\s\S]|[^`\\$]|\$(?!\{))*(?:`|\$\{)?/uy;
   const templateDepth: number[] = [];
   let braces = 0;
   const conditions: boolean[] = [];
@@ -99,43 +99,37 @@ function javascriptCode(text: string, pkg: string): string {
     // In "for await (...)" the parenthesis still belongs to "for".
     if (token !== "await")
       control = !member && /^(?:if|for|while|with)$/u.test(token);
-    if (token === "'" || token === '"' || (token === "/" && regexAllowed)) {
-      tokens.lastIndex = literalEnd(text, tokens.lastIndex, token);
-      token = token === "/" ? "0" : text.slice(match.index, tokens.lastIndex);
-    }
-    if (token === "`" || (token === "}" && braces === templateDepth.at(-1))) {
-      if (token === "}") templateDepth.pop();
-      templateChunk.lastIndex = tokens.lastIndex;
-      const chunk = templateChunk.exec(text)?.[0] ?? "";
-      tokens.lastIndex += chunk.length;
-      if (chunk.endsWith("${")) {
+    const resumes = token === "}" && braces === templateDepth.at(-1);
+    if (token === "/" && regexAllowed) {
+      tokens.lastIndex = literalEnd(text, tokens.lastIndex, "/");
+      token = "0";
+    } else if (resumes || token === "`" || token === "'" || token === '"') {
+      const delimiter = resumes ? "`" : token;
+      tokens.lastIndex = literalEnd(text, tokens.lastIndex, delimiter);
+      const chunk = text.slice(match.index + 1, tokens.lastIndex);
+      code += newlinesIn(chunk);
+      if (resumes) templateDepth.pop();
+      if (delimiter === "`" && chunk.endsWith("${")) {
         templateDepth.push(braces);
-        code += newlinesIn(chunk);
         token = ";";
-      } else if (token === "}") {
-        code += newlinesIn(chunk);
-        token = ")";
-      } else token += chunk;
+      } else if (resumes) token = ")";
+      else {
+        const value = chunk.slice(0, -1);
+        const matches = value === pkg || value.startsWith(pkg + "/");
+        token = matches && chunk.endsWith(delimiter) ? '"@"' : '""';
+      }
     } else if (token === "{") braces++;
     else if (token === "}") braces--;
 
-    if (/^['"`]/u.test(token)) {
-      const value = token.slice(1, -1);
-      const matches = value === pkg || value.startsWith(pkg + "/");
-      code += matches && token.at(-1) === token[0] ? '"@"' : '""';
-      code += newlinesIn(token);
-      regexAllowed = false;
-    } else {
-      // Member names can follow whitespace or comments. Spread starts a new expression.
-      if (member && (token === "require" || token === "import")) token = "0";
-      code += token === "..." ? "... " : token;
-      regexAllowed =
-        startsBody ||
-        (!member &&
-          /^(?:[=(:,;!?&|{\[~*+%/-]|=>|\.\.\.|await|case|delete|do|else|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
-            token,
-          ));
-    }
+    // Member names can follow whitespace or comments. Spread starts a new expression.
+    if (member && (token === "require" || token === "import")) token = "0";
+    code += token === "..." ? "... " : token;
+    regexAllowed =
+      startsBody ||
+      (!member &&
+        /^(?:[=(:,;!?&|{\[~*+%/-]|=>|\.\.\.|await|case|delete|do|else|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
+          token,
+        ));
     member = token === "." || token === "#";
   }
   return code;
@@ -163,17 +157,21 @@ function pythonCode(text: string): string {
     .join("\n");
 }
 
-function importNames(clause: string) {
-  return clause
+// ES imports and destructured require() calls share the same local bindings.
+// Return null for erased clauses, [] for an import with no bindings.
+function javascriptBindings(clause: string) {
+  if (/^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) return null;
+  const names = clause
     .replace(/[{}]/gu, "")
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean);
-}
-
-// Both an ES import and a destructured require can bind an alias.
-function localNames(names: string[]) {
-  return names.flatMap((name) => {
+  // "type Foo" is erased, but "type as foo" imports a value named type.
+  const values = names.filter(
+    (name) => !/^type\s/u.test(name) || /^type\s+as\s+[\w$]+$/u.test(name),
+  );
+  if (names.length && !values.length) return null;
+  return values.flatMap((name) => {
     const binding = name.split("=", 1)[0]!.trim();
     const local = /(?:^|\bas\s+|:\s*|\.\.\.\s*)([A-Za-z_$][\w$]*)$/u.exec(
       binding,
@@ -196,12 +194,19 @@ export function sourceReferences(
     !/\.d\.[cm]?ts$/iu.test(path);
   if (!python && !javascript) return { lines: [], bindings: [] };
 
-  const matches: { offset: number; bindings: string[] }[] = [];
   text = text.replace(/\r\n/gu, "\n");
-  let sanitized: string;
+  const code = python ? pythonCode(text) : javascriptCode(text, pkg.name);
+  const lines = new Set<number>();
+  const bindings = new Set<string>();
+  let offset = 0;
+  let line = 1;
+  function record(start: number, names: string[]) {
+    while (offset < start) if (code[offset++] === "\n") line++;
+    lines.add(line);
+    for (const name of names) bindings.add(name);
+  }
 
   if (python) {
-    sanitized = pythonCode(text);
     const roots = [
       pkg.name.replace(/-/gu, "_"),
       ...symbols.map((symbol) => symbol.split(".")[0]!).filter(Boolean),
@@ -213,76 +218,48 @@ export function sourceReferences(
       );
     };
 
-    for (const match of sanitized.matchAll(
-      /(?:^|;)[ \t]*((?:from(?:[ \t]|\\\n)+([\w.]+)(?:[ \t]|\\\n)+)?import\b(?:[ \t]|\\\n)*(\([^();]*\)|(?:\\\n|[^\n;])+))/gmu,
+    for (const match of code.matchAll(
+      /(?:^|;)[ \t]*(?:from(?:[ \t]|\\\n)+([\w.]+)(?:[ \t]|\\\n)+)?import\b(?:[ \t]|\\\n)*(\([^();]*\)|(?:\\\n|[^\n;])+)/gmu,
     )) {
-      const from = match[2];
+      const from = match[1];
       if (from && !matchesRoot(from)) continue;
-      const names = match[3]!.replace(/^\(|\)$/gu, "").replace(/\\\n/gu, " ");
+      const names = match[2]!.replace(/^\(|\)$/gu, "").replace(/\\\n/gu, " ");
       const bindings = names.split(",").flatMap((name) => {
         const parsed = /^([\w.]+)(?:\s+as\s+(\w+))?$/u.exec(name.trim());
         if (!parsed || (!from && !matchesRoot(parsed[1]!))) return [];
         return [parsed[2] ?? parsed[1]!.split(".")[0]!];
       });
-      if (from || bindings.length) {
-        matches.push({
-          offset: match.index + match[0].indexOf(match[1]!),
-          bindings,
-        });
-      }
+      if (from || bindings.length) record(match.index, bindings);
     }
   } else {
-    sanitized = javascriptCode(text, pkg.name);
-    for (const match of sanitized.matchAll(
-      /(?<![.$\w])(import|export)\b\s*(?:((?:type\s*)?(?:[\w$]+\s*,\s*)?(?:[\w$]+|\*(?:\s*as\s+[\w$]+)?|\{[^{};()]*\}))\s*from\s*)?"@"/gu,
-    )) {
-      const clause = match[2] ?? "";
-      if (/^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) continue;
-      const names = importNames(clause);
-      // "type Foo" is erased, but "type as foo" imports a value named type.
-      const values = names.filter(
-        (name) => !/^type\s/u.test(name) || /^type\s+as\s+[\w$]+$/u.test(name),
-      );
-      if (names.length && !values.length) continue;
-      matches.push({
-        offset: match.index,
-        bindings: match[1] === "export" ? [] : localNames(values),
-      });
-    }
-
+    const statement =
+      /(?<![.$\w])(import|export)\b\s*(?:((?:type\s*)?(?:[\w$]+\s*,\s*)?(?:[\w$]+|\*(?:\s*as\s+[\w$]+)?|\{[^{};()]*\}))\s*from\s*)?"@"/u;
     const declaration =
       /((?<![.$\w])(?:import\s+type|type|const|let|var|import)\b|,)\s*([\w$]+|\{[^{};()]*\})\s*=\s*(?:\(\s*)?(?:(await|typeof)\s+)?/u;
     const call =
       /(?<![.$\w])(require|import)\s*\(\s*"@"\s*(?:(?:,\s*)?\)(?:\s*\))?(?:\s*\.\s*[\w$]+)?|,)/u;
-    const loads = new RegExp(`(?:${declaration.source})?${call.source}`, "gu");
+    // Visit declarations and calls in source order so offsets need only one pass.
+    const imports = new RegExp(
+      `${statement.source}|(?:${declaration.source})?${call.source}`,
+      "gu",
+    );
     const chained = /\s*[.(\[]/uy;
-    for (const match of sanitized.matchAll(loads)) {
-      const [, kind, target, operator, load] = match;
+    for (const match of code.matchAll(imports)) {
+      const [, statementKind, clause, kind, target, operator, load] = match;
       if (kind?.endsWith("type")) continue;
-      // Track the imported value, not a promise or the result of calling it.
+      const names = javascriptBindings(clause ?? target ?? "");
+      if (!names) continue;
       chained.lastIndex = match.index + match[0].length;
       const binds =
-        target &&
-        operator !== "typeof" &&
-        (load === "require" || operator === "await") &&
-        !chained.test(sanitized);
-      matches.push({
-        offset:
-          kind === "," ? match.index + match[0].indexOf(target!) : match.index,
-        bindings: binds ? localNames(importNames(target)) : [],
-      });
+        statementKind === "import" ||
+        (target &&
+          operator !== "typeof" &&
+          (load === "require" || operator === "await") &&
+          !chained.test(code));
+      const start =
+        kind === "," ? match.index + match[0].indexOf(target!) : match.index;
+      record(start, binds ? names : []);
     }
-  }
-
-  matches.sort((a, b) => a.offset - b.offset);
-  const lines = new Set<number>();
-  const bindings = new Set<string>();
-  let offset = 0;
-  let line = 1;
-  for (const item of matches) {
-    while (offset < item.offset) if (sanitized[offset++] === "\n") line++;
-    lines.add(line);
-    for (const binding of item.bindings) bindings.add(binding);
   }
   return { lines: [...lines], bindings: [...bindings] };
 }
