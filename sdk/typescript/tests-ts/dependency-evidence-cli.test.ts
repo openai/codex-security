@@ -64,6 +64,44 @@ test("command schema exposes complete and blocked reports as direct output alter
   );
 });
 
+test("a project-selected investigator provider requires a model", async () => {
+  await using repo = await scopedTemporaryDirectory("investigator-provider-");
+  await preparePackage(repo.path);
+  const config = join(repo.path, "project.json");
+  await writeFile(
+    config,
+    JSON.stringify({ codex: { model_provider: "openrouter" } }),
+  );
+  const stderr = capture();
+  const stdout = capture();
+  const status = await main(
+    [
+      "exploitability",
+      "check",
+      "npm:sample",
+      "--config",
+      config,
+      "--vuln-description",
+      "Synthetic issue",
+      "--json",
+    ],
+    stdout.stream,
+    stderr.stream,
+    dependencies({
+      currentDirectory: repo.path,
+      environment: {
+        CODEX_HOME: repo.path,
+        CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+      },
+    }),
+  );
+  expect(status, stderr.text()).toBe(2);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    status: "blocked",
+    reason: expect.stringContaining("--model is required"),
+  });
+});
+
 test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
   const git = (...args: string[]) =>
@@ -436,14 +474,13 @@ test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
   checkCoordinatorOutput,
 );
 
-async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
-  await using repo = await scopedTemporaryDirectory("dependency-progress-");
-  execFileSync("git", ["init", "-q"], { cwd: repo.path });
+async function preparePackage(path: string) {
+  execFileSync("git", ["init", "-q"], { cwd: path });
   await writeFile(
-    join(repo.path, "package.json"),
+    join(path, "package.json"),
     JSON.stringify({ name: "fixture", version: "1.0.0" }),
   );
-  execFileSync("git", ["add", "package.json"], { cwd: repo.path });
+  execFileSync("git", ["add", "package.json"], { cwd: path });
   execFileSync(
     "git",
     [
@@ -455,8 +492,13 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
       "-qm",
       "fixture",
     ],
-    { cwd: repo.path },
+    { cwd: path },
   );
+}
+
+async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
+  await using repo = await scopedTemporaryDirectory("dependency-progress-");
+  await preparePackage(repo.path);
   const stdout = capture(format === "summary"),
     stderr = capture(false);
   const eventsPath = join(repo.path, "events.jsonl");

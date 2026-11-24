@@ -378,9 +378,10 @@ Edit the file, select another file, or omit `-c` and unset
 Native objects merge using the existing configuration code. Duplicate native CLI
 assignments remain errors; overriding a file value is valid. Selected native
 profiles can still override root model/effort values, including convenience flags.
-`--provider openai` explicitly selects OpenAI; omitting `--provider` retains the
-configured provider. External providers require an explicitly selected or
-configured model; the built-in OpenAI model default does not apply.
+`--provider openai` explicitly selects OpenAI. Omit `--provider` to keep the
+configured provider. When project or CLI settings select an external provider,
+supply a model. Providers selected only in a native Codex profile file can
+inherit the scan default.
 
 ## Deep settings and limits
 
@@ -469,8 +470,7 @@ that the selected scan configuration still matches the campaign.
 target, prompt-file reads, credentials checks, or runtime initialization. With no
 file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
 effective model details and native key sources without dumping raw native values.
-An external provider selected by the project must include a model, as for
-`scan`. Providers selected only in a native Codex profile file can use the default model.
+It applies the same provider and model requirements as `scan`.
 This is configuration inspection, not a filesystem, target, or model-availability
 check.
 

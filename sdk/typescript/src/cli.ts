@@ -502,6 +502,7 @@ const execFile = promisify(execFileCallback);
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
+const OUTPUT_SWITCHES = ["--json", "--full-output", "--token-count"];
 const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--format",
   "--filter-output",
@@ -5630,7 +5631,7 @@ export async function main(
         "CLI input/output paths are relative to the current directory (scope paths are repository-relative). Flags override project configuration, except model and effort selected by a native Codex profile; displayed defaults are built-in defaults. Use init to create a config and info -c FILE --json to inspect it.\n\n" +
         "Automation and results:\n" +
         "  codex-security scan . --auth api-key --json --fail-on-severity high > ../findings.json\n" +
-        "The API-key example requires OPENAI_API_KEY or CODEX_API_KEY. Progress and summaries go to stderr. Completed scans leave stdout empty unless an output option is selected. --json writes results to stdout. Exit codes: 0 success (findings are report-only by default), 1 severity policy failed, 2 execution failure, 130/143 interrupted/terminated. Browse saved results with scans and findings; use export to save reports.\n\n" +
+        "The API-key example requires OPENAI_API_KEY or CODEX_API_KEY. Progress and summaries go to stderr. Completed scans leave stdout empty unless an output option is selected. --json writes results to stdout. Exit codes: 0 success (findings are report-only by default), 1 severity policy failed or patch blocked, 2 execution failure, 130/143 interrupted/terminated. Browse saved results with scans and findings; use export to save reports.\n\n" +
         "Import existing findings without security analysis:\n" +
         "  codex-security scan import findings.csv\n" +
         "  codex-security scan import findings.json --json\n" +
@@ -8446,7 +8447,7 @@ export async function main(
   }
   const command = argv[commandIndex];
   const entry = command === undefined ? undefined : commands.get(command);
-  const verbIndex = firstNonGlobal(argv, commandIndex + 1);
+  const verbIndex = firstNonGlobal(argv, commandIndex + 1, command === "scan");
   let following = argv[verbIndex];
   const scanImport = command === "scan" && following === "import";
   const importArgs = normalizeImportArguments(
@@ -8695,7 +8696,7 @@ export async function main(
     "options" in selected &&
     !!selected.options?.shape["reportFile"];
   const frameworkFlags = parseFrameworkArguments(argv, {
-    scanCommand,
+    scan: command === "scan",
     dependencyReport,
   });
   const frameworkArgv = frameworkFlags.args;
@@ -9362,7 +9363,11 @@ function isJsonFormat(format: string | undefined): format is "json" | "jsonl" {
 }
 
 /** Skip recognized global options and their operands while locating a command. */
-function firstNonGlobal(argv: readonly string[], start: number): number {
+function firstNonGlobal(
+  argv: readonly string[],
+  start: number,
+  scan = false,
+): number {
   let index = start;
   while (index < argv.length) {
     const value = argv[index]!;
@@ -9376,7 +9381,7 @@ function firstNonGlobal(argv: readonly string[], start: number): number {
       index += value.includes("=") ? 1 : 2;
     } else if (
       INSPECTION_FLAGS.includes(value) ||
-      ["--json", "--full-output", "--token-count"].includes(value)
+      OUTPUT_SWITCHES.includes(scan ? value.replace(/^--no-/u, "--") : value)
     ) {
       index++;
     } else break;
@@ -9445,18 +9450,15 @@ function normalizeImportArguments(
 
 function parseFrameworkArguments(
   argv: readonly string[],
-  {
-    scanCommand,
-    dependencyReport,
-  }: { scanCommand: boolean; dependencyReport: boolean },
+  { scan, dependencyReport }: { scan: boolean; dependencyReport: boolean },
 ) {
-  if (scanCommand) {
-    for (const name of ["json", "full-output", "token-count"]) {
-      const disabled = argv.lastIndexOf(`--no-${name}`);
+  if (scan) {
+    for (const flag of OUTPUT_SWITCHES) {
+      const negative = `--no-${flag.slice(2)}`;
+      const disabled = argv.lastIndexOf(negative);
       if (disabled < 0) continue;
       argv = argv.filter(
-        (arg, index) =>
-          arg !== `--no-${name}` && (arg !== `--${name}` || index > disabled),
+        (arg, index) => arg !== negative && (arg !== flag || index > disabled),
       );
     }
   }
@@ -10999,7 +11001,10 @@ async function executeDependencyAgent(
     mergeCodexOverrides(configured, explicit),
     scanCodexHome(dependencies.environment),
   );
-  requireExternalProviderModel(overrides, explicit["model_provider"]);
+  requireExternalProviderModel(
+    overrides,
+    explicit["model_provider"] ?? project?.input.codex?.["model_provider"],
+  );
   const model = scanModelConfiguration(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );

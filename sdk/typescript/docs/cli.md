@@ -2942,7 +2942,7 @@ codex-security scan . --diff origin/main \
 | Exit code     | Meaning                                                                  |
 | ------------- | ------------------------------------------------------------------------ |
 | `0`           | Complete report-only scan or passing severity policy.                    |
-| `1`           | Severity policy violation.                                               |
+| `1`           | Severity policy violation or blocked patch.                               |
 | `2`           | Invalid input, runtime error, target change, or required-output failure. |
 | `130` / `143` | Interrupt / termination.                                                 |
 
