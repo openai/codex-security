@@ -119,6 +119,13 @@ describe("built SECURITY.md helper", () => {
         expectGuidance(readFileSync(out, "utf8"), [
           [`${scope}/SECURITY.md`, "component policy"],
         ]);
+        const missing = await launcher.run(powershell, "policy-resolve", {
+          ...args,
+          "<file_or_directory>": "missing",
+          "<output_path_or_dash>": "-",
+        });
+        expect(missing.status, missing.diagnostics).toBe(2);
+        expect(missing.stderr).toContain("scan scope does not exist");
       }
     },
   );

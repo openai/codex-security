@@ -60,6 +60,9 @@ export function windowsHelperFixture(
         );
       command =
         "$ProgressPreference = 'SilentlyContinue'\n" +
+        (topic.startsWith("policy-")
+          ? "$PSNativeCommandArgumentPassing = 'Standard'\n$PSNativeCommandUseErrorActionPreference = $true\n$ErrorActionPreference = 'Stop'\n"
+          : "") +
         `Set-Location -LiteralPath '${escapeSingleQuotes(workingDirectory)}' -ErrorAction Stop\n` +
         "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
         command;

@@ -94,6 +94,8 @@ from workbench_scan_start import (
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
+    workspace_confirmation_version,
+    workspace_setup_digest,
 )
 from workbench_schema import (
     MIGRATIONS,
@@ -724,10 +726,9 @@ def require_working_tree_unchanged(target: Path, diff_target: dict[str, str] | N
 def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
     manages_transaction = not connection.in_transaction
-    try:
-        workspace = require_workspace(connection, workspace_id)
-        if not workspace["submitted"] or not workspace["target_path"]:
-            raise SystemExit("Save the Codex Security setup before starting the scan.")
+    confirmed = getattr(args, "confirmed_concurrent_scan_id", [])
+
+    def current_scan() -> sqlite3.Row | None:
         active = connection.execute(
             """
             SELECT *
@@ -736,21 +737,47 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             """,
             (workspace["id"],),
         ).fetchone()
+        if confirmed:
+            version = getattr(args, "workspace_version", None) or ""
+            if active is not None:
+                # Registration changes updated_at. Rejoins must still match the confirmed setup.
+                current = require_workspace(connection, workspace_id)
+                matches = version.partition(".")[0] == workspace_setup_digest(current)
+            else:
+                matches = version == workspace_confirmation_version(workspace)
+            if not matches:
+                raise SystemExit(
+                    "Concurrent scan confirmation requires the current workspace setup. Try again."
+                )
+        return active
+
+    try:
+        workspace = require_workspace(connection, workspace_id)
+        if not workspace["submitted"] or not workspace["target_path"]:
+            raise SystemExit("Save the Codex Security setup before starting the scan.")
+        pending = (
+            deep_scan.concurrent_launch_confirmation(connection, confirmed)
+            if workspace["default_mode"] == "deep"
+            else None
+        )
+        active = current_scan()
         if active is not None:
             require_scan_checkout_owner(connection, active)
             return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
         workspace_version = workspace["updated_at"]
-        confirmed = getattr(args, "confirmed_concurrent_scan_id", [])
-        if confirmed and getattr(args, "workspace_version", None) != workspace_version:
-            raise SystemExit(
-                "Concurrent scan confirmation requires the current workspace setup. Try again."
-            )
         scan_id = str(uuid.uuid4())
         timestamp = now()
         target = require_target(workspace["target_path"])
         require_scannable_target(target)
         target_metadata = target.stat()
         scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
+        if pending and not (
+            workspace["thread_id"] is not None
+            and deep_scan.existing_deep_scan_for_target(
+                connection, workspace["thread_id"], str(target), scope
+            )
+        ):
+            return {**pending, "workspaceVersion": workspace_confirmation_version(workspace)}
         diff_target = None
         if workspace["default_mode"] == "diff":
             diff_target = require_diff_target(
@@ -782,14 +809,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
-        active = connection.execute(
-            """
-            SELECT *
-            FROM scans
-            WHERE workspace_id = ? AND status = 'running' AND canceled_at IS NULL
-            """,
-            (workspace["id"],),
-        ).fetchone()
+        active = current_scan()
         if active is not None:
             require_scan_checkout_owner(connection, active)
             if manages_transaction:
@@ -823,7 +843,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             if pending:
                 if manages_transaction:
                     connection.commit()
-                return {**pending, "workspaceVersion": workspace_version}
+                return {**pending, "workspaceVersion": workspace_confirmation_version(workspace)}
         registration = register_security_target(connection, str(current_target))
         if registration.target_id != workspace["target_id"]:
             raise SystemExit(

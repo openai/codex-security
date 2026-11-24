@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,27 @@ from workbench_target import (
     worktree_content_digest,
 )
 from workbench_validation import optional_text, read_json_object, reject_non_finite_json
+
+
+def workspace_setup_digest(workspace: sqlite3.Row) -> str:
+    setup = [
+        workspace[key]
+        for key in (
+            "id",
+            "thread_id",
+            "target_id",
+            "target_path",
+            "default_mode",
+            "default_scope",
+            "user_context",
+            "deep_scan_config_json",
+        )
+    ]
+    return hashlib.sha256(json.dumps(setup).encode()).hexdigest()
+
+
+def workspace_confirmation_version(workspace: sqlite3.Row) -> str:
+    return f"{workspace_setup_digest(workspace)}.{workspace['updated_at']}"
 
 
 def safe_segment(value: str) -> str:

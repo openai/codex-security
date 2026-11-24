@@ -16192,15 +16192,17 @@ if __name__ == "__main__":
       expect(windowsCommand).toBeDefined();
       expect(prompt).toContain(windowsCommand!.replaceAll("\r\n", "\n"));
     }
-    const fileInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/sdk-files.md"),
-      "utf8",
-    );
     const commandFence =
       process.platform === "win32"
         ? /^`{3}powershell\r?\n([\s\S]*?)\r?\n`{3}/m
         : /^`{3}sh\r?\n([\s\S]*?)\r?\n`{3}/m;
-    const bindScopeCommand = fileInstructions.match(commandFence)![1]!;
+    const scopeCommand = (topic: string) =>
+      execFileSync(
+        Bun.which("node")!,
+        [join(PLUGIN_ROOT, "scripts", "skill_runtime.mjs"), topic],
+        { encoding: "utf8" },
+      ).match(commandFence)![1]!;
+    const bindScopeCommand = scopeCommand("scope-binding");
     expect(prompt).toContain("references/scoped-paths.md");
     expect(prompt).toContain("resolve-security-md");
     expect(prompt).not.toContain(policyDirectory);
@@ -16269,11 +16271,7 @@ if __name__ == "__main__":
       );
     };
     expect(existsSync(scopedSourceInput)).toBe(false);
-    const scopedInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/scoped-paths.md"),
-      "utf8",
-    );
-    const makeScopeCommand = scopedInstructions.match(commandFence)![1]!;
+    const makeScopeCommand = scopeCommand("scope-inventory");
     runScopedHelper(makeScopeCommand);
     const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(

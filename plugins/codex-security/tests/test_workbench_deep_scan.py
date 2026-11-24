@@ -1900,6 +1900,8 @@ def test_competing_native_launches_require_consent_for_the_current_scans(tmp_pat
     assert {scan["scanId"] for scan in stale["otherRunningDeepScans"]} == {first, second}
     app_scan_id = launch_app(first, second, version=stale["workspaceVersion"])["results"]["scanId"]
     assert launch_app()["results"]["scanId"] == app_scan_id
+    retry = launch_app(first, second, version=stale["workspaceVersion"])
+    assert retry["results"]["scanId"] == app_scan_id
 
 
 def test_app_workspaces_cannot_start_duplicate_owned_target_scans(tmp_path: Path) -> None:

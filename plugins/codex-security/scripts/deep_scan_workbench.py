@@ -815,6 +815,11 @@ def begin_deep_scan_for_target(
     dependencies().require_scannable_target(target)
     scope = dependencies().require_scope(args.scope, "deep", target)
     target_path = str(target)
+    pending = (
+        None
+        if args.join_only
+        else concurrent_launch_confirmation(connection, args.confirmed_concurrent_scan_id)
+    )
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
@@ -822,10 +827,9 @@ def begin_deep_scan_for_target(
     # Keep the requested spelling so a continuation can match a removed file or symlink.
     # NULL means no result is pending. The empty string denotes a launch with no project file.
     project_path = args.project_config_path or ""
-    # Avoid hashing the checkout during this probe when a fresh scan needs its configuration.
-    if (
-        args.join_only
-        and not connection.execute(
+    # Only a possible terminal rejoin needs a digest before configuration or consent.
+    if args.join_only or pending:
+        candidate = connection.execute(
             """
             SELECT 1 FROM scans JOIN deep_scan_runs ON deep_scan_runs.scan_id = scans.id
             WHERE scans.target_path = ? AND scans.scope = ?
@@ -842,8 +846,8 @@ def begin_deep_scan_for_target(
             """,
             (target_path, scope, project_path, json.dumps(user_context)),
         ).fetchone()
-    ):
-        return {"newScanTarget": target_path}
+        if candidate is None:
+            return pending or {"newScanTarget": target_path}
     target_metadata = target.stat()
     target_identity = dependencies().scan_target_identity(target, None, metadata=target_metadata)
     revision, target_snapshot_digest, target_device, target_inode = target_identity

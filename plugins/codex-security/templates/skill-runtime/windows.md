@@ -66,7 +66,14 @@ Use an absolute repository path or a leading tilde for the helper to expand.
 ```powershell
 $env:policyPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
 $env:policyRepository = '<repo_root>'
-cmd.exe /d /v:off /s /c '""%policyPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo "%policyRepository%\." --list"'
+$global:LASTEXITCODE = $null
+& {
+  $PSNativeCommandArgumentPassing = 'Legacy'
+  $PSNativeCommandUseErrorActionPreference = $false
+  cmd.exe /d /v:off /s /c '""%policyPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo "%policyRepository%\." --list"'
+}
+if ($null -eq $global:LASTEXITCODE) { throw 'PowerShell did not return a cmd.exe exit code. Check PATH and PATHEXT.' }
+if ($global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
 ```
 
 ## policy-resolve
@@ -78,7 +85,14 @@ $env:policyPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction St
 $env:policyRepository = '<repo_root>'
 $env:policyScope = '<file_or_directory>' -replace '[\\/]$', '$0.'
 $env:policyOutput = '<output_path_or_dash>'
-cmd.exe /d /v:off /s /c '""%policyPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo="%policyRepository%\." --scope="%policyScope%" --out="%policyOutput%""'
+$global:LASTEXITCODE = $null
+& {
+  $PSNativeCommandArgumentPassing = 'Legacy'
+  $PSNativeCommandUseErrorActionPreference = $false
+  cmd.exe /d /v:off /s /c '""%policyPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper resolve-security-md --repo="%policyRepository%\." --scope="%policyScope%" --out="%policyOutput%""'
+}
+if ($null -eq $global:LASTEXITCODE) { throw 'PowerShell did not return a cmd.exe exit code. Check PATH and PATHEXT.' }
+if ($global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
 ```
 
 Supply the scope relative to the repository or as an absolute path. The helper also expands a leading tilde in the scope. Use `-` for standard output. For file output, supply an absolute path, resolving any relative path against PowerShell's current location with tildes kept literal.
