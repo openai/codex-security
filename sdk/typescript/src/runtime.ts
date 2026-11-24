@@ -2693,27 +2693,30 @@ export async function requireWindowsOutputPath(
   );
   if (error !== 0)
     throw new OutputDirectoryError(
-      `Scan output directory or its parent could not be trusted (Windows error ${error}): ${path}${rejectedDirectoryDetail(native, path)}`,
+      `Scan output directory or its parent could not be trusted (Windows error ${error}): ${path}${rejectedDirectoryDetail(native, path, error)}`,
     );
 }
 
-/** Name the first directory, from the root down, that fails output validation.
- * Without a writable leaf, a prefix gets the same ancestor checks as the full path. */
+/** Find the highest prefix that also fails preflight with access denied. */
 function rejectedDirectoryDetail(
   native: Awaited<ReturnType<typeof windowsOutputBinding>>,
   path: string,
+  error: number,
 ): string {
-  const prefixes: string[] = [];
-  for (let current = path; ; current = dirname(current)) {
-    prefixes.unshift(current);
-    if (dirname(current) === current) break;
+  if (error !== 5) return ""; // ERROR_ACCESS_DENIED
+  let rejected: string | undefined;
+  // Preflight omits leaf-only checks. Stop at the first trusted parent.
+  for (
+    let current = path;
+    current !== rejected;
+    current = win32.dirname(current)
+  ) {
+    const result = native.validateWindowsOutputPath(
+      Buffer.from(win32.toNamespacedPath(current), "utf16le"),
+    );
+    if (result !== error) break;
+    rejected = current;
   }
-  const rejected = prefixes.find(
-    (prefix) =>
-      native.validateWindowsOutputPath(
-        Buffer.from(win32.toNamespacedPath(prefix), "utf16le"),
-      ) !== 0,
-  );
   return rejected === undefined
     ? ""
     : `. First rejected directory: ${rejected}. Check the owner and permissions of that directory and its parent.`;
@@ -2746,7 +2749,7 @@ export async function createWindowsOutputDirectory(
       return firstCreated;
     }
     throw new OutputDirectoryError(
-      `Unable to create private Windows output directory (Windows error ${error}): ${target}${rejectedDirectoryDetail(native, target)}`,
+      `Unable to create private Windows output directory (Windows error ${error}): ${target}${rejectedDirectoryDetail(native, target, error)}`,
     );
   };
   return create(path);
