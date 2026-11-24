@@ -1137,6 +1137,7 @@ test.each([
   "Connection refused while fetching content-policy.ts",
   "Artifact upload was blocked by the content policy.",
   "Artifact upload failed due to content policy violation",
+  "Command failed: This content was flagged for possible biological risk.",
   "Artifact upload failed due to safety policy violation",
   "Content policy refusal report upload failed",
   "Artifact publication was refused due to the content policy.",
