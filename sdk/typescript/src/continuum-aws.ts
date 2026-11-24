@@ -132,6 +132,12 @@ export async function prepareContinuumAws(
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
   sourceRoot?: string,
+  hostPathResolver: (
+    cwd: string,
+    roots: readonly string[],
+  ) =>
+    | ((path: string) => string | null)
+    | Promise<(path: string) => string | null> = trustedHostPathResolver,
 ) {
   const caller = await realpath(cwd);
   const source = sourceRoot ?? cwd;
@@ -152,7 +158,7 @@ export async function prepareContinuumAws(
       })),
     ]),
   ];
-  const resolvePath = await trustedHostPathResolver(caller, roots);
+  const resolvePath = await hostPathResolver(caller, roots);
 
   const name = windows ? "aws.exe" : "aws";
   const directories: string[] = [];

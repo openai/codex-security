@@ -1,17 +1,22 @@
 import { readScannerJson } from "./scanner-import.js";
 import { hash, randomUUID } from "node:crypto";
-import { chmodSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import {
+  withPublicationLock as withImportLock,
+  writeAtomicJson,
+} from "./publication-state.js";
+export { writeAtomicJson } from "./publication-state.js";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { nullIfMissingFile } from "./targets.js";
-import { setTimeout as delay } from "node:timers/promises";
 import { isProxy } from "node:util/types";
 import {
+  continuumRowErrors,
   privateImportClient,
   privateJobVersions,
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
+  rejectedSourceRevision,
   parsePrivateCheckpoint,
   type PrivateImportContext,
   unsuccessfulJob,
@@ -33,9 +38,7 @@ import { cloudBaseUrl, cloudFindingsUrl } from "./cloud-endpoint.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import {
   codexSecurityStateDirectory,
-  createWindowsOutputDirectory,
   validatePreparedOutputDir,
-  sqliteDatabaseOpener,
 } from "./runtime.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
@@ -85,7 +88,10 @@ import {
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
 import { checkmarxSelection } from "./checkmarx-repository.js";
-import { continuumReportRepositories } from "./continuum-findings.js";
+import {
+  checkRetainedContinuumPatches,
+  continuumReportRepositories,
+} from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
@@ -220,6 +226,7 @@ export interface ExternalPublicationPreview extends ExternalFindings {
   privateImport?: {
     format: PrivateImportFormat;
     contextVersion: string;
+    sourceCheckpoint?: string;
     sha256: string;
     bytes: number;
     retryOfJobId?: string;
@@ -255,6 +262,34 @@ export function cloudReviewDigest(
       ),
     }),
   );
+}
+
+/** A split CLI approval must refer to the revision shown by the dry run. */
+export async function reviewContinuumPublication(
+  preview: ExternalPublicationPreview,
+  report: string,
+  environment: NodeJS.ProcessEnv,
+  dryRun: boolean,
+  signal: AbortSignal,
+) {
+  if (preview.source.provider !== "continuum" || (preview.resumed && !dryRun))
+    return;
+  const state = externalPublicationStateDirectory(environment);
+  const key = hash("sha256", report);
+  const path = join(state, key + ".review.json");
+  const saved = await readOptionalFile(path);
+  const needsReview =
+    !preview.resumed && preview.privateImport?.sourceCheckpoint !== undefined;
+  if (!needsReview && saved === undefined) return;
+  const digest = cloudReviewDigest(preview, report, []);
+  if (dryRun)
+    await withImportLock(state, key, signal, () =>
+      needsReview ? writeAtomicJson(path, digest) : rm(path, { force: true }),
+    );
+  else if (saved !== JSON.stringify(digest))
+    throw new CodexSecurityError(
+      "No matching Continuum preview for this file, destination and source checkpoint. Run --dry-run --format json and review it before using --yes.",
+    );
 }
 
 export interface PreparedExternalPublication {
@@ -435,25 +470,6 @@ export function externalPublicationStateDirectory(
   );
 }
 
-export async function writeAtomicJson(
-  path: string,
-  value: unknown,
-): Promise<void> {
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    const file = await open(temporary, "wx", 0o600);
-    try {
-      await file.writeFile(JSON.stringify(value));
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(temporary, path);
-  } finally {
-    await rm(temporary, { force: true });
-  }
-}
-
 function sourcePath(repository: ImportRepository): string {
   return `/repository_connectors/${encodeURIComponent(repository.repo_connector_id)}/repositories/${encodeURIComponent(repository.id)}/source_reports`;
 }
@@ -524,42 +540,6 @@ function acknowledgedReceipts({ receipts = [], requests }: SavedSubmission) {
   return receipts.map((receipt, index) =>
     validatePublicationReceipt(receipt, requests[index]!),
   );
-}
-
-async function withImportLock<T>(
-  state: string,
-  key: string,
-  signal: AbortSignal | undefined,
-  operation: () => Promise<T>,
-): Promise<T> {
-  if (process.platform === "win32")
-    await createWindowsOutputDirectory(state, true);
-  else await mkdir(state, { recursive: true, mode: 0o700 });
-  await validatePreparedOutputDir(state, undefined, true);
-  const path = join(state, key + ".lock.sqlite");
-  const metadata = await lstat(path).catch(nullIfMissingFile);
-  if (metadata && !metadata.isFile())
-    throw new CodexSecurityError("The publication lock is not a regular file.");
-  const guard = sqliteDatabaseOpener()(path);
-  try {
-    if (process.platform !== "win32") chmodSync(path, 0o600);
-    guard.exec("PRAGMA busy_timeout = 0");
-    for (;;) {
-      signal?.throwIfAborted();
-      try {
-        guard.exec("BEGIN EXCLUSIVE");
-        break;
-      } catch (error) {
-        const sqliteError = error as { code?: string; errcode?: number };
-        if (sqliteError.errcode !== 5 && sqliteError.code !== "SQLITE_BUSY")
-          throw error;
-        await delay(50, undefined, { signal });
-      }
-    }
-    return await operation();
-  } finally {
-    guard.close();
-  }
 }
 
 type ResolvedPublicationInput = PublicationSelection & {
@@ -1409,12 +1389,13 @@ async function preparePublicationInput(
   const privateSaved = await readPrivate();
   const usePrivateImport =
     !saved && (canStartJob || privateSaved !== undefined);
+  const scopedSource = source.provider === "continuum" ? source : undefined;
   async function preparePrivateAttempt() {
-    const context = await privateClient.context();
     if (source.source_key.trim() !== source.source_key)
       throw new CodexSecurityError(
         "A private source key cannot have leading or trailing whitespace.",
       );
+    const context = await privateClient.context(scopedSource);
     const report = selectPrivateReport(
       parsed.findings,
       source.provider,
@@ -1451,8 +1432,14 @@ async function preparePublicationInput(
   const previous =
     privateAttempt &&
     readPrivateCheckpoint(privateSaved, privateAttempt.binding);
+  const reviewedRevision =
+    scopedSource && privateAttempt?.context.source_checkpoint;
+  const retryRowErrors =
+    continuumRowErrors(previous?.receipt) &&
+    reviewedRevision !== undefined &&
+    reviewedRevision !== previous?.sourceCheckpoint;
   const retryOfJobId =
-    unsuccessfulJob(previous?.receipt) &&
+    (unsuccessfulJob(previous?.receipt) || retryRowErrors) &&
     canStartJob &&
     privateAttempt?.context.can_upload &&
     acceptsJob(privateAttempt.context, privateAttempt.report.format)
@@ -1636,6 +1623,9 @@ async function preparePublicationInput(
     );
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      // Resume only the exact bytes already approved under an older reader.
+      if (provider === "continuum" && !historical)
+        checkRetainedContinuumPatches(evidence.source_data);
       const guardian = guardianFindingRepository(finding, "cloud");
       if (guardian) {
         requireDestination(id, guardian);
@@ -1724,12 +1714,18 @@ async function preparePublicationInput(
     }
     checkRepositories(parsed, resumed);
     requireAccess(context, previous);
+    const sourceCheckpoint = privateApproval
+      ? privateApproval.sourceCheckpoint
+      : reviewedRevision;
+    // The prior job is part of the review ID even after its retry starts.
+    const priorJobId = retryOfJobId ?? privateApproval?.previousReceipt?.id;
     const privateImport = {
       format: report.format,
       contextVersion: binding.contextVersion,
+      ...(sourceCheckpoint && { sourceCheckpoint }),
       sha256: report.digest,
       bytes: Buffer.byteLength(report.bytes),
-      ...(retryOfJobId ? { retryOfJobId } : {}),
+      ...(priorJobId && { retryOfJobId: priorJobId }),
     };
     const preview: ExternalPublicationPreview = {
       ...parsed,
@@ -1745,7 +1741,7 @@ async function preparePublicationInput(
       preview: structuredClone(preview),
       publish: () =>
         underPublishLock(async () => {
-          const current = await client.context();
+          const current = await client.context(scopedSource);
           if (current.context_version !== binding.contextVersion)
             throw new CodexSecurityError(
               "The private inbox changed. Run the command again to review the new destination.",
@@ -1759,6 +1755,18 @@ async function preparePublicationInput(
           const retrying =
             retryOfJobId !== undefined && stored?.receipt?.id === retryOfJobId;
           const active = retrying ? undefined : stored;
+          if (active && active.sourceCheckpoint !== sourceCheckpoint)
+            throw new CodexSecurityError(
+              "The saved source checkpoint changed. Preview this report again to resume.",
+            );
+          if (
+            !active &&
+            scopedSource &&
+            current.source_checkpoint !== sourceCheckpoint
+          )
+            throw new CodexSecurityError(
+              "The Continuum source checkpoint changed. Review a new preview before uploading.",
+            );
           requireAccess(current, active);
           if (await readPending())
             throw new CodexSecurityError(
@@ -1766,6 +1774,7 @@ async function preparePublicationInput(
             );
           const checkpoint = active ?? {
             ...binding,
+            sourceCheckpoint,
             approvedRepositoryUrl: destination.url,
             approvedRepositoryPlatform:
               hostedSource?.github === false ? ("other" as const) : undefined,
@@ -1836,6 +1845,7 @@ async function preparePublicationInput(
                 fileId: checkpoint.fileId,
                 format: report.format,
                 source,
+                sourceCheckpoint: checkpoint.sourceCheckpoint,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
                 jobApiVersion: checkpoint.jobApiVersion,
@@ -1854,7 +1864,29 @@ async function preparePublicationInput(
             result.status = "interrupted";
             result.error =
               error instanceof Error ? error.message : String(error);
-            result.savedSubmission = privatePath;
+            if (
+              sourceCheckpoint &&
+              checkpoint.fileId &&
+              !checkpoint.jobId &&
+              rejectedSourceRevision(error)
+            ) {
+              const receipt = checkpoint.previousReceipt;
+              if (receipt) {
+                // Retire only the rejected attempt. The prior job may
+                // already have accepted part of this selection.
+                await writeAtomicJson(privatePath, {
+                  ...checkpoint,
+                  jobId: receipt.id,
+                  jobRequestId: receipt.request_id,
+                  fileId: receipt.input.file_id,
+                  sourceCheckpoint: receipt.source_checkpoint ?? undefined,
+                  receipt,
+                  previousReceipt: undefined,
+                });
+              } else await rm(privatePath);
+              result.error +=
+                " The job was rejected. Review a new preview against the current inbox evidence before retrying.";
+            } else result.savedSubmission = privatePath;
             throw new ExternalPublicationError(result.error, result, error);
           }
         }),
