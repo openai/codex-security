@@ -29,67 +29,75 @@ type PluginRetry = ValidationProviderAssessment & {
   disputes?: Record<string, Dispute>;
 };
 
-/** Update a single poll. Only an unresolved, detached score needs a separate
- * record. All other disputes can be recovered from the assessment itself. */
+// Keep disputed evidence, but refresh issue metadata and the reason for deferral.
+function deferAssessment(
+  update: ValidationProviderAssessment,
+  record: ValidationItemRecord,
+  unavailable = record.unavailable ??
+    "Retry when a newer validation is available.",
+) {
+  const current = update.record!;
+  update.disposition = "deferred";
+  update.unavailable = unavailable;
+  update.provenance = {
+    ...update.provenance,
+    validatedAt: record.freshness.validatedAt,
+  };
+  update.record = {
+    ...record,
+    disposition: "deferred",
+    unavailable,
+    issueFindingCount: current.issueFindingCount,
+    providerSeverity: current.providerSeverity,
+    issueUrl: current.issueUrl,
+    reasons: record.reasons.map((item) =>
+      item.reason === record.unavailable
+        ? { ...item, reason: unavailable }
+        : item,
+    ),
+  };
+  update.report = validationSummary([update]);
+}
+
+/** Only a detached score dispute needs a separate record after this poll. */
 function reconcileDispute(
   { record: tied, reconfirmAfter }: Dispute,
   update: ValidationProviderAssessment,
   prior?: ValidationItemRecord,
-) {
+): Dispute | undefined {
   const current = update.record!;
-  const time = evidenceTime(tied);
-  const delta = compareTimestamps(evidenceTime(current), time);
-  const linked = prior?.issueArn === current.issueArn && !prior?.issueUnlinked;
-
-  // Carry the disputed evidence with live issue metadata, never a previous
-  // lookup error in place of the current reason for deferral.
-  const defer = (unavailable: string, record = tied) => {
-    update.disposition = "deferred";
-    update.unavailable = unavailable;
-    update.provenance = {
-      ...update.provenance,
-      validatedAt: record.freshness.validatedAt,
-    };
-    update.record = {
-      ...record,
-      disposition: "deferred",
-      unavailable,
-      issueFindingCount: current.issueFindingCount,
-      providerSeverity: current.providerSeverity,
-      issueUrl: current.issueUrl,
-      reasons: record.reasons.map((item) =>
-        item.reason === record.unavailable
-          ? { ...item, reason: unavailable }
-          : item,
-      ),
-    };
-    update.report = validationSummary([update]);
-  };
-  if (!tied.scoringPending) {
-    if (!(delta > 0))
-      defer(tied.unavailable ?? "Retry when a newer validation is available.");
-    return;
-  }
-
   const scoreConflict =
     "Continuum has not returned a newer score to resolve the earlier conflict. Retry validation.";
-  if (current.validationArtifactId === tied.validationArtifactId) {
+  if (
+    tied.scoringPending &&
+    current.validationArtifactId === tied.validationArtifactId
+  ) {
     const scoredAt = tied.freshness.scoredAt!;
     if (compareTimestamps(current.freshness.scoredAt ?? "", scoredAt) > 0)
       return;
     if (current.scoringPending) current.freshness.scoredAt = scoredAt;
-    else if (current.scoringArtifactId) defer(scoreConflict);
+    else if (current.scoringArtifactId)
+      deferAssessment(update, tied, scoreConflict);
     return;
   }
 
-  // A newer validation or a provider-reported validation tie takes precedence.
-  if (delta > 0 || (delta === 0 && !current.validationArtifactId)) return;
+  const time = evidenceTime(tied);
+  const delta = compareTimestamps(evidenceTime(current), time);
+  if (delta > 0) return;
+  if (!tied.scoringPending) {
+    deferAssessment(update, tied);
+    return;
+  }
+  // A validation tie reported by the provider supersedes a score dispute.
+  if (delta === 0 && !current.validationArtifactId) return;
+
+  const linked = prior?.issueArn === current.issueArn && !prior?.issueUnlinked;
   if (
     delta < 0 &&
     linked &&
     prior?.validationArtifactId === tied.validationArtifactId
   ) {
-    defer(scoreConflict);
+    deferAssessment(update, tied, scoreConflict);
     return;
   }
 
@@ -98,7 +106,7 @@ function reconcileDispute(
     delta === 0
       ? `Continuum returned conflicting validations (${tied.validationArtifactId}, ${current.validationArtifactId}). Retry when a newer validation is available.`
       : "Continuum returned older validation evidence. Retry to confirm the current validation.";
-  defer(unavailable, {
+  const unknown: ValidationItemRecord = {
     itemId: current.itemId,
     provider: current.provider,
     submittedAt: current.submittedAt,
@@ -117,7 +125,8 @@ function reconcileDispute(
       evidenceCreatedAt: time,
     },
     reasons: [],
-  });
+  };
+  deferAssessment(update, unknown, unavailable);
   // Equal-time validations need a newer run. After a move, a fresh poll
   // can instead reconfirm the original validation and settle its score.
   if (delta !== 0)

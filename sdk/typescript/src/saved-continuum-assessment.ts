@@ -272,8 +272,8 @@ function pendingScore(
     return pending;
 }
 
-/** CLI requests establish membership in start order. Only compare artifacts
- * within one issue. Require the workbench and CLI to agree on membership. */
+/** CLI requests establish membership in start order. Evidence from previous
+ * visits can reveal disputes but cannot restore a verdict or a score. */
 function selectConclusion(
   cli: { item: Conclusion; requestedAt: number | undefined }[],
   plugin: Conclusion | undefined,
@@ -286,65 +286,65 @@ function selectConclusion(
       item.issueUnlinked || (item.issueArn && item.issueArn !== issue),
   );
   if (plugin?.issueUnlinked && issue) return;
-  if (!change && !pending) {
-    const records = cli.map(({ item }) => item);
-    if (plugin) records.unshift(plugin);
-    return selectEvidence(records);
-  }
   if (change && plugin?.issueArn && plugin.issueArn !== issue) return;
 
-  // Before a move, evidence can only expose conflicts. Missing or equal
-  // request times cannot confirm a link.
+  // Missing or equal request times cannot confirm a return.
+  const needsConfirmation = Boolean(change || pending);
   const cutoff = Math.max(
     change ? (change.requestedAt ?? Infinity) : 0,
     pending?.reconfirmAfter ?? 0,
   );
-  const records: Conclusion[] = [];
-  const historical: Conclusion[] = [];
+  const current: Conclusion[] = [];
+  const history: Conclusion[] = [];
   for (const { item, requestedAt } of cli) {
     if (
+      !needsConfirmation ||
       (item === change?.item && !issue) ||
       (requestedAt !== undefined && requestedAt > cutoff)
     )
-      records.push(item);
+      current.push(item);
     else if (issue && item.issueArn === issue && evidenceTime(item))
-      historical.push(item);
+      history.push(item);
   }
+  if (needsConfirmation && issue && plugin?.issueArn === issue)
+    history.push(pending?.record ?? plugin);
+  else if (plugin) current.unshift(plugin);
+
+  const terminal = current.find((item) => item.verdict !== "UNAVAILABLE");
+  if (needsConfirmation && issue && terminal?.issueArn !== issue) return;
+  if (!terminal) return current.at(-1);
+  // A failed artifact read can still confirm that the finding changed issues.
   if (
-    issue &&
-    !records.some(
-      (item) => item.issueArn === issue && item.verdict !== "UNAVAILABLE",
-    )
+    current.some(({ issueArn }) => issueArn && issueArn !== terminal.issueArn)
   )
     return;
-  if (pending && issue === pending.record.issueArn)
-    historical.push(pending.record);
-  else if (change && plugin?.issueArn) historical.push(plugin);
-  else if (plugin) records.unshift(plugin);
-  return selectEvidence(records, historical);
+
+  return selectEvidence(current, history);
 }
 
-/** Older visits to the same issue can reveal a dispute, but cannot supply
- * a verdict or score after membership changes. */
-function selectEvidence(records: Conclusion[], historical: Conclusion[] = []) {
-  const terminal = records.filter((item) => item.verdict !== "UNAVAILABLE");
-  if (!terminal.length) return records.at(-1);
-  // A failed artifact read can still confirm that the finding changed issues.
-  const issue = terminal[0]!.issueArn;
-  if (records.some(({ issueArn }) => issueArn && issueArn !== issue)) return;
-  let latest = [terminal[0]!];
-  for (const item of terminal.slice(1).concat(historical)) {
-    if (item.verdict === "UNAVAILABLE") continue;
+/** Keep the first copy of identical evidence and any ties at the newest time. */
+function newest(items: Conclusion[], timeOf: (item: Conclusion) => string) {
+  let latest = items.slice(0, 1);
+  for (const item of items.slice(1)) {
     const prev = latest[0]!;
     if (isDeepStrictEqual(prev, item)) continue;
-    if (!prev.issueArn || prev.issueArn !== item.issueArn) return;
-    const delta = compareTimestamps(evidenceTime(item), evidenceTime(prev));
-    if (!Number.isFinite(delta)) return;
+    if (!prev.issueArn || prev.issueArn !== item.issueArn) return [];
+    const delta = compareTimestamps(timeOf(item), timeOf(prev));
+    if (!Number.isFinite(delta)) return [];
     if (delta > 0) latest = [item];
     if (delta === 0) latest.push(item);
   }
-  const first = latest[0]!;
-  if (historical.includes(first)) return;
+  return latest;
+}
+
+function selectEvidence(current: Conclusion[], history: Conclusion[]) {
+  // Put current evidence first so identical historical copies cannot displace it.
+  const evidence = current
+    .concat(history)
+    .filter((item) => item.verdict !== "UNAVAILABLE");
+  const latest = newest(evidence, evidenceTime);
+  const first = latest[0];
+  if (!first || history.includes(first)) return;
   if (latest.length === 1) return first;
   const validation = withoutScore(first);
   if (
@@ -359,22 +359,8 @@ function selectEvidence(records: Conclusion[], historical: Conclusion[] = []) {
       item.freshness.scoredAt &&
       (item.scoringArtifactId || item.scoringPending),
   );
-  scored.sort((a, b) =>
-    compareTimestamps(b.freshness.scoredAt!, a.freshness.scoredAt!),
-  );
-  const best = scored[0];
-  if (
-    best &&
-    !historical.includes(best) &&
-    !best.scoringPending &&
-    !scored.some(
-      (item) =>
-        compareTimestamps(
-          item.freshness.scoredAt!,
-          best.freshness.scoredAt!,
-        ) === 0 && !isDeepStrictEqual(item, best),
-    )
-  )
+  const [best, conflict] = newest(scored, (item) => item.freshness.scoredAt!);
+  if (best && !conflict && !best.scoringPending && !history.includes(best))
     return best;
   return { ...validation, scoringPending: true };
 }
