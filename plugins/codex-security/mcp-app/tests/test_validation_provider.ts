@@ -38,17 +38,25 @@ const {
   readCompletedValidation,
   validateCompletedScan,
   validationCompletionText,
-} = (await importSource(
-  join(import.meta.dirname, "../src/validation-provider.ts"),
-)) as typeof Host;
+} = (await importSource("src/validation-provider.ts")) as typeof Host;
 
-const { deriveFindingIdentity } = await importSource(
-  join(import.meta.dirname, "../src/contract-values.ts"),
-);
+const { deriveFindingIdentity } = await importSource("src/contract-values.ts");
 const configuration = {
   provider: "continuum",
   continuum: { environment_id: "example" },
 };
+
+async function validationRoot(prefix: string) {
+  const root = await temporaryDirectory(prefix);
+  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  async function cleanup() {
+    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+    await rm(root, { recursive: true, force: true });
+  }
+  return { root, cleanup };
+}
 
 async function sealedScan(
   scanDir: string,
@@ -140,9 +148,9 @@ await test("unconfigured plugin scans never invoke a validation provider", async
 for (const schemaVersion of [undefined, 2, 4, 5, 6]) {
   const mixed = schemaVersion === 2;
   await test(`legacy version ${schemaVersion} assessments refresh only on explicit completion`, async () => {
-    const root = await temporaryDirectory("plugin-validation-upgrade-");
-    const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-    process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+    const { root, cleanup } = await validationRoot(
+      "plugin-validation-upgrade-",
+    );
     try {
       const directory = join(root, "state", "validation-providers");
       const repositoryPath = join(root, "repository");
@@ -212,17 +220,13 @@ for (const schemaVersion of [undefined, 2, 4, 5, 6]) {
       await validateCompletedScan(scan, resolveProvider);
       assert.deepEqual(calls, ids);
     } finally {
-      if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-      else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-      await rm(root, { recursive: true, force: true });
+      await cleanup();
     }
   });
 }
 
 await test("explicit completion retries pending assessments and preserves terminal results and sealed artifacts", async () => {
-  const root = await temporaryDirectory("plugin-validation-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  const { root, cleanup } = await validationRoot("plugin-validation-");
   try {
     const repository = join(root, "repository");
     const scanDir = join(root, "scan");
@@ -365,21 +369,13 @@ await test("explicit completion retries pending assessments and preserves termin
       /High → Critical/,
     );
   } finally {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
 await test("a conflicting rejoin blocks automatic upload by the original caller", async (t) => {
-  const root = await temporaryDirectory("plugin-consent-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
-  t.after(async () => {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
-  });
+  const { root, cleanup } = await validationRoot("plugin-consent-");
+  t.after(cleanup);
   const enabled = {
     ...configuration,
     continuum: { ...configuration.continuum, include_local_validation: true },
@@ -433,14 +429,8 @@ await test("a conflicting rejoin blocks automatic upload by the original caller"
 });
 
 await test("only the selected completed scan can start a validation batch", async (t) => {
-  const root = await temporaryDirectory("plugin-seal-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
-  t.after(async () => {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
-  });
+  const { root, cleanup } = await validationRoot("plugin-seal-");
+  t.after(cleanup);
   const { scan } = await sealedScan(root, root, "sealed");
   await bindValidationProviderConfiguration(scan.scanId, configuration, true);
   await bindValidationProviderConfiguration("other", configuration, true);
@@ -466,9 +456,7 @@ await test("only the selected completed scan can start a validation batch", asyn
 
 for (const reachable of [true, false, undefined])
   await test(`compact completion distinguishes shared issue results with reachability ${reachable}`, async () => {
-    const root = await temporaryDirectory("plugin-validation-issue-");
-    const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-    process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+    const { root, cleanup } = await validationRoot("plugin-validation-issue-");
     try {
       const scanDir = join(root, "scan");
       await mkdir(scanDir);
@@ -542,16 +530,12 @@ for (const reachable of [true, false, undefined])
       assert.equal(saved.items[0].resultScope, "issue");
       assert.equal(saved.items[0].issueFindingCount, 2);
     } finally {
-      if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-      else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-      await rm(root, { recursive: true, force: true });
+      await cleanup();
     }
   });
 
 await test("model-authored supplemental files cannot impersonate provider results or disclose symlink targets", async () => {
-  const root = await temporaryDirectory("plugin-validation-symlink-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  const { root, cleanup } = await validationRoot("plugin-validation-symlink-");
   try {
     const scanDir = join(root, "scan");
     await mkdir(scanDir);
@@ -617,19 +601,15 @@ await test("model-authored supplemental files cannot impersonate provider result
       await rm(recordsPath);
     }
   } finally {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
 await test("app-backed Deep Scan binds the saved setup provider without a project path", async () => {
   const { WorkbenchDeepScanStore } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/store.ts"),
+    "src/deep-scan/store.ts",
   );
-  const root = await temporaryDirectory("plugin-validation-snapshot-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  const { root, cleanup } = await validationRoot("plugin-validation-snapshot-");
   try {
     const configuration = {
       provider: "continuum",
@@ -675,23 +655,17 @@ await test("app-backed Deep Scan binds the saved setup provider without a projec
     assert.equal(resolved, true);
     assert.equal(result?.status, "complete");
   } finally {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
 await test("rejoining Deep Scan recovers an interrupted binding from saved setup", async () => {
   const { WorkbenchDeepScanStore } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/store.ts"),
+    "src/deep-scan/store.ts",
   );
-  const { runWorkbench } = await importSource(
-    join(import.meta.dirname, "../src/workbench-client.ts"),
-  );
-  const root = await temporaryDirectory("plugin-validation-rejoin-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  const { runWorkbench } = await importSource("src/workbench-client.ts");
+  const { root, cleanup } = await validationRoot("plugin-validation-rejoin-");
   const state = join(root, "state");
-  process.env.CODEX_SECURITY_STATE_DIR = state;
   try {
     const input = {
       targetPath: join(root, "repository"),
@@ -718,16 +692,12 @@ await test("rejoining Deep Scan recovers an interrupted binding from saved setup
       configuration,
     );
   } finally {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
 await test("batch transport failure is supplemental, not a scan completion failure", async () => {
-  const root = await temporaryDirectory("plugin-validation-batch-");
-  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
-  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  const { root, cleanup } = await validationRoot("plugin-validation-batch-");
   try {
     const { scan } = await sealedScan(root, root, "batch-scan", 2);
     await bindValidationProviderConfiguration(scan.scanId, configuration, true);
@@ -745,9 +715,7 @@ await test("batch transport failure is supplemental, not a scan completion failu
     assert.equal(result?.findings, 2);
     assert.match(String(result?.report), /offline/);
   } finally {
-    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
-    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
-    await rm(root, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
@@ -789,14 +757,12 @@ esac
       );
       await chmod(aws, 0o755);
       process.env.PATH = bin + delimiter + oldPath;
-      const { runWorkbench } = await importSource(
-        join(import.meta.dirname, "../src/workbench-client.ts"),
-      );
+      const { runWorkbench } = await importSource("src/workbench-client.ts");
       const { createScanArtifactContext } = await importSource(
-        join(import.meta.dirname, "../src/artifact-context.ts"),
+        "src/artifact-context.ts",
       );
       const { recordCodexSecurityScanDraftViaWorkbench } = await importSource(
-        join(import.meta.dirname, "../src/artifact-scan-draft.ts"),
+        "src/artifact-scan-draft.ts",
       );
       const source = join(repository, "app.py");
       await writeFile(source, "# synthetic source\n");

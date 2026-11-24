@@ -20,7 +20,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
 import { mock } from "node:test";
-import { importSource } from "./import-module.ts";
+import { bundledMcpDefine, importSource } from "./import-module.ts";
 
 const {
   compactDiscoveryCandidateSchema,
@@ -28,19 +28,9 @@ const {
   recordCodexSecurityDiscoveryCandidates,
   workbenchDiscoveryCandidatesInputSchema,
   workbenchListCodexSecurityCandidatesInputSchema,
-} = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
-  {
-    define: {
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-          import.meta.url,
-        ).href,
-      ),
-    },
-  },
-);
+} = await importSource("src/artifact-discovery.ts", {
+  define: bundledMcpDefine("server"),
+});
 
 const pluginRoot = path.join(import.meta.dirname, "../../");
 const definitions = await readJson(
@@ -124,113 +114,57 @@ try {
 }
 
 async function verifyInputSchema() {
-  const parseCandidate = (value: unknown) =>
-    workbenchDiscoveryCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-      candidates: [value],
-    });
+  const scanId = "scan-fixture";
   const candidate = rawCandidate();
-  assert.equal(parseCandidate(candidate).success, true);
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      cwe_ids: [" cwe-089 "],
-    }).success,
-    true,
-  );
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      cwe_ids: [],
-    }).success,
-    true,
-  );
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      candidate_id: "candidate-model-invented",
-    }).success,
-    false,
-  );
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      locations: [],
-    }).success,
-    false,
-  );
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      locations: [{ path: "src/routes.ts", start_line: 1, role: "invented" }],
-    }).success,
-    false,
-  );
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      locations: [{ path: "src/routes.ts", start_line: 0, role: "sink" }],
-    }).success,
-    false,
-  );
-  assert.equal(
-    parseCandidate({
-      ...candidate,
-      evidence: "  ",
-    }).success,
-    false,
-  );
-  assert.equal(
-    workbenchDiscoveryCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-      rows: [candidate],
-    }).success,
-    false,
-  );
-  assert.equal(
-    workbenchDiscoveryCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-      candidates: [],
-    }).success,
-    true,
-  );
-  assert.equal(
-    workbenchDiscoveryCandidatesInputSchema.safeParse({
-      candidates: [],
-    }).success,
-    false,
-  );
-  assert.equal(
-    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-    }).success,
-    true,
-  );
-  assert.equal(
-    workbenchListCodexSecurityCandidatesInputSchema.safeParse({}).success,
-    false,
-  );
-  assert.equal(
-    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-      cursor: "01",
-    }).success,
-    false,
-  );
-  assert.equal(
-    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-      limit: 0,
-    }).success,
-    false,
-  );
-  assert.equal(
-    workbenchListCodexSecurityCandidatesInputSchema.safeParse({
-      scanId: "scan-fixture",
-      limit: 1001,
-    }).success,
-    false,
-  );
+  for (const [label, changes, accepted] of [
+    ["valid candidate", {}, true],
+    ["padded CWE", { cwe_ids: [" cwe-089 "] }, true],
+    ["no CWEs", { cwe_ids: [] }, true],
+    [
+      "supplied candidate ID",
+      { candidate_id: "candidate-model-invented" },
+      false,
+    ],
+    ["empty locations", { locations: [] }, false],
+    [
+      "unknown role",
+      {
+        locations: [{ path: "src/routes.ts", start_line: 1, role: "invented" }],
+      },
+      false,
+    ],
+    [
+      "line zero",
+      { locations: [{ path: "src/routes.ts", start_line: 0, role: "sink" }] },
+      false,
+    ],
+    ["blank evidence", { evidence: "  " }, false],
+  ] as const) {
+    const result = workbenchDiscoveryCandidatesInputSchema.safeParse({
+      scanId,
+      candidates: [{ ...candidate, ...changes }],
+    });
+    assert.equal(result.success, accepted, label);
+  }
+  for (const [label, payload, accepted] of [
+    ["rows instead of candidates", { scanId, rows: [candidate] }, false],
+    ["empty candidates", { scanId, candidates: [] }, true],
+    ["write without scan ID", { candidates: [] }, false],
+  ] as const) {
+    const result = workbenchDiscoveryCandidatesInputSchema.safeParse(payload);
+    assert.equal(result.success, accepted, label);
+  }
+  for (const [label, page, accepted] of [
+    ["default page", { scanId }, true],
+    ["read without scan ID", {}, false],
+    ["padded cursor", { scanId, cursor: "01" }, false],
+    ["zero limit", { scanId, limit: 0 }, false],
+    ["oversized limit", { scanId, limit: 1001 }, false],
+  ] as const) {
+    const result =
+      workbenchListCodexSecurityCandidatesInputSchema.safeParse(page);
+    assert.equal(result.success, accepted, label);
+  }
 }
 
 async function verifyNormalizationAndPagination(context: ArtifactContext) {
@@ -890,7 +824,7 @@ async function verifyNormalizerDiagnostics(context: ArtifactContext) {
     `throw new Error(${JSON.stringify(detail)});`,
   );
   const { recordCodexSecurityDiscoveryCandidates: record } = await importSource(
-    path.join(import.meta.dirname, "../src/artifact-discovery.ts"),
+    "src/artifact-discovery.ts",
     {
       define: {
         "import.meta.url": JSON.stringify(

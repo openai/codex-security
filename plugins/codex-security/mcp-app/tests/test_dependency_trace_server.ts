@@ -1,10 +1,13 @@
-import { nativeRules, sourceStep } from "./support/native-trace-rules.ts";
+import {
+  available,
+  nativeRules,
+  sourceStep,
+} from "./support/native-trace-rules.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -13,30 +16,18 @@ import type {
   TraceEvidence,
   TraceResult,
 } from "../src/dependency-trace/types.ts";
-import { applicationRoot, buildServer } from "./build-server.ts";
+import { buildServer, loadGraphSession } from "./build-server.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 test("operator discovery exclusions preserve nested policy and exact caller follow-ups", async (t) => {
   for (const command of ["rg", "opengrep"]) {
-    try {
-      await promisify(execFile)(command, ["--version"]);
-    } catch {
-      return t.skip(command + " required");
-    }
+    if (!(await available(command))) return t.skip(command + " required");
   }
   const temps = createTemporaryDirectories(true);
   t.after(() => temps.cleanup());
   const checkout = await temps.create("source-scope-checkout-");
   const runtime = await temps.create("source-scope-session-");
-  const bundle = join(runtime, "session.cjs");
-  await buildServer(bundle, {
-    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
-  });
-  const { createDependencyGraphSession } = (
-    (await import(pathToFileURL(bundle).href)) as {
-      default: typeof import("../src/dependency-trace/session.ts");
-    }
-  ).default;
+  const { createDependencyGraphSession } = await loadGraphSession(runtime);
   await mkdir(join(checkout, "examples", "runtime"), { recursive: true });
   await mkdir(join(checkout, "tests"));
   await mkdir(join(checkout, "docs"));
@@ -212,25 +203,13 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
 
 test("filtered directory discovery registers OpenGrep hits without selecting files", async (t) => {
   for (const command of ["rg", "opengrep"]) {
-    try {
-      await promisify(execFile)(command, ["--version"]);
-    } catch {
-      return t.skip(command + " required");
-    }
+    if (!(await available(command))) return t.skip(command + " required");
   }
   const temps = createTemporaryDirectories(true);
   t.after(() => temps.cleanup());
   const checkout = await temps.create("dependency-batch-checkout-");
   const runtime = await temps.create("dependency-batch-session-");
-  const bundle = join(runtime, "session.cjs");
-  await buildServer(bundle, {
-    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
-  });
-  const { createDependencyGraphSession } = (
-    (await import(pathToFileURL(bundle).href)) as {
-      default: typeof import("../src/dependency-trace/session.ts");
-    }
-  ).default;
+  const { createDependencyGraphSession } = await loadGraphSession(runtime);
   const session = await createDependencyGraphSession(checkout, true);
   t.after(() => session.close());
 
@@ -669,15 +648,7 @@ test("only host catalog results settle requested service lookups", async (t) => 
   t.after(() => temps.cleanup());
   const checkout = await temps.create("dependency-catalog-checkout-");
   const runtime = await temps.create("dependency-catalog-session-");
-  const bundle = join(runtime, "session.cjs");
-  await buildServer(bundle, {
-    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
-  });
-  const { createDependencyGraphSession } = (
-    (await import(pathToFileURL(bundle).href)) as {
-      default: typeof import("../src/dependency-trace/session.ts");
-    }
-  ).default;
+  const { createDependencyGraphSession } = await loadGraphSession(runtime);
   const session = await createDependencyGraphSession(checkout, true);
   t.after(() => session.close());
   const resolve = "resolve_codex_security_services";

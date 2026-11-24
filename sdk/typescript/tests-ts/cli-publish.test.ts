@@ -38,20 +38,15 @@ const DESTINATION_OPTIONS = [
   "--linear-project",
   "project-from-flags",
 ] as const;
+
+function linearPublishArgs(...args: string[]) {
+  return ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, ...args];
+}
+
 const { temporaryDirectory: publicationDirectory, cleanup } =
   createApiTestFixtures("codex-security-cli-publication-", false);
 
 afterEach(cleanup);
-
-function linearPublishArgs(...flags: string[]) {
-  return [
-    "publish",
-    "scan",
-    "completed-scan",
-    ...DESTINATION_OPTIONS,
-    ...flags,
-  ];
-}
 
 test.each(["linear", "custom"] as const)(
   "interactive %s selection preserves scan identity and cancellation",
@@ -1895,47 +1890,27 @@ describe("publish scan", () => {
     const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
 
     const deps = dependencies();
-    deps.publishScan = async (_scanDirectory, options) => {
-      options.onProgress?.({ type: "started", scanId: "scan-123", total: 2 });
-      options.onProgress?.({
-        type: "codex_event",
-        event: {
-          type: "item.completed",
-          item: {
-            id: "reasoning-1",
-            type: "reasoning",
-            text: "Checking the connected Linear project.",
-          },
+
+    deps.publishScan = publishWithCodexEvents(2, [
+      {
+        type: "item.completed",
+        item: {
+          id: "reasoning-1",
+          type: "reasoning",
+          text: "Checking the connected Linear project.",
         },
-      });
-      options.onProgress?.({
-        type: "codex_event",
-        event: {
-          type: "item.started",
-          item: {
-            id: "linear-team",
-            type: "mcp_tool_call",
-            server: "codex_apps",
-            tool: "linear_get_team",
-            arguments: { query: "team-from-flags" },
-          },
+      },
+      {
+        type: "item.started",
+        item: {
+          id: "linear-team",
+          type: "mcp_tool_call",
+          server: "codex_apps",
+          tool: "linear_get_team",
+          arguments: { query: "team-from-flags" },
         },
-      });
-      options.onProgress?.({
-        type: "issue_completed",
-        findingId: "finding-1",
-        issueIdentifier: "SEC-123",
-        completed: 1,
-        total: 2,
-      });
-      options.onProgress?.({
-        type: "completed",
-        created: 1,
-        failed: 1,
-        total: 2,
-      });
-      return publicationResult();
-    };
+      },
+    ]);
 
     expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
@@ -2009,48 +1984,30 @@ describe("publish scan", () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 
     const deps = dependencies();
-    deps.publishScan = async (_scanDirectory, options) => {
-      options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
-      const reasoning = {
-        type: "item.completed",
+    const reasoning = {
+      type: "item.completed",
+      item: {
+        id: "reasoning-1",
+        type: "reasoning",
+        text: "Preparing the Linear issue.\u001B[31m",
+      },
+    };
+    deps.publishScan = publishWithCodexEvents(1, [
+      reasoning,
+      reasoning,
+      {
+        type: "item.started",
         item: {
-          id: "reasoning-1",
-          type: "reasoning",
-          text: "Preparing the Linear issue.\u001B[31m",
-        },
-      };
-      options.onProgress?.({ type: "codex_event", event: reasoning });
-      options.onProgress?.({ type: "codex_event", event: reasoning });
-      options.onProgress?.({
-        type: "codex_event",
-        event: {
-          type: "item.started",
-          item: {
-            id: "linear-create",
-            type: "mcp_tool_call",
-            server: "codex_apps",
-            tool: "linear_save_issue",
-            arguments: {
-              description: "PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED",
-            },
+          id: "linear-create",
+          type: "mcp_tool_call",
+          server: "codex_apps",
+          tool: "linear_save_issue",
+          arguments: {
+            description: "PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED",
           },
         },
-      });
-      options.onProgress?.({
-        type: "issue_completed",
-        findingId: "finding-1",
-        issueIdentifier: "SEC-123",
-        completed: 1,
-        total: 1,
-      });
-      options.onProgress?.({
-        type: "completed",
-        created: 1,
-        failed: 0,
-        total: 1,
-      });
-      return publicationResult();
-    };
+      },
+    ]);
 
     expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
@@ -2115,76 +2072,50 @@ describe("publish scan", () => {
       });
 
       const deps = dependencies();
-      deps.publishScan = async (_scanDirectory, options) => {
-        options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
-        options.onProgress?.({
-          type: "codex_event",
-          event: {
-            type: "item.completed",
-            item: {
-              id: "reasoning-1",
-              type: "reasoning",
-              text: "Saving the verified Linear issue.",
+
+      deps.publishScan = publishWithCodexEvents(1, [
+        {
+          type: "item.completed",
+          item: {
+            id: "reasoning-1",
+            type: "reasoning",
+            text: "Saving the verified Linear issue.",
+          },
+        },
+        {
+          type: "item.started",
+          item: {
+            id: "handoff-command",
+            type: "command_execution",
+            command:
+              "python -c 'write(\"PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED\")'",
+          },
+        },
+        {
+          type: "item.started",
+          item: {
+            id: "handoff-tool",
+            type: "mcp_tool_call",
+            server: "local-tools",
+            tool: "exec",
+            arguments: {
+              cmd: "append PRIVATE_ISSUE_DESCRIPTION_MUST_NOT_BE_LOGGED",
             },
           },
-        });
-        options.onProgress?.({
-          type: "codex_event",
-          event: {
-            type: "item.started",
-            item: {
-              id: "handoff-command",
-              type: "command_execution",
-              command:
-                "python -c 'write(\"PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED\")'",
+        },
+        {
+          type: "item.started",
+          item: {
+            id: "linear-create",
+            type: "mcp_tool_call",
+            server: "codex_apps",
+            tool: "linear.save_issue",
+            arguments: {
+              description: "PRIVATE_LINEAR_ARGUMENT_MUST_NOT_BE_LOGGED",
             },
           },
-        });
-        options.onProgress?.({
-          type: "codex_event",
-          event: {
-            type: "item.started",
-            item: {
-              id: "handoff-tool",
-              type: "mcp_tool_call",
-              server: "local-tools",
-              tool: "exec",
-              arguments: {
-                cmd: "append PRIVATE_ISSUE_DESCRIPTION_MUST_NOT_BE_LOGGED",
-              },
-            },
-          },
-        });
-        options.onProgress?.({
-          type: "codex_event",
-          event: {
-            type: "item.started",
-            item: {
-              id: "linear-create",
-              type: "mcp_tool_call",
-              server: "codex_apps",
-              tool: "linear.save_issue",
-              arguments: {
-                description: "PRIVATE_LINEAR_ARGUMENT_MUST_NOT_BE_LOGGED",
-              },
-            },
-          },
-        });
-        options.onProgress?.({
-          type: "issue_completed",
-          findingId: "finding-1",
-          issueIdentifier: "SEC-123",
-          completed: 1,
-          total: 1,
-        });
-        options.onProgress?.({
-          type: "completed",
-          created: 1,
-          failed: 0,
-          total: 1,
-        });
-        return publicationResult();
-      };
+        },
+      ]);
 
       expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
@@ -2737,6 +2668,32 @@ describe("publish scan", () => {
     expect(stdout.text()).toBe("");
   });
 });
+
+function publishWithCodexEvents(
+  total: number,
+  events: unknown[],
+): ReturnType<typeof dependencies>["publishScan"] {
+  return async (_scanDirectory, options) => {
+    options.onProgress?.({ type: "started", scanId: "scan-123", total });
+    for (const event of events) {
+      options.onProgress?.({ type: "codex_event", event });
+    }
+    options.onProgress?.({
+      type: "issue_completed",
+      findingId: "finding-1",
+      issueIdentifier: "SEC-123",
+      completed: 1,
+      total,
+    });
+    options.onProgress?.({
+      type: "completed",
+      created: 1,
+      failed: total - 1,
+      total,
+    });
+    return publicationResult();
+  };
+}
 
 const publishWithProgress: ReturnType<
   typeof dependencies
