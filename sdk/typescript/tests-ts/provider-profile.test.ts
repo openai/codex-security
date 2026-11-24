@@ -848,46 +848,33 @@ test.each([
   },
 );
 
-test("private profiles adapt direct xAI without rerouting gateways or other providers", async () => {
-  const home = await temporaryDirectory();
-  const profile = await createProviderProfile(home, {
+const xai = {
+  name: "xAI",
+  base_url: "https://api.x.ai/v1",
+  wire_api: "responses",
+  env_key: "XAI_API_KEY",
+};
+const providers = {
+  xai,
+  gateway: { base_url: "http://127.0.0.1:8317/v1" },
+  socket: { ...xai, supports_websockets: true },
+  openai: { base_url: "https://api.openai.com/v1" },
+};
+
+test("private profiles adapt only the selected direct xAI HTTP endpoint", async () => {
+  const profile = await createProviderProfile(await temporaryDirectory(), {
     model_provider: "xai",
-    model_providers: {
-      gateway: { base_url: "http://127.0.0.1:8317/v1" },
-      xai: {
-        name: "xAI",
-        base_url: "https://api.x.ai/v1",
-        wire_api: "responses",
-        env_key: "XAI_API_KEY",
-      },
-      socket: { base_url: "https://api.x.ai/v1", supports_websockets: true },
-      openai: {
-        name: "OpenAI",
-        base_url: "https://api.openai.com/v1",
-        wire_api: "responses",
-      },
-    },
+    model_providers: providers,
   });
   try {
     const written = parse(await readFile(profile.path, "utf8")) as {
-      model_providers: Record<string, Record<string, unknown>>;
+      model_providers: typeof providers;
     };
-    const xai = written.model_providers["xai"]!;
-    expect(xai["base_url"]).toMatch(
-      /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
-    );
-    expect(xai["name"]).toBe("xAI");
-    expect(xai["env_key"]).toBe("XAI_API_KEY");
-    expect(written.model_providers["gateway"]).toEqual({
-      base_url: "http://127.0.0.1:8317/v1",
-    });
-    expect(written.model_providers["socket"]?.["base_url"]).toBe(
-      "https://api.x.ai/v1",
-    );
-    expect(written.model_providers["openai"]).toEqual({
-      name: "OpenAI",
-      base_url: "https://api.openai.com/v1",
-      wire_api: "responses",
+    const proxyUrl = written.model_providers.xai.base_url;
+    expect(proxyUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/);
+    expect(written.model_providers).toEqual({
+      ...providers,
+      xai: { ...xai, base_url: proxyUrl },
     });
     expect(profileProxyExclusions(profile, { NO_PROXY: "*" })["NO_PROXY"]).toBe(
       "*,127.0.0.1",
@@ -903,7 +890,6 @@ test("private profiles adapt direct xAI without rerouting gateways or other prov
         no_proxy: "b.test,127.0.0.1",
       });
     }
-    const proxyUrl = String(xai["base_url"]);
     await profile.cleanup();
     await expect(
       fetch(`${proxyUrl}/responses`, {
@@ -918,39 +904,29 @@ test("private profiles adapt direct xAI without rerouting gateways or other prov
   }
 });
 
-test("an inactive xAI definition keeps its native URL and proxy settings", async () => {
-  const providers = {
-    gateway: { base_url: "https://gateway.example.test/v1" },
-    xai: { base_url: "https://api.x.ai/v1" },
-  };
-  const profile = await createProviderProfile(await temporaryDirectory(), {
-    model_provider: "gateway",
-    model_providers: providers,
-  });
-  try {
-    expect(parse(await readFile(profile.path, "utf8"))).toEqual({
+test.each(["gateway", "socket", "openai"])(
+  "selecting %s leaves all URLs and proxy settings unchanged",
+  async (selected) => {
+    const profile = await createProviderProfile(await temporaryDirectory(), {
+      model_provider: selected,
       model_providers: providers,
     });
-    expect(profileProxyExclusions(profile, {})).toEqual({});
-  } finally {
-    await profile.cleanup();
-  }
-});
+    try {
+      expect(parse(await readFile(profile.path, "utf8"))).toEqual({
+        model_providers: providers,
+      });
+      expect(profileProxyExclusions(profile, {})).toEqual({});
+    } finally {
+      await profile.cleanup();
+    }
+  },
+);
 
 test("replay profiles preserve the original upstream base URL", async () => {
   const root = await temporaryDirectory();
   const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
   const home = codexSecurityCredentialHome(environment);
-  const config = {
-    model_provider: "xai",
-    model_providers: {
-      xai: {
-        name: "xAI",
-        base_url: "https://api.x.ai/v1",
-        wire_api: "responses",
-      },
-    },
-  };
+  const config = { model_provider: "xai", model_providers: { xai } };
   const profile = await createProviderProfile(home, config, { replay: true });
   try {
     expect(JSON.parse(await readFile(profile.path, "utf8"))).toEqual(config);

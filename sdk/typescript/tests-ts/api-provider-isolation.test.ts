@@ -1160,6 +1160,7 @@ test.each([
   ["root", "openrouter"],
   ["profile", "openrouter"],
   ["root", "xai"],
+  ["profile", "xai"],
 ] as const)(
   "Deep workers, rerun and resume inherit the %s %s endpoint",
   async (selection, provider) => {
@@ -1226,34 +1227,22 @@ test.each([
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) =>
           codexFactory(async function runStreamed() {
-            const worker = parseToml(
-              await readFile(
-                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                "utf8",
-              ),
-            );
-            const runtime = worker["worker_runtime"] as JsonObject;
-            const profile = runtime["native_profile"];
-            const providerConfig =
-              typeof profile === "string"
-                ? await readProviderProfile(
-                    options.env!["CODEX_HOME"]!,
-                    profile,
-                  )
-                : {};
+            const env = options.env!;
+            const settings = await workerRuntimeSettings(env);
+            const providerConfig = settings.nativeProfile
+              ? await readProviderProfile(
+                  env["CODEX_HOME"]!,
+                  settings.nativeProfile,
+                )
+              : {};
             const expected = structuredClone(routing);
             if (provider === "xai") {
-              const settings = await workerRuntimeSettings(options.env!);
               expect(settings.nativeProfile).toBe(options.nativeProfile);
-              expect(options.env!["NO_PROXY"]).toBe(
-                "example.invalid,127.0.0.1",
-              );
-              expect(settings.environment?.["NO_PROXY"]).toBe(
-                options.env!["NO_PROXY"],
-              );
-              expect(settings.environment?.["XAI_API_KEY"]).toBe(
-                environment.XAI_API_KEY,
-              );
+              expect(env["NO_PROXY"]).toBe("example.invalid,127.0.0.1");
+              expect(settings.environment).toMatchObject({
+                NO_PROXY: env["NO_PROXY"],
+                XAI_API_KEY: environment.XAI_API_KEY,
+              });
               const selected = await effectiveProvider(
                 options.env!,
                 repository,
@@ -1272,7 +1261,9 @@ test.each([
             expect({ ...options.config, ...providerConfig }).toMatchObject(
               expected,
             );
-            expect({ ...runtime, ...providerConfig }).toMatchObject(expected);
+            expect({ ...settings.config, ...providerConfig }).toMatchObject(
+              expected,
+            );
             throw new Error("synthetic endpoint inherited");
           })(),
       },
