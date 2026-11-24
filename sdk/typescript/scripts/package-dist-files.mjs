@@ -138,6 +138,7 @@ const distModules = [
   "wiz-csv",
   "veracode-findings",
   "tenable-findings",
+  "tenzai-findings",
   "crowdstrike-findings",
   "grype-findings",
   "wiz-findings",
