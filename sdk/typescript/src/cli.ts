@@ -142,10 +142,12 @@ import { publishScanToCustom } from "./custom-publish.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  reviewContinuumPublication,
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { continuumRowErrors } from "./private-finding-import.js";
 import {
   collectContinuumFinding,
   collectContinuumIssues,
@@ -192,6 +194,7 @@ import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  standaloneRemediationText,
   verificationBatches,
   VerificationModeSchema,
   type FindingPatch,
@@ -463,6 +466,19 @@ import {
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import {
+  saveCliContinuumAssessments,
+  savedContinuumAssessments,
+} from "./saved-continuum-assessment.js";
+import { validationSummary } from "./validation-provider-report.js";
+import { validationProviderFromConfiguration } from "./validation-providers.js";
+import {
+  retryableAssessment,
+  supplementalValidationStatus,
+  unavailableAssessment,
+  type ValidationItemRecord,
+  type ValidationProviderAssessment,
+} from "./validation-provider.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -867,6 +883,11 @@ function renderExternalPublicationSummary(
       : `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
     ...(result.privateJob?.error
       ? [diagnosticValue(result.privateJob.error.message)]
+      : []),
+    ...(continuumRowErrors(result.privateJob)
+      ? [
+          "Check the job errors in the private inbox. For conflicting evidence, compare the current inbox records with a new --dry-run --format json before retrying.",
+        ]
       : []),
     ...result.failures.map(
       (item) =>
@@ -2629,6 +2650,18 @@ export async function main(
   const separator = argv.indexOf("--");
   const literalArgs = separator < 0 ? [] : argv.slice(separator + 1);
   if (separator >= 0) argv = argv.slice(0, separator);
+  // Keep the bare boolean form from consuming the repository positional.
+  let validationProviderOverride: string | undefined;
+  argv = argv.map((argument) => {
+    if (
+      !argument.startsWith("--validate=") ||
+      argument === "--validate=true" ||
+      argument === "--validate=false"
+    )
+      return argument;
+    validationProviderOverride = argument.slice("--validate=".length);
+    return "--validate";
+  });
   const inspection = argv.some((arg) => INSPECTION_FLAGS.includes(arg));
   const actionFlags = argv.filter(
     (arg) => arg === "--mcp" || arg === "--update",
@@ -4330,7 +4363,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Confirm publication of the previewed input without a terminal prompt.",
+            "Confirm the previewed input without a prompt. Continuum inbox updates require a matching --dry-run.",
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4518,8 +4551,12 @@ export async function main(
             const showPreview = () => {
               showScannerReport(preview);
               writeDiagnostic(
-                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nRetrying private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nPrior private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
+              if (preview.privateImport?.sourceCheckpoint)
+                writeDiagnostic(
+                  `Confirming this import can update evidence for matching ARNs in your inbox.\nSource checkpoint: ${diagnosticValue(preview.privateImport.sourceCheckpoint)}\n${preview.privateImport.retryOfJobId && !preview.resumed ? "This retries the full selection, including any previously accepted items.\n" : ""}`,
+                );
               if (preview.cloudUrl)
                 writeDiagnostic(
                   `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
@@ -4550,6 +4587,14 @@ export async function main(
               );
             };
             if (!structured) showPreview();
+            if (options.dryRun || options.yes)
+              await reviewContinuumPublication(
+                preview,
+                report,
+                dependencies.environment,
+                options.dryRun,
+                controller.signal,
+              );
             if (options.dryRun) {
               if (humanSummary)
                 renderedOutput = "Dry run complete. No findings uploaded.\n";
@@ -5742,7 +5787,9 @@ export async function main(
           validate: z
             .boolean()
             .default(false)
-            .describe("Run standalone finding validation after the scan."),
+            .describe(
+              "Validate after sealing the scan. Uses the configured provider, or the existing Codex validator. --validate=NAME overrides the provider.",
+            ),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -5845,6 +5892,19 @@ export async function main(
             directory,
             scope.sources,
           );
+          if (validationProviderOverride !== undefined) {
+            if (!validationProviderOverride.trim())
+              throw new CodexSecurityError(
+                "--validate=NAME requires a provider name.",
+              );
+            settings.validationProvider = {
+              ...settings.validationProvider,
+              provider: validationProviderOverride,
+            };
+          }
+          if (options.validate && settings.validationProvider) {
+            validationProviderFromConfiguration(settings.validationProvider);
+          }
           if (options.archiveExisting && settings.outputDir === undefined) {
             throw new CodexSecurityError(
               "--archive-existing requires --output-dir.",
@@ -7281,21 +7341,34 @@ export async function main(
       },
     })
     .command("validate", {
-      usage: [{ suffix: "<findings...> [options]" }, { suffix: "--records" }],
+      alias: { config: "c" },
+      usage: [
+        { suffix: "<findings...> [options]" },
+        { suffix: "--scan ID -c FILE [FINDING_ID...]" },
+        { suffix: "--records" },
+      ],
       examples: [{ args: { "findings...": "findings.json" } }],
-      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
+      hint: "With --scan, submit all open findings or pass IDs to narrow the selection. Review full findings locally with codex-security export --scan ID --export-format json --output -. With include_local_validation enabled, Continuum receives the complete validation method and summary, including any secrets. Use --records alone for host-provided reviews over JSON-RPC.",
+      output: jsonDocument.optional(),
       description:
-        "Assess candidate security findings using source evidence only.",
+        "Assess candidate security findings using source evidence, or submit sealed findings to a validation provider.",
       destructive: false,
       args: z.object({
         "findings...": z
           .string()
           .min(1, "A finding must not be empty.")
+          .optional()
           .describe(
-            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose.",
+            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose. With --scan, pass saved finding identifiers.",
           ),
       }),
       options: z.object({
+        config: PROJECT_CONFIG_OPTION,
+        scan: optionValue("--scan")
+          .optional()
+          .describe(
+            "Submit open findings from a saved scan ID or latest using the configured provider.",
+          ),
         records: z
           .boolean()
           .default(false)
@@ -7322,11 +7395,132 @@ export async function main(
           .optional()
           .describe("Return JSON matching a Codex-supported JSON Schema file."),
       }),
-      async run({ options }) {
+      async run({ options, format }) {
         let knowledgeBase: PreparedKnowledgeBase | undefined;
         try {
           if (options.records)
             throw new CodexSecurityError("Use validate --records alone.");
+          if (options.scan !== undefined) {
+            if (
+              options.model !== undefined ||
+              options.effort !== undefined ||
+              options.auth !== "auto" ||
+              options.codex.length ||
+              options.knowledgeBase.length ||
+              options.outputSchema ||
+              options.context ||
+              options.contextFile
+            )
+              throw new CodexSecurityError(
+                "Use only a selected project file and finding identifiers with validate --scan.",
+              );
+            const project = await selectedProjectConfig(
+              options.config,
+              dependencies,
+            );
+            const configuration = project?.input.scan?.validation;
+            if (!configuration)
+              throw new CodexSecurityError(
+                "Select a project file with scan.validation.provider using -c FILE.",
+              );
+            const provider = validationProviderFromConfiguration(configuration);
+            const selected = await selectSavedFindings(
+              positionals,
+              options.scan,
+              undefined,
+              dependencies,
+              "validation",
+            );
+            const openIds = new Set(
+              selected.findings.flatMap((f) => [f.occurrenceId, f.findingId]),
+            );
+            if (positionals.some((id) => !openIds.has(id)))
+              throw new CodexSecurityError(
+                "Choose open findings for validation.",
+              );
+            const controller = new AbortController();
+            const removeSignals = listenForAbort(dependencies, controller);
+            try {
+              const context = {
+                repositoryPath: selected.repository,
+                signal: controller.signal,
+                checkSubmissionTarget: (signal?: AbortSignal) =>
+                  checkValidationTarget(
+                    dependencies,
+                    selected.scanId,
+                    selected.repository,
+                    signal,
+                  ),
+              };
+              announceContinuum(
+                errorOutput,
+                configuration,
+                selected.findings.length,
+              );
+              const requestedAt = performance.timeOrigin + performance.now();
+              const results = !selected.findings.length
+                ? []
+                : provider.validateBatch
+                  ? await provider.validateBatch(selected.findings, context)
+                  : await Promise.all(
+                      selected.findings.map((finding) =>
+                        provider.validate(finding, context),
+                      ),
+                    );
+              const status = supplementalValidationStatus(provider, results);
+              const items = results.map((result) => result.record);
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                selected.repository,
+                selected.scanId,
+                configuration,
+                items,
+                requestedAt,
+              );
+              exitCode = controller.signal.aborted
+                ? controller.signal.reason === "SIGTERM"
+                  ? 143
+                  : 130
+                : results.some((r) => r.unavailable)
+                  ? 1
+                  : 0;
+              showValidationRetry(
+                errorOutput,
+                selected.scanId,
+                project.path,
+                results,
+              );
+              if (format === "json" || format === "jsonl") {
+                return {
+                  schemaVersion: 1,
+                  scanId: selected.scanId,
+                  status,
+                  items,
+                };
+              }
+              await writeCliOutput(
+                output,
+                [
+                  `Supplemental validation ${status} (${items.length} findings).`,
+                  ...(results.length > 1 ? [validationSummary(results)] : []),
+                  ...results.map(
+                    (result, index) =>
+                      `## ${escapeTerminalText(selected.findings[index]!.occurrenceId)} — ${result.disposition}\n\n${escapeTerminalText(result.report, true)}`,
+                  ),
+                ].join("\n\n") + "\n",
+              );
+              return;
+            } finally {
+              removeSignals();
+            }
+          }
+          if (options.config !== undefined)
+            throw new CodexSecurityError("Use --config with validate --scan.");
+          if (!positionals.length)
+            throw new CodexSecurityError(
+              "Validation requires a finding or --scan.",
+            );
           if (options.knowledgeBase.length > 0) {
             const directory = dependencies.currentDirectory();
             const checkout = await gitMarkerRoot(
@@ -7490,7 +7684,7 @@ export async function main(
                 : withoutLinearCredentials(dependencies.environment);
             const batches = selected
               ? await verificationBatches(
-                  selected.findings,
+                  await remediationFindings(selected, dependencies),
                   await bundledPluginRoot(),
                   options.verificationMode,
                 )
@@ -8566,7 +8760,9 @@ export async function main(
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
-      (["validate", "logout"].includes(command) ||
+      ((command === "validate" &&
+        !argv.some((arg) => arg === "--scan" || arg.startsWith("--scan="))) ||
+        command === "logout" ||
         (command === "login" && following !== "status")) &&
       !inspection
     ) {
@@ -9727,15 +9923,35 @@ async function* workbenchFindings(
   } while (offset !== undefined);
 }
 
+async function saveForRemediation(
+  stderr: Writable,
+  ...args: Parameters<typeof saveCliContinuumAssessments>
+): Promise<void> {
+  try {
+    const warning = await saveCliContinuumAssessments(...args);
+    if (warning)
+      await writeCliOutput(
+        stderr,
+        `codex-security: ${diagnosticValue(warning)}\n`,
+      ).catch(() => {});
+  } catch (error) {
+    await writeCliOutput(
+      stderr,
+      `codex-security: Could not save validation for remediation: ${diagnosticValue(errorMessage(error))}\n`,
+    ).catch(() => {});
+  }
+}
+
 async function selectSavedFindings(
   identifiers: readonly string[],
   requestedScanId: string | undefined,
   severity: FailureSeverity | undefined,
   dependencies: CliDependencies,
+  purpose?: "validation",
 ): Promise<SelectedFindings> {
   if (identifiers.some((identifier) => !isFindingIdentifier(identifier))) {
     throw new CodexSecurityError(
-      "Saved scan patching accepts only finding identifiers.",
+      "Saved scan selection accepts only finding identifiers.",
     );
   }
 
@@ -9790,6 +10006,8 @@ async function selectSavedFindings(
     | {
         scanId: string;
         targetPath: string;
+        progress?: { status?: string };
+        sealManifestDigest?: string | null;
         findings?: Finding[];
         findingsTruncated?: boolean;
       }
@@ -9804,6 +10022,13 @@ async function selectSavedFindings(
     );
   }
 
+  if (
+    purpose === "validation" &&
+    (scan.progress?.status !== "complete" || !scan.sealManifestDigest)
+  )
+    throw new CodexSecurityError(
+      "External validation requires a completed scan with a recorded seal.",
+    );
   let findings = scan.findings ?? [];
   if (scan.findingsTruncated) {
     findings = [];
@@ -9844,6 +10069,7 @@ async function selectSavedFindings(
       : await (dependencies.readSavedFindings ?? readSavedFindings)(
           scan.scanId,
           dependencies.runWorkbench,
+          scan.sealManifestDigest ?? undefined,
         );
   const byOccurrence = new Map(
     fullFindings.map((finding) => [finding.occurrenceId, finding]),
@@ -9874,14 +10100,35 @@ async function selectSavedFindings(
         if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
         else delete hydrated[key];
       }
+      delete hydrated["continuumAssessment"];
       return hydrated;
     }),
   };
 }
 
+/** Use the same host-only evidence for inline and reopened remediation. */
+async function remediationFindings(
+  { scanId, repository, findings }: SelectedFindings,
+  dependencies: CliDependencies,
+): Promise<Finding[]> {
+  const assessments = await savedContinuumAssessments(
+    dependencies.environment,
+    scanId,
+    repository,
+    findings.map((finding) => finding.occurrenceId),
+  );
+  return findings.map(({ continuumAssessment: _ignored, ...finding }) => {
+    const assessment = assessments.get(finding.occurrenceId);
+    return assessment
+      ? { ...finding, continuumAssessment: assessment }
+      : finding;
+  });
+}
+
 async function readSavedFindings(
   scanId: string,
   workbench: CliDependencies["runWorkbench"],
+  expectedManifestDigest?: string,
 ): Promise<readonly Finding[]> {
   const directory = await resolveSavedArtifactDirectory(
     scanId,
@@ -9891,6 +10138,7 @@ async function readSavedFindings(
   const { findings } = await loadContract(directory, {
     pluginRoot: await bundledPluginRoot(),
     expectedScanId: scanId,
+    expectedManifestDigest,
   });
   return findings.findings;
 }
@@ -10621,7 +10869,7 @@ async function runFindingPatches(
     `\nPatching ${formatItemCount(selected.findings.length, "confirmed finding")}...\n`,
   );
   const patches: FindingPatch[] = [];
-  for (const finding of selected.findings) {
+  for (const finding of await remediationFindings(selected, dependencies)) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
     const progress = new FindingProgressPresenter(
@@ -10968,8 +11216,14 @@ async function executeDependencyAgent(
     process.platform === "win32"
       ? request.directory.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
       : request.directory;
+  const command = "exploitability check";
   const settings: JsonObject = {
     ...overrides,
+    responses_api_metadata: codexSecurityRequestContext(overrides, {
+      surface: "cli",
+      command,
+      providerResolved: false,
+    }).metadata,
     model: model.model,
     model_reasoning_effort: request.coordinator
       ? "high"
@@ -11032,7 +11286,7 @@ async function executeDependencyAgent(
         : ["--skip-git-repo-check", "--cd", request.directory, "-"]),
     ],
     {
-      command: "exploitability check",
+      command,
       directory: request.directory,
       signal: request.signal,
       auth: "auto",
@@ -11173,6 +11427,10 @@ async function runSkill(
       : new Ajv2020({ strict: false }).compile(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
+  const directInput = (value: string) =>
+    skill === "fix-finding" || skill === "verify-fix"
+      ? standaloneRemediationText(value)
+      : value;
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   let standaloneFileContents: string | undefined;
   for (const input of inputs) {
@@ -11193,10 +11451,11 @@ async function runSkill(
         throw new CodexSecurityError(
           "Finding or issue inputs must not be empty.",
         );
-      contents.push(literal);
+      contents.push(directInput(literal));
       continue;
     }
     let contentsOrLiteral = input;
+    let fromFile = false;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
       : undefined;
@@ -11274,12 +11533,13 @@ async function runSkill(
             "Finding or issue inputs must not be empty.",
           );
         }
-        if (inputs.length === 1 && contents.length === 0) {
-          standaloneFileContents = contentsOrLiteral;
-        }
+        fromFile = true;
       }
     }
-    contents.push(contentsOrLiteral);
+    const data = directInput(contentsOrLiteral);
+    if (fromFile && inputs.length === 1 && contents.length === 0)
+      standaloneFileContents = data;
+    contents.push(data);
   }
   const plugin = await bundledPluginRoot();
   const pluginVersion = await pluginMetadata(plugin).then(
@@ -12980,33 +13240,28 @@ async function executeScan(
       );
       if (arguments_.validate) {
         const scanId = result.manifest.scan.id;
-        const checkTarget = async () => {
-          const context = await dependencies.runWorkbench(
-            ["get-scan", "--scan-id", scanId, "--check-target"],
-            undefined,
-            preparationAbortController.signal,
-            config.pythonPath,
+        const checkTarget = (signal = preparationAbortController.signal) =>
+          checkValidationTarget(
+            dependencies,
+            scanId,
             repository,
+            signal,
+            config,
             options.knowledgeBaseSnapshot?.protectedRoots,
-            config.pluginPath,
           );
-          const scan = context["scan"];
-          if (
-            !isJsonObject(scan) ||
-            scan["targetPath"] !== (await realpath(repository))
-          ) {
-            throw new CodexSecurityError(
-              "The recorded scan target does not match the validation repository.",
-            );
-          }
-        };
         const findings = result.findings.findings;
+        const configuredValidation = arguments_.validationProvider;
+        const validationProvider =
+          configuredValidation === undefined
+            ? undefined
+            : validationProviderFromConfiguration(configuredValidation);
+        const validationInputs = findings;
         if (targetWarnings.length > 0) {
           validation = {
             status: "skipped",
             reason: "The scan target changed during execution.",
           };
-        } else if (findings.length === 0) {
+        } else if (validationInputs.length === 0) {
           try {
             await checkTarget();
             validation = { status: "complete", findings: 0 };
@@ -13021,7 +13276,9 @@ async function executeScan(
         } else {
           stopPresentation();
           try {
-            progress?.stage(`Validating ${findings.length} scan findings`);
+            progress?.stage(
+              `Validating ${validationInputs.length} scan findings`,
+            );
           } catch {}
           try {
             const scanDirectory = result.scanDir;
@@ -13039,22 +13296,72 @@ async function executeScan(
             );
             validation = { status: "failed", findings: 0, reportPath };
             let completed = 0;
+            const records: ValidationItemRecord[] = [];
+            let providerAssessments: ValidationProviderAssessment[] | undefined;
+            const requestedAt = performance.timeOrigin + performance.now();
             try {
-              for (const finding of findings) {
-                const assessment = await security.validate({
-                  repositoryPath: repository,
-                  scanId: result.manifest.scan.id,
-                  workflowId: arguments_.workflowId,
-                  knowledgeBasePaths: options.knowledgeBasePaths,
-                  knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
-                  finding,
-                  auth,
-                  cyberAccessProgram: arguments_.cyberAccessProgram,
-                  safetyIdentifier: arguments_.safetyIdentifier,
-                  signal: preparationAbortController.signal,
-                });
+              announceContinuum(
+                errorOutput,
+                configuredValidation,
+                validationInputs.length,
+              );
+              providerAssessments =
+                validationProvider?.validateBatch === undefined
+                  ? undefined
+                  : await validationProvider
+                      .validateBatch(validationInputs, {
+                        checkSubmissionTarget: checkTarget,
+                        repositoryPath: repository,
+                        signal: preparationAbortController.signal,
+                      })
+                      .catch((error: unknown) =>
+                        validationInputs.map(() =>
+                          unavailableAssessment(validationProvider, error),
+                        ),
+                      );
+              if (
+                providerAssessments &&
+                validationProvider?.name === "continuum"
+              )
+                errorOutput.write(
+                  validationSummary(providerAssessments) + "\n",
+                );
+              if (providerAssessments)
+                showValidationRetry(
+                  errorOutput,
+                  scanId,
+                  arguments_.projectConfig?.path,
+                  providerAssessments,
+                );
+              for (const [index, finding] of validationInputs.entries()) {
+                const assessment =
+                  providerAssessments?.[index] ??
+                  (await security.validate({
+                    repositoryPath: repository,
+                    scanId: result.manifest.scan.id,
+                    workflowId: arguments_.workflowId,
+                    knowledgeBasePaths: options.knowledgeBasePaths,
+                    knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
+                    finding,
+                    validationProvider,
+                    auth,
+                    cyberAccessProgram: arguments_.cyberAccessProgram,
+                    safetyIdentifier: arguments_.safetyIdentifier,
+                    signal: preparationAbortController.signal,
+                  }));
+                if (assessment.record) records.push(assessment.record);
+                const provenance = assessment.provenance;
+                const evidence =
+                  "outputDir" in assessment && assessment.outputDir
+                    ? `Evidence: ${assessment.outputDir}\n\n`
+                    : "";
+                const label = String(
+                  finding["occurrenceId"] ??
+                    finding["id"] ??
+                    `item-${index + 1}`,
+                );
                 await report.writeFile(
-                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}${provenance.validatedAt ? `; validated ${provenance.validatedAt}` : ""}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
                 );
                 completed += 1;
                 validation = { ...validation, findings: completed };
@@ -13062,11 +13369,35 @@ async function executeScan(
             } finally {
               await report.close();
             }
+            const recordsPath = validationProvider
+              ? reportPath.replace(/\.md$/u, ".json")
+              : undefined;
+            if (recordsPath)
+              await writeFile(
+                recordsPath,
+                JSON.stringify({ schemaVersion: 1, items: records }, null, 2) +
+                  "\n",
+                { flag: "wx", mode: 0o600 },
+              );
             await checkTarget();
+            if (configuredValidation)
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                repository,
+                result.manifest.scan.id,
+                configuredValidation,
+                records,
+                requestedAt,
+              );
             validation = {
-              status: "complete",
-              findings: findings.length,
+              status: supplementalValidationStatus(
+                validationProvider,
+                providerAssessments,
+              ),
+              findings: validationInputs.length,
               reportPath,
+              ...(recordsPath ? { recordsPath } : {}),
             };
             try {
               progress?.stage(`Finding validation saved to ${reportPath}`);
@@ -14036,6 +14367,68 @@ function importedFindingsCommand(repository: string): string {
     return "From the repository directory, run codex-security findings imported.";
   const path = quoteCliPath(repository);
   return `Stored evidence${cliShellLabel(path)}: codex-security findings imported ${path}`;
+}
+
+async function checkValidationTarget(
+  dependencies: CliDependencies,
+  scanId: string,
+  repository: string,
+  signal?: AbortSignal,
+  config?: { pythonPath?: string; pluginPath?: string },
+  protectedRoots?: readonly string[],
+) {
+  const { scan } = await dependencies.runWorkbench(
+    ["get-scan", "--scan-id", scanId, "--check-target"],
+    undefined,
+    signal,
+    config?.pythonPath,
+    repository,
+    protectedRoots,
+    config?.pluginPath,
+  );
+  if (
+    !isJsonObject(scan) ||
+    scan["targetPath"] !== (await realpath(repository))
+  ) {
+    throw new CodexSecurityError(
+      "The recorded scan target does not match the validation repository.",
+    );
+  }
+}
+
+function announceContinuum(
+  stderr: Writable,
+  configuration: ResolvedScanSettings["validationProvider"],
+  count: number,
+) {
+  const settings = configuration?.continuum;
+  if (!settings || !count) return;
+  const detail = settings.include_local_validation
+    ? " New submissions include the full local validation method and summary, including any secrets."
+    : "";
+  stderr.write(
+    `Continuum environment ${diagnosticValue(settings.environment_id)}. Submitting or polling ${count} selected findings.${detail}\n`,
+  );
+}
+
+function showValidationRetry(
+  stderr: Writable,
+  scanId: string,
+  file: string | undefined,
+  results: readonly ValidationProviderAssessment[],
+) {
+  const pending = results.flatMap((item) =>
+    item.record?.provider === "continuum" && retryableAssessment(item)
+      ? [item.record.itemId]
+      : [],
+  );
+  if (!pending.length) return;
+  const config =
+    file && escapeTerminalText(file) === file ? quoteCliPath(file) : "FILE";
+  const ids = pending.map((id) => quoteCliPath(diagnosticValue(id))).join(" ");
+  stderr.write(
+    `To retry pending findings, make sure the file sets scan.validation.provider to continuum. Keep the other settings and host state, then run${cliShellLabel(config)} codex-security validate --scan ${quoteCliPath(diagnosticValue(scanId))} -c ${config} ${ids}\nChanging the payload or destination can create a new finding.\n`,
+  );
 }
 
 async function selectedProjectConfig(
