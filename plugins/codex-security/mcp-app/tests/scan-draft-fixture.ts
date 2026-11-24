@@ -1,5 +1,9 @@
 export const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
+export function apiSurface(disposition: string, receiptRefs: string[]) {
+  return { id: "api", label: "API", disposition, receiptRefs };
+}
+
 export function workerDraft<Finding extends Record<string, unknown>>(
   findings: Finding[],
   extra = {},

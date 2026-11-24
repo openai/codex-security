@@ -11,31 +11,15 @@ import {
   trustedParentSandboxWithDenials,
 } from "./support/fake-codex-fixture.ts";
 import { restoreEnv } from "./support/fake-codex-source.ts";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
-
-export async function testWorkerSelectedProfileFiles({
+import {
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
   workerPermissionProfileOverride,
   assertReadOnlyWorkerPolicy,
   assertWorkerSubagentPolicy,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: (
-    profile: typeof deniedWorkerPermissionProfile,
-    allowed: boolean,
-    account: { account: null; requiresOpenaiAuth: boolean },
-  ) => Promise<{ root: string; executablePath: string }>;
-  workerPermissionProfileOverride: (
-    args: readonly string[],
-  ) => string | undefined;
-  assertReadOnlyWorkerPolicy: (args: readonly string[]) => void;
-  assertWorkerSubagentPolicy: (
-    args: readonly string[],
-    subagents: number,
-    codeMode?: { enabled: boolean; excluded_tool_namespaces: string[] },
-  ) => void;
-}) {
+} from "./deep_scan_executor_fixture.ts";
+
+export async function testWorkerSelectedProfileFiles() {
   const cases: [string, string | undefined, boolean?][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],

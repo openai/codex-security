@@ -16,31 +16,16 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
-import type {
-  CodexSdkWorkerExecutor as WorkerExecutor,
-  resolveCodexPath as ResolveCodexPath,
-} from "../src/deep-scan/executor.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-
-interface Fixture {
-  root: string;
-  markerPath: string;
-  preflightMarkerPath: string;
-  executablePath: string;
-}
-
-export async function testExecutorExecutablePinning({
+import {
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
-  parentSandbox,
   resolveCodexPath,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<Fixture>;
-  parentSandbox: DeepWorkerParentSandbox;
-  resolveCodexPath: typeof ResolveCodexPath;
-}) {
+  workerRequest,
+} from "./deep_scan_executor_fixture.ts";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
+
+export async function testExecutorExecutablePinning() {
   const originalSpawn = childProcess.spawn;
   const nativeScripts = new Map<string, string>();
   const nativeLaunches: string[] = [];
@@ -455,7 +440,7 @@ export async function testExecutorExecutablePinning({
 
   async function withWorkerFixture(
     action: (
-      fixture: Fixture,
+      fixture: Awaited<ReturnType<typeof fakeCodexFixture>>,
       promptPath: string,
       workingDirectory: string,
     ) => Promise<void>,
@@ -480,7 +465,7 @@ export async function testExecutorExecutablePinning({
 }
 
 function runTurn(
-  executor: WorkerExecutor,
+  executor: InstanceType<typeof CodexSdkWorkerExecutor>,
   promptPath: string,
   cwd: string,
   turn: "discovery" | "resume" | "compare",
@@ -499,24 +484,4 @@ function runTurn(
       turn === "resume" ? { resumeThreadId: "fixture-resumed-thread" } : {},
     ),
   );
-}
-
-function workerRequest(
-  promptPath: string,
-  workingDirectory: string,
-  options: Partial<CodexWorkerRequest> = {},
-): CodexWorkerRequest {
-  return {
-    kind: "discovery",
-    promptPath,
-    workingDirectory,
-    subagents: 0,
-    signal: new AbortController().signal,
-    ...options,
-  };
-}
-
-function restoreEnv(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
 }
