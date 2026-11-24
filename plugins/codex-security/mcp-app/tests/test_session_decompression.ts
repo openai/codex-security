@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
 
 const { createZstdDecompress } = await importSource(
-  fileURLToPath(new URL("../src/session-decompression.ts", import.meta.url)),
+  "src/session-decompression.ts",
 );
 
 // One frame containing 128 KiB of "a", compressed with Zstandard level 3.
