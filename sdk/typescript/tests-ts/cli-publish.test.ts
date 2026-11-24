@@ -43,6 +43,16 @@ const { temporaryDirectory: publicationDirectory, cleanup } =
 
 afterEach(cleanup);
 
+function linearPublishArgs(...flags: string[]) {
+  return [
+    "publish",
+    "scan",
+    "completed-scan",
+    ...DESTINATION_OPTIONS,
+    ...flags,
+  ];
+}
+
 test.each(["linear", "custom"] as const)(
   "interactive %s selection preserves scan identity and cancellation",
   async (destination) => {
@@ -111,12 +121,7 @@ test("prints completed publication when an interrupt arrives with its result", a
     return publicationResult();
   };
   const { runCli, stdout } = createCliTest(main);
-  expect(
-    await runCli(
-      ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-      deps,
-    ),
-  ).toBe(0);
+  expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual(publicationResult());
 });
 
@@ -231,18 +236,7 @@ describe("optional publication diagnostics", () => {
       const stdout = capture();
       const stderr = failingOutput();
       expect(
-        await main(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            "--json",
-          ],
-          stdout.stream,
-          stderr,
-          deps,
-        ),
+        await main(linearPublishArgs("--json"), stdout.stream, stderr, deps),
       ).toBe(partial ? 2 : 0);
       expect(JSON.parse(stdout.text())).toEqual(receipt);
       expect(stderr.write).toHaveBeenCalledTimes(1);
@@ -331,12 +325,7 @@ describe("optional publication diagnostics", () => {
     const stdout = failingOutput();
     const stderr = capture();
     expect(
-      await main(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        stdout,
-        stderr.stream,
-        deps,
-      ),
+      await main(linearPublishArgs("--json"), stdout, stderr.stream, deps),
     ).toBe(2);
     expect(stdout.write).toHaveBeenCalledTimes(1);
     expect(stderr.text()).toContain("Output stream failed.");
@@ -358,18 +347,7 @@ describe("optional publication diagnostics", () => {
       const stdout = capture();
       const stderr = failingAsyncOutput();
       expect(
-        await main(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            "--json",
-          ],
-          stdout.stream,
-          stderr,
-          deps,
-        ),
+        await main(linearPublishArgs("--json"), stdout.stream, stderr, deps),
       ).toBe(partial ? 2 : 0);
       await setImmediate();
       expect(JSON.parse(stdout.text())).toEqual(receipt);
@@ -459,12 +437,7 @@ describe("optional publication diagnostics", () => {
     const stdout = failingAsyncOutput();
     const stderr = capture();
     expect(
-      await main(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        stdout,
-        stderr.stream,
-        deps,
-      ),
+      await main(linearPublishArgs("--json"), stdout, stderr.stream, deps),
     ).toBe(2);
     await setImmediate();
     expect(stderr.text()).toContain("Output stream failed.");
@@ -957,14 +930,10 @@ describe("publish scan", () => {
       };
       expect(
         await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
+          linearPublishArgs(
             "--skip-existing",
             ...(dryRun ? ["--dry-run", "--json"] : []),
-          ],
+          ),
           deps,
         ),
       ).toBe(0);
@@ -1057,14 +1026,7 @@ describe("publish scan", () => {
     const stderr = captureCli(main, "stderr");
     expect(
       await stderr.run(
-        [
-          "publish",
-          "scan",
-          "completed-scan",
-          ...DESTINATION_OPTIONS,
-          "--project",
-          "different-project",
-        ],
+        linearPublishArgs("--project", "different-project"),
         dependencies(),
       ),
     ).toBe(2);
@@ -1153,17 +1115,7 @@ describe("publish scan", () => {
       };
 
       expect(
-        await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            ...scenario.flags,
-            "--json",
-          ],
-          deps,
-        ),
+        await runCli(linearPublishArgs(...scenario.flags, "--json"), deps),
       ).toBe(0);
       expect(options).toMatchObject({
         linearApiKey: scenario.key,
@@ -1183,14 +1135,7 @@ describe("publish scan", () => {
 
     expect(
       await runCli(
-        [
-          "publish",
-          "scan",
-          "completed-scan",
-          ...DESTINATION_OPTIONS,
-          "--linear-assignee",
-          "teammate@example.test",
-        ],
+        linearPublishArgs("--linear-assignee", "teammate@example.test"),
         dependencies(),
       ),
     ).toBe(2);
@@ -1208,12 +1153,7 @@ describe("publish scan", () => {
     });
     deps.publishScan = async () => fail(`Linear rejected ${key}.`);
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(2);
     expect(stderr.text()).toContain(key);
   });
 
@@ -1291,10 +1231,7 @@ describe("publish scan", () => {
         );
       };
 
-      const publishing = runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      );
+      const publishing = runCli(linearPublishArgs("--json"), deps);
       await publicationStarted.promise;
       expect(signals.listeners.get("SIGINT")?.size).toBe(1);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(1);
@@ -1335,12 +1272,7 @@ describe("publish scan", () => {
     const deps = dependencies();
     deps.publishScan = async () => result;
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(0);
 
     expect(stdout.text()).toBe(
       [
@@ -1396,16 +1328,7 @@ describe("publish scan", () => {
       deps.publishScan = async () => result;
 
       expect(
-        await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            ...(json ? ["--json"] : []),
-          ],
-          deps,
-        ),
+        await runCli(linearPublishArgs(...(json ? ["--json"] : [])), deps),
       ).toBe(failed ? 2 : 0);
 
       expect(stderr.text()).toContain(`codex-security: ${warning}\n`);
@@ -1446,12 +1369,7 @@ describe("publish scan", () => {
       const deps = dependencies();
       deps.publishScan = async () => result;
 
-      expect(
-        await runCli(
-          ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(linearPublishArgs(), deps)).toBe(0);
       expect(stdout.text()).not.toContain("\n  ...\n");
       expect(stdout.text()).toContain(
         `${total} total issue${total === 1 ? "" : "s"} created\n`,
@@ -1483,12 +1401,7 @@ describe("publish scan", () => {
     const deps = dependencies();
     deps.publishScan = async () => result;
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(2);
     expect(stdout.text()).toBe(
       [
         "! Linear publication completed with failures",
@@ -1544,12 +1457,7 @@ describe("publish scan", () => {
     const deps = dependencies();
     deps.publishScan = async () => result;
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(0);
     expect(stdout.text()).toContain("  SEC-400 safe\n");
     for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
       expect(stdout.text()).toContain(`  ${identifier}\n`);
@@ -1580,12 +1488,7 @@ describe("publish scan", () => {
       const deps = dependencies({ environment: scenario.environment });
       deps.publishScan = successfulPublication<[]>;
 
-      expect(
-        await runCli(
-          ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(linearPublishArgs(), deps)).toBe(0);
       expect(stripVTControlCharacters(stdout.text())).toContain(
         "✓ Linear publication complete\n",
       );
@@ -1612,18 +1515,7 @@ describe("publish scan", () => {
       const deps = dependencies();
       deps.publishScan = async () => result;
 
-      expect(
-        await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            ...format.flags,
-          ],
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(linearPublishArgs(...format.flags), deps)).toBe(0);
       if (format.json) {
         expect(JSON.parse(stdout.text())).toEqual(result);
       } else {
@@ -1643,18 +1535,7 @@ describe("publish scan", () => {
       return { ...publicationResult(), dryRun: true, issues: [] };
     };
 
-    expect(
-      await runCli(
-        [
-          "publish",
-          "scan",
-          "completed-scan",
-          ...DESTINATION_OPTIONS,
-          "--dry-run",
-        ],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs("--dry-run"), deps)).toBe(0);
     expect(stdout.text()).toContain("dryRun: true");
     expect(stdout.text()).not.toContain("Linear publication complete");
     expect(stderr.text()).toBe("");
@@ -1709,12 +1590,7 @@ describe("publish scan", () => {
       return result;
     };
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toContain("[1/2] Created SEC-123\n");
     expect(stderr.text()).toContain("[2/2] Created SEC-124\n");
@@ -2061,12 +1937,7 @@ describe("publish scan", () => {
       return publicationResult();
     };
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
     const text = stripVTControlCharacters(stderr.text());
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
@@ -2181,12 +2052,7 @@ describe("publish scan", () => {
       return publicationResult();
     };
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
     expect(stderr.text()).toContain("Publishing 1 finding to Linear.\n");
     expect(stderr.text()).toContain("Codex: Preparing the Linear issue.");
@@ -2236,18 +2102,7 @@ describe("publish scan", () => {
         return publicationResult();
       };
 
-      expect(
-        await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            "--json",
-          ],
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
       expect(stderr.text()).toBe(`Codex: ${expected}\n`);
     },
@@ -2331,18 +2186,7 @@ describe("publish scan", () => {
         return publicationResult();
       };
 
-      expect(
-        await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            "--json",
-          ],
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
       const progress = stripVTControlCharacters(stderr.text());
       expect(progress).toContain("Saving the verified Linear issue.");
@@ -2366,12 +2210,7 @@ describe("publish scan", () => {
       throw new Error("Linear publication stopped unexpectedly.");
     };
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(2);
 
     const restored = stderr.text().lastIndexOf("\u001B[?25h\u001B[?1049l");
     const error = stderr
@@ -2389,18 +2228,7 @@ describe("publish scan", () => {
       const deps = dependencies({ environment });
       deps.publishScan = publishWithProgress;
 
-      expect(
-        await runCli(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            "--json",
-          ],
-          deps,
-        ),
-      ).toBe(0);
+      expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
 
       expect(stderr.text()).toContain("Publishing 1 finding to Linear.");
       expect(stderr.text()).toContain("Published 1/1 finding.");
@@ -2463,13 +2291,7 @@ describe("publish scan", () => {
           return status;
         });
         const publishing = main(
-          [
-            "publish",
-            "scan",
-            "completed-scan",
-            ...DESTINATION_OPTIONS,
-            ...(signal === "SIGINT" ? ["--json"] : []),
-          ],
+          linearPublishArgs(...(signal === "SIGINT" ? ["--json"] : [])),
           stdout.stream,
           stderr,
           deps,
@@ -2530,12 +2352,7 @@ describe("publish scan", () => {
     deps.publishScan = publishWithProgress;
 
     expect(
-      await main(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        stdout.stream,
-        stderr,
-        deps,
-      ),
+      await main(linearPublishArgs("--json"), stdout.stream, stderr, deps),
     ).toBe(0);
 
     expect(failed).toBe(true);
@@ -2785,7 +2602,7 @@ describe("publish scan", () => {
         expectedProject: "project-from-environment",
       },
       {
-        argv: ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        argv: linearPublishArgs(),
         expectedTeam: "team-from-flags",
         expectedProject: "project-from-flags",
       },
@@ -2824,19 +2641,9 @@ describe("publish scan", () => {
       return { ...publicationResult(), dryRun: true, issues: [] };
     };
 
-    expect(
-      await runCli(
-        [
-          "publish",
-          "scan",
-          "completed-scan",
-          ...DESTINATION_OPTIONS,
-          "--dry-run",
-          "--json",
-        ],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs("--dry-run", "--json"), deps)).toBe(
+      0,
+    );
     expect(dryRun).toBe(true);
     expect(JSON.parse(stdout.text())).toMatchObject({
       scanId: "scan-123",
@@ -2856,12 +2663,7 @@ describe("publish scan", () => {
     const deps = dependencies();
     deps.publishScan = async () => result;
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs("--json"), deps)).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
@@ -2877,12 +2679,7 @@ describe("publish scan", () => {
       warnings: [warning],
     });
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(0);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(0);
     expect(stdout.text()).toContain("SEC-123");
     expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
   });
@@ -2903,12 +2700,7 @@ describe("publish scan", () => {
     const deps = dependencies();
     deps.publishScan = async () => result;
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(linearPublishArgs("--json"), deps)).toBe(2);
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toBe(
       "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
@@ -2926,12 +2718,7 @@ describe("publish scan", () => {
     const deps = dependencies();
     deps.publishScan = async () => publicationResult(failed);
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(linearPublishArgs("--json"), deps)).toBe(2);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult(failed));
     expect(stderr.text()).toBe("");
   });
@@ -2943,12 +2730,7 @@ describe("publish scan", () => {
     deps.publishScan = async () =>
       fail("Linear is not connected to your Codex account.");
 
-    expect(
-      await runCli(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(linearPublishArgs(), deps)).toBe(2);
     expect(stderr.text()).toContain(
       "Linear is not connected to your Codex account.",
     );
