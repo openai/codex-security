@@ -1,4 +1,13 @@
+import type { SurfaceDisposition } from "../src/models.js";
+
 export const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
+
+export function apiSurface(
+  disposition: SurfaceDisposition,
+  receiptRefs: string[],
+) {
+  return reviewSurface("api", "API", disposition, receiptRefs);
+}
 
 export function workerDraft<Finding extends Record<string, unknown>>(
   findings: Finding[],
@@ -14,6 +23,15 @@ export function workerDraft<Finding extends Record<string, unknown>>(
     },
     ...extra,
   };
+}
+
+export function reviewSurface(
+  id: string,
+  label: string,
+  disposition: SurfaceDisposition,
+  receiptRefs: string[] = [],
+) {
+  return { id, label, disposition, receiptRefs };
 }
 
 export function finding(id: string, repositoryPath: string) {

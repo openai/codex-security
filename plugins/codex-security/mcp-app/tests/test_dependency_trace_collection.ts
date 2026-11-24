@@ -1,7 +1,7 @@
-import { nativeRules } from "./support/native-trace-rules.ts";
+import { available, nativeRules } from "./support/native-trace-rules.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join, extname } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
@@ -31,6 +31,53 @@ async function matchingFiles(root: string, count: number) {
   return files;
 }
 
+async function trackedIgnoredFiles(root: string, count: number) {
+  const files = await matchingFiles(root, count);
+  // These two files must not combine into one multiline discovery match.
+  const nonmatches = ["consumer-import-only.py", "consumer-call-only.py"];
+  await writeFile(
+    join(root, nonmatches[0]),
+    "from image_lib import safe_operation\n",
+  );
+  await writeFile(join(root, nonmatches[1]), "decode(data)\n");
+  await writeFile(join(root, ".gitignore"), "consumer-*.py\n");
+  const git = promisify(execFile);
+  await git("git", ["init", "-q", root]);
+  await git("git", [
+    "-C",
+    root,
+    "add",
+    "--force",
+    "--",
+    ...files,
+    ...nonmatches,
+  ]);
+  return { files, nonmatches };
+}
+
+function imageSearch(): TraceScope {
+  return {
+    kind: "search",
+    package: "image-package",
+    symbol: "decode",
+    rules: nativeRules("decode"),
+    source_terms: ["image_lib"],
+    path: ".",
+  };
+}
+
+function fileTrace(files: string[], time_budget_ms: number, max_hops = 0) {
+  return {
+    package: "image-package",
+    symbol: "decode",
+    rules: nativeRules("decode"),
+    files,
+    source_only: true,
+    max_hops,
+    time_budget_ms,
+  };
+}
+
 test("trace requests accept complete discovered file and directory lists", () => {
   for (const key of ["files", "paths"] as const) {
     const scope = Array.from({ length: 65 }, (_, index) => `src/unit-${index}`);
@@ -48,11 +95,7 @@ test("trace requests accept complete discovered file and directory lists", () =>
 });
 
 test("native OpenGrep accepts an exact-file census through the request schema", async (t) => {
-  try {
-    await promisify(execFile)("opengrep", ["--version"]);
-  } catch {
-    return t.skip("opengrep required");
-  }
+  if (!(await available("opengrep"))) return t.skip("opengrep required");
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-exact-file-census-");
@@ -66,15 +109,7 @@ test("native OpenGrep accepts an exact-file census through the request schema", 
   };
   const tracer = createDependencyTracer(root, provider, 2);
   t.after(() => tracer.close());
-  const request = traceInputSchema.parse({
-    package: "image-package",
-    symbol: "decode",
-    rules: nativeRules("decode"),
-    files,
-    source_only: true,
-    max_hops: 0,
-    time_budget_ms: 60000,
-  });
+  const request = traceInputSchema.parse(fileTrace(files, 60000));
   const result = await tracer.trace(request);
   assert.equal(result.complete, true, result.limits.join(", "));
   assert.deepEqual(
@@ -108,24 +143,13 @@ test("native OpenGrep accepts an exact-file census through the request schema", 
 });
 
 test("directory discovery batches every matching file beyond the old cutoff", async (t) => {
-  try {
-    await promisify(execFile)("rg", ["--version"]);
-  } catch {
-    return t.skip("rg required");
-  }
+  if (!(await available("rg"))) return t.skip("rg required");
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-all-matching-files-");
   const files = await matchingFiles(root, 641);
   const result = await localProvider(root).run(
-    {
-      kind: "search",
-      package: "image-package",
-      symbol: "decode",
-      rules: nativeRules("decode"),
-      source_terms: ["image_lib"],
-      path: ".",
-    },
+    imageSearch(),
     new AbortController().signal,
   );
   assert.equal(result.complete, true, result.reason ?? "incomplete discovery");
@@ -142,11 +166,7 @@ test("directory discovery batches every matching file beyond the old cutoff", as
 
 test("native OpenGrep processes every matching file across source batches", async (t) => {
   for (const tool of ["rg", "opengrep"]) {
-    try {
-      await promisify(execFile)(tool, ["--version"]);
-    } catch {
-      return t.skip(tool + " required");
-    }
+    if (!(await available(tool))) return t.skip(tool + " required");
   }
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
@@ -186,44 +206,14 @@ test("native OpenGrep processes every matching file across source batches", asyn
 
 test("tracked ignored discovery includes matches after the old cutoff", async (t) => {
   for (const tool of ["git", "rg"]) {
-    try {
-      await promisify(execFile)(tool, ["--version"]);
-    } catch {
-      return t.skip(tool + " required");
-    }
+    if (!(await available(tool))) return t.skip(tool + " required");
   }
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-all-ignored-files-");
-  const files = await matchingFiles(root, 641);
-  // These two files must not combine into one multiline discovery match.
-  const nonmatches = ["consumer-import-only.py", "consumer-call-only.py"];
-  await writeFile(
-    join(root, nonmatches[0]),
-    "from image_lib import safe_operation\n",
-  );
-  await writeFile(join(root, nonmatches[1]), "decode(data)\n");
-  await writeFile(join(root, ".gitignore"), "consumer-*.py\n");
-  const git = promisify(execFile);
-  await git("git", ["init", "-q", root]);
-  await git("git", [
-    "-C",
-    root,
-    "add",
-    "--force",
-    "--",
-    ...files,
-    ...nonmatches,
-  ]);
+  const { files } = await trackedIgnoredFiles(root, 641);
   const result = await localProvider(root).run(
-    {
-      kind: "search",
-      package: "image-package",
-      symbol: "decode",
-      rules: nativeRules("decode"),
-      source_terms: ["image_lib"],
-      path: ".",
-    },
+    imageSearch(),
     new AbortController().signal,
   );
   assert.equal(
@@ -328,9 +318,14 @@ test("filename discovery is not cut off by the native diagnostic byte budget", a
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-long-filename-list-");
   const tools = await dirs.create("trace-filename-tool-");
+  const linked = await dirs.create("trace-linked-tool-");
+  const inheritedPath = join(tools, "inherited-path");
+  await writeFile(join(root, "rg"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  await symlink(join(root, "rg"), join(linked, "rg"));
   await writeFile(
     join(tools, "rg"),
     `#!${process.execPath}\n` +
+      `process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(inheritedPath)}, process.env.PATH);\n` +
       "const root = process.argv.at(-1);\n" +
       'const prefix = "component-".repeat(20);\n' +
       'const files = Array.from({length:8000},(_,i)=>root+"/"+prefix+"/"+prefix+"/consumer-"+i+".py");\n' +
@@ -338,20 +333,13 @@ test("filename discovery is not cut off by the native diagnostic byte budget", a
     { mode: 0o755 },
   );
   const originalPath = process.env.PATH;
-  process.env.PATH = tools + delimiter + originalPath;
+  process.env.PATH = [root, tools, linked, originalPath].join(delimiter);
   t.after(() => {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
   });
   const result = await localProvider(root).run(
-    {
-      kind: "search",
-      package: "image-package",
-      symbol: "decode",
-      rules: nativeRules("decode"),
-      source_terms: ["image_lib"],
-      path: ".",
-    },
+    imageSearch(),
     new AbortController().signal,
   );
   assert.equal(
@@ -359,6 +347,10 @@ test("filename discovery is not cut off by the native diagnostic byte budget", a
     true,
     result.reason ?? "incomplete filename discovery",
   );
+  const inherited = (await readFile(inheritedPath, "utf8")).split(delimiter);
+  assert.equal(inherited[0], tools);
+  assert.ok(!inherited.includes(root));
+  assert.ok(!inherited.includes(linked));
   const files = result.next.flatMap(({ files = [] }) => files);
   assert.equal(files.length, 8000);
   assert.ok(files.at(-1)?.endsWith("consumer-999.py"));
@@ -369,9 +361,7 @@ async function descriptorLauncherFixture(
   mode: "closing" | "unrelated" | "abort",
 ) {
   for (const tool of ["git", "rg"]) {
-    try {
-      await promisify(execFile)(tool, ["--version"]);
-    } catch {
+    if (!(await available(tool))) {
       t.skip(tool + " required");
       return;
     }
@@ -380,24 +370,7 @@ async function descriptorLauncherFixture(
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-descriptor-source-");
   const tools = await dirs.create("trace-descriptor-launcher-");
-  const files = await matchingFiles(root, 20);
-  const nonmatches = ["consumer-import-only.py", "consumer-call-only.py"];
-  await writeFile(
-    join(root, nonmatches[0]),
-    "from image_lib import safe_operation\n",
-  );
-  await writeFile(join(root, nonmatches[1]), "decode(data)\n");
-  await writeFile(join(root, ".gitignore"), "consumer-*.py\n");
-  await promisify(execFile)("git", ["init", "-q", root]);
-  await promisify(execFile)("git", [
-    "-C",
-    root,
-    "add",
-    "--force",
-    "--",
-    ...files,
-    ...nonmatches,
-  ]);
+  const { files, nonmatches } = await trackedIgnoredFiles(root, 20);
   const originalPath = process.env.PATH;
   const log = join(tools, "calls.jsonl");
   const started = join(tools, "stdin-started");
@@ -461,14 +434,7 @@ async function descriptorLauncherFixture(
   };
 }
 
-const descriptorSearch: TraceScope = {
-  kind: "search",
-  package: "image-package",
-  symbol: "decode",
-  rules: nativeRules("decode"),
-  source_terms: ["image_lib"],
-  path: ".",
-};
+const descriptorSearch: TraceScope = imageSearch();
 
 test("tracked ignored descriptor fallback preserves offset-zero matches and caches launcher support", async (t) => {
   if (process.platform === "win32") return t.skip("POSIX descriptor launcher");
@@ -543,15 +509,7 @@ test("supplied rules batch exact targets by language while manifests stay direct
     "README.md",
   ];
   const seen: TraceScope[] = [];
-  const input = {
-    package: "image-package",
-    symbol: "decode",
-    rules: nativeRules("decode"),
-    files,
-    source_only: true,
-    max_hops: 0,
-    time_budget_ms: 10000,
-  };
+  const input = fileTrace(files, 10000);
   const result = await processTrace(
     input,
     async (scope) => {
@@ -599,11 +557,7 @@ test("supplied rules batch exact targets by language while manifests stay direct
 });
 
 test("exact source batches retain path and size failures alongside valid evidence", async (t) => {
-  try {
-    await promisify(execFile)("opengrep", ["--version"]);
-  } catch {
-    return t.skip("opengrep required");
-  }
+  if (!(await available("opengrep"))) return t.skip("opengrep required");
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-batch-invalid-");
@@ -619,21 +573,12 @@ test("exact source batches retain path and size failures alongside valid evidenc
   await writeFile(join(root, "README.md"), "image-package");
   const tracer = createDependencyTracer(root, localProvider(root), 2);
   t.after(() => tracer.close());
-  const result = await tracer.trace({
-    package: "image-package",
-    symbol: "decode",
-    rules: nativeRules("decode"),
-    files: [
-      "valid.py",
-      "large.py",
-      "../outside.py",
-      "package.json",
-      "README.md",
-    ],
-    source_only: true,
-    max_hops: 0,
-    time_budget_ms: 60000,
-  });
+  const result = await tracer.trace(
+    fileTrace(
+      ["valid.py", "large.py", "../outside.py", "package.json", "README.md"],
+      60000,
+    ),
+  );
   assert.equal(result.complete, false);
   const batch = result.scopes.find(
     ({ scope }) => scope.kind === "source_batch",
@@ -665,15 +610,7 @@ test("cancellation reaches exact-file source batches at zero hops", async () => 
   setImmediate(() => controller.abort(new Error("cancelled")));
   await assert.rejects(
     processTrace(
-      {
-        package: "image-package",
-        symbol: "decode",
-        rules: nativeRules("decode"),
-        files: ["a.py", "b.py"],
-        source_only: true,
-        max_hops: 0,
-        time_budget_ms: 10000,
-      },
+      fileTrace(["a.py", "b.py"], 10000),
       async (scope, signal) => {
         assert.equal(scope.kind, "source_batch");
         await new Promise<void>((resolve) =>
@@ -696,11 +633,7 @@ test("cancellation reaches exact-file source batches at zero hops", async () => 
 });
 
 test("exact-file batches expose caller-rule followups and reject changed source before caching", async (t) => {
-  try {
-    await promisify(execFile)("opengrep", ["--version"]);
-  } catch {
-    return t.skip("opengrep required");
-  }
+  if (!(await available("opengrep"))) return t.skip("opengrep required");
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
   const root = await dirs.create("trace-batch-followups-");
@@ -710,15 +643,7 @@ test("exact-file batches expose caller-rule followups and reject changed source 
   );
   const tracer = createDependencyTracer(root, localProvider(root), 2);
   t.after(() => tracer.close());
-  const request = {
-    package: "image-package",
-    symbol: "decode",
-    rules: nativeRules("decode"),
-    files: ["chain.py"],
-    source_only: true,
-    max_hops: 2,
-    time_budget_ms: 60000,
-  };
+  const request = fileTrace(["chain.py"], 60000, 2);
   const result = await tracer.trace(request);
   assert.equal(result.complete, false);
   assert.ok(

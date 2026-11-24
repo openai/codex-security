@@ -458,6 +458,16 @@ def deep_scan_result(
     result: dict[str, Any] = {"deepScan": deep_scan_state(connection, scan_id)}
     if start_disposition is not None:
         result["startDisposition"] = start_disposition
+        scan = dependencies().require_scan(connection, scan_id)
+        workspace = dependencies().require_workspace(connection, scan["workspace_id"])
+        # Setup is immutable while this scan owns the workspace.
+        if (
+            workspace["active_scan_id"] == scan_id
+            and workspace["deep_scan_config_json"] is not None
+        ):
+            configuration = json.loads(workspace["deep_scan_config_json"])
+            if "validation" in configuration:
+                result["validationProviderConfiguration"] = configuration["validation"]
     return result
 
 

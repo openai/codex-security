@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
-import { importSource } from "./import-module.ts";
+import { bundledMcpUrl, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type * as Findings from "../src/workbench/findings.ts";
 import type * as Migrations from "../src/workbench/migrations.ts";
@@ -139,12 +139,7 @@ for (const formatting of ["spaced", "reordered", "escaped"]) {
 }
 
 test("finding helper help exits without reading stdin", async () => {
-  const helper = fileURLToPath(
-    new URL(
-      "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-      import.meta.url,
-    ),
-  );
+  const helper = fileURLToPath(bundledMcpUrl("helpers"));
   const commands = [
     "store-findings",
     "list-stored-findings",

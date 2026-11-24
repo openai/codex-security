@@ -233,6 +233,7 @@ for examples.
 - [CLI reference](sdk/typescript/docs/cli.md)
 - [Imported finding identity and evidence](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
+- [Validation providers](docs/validation-providers.md)
 - [Examples](examples/README.md)
 
 To report a vulnerability privately, follow the [security policy](SECURITY.md).

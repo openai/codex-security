@@ -5,7 +5,7 @@ import {
   validateRetainedCoverage,
   validateWorkerReport,
 } from "./coverage-publication.js";
-import { isRecord as isObject } from "./record.js";
+import { asRecord, isNonEmptyString, isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, posix, sep } from "node:path";
@@ -1024,21 +1024,13 @@ async function preserveScanDraft(
     const terminalSurfaceIds = new Set(
       (result.reviewState.surfaces as JsonObject[])
         .filter((row) => row.disposition !== "needs_follow_up")
-        .flatMap((row) =>
-          [row.id, row.candidateId].filter(
-            (id): id is string => typeof id === "string",
-          ),
-        ),
+        .flatMap(coverageIds),
     );
     const terminalWorkIds = new Set([
       ...terminalSurfaceIds,
       ...closedIds,
       ...terminalOutcomeIds,
-      ...(result.reviewState.deferred as JsonObject[]).flatMap((row) =>
-        [row.id, row.candidateId].filter(
-          (id): id is string => typeof id === "string",
-        ),
-      ),
+      ...(result.reviewState.deferred as JsonObject[]).flatMap(coverageIds),
     ]);
     const retainedHasOutstandingWork = coverageHasOutstandingWork(
       result.reviewState,
@@ -1067,10 +1059,8 @@ async function preserveScanDraft(
       );
       const reopenedIds = new Set(
         deferred.flatMap((row) =>
-          [row.id, row.candidateId].filter(
-            (id): id is string =>
-              typeof id === "string" &&
-              (closedIds.has(id) || terminalSurfaceIds.has(id)),
+          coverageIds(row).filter(
+            (id) => closedIds.has(id) || terminalSurfaceIds.has(id),
           ),
         ),
       );
@@ -1708,13 +1698,7 @@ function ambiguousGenericDeferredIds(sources: ScanDraftInput[]): Set<string> {
   for (const source of sources) {
     const rows = source.reviewState.deferred;
     const candidateIds = new Set(
-      rows
-        .filter((row) => !genericDeferred(row))
-        .flatMap((row) =>
-          [row.id, row.candidateId].filter(
-            (id): id is string => typeof id === "string",
-          ),
-        ),
+      rows.filter((row) => !genericDeferred(row)).flatMap(coverageIds),
     );
     const byId = new Map<string, JsonObject>();
     for (const row of rows) {
@@ -1752,13 +1736,7 @@ function reconcileResolvedDeferred(
         activeDeferred.push(structuredClone(row));
     }
   }
-  const observedIds = new Set(
-    activeDeferred.flatMap((row) =>
-      [row.id, row.candidateId].filter(
-        (id): id is string => typeof id === "string",
-      ),
-    ),
-  );
+  const observedIds = new Set(activeDeferred.flatMap(coverageIds));
   // Equal timestamps cannot prove that a closure followed pending work.
   const pendingByTime = new Map<string, Set<string>>();
   const tiedPending = new Map<ScanDraftInput, Set<string>>();
@@ -1773,19 +1751,8 @@ function reconcileResolvedDeferred(
     tiedPending.set(source.input, pending);
   }
   const historical = sources.flatMap((source) => source.reviewState.deferred);
-  const candidateRows = historical.filter(
-    (row) =>
-      typeof row.candidateId === "string" ||
-      "candidate" in row ||
-      "finding" in row,
-  );
-  const candidateIds = new Set(
-    candidateRows.flatMap((row) =>
-      [row.id, row.candidateId].filter(
-        (id): id is string => typeof id === "string",
-      ),
-    ),
-  );
+  const candidateRows = historical.filter((row) => !genericDeferred(row));
+  const candidateIds = new Set(candidateRows.flatMap(coverageIds));
   const closures = new Map<
     string,
     NonNullable<DraftCoverage["resolvedDeferred"]>[number]
@@ -2525,7 +2492,7 @@ function sameSavedFinding(left: JsonObject, right: JsonObject): boolean {
   const reportIds = ["reportId", "ledgerRowId"].map((field) =>
     [left, right].map((finding) => {
       const value = (finding.extensions as JsonObject | undefined)?.[field];
-      return typeof value === "string" && value.trim() ? value : undefined;
+      return isNonEmptyString(value) ? value : undefined;
     }),
   );
   if (
@@ -2671,10 +2638,8 @@ function deferredEntryPresent(
           typeof previous.id === "string" &&
           current.id !== previous.id
         ) &&
-        [previous.id, previous.candidateId].some(
-          (id) =>
-            typeof id === "string" &&
-            (current.id === id || current.candidateId === id),
+        coverageIds(previous).some(
+          (id) => current.id === id || current.candidateId === id,
         )),
   );
 }
@@ -2704,10 +2669,10 @@ function coverageEntryPresent(
         ambiguousGenericEntry(original, ambiguousIds)
       )
         return isDeepStrictEqual(current, original);
-      const currentIdentities = coverageEntryIdentities(current);
       if (
-        coverageEntryIdentities(original).some((identity) =>
-          currentIdentities.includes(identity),
+        coverageIds(original).some(
+          (id) =>
+            id.trim() && (current.id === id || current.candidateId === id),
         )
       ) {
         return true;
@@ -2723,14 +2688,8 @@ function coverageEntryPresent(
   });
 }
 
-function coverageEntryIdentities(entry: JsonObject): string[] {
-  const stable: string[] = [];
-  for (const field of ["id", "candidateId"] as const) {
-    const value = entry[field];
-    if (typeof value === "string" && value.trim())
-      stable.push(`stable:${value}`);
-  }
-  return stable;
+function coverageIds(row: JsonObject): string[] {
+  return [row.id, row.candidateId].filter((id) => typeof id === "string");
 }
 
 /** Reducers cannot resolve source review by omitting its reviewState records. */
@@ -2812,29 +2771,17 @@ function findingIdentityCandidate(finding: JsonObject): string | undefined {
   return [
     (finding.extensions as JsonObject | undefined)?.candidateId,
     (finding.provenance as JsonObject | undefined)?.candidateId,
-  ].find(
-    (value): value is string =>
-      typeof value === "string" && Boolean(value.trim()),
-  );
+  ].find(isNonEmptyString);
 }
 
 function findingCandidateId(finding: JsonObject): string | undefined {
-  const provenance = finding.provenance;
-  if (
-    isObject(provenance) &&
-    typeof provenance.candidateId === "string" &&
-    provenance.candidateId.trim()
-  ) {
-    return provenance.candidateId;
-  }
-  const extensions = finding.extensions;
-  if (isObject(extensions)) {
-    for (const field of ["candidateId", "reportId", "ledgerRowId"] as const) {
-      const value = extensions[field];
-      if (typeof value === "string" && value.trim()) return value;
-    }
-  }
-  return undefined;
+  const extensions = asRecord(finding.extensions);
+  return [
+    asRecord(finding.provenance)?.candidateId,
+    extensions?.candidateId,
+    extensions?.reportId,
+    extensions?.ledgerRowId,
+  ].find(isNonEmptyString);
 }
 
 /** Return the existing sealed documents only after workbench completion succeeds. */
@@ -3217,8 +3164,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     const identity: JsonObject = { anchor: anchors[index] };
     const extensions = finding.extensions as JsonObject | undefined;
     const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
-      (value): value is string =>
-        typeof value === "string" && Boolean(value.trim()),
+      isNonEmptyString,
     );
     const ruleScopedAnchor = `${finding.ruleId}\0${identity.anchor}`;
     if (
@@ -3312,13 +3258,7 @@ function buildCoverage(
 function normalizeSurfaces(
   surfaces: DraftCoverage["surfaces"],
 ): DraftCoverage["surfaces"] {
-  const reservedSurfaceIds = new Set(
-    surfaces.flatMap((surface) =>
-      [surface.id, surface.candidateId].filter(
-        (id): id is string => typeof id === "string",
-      ),
-    ),
-  );
+  const reservedSurfaceIds = new Set(surfaces.flatMap(coverageIds));
   const surfaceIds = new Set<string>();
   return surfaces.map((surface) => {
     const explicitId = typeof surface.id === "string";

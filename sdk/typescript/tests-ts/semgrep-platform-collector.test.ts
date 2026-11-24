@@ -49,6 +49,17 @@ function responses(...pages: Response[]) {
   };
 }
 
+function collectPages(...pages: Response[]) {
+  return collectSemgrepPlatformFindings(options, responses(...pages));
+}
+
+function projectFetch(project: unknown, findings: unknown[]) {
+  return async (endpoint: URL) =>
+    Response.json(
+      endpoint.pathname.endsWith("/findings") ? { findings } : { project },
+    );
+}
+
 test.each(["%23", "%3F"])(
   "a Git project path containing %s stays in the complete report",
   async (encoded) => {
@@ -72,12 +83,7 @@ test.each(["%23", "%3F"])(
     const rows = [numeric, quoted];
     const report = await collectSemgrepPlatformFindings(options, {
       environment,
-      fetch: async (endpoint) =>
-        Response.json(
-          endpoint.pathname.endsWith("/findings")
-            ? { findings: rows }
-            : { project: native },
-        ),
+      fetch: projectFetch(native, rows),
     });
     const input = {
       ...options,
@@ -133,10 +139,7 @@ test("a supplied empty repository URL remains bulk-only on capture and replay", 
   expect(() => normalizeSelectedSemgrepPlatformFindings(selection)).toThrow(
     /repository/,
   );
-  const bulk = await collectSemgrepPlatformFindings(
-    options,
-    responses(Response.json(page)),
-  );
+  const bulk = await collectPages(Response.json(page));
   expect(() =>
     normalizeSemgrepPlatformFindings({
       ...bulk,
@@ -149,11 +152,8 @@ test("a supplied empty repository URL remains bulk-only on capture and replay", 
 });
 
 test("an opaque bulk finding ID still requires the original native occurrence ID", async () => {
-  const report = await collectSemgrepPlatformFindings(
-    options,
-    responses(
-      Response.json({ findings: [{ id: 9, rule_name: "example.rule" }] }),
-    ),
+  const report = await collectPages(
+    Response.json({ findings: [{ id: 9, rule_name: "example.rule" }] }),
   );
   const row = normalizeSemgrepFindings(report, {}, "local").findings[0]!;
   row.source_finding_id = "assigned-id";
@@ -187,10 +187,7 @@ test("integer-valued native IDs replay identically through selected and bulk imp
     }),
   });
   const selected = selectSemgrepPlatformFindings(input);
-  const bulk = await collectSemgrepPlatformFindings(
-    options,
-    responses(new Response(page)),
-  );
+  const bulk = await collectPages(new Response(page));
   for (const saved of [selected, bulk]) {
     const replay = normalizeSemgrepFindings(saved, {}, "local");
     expect(replay.excluded).toEqual([]);
@@ -200,20 +197,17 @@ test("integer-valued native IDs replay identically through selected and bulk imp
 });
 
 test("a retagged Semgrep row still requires its provider after assigning an opaque ID", async () => {
-  const report = await collectSemgrepPlatformFindings(
-    options,
-    responses(
-      Response.json({
-        findings: [
-          {
-            id: 9,
-            ref: options.ref,
-            repository: project,
-            rule_name: "example.rule",
-          },
-        ],
-      }),
-    ),
+  const report = await collectPages(
+    Response.json({
+      findings: [
+        {
+          id: 9,
+          ref: options.ref,
+          repository: project,
+          rule_name: "example.rule",
+        },
+      ],
+    }),
   );
   const normalized = normalizeSemgrepFindings(report, {}, "local");
   const row = normalized.findings[0]!;
@@ -237,11 +231,8 @@ test("a retagged Semgrep row still requires its provider after assigning an opaq
 });
 
 test("a normalized Platform report binds native rows even when both projects have checkout remotes", async () => {
-  const report = await collectSemgrepPlatformFindings(
-    options,
-    responses(
-      Response.json({ findings: [{ id: 9, rule_name: "example.rule" }] }),
-    ),
+  const report = await collectPages(
+    Response.json({ findings: [{ id: 9, rule_name: "example.rule" }] }),
   );
   const upstream = "https://git.example.test/service/upstream";
   const fork = "https://git.example.test/service/fork";
@@ -669,23 +660,17 @@ test("retries the throttled page in scope, then rechecks page zero for offset dr
   expect(JSON.parse(report.findings[3000]!)).toEqual({ id: 3001 });
 
   await expect(
-    collectSemgrepPlatformFindings(
-      options,
-      responses(
-        Response.json({ findings: fullPage }),
-        Response.json({ findings: [] }),
-        Response.json({ findings: [...fullPage.slice(1), { id: 3001 }] }),
-      ),
+    collectPages(
+      Response.json({ findings: fullPage }),
+      Response.json({ findings: [] }),
+      Response.json({ findings: [...fullPage.slice(1), { id: 3001 }] }),
     ),
   ).rejects.toThrow(/changed across pages/);
 });
 
 test("rejects numeric API finding rows before returning an unreadable export", async () => {
   await expect(
-    collectSemgrepPlatformFindings(
-      options,
-      responses(Response.json({ findings: [{ id: 7 }, 42] })),
-    ),
+    collectPages(Response.json({ findings: [{ id: 7 }, 42] })),
   ).rejects.toThrow("Semgrep finding must be an object");
 });
 
@@ -727,19 +712,13 @@ test("rejects failed, overlapping or wrong-scope pages without returning a parti
     ],
   ] as const) {
     await expect(
-      collectSemgrepPlatformFindings(
-        options,
-        responses(Response.json({ findings: fullPage }), second),
-      ),
+      collectPages(Response.json({ findings: fullPage }), second),
     ).rejects.toThrow(error);
   }
   const limited = () =>
     new Response("try later", { status: 429, headers: { "Retry-After": "0" } });
   await expect(
-    collectSemgrepPlatformFindings(
-      options,
-      responses(Response.json({ findings: fullPage }), limited(), limited()),
-    ),
+    collectPages(Response.json({ findings: fullPage }), limited(), limited()),
   ).rejects.toThrow("Retry-After: 0: try later");
 });
 
@@ -918,12 +897,7 @@ test("matches GitHub project-path aliases across casing in collected and normali
       { ...options, project: name },
       {
         environment,
-        fetch: async (endpoint) =>
-          Response.json(
-            endpoint.pathname.endsWith("/findings")
-              ? { findings }
-              : { project: { ...native, url: projectUrl } },
-          ),
+        fetch: projectFetch({ ...native, url: projectUrl }, findings),
       },
     );
   }
@@ -1135,10 +1109,7 @@ test("blank display names replay when a native ID or URL binds the repository", 
     rule_name: "example.rule",
   }));
   const page = JSON.stringify({ findings });
-  const saved = await collectSemgrepPlatformFindings(
-    options,
-    responses(new Response(page)),
-  );
+  const saved = await collectPages(new Response(page));
   expect(saved.repositoryAliases).toEqual([]);
   const normalized = normalizeSemgrepFindings(saved, {}, "local");
   expect(normalized.excluded).toEqual([]);
@@ -1164,11 +1135,8 @@ test("blank display names replay when a native ID or URL binds the repository", 
     { id: project.id, url: "https://github.com/other/service", name: "" },
   ]) {
     await expect(
-      collectSemgrepPlatformFindings(
-        options,
-        responses(
-          Response.json({ findings: [{ ...findings[0], repository }] }),
-        ),
+      collectPages(
+        Response.json({ findings: [{ ...findings[0], repository }] }),
       ),
     ).rejects.toThrow(/repository/);
   }
@@ -1184,10 +1152,7 @@ test("uses independently verified project aliases for name-only rows", async () 
       { id: 3, repository: { ...alias, ...proof } },
       { id: 4, repository: alias },
     ];
-    const report = await collectSemgrepPlatformFindings(
-      options,
-      responses(Response.json({ findings })),
-    );
+    const report = await collectPages(Response.json({ findings }));
     expect(report.repositoryAliases).toEqual([label, project.name, "service"]);
     expect(report.findingCount).toBe(4);
   }
@@ -1198,10 +1163,7 @@ test("uses independently verified project aliases for name-only rows", async () 
     { ...alias, url: "https://github.com/other/service" },
   ]) {
     await expect(
-      collectSemgrepPlatformFindings(
-        options,
-        responses(Response.json({ findings: [{ id: 1, repository }] })),
-      ),
+      collectPages(Response.json({ findings: [{ id: 1, repository }] })),
     ).rejects.toThrow(/repository/i);
   }
 });
@@ -1209,15 +1171,12 @@ test("uses independently verified project aliases for name-only rows", async () 
 test("accepts a name-only repository alias verified on a later page", async () => {
   const name = "project display name";
   const first = [{ id: 1, repository: { name } }, ...fullPage.slice(1)];
-  const report = await collectSemgrepPlatformFindings(
-    options,
-    responses(
-      Response.json({ findings: first }),
-      Response.json({
-        findings: [{ id: 3001, repository: { name, id: project.id } }],
-      }),
-      Response.json({ findings: first }),
-    ),
+  const report = await collectPages(
+    Response.json({ findings: first }),
+    Response.json({
+      findings: [{ id: 3001, repository: { name, id: project.id } }],
+    }),
+    Response.json({ findings: first }),
   );
   expect(report.repositoryAliases).toEqual([name]);
   expect(report.findingCount).toBe(3001);
@@ -1229,15 +1188,12 @@ test("cross-page ID-less findings compare original numeric values and member ord
     { vendor: { score: 1 }, rule_name: "example.rule" },
   ];
   const collect = (score: string) =>
-    collectSemgrepPlatformFindings(
-      options,
-      responses(
-        Response.json({ findings: first }),
-        new Response(
-          `{"findings":[{"rule_name":"example.rule","vendor":{"score":${score}}},{"id":3001}]}`,
-        ),
-        Response.json({ findings: first }),
+    collectPages(
+      Response.json({ findings: first }),
+      new Response(
+        `{"findings":[{"rule_name":"example.rule","vendor":{"score":${score}}},{"id":3001}]}`,
       ),
+      Response.json({ findings: first }),
     );
   await expect(collect("1.0")).rejects.toThrow(
     /repeated findings across pages/,
@@ -1250,10 +1206,7 @@ test("keeps unrelated valid findings on a page with missing or duplicate source 
     id,
     rule_name: "example.rule",
   }));
-  const saved = await collectSemgrepPlatformFindings(
-    options,
-    responses(Response.json({ findings })),
-  );
+  const saved = await collectPages(Response.json({ findings }));
   expect(saved.findingCount).toBe(4);
   const result = normalizeSemgrepFindings(saved, {}, "local");
   expect(result.findings).toHaveLength(1);
@@ -1464,20 +1417,13 @@ test.each(["gitlab.com", "bitbucket.org"])(
     const native = `ssh://git@${alternate}:443/example/service.git`;
     const report = await collectSemgrepPlatformFindings(options, {
       environment,
-      fetch: async (endpoint) =>
-        Response.json(
-          endpoint.pathname.endsWith("/findings")
-            ? {
-                findings: [
-                  {
-                    id: 9,
-                    rule_name: "example.rule",
-                    severity: "informational",
-                  },
-                ],
-              }
-            : { project: { ...project, url: native } },
-        ),
+      fetch: projectFetch({ ...project, url: native }, [
+        {
+          id: 9,
+          rule_name: "example.rule",
+          severity: "informational",
+        },
+      ]),
     });
     expect(report.project.url).toBe(`https://${host}/example/service.git`);
     const source = { provider: "semgrep" as const, sourceKey: "example/topic" };
@@ -1530,12 +1476,7 @@ test("CLI emits a replayable report for the requested product", async () => {
   );
   const code = await cli.runCli([...flags, "--source-repository-url", url], {
     ...dependencies({ environment }),
-    hostedScannerFetch: async (endpoint) =>
-      Response.json(
-        endpoint.pathname.endsWith("/findings")
-          ? { findings: [row] }
-          : { project: { ...project, url: null } },
-      ),
+    hostedScannerFetch: projectFetch({ ...project, url: null }, [row]),
   });
   expect(code).toBe(0);
   expect(cli.stderr.text()).toBe("");
@@ -1841,12 +1782,7 @@ test("collects private GitHub and GitLab rows with an independently supplied rep
       { ...options, project: name, sourceRepositories },
       {
         environment,
-        fetch: async (endpoint) =>
-          Response.json(
-            endpoint.pathname.endsWith("/findings")
-              ? { findings: rows }
-              : { project: { id: project.id, name, url: projectUrl } },
-          ),
+        fetch: projectFetch({ id: project.id, name, url: projectUrl }, rows),
       },
     );
   }

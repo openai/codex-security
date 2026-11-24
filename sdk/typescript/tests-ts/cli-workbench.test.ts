@@ -1,3 +1,4 @@
+import { confirmedGroup, findingPair } from "./support/finding-matches.js";
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
@@ -655,14 +656,7 @@ describe("CLI workbench", () => {
     const before = [{ occurrenceId: "before" }];
     const after = [{ occurrenceId: "after" }];
     const matching = {
-      matches: [
-        {
-          beforeOccurrenceIds: ["before"],
-          afterOccurrenceIds: ["after"],
-          confidence: "high" as const,
-          reason: "Same root cause.",
-        },
-      ],
+      matches: [confirmedGroup(["before"], ["after"], "Same root cause.")],
       uncertain: [],
     };
 
@@ -1036,37 +1030,20 @@ describe("CLI workbench", () => {
     const matcherCalls = mock<typeof matchScanFindings>(async (input) => {
       return input.after[0]?.occurrenceId === "b"
         ? {
-            matches: [
-              {
-                beforeOccurrenceIds: ["a"],
-                afterOccurrenceIds: ["b"],
-                confidence: "high",
-                reason: "Same root cause.",
-              },
-            ],
+            matches: [confirmedGroup(["a"], ["b"], "Same root cause.")],
             uncertain: [],
           }
         : {
             matches: [
-              {
-                beforeOccurrenceIds: ["a", "b"],
-                afterOccurrenceIds: ["c"],
-                confidence: "high",
-                reason: "Same root cause.",
-              },
-              {
-                beforeOccurrenceIds: ["a-shared"],
-                afterOccurrenceIds: ["c-shared"],
-                confidence: "high",
-                reason: "Same root cause.",
-              },
+              confirmedGroup(["a", "b"], ["c"], "Same root cause."),
+              confirmedGroup(["a-shared"], ["c-shared"], "Same root cause."),
             ],
             uncertain: [
-              {
-                beforeOccurrenceId: "b-shared",
-                afterOccurrenceId: "c-shared",
-                reason: "Possibly the same root cause.",
-              },
+              findingPair(
+                "b-shared",
+                "c-shared",
+                "Possibly the same root cause.",
+              ),
             ],
           };
     });
@@ -1151,11 +1128,11 @@ describe("CLI workbench", () => {
     const before = [{ occurrenceId: "before", findingId: "known-a" }];
     const after = [{ occurrenceId: "after", findingId: "other" }];
     const knownFindingGroups = [["known-a", "known-b"]];
-    const related = {
-      beforeOccurrenceId: "before",
-      afterOccurrenceId: "after",
-      reason: "Separate controls share a nearby trust boundary.",
-    };
+    const related = findingPair(
+      "before",
+      "after",
+      "Separate controls share a nearby trust boundary.",
+    );
     let saved: string | undefined;
 
     expect(
@@ -1246,12 +1223,11 @@ describe("CLI workbench", () => {
             return matchedInputs.length === 1
               ? {
                   matches: [
-                    {
-                      beforeOccurrenceIds: [first.occurrenceId],
-                      afterOccurrenceIds: [third.occurrenceId],
-                      confidence: "high",
-                      reason: "These confirmed identities describe one issue.",
-                    },
+                    confirmedGroup(
+                      [first.occurrenceId],
+                      [third.occurrenceId],
+                      "These confirmed identities describe one issue.",
+                    ),
                   ],
                   uncertain: [],
                 }
@@ -1386,11 +1362,12 @@ describe("CLI workbench", () => {
               codex: jsonCodex(() => ({
                 matches: [],
                 uncertain: ["uncertain", "earlier-uncertain"].map(
-                  (beforeOccurrenceId) => ({
-                    beforeOccurrenceId,
-                    afterOccurrenceId: "after",
-                    reason: "Possibly the same root cause.",
-                  }),
+                  (beforeOccurrenceId) =>
+                    findingPair(
+                      beforeOccurrenceId,
+                      "after",
+                      "Possibly the same root cause.",
+                    ),
                 ),
               })),
             }),
