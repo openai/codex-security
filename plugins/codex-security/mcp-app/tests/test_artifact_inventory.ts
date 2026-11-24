@@ -17,24 +17,14 @@ import {
 import { build } from "esbuild";
 import path from "node:path";
 import { promisify } from "node:util";
-import { importSource } from "./import-module.ts";
+import { bundledMcpDefine, importSource } from "./import-module.ts";
 
 const execFile = promisify(nodeExecFile);
 const temporaryDirectories = createTemporaryDirectories(true);
 
-const inventory = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-inventory.ts"),
-  {
-    define: {
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-          import.meta.url,
-        ).href,
-      ),
-    },
-  },
-);
+const inventory = await importSource("src/artifact-inventory.ts", {
+  define: bundledMcpDefine("helpers"),
+});
 
 // EUC-JP Perl source ("日本語コメント", "テスト", "こんにちは"), encoded as
 // bytes because Node has no EUC-JP encoder. Non-UTF-8 text must stay eligible.
@@ -194,15 +184,7 @@ test(async function testNonUtf8InventoryPaths(t) {
     ["./name-\udcff.ts", "./name-�.ts"],
   );
   await unlink(rawPath);
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    {
-      reviewItemsTotal: 1,
-    },
-  );
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
-    items: [{ path: "./name-�.ts" }],
-  });
+  await checkInventory(fixture.scan, 1, ["./name-�.ts"]);
 });
 
 test(async function testPrepareWithIgnoredTrackedFiles() {
@@ -293,31 +275,16 @@ test(async function testPrepareExcludesGitMetadata() {
     await fixture.writeRepositoryFile(name, source);
   }
 
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    { reviewItemsTotal: 5 },
-  );
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
-    items: [
-      { path: "./.github/workflows/check.yml" },
-      { path: "./.gitignore" },
-      { path: "./src/widget.git" },
-      { path: "./vendor/lib/handler.py" },
-      { path: "./vendor/worktree/handler.py" },
-    ],
-  });
+  await checkInventory(fixture.scan, 5, [
+    "./.github/workflows/check.yml",
+    "./.gitignore",
+    "./src/widget.git",
+    "./vendor/lib/handler.py",
+    "./vendor/worktree/handler.py",
+  ]);
 
   const metadataScope = { ...fixture.scan, scope: "vendor/lib/.git/hooks" };
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(metadataScope),
-    { reviewItemsTotal: 0 },
-  );
-  assert.deepEqual(
-    await inventory.listCodexSecurityReviewItems(metadataScope),
-    {
-      items: [],
-    },
-  );
+  await checkInventory(metadataScope, 0, []);
 });
 
 test(async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
@@ -363,29 +330,19 @@ test(async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
     },
   };
 
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 4,
-  });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-    items: [
-      { path: "src/changed.ts" },
-      { path: "src/deleted.ts" },
-      { path: "src/new.ts" },
-      { path: "tests/example.ts" },
-    ],
-  });
+  await checkInventory(context, 4, [
+    "src/changed.ts",
+    "src/deleted.ts",
+    "src/new.ts",
+    "tests/example.ts",
+  ]);
   const previous = process.env.CODEX_SECURITY_EXCLUDE_PATHS;
   try {
     process.env.CODEX_SECURITY_EXCLUDE_PATHS = JSON.stringify([
       "tests",
       "src/deleted.ts",
     ]);
-    assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-      reviewItemsTotal: 2,
-    });
-    assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-      items: [{ path: "src/changed.ts" }, { path: "src/new.ts" }],
-    });
+    await checkInventory(context, 2, ["src/changed.ts", "src/new.ts"]);
   } finally {
     if (previous === undefined) delete process.env.CODEX_SECURITY_EXCLUDE_PATHS;
     else process.env.CODEX_SECURITY_EXCLUDE_PATHS = previous;
@@ -441,19 +398,14 @@ test(async function testPrepareIncludesPerlSourceWithMixedEncodings() {
     },
   };
 
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 6,
-  });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-    items: [
-      { path: "lib/Util.pm" },
-      { path: "t/basic.t" },
-      { path: "www/cgi-bin/app.pl" },
-      { path: "www/cgi-bin/entrypoint" },
-      { path: "www/cgi-bin/index.cgi" },
-      { path: "www/cgi-bin/legacy.cgi" },
-    ],
-  });
+  await checkInventory(context, 6, [
+    "lib/Util.pm",
+    "t/basic.t",
+    "www/cgi-bin/app.pl",
+    "www/cgi-bin/entrypoint",
+    "www/cgi-bin/index.cgi",
+    "www/cgi-bin/legacy.cgi",
+  ]);
 });
 
 test(async function testPrepareIncludesStagedAndUnstagedChanges() {
@@ -492,16 +444,11 @@ test(async function testPrepareIncludesStagedAndUnstagedChanges() {
     },
   };
 
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 3,
-  });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-    items: [
-      { path: "src/changed.ts" },
-      { path: "src/staged.ts" },
-      { path: "src/untracked.ts" },
-    ],
-  });
+  await checkInventory(context, 3, [
+    "src/changed.ts",
+    "src/staged.ts",
+    "src/untracked.ts",
+  ]);
 });
 
 test(async function testInventoryChildPreservesSettingsAndCwd() {
@@ -560,12 +507,7 @@ test(async function testInventoryChildPreservesSettingsAndCwd() {
         },
       },
     };
-    assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-      reviewItemsTotal: 1,
-    });
-    assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-      items: [{ path: "visible.py" }],
-    });
+    await checkInventory(context, 1, ["visible.py"]);
     const records = (await readFile(marker, "utf8"))
       .trim()
       .split("\n")
@@ -641,14 +583,7 @@ test(async function testInventoryChildPreservesRawPaths(t) {
     platform: "node",
     format: "esm",
     outfile: driver,
-    define: {
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-          import.meta.url,
-        ).href,
-      ),
-    },
+    define: bundledMcpDefine("helpers"),
   });
   const octal = (value: Buffer) =>
     [...value]
@@ -868,6 +803,19 @@ test(async function testInvalidDiffTargetPreservesPreviousInventory() {
     "src/original.ts\n",
   );
 });
+
+async function checkInventory(
+  context: Awaited<ReturnType<typeof createFixture>>["scan"],
+  reviewItemsTotal: number,
+  paths: string[],
+) {
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal,
+  });
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
+    items: paths.map((path) => ({ path })),
+  });
+}
 
 async function createFixture(label: string) {
   const root = await temporaryDirectories.create(

@@ -12,7 +12,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { collectSonarIssues } from "../src/sonar-collector.js";
+import {
+  collectSonarIssues,
+  type SonarCollectionOptions,
+} from "../src/sonar-collector.js";
 import {
   normalizeSonarFindings,
   readSonarFindings,
@@ -97,9 +100,12 @@ function sonarSession(options: {
 }) {
   const commands: string[][] = [];
   const queries: URLSearchParams[] = [];
-  return {
+  const session = {
     commands,
     queries,
+    collect(selection: Omit<SonarCollectionOptions, "environment">) {
+      return collectSonarIssues({ ...selection, environment }, session.run);
+    },
     run: async (args: string[]): Promise<Record<string, unknown>> => {
       commands.push(args);
       if (args[0] === "auth") return options.connection?.() ?? auth;
@@ -163,6 +169,7 @@ function sonarSession(options: {
       return options.pages[Number(url.searchParams.get("p")) - 1]!;
     },
   };
+  return session;
 }
 
 test("uses the signed-in CLI and a verified checkout binding, retaining all security issue pages", async () => {
@@ -173,10 +180,7 @@ test("uses the signed-in CLI and a verified checkout binding, retaining all secu
     analyses: [{ key: "analysis", relativePathFromScmRoot: "" }],
   });
   const branch = "release/space & plus+";
-  const capture = await collectSonarIssues(
-    { cwd, branch, environment },
-    session.run,
-  );
+  const capture = await session.collect({ cwd, branch });
   expect(session.commands[0]).toEqual(["auth", "status", "--format", "json"]);
   expect(session.commands[1]).toEqual([
     "api",
@@ -216,10 +220,12 @@ test("collects the exact issue keys and PR selected in the plugin handoff", asyn
       { key: "analysis", relativePathFromScmRoot: "packages/main-branch" },
     ],
   });
-  const capture = await collectSonarIssues(
-    { cwd, project, pullRequest: "35", issueKeys, environment },
-    session.run,
-  );
+  const capture = await session.collect({
+    cwd,
+    project,
+    pullRequest: "35",
+    issueKeys,
+  });
   expect(capture.pullRequest).toBe("35");
   expect(capture.projectBase).toBeUndefined();
   expect(session.commands.flat().join(" ")).not.toContain(
@@ -236,10 +242,7 @@ test("collects the exact issue keys and PR selected in the plugin handoff", asyn
   ] as const) {
     const incomplete = sonarSession({ pages: [page(key)] });
     await expect(
-      collectSonarIssues(
-        { cwd, project, issueKeys, environment },
-        incomplete.run,
-      ),
+      incomplete.collect({ cwd, project, issueKeys }),
     ).rejects.toThrow(error);
   }
 });
@@ -277,10 +280,12 @@ test("a large exact selection retains each query's native pages for offline repl
       return result;
     },
   });
-  const capture = await collectSonarIssues(
-    { cwd, project, branch: "main", issueKeys: largeSelection, environment },
-    session.run,
-  );
+  const capture = await session.collect({
+    cwd,
+    project,
+    branch: "main",
+    issueKeys: largeSelection,
+  });
   const firstPages = session.queries.filter((query) => query.get("p") === "1");
   expect(firstPages.length).toBeGreaterThan(1);
   expect(
@@ -315,16 +320,12 @@ test("multiple exact-key queries reject missing, foreign, and duplicate keys in 
       },
     });
     await expect(
-      collectSonarIssues(
-        {
-          cwd,
-          project,
-          branch: "main",
-          issueKeys: largeSelection,
-          environment,
-        },
-        session.run,
-      ),
+      session.collect({
+        cwd,
+        project,
+        branch: "main",
+        issueKeys: largeSelection,
+      }),
     ).rejects.toThrow(error);
     expect(
       session.queries.filter((query) => query.get("p") === "1").length,
@@ -335,14 +336,8 @@ test("multiple exact-key queries reject missing, foreign, and duplicate keys in 
 test("an omitted ref and the explicit Sonar main branch produce identical captures", async () => {
   const cwd = await checkout();
   const session = sonarSession({ pages: [page("A")] });
-  const implicit = await collectSonarIssues(
-    { cwd, project, environment },
-    session.run,
-  );
-  const explicit = await collectSonarIssues(
-    { cwd, project, branch: "trunk", environment },
-    session.run,
-  );
+  const implicit = await session.collect({ cwd, project });
+  const explicit = await session.collect({ cwd, project, branch: "trunk" });
   expect(implicit).toEqual(explicit);
   expect(session.queries.map((query) => query.get("branch"))).toEqual([
     "trunk",
@@ -377,19 +372,16 @@ test("a supplied source repository must agree with checkout discovery and select
   const cwd = await checkout();
   const sourceRepositoryUrl = repositoryUrl + "-other";
   const implicit = sonarSession({ pages: [] });
-  await expect(
-    collectSonarIssues({ cwd, sourceRepositoryUrl, environment }, implicit.run),
-  ).rejects.toThrow("--source-repository-url");
+  await expect(implicit.collect({ cwd, sourceRepositoryUrl })).rejects.toThrow(
+    "--source-repository-url",
+  );
   expect(implicit.commands).toEqual([]);
   const explicit = sonarSession({
     pages: [],
     navigation: { alm: { url: sourceRepositoryUrl } },
   });
   await expect(
-    collectSonarIssues(
-      { cwd, project, sourceRepositoryUrl: repositoryUrl, environment },
-      explicit.run,
-    ),
+    explicit.collect({ cwd, project, sourceRepositoryUrl: repositoryUrl }),
   ).rejects.toThrow("--source-repository-url");
   expect(explicit.queries).toEqual([]);
 });
@@ -406,10 +398,7 @@ test("conflicting organization, branch, and pull request on returned issues fail
     Object.assign(result.issues[0]!, scope);
     const session = sonarSession({ pages: [result] });
     await expect(
-      collectSonarIssues(
-        { cwd, project, ...selection, environment },
-        session.run,
-      ),
+      session.collect({ cwd, project, ...selection }),
     ).rejects.toThrow(error);
     expect(session.queries).toHaveLength(1);
   }
@@ -425,9 +414,9 @@ test("automatic discovery rejects a forged Git pointer but accepts a registered 
   await mkdir(forged);
   await writeFile(join(forged, ".git"), `gitdir: ${join(cwd, ".git")}\n`);
   const session = sonarSession({ pages: [page("A")] });
-  await expect(
-    collectSonarIssues({ cwd: forged, environment }, session.run),
-  ).rejects.toThrow("--sonar-project");
+  await expect(session.collect({ cwd: forged })).rejects.toThrow(
+    "--sonar-project",
+  );
   expect(session.commands).toEqual([]);
 
   git(
@@ -454,10 +443,7 @@ test("automatic discovery rejects a forged Git pointer but accepts a registered 
     "origin",
     repositoryUrl + "-mirror",
   );
-  const capture = await collectSonarIssues(
-    { cwd: linked, environment },
-    session.run,
-  );
+  const capture = await session.collect({ cwd: linked });
   expect(capture).toMatchObject({ project, repositoryUrl });
   expect(session.queries).toHaveLength(1);
 });
@@ -476,7 +462,7 @@ test("automatic discovery uses only the rewritten primary fetch URL of origin", 
     repositoryUrl + "-mirror",
   );
   const session = sonarSession({ pages: [page("A")] });
-  const capture = await collectSonarIssues({ cwd, environment }, session.run);
+  const capture = await session.collect({ cwd });
   expect(capture).toMatchObject({ project, repositoryUrl });
 
   git(
@@ -489,9 +475,7 @@ test("automatic discovery uses only the rewritten primary fetch URL of origin", 
     "^source:",
   );
   const rejected = sonarSession({ pages: [] });
-  await expect(
-    collectSonarIssues({ cwd, environment }, rejected.run),
-  ).rejects.toThrow("--sonar-project");
+  await expect(rejected.collect({ cwd })).rejects.toThrow("--sonar-project");
   expect(rejected.commands).toEqual([]);
 });
 
@@ -503,10 +487,7 @@ test("uses the explicit project in token-only sessions and claims only a matchin
       navigationDenied: true,
       components: [{ key: resolvedProject }],
     });
-    const capture = await collectSonarIssues(
-      { cwd, project, environment },
-      session.run,
-    );
+    const capture = await session.collect({ cwd, project });
     expect(capture.project).toBe(project);
     expect(capture.repositoryUrl).toBe(
       resolvedProject === project ? repositoryUrl : undefined,
@@ -540,10 +521,7 @@ test("an empty search cannot validate an unbound project without Browse access i
       shownComponent,
     });
     await expect(
-      collectSonarIssues(
-        { cwd, project, sourceRepositoryUrl: repositoryUrl, environment },
-        session.run,
-      ),
+      session.collect({ cwd, project, sourceRepositoryUrl: repositoryUrl }),
     ).rejects.toThrow(/selected project|Browse denied/);
     expect(session.commands.flat().join(" ")).not.toContain(
       "/api/project_branches/list",
@@ -563,10 +541,7 @@ test("an explicit project disambiguates token-only monorepo bindings", async () 
       "p-1": [{ key: project, id: "p-1", organization }],
     },
   });
-  const capture = await collectSonarIssues(
-    { cwd, project, environment },
-    session.run,
-  );
+  const capture = await session.collect({ cwd, project });
   expect(capture.repositoryUrl).toBe(repositoryUrl);
   expect(session.queries.map((q) => q.get("componentKeys"))).toEqual([project]);
 });
@@ -575,9 +550,9 @@ test("a confirmed project or organization mismatch stops before further lookups"
   const cwd = await checkout();
   for (const navigation of [{ key: "foreign" }, { organization: "foreign" }]) {
     const session = sonarSession({ pages: [], navigation });
-    await expect(
-      collectSonarIssues({ cwd, project, environment }, session.run),
-    ).rejects.toThrow("different project or organization");
+    await expect(session.collect({ cwd, project })).rejects.toThrow(
+      "different project or organization",
+    );
     expect(session.commands).toHaveLength(2);
   }
 });
@@ -586,10 +561,7 @@ test("explicitly selecting zero issues never broadens to all open issues", async
   const cwd = await checkout();
   const session = sonarSession({ pages: [] });
   await expect(
-    collectSonarIssues(
-      { cwd, project, issueKeys: [], environment },
-      session.run,
-    ),
+    session.collect({ cwd, project, issueKeys: [] }),
   ).rejects.toThrow("selection is empty");
   expect(session.commands).toEqual([]);
 });
@@ -597,9 +569,9 @@ test("explicitly selecting zero issues never broadens to all open issues", async
 test("asks for a narrower selection on the first page exceeding Sonar's search window", async () => {
   const cwd = await checkout();
   const session = sonarSession({ pages: [page("A", 1, 10_001)] });
-  await expect(
-    collectSonarIssues({ cwd, project, environment }, session.run),
-  ).rejects.toThrow("--sonar-issue");
+  await expect(session.collect({ cwd, project })).rejects.toThrow(
+    "--sonar-issue",
+  );
   expect(session.queries).toHaveLength(1);
 });
 
@@ -611,10 +583,7 @@ test("cannot save a partial or overlapping Sonar search as a complete capture", 
   ]) {
     const session = sonarSession({ pages });
     await expect(
-      collectSonarIssues(
-        { cwd, project, branch: "main", environment },
-        session.run,
-      ),
+      session.collect({ cwd, project, branch: "main" }),
     ).rejects.toThrow(/overlap|paging/);
   }
 });
@@ -630,9 +599,7 @@ test("asks for a project before fetching findings from an ambiguous or unverifie
     { components: [{ key: project, id: "p-2" }] },
   ]) {
     const session = sonarSession({ ...options, pages: [] });
-    await expect(
-      collectSonarIssues({ cwd, environment }, session.run),
-    ).rejects.toThrow("--sonar-project");
+    await expect(session.collect({ cwd })).rejects.toThrow("--sonar-project");
     expect(session.queries).toHaveLength(0);
     expect(session.commands.flat().join(" ")).not.toContain(
       "/api/navigation/component",
@@ -678,10 +645,7 @@ test("canonical Cloud endpoints are accepted and connection changes during issue
         return page("A");
       },
     });
-    const result = collectSonarIssues(
-      { cwd, branch: "trunk", environment },
-      session.run,
-    );
+    const result = session.collect({ cwd, branch: "trunk" });
     if (initialServer === server)
       await expect(result).rejects.toThrow("connection changed");
     else expect((await result).server).toBe(final.server);
@@ -706,10 +670,7 @@ test("projects paths only from the selected branch's recorded analysis base", as
       pages: [page("A")],
       analyses,
     });
-    const capture = await collectSonarIssues(
-      { cwd, branch, environment },
-      session.run,
-    );
+    const capture = await session.collect({ cwd, branch });
     expect(session.commands).toContainEqual([
       "api",
       "get",
@@ -736,10 +697,7 @@ test("preserves native paths without projecting a changed analysis or base durin
         return page("issue-" + index, index, 2);
       },
     });
-    const capture = await collectSonarIssues(
-      { cwd, branch: "main", environment },
-      session.run,
-    );
+    const capture = await session.collect({ cwd, branch: "main" });
     expect(capture.projectBase).toBeUndefined();
     expect(capture.pages).toEqual([
       page("issue-1", 1, 2),
@@ -757,10 +715,7 @@ test("a fork with a matching upstream projects the selected project's stable ana
     analyses: [{ key: "stable", relativePathFromScmRoot: "packages/service" }],
     pages: [page("A")],
   });
-  const capture = await collectSonarIssues(
-    { cwd, project, branch: "main", environment },
-    session.run,
-  );
+  const capture = await session.collect({ cwd, project, branch: "main" });
   const { findings } = normalizeSonarFindings(capture, repositoryUrl, "local");
   expect(findings[0]?.evidence.locations).toMatchObject([
     { path: "packages/service/source.ts" },
@@ -803,7 +758,7 @@ test.each([
     const cwd = await checkout();
     git("-C", cwd, "remote", "set-url", "origin", origin);
     const session = sonarSession({ pages: [page("A")], repositoryUrl: source });
-    const capture = await collectSonarIssues({ cwd, environment }, session.run);
+    const capture = await session.collect({ cwd });
     expect(capture.repositoryUrl).toBe(source);
   },
 );
@@ -836,9 +791,7 @@ test("rejects ambiguous Git transport and credential-bearing query strings befor
   ]) {
     git("-C", cwd, "remote", "set-url", "origin", origin);
     const session = sonarSession({ pages: [] });
-    await expect(
-      collectSonarIssues({ cwd, environment }, session.run),
-    ).rejects.toThrow("--sonar-project");
+    await expect(session.collect({ cwd })).rejects.toThrow("--sonar-project");
     expect(session.commands).toEqual([]);
   }
 });

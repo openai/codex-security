@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import * as z from "zod/v4";
 import { importSource } from "./import-module.ts";
 
 const { projectArtifactToolSchema } = await importSource(
-  join(import.meta.dirname, "../src/artifact-schema-loader.ts"),
+  "src/artifact-schema-loader.ts",
 );
 
 const document = {
