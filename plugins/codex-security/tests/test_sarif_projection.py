@@ -9,10 +9,9 @@ import json
 import os
 import shutil
 import tempfile
-import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, mock
 
 import pytest
 from workbench_test_support import load_script
@@ -22,7 +21,7 @@ EXAMPLE_DIR = PLUGIN_ROOT / "examples" / "legacy-completed-scan"
 FINALIZER = load_script("finalize_scan_contract", module_name="sarif_finalizer")
 
 
-class SarifProjectionTest(unittest.TestCase):
+class SarifProjectionTest(TestCase):
     def setUp(self) -> None:
         self.manifest = json.loads((EXAMPLE_DIR / "scan-manifest.json").read_text())
         self.findings = json.loads((EXAMPLE_DIR / "findings.json").read_text())

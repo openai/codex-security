@@ -174,12 +174,17 @@ assume an open `CodexSecurity` client named `security`; close it when finished.
 ```ts
 const result = await security.run("/path/to/repository", {
   target: ["src", "tests"],
+  excludePaths: ["src/examples"],
   knowledgeBasePaths: ["/path/to/architecture.md"],
   scanPrompt: "Focus on authentication and authorization.",
   outputDir: "/path/outside/repository/results",
   maxCostUsd: 5,
 });
 ```
+
+`excludePaths` takes literal repository-relative files or directories. A directory
+excludes all descendants, and exclusions take precedence over `target`. The default
+is no exclusions. Requested exclusions are recorded in `result.manifest.scan.scope.excludePaths`.
 
 | Option                                      | Use                                                                            |
 | ------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -188,6 +193,7 @@ const result = await security.run("/path/to/repository", {
 | `knowledgeBasePaths`                        | Supporting text, PDF, DOCX files, or directories.                              |
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
+| `validationProvider`                        | Host-side provider configuration; pass it to `validate()` after `run()`.       |
 | `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
 | `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
@@ -210,6 +216,55 @@ model call, including when `maxCostUsd` is set. Missing hints abstain and invali
 hints produce per-finding errors. Working-tree and directory snapshots are
 unsupported. Explicit owner-only analysis remains available through `suggestOwners`
 and `suggest-owners`, sharing the same evidence validation and report code.
+
+### Use a validation provider
+
+`run()` accepts `validationProvider` configuration but does not invoke it. SDK
+callers validate sealed findings explicitly with `validate()`, which accepts
+that configuration or a `ValidationProvider` implementation:
+
+```ts
+const validationProvider = {
+  provider: "continuum",
+  continuum: { environment_id: "example" },
+};
+const result = await security.run("/path/to/repository", {
+  validationProvider,
+});
+for (const finding of result.findings.findings) {
+  const assessment = await security.validate({
+    repositoryPath: "/path/to/repository",
+    finding,
+    validationProvider,
+  });
+  console.log(assessment.report, assessment.record);
+}
+```
+
+`validate()` returns the assessment; it does not save supplemental report files.
+The CLI and plugin completion workflows save those files automatically. See
+[validation providers](../../../docs/validation-providers.md) for selection,
+outputs, and requirements. Omit the provider to keep source-only validation.
+
+Public types are `ValidationProviderSettings`, `ValidationProvider`,
+`ValidationProviderContext`, `ValidationProviderAssessment`,
+`ValidationProvenance`, `ValidationItemRecord`, `ValidationBasis`,
+`ValidationResultScope`, and `ValidationClaimMatch`. Continuum records distinguish
+finding and issue verdicts with `resultScope`. Both retain Codex severity.
+`issueFindingCount` describes membership and `providerSeverity` is the
+issue's severity. A member verdict alone cannot establish that the exact
+flaw was reproduced. `claimMatch` stays `unknown`. The `FINDING` reason
+basis indicates a statement from the submitted finding.
+
+The built-in `ContinuumValidationProvider` constructor accepts
+`ContinuumValidationOptions`. Provider authors implement `validate()` and
+optionally `validateBatch()`. External registry discovery is unsupported.
+
+Continuum returns `record.terminalStatus` alongside `record.verdict` when AWS
+supplies a run status. Check `disposition` before using a result to prioritize
+a finding. Failed and inconclusive runs are deferred. For discarded findings,
+read `record.statusMessage` for the reason. `provenance.validatedAt` and
+`record.freshness.validatedAt` are optional.
 
 ### Scan a diff
 
@@ -739,6 +794,13 @@ returned `preview`, then call `import()` to save locally or `publish()` to
 upload. The [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md)
 list the supported report formats and destinations for each provider.
 
+For a Continuum inbox import, `preview.privateImport.sourceCheckpoint`
+identifies the source revision on which the update is based. Call `publish()`
+on the object you reviewed. If Cloud rejects the revision, compare the current
+inbox evidence with a new preview. A preview with `retryOfJobId` and
+`resumed: false` offers a fresh attempt for the full selection. A resumed
+upload retains the approved revision and any prior job ID.
+
 For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
 or `prepareNormalizedExternalPublication(findings, options)` and review the
 preview in the same way. Cloud file imports use `ExternalPublicationOptions`,
@@ -772,7 +834,7 @@ If you know the source repository, pass its Git URL in `options.sourceRepository
 to check the Sonar binding before fetching issues.
 
 For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
-saved issue export or finding response. Use
+saved issue export, single-finding capture, or native finding response. Use
 `normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
 Issue exports with a saved repository URL can omit the second argument.
 For other reports, pass the verified source repository URL.
@@ -781,7 +843,11 @@ For other reports, pass the verified source repository URL.
 Pass `"local"` as the third argument to retain full patch contents in collector
 captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
 when the patch contents exceed the evidence budget. Available patches are in
-`evidence.source_data.patches`.
+`evidence.source_data.patches`. Single-finding captures provide their matching
+validation artifacts in `evidence.source_data.evidence_artifacts`. The local
+projection retains each validation body, and Cloud marks omitted bodies with
+the same `contentOmitted` value. When even the validation descriptors exceed
+the budget, Cloud omits them and preserves the finding and its fitting patches.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
@@ -828,6 +894,21 @@ credentials, deduplication, backups, and independently operated HTTP endpoints.
 For an older service deployment, see [migration guidance](findings-service.md#local-service-removal).
 For records stored in your own system, see
 [SDK records deduplication](dedupe-records.md).
+
+## Repository dependency evidence
+
+The experimental dependency investigator reads source, manifests and lockfiles at
+one Git commit. For npm it can follow a requesting project's installed path in
+a v2 or v3 npm lockfile. For Python it can cite a literal, unconditional version
+pin in a requirements file. Both are build inputs. A deployment needs a separate
+observation that connects the running package to its source revision. Import
+matches and OpenGrep call locations are candidates for review.
+
+For a reviewed repository check, select MCP servers through
+`exploitability.evidence_sources` in the project file. The investigator can
+query those servers and cite their replies. A deployment record can establish
+which build ran. Establishing caller access takes evidence of who could reach
+the affected operation. See the [CLI configuration example](cli.md#experimental-dependency-investigations).
 
 ## Containerized bulk scans
 

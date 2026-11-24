@@ -52,6 +52,32 @@ function option(helpText: string, flag: string): string {
 }
 
 describe("CLI help", () => {
+  test.each([undefined, "", "0", "true", "1"])(
+    "registers the experimental dependency command only for the exact opt-in (%j)",
+    async (value) => {
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: value },
+      });
+      const root = createCliTest(main);
+      expect(await root.runCli(["--help"], deps)).toBe(0);
+      expect(/^  exploitability\s/mu.test(root.stdout.text())).toBe(
+        value === "1",
+      );
+
+      const group = createCliTest(main);
+      const status = await group.runCli(["exploitability", "--help"], deps);
+      if (value === "1") {
+        expect(status).toBe(0);
+        expect(group.stdout.text()).toContain(
+          "Usage: codex-security exploitability",
+        );
+      } else {
+        expect(status).toBe(2);
+        expect(group.stderr.text()).toContain("Unknown command exploitability");
+      }
+    },
+  );
+
   test.each(["scan", "patch", "verify-fix"])(
     "%s advertises hosted mode without entering the protocol",
     async (command) => {
@@ -644,4 +670,53 @@ describe("CLI help", () => {
       }
     },
   );
+});
+
+test("HTML is a file format only on commands that produce an exploitability report", async () => {
+  const deps = dependencies({
+    environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+  });
+  async function invoke(args: string[]) {
+    const stdout = capture(),
+      stderr = capture();
+    const code = await main(args, stdout.stream, stderr.stream, deps);
+    return { code, help: stdout.text(), error: stderr.text() };
+  }
+  for (const path of [["check"], ["run", "finalize"]]) {
+    const result = await invoke(["exploitability", ...path, "--help"]);
+    expect(result.code).toBe(0);
+    expect(option(result.help, "--format")).toContain("html");
+    const invalid = await invoke([
+      "exploitability",
+      ...path,
+      "--format",
+      "pdf",
+    ]);
+    expect(invalid.error).toContain("html");
+    expect(option(result.help, "--report-file")).toContain(
+      "exploitability_report_<timestamp>.html",
+    );
+  }
+  for (const path of [["info"], ["exploitability", "run", "init"]]) {
+    const result = await invoke([...path, "--help"]);
+    expect(option(result.help, "--format")).not.toContain("html");
+    expect((await invoke([...path, "--format=html"])).error).toContain(
+      "Invalid format",
+    );
+  }
+  for (const flags of [
+    ["--json"],
+    ["--format", "md"],
+    ["--filter-output", "uses"],
+  ]) {
+    const result = await invoke([
+      "--format=html",
+      "exploitability",
+      "check",
+      "CVE-2099-0001",
+      ...flags,
+    ]);
+    expect(result.code).toBe(2);
+    expect(result.error).toContain(flags[0]!);
+  }
 });

@@ -4,7 +4,7 @@ These internal bindings supply OS operations that Node does not expose. The `res
 
 ## Package inputs
 
-For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](../../../.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
+For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](https://github.com/openai/codex-security/blob/main/.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
 
 ```sh
 gh run download RUN_ID --name native-universal-COMMIT --dir plugins/codex-security/native/prebuilt
@@ -26,7 +26,7 @@ node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. CI tests this build without the SDK on Linux, macOS, and Windows.
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. The MCP source build shares validation adapters with the sibling TypeScript SDK sources, so build from the repository checkout with both packages' dependencies installed. Installed plugins contain self-contained bundles and need no Codex Security SDK installation. CI tests the native-wrapper build without an npm launcher on Linux, macOS, and Windows.
 
 ## Build and verify the native bindings
 
