@@ -68,7 +68,7 @@ export type ExportArtifactOptions = {
     }
   | {
       artifact?: "findings";
-      format?: "csv" | "html" | "json" | "sarif";
+      format?: Exclude<ExportFormat, "md" | "servicenow-avit">;
       sourceRoot?: string;
       avitTemplate?: never;
     }

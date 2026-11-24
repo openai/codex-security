@@ -1078,10 +1078,9 @@ def build_report_markdown(
 def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) -> bytes:
     """Render a standalone HTML export from a validated, sealed scan."""
     scan = manifest["scan"]
-    target = escape(scan["target"]["displayName"])
+    heading = "Codex Security findings — " + escape(scan["target"]["displayName"])
     items = findings["findings"]
-    word = "finding" if len(items) == 1 else "findings"
-    summary = f"{len(items)} {word}"
+    summary = "1 finding" if len(items) == 1 else f"{len(items)} findings"
     if items:
         summary += f" · {_level_mix(items, 'severity', SEVERITY_ORDER)}"
         if scan["status"] != "completed":
@@ -1099,14 +1098,14 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
             f'<tr><td>{badge}</td><td><a href="#finding-{index}">{title}</a></td>'
             f"<td><code>{location}</code></td></tr>"
         )
-        fields = (
-            ("Finding ID", finding["findingId"]),
-            ("Occurrence ID", finding["occurrenceId"]),
-            ("Summary", finding["summary"]),
-            ("Remediation", finding["remediation"]),
-        )
         description = "".join(
-            f"<dt>{label}</dt><dd>{escape(value)}</dd>" for label, value in fields
+            f"<dt>{label}</dt><dd>{escape(finding[key])}</dd>"
+            for label, key in (
+                ("Finding ID", "findingId"),
+                ("Occurrence ID", "occurrenceId"),
+                ("Summary", "summary"),
+                ("Remediation", "remediation"),
+            )
         )
         details.append(
             f'<article class="finding" id="finding-{index}"><h2>{title}</h2>'
@@ -1125,11 +1124,11 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codex Security findings — {target}</title>
+<title>{heading}</title>
 <style>{_HTML_EXPORT_STYLE}</style>
 </head>
 <body>
-<header><h1>Codex Security findings — {target}</h1><p>{meta}</p>
+<header><h1>{heading}</h1><p>{meta}</p>
 <p>This sealed snapshot excludes triage status and review coverage.</p><p>{summary}</p></header>
 <table>
 <thead><tr><th>Severity</th><th>Finding</th><th>Location</th></tr></thead>

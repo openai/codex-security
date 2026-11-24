@@ -1026,13 +1026,13 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertIn(str(diagnostic), stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
 
-    def test_html_export_escapes_markup_and_handles_an_empty_scan(self) -> None:
-        self.finding["title"] = "<script>alert(1)</script>"
-        self.finding["summary"] = '<img src="x" onerror="alert(1)">'
-        self.finding["locations"] = [
+    def test_html_export_escapes_markup(self) -> None:
+        finding = self.findings["findings"][0]
+        finding["title"] = "<script>alert(1)</script>"
+        finding["summary"] = '<img src="x" onerror="alert(1)">'
+        finding["locations"] = [
             {"path": "src/<b>.py", "startLine": 7, "endLine": 9, "role": "sink"}
         ]
-        self.findings["findings"] = [copy.deepcopy(self.finding)]
         self.write_sealed_scan()
 
         html = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
@@ -1042,15 +1042,9 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertNotIn('<img src="x"', html)
         self.assertIn("src/&lt;b&gt;.py:7-9", html)
 
-        self.findings["findings"] = []
-        self.write_sealed_scan()
-        empty = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
-        self.assertIn("No findings were reported.", empty)
-        self.assertIn("0 findings", empty)
-
     def test_html_export_distinguishes_empty_stopped_scans(self) -> None:
         self.findings["findings"] = []
-        for status in ("failed", "interrupted", "canceled"):
+        for status in ("completed", "failed", "interrupted", "canceled"):
             with self.subTest(status=status):
                 self.write_scan()
                 FINALIZER.finalize_scan(
@@ -1058,8 +1052,11 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     completion_binding={**self.completion_binding(), "status": status},
                 )
                 report = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
-                self.assertIn("No vulnerability conclusion can be drawn.", report)
-                self.assertNotIn("No findings were reported.", report)
+                self.assertIn("0 findings", report)
+                self.assertEqual("No findings were reported." in report, status == "completed")
+                self.assertEqual(
+                    "No vulnerability conclusion can be drawn." in report, status != "completed"
+                )
 
     def test_malformed_remote_is_a_contract_error(self) -> None:
         self.manifest["scan"]["target"]["remote"] = "https://[invalid"
