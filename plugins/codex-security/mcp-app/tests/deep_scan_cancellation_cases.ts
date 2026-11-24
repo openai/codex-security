@@ -8,9 +8,11 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { assertFlagPair } from "./assertions.ts";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-
+import {
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+} from "./deep_scan_executor_fixture.ts";
+import { trustedParentSandbox } from "./support/fake-codex-fixture.ts";
 import { restoreEnv } from "./support/fake-codex-source.ts";
 
 export function mockWorkerSpawn(
@@ -48,20 +50,7 @@ export function mockWorkerSpawn(
   };
 }
 
-export async function testWorkerCancellation({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  trustedParentSandbox,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<{
-    root: string;
-    executablePath: string;
-    preflightMarkerPath: string;
-    markerPath: string;
-  }>;
-  trustedParentSandbox: DeepWorkerParentSandbox;
-}) {
+export async function testWorkerCancellation() {
   const fixture = await fakeCodexFixture();
   let worker: ChildProcess | undefined;
   let workerSignal: AbortSignal | undefined;
