@@ -20,30 +20,29 @@ const pull = {
   base: { ref: "main" },
 };
 
-function run(id, name, extra = {}) {
+function outcome(conclusion) {
+  return { status: conclusion ? "completed" : "in_progress", conclusion };
+}
+
+function run(id, name, { conclusion = null, ...extra } = {}) {
+  const title = name === "node-github-release" ? "Publish npm-v99.1.2" : name;
   return {
     id,
-    name: name === "node-github-release" ? "Publish npm-v99.1.2" : name,
+    name: title,
     path: `.github/workflows/${name}.yml`,
     head_sha: sha,
     head_branch: name === "node-release" ? "npm-v99.1.2" : "main",
     event: name === "node-ci" ? "push" : "workflow_dispatch",
-    display_title:
-      name === "node-github-release" ? "Publish npm-v99.1.2" : name,
+    display_title: title,
     html_url: `https://github.com/example/security-tool/actions/runs/${id}`,
     created_at: `2026-01-01T00:${String(id).padStart(2, "0")}:00Z`,
-    status: "in_progress",
-    conclusion: null,
+    ...outcome(conclusion),
     ...extra,
   };
 }
 
 function job(name, conclusion = "success") {
-  return {
-    name,
-    status: conclusion ? "completed" : "in_progress",
-    conclusion,
-  };
+  return { name, ...outcome(conclusion) };
 }
 
 function fixture(repo) {
@@ -117,10 +116,15 @@ function fixture(repo) {
     },
   };
   return {
-    setRun(id, workflow, options) {
-      runs.set(id, run(id, workflow, options));
-    },
     runs,
+    setRun(id, name, extra) {
+      const input = run(id, name, extra);
+      runs.set(input.id, input);
+      return input;
+    },
+    complete(id, conclusion) {
+      Object.assign(runs.get(id), outcome(conclusion));
+    },
     jobs,
     deployments,
     errors,
@@ -178,12 +182,8 @@ test("accepts stable version-bump titles with breaking-change markers", async ()
 test("recognizes ref-qualified workflow paths for progress and observation", async () => {
   for (const workflow of ["node-ci", "node-release", "node-github-release"]) {
     const f = fixture();
-    const input = run(1, workflow, {
-      status: "completed",
-      conclusion: "failure",
-    });
+    const input = f.setRun(1, workflow, { conclusion: "failure" });
     input.path += `@${input.head_branch}`;
-    f.runs.set(1, input);
     assert.equal((await f.update(1)).action, "created");
     assert.ok(f.body().includes(`"${workflow}":1`));
     await f.watch(1, () => assert.fail("must not poll a completed run"));
@@ -232,16 +232,10 @@ test("queued or cancelled duplicates cannot hide an active protected approval", 
             "[View run](https://github.com/example/security-tool/actions/runs/1)",
           ),
       );
-      Object.assign(f.runs.get(2), {
-        status: "completed",
-        conclusion: "cancelled",
-      });
+      f.complete(2, "cancelled");
       await f.update(2);
       assert.ok(f.body().includes(`"${workflow}":1`));
-      Object.assign(f.runs.get(1), {
-        status: "completed",
-        conclusion: "success",
-      });
+      f.complete(1, "success");
       f.deployments.set(1, []);
       Object.assign(f.runs.get(2), { status: "in_progress", conclusion: null });
       f.jobs.set(2, [job(jobName, null)]);
@@ -253,14 +247,13 @@ test("queued or cancelled duplicates cannot hide an active protected approval", 
 
 test("a new attempt of an older run supersedes a newer cancelled run", async () => {
   const f = fixture();
-  f.setRun(1, "node-release", { status: "completed", conclusion: "failure" });
-  f.setRun(2, "node-release", { status: "completed", conclusion: "cancelled" });
+  f.setRun(1, "node-release", { conclusion: "failure" });
+  f.setRun(2, "node-release", { conclusion: "cancelled" });
   await f.update(2);
   Object.assign(f.runs.get(1), {
     run_attempt: 2,
     run_started_at: "2026-01-01T00:03:00Z",
-    status: "completed",
-    conclusion: "success",
+    ...outcome("success"),
   });
   f.jobs.set(1, [job("verify"), job("publish")]);
   await f.update(1);
@@ -272,13 +265,10 @@ test("a new attempt of an older run supersedes a newer cancelled run", async () 
 
 test("successful verified recovery completes despite a failed npm retry", async () => {
   const f = fixture();
-  f.setRun(2, "node-release", { status: "completed", conclusion: "failure" });
+  f.setRun(2, "node-release", { conclusion: "failure" });
   f.jobs.set(2, [job("verify", "failure")]);
   await f.update(2);
-  f.setRun(3, "node-github-release", {
-    status: "completed",
-    conclusion: "success",
-  });
+  f.setRun(3, "node-github-release", { conclusion: "success" });
   f.jobs.set(3, [job("release status")]);
   await f.update(3);
   assert.match(f.body(), /## Automated release complete/u);
@@ -313,7 +303,6 @@ test("keeps the published container result on a historical failed release", () =
     const body = renderProgress(
       {
         "node-github-release": run(3, "node-github-release", {
-          status: "completed",
           conclusion: "failure",
         }),
       },
@@ -347,10 +336,7 @@ test("observer follows protected approval through completion without workflow ev
     }
     if (waits === 4) {
       f.deployments.set(2, []);
-      Object.assign(f.runs.get(2), {
-        status: "completed",
-        conclusion: "success",
-      });
+      f.complete(2, "success");
       f.jobs.set(2, [
         job("verify"),
         job("publish"),
@@ -377,10 +363,7 @@ test("observer refreshes final failures and ignores unrelated runs", async () =>
   const f = fixture();
   f.setRun(3, "node-github-release");
   await f.watch(3, async () => {
-    Object.assign(f.runs.get(3), {
-      status: "completed",
-      conclusion: "failure",
-    });
+    f.complete(3, "failure");
     f.jobs.set(3, [job("release status", "failure")]);
   });
   assert.equal(f.writes().length, 2);
@@ -401,10 +384,7 @@ test("tracks protected container approval and failed reusable workflow jobs", as
   assert.match(f.body(), /Approve the protected \*\*container\*\* deployment/u);
   await f.watch(3, async () => {
     f.deployments.set(3, []);
-    Object.assign(f.runs.get(3), {
-      status: "completed",
-      conclusion: "failure",
-    });
+    f.complete(3, "failure");
     f.jobs.set(3, [
       job("publish matching container / source"),
       job("publish matching container / publish-linux-amd64", "failure"),
@@ -421,8 +401,7 @@ test("keeps one comment across CI, verification, and protected approval", async 
   const f = fixture();
   f.setRun(1, "node-ci");
   assert.equal((await f.update(1)).action, "created");
-  f.runs.get(1).status = "completed";
-  f.runs.get(1).conclusion = "success";
+  f.complete(1, "success");
   f.setRun(2, "node-release", { status: "waiting" });
   f.jobs.set(2, [
     job("native / bundle"),
@@ -503,11 +482,7 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
     { ...pull, number: 43, title: "fix: release verification" },
   ]);
   f.tag(fix);
-  f.setRun(1, "node-ci", {
-    head_sha: bump,
-    status: "completed",
-    conclusion: "failure",
-  });
+  f.setRun(1, "node-ci", { head_sha: bump, conclusion: "failure" });
   await f.update(1);
   assert.match(f.body(), /Post-merge CI \| Failed/u);
   f.setRun(2, "node-release", { head_sha: fix, status: "waiting" });
@@ -521,10 +496,9 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
     /Protected npm publication \| Waiting for npm approval/u,
   );
   assert.match(f.body(), /Approve the protected \*\*npm\*\* deployment/u);
-  Object.assign(f.runs.get(2), { status: "completed", conclusion: "success" });
+  f.complete(2, "success");
   f.setRun(3, "node-github-release", {
     head_sha: automationSha,
-    status: "completed",
     conclusion: "success",
   });
   assert.equal((await f.update(3)).action, "updated");
@@ -532,11 +506,7 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
   assert.equal(f.comments.length, 1);
   const completed = f.body();
   assert.equal((await f.update(1)).action, "ignored");
-  f.setRun(4, "node-ci", {
-    head_sha: fix,
-    status: "completed",
-    conclusion: "success",
-  });
+  f.setRun(4, "node-ci", { head_sha: fix, conclusion: "success" });
   assert.equal((await f.update(4)).action, "ignored");
   assert.equal(f.body(), completed);
 });
@@ -549,7 +519,7 @@ test("continues a release backfill when saved workflow runs were deleted", async
       [2, "node-release"],
       [3, "node-github-release"],
     ]) {
-      f.setRun(id, workflow, { status: "completed", conclusion: "success" });
+      f.setRun(id, workflow, { conclusion: "success" });
       await f.update(id);
     }
     for (const id of deleted) {
@@ -640,7 +610,7 @@ test("workflow results remain visible when no jobs start or every job is skipped
         let waits = 0;
         await f.watch(1, async () => {
           waits += 1;
-          Object.assign(f.runs.get(1), { status: "completed", conclusion });
+          f.complete(1, conclusion);
         });
         assert.equal(waits, 1);
         assert.equal(
@@ -658,7 +628,7 @@ test("workflow results remain visible when no jobs start or every job is skipped
 test("reports failed shards and cancelled publication without declaring completion", async () => {
   for (const conclusion of ["failure", "cancelled"]) {
     const f = fixture();
-    f.setRun(2, "node-release", { status: "completed", conclusion });
+    f.setRun(2, "node-release", { conclusion });
     f.jobs.set(2, [
       job("verify"),
       job("release tests / 2", conclusion),
@@ -673,7 +643,7 @@ test("reports failed shards and cancelled publication without declaring completi
 test("reports a failed handoff after npm publication succeeds", async () => {
   for (const conclusion of ["failure", "cancelled"]) {
     const f = fixture();
-    f.setRun(2, "node-release", { status: "completed", conclusion });
+    f.setRun(2, "node-release", { conclusion });
     f.jobs.set(2, [
       job("verify"),
       job("publish"),
@@ -693,10 +663,7 @@ test("reports a failed handoff after npm publication succeeds", async () => {
 
 test("Action verification failures take precedence over skipped publication", async () => {
   const f = fixture();
-  f.setRun(3, "node-github-release", {
-    status: "completed",
-    conclusion: "failure",
-  });
+  f.setRun(3, "node-github-release", { conclusion: "failure" });
   f.jobs.set(3, [
     job("verify matching Action", "failure"),
     job("publish matching Action", "skipped"),
@@ -713,7 +680,6 @@ test("resolves GitHub publication to the release tag, including annotated tags",
     if (annotated) f.annotate();
     f.setRun(3, "node-github-release", {
       head_sha: automationSha,
-      status: "completed",
       conclusion: "success",
     });
     f.jobs.set(3, [
@@ -744,10 +710,7 @@ test("resolves GitHub publication to the release tag, including annotated tags",
 
 test("shows partial publication failures and installation failures beyond the first page", async () => {
   const f = fixture();
-  f.setRun(3, "node-github-release", {
-    status: "completed",
-    conclusion: "failure",
-  });
+  f.setRun(3, "node-github-release", { conclusion: "failure" });
   f.jobs.set(3, [
     job("publish verified GitHub release"),
     ...Array.from({ length: 100 }, (_, i) =>
@@ -766,14 +729,13 @@ test("shows partial publication failures and installation failures beyond the fi
 
 test("late events cannot replace a newer run and reruns refresh the latest attempt", async () => {
   const f = fixture();
-  f.setRun(1, "node-ci", { status: "completed", conclusion: "failure" });
-  f.setRun(2, "node-ci", { status: "completed", conclusion: "success" });
+  f.setRun(1, "node-ci", { conclusion: "failure" });
+  f.setRun(2, "node-ci", { conclusion: "success" });
   await f.update(2);
   await f.update(1);
   assert.match(f.body(), /Post-merge CI \| Passed/u);
   assert.match(f.body(), /"node-ci":2/u);
-  f.runs.get(2).status = "in_progress";
-  f.runs.get(2).conclusion = null;
+  Object.assign(f.runs.get(2), { status: "in_progress", conclusion: null });
   await f.update(2);
   assert.match(f.body(), /Post-merge CI \| Running/u);
 });

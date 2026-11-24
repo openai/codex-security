@@ -8,6 +8,7 @@ import * as z from "zod/v4";
 const bundled = await build({
   stdin: {
     contents: `export * from "../src/artifact-contracts.ts";
+      export { forbiddenProperty } from "../src/artifact-schema-loader.ts";
       export * from "./canonical-schemas.mts";`,
     resolveDir: fileURLToPath(new URL(".", import.meta.url)),
   },
@@ -20,6 +21,7 @@ const {
   artifactSchemaDocuments,
   artifactJsonMetadata,
   canonicalSchemaDocuments,
+  forbiddenProperty,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].contents).toString("base64")}`
 );
@@ -80,8 +82,7 @@ for (const [path, { $defs, ...header }] of Object.entries(
       ...header,
       $defs: definitions,
     },
-    (_key, schema) =>
-      JSON.stringify(schema) === '{"not":{}}' ? false : schema,
+    (_key, schema) => (forbiddenProperty(schema) ? false : schema),
   );
 }
 for (const [path, { title, schema, definitions = {} }] of Object.entries(
