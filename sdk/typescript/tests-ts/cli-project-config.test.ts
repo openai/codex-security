@@ -12,6 +12,7 @@ import {
 import { ScanResult } from "../src/result.js";
 import { main, parseCodexOverrides } from "../src/cli.js";
 import {
+  DEFAULT_CODEX_CONFIG,
   scanModel,
   scanModelProvider,
   mergedCodexConfig,
@@ -309,7 +310,9 @@ test("info ignores an external provider in an unselected profile", async () => {
       }),
     ),
   ).toBe(0);
-  expect(JSON.parse(stdout.text())).toMatchObject({ model: "gpt-5.6-sol" });
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    model: scanModel(DEFAULT_CODEX_CONFIG),
+  });
 });
 
 test("info without a file reports default sources, including unset settings", async () => {
