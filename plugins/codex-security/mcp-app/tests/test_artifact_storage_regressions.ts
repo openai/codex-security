@@ -1,3 +1,4 @@
+import { reviewSurface } from "./scan-draft-fixture.ts";
 import { fixturePython as python } from "./support/python.ts";
 interface ArtifactToolResults {
   save_codex_security_artifact: {
@@ -856,14 +857,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       findings: [],
       threatModel: { summary: "Synthetic test target" },
       reviewState: {
-        surfaces: [
-          {
-            id: "source",
-            label: "Source",
-            disposition: "not_applicable",
-            receiptRefs: [],
-          },
-        ],
+        surfaces: [reviewSurface("source", "Source", "not_applicable")],
         explicitExclusions: [],
         deferred: [],
       },
