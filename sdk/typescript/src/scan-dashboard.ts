@@ -33,7 +33,7 @@ import {
   type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
-import { formatDeepScanReviews } from "./scan-progress.js";
+import { formatDeepScanReviews, formatItemCount } from "./scan-progress.js";
 import type { ScanActivity } from "./scan-activity.js";
 import {
   ACCOUNT_LIMITS_UNAVAILABLE,
@@ -499,7 +499,7 @@ export class ScanDashboard {
         dashboard.setStage(status);
         dashboard.note(
           receipt.error ??
-            `${status} · ${receipt.findingCount ?? 0} finding${receipt.findingCount === 1 ? "" : "s"} before deduplication`,
+            `${status} · ${formatItemCount(receipt.findingCount ?? 0, "finding")} before deduplication`,
         );
       }
     }
@@ -1040,8 +1040,8 @@ export class ScanDashboard {
     );
     const findings =
       this.#componentResult === null
-        ? `${rawFindings} finding${rawFindings === 1 ? "" : "s"} before deduplication`
-        : `${this.#componentResult.sourceFindingCount} finding${this.#componentResult.sourceFindingCount === 1 ? "" : "s"} → ${this.#componentResult.findingCount} group${this.#componentResult.findingCount === 1 ? "" : "s"}${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
+        ? `${formatItemCount(rawFindings, "finding")} before deduplication`
+        : `${formatItemCount(this.#componentResult.sourceFindingCount, "finding")} → ${formatItemCount(this.#componentResult.findingCount, "group")}${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     return this.#formatFrame([
       `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,

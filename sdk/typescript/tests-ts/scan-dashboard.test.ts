@@ -1562,26 +1562,28 @@ describe("live scan dashboard", () => {
     dashboard.updateComponent({
       ...receipts[0]!,
       status: "completed",
-      findingCount: 3,
+      findingCount: 1,
       scanId: "scan-api",
     });
     dashboard.showComponents("Combining duplicate findings");
     expect(frame()).toContain("1 complete · 1 running · 1 queued");
-    expect(frame()).toContain("3 findings before deduplication");
+    expect(frame()).toContain("1 finding before deduplication");
+    input.emit("data", "\u001B[A\rd");
+    expect(frame()).toContain("Complete · 1 finding before deduplication");
     dashboard.finishComponents({
       total: 3,
       completed: 2,
       failed: 1,
       planPath: "/synthetic/plan.json",
       sourceFindingCount: 3,
-      findingCount: 2,
+      findingCount: 1,
       deduplication: {
         status: "failed",
         confirmedGroups: 1,
         uncertainPairs: 0,
       },
     });
-    expect(frame()).toContain("3 findings → 2 groups · matching failed");
+    expect(frame()).toContain("3 findings → 1 group · matching failed");
     expect(frame()).toContain("Finished with errors");
     expect(timers).toBe(1);
     dashboard.stop();
@@ -1589,48 +1591,6 @@ describe("live scan dashboard", () => {
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
     expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
-  });
-
-  test("uses the singular for one component finding and group", () => {
-    const stderr = capture(true);
-    const input = new DashboardTestInput();
-    const dashboard = createDashboard(
-      { ...stderr.stream, columns: 100, rows: 16 },
-      {
-        repository: "/synthetic/project",
-        presentation: "components",
-        input,
-      },
-    );
-    const receipt: ComponentReceipt = {
-      id: "component-1",
-      name: "API",
-      paths: ["src/api"],
-      status: "pending",
-      outputDir: "/synthetic/results/1",
-    };
-    const frame = () =>
-      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
-    dashboard.start();
-    dashboard.setComponents([receipt]);
-    dashboard.updateComponent({
-      ...receipt,
-      status: "completed",
-      findingCount: 1,
-    });
-    expect(frame()).toContain("1 finding before deduplication");
-    dashboard.finishComponents({
-      total: 1,
-      completed: 1,
-      failed: 0,
-      planPath: "/synthetic/plan.json",
-      sourceFindingCount: 1,
-      findingCount: 1,
-    });
-    expect(frame()).toContain("1 finding → 1 group\n");
-    input.emit("data", "\r");
-    expect(frame()).toContain("Complete · 1 finding before deduplication");
-    dashboard.stop();
   });
 
   test("navigates a long component list and shows original failure details", () => {

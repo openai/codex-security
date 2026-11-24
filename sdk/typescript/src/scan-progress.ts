@@ -19,6 +19,10 @@ export interface DeepScanProgress extends z.output<typeof deepProgressSchema> {
   consolidating?: boolean;
 }
 
+export function formatItemCount(count: number, singular: string): string {
+  return count === 1 ? `1 ${singular}` : `${count} ${singular}s`;
+}
+
 export function formatDeepScanReviews(progress: DeepScanProgress): string {
   return `Reviews: ${progress.completed} completed, ${progress.active} active, cap ${progress.maximum}`;
 }
