@@ -2661,7 +2661,7 @@ def build_sarif(
         ],
         "properties": {
             "codexSecuritySchemaVersion": manifest["schemaVersion"],
-            # keep the scan id here, not in automationDetails, so upload-sarif's category wins
+            # upload-sarif sets the workflow category only when automationDetails is absent.
             "codexSecurityScanId": scan["id"],
             "codexSecurityTargetKind": target["kind"],
         },
