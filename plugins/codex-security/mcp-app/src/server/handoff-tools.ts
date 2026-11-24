@@ -86,17 +86,12 @@ export function registerScanHandoffTools(
         annotations: writingAnnotations,
         _meta: appMeta,
       },
-      async (input: z.infer<typeof inputSchema>) => {
-        const arguments_ = workbenchArgs(command, {
-          scanId: input.scanId,
-          claimToken: input.claimToken,
-          takeOverStale: "takeOverStale" in input && input.takeOverStale,
-          threadId: "threadId" in input ? input.threadId : undefined,
-        });
-        return workspaceResult(
-          (await runWorkbench(arguments_)) as HandoffWorkspaceState,
-        );
-      },
+      async (input: z.infer<typeof inputSchema>) =>
+        workspaceResult(
+          (await runWorkbench(
+            workbenchArgs(command, input),
+          )) as HandoffWorkspaceState,
+        ),
     );
   }
 }

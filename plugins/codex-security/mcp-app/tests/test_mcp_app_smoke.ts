@@ -508,7 +508,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     await headlessServer.initialize("codex-security-headless-smoke");
     const withoutOwner = await headlessServer.callTool(2, {
       name: "start_codex_security_standard_scan",
-      arguments: { targetPath: target },
+      arguments: { targetPath: target, threadId: ownerThread },
     });
     assert.equal(withoutOwner.result.isError, true);
     assert.equal(withoutOwner.result._meta, undefined);
@@ -522,6 +522,9 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: {
         targetPath: target,
         userContext: headlessContext,
+        mode: "diff",
+        threadId: "untrusted-thread",
+        model: "untrusted-model",
       },
       _meta: {
         "openai/threadId": ownerThread,
@@ -2256,7 +2259,11 @@ try {
   ].entries()) {
     const claimedHandoff = await testServer.callSuccessfulTool(200200 + index, {
       name,
-      arguments: { claimToken: handoffClaimToken, scanId },
+      arguments: {
+        claimToken: handoffClaimToken,
+        scanId,
+        threadId: "untrusted-thread",
+      },
     });
     assert.equal(
       claimedHandoff.structuredContent.workspace.results.handoffClaimToken,
@@ -3367,6 +3374,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       query: "SRC/A.PY",
       severity: "high",
       status: "open",
+      repository: "--unexpected-filter",
       targetId: indexedFinding.targetId,
     },
   });
@@ -3442,7 +3450,11 @@ with sqlite3.connect(sys.argv[1]) as connection:
   for (const operation of [
     {
       name: "update_codex_security_scan_progress",
-      arguments: { phase: "discovery" },
+      arguments: {
+        phase: "discovery",
+        modelThreadId: "fixture-rotated-recovery-thread",
+        claimToken: rotatedFallbackClaimToken,
+      },
     },
     { name: "complete_codex_security_scan", arguments: {} },
     {

@@ -1650,10 +1650,7 @@ def merge_saved_results(
                         represented_history.setdefault(retained_key, set()).add(
                             _digest(_finding_content(retained))
                         )
-                    previous_key = represented.get(retained_key)
-                    if retained_key not in represented:
-                        represented[retained_key] = canonical_key
-                    elif previous_key != canonical_key:
+                    if represented.setdefault(retained_key, canonical_key) != canonical_key:
                         # Ambiguous history cannot suppress an independent source.
                         represented[retained_key] = None
                 originals = finding["provenance"].get("sourceFindings", [])
@@ -1667,13 +1664,11 @@ def merge_saved_results(
                                 candidate_id,
                                 original["finding"],
                             )
-                            previous_key = represented_candidates.get(candidate_key)
-                            if candidate_key not in represented_candidates:
-                                represented_candidates[candidate_key] = canonical_key
-                            elif previous_key != canonical_key:
-                                # Candidate ids are only authoritative within one
-                                # logical worker. Multiple canonical owners make
-                                # that worker-local identity ambiguous.
+                            # Candidate IDs are authoritative only within one worker.
+                            owner_key = represented_candidates.setdefault(
+                                candidate_key, canonical_key
+                            )
+                            if owner_key != canonical_key:
                                 represented_candidates[candidate_key] = None
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
@@ -2163,13 +2158,12 @@ def merge_saved_results(
             destinations = set()
             for value in group["rows"]:
                 history_key = _finding_key(value)
-                if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
+                content_digest = _digest(_finding_content(value))
+                if content_digest in represented_history.get(history_key, ()):
                     destinations.add(represented.get(history_key))
                 elif group["owner"] and (candidate_id := finding_candidate_id(value)):
                     candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
-                    if _digest(_finding_content(value)) in represented_candidate_history.get(
-                        candidate_key, set()
-                    ):
+                    if content_digest in represented_candidate_history.get(candidate_key, ()):
                         destinations.add(represented_candidates[candidate_key])
             if len(destinations) == 1 and None not in destinations:
                 group["parent_key"] = destinations.pop()
@@ -2499,23 +2493,22 @@ def merge_saved_results(
                 history_key = _finding_key(value)
                 # A singleton key is not evidence that a new batch sibling was
                 # absorbed. Only recorded content may reuse that historical edge.
-                if _digest(_finding_content(value)) not in represented_history.get(
-                    history_key, set()
-                ):
+                content_digest = _digest(_finding_content(value))
+                if content_digest not in represented_history.get(history_key, ()):
                     history_key = key
                 if history_key in represented:
                     mapped_key = represented[history_key]
-                    historical_contents = represented_history.get(history_key, set())
+                    historical_contents = represented_history.get(history_key, ())
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
                     mapped_key = represented_candidates.get(candidate_key)
-                    historical_contents = represented_candidate_history.get(candidate_key, set())
+                    historical_contents = represented_candidate_history.get(candidate_key, ())
                 else:
                     mapped_key = None
-                    historical_contents = set()
+                    historical_contents = ()
                 if mapped_key is not None:
                     key = mapped_key
-                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
+                    represented_by_parent = content_digest in historical_contents
             if key in finding_positions:
                 position, retained_group = finding_positions[key]
                 retained = findings[position]
@@ -2739,20 +2732,7 @@ def merge_saved_results(
                 if draft.get("complete") is not False or relative in selected_observations
             },
         )
-        replaced_rows = {
-            "surfaces": replaced_surfaces,
-            "deferred": {
-                id(row)
-                for relative, _, owner in all_sources
-                for row in deferred_rows[relative]
-                if isinstance(row, dict)
-                and isinstance(identity := row.get("id"), str)
-                and (key := record_key("deferred", owner, row)) not in candidate_ids
-                and key not in ambiguous_deferred
-                and (updated := accepted_deferred_orders.get(key)) is not None
-                and updated > candidate_order(relative, key[0], row)
-            },
-        }
+        replaced_rows = {"surfaces": replaced_surfaces, "deferred": replaced_deferred}
         for field, replaced in replaced_rows.items():
             if parent and isinstance(coverage.get(field), list):
                 previous = parent["reviewState"].get(field, [])

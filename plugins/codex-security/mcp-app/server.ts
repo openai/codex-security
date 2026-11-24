@@ -215,9 +215,9 @@ const startHeadlessStandardScanSchema = {
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
-type PromptOnlyScanInput = z.output<
-  z.ZodObject<typeof startPromptOnlyScanSchema>
->;
+type ConversationScanInput =
+  | z.output<z.ZodObject<typeof startPromptOnlyScanSchema>>
+  | z.output<z.ZodObject<typeof startHeadlessStandardScanSchema>>;
 const userInputOptionSchema = z.strictObject({
   description: requiredText.max(1200),
   label: requiredText.max(200),
@@ -600,21 +600,14 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async (
-      { targetPath, scope, targetSummary, userContext, projectConfigPath },
-      extra,
-    ) => {
+    async (input, extra) => {
       const threadId = threadIdFromExtra(extra);
       if (!threadId) {
         return toolErrorResult(
           "Starting a Standard scan requires the owning Codex thread context.",
         );
       }
-      const started = await startHeadlessStandardScan(
-        { targetPath, scope, targetSummary, userContext, projectConfigPath },
-        threadId,
-        codexModelSettingsFromExtra(extra),
-      );
+      const started = await startConversationScan(input, threadId, extra);
       const scan = startedScanSchema.safeParse(started).data?.scan;
       const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
       const handoffClaimToken = scan?.handoffClaimToken;
@@ -671,18 +664,8 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async (
-      {
-        mode,
-        targetPath,
-        scope,
-        targetSummary,
-        userContext,
-        diffTarget,
-        projectConfigPath,
-      },
-      extra,
-    ) => {
+    async (input, extra) => {
+      const { mode, diffTarget, scope, targetPath } = input;
       if (mode === "diff" && !diffTarget) {
         return toolErrorResult(
           "Review changes prompt-only scans require diffTarget.",
@@ -704,20 +687,9 @@ export function createCodexSecurityServer(): McpServer {
           "Starting a prompt-only scan requires the owning Codex thread context.",
         );
       }
-      const promptOnly = await startPromptOnlyScan(
-        {
-          mode,
-          targetPath,
-          scope,
-          targetSummary,
-          userContext,
-          diffTarget,
-          projectConfigPath,
-        },
-        threadId,
-        codexModelSettingsFromExtra(extra),
+      return promptOnlyScanResult(
+        await startConversationScan(input, threadId, extra),
       );
-      return promptOnlyScanResult(promptOnly);
     },
   );
 
@@ -1345,16 +1317,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async ({ limit, mode, offset, query, status, targetId }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("list-scans", {
-          query,
-          targetId,
-          status,
-          mode,
-          offset,
-          limit,
-        }),
+        await workbench("list-scans", input),
         "Loaded Codex Security scan summaries.",
       ),
   );
@@ -1369,16 +1334,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async ({ limit, offset, query, severity, status, targetId }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("list-global-findings", {
-          query,
-          severity,
-          status,
-          targetId,
-          offset,
-          limit,
-        }),
+        await workbench("list-global-findings", input),
         "Loaded Codex Security global findings.",
       ),
   );
@@ -1393,15 +1351,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async ({ limit, offset, query, status, targetId }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("list-repositories", {
-          query,
-          targetId,
-          status,
-          offset,
-          limit,
-        }),
+        await workbench("list-repositories", input),
         "Loaded Codex Security repositories.",
       ),
   );
@@ -1584,37 +1536,16 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async (
-      {
-        scanId,
-        deepReviewPass,
-        phase,
-        phaseItemsTotal,
-        phaseItemsCompleted,
-        phaseProgressUnit,
-        reviewItemsTotal,
-        reviewItemsCompleted,
-        reportableFindingsCount,
-        handoffClaimToken,
-      },
-      extra,
-    ) => {
-      const modelSettings = codexModelSettingsFromExtra(extra);
+    async ({ handoffClaimToken, ...progress }, extra) => {
       const { scan, deepPreflight } = await workbench("update-progress", {
-        scanId,
+        ...progress,
         modelUpdate: true,
         modelThreadId: threadIdFromExtra(extra) ?? "",
-        coordinatorGeneration: deepScanStore.coordinatorGeneration(scanId),
-        ...modelSettings,
+        coordinatorGeneration: deepScanStore.coordinatorGeneration(
+          progress.scanId,
+        ),
+        ...codexModelSettingsFromExtra(extra),
         claimToken: handoffClaimToken,
-        deepReviewPass,
-        phase,
-        phaseItemsTotal,
-        phaseItemsCompleted,
-        phaseProgressUnit,
-        reviewItemsTotal,
-        reviewItemsCompleted,
-        reportableFindingsCount,
       });
       return scanActionResult(
         { scan },
@@ -1682,14 +1613,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ scanId, threadId, turnId, turnStatus }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("finalize-scan-usage", {
-          scanId,
-          threadId,
-          turnId,
-          turnStatus,
-        }),
+        await workbench("finalize-scan-usage", input),
         "Recorded final Codex Security scan usage.",
       ),
   );
@@ -1733,14 +1659,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ occurrenceId, status, closeReason, note }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("set-finding-triage", {
-          occurrenceId,
-          status,
-          closeReason,
-          note,
-        }),
+        await workbench("set-finding-triage", input),
         "Updated the local Codex Security finding status.",
       ),
   );
@@ -1755,13 +1676,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ occurrenceId, requestId, actionToken }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("request-finding-remediation", {
-          occurrenceId,
-          requestId,
-          actionToken,
-        }),
+        await workbench("request-finding-remediation", input),
         "Queued the local Codex Security finding remediation request.",
       ),
   );
@@ -1776,16 +1693,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ occurrenceId, requestId, expectedVersion, action, actionToken }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("request-finding-remediation-action", {
-          occurrenceId,
-          requestId,
-          expectedVersion: String(expectedVersion),
-          action,
-          actionToken,
-        }),
-        `Queued the local Codex Security finding remediation ${action} request.`,
+        await workbench("request-finding-remediation-action", input),
+        `Queued the local Codex Security finding remediation ${input.action} request.`,
       ),
   );
 
@@ -1837,11 +1748,8 @@ export function createCodexSecurityServer(): McpServer {
         annotations,
         _meta: appMeta,
       },
-      async ({ occurrenceId, requestId, actionToken }) =>
-        scanActionResult(
-          await workbench(command, { occurrenceId, requestId, actionToken }),
-          message,
-        ),
+      async (input) =>
+        scanActionResult(await workbench(command, input), message),
     );
   }
 
@@ -1897,16 +1805,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ limit, offset, query, scanId, severity, status }) =>
+    async (input) =>
       scanActionResult(
-        await workbench("list-findings", {
-          scanId,
-          query,
-          severity,
-          status,
-          offset,
-          limit,
-        }),
+        await workbench("list-findings", input),
         "Loaded a local Codex Security findings page.",
       ),
   );
@@ -1967,51 +1868,23 @@ async function getWorkspace(
   })) as WorkspaceState;
 }
 
-async function startPromptOnlyScan(
-  input: PromptOnlyScanInput,
+async function startConversationScan(
+  input: ConversationScanInput,
   threadId: string,
-  modelSettings: { model?: string; reasoningEffort?: string } = {},
+  extra: unknown,
 ): Promise<JsonObject> {
-  const { mode, targetPath, scope, targetSummary, userContext, diffTarget } =
-    input;
+  const prompt = "mode" in input ? input : undefined;
   return startWithValidation(
-    "start-prompt-only-scan",
-    {
-      threadId,
-      targetPath,
-      scope,
-      mode,
-      ...modelSettings,
-      targetSummary,
-      userContextStdin: Boolean(userContext),
-      ...diffTargetFields(diffTarget),
-      scanRoot: await scanRoot(),
-    },
-    input.projectConfigPath,
-    userContext,
-  );
-}
-
-async function startHeadlessStandardScan(
-  input: {
-    targetPath: string;
-    scope?: string;
-    targetSummary?: string;
-    userContext?: string;
-    projectConfigPath?: string;
-  },
-  threadId: string,
-  modelSettings: { model?: string; reasoningEffort?: string } = {},
-): Promise<JsonObject> {
-  return startWithValidation(
-    "start-headless-standard-scan",
+    prompt ? "start-prompt-only-scan" : "start-headless-standard-scan",
     {
       threadId,
       targetPath: input.targetPath,
       scope: input.scope ?? ".",
-      ...modelSettings,
+      mode: prompt?.mode,
+      ...codexModelSettingsFromExtra(extra),
       targetSummary: input.targetSummary || undefined,
       userContextStdin: Boolean(input.userContext),
+      ...diffTargetFields(prompt?.diffTarget),
       scanRoot: await scanRoot(),
     },
     input.projectConfigPath,

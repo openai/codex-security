@@ -47,7 +47,7 @@ def test_rename_persists_without_changing_scan_results(
 ) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
     scan = create_cli_scan(state_dir, tmp_path / "scans", repository, complete=complete)
-    before = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    before = get_scan(state_dir, scan["scanId"])["scan"]
     if upgrade:
         with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
             connection.execute("ALTER TABLE scans DROP COLUMN name")
@@ -58,7 +58,7 @@ def test_rename_persists_without_changing_scan_results(
     )
 
     assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
-    after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
+    after = get_scan(state_dir, scan["scanId"])["scan"]
     assert get_scan(state_dir, scan["scanId"][:8], "--progress-only") == {
         "scan": {"progress": after["progress"]}
     }
@@ -78,7 +78,7 @@ def test_rename_rejects_blank_names(tmp_path: Path) -> None:
     )
     assert blank["returncode"] != 0
     assert "Scan name cannot be empty" in blank["stderr"]
-    assert run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]["name"] is None
+    assert get_scan(state_dir, scan["scanId"])["scan"]["name"] is None
 
 
 def test_scan_history_search_casefolds_displayed_fields(tmp_path: Path) -> None:
@@ -130,6 +130,49 @@ def empty_history_paths(tmp_path: Path) -> tuple[Path, Path]:
     repository = tmp_path / "repository"
     repository.mkdir()
     return tmp_path / "state", repository
+
+
+def mark_incomplete_coverage(scan_dir: Path) -> None:
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"][0]["disposition"] = "needs_follow_up"
+    coverage["deferred"] = [
+        {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+
+
+def initialize_existing_repository(repository: Path) -> str:
+    git = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run([*git, "add", "."], cwd=repository, check=True)
+    subprocess.run([*git, "commit", "-qm", "Initialize repository"], cwd=repository, check=True)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+
+
+def clone_with_origin(repository: Path, clone: Path, *, same_origin: bool) -> None:
+    origin = "https://example.test/synthetic/project.git"
+    subprocess.run(["git", "remote", "add", "origin", origin], cwd=repository, check=True)
+    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
+    clone_origin = origin if same_origin else "https://example.test/synthetic/other.git"
+    subprocess.run(["git", "remote", "set-url", "origin", clone_origin], cwd=clone, check=True)
+
+
+def linked_checkouts(tmp_path: Path) -> tuple[Path, Path, str]:
+    repository = tmp_path / "repository"
+    linked = tmp_path / "linked"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    return repository, linked, revision
+
+
+def clear_scan_generation(state: Path, scan: dict[str, Any]) -> None:
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (scan["scanId"],)
+        )
 
 
 def compare_scan_pair(
@@ -268,13 +311,7 @@ def create_cli_scan(
                 findings["findings"].append(additional)
         findings_path.write_text(json.dumps(findings))
     if follow_up:
-        coverage_path = scan_dir / "coverage.json"
-        coverage = json.loads(coverage_path.read_text())
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        coverage["deferred"] = [
-            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
-        ]
-        coverage_path.write_text(json.dumps(coverage))
+        mark_incomplete_coverage(scan_dir)
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
     completion = ["complete-scan", "--scan-id", launched["scanId"]]
     if cost is not None:
@@ -2180,10 +2217,7 @@ def test_history_repair_matches_legacy_generation_in_owned_checkout(tmp_path: Pa
     revision = initialize_git_repository(repository)
     first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     second = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (first["scanId"],)
-        )
+    clear_scan_generation(state, first)
     pending = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repository))
     assert len(pending["batches"]) == 1
     assert pending["batches"][0]["afterScanId"] == second["scanId"]
@@ -2211,20 +2245,14 @@ def test_history_repair_keeps_triage_across_legacy_match(
         target_revision=revision,
         identity_anchor="synthetic-current-anchor",
     )
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (first["scanId"],)
-        )
+    clear_scan_generation(state, first)
     inputs = compare_scan_pair(state, first, second, "--include-matching-inputs")["matchingInputs"]
     prior = inputs["before"][0]["occurrenceId"]
     current = inputs["after"][0]["occurrenceId"]
     save_scan_matches(state, first, second, confirmed_match(prior, current))
-    run_workbench(
+    set_triage(
         state,
-        "set-finding-triage",
-        "--occurrence-id",
         prior,
-        "--status",
         "closed",
         "--close-reason",
         "false_positive",
@@ -2341,17 +2369,9 @@ def test_history_repair_rebinds_only_unscanned_workspace(tmp_path: Path) -> None
 
 def test_history_repair_counts_only_each_worktrees_legacy_findings(tmp_path: Path) -> None:
     state = tmp_path / "state"
-    repository = tmp_path / "repository"
-    linked = tmp_path / "linked"
-    revision = initialize_git_repository(repository)
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
-    )
+    repository, linked, revision = linked_checkouts(tmp_path)
     legacy = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (legacy["scanId"],)
-        )
+    clear_scan_generation(state, legacy)
     create_cli_scan(state, tmp_path / "results", linked, target_revision=revision, finding=False)
     counts = {
         row["targetPath"]: row["openFindingsCount"]
@@ -2550,29 +2570,7 @@ def test_portable_identity_allows_git_initialization_after_plain_directory_histo
             ).fetchone()[0]
             == "unversioned"
         )
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "add", "."],
-        cwd=repository,
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "Initialize repository",
-        ],
-        cwd=repository,
-        check=True,
-    )
-    revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
-    ).strip()
+    revision = initialize_existing_repository(repository)
     after = create_cli_scan(
         state, tmp_path / "results", repository, mode=mode, target_revision=revision
     )
@@ -2591,26 +2589,8 @@ def test_portable_identity_explicit_clone_comparison_without_birth_timestamps(
 
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "https://example.test/synthetic/project.git"],
-        cwd=repository,
-        check=True,
-    )
     clone = tmp_path / "clone"
-    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
-    subprocess.run(
-        [
-            "git",
-            "remote",
-            "set-url",
-            "origin",
-            "https://example.test/synthetic/project.git"
-            if same_origin
-            else "https://example.test/synthetic/other.git",
-        ],
-        cwd=clone,
-        check=True,
-    )
+    clone_with_origin(repository, clone, same_origin=same_origin)
     state = tmp_path / "state"
     before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
@@ -2694,29 +2674,7 @@ def test_legacy_aliases_restore_mixed_plain_and_git_history(tmp_path: Path, mode
     (repository / "README.md").write_text("fixture\n")
     state = tmp_path / "state"
     before = create_cli_scan(state, tmp_path / "results", repository, mode=mode)
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "add", "."],
-        cwd=repository,
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "Initialize repository",
-        ],
-        cwd=repository,
-        check=True,
-    )
-    revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
-    ).strip()
+    revision = initialize_existing_repository(repository)
     after = create_cli_scan(
         state, tmp_path / "results", repository, mode=mode, target_revision=revision
     )
@@ -2743,26 +2701,8 @@ def test_legacy_aliases_explicit_comparison_with_mixed_birth_support(
 
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "https://example.test/synthetic/project.git"],
-        cwd=repository,
-        check=True,
-    )
     clone = tmp_path / "clone"
-    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
-    subprocess.run(
-        [
-            "git",
-            "remote",
-            "set-url",
-            "origin",
-            "https://example.test/synthetic/project.git"
-            if same_origin
-            else "https://example.test/synthetic/other.git",
-        ],
-        cwd=clone,
-        check=True,
-    )
+    clone_with_origin(repository, clone, same_origin=same_origin)
     state = tmp_path / "state"
     before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
@@ -3189,12 +3129,7 @@ def test_repository_generation_migration_is_atomic_and_preserves_shared_history(
     assert git is not None
     # Keep Git available when the linked checkout below is temporarily absent.
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(Path(git).absolute()))
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    linked = tmp_path / "linked"
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
-    )
+    repository, linked, revision = linked_checkouts(tmp_path)
     state = tmp_path / "state"
     first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     second = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
@@ -3321,13 +3256,7 @@ def test_repository_generation_returns_after_offline_migration(
     import workbench_db as workbench
     import workbench_target_state as target_state
 
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    linked = tmp_path / "linked"
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
-        check=True,
-    )
+    repository, linked, revision = linked_checkouts(tmp_path)
     state = tmp_path / "state"
     scan = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     if alias_binding == "legacy":
