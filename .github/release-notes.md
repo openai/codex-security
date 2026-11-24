@@ -48,6 +48,11 @@
 - include prereleases in stack affected ranges ([#2800](https://github.com/openai/codex-security/pull/2800))
 - carry reviewed Continuum revisions into private jobs ([#2780](https://github.com/openai/codex-security/pull/2780))
 - add optional deployment-aware validation providers ([#2742](https://github.com/openai/codex-security/pull/2742))
+- resume Continuum submissions from saved scans ([#2781](https://github.com/openai/codex-security/pull/2781))
+- resume pending Continuum checks and preserve inconclusive outcomes (#2784) ([2324a7b](https://github.com/openai/codex-security/commit/2324a7b557c49b9f0640ca4833ec56ac796dea9d))
+- keep Continuum verdicts while waiting for linked issue scores (#2793) ([81534c4](https://github.com/openai/codex-security/commit/81534c4b689501f7a728209aafe84ae486de6286))
+- reuse saved Continuum assessments in patch and verify-fix (#2794) ([73eb152](https://github.com/openai/codex-security/commit/73eb1520f6bdfdbaebfe0ba6f2861617cdc27d73))
+- exclude outdated Continuum verdicts from remediation (#2797) ([6f586d8](https://github.com/openai/codex-security/commit/6f586d8bbc2396f0f991c1756a1364896b9c3c04))
 
 </details>
 

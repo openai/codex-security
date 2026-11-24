@@ -4,12 +4,16 @@ import {
   type ContinuumRequest,
 } from "./continuum-submissions.js";
 import { repositoryFilePath } from "./scanner-import.js";
+import { errorMessage } from "./errors.js";
 import { compareTimestamps } from "./timestamps.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as waitFor } from "node:timers/promises";
 import { prepareContinuumAws } from "./continuum-aws.js";
-import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
+import {
+  linkedIssueId,
+  selectFindingValidationArtifact,
+} from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
 import { resourceNames } from "./validation-provider-report.js";
 import {
@@ -35,7 +39,15 @@ async function forEachPending(
     }),
   );
 }
-type Submission = ContinuumReceipt & { issueId?: string; issueArn?: string };
+type Submission = ContinuumReceipt & {
+  issueId?: string;
+  issueArn?: string;
+  issueUnlinked?: true;
+};
+
+class ScoreReadError extends Error {}
+const scoreTimeout =
+  "Continuum timed out waiting for an unambiguous linked issue score. Retry validation to refresh the score.";
 
 export type ContinuumAwsLauncher = (
   operation: string,
@@ -47,6 +59,8 @@ export interface ContinuumValidationOptions {
   environmentId: string;
   awsProfile?: string;
   awsRegion?: string;
+  /** Send each finding’s local validation method and summary to AWS. Defaults to false. */
+  includeLocalValidation?: boolean;
   waitMinutes?: number;
   consoleBaseUrl?: string;
   launcher?: ContinuumAwsLauncher;
@@ -186,10 +200,19 @@ function severityId(level: string): number {
 export function findingToOcsf(
   finding: AnyFinding,
   now = new Date(),
+  includeLocalValidation = false,
 ): Record<string, unknown> {
   const id = occurrence(finding);
   const title = text(finding["title"]) ?? id;
-  const summary = text(finding["summary"]) ?? title;
+  let summary = text(finding["summary"]) ?? title;
+  if (includeLocalValidation === true) {
+    const validation = object(finding["validation"]);
+    for (const field of ["method", "summary"]) {
+      const value = validation[field];
+      if (typeof value === "string" && /\S/u.test(value))
+        summary += `\n\nCodex local validation ${field}\n${value}`;
+    }
+  }
   const selected = locations(finding);
   if (selected.length === 0)
     throw new Error(`${id} has no code location with real lines`);
@@ -385,8 +408,6 @@ async function* issueArtifacts(
   const items = Array.isArray(listed["items"])
     ? listed["items"].map(object)
     : [];
-  // Only a single unambiguous scorer can supply issue reachability.
-  if (kind === "EVIDENCE" && items.length !== 1) return;
   items.sort((a, b) => {
     const left = createdAt(a);
     const right = createdAt(b);
@@ -557,28 +578,51 @@ export class ContinuumValidationProvider implements ValidationProvider {
     };
     const results: ValidationProviderAssessment[] = new Array(supplied.length);
     const submissions: (Submission | undefined)[] = new Array(supplied.length);
+    const invalid = new Set<number>();
     let pending = supplied.map((_, index) => index);
     let request: ContinuumRequest;
     try {
-      const launch = await this.#launcher(context);
-      request = (operation, args) =>
-        this.#call(launch, operation, args, context, deadline, delay, now);
-      const submit = await prepareContinuumSubmissions(
-        request,
-        this.#options.environmentId,
-        context.repositoryPath,
-        context.signal,
-        context.checkSubmissionTarget,
-      );
+      // Prepare AWS once, after the first valid document. Only active senders
+      // retain serialized findings while the shared setup runs.
+      const prepare = async () => {
+        const launch = await this.#launcher(context);
+        request = (operation, args) =>
+          this.#call(launch, operation, args, context, deadline, delay, now);
+        return prepareContinuumSubmissions(
+          request,
+          this.#options.environmentId,
+          context.repositoryPath,
+          context.signal,
+          context.checkSubmissionTarget,
+        );
+      };
+      let ready: ReturnType<typeof prepare> | undefined;
       await forEachPending(pending, async (index) => {
+        const item = supplied[index]!;
+        const time = now();
+        let document: Record<string, unknown>;
         try {
-          const item = supplied[index]!;
           if (typeof item === "string")
             throw new Error(
               "not submittable: no structured item or code location",
             );
-          const time = now();
-          submissions[index] = await submit(findingToOcsf(item, time), time);
+          document = findingToOcsf(
+            item,
+            time,
+            this.#options.includeLocalValidation,
+          );
+        } catch (error) {
+          invalid.add(index);
+          const reason = error instanceof Error ? error.message : String(error);
+          results[index] = unavailableAssessment(
+            this,
+            `${reason} No upload attempted for this finding. Correct the input before submitting again.`,
+          );
+          return;
+        }
+        try {
+          const submit = await (ready ??= prepare());
+          submissions[index] = await submit(document, now());
         } catch (error) {
           results[index] = unavailableAssessment(this, error);
         }
@@ -589,17 +633,33 @@ export class ContinuumValidationProvider implements ValidationProvider {
         results[index] = unavailableAssessment(this, error);
       pending = [];
     }
+    // A finished verdict remains useful if its linked score misses the deadline.
+    const waiting = new Map<number, ValidationProviderAssessment>();
     while (pending.length > 0 && !timedOut()) {
       await forEachPending(pending, async (index) => {
         const submission = submissions[index]!;
+        const previousIssue = submission.issueArn;
         try {
           const assessment = await this.#poll(
             supplied[index] as AnyFinding,
             submission,
             request,
+            timedOut,
           );
-          if (assessment) results[index] = assessment;
+          if (assessment && "waiting" in assessment)
+            waiting.set(index, assessment.waiting);
+          else {
+            waiting.delete(index);
+            if (assessment) results[index] = assessment;
+          }
         } catch (error) {
+          if (timedOut() && submission.issueArn === previousIssue) {
+            const partial = waiting.get(index);
+            if (partial) {
+              results[index] = partial;
+              return;
+            }
+          }
           results[index] = unavailableAssessment(this, error);
         }
       });
@@ -619,10 +679,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
       }
     }
     for (const index of pending) {
-      results[index] = unavailableAssessment(
-        this,
-        `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
-      );
+      results[index] =
+        waiting.get(index) ??
+        unavailableAssessment(
+          this,
+          `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
+        );
     }
     return results.map((assessment, index) => {
       const item = supplied[index];
@@ -631,6 +693,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         itemId: occurrence(finding),
         provider: this.name,
         verdict: "UNAVAILABLE",
+        ...(invalid.has(index) && { invalidInput: true }),
         severityBefore: severityLevel(finding),
         severityAfter: severityLevel(finding),
         reasons: [],
@@ -700,7 +763,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
     finding: AnyFinding,
     submission: Submission,
     request: ContinuumRequest,
-  ): Promise<ValidationProviderAssessment | undefined> {
+    timedOut: () => boolean,
+  ): Promise<
+    | ValidationProviderAssessment
+    | { waiting: ValidationProviderAssessment }
+    | undefined
+  > {
     const { findingId, findingArn, submittedAt } = submission;
     const environmentArgs = ["--environment-id", this.#options.environmentId];
     const current = await request("get-code-finding", [
@@ -717,15 +785,11 @@ export class ContinuumValidationProvider implements ValidationProvider {
       );
     const status = text(current["status"]);
     const terminal = status && TERMINAL_WITHOUT_ISSUE.has(status);
-    const issueId =
-      text(current["mergedIntoIssueId"]) ??
-      text(current["duplicateOfIssueId"]) ??
-      text(current["createdIssueId"]);
-    if (terminal || issueId !== submission.issueId) {
+    const issueId = linkedIssueId(current)?.trim();
+    if (terminal) {
+      delete submission.issueUnlinked;
       delete submission.issueId;
       delete submission.issueArn;
-    }
-    if (terminal) {
       return this.#report(finding, submittedAt, {
         verdict: status,
         statusMessage: text(
@@ -736,17 +800,29 @@ export class ContinuumValidationProvider implements ValidationProvider {
         disposition: "not_applicable",
       });
     }
-    if (!issueId) return;
-    const issueArgs = [...environmentArgs, "--issue-id", issueId];
-    const issue = await request("get-code-issue", issueArgs);
+    if (!issueId) {
+      delete submission.issueId;
+      delete submission.issueArn;
+      submission.issueUnlinked = true;
+      return;
+    }
+    // Keep the finding's current link even if reading a merge destination
+    // fails. A retry must not restore a verdict from the previous issue.
     const scope = findingArn.slice(0, -("/code-findings/" + findingId).length);
     const issueArn = scope + "/code-issues/" + issueId;
-    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
-      throw new Error("Continuum returned a different issue while polling.");
     submission.issueId = issueId;
     submission.issueArn = issueArn;
+    const issueArgs = [...environmentArgs, "--issue-id", issueId];
+    const issue = await request("get-code-issue", issueArgs);
+    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
+      throw new Error("Continuum returned a different issue while polling.");
     const ids = issue["findingIds"];
-    if (!Array.isArray(ids) || !ids.includes(findingId)) return;
+    if (!Array.isArray(ids)) return;
+    if (!ids.includes(findingId)) {
+      submission.issueUnlinked = true;
+      return;
+    }
+    delete submission.issueUnlinked;
     const validation = await selectValidation(
       issueArtifacts(request, issueArgs, "VALIDATION_EVIDENCE"),
       findingId,
@@ -755,7 +831,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const { outcome, artifact, scope: resultScope } = validation;
     const currentEvidence =
       compareTimestamps(createdAt(artifact), submittedAt.toISOString()) >= 0;
-    if (!currentEvidence && (status === "SUBMITTED" || status === "VALIDATING"))
+    if (
+      (status === "SUBMITTED" || status === "VALIDATING") &&
+      (!currentEvidence || resultScope === "issue")
+    )
       return;
     const issueVerdict = validationOutcome(artifact).verdict;
     const details = {
@@ -774,18 +853,62 @@ export class ContinuumValidationProvider implements ValidationProvider {
       return this.#report(finding, submittedAt, outcome, details);
 
     // A score describes the issue, even if this member has a different verdict.
-    for await (const { artifact: score } of issueArtifacts(
-      request,
-      issueArgs,
-      "EVIDENCE",
-    )) {
-      if (linkedScore(issue, artifact, score))
-        return this.#report(finding, submittedAt, outcome, {
-          ...details,
-          score,
-        });
+    // AWS can expose validation before publishing the corresponding score.
+    const readScore: ContinuumRequest = (...args) =>
+      request(...args).catch((error: unknown) => {
+        throw new ScoreReadError(errorMessage(error));
+      });
+    try {
+      let score: Record<string, unknown> | undefined;
+      for await (const { artifact: candidate, tied } of issueArtifacts(
+        readScore,
+        issueArgs,
+        "EVIDENCE",
+      )) {
+        if (linkedScore(issue, artifact, candidate)) {
+          // Two eligible scores with the same time cannot be ordered. Leave
+          // scoring pending until a newer, unambiguous score arrives.
+          if (score && score["artifactId"] !== candidate["artifactId"])
+            return this.#report(
+              finding,
+              submittedAt,
+              {
+                ...outcome,
+                unavailable:
+                  "Continuum returned conflicting linked issue scores at the same time. Retry validation for a newer score.",
+              },
+              {
+                ...details,
+                scoringPending: true,
+                conflictingScoreTime: createdAt(score),
+              },
+            );
+          score = candidate;
+        }
+        if (score && !tied)
+          return this.#report(finding, submittedAt, outcome, {
+            ...details,
+            score,
+          });
+      }
+    } catch (error) {
+      if (!(error instanceof ScoreReadError)) throw error;
+      const reason = timedOut()
+        ? scoreTimeout
+        : "Could not read the linked issue score.";
+      return this.#report(
+        finding,
+        submittedAt,
+        { ...outcome, unavailable: `${reason} ${error.message}` },
+        { ...details, scoringPending: true },
+      );
     }
-    return this.#report(finding, submittedAt, outcome, details);
+    return {
+      waiting: this.#report(finding, submittedAt, outcome, {
+        ...details,
+        scoringPending: true,
+      }),
+    };
   }
 
   #report(
@@ -802,6 +925,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       issue = {},
       validationArtifact = {},
       score,
+      scoringPending,
+      conflictingScoreTime,
       resultScope = "finding",
       issueFindingCount,
       issueVerdict,
@@ -809,6 +934,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       issue?: Record<string, unknown>;
       validationArtifact?: Record<string, unknown>;
       score?: Record<string, unknown>;
+      scoringPending?: boolean;
+      conflictingScoreTime?: string;
       resultScope?: ValidationResultScope;
       issueFindingCount?: number;
       issueVerdict?: string;
@@ -843,7 +970,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       `Codex finding severity: ${severity} (retained).`,
     ];
     if (statusMessage) report.push(statusMessage);
-    if (unavailable && !terminalStatus) report.push(unavailable);
+    if (unavailable && !terminalStatus && !scoringPending)
+      report.push(unavailable);
     if (validationArtifactId) {
       report.push(
         "Codex has not independently verified that this result reproduces the submitted flaw. Deployment source identity is not compared.",
@@ -899,8 +1027,11 @@ export class ContinuumValidationProvider implements ValidationProvider {
           })),
         ),
       );
-    } else if (conclusive) {
-      report.push("A single current issue score could not be established.");
+    } else if (scoringPending) {
+      unavailable ??= scoreTimeout;
+      disposition = "deferred";
+      reasons.push({ basis: "INFERRED", reason: unavailable });
+      report.push(unavailable);
     }
     return {
       disposition,
@@ -913,6 +1044,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ...(terminalStatus && { terminalStatus }),
         validationArtifactId,
         ...(score && { scoringArtifactId: text(score["artifactId"]) }),
+        ...(scoringPending && { scoringPending }),
         ...(statusMessage && { statusMessage }),
         ...(unavailable && { unavailable }),
         severityBefore: severity,
@@ -929,6 +1061,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
           ...(evidenceCreatedAt && { evidenceCreatedAt }),
           ...(validatedAt && { validatedAt }),
           ...(score && { scoredAt: createdAt(score) }),
+          ...(conflictingScoreTime && { scoredAt: conflictingScoreTime }),
           stale,
           reasons: stale ? ["Evidence predates this submission."] : [],
         },
@@ -949,6 +1082,7 @@ export function continuumProviderFromConfig(
     environmentId: text(config["environment_id"]) ?? "",
     awsProfile: text(config["aws_profile"]),
     awsRegion: text(config["aws_region"]),
+    includeLocalValidation: config["include_local_validation"] === true,
     waitMinutes:
       typeof config["wait_minutes"] === "number"
         ? config["wait_minutes"]

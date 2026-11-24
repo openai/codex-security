@@ -51,6 +51,7 @@ import {
   bindValidationProviderConfiguration,
   validateCompletedScan,
   validationCompletionText,
+  withAssignedAssessment,
 } from "./src/validation-provider.js";
 import {
   validationProviderFromConfiguration,
@@ -1135,6 +1136,18 @@ export function createCodexSecurityServer(): McpServer {
               scanId: begun.scanId,
             });
           }
+          if (begun.validationNotice && projectConfigPath !== undefined) {
+            const instructions = `The local Deep Scan continues. Call start_codex_security_deep_scan with only scanId ${begun.scanId} to await the result.`;
+            return scanActionResult(
+              {
+                scanId: begun.scanId,
+                validationNotice: begun.validationNotice,
+                instructions,
+              },
+              begun.validationNotice + "\n" + instructions,
+              begun.scanId,
+            );
+          }
           const terminal = await coordinator.wait(abortSignalFromExtra(extra));
           result = preparation.completion.result
             ? await preparation.completion.result
@@ -1413,13 +1426,14 @@ export function createCodexSecurityServer(): McpServer {
             "Remediation context requires occurrenceId, requestId and actionToken.",
           );
         }
+        const assigned = await workbench("get-scan", {
+          scanId,
+          occurrenceId,
+          requestId,
+          actionToken,
+        });
         return scanActionResult(
-          await workbench("get-scan", {
-            scanId,
-            occurrenceId,
-            requestId,
-            actionToken,
-          }),
+          await withAssignedAssessment(assigned),
           "Loaded the assigned remediation finding.",
         );
       }
@@ -2029,8 +2043,20 @@ async function startWithValidation(
   const configuration = started.validationProviderConfiguration as
     ValidationProviderConfiguration | undefined;
   if (configuration) {
-    const { scanId } = (started.scan ?? started.results) as { scanId: string };
-    await bindValidationProviderConfiguration(scanId, configuration, true);
+    const { scanId, targetPath } = (started.scan ?? started.results) as {
+      scanId: string;
+      targetPath: string;
+    };
+    const notice = await bindValidationProviderConfiguration(
+      scanId,
+      configuration,
+      started.startDisposition !== "joined",
+      projectConfigPath === undefined
+        ? undefined
+        : { file: projectConfigPath, target: targetPath, mode: "standard" },
+    );
+    if (notice)
+      ((started.workspace ?? started) as JsonObject).validationNotice = notice;
     delete started.validationProviderConfiguration;
   }
   return started;

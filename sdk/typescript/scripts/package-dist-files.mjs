@@ -96,6 +96,8 @@ const distModules = [
   "continuum-collector",
   "continuum-aws",
   "continuum-submissions",
+  "continuum-assessment-store",
+  "saved-continuum-assessment",
   "continuum-validation-evidence",
   "continuum-validation-provider",
   "checkmarx-evidence",

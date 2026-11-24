@@ -984,8 +984,34 @@ scan:
 codex-security scan . --validate -c codex-security.yaml
 ```
 
+To send findings from a completed scan, supply its scan ID and the selected
+occurrence IDs. Use `--scan latest` for the latest completed scan in the
+current directory. Omitting the IDs submits all open findings in that scan.
+
 Continuum receives titles, summaries, identifiers, severities, CWEs and code
-locations. New uploads require the original checkout and scan snapshot.
+locations. Setting `scan.validation.continuum.include_local_validation` to
+`true` also sends the full local `validation.method` and `validation.summary`,
+including any secrets in those fields. This setting defaults to `false`.
+For a local review before submission, run the CLI scan without `--validate`
+and export the complete sealed findings. `scans show` may shorten these fields.
+
+```sh
+codex-security export --scan SCAN_ID --export-format json --output -
+codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
+```
+
+The command writes results to stdout and exits with code 1 if any assessment
+is unavailable. Check `status` and each item's `disposition` in JSON.
+An inconclusive assessment can return `incomplete` with exit code 0. JSON
+also includes the AWS finding ID and ARN after acceptance and the issue ID
+and ARN when found.
+
+To resume, use the original scan ID, pending occurrence IDs, configuration
+and private host state. New uploads and retries without receipts require
+the original checkout and scan snapshot. With a receipt, the host can poll
+after local edits if the repository still matches the destination. Changing
+the payload or environment, or losing the receipt, can create a new AWS
+finding. Until a receipt is saved, the request remains in private host state.
 
 In Codex CLI, explicitly select the same project file when requesting a plugin
 scan. Standard, diff and Deep Scan completion runs the configured provider on

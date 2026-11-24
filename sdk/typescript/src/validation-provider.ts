@@ -23,10 +23,16 @@ export interface ValidationItemRecord {
   findingArn?: string;
   issueId?: string;
   issueArn?: string;
+  /** Membership was lost. Any reported issue ID is unconfirmed. */
+  issueUnlinked?: true;
+  /** An unsuccessful upgrade could not resolve an invalid or duplicate saved admission. */
+  admissionConflict?: true;
   validationArtifactId?: string;
   scoringArtifactId?: string;
   /** True when a completed validation is still waiting for a linked issue score. */
   scoringPending?: boolean;
+  /** The local serializer rejected the input before any upload. */
+  invalidInput?: boolean;
   disposition?: ValidationProviderAssessment["disposition"];
   submittedAt?: string;
   provider: string;
@@ -55,7 +61,7 @@ export interface ValidationItemRecord {
     /** Creation time of the returned validation artifact, including inconclusive results. */
     evidenceCreatedAt?: string;
     validatedAt?: string;
-    /** Creation time of the linked issue score, if available. */
+    /** Linked score time. With scoringPending, this marks a tie between scores. */
     scoredAt?: string;
     stale: boolean;
     reasons: string[];
@@ -109,6 +115,7 @@ export type ValidationProviderConfiguration = {
 export function retryableAssessment(
   item: ValidationProviderAssessment,
 ): boolean {
+  if (item.record?.invalidInput) return false;
   return Boolean(
     item.record?.scoringPending ||
     (item.unavailable && !item.record?.terminalStatus),

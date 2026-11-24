@@ -122,6 +122,7 @@
                 "environment_id": { "type": "string", "minLength": 1 },
                 "aws_profile": { "type": "string", "minLength": 1 },
                 "aws_region": { "type": "string", "minLength": 1 },
+                "include_local_validation": { "type": "boolean" },
                 "wait_minutes": {
                   "type": "number",
                   "exclusiveMinimum": 0,
