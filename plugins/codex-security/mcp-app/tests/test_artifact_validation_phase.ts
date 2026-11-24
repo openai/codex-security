@@ -10,9 +10,7 @@ import { importSource } from "./import-module.ts";
 const {
   candidateValidationsInputSchema,
   recordCodexSecurityCandidateValidations,
-} = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
-);
+} = await importSource("src/artifact-candidate-ledger.ts");
 
 const toolSchema = await readJson(
   import.meta.dirname,

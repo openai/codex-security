@@ -177,11 +177,7 @@ export class DeepScanCoordinator {
     this.scheduleDiscoveryDeadline();
     this.scheduleHeartbeat();
     void this.run().catch((error: unknown) => {
-      this.log({
-        event: "coordinator_unhandled_error",
-        scanId: this.state.scanId,
-        reason: errorKind(error),
-      });
+      this.logFailure("coordinator_unhandled_error", error);
       if (this.stopLocally()) this.terminalResult.reject(error);
     });
   }
@@ -227,36 +223,23 @@ export class DeepScanCoordinator {
   ): Promise<DeepScanRunState | undefined> {
     if (this.terminal) return await this.settled();
     if (signal?.aborted) throw abortError(signal.reason);
-    return await new Promise<DeepScanRunState | undefined>(
-      (resolvePromise, rejectPromise) => {
-        const timeout =
-          timeoutMs === undefined
-            ? undefined
-            : setTimeout(() => {
-                cleanup();
-                resolvePromise(undefined);
-              }, timeoutMs);
-        const onAbort = (): void => {
-          cleanup();
-          rejectPromise(abortError(signal?.reason));
-        };
-        const cleanup = (): void => {
-          if (timeout !== undefined) clearTimeout(timeout);
-          signal?.removeEventListener("abort", onAbort);
-        };
-        signal?.addEventListener("abort", onAbort, { once: true });
-        void this.terminalResult.promise.then(
-          (state) => {
-            cleanup();
-            resolvePromise(cloneState(state));
-          },
-          (error: unknown) => {
-            cleanup();
-            rejectPromise(error);
-          },
-        );
-      },
-    );
+    const { promise, resolve, reject } = Promise.withResolvers<
+      DeepScanRunState | undefined
+    >();
+    const timeout =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => resolve(undefined), timeoutMs);
+    const onAbort = () => reject(abortError(signal?.reason));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void this.terminalResult.promise.then(resolve, reject);
+    try {
+      const state = await promise;
+      return state && cloneState(state);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   cancel(reason: string): void {
@@ -454,11 +437,7 @@ export class DeepScanCoordinator {
       const message = errorMessage(error);
       const persistedMessage = deepScanErrorMessage(error);
       if (!this.setupComplete && !this.state.error) {
-        this.log({
-          event: "setup_failed",
-          scanId: this.state.scanId,
-          reason: errorKind(error),
-        });
+        this.logFailure("setup_failed", error);
       }
       this.abortController.abort(message);
       if (this.canceled || this.externallyFailed) return;
@@ -486,17 +465,9 @@ export class DeepScanCoordinator {
           status: "failed",
           error: persistedMessage,
         };
-        this.log({
-          event: "coordinator_failure_persistence_error",
-          scanId: this.state.scanId,
-          reason: errorKind(persistError),
-        });
+        this.logFailure("coordinator_failure_persistence_error", persistError);
       }
-      this.log({
-        event: "coordinator_failed",
-        scanId: this.state.scanId,
-        reason: errorKind(error),
-      });
+      this.logFailure("coordinator_failed", error);
     } finally {
       // A worker can finish an atomic draft write while cancellation is being
       // persisted. Publish saved output only after every local writer settles.
@@ -515,11 +486,7 @@ export class DeepScanCoordinator {
               this.options.threadId,
             );
           } catch (error) {
-            this.log({
-              event: "coordinator_terminal_state_read_failed",
-              scanId: this.state.scanId,
-              reason: errorKind(error),
-            });
+            this.logFailure("coordinator_terminal_state_read_failed", error);
           }
         } while (persistence !== this.cancellationPersistence?.promise);
         if (current?.status === "failed" || current?.status === "canceled") {
@@ -553,18 +520,12 @@ export class DeepScanCoordinator {
                 );
             } catch (persistError) {
               this.state = localState;
-              this.log({
-                event:
-                  "coordinator_result_preservation_failure_persistence_error",
-                scanId: this.state.scanId,
-                reason: errorKind(persistError),
-              });
+              this.logFailure(
+                "coordinator_result_preservation_failure_persistence_error",
+                persistError,
+              );
             }
-            this.log({
-              event: "coordinator_result_preservation_failed",
-              scanId: this.state.scanId,
-              reason: errorKind(error),
-            });
+            this.logFailure("coordinator_result_preservation_failed", error);
           }
         }
       }
@@ -660,11 +621,7 @@ export class DeepScanCoordinator {
         updatedAt: renewed.updatedAt,
       };
     } catch (error) {
-      this.log({
-        event: "coordinator_heartbeat_failed",
-        scanId: this.state.scanId,
-        reason: errorKind(error),
-      });
+      this.logFailure("coordinator_heartbeat_failed", error);
     }
     this.scheduleHeartbeat();
     if (this.terminal || this.ownershipCheck) return;
@@ -689,11 +646,7 @@ export class DeepScanCoordinator {
       current ??= await this.options.store.get(this.state.scanId, threadId);
       this.failurePersisted ||= current.status === "failed";
     } catch (readError) {
-      this.log({
-        event: "coordinator_ownership_read_failed",
-        scanId: this.state.scanId,
-        reason: errorKind(readError),
-      });
+      this.logFailure("coordinator_ownership_read_failed", readError);
       return this.externallyFailed;
     }
     if (this.externallyFailed || this.terminal) return this.externallyFailed;
@@ -718,11 +671,10 @@ export class DeepScanCoordinator {
         );
         this.failurePersisted ||= this.state.status === "failed";
       } catch (observeError) {
-        this.log({
-          event: "coordinator_replacement_observation_failed",
-          scanId: this.state.scanId,
-          reason: errorKind(observeError),
-        });
+        this.logFailure(
+          "coordinator_replacement_observation_failed",
+          observeError,
+        );
         this.state = {
           ...current,
           status: "failed",
@@ -1129,6 +1081,14 @@ export class DeepScanCoordinator {
     );
   }
 
+  private logFailure(event: string, error: unknown): void {
+    this.log({
+      event,
+      scanId: this.state.scanId,
+      reason: error instanceof Error ? errorNameWithCode(error) : typeof error,
+    });
+  }
+
   private logProgress(count: number): void {
     this.log({
       event: "progress_updated",
@@ -1254,9 +1214,4 @@ function discoveryErrorLimitError(
     `Deep Scan stopped after ${count} consecutive unsuccessful discovery workers ` +
     `(limit: ${limit}); last failure (${kind}): ${message}`;
   return cause ? new Error(detail, { cause }) : new Error(detail);
-}
-
-function errorKind(error: unknown): string {
-  if (!(error instanceof Error)) return typeof error;
-  return errorNameWithCode(error);
 }

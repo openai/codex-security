@@ -1052,61 +1052,34 @@ try {
       }),
       rm(path.join(workerRoot, "checkpoint-head.json"), { force: true }),
     ]);
-  await resetWorkerDraft();
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(
-      { ...workerContext, scope: "src" },
-      scopedWorkerInput,
-    ),
-    {
-      scanId,
-      findingCount: 1,
-      surfaceCount: 1,
-      reviewState: (await readJson(workerResultPath)).reviewState,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(await readJson(workerResultPath), {
-    ...scopedWorkerInput,
-    findings: [supportedScopedFinding],
-  });
-  assert.deepEqual(scopedWorkerInput, originalScopedWorkerInput);
-  await resetWorkerDraft();
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(
-      { ...workerContext, scope: "src/extract.py" },
-      scopedWorkerInput,
-    ),
-    {
-      scanId,
-      findingCount: 1,
-      surfaceCount: 1,
-      reviewState: (await readJson(workerResultPath)).reviewState,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(await readJson(workerResultPath), {
-    ...scopedWorkerInput,
-    findings: [supportedScopedFinding],
-  });
-  await resetWorkerDraft();
-  assert.deepEqual(
-    await recordCodexSecurityWorkerScanDraft(
-      { ...workerContext, scope: "." },
-      scopedWorkerInput,
-    ),
-    {
-      scanId,
-      findingCount: 3,
-      surfaceCount: 1,
-      reviewState: (await readJson(workerResultPath)).reviewState,
-      operation: "replace",
-      status: "draft_written",
-    },
-  );
-  assert.deepEqual(await readJson(workerResultPath), scopedWorkerInput);
+  for (const [scope, findingCount] of [
+    ["src", 1],
+    ["src/extract.py", 1],
+    [".", 3],
+  ] as const) {
+    await resetWorkerDraft();
+    assert.deepEqual(
+      await recordCodexSecurityWorkerScanDraft(
+        { ...workerContext, scope },
+        scopedWorkerInput,
+      ),
+      {
+        scanId,
+        findingCount,
+        surfaceCount: 1,
+        reviewState: (await readJson(workerResultPath)).reviewState,
+        operation: "replace",
+        status: "draft_written",
+      },
+    );
+    assert.deepEqual(
+      await readJson(workerResultPath),
+      scope === "."
+        ? scopedWorkerInput
+        : { ...scopedWorkerInput, findings: [supportedScopedFinding] },
+    );
+    assert.deepEqual(scopedWorkerInput, originalScopedWorkerInput);
+  }
   for (const name of ["scan-manifest.json", "findings.json", "coverage.json"]) {
     await assert.rejects(readFile(path.join(workerRoot, name)), {
       code: "ENOENT",
@@ -1429,107 +1402,52 @@ try {
     }).success,
     true,
   );
-  assert.equal(
-    scanDraftInputSchema.safeParse({ ...input, reviewState: undefined })
-      .success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse({ ...input, findings: undefined }).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse({ ...input, scanId: "not-a-scan-id" })
-      .success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
-      findingInput({ severity: { level: "moderate" } }),
-    ).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(findingInput({ confidence: "high" }))
-      .success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
+
+  for (const [field, rejectedInput] of [
+    ["missing review state", { ...input, reviewState: undefined }],
+    ["missing findings", { ...input, findings: undefined }],
+    ["invalid scan ID", { ...input, scanId: "not-a-scan-id" }],
+    ["severity", findingInput({ severity: { level: "moderate" } })],
+    ["confidence", findingInput({ confidence: "high" })],
+    [
+      "disposition",
       coverageInput({
         surfaces: [{ label: "surface", disposition: "unreviewed" }],
       }),
-    ).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
+    ],
+    [
+      "location",
       findingInput({ locations: [{ path: "../outside.py", startLine: 1 }] }),
-    ).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse({
-      ...input,
-      scope: { includePaths: ["outside"] },
-    }).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
-      coverageInput({ inventoryStrategy: "directory" }),
-    ).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(coverageInput({ mode: "repository" }))
-      .success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(coverageInput({ includePaths: ["outside"] }))
-      .success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(coverageInput({ excludePaths: ["outside"] }))
-      .success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
-      findingInput({ findingId: "csf_0123456789abcdef01234567" }),
-    ).success,
-    false,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
-      coverageInput({
-        surfaces: [
-          {
-            label: "surface",
-            disposition: "reported",
-            receiptRefs: ["artifacts/02_discovery/candidate_ledger.jsonl"],
-          },
-        ],
-      }),
-    ).success,
-    true,
-  );
-  assert.equal(
-    scanDraftInputSchema.safeParse(
-      coverageInput({
-        surfaces: [
-          {
-            label: "surface",
-            disposition: "reported",
-            receiptRefs: ["artifacts/../../outside.jsonl"],
-          },
-        ],
-      }),
-    ).success,
-    false,
-  );
+    ],
+    ["scope", { ...input, scope: { includePaths: ["outside"] } }],
+    ["inventory strategy", coverageInput({ inventoryStrategy: "directory" })],
+    ["mode", coverageInput({ mode: "repository" })],
+    ["included paths", coverageInput({ includePaths: ["outside"] })],
+    ["excluded paths", coverageInput({ excludePaths: ["outside"] })],
+    ["finding ID", findingInput({ findingId: "csf_0123456789abcdef01234567" })],
+  ] as const) {
+    assert.equal(
+      scanDraftInputSchema.safeParse(rejectedInput).success,
+      false,
+      field,
+    );
+  }
+
+  for (const [receipt, accepted] of [
+    ["artifacts/02_discovery/candidate_ledger.jsonl", true],
+    ["artifacts/../../outside.jsonl", false],
+  ] as const) {
+    const draft = coverageInput({
+      surfaces: [
+        { label: "surface", disposition: "reported", receiptRefs: [receipt] },
+      ],
+    });
+    assert.equal(
+      scanDraftInputSchema.safeParse(draft).success,
+      accepted,
+      receipt,
+    );
+  }
 
   let checkpointsVisibleBeforePublication: string[] = [];
   await assert.rejects(
@@ -2261,17 +2179,15 @@ try {
     "a later refinement inherits the stable identity of the matched saved finding",
   );
 
+  const withExtensions = (extensions: Record<string, string>) => ({
+    ...finding,
+    extensions: { ...finding.extensions, ...extensions },
+  });
   await recordFreshScanDraft(context, {
     ...input,
     findings: [
-      {
-        ...finding,
-        extensions: { ...finding.extensions, candidateId: "candidate-a" },
-      },
-      {
-        ...finding,
-        extensions: { ...finding.extensions, candidateId: "candidate-b" },
-      },
+      withExtensions({ candidateId: "candidate-a" }),
+      withExtensions({ candidateId: "candidate-b" }),
     ],
   });
   assert.deepEqual(
@@ -2308,22 +2224,14 @@ try {
         },
         ruleId: "path-traversal.archive-upload",
       },
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-cross-rule",
-          reportId: "shared-report",
-        },
-      },
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-cross-rule",
-          reportId: "second-report",
-        },
-      },
+      withExtensions({
+        candidateId: "candidate-cross-rule",
+        reportId: "shared-report",
+      }),
+      withExtensions({
+        candidateId: "candidate-cross-rule",
+        reportId: "second-report",
+      }),
     ],
   });
   assert.deepEqual(
@@ -2341,22 +2249,14 @@ try {
   await recordFreshScanDraft(context, {
     ...input,
     findings: [
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-shared",
-          reportId: "DSS-145-A",
-        },
-      },
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-shared",
-          ledgerRowId: "ledger-row-b",
-        },
-      },
+      withExtensions({
+        candidateId: "candidate-shared",
+        reportId: "DSS-145-A",
+      }),
+      withExtensions({
+        candidateId: "candidate-shared",
+        ledgerRowId: "ledger-row-b",
+      }),
     ],
   });
   assert.deepEqual(
@@ -2376,14 +2276,10 @@ try {
         ...finding,
         identity: { anchor: "candidate-authored-collision" },
       },
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-authored-collision",
-          reportId: "DSS-146-A",
-        },
-      },
+      withExtensions({
+        candidateId: "candidate-authored-collision",
+        reportId: "DSS-146-A",
+      }),
     ],
   });
   assert.deepEqual(
@@ -2406,22 +2302,14 @@ try {
           instance: "dss-147-a",
         },
       },
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-authored-instance",
-          reportId: "DSS-147-A",
-        },
-      },
-      {
-        ...finding,
-        extensions: {
-          ...finding.extensions,
-          candidateId: "candidate-authored-instance",
-          ledgerRowId: "ledger-row-c",
-        },
-      },
+      withExtensions({
+        candidateId: "candidate-authored-instance",
+        reportId: "DSS-147-A",
+      }),
+      withExtensions({
+        candidateId: "candidate-authored-instance",
+        ledgerRowId: "ledger-row-c",
+      }),
     ],
   });
   assert.deepEqual(

@@ -130,6 +130,7 @@ interface SavedValidation {
   records: { items: JsonObject[] };
   result: JsonObject & { report: string };
   retry?: unknown[] | null;
+  polls?: JsonObject;
 }
 
 async function readSavedValidation(
@@ -286,22 +287,30 @@ async function completedScanValidation(
                 "Validation no longer matches the recorded scan.",
               );
           };
-          const { providerName, status, summary, report, records, retry } =
-            await assessPluginFindings(
-              configuration,
-              findings,
-              {
-                repositoryPath,
-                signal,
-                checkSubmissionTarget,
-                resolveHostPaths: protectedHostPathResolver,
-              },
-              resolveProvider,
-              saved?.retry,
-              saved?.result.status === "outdated"
-                ? saved.records.items
-                : undefined,
-            );
+          const {
+            providerName,
+            status,
+            summary,
+            report,
+            records,
+            retry,
+            polls,
+          } = await assessPluginFindings(
+            configuration,
+            findings,
+            {
+              repositoryPath,
+              signal,
+              checkSubmissionTarget,
+              resolveHostPaths: protectedHostPathResolver,
+            },
+            resolveProvider,
+            saved?.retry,
+            saved?.result.status === "outdated"
+              ? saved.records.items
+              : undefined,
+            saved?.polls,
+          );
           const result = {
             status,
             provider: providerName,
@@ -320,6 +329,7 @@ async function completedScanValidation(
             records,
             result,
             retry,
+            polls,
           };
           await replaceArtifactText(cachePath, JSON.stringify(saved));
         }

@@ -158,6 +158,14 @@ test.each([undefined, "", " \t", "synthetic-primary"])(
   },
 );
 
+function neighborOf(anchor: Finding) {
+  return {
+    ...anchor,
+    findingId: "csf_neighbor",
+    fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
+  };
+}
+
 async function fixture() {
   const value = await workflowFixture();
   temporaryDirectories.track(value.root);
@@ -200,6 +208,7 @@ async function fixture() {
       undefined,
       { ...embedding, embedder },
     );
+  const store = new SqliteFindingsStore(value.environment);
   return {
     ...value,
     targetId,
@@ -207,7 +216,12 @@ async function fixture() {
     embed,
     embedding,
     local,
-    store: new SqliteFindingsStore(value.environment),
+    store,
+    insertFinding: (finding: Finding, repository = targetId) =>
+      store.insert(
+        [{ finding, embedding: { model: EMBEDDING_MODEL, vector } }],
+        repository,
+      ),
   };
 }
 
@@ -300,15 +314,8 @@ test("saved-scan dedupe observes built-in embedding batches and skips cached emb
 test("saved-scan local review persists a group with an existing repository finding", async () => {
   const f = await fixture();
   const anchor = f.document.findings[0]!;
-  const neighbor = {
-    ...anchor,
-    findingId: "csf_neighbor",
-    fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-  };
-  await f.store.insert(
-    [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
-    f.targetId,
-  );
+  const neighbor = neighborOf(anchor);
+  await f.insertFinding(neighbor);
   const result = await deduplicateScanDirectoryInternal(
     f.scanDir,
     { repository: f.repository, embedding: f.embedding },
@@ -335,19 +342,7 @@ test("saved-scan dedupe uses configured Codex models and efforts for both review
     'model = "synthetic-configured"\nmodel_reasoning_effort = "medium"\n',
   );
   const anchor = f.document.findings[0]!;
-  await f.store.insert(
-    [
-      {
-        finding: {
-          ...anchor,
-          findingId: "csf_neighbor",
-          fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-        },
-        embedding: { model: EMBEDDING_MODEL, vector },
-      },
-    ],
-    f.targetId,
-  );
+  await f.insertFinding(neighborOf(anchor));
   const calls: string[][] = [];
   await deduplicateScanDirectoryInternal(
     f.scanDir,
@@ -388,19 +383,7 @@ test("workflow ignores native SQLite writes on replay but detects source changes
   await writeFile(join(f.repository, "source.py"), "original source\n");
   await writeFile(join(f.repository, ".gitignore"), "runtime/\nsource.py\n");
   const anchor = f.document.findings[0]!;
-  await f.store.insert(
-    [
-      {
-        finding: {
-          ...anchor,
-          findingId: "csf_neighbor",
-          fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-        },
-        embedding: { model: EMBEDDING_MODEL, vector },
-      },
-    ],
-    f.targetId,
-  );
+  await f.insertFinding(neighborOf(anchor));
   const environment = {
     ...f.environment,
     OPENAI_API_KEY: "synthetic-review-key",
@@ -576,17 +559,9 @@ test.each([
         : 'model = "stored-model"\nmodel_reasoning_effort = "high"\n',
     );
     const anchor = f.document.findings[0]!;
-    const neighbor = {
-      ...anchor,
-      findingId: "csf_neighbor",
-      fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-    };
+    const neighbor = neighborOf(anchor);
     const useDatabase = selection === "stored-login";
-    if (useDatabase)
-      await f.store.insert(
-        [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
-        f.targetId,
-      );
+    if (useDatabase) await f.insertFinding(neighbor);
     const environment = {
       ...f.environment,
       ...(selection === "environment-key"
@@ -700,10 +675,7 @@ test("all-repository reviews receive stored source associations without rewritin
     findingId: "__proto__",
     fingerprints: { ...anchor.fingerprints, primary: "other-repository" },
   };
-  await f.store.insert(
-    [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
-    "repository-b",
-  );
+  await f.insertFinding(neighbor, "repository-b");
   const contexts: unknown[] = [];
   const result = await deduplicateScanDirectoryInternal(
     f.scanDir,
@@ -848,14 +820,8 @@ test("scope preparation refreshes legacy embeddings, preserves current bodies, a
     findingId: "csf_other",
     fingerprints: { ...original.fingerprints, primary: "other" },
   };
-  await f.store.insert(
-    [{ finding: newer, embedding: { model: EMBEDDING_MODEL, vector } }],
-    f.targetId,
-  );
-  await f.store.insert(
-    [{ finding: other, embedding: { model: EMBEDDING_MODEL, vector } }],
-    "other-repository",
-  );
+  await f.insertFinding(newer);
+  await f.insertFinding(other, "other-repository");
   const local = f.local();
   await local.prepare([original], f.targetId);
   expect(f.embed.mock.calls.map(([findings]) => findings[0]!.title)).toEqual([
@@ -873,15 +839,7 @@ test("scope preparation refreshes legacy embeddings, preserves current bodies, a
   ).toEqual([other.findingId]);
   await all.storeDedupeGroups([[original.findingId, other.findingId]]);
   expect(await f.store.listDedupeGroups(original.findingId)).toHaveLength(1);
-  await f.store.insert(
-    [
-      {
-        finding: { ...newer, title: "Concurrent update" },
-        embedding: { model: EMBEDDING_MODEL, vector },
-      },
-    ],
-    f.targetId,
-  );
+  await f.insertFinding({ ...newer, title: "Concurrent update" });
   await expect(local.potentialDuplicates(original.findingId)).rejects.toThrow(
     "Findings changed",
   );
@@ -1114,15 +1072,8 @@ test.each(["resolve", "reject"])(
 test("local workflow replays a lost group acknowledgement without publication or more embeddings", async () => {
   const f = await fixture();
   const anchor = f.document.findings[0]!;
-  const neighbor = {
-    ...anchor,
-    findingId: "csf_neighbor",
-    fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
-  };
-  await f.store.insert(
-    [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
-    f.targetId,
-  );
+  const neighbor = neighborOf(anchor);
+  await f.insertFinding(neighbor);
   const reviewer = duplicateReviewer();
   let loseAcknowledgement = true;
   const workbench = async (args: readonly string[], input?: string) => {
@@ -1195,15 +1146,7 @@ test("local workflow replays a lost group acknowledgement without publication or
 
 test("empty input does not embed unrelated history and cancellation stops preparation", async () => {
   const f = await fixture();
-  await f.store.insert(
-    [
-      {
-        finding: f.document.findings[0]!,
-        embedding: { model: EMBEDDING_MODEL, vector },
-      },
-    ],
-    f.targetId,
-  );
+  await f.insertFinding(f.document.findings[0]!);
   await f
     .local({ embed: rejecting("Empty scan must not embed") })
     .prepare([], f.targetId);
@@ -1225,15 +1168,7 @@ test("empty input does not embed unrelated history and cancellation stops prepar
 
 test("sealed artifacts cannot select a different local repository corpus", async () => {
   const f = await fixture();
-  await f.store.insert(
-    [
-      {
-        finding: f.document.findings[0]!,
-        embedding: { model: EMBEDDING_MODEL, vector },
-      },
-    ],
-    f.targetId,
-  );
+  await f.insertFinding(f.document.findings[0]!);
   const differentRepository = join(f.root, "other-checkout");
   await mkdir(differentRepository);
   await expect(
