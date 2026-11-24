@@ -196,13 +196,17 @@ export async function readPythonRequirements(
   for (const path of paths.filter((p) =>
     /^requirements[^/]*\.(?:txt|lock|in)$/iu.test(posix.basename(p)),
   )) {
+    // pip joins continued lines before stripping comments. Keep the first
+    // physical line number so the selected pin points back to the source.
     const physical = (await read(path)).split(/\r?\n/u);
-    // pip joins a line ending in a backslash with the next one (e.g. --generate-hashes output).
-    for (let index = physical.length - 2; index >= 0; index--) {
-      if (!physical[index]!.endsWith("\\")) continue;
-      physical[index] =
-        `${physical[index]!.slice(0, -1)} ${physical[index + 1]}`;
-      physical[index + 1] = "";
+    for (let index = physical.length - 1; index >= 0; index--) {
+      const line = physical[index]!;
+      if (/^\s*#/u.test(line)) {
+        physical[index] = "";
+      } else if (line.endsWith("\\")) {
+        physical[index] = line.slice(0, -1) + (physical[index + 1] ?? "");
+        physical[index + 1] = "";
+      }
     }
     const lines = physical.map((line) =>
       line.replace(/(?:^|\s+)#.*$/u, "").trim(),

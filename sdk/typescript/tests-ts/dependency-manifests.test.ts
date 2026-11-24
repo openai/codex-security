@@ -8,7 +8,7 @@ test("hashed requirements continued onto later lines are pins", async () => {
     ["requirements.txt"],
     "requests",
     async () =>
-      `idna==3.6 \\\n    --hash=${hash}\nrequests==2.31.0 \\\n    --hash=${hash} \\\n    --hash=${hash}\n`,
+      `idna==3.6 \\\n    --hash=${hash}\nrequests==2.\\\n31.0 \\\n    --hash=${hash} \\\n    --hash=${hash}\n`,
     gaps,
   );
   expect(gaps).toEqual([]);
@@ -19,4 +19,14 @@ test("hashed requirements continued onto later lines are pins", async () => {
     packagePath: "requests",
     line: 3,
   });
+});
+
+test("a trailing backslash in a pip comment cannot hide a constraint", async () => {
+  const [manifest] = await readPythonRequirements(
+    ["requirements.txt"],
+    "requests",
+    async () => "requests==2.31.0\n# constraints \\\n-c limits.txt",
+    [],
+  );
+  expect(manifest?.selection).toBeUndefined();
 });
