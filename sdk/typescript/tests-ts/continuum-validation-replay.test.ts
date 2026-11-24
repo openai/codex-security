@@ -10,6 +10,7 @@ import {
   ContinuumValidationProvider,
   type ContinuumAwsLauncher,
 } from "../src/continuum-validation-provider.js";
+import { assessPluginFindings } from "../src/plugin-validation.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 
 const recorded = JSON.parse(
@@ -659,6 +660,139 @@ describe("explicitly fake outcome variations", () => {
       "waiting",
     ]);
   });
+});
+
+test.each(["finding", "issue"])(
+  "after detachment on the %s, retries show observed issue IDs without restoring the verdict",
+  async (side) => {
+    const launch = transport();
+    let stage: "linked" | "detached" | "offline" | "relink" | "merged" =
+      "linked";
+    const p = provider(async (op, args) => {
+      if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+        return { items: [] };
+      if (op === "get-code-" + side && stage === "offline")
+        throw Error("Offline");
+      const response = await launch(op, args);
+      if (op === "get-code-issue" && stage === "detached" && side === "issue")
+        response["findingIds"] = ["sibling"];
+      if (
+        op === "get-code-finding" &&
+        stage === "detached" &&
+        side === "finding"
+      ) {
+        delete response["createdIssueId"];
+        delete response["duplicateOfIssueId"];
+        delete response["mergedIntoIssueId"];
+      }
+      if (stage === "relink" || stage === "merged") {
+        if (stage === "relink" && op === "get-code-issue")
+          throw Error("Offline");
+        if (op === "get-code-finding") response["mergedIntoIssueId"] = "new";
+        if (op === "get-code-issue") {
+          response["issueId"] = "new";
+          response["issueArn"] = recorded.issue.issueArn.replace(
+            recorded.issueId,
+            "new",
+          );
+        }
+      }
+      return response;
+    });
+    const config = {
+      provider: "continuum",
+      continuum: { environment_id: recorded.environmentId },
+    };
+    let result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+    );
+    const first = result.records.items[0]!;
+    expect(first.scoringPending).toBe(true);
+    for (const next of ["detached", "offline", "relink"] as const) {
+      stage = next;
+      result = await assessPluginFindings(
+        config,
+        [finding],
+        context,
+        () => p,
+        result.retry!,
+      );
+      const item = result.records.items[0]!;
+      expect(item).toMatchObject({
+        findingArn: first.findingArn,
+        issueUnlinked: true,
+        verdict: "UNAVAILABLE",
+      });
+      const id =
+        next === "relink"
+          ? "new"
+          : side === "issue"
+            ? first.issueId
+            : undefined;
+      expect(item.issueId).toBe(id);
+      if (id) {
+        expect(item.issueArn?.endsWith("/code-issues/" + id)).toBe(true);
+        expect(result.summary).toContain(id);
+      } else expect(item.issueArn).toBeUndefined();
+      expect(item.validationArtifactId).toBeUndefined();
+      expect(result.summary).not.toContain("EXPLOITABLE");
+    }
+    stage = "merged";
+    result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+      result.retry!,
+    );
+    expect(result.records.items[0]?.issueId).toBe("new");
+    expect(result.records.items[0]?.issueUnlinked).toBeUndefined();
+  },
+);
+
+test("a plugin retry drops the old verdict when reading the merge destination fails", async () => {
+  const launch = transport();
+  let merged = false;
+  const p = provider(async (op, args) => {
+    if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+      return { items: [] };
+    if (op === "get-code-issue" && args.at(-1) === "new")
+      throw new Error("Issue read failed");
+    const response = await launch(op, args);
+    if (op === "get-code-finding" && merged)
+      response["mergedIntoIssueId"] = "new";
+    return response;
+  });
+  const pending = await p.validate(finding, context);
+  expect(pending.record).toMatchObject({
+    issueId: recorded.issueId,
+    verdict: "EXPLOITABLE",
+    scoringPending: true,
+  });
+  merged = true;
+  const result = await assessPluginFindings(
+    {
+      provider: "continuum",
+      continuum: { environment_id: recorded.environmentId },
+    },
+    [finding],
+    context,
+    () => p,
+    [pending],
+  );
+  const record = result.records.items[0]!;
+  expect(record).toMatchObject({
+    issueId: "new",
+    issueArn: recorded.issue.issueArn.replace(recorded.issueId, "new"),
+    verdict: "UNAVAILABLE",
+    unavailable: "Issue read failed",
+  });
+  expect(record.validationArtifactId).toBeUndefined();
+  expect(record.providerSeverity).toBeUndefined();
+  expect(result.summary).not.toContain("EXPLOITABLE");
 });
 
 test.each(["EVIDENCE", "VALIDATION_EVIDENCE"])(

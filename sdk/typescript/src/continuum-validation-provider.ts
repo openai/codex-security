@@ -36,7 +36,11 @@ async function forEachPending(
     }),
   );
 }
-type Submission = ContinuumReceipt & { issueId?: string; issueArn?: string };
+type Submission = ContinuumReceipt & {
+  issueId?: string;
+  issueArn?: string;
+  issueUnlinked?: true;
+};
 
 class ScoreReadError extends Error {}
 
@@ -558,28 +562,47 @@ export class ContinuumValidationProvider implements ValidationProvider {
     };
     const results: ValidationProviderAssessment[] = new Array(supplied.length);
     const submissions: (Submission | undefined)[] = new Array(supplied.length);
+    const invalid = new Set<number>();
     let pending = supplied.map((_, index) => index);
     let request: ContinuumRequest;
     try {
-      const launch = await this.#launcher(context);
-      request = (operation, args) =>
-        this.#call(launch, operation, args, context, deadline, delay, now);
-      const submit = await prepareContinuumSubmissions(
-        request,
-        this.#options.environmentId,
-        context.repositoryPath,
-        context.signal,
-        context.checkSubmissionTarget,
-      );
+      // Prepare AWS once, after the first valid document. Only active senders
+      // retain serialized findings while the shared setup runs.
+      const prepare = async () => {
+        const launch = await this.#launcher(context);
+        request = (operation, args) =>
+          this.#call(launch, operation, args, context, deadline, delay, now);
+        return prepareContinuumSubmissions(
+          request,
+          this.#options.environmentId,
+          context.repositoryPath,
+          context.signal,
+          context.checkSubmissionTarget,
+        );
+      };
+      let ready: ReturnType<typeof prepare> | undefined;
       await forEachPending(pending, async (index) => {
+        const item = supplied[index]!;
+        const time = now();
+        let document: Record<string, unknown>;
         try {
-          const item = supplied[index]!;
           if (typeof item === "string")
             throw new Error(
               "not submittable: no structured item or code location",
             );
-          const time = now();
-          submissions[index] = await submit(findingToOcsf(item, time), time);
+          document = findingToOcsf(item, time);
+        } catch (error) {
+          invalid.add(index);
+          const reason = error instanceof Error ? error.message : String(error);
+          results[index] = unavailableAssessment(
+            this,
+            `${reason} No upload attempted for this finding. Correct the input before submitting again.`,
+          );
+          return;
+        }
+        try {
+          const submit = await (ready ??= prepare());
+          submissions[index] = await submit(document, now());
         } catch (error) {
           results[index] = unavailableAssessment(this, error);
         }
@@ -632,6 +655,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         itemId: occurrence(finding),
         provider: this.name,
         verdict: "UNAVAILABLE",
+        ...(invalid.has(index) && { invalidInput: true }),
         severityBefore: severityLevel(finding),
         severityAfter: severityLevel(finding),
         reasons: [],
@@ -722,11 +746,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
       text(current["mergedIntoIssueId"]) ??
       text(current["duplicateOfIssueId"]) ??
       text(current["createdIssueId"]);
-    if (terminal || issueId !== submission.issueId) {
+    if (terminal) {
+      delete submission.issueUnlinked;
       delete submission.issueId;
       delete submission.issueArn;
-    }
-    if (terminal) {
       return this.#report(finding, submittedAt, {
         verdict: status,
         statusMessage: text(
@@ -737,17 +760,29 @@ export class ContinuumValidationProvider implements ValidationProvider {
         disposition: "not_applicable",
       });
     }
-    if (!issueId) return;
-    const issueArgs = [...environmentArgs, "--issue-id", issueId];
-    const issue = await request("get-code-issue", issueArgs);
+    if (!issueId) {
+      delete submission.issueId;
+      delete submission.issueArn;
+      submission.issueUnlinked = true;
+      return;
+    }
+    // Keep the finding's current link even if reading a merge destination
+    // fails. A retry must not restore a verdict from the previous issue.
     const scope = findingArn.slice(0, -("/code-findings/" + findingId).length);
     const issueArn = scope + "/code-issues/" + issueId;
-    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
-      throw new Error("Continuum returned a different issue while polling.");
     submission.issueId = issueId;
     submission.issueArn = issueArn;
+    const issueArgs = [...environmentArgs, "--issue-id", issueId];
+    const issue = await request("get-code-issue", issueArgs);
+    if (issue["issueArn"] !== issueArn || issue["issueId"] !== issueId)
+      throw new Error("Continuum returned a different issue while polling.");
     const ids = issue["findingIds"];
-    if (!Array.isArray(ids) || !ids.includes(findingId)) return;
+    if (!Array.isArray(ids)) return;
+    if (!ids.includes(findingId)) {
+      submission.issueUnlinked = true;
+      return;
+    }
+    delete submission.issueUnlinked;
     const validation = await selectValidation(
       issueArtifacts(request, issueArgs, "VALIDATION_EVIDENCE"),
       findingId,

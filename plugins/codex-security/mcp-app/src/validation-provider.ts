@@ -22,7 +22,7 @@ export function validationCompletionText(
 ): string {
   if (!validation) return "";
   const retry = validation.retryable
-    ? `\nOn request, resume pending checks or retry unavailable findings with complete_codex_security_scan and this scan ID.`
+    ? `\nOn request, ${validation.status === "outdated" ? "refresh assessments" : "resume pending checks or retry unavailable findings"} with complete_codex_security_scan and this scan ID.`
     : "";
   return `\n\nSupplemental validation (${validation.provider ?? "provider"}): ${validation.status}\n${validation.summary ?? validation.report ?? validation.message ?? ""}${validation.reportPath ? `\nReport: ${validation.reportPath}` : ""}${validation.recordsPath ? `\nRecords: ${validation.recordsPath}` : ""}${retry}`;
 }
@@ -80,15 +80,38 @@ async function readSavedValidation(
       "Saved validation does not match this scan's provider configuration.",
     );
   }
-  // Refresh older attribution rules from the separate submission receipts.
-  if (saved.schemaVersion !== continuumAssessmentVersion) return;
+  // Legacy terminal conclusions and mixed retry lists may both attribute an
+  // issue-wide verdict to one finding. Re-evaluate the whole batch from the
+  // separate submission receipts only when completion is explicitly requested.
+  if (
+    (saved.schemaVersion !== continuumAssessmentVersion ||
+      saved.retry === undefined) &&
+    saved.result.provider === "continuum" &&
+    (saved.result.findings || saved.records.items.length)
+  ) {
+    saved.retry = [];
+    saved.result.status = "outdated";
+  }
   return saved;
 }
 
 /** Run only after the workbench has sealed the scan. */
-export async function validateCompletedScan(
+export function validateCompletedScan(
   scan: JsonObject,
   resolveProvider = validationProviderFromConfiguration,
+  signal?: AbortSignal,
+) {
+  return completedScanValidation(scan, resolveProvider, signal);
+}
+
+/** Read the last protected assessment without running the provider. */
+export function readCompletedValidation(scan: JsonObject) {
+  return completedScanValidation(scan);
+}
+
+async function completedScanValidation(
+  scan: JsonObject,
+  resolveProvider?: typeof validationProviderFromConfiguration,
   signal?: AbortSignal,
 ): Promise<JsonObject | undefined> {
   const { scanId, sealManifestDigest } = scan;
@@ -110,6 +133,29 @@ export async function validateCompletedScan(
     const cachePath = `${configurationPath(scanId)}.result`;
     const readSaved = () =>
       readSavedValidation(cachePath, configuration, repositoryPath);
+    if (!resolveProvider) {
+      const saved = await readSaved();
+      if (!saved) return;
+      const { status, provider, findings, summary, retryable } = saved.result;
+      if (status === "outdated") {
+        return {
+          status,
+          provider,
+          findings,
+          retryable: true,
+          message:
+            "Complete this scan again to refresh Continuum terminal statuses and finding attribution. Findings without a saved submission receipt may be submitted again.",
+        };
+      }
+      return {
+        status,
+        provider,
+        findings,
+        summary,
+        retryable,
+        items: saved.records.items,
+      };
+    }
     if (
       asRecord(scan.progress)?.status !== "complete" ||
       typeof sealManifestDigest !== "string"
@@ -125,7 +171,11 @@ export async function validateCompletedScan(
       async () => {
         let saved = await readSaved();
         // A waiter shares the result even if another attempt could be useful.
-        if (saved?.attemptId && saved.attemptId !== attempt)
+        if (
+          saved?.attemptId &&
+          saved.attemptId !== attempt &&
+          saved.result.status !== "outdated"
+        )
           return saved.result;
         const { contract } = await loadSealedContract(scanDir, {
           pluginRoot: process.env.CODEX_SECURITY_PLUGIN_ROOT,
@@ -166,6 +216,7 @@ export async function validateCompletedScan(
                 resolveHostPaths: protectedHostPathResolver,
               },
               resolveProvider,
+              saved?.retry,
             );
           const result = {
             status,

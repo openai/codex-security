@@ -35,6 +35,7 @@ function importSource(path: string) {
 
 const {
   bindValidationProviderConfiguration,
+  readCompletedValidation,
   validateCompletedScan,
   validationCompletionText,
 } = (await importSource(
@@ -136,7 +137,88 @@ await test("unconfigured plugin scans never invoke a validation provider", async
   assert.equal(calls, 0);
 });
 
-await test("explicit completion retries incomplete batches and preserves sealed artifacts", async () => {
+for (const mixed of [false, true]) {
+  await test(`legacy ${mixed ? "mixed retry" : "completed"} assessments refresh only on explicit completion`, async () => {
+    const root = await temporaryDirectory("plugin-validation-upgrade-");
+    const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+    process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+    try {
+      const directory = join(root, "state", "validation-providers");
+      const repositoryPath = join(root, "repository");
+      await mkdir(directory, { recursive: true });
+      await mkdir(repositoryPath);
+      const { scan, ids } = await sealedScan(
+        root,
+        repositoryPath,
+        "upgrade",
+        mixed ? 2 : 1,
+      );
+      const path = join(directory, "upgrade.json");
+      await bindValidationProviderConfiguration(
+        scan.scanId,
+        configuration,
+        true,
+      );
+      const record = {
+        itemId: ids[0],
+        verdict: "EXPLOITABLE",
+        claimMatch: "on_target",
+        resultScope: "finding",
+        severityBefore: "high",
+        severityAfter: "critical",
+      };
+      const old = JSON.stringify({
+        schemaVersion: mixed ? 2 : undefined,
+        configuration,
+        repositoryPath,
+        records: { schemaVersion: 1, items: [record] },
+        result: {
+          provider: "continuum",
+          findings: ids.length,
+          status: mixed ? "incomplete" : "complete",
+          report: "Legacy regrade",
+          summary: "Legacy regrade",
+        },
+        retry: mixed
+          ? [{ record, report: "Legacy regrade" }, { unavailable: "timeout" }]
+          : null,
+      });
+      await writeFile(path + ".result", old);
+      const read = await readCompletedValidation(scan);
+      assert.equal(read?.status, "outdated");
+      assert.equal(read?.items, undefined);
+      assert.equal(read?.retryable, true);
+      assert.doesNotMatch(validationCompletionText(read), /Legacy regrade/);
+      assert.equal(await readFile(path + ".result", "utf8"), old);
+      const calls: string[] = [];
+      const resolveProvider = () => ({
+        name: "continuum",
+        version: "1",
+        async validate(finding: { occurrenceId: string }) {
+          calls.push(finding.occurrenceId);
+          return {
+            disposition: "reportable",
+            report: "Current assessment",
+            provenance: { provider: "continuum", providerVersion: "1" },
+          };
+        },
+      });
+      const refreshed = await validateCompletedScan(scan, resolveProvider);
+      assert.deepEqual(calls, ids);
+      assert.equal(refreshed?.status, "complete");
+      assert.doesNotMatch(String(refreshed?.report), /Legacy regrade/);
+      assert.equal((await readCompletedValidation(scan))?.status, "complete");
+      await validateCompletedScan(scan, resolveProvider);
+      assert.deepEqual(calls, ids);
+    } finally {
+      if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+      else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+await test("explicit completion retries pending assessments and preserves terminal results and sealed artifacts", async () => {
   const root = await temporaryDirectory("plugin-validation-");
   const oldState = process.env.CODEX_SECURITY_STATE_DIR;
   process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
@@ -241,6 +323,14 @@ await test("explicit completion retries incomplete batches and preserves sealed 
         summary: "Fabricated negative result",
       }),
     );
+    const read = await readCompletedValidation(scan);
+    assert.equal(read?.retryable, true);
+    assert.deepEqual(read?.items, saved.items);
+    assert.deepEqual(calls, ids);
+    assert.match(
+      await readFile(join(scanDir, "validation.md"), "utf8"),
+      /Fabricated/,
+    );
     // Every new attempt uses exactly the bytes sealed at completion.
     await writeFile(join(scanDir, "findings.json"), findings + "\n");
     assert.equal(
@@ -248,13 +338,14 @@ await test("explicit completion retries incomplete batches and preserves sealed 
       "failed",
     );
     assert.deepEqual(calls, ids);
+    assert.deepEqual((await readCompletedValidation(scan))?.items, saved.items);
     await writeFile(join(scanDir, "findings.json"), findings);
     const [cached, joined] = await Promise.all([
       validateCompletedScan(scan, resolveProvider),
       validateCompletedScan(scan, resolveProvider),
     ]);
     assert.deepEqual(cached, joined);
-    assert.deepEqual(calls, [...ids, ...ids]);
+    assert.deepEqual(calls, [...ids, ids[1]]);
     assert.equal(cached?.status, "incomplete");
     assert.equal(cached?.retryable, undefined);
     assert.match(validationCompletionText(cached), /FAILED/);
@@ -265,6 +356,7 @@ await test("explicit completion retries incomplete batches and preserves sealed 
       items.map((item: { verdict: string }) => item.verdict),
       ["EXPLOITABLE", "UNCERTAIN"],
     );
+    assert.deepEqual((await readCompletedValidation(scan))?.items, items);
     assert.equal(cached?.findings, 2);
     assert.doesNotMatch(validationCompletionText(cached), /Fabricated/);
     assert.match(
@@ -307,6 +399,7 @@ await test("only the selected completed scan can start a validation batch", asyn
   }
   await validateCompletedScan(scan, resolveProvider, AbortSignal.abort());
   assert.equal(resolveProvider.mock.callCount(), 0);
+  assert.equal(await readCompletedValidation(scan), undefined);
 });
 
 for (const reachable of [true, false, undefined])
@@ -706,8 +799,22 @@ esac
       await writeFile(source, "# synthetic source\n");
       const pending = await validateCompletedScan(scan);
       assert.equal(pending?.retryable, true);
+      // Reproduce the previous aggregate cache format on plugin upgrade.
+      const cachePath = join(
+        root,
+        "state",
+        "validation-providers",
+        scanId + ".json.result",
+      );
+      const cache = JSON.parse(await readFile(cachePath, "utf8"));
+      delete cache.schemaVersion;
+      delete cache.retry;
+      delete cache.result.retryable;
+      cache.result.status = "complete";
+      await writeFile(cachePath, JSON.stringify(cache));
       await writeFile(aws + ".ready", "");
       await writeFile(source, "# edited source\n");
+      assert.equal((await readCompletedValidation(scan))?.status, "outdated");
       const result = await validateCompletedScan(scan);
       assert.equal(result?.status, "complete");
       assert.equal(result?.retryable, undefined);

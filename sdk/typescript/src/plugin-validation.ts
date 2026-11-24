@@ -20,16 +20,21 @@ export async function assessPluginFindings(
   findings: Record<string, unknown>[],
   context: ValidationProviderContext,
   resolveProvider = validationProviderFromConfiguration,
+  previous: ValidationProviderAssessment[] = [],
 ) {
   const provider = resolveProvider(configuration);
-  const assessments: ValidationProviderAssessment[] = provider.validateBatch
+  // Each assessment corresponds to the same position in the sealed findings.
+  const pending = findings.filter(
+    (_, index) => !previous[index] || retryableAssessment(previous[index]),
+  );
+  const updates = provider.validateBatch
     ? await provider
-        .validateBatch(findings, context)
+        .validateBatch(pending, context)
         .catch((error: unknown) =>
-          findings.map(() => unavailableAssessment(provider, error)),
+          pending.map(() => unavailableAssessment(provider, error)),
         )
     : await Promise.all(
-        findings.map(async (finding) => {
+        pending.map(async (finding) => {
           try {
             return await provider.validate(finding, context);
           } catch (error) {
@@ -37,6 +42,36 @@ export async function assessPluginFindings(
           }
         }),
       );
+  let next = 0;
+  const assessments = findings.map((_, index) => {
+    const saved = previous[index];
+    if (saved && !retryableAssessment(saved)) return saved;
+    const update = updates[next++]!;
+    const prior = saved?.record;
+    const current = update.record;
+    const sameAdmission =
+      prior?.findingArn &&
+      prior.findingArn === current?.findingArn &&
+      prior.submittedAt === current.submittedAt;
+    // A failed lookup cannot undo acceptance or a confirmed change of issue.
+    // A successful lookup with no issue must drop the previous issue's verdict.
+    if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {
+      // Keep a newly observed link visible without reviving detached evidence.
+      if (sameAdmission && prior.issueUnlinked && current.issueArn)
+        current.issueUnlinked = true;
+      if (
+        prior?.findingArn &&
+        (!current?.findingArn ||
+          (sameAdmission &&
+            !current.issueUnlinked &&
+            (!current.issueArn || prior.issueArn === current.issueArn)))
+      ) {
+        update.record = { ...prior, unavailable: update.unavailable };
+        if (prior.scoringPending) update.report = validationSummary([update]);
+      }
+    }
+    return update;
+  });
   const summary = validationSummary(assessments);
   const report = assessments
     .map(
@@ -52,7 +87,8 @@ export async function assessPluginFindings(
       assessment.record ? [assessment.record] : [],
     ),
   };
-  // Completion can retry a batch using its saved submission receipts.
+  // Continuum persists requests and receipts before polling. It is safe to
+  // retry transport failures while reusing each definitive provider result.
   const retry =
     provider.name === "continuum" && assessments.some(retryableAssessment)
       ? assessments
