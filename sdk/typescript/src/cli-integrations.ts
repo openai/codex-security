@@ -277,26 +277,20 @@ export function completeCli(
       [...words.slice(0, index), "--report-file"],
       index,
     ).some((candidate) => candidate.value === "--report-file");
-  let scanFormat = false;
+  let outputFormats = cliOutputFormats(reportFormat);
   if (words[index - 1] === "--format") {
     const prefix = words.slice(0, index - 1);
     const commandIndex = firstNonGlobal(prefix, 1);
     const command = prefix[commandIndex];
-    scanFormat = command === "scan";
-    if (command === "scans") {
-      const verb = prefix[firstNonGlobal(prefix, commandIndex + 1)];
-      scanFormat = verb === "rerun" || verb === "resume";
-    }
+    const verb = prefix[firstNonGlobal(prefix, commandIndex + 1)];
+    if (
+      command === "scan" ||
+      (command === "scans" && (verb === "rerun" || verb === "resume"))
+    )
+      outputFormats = outputFormats.filter((format) => format !== "md");
   }
-  const outputFormats = cliOutputFormats(reportFormat);
   const candidates = Completions.complete(commands, undefined, words, index, {
-    schema: z.object({
-      format: z.enum(
-        scanFormat
-          ? outputFormats.filter((format) => format !== "md")
-          : outputFormats,
-      ),
-    }),
+    schema: z.object({ format: z.enum(outputFormats) }),
   });
   return Completions.format(shell, candidates);
 }
