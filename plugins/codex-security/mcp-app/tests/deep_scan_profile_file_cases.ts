@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import childProcess, { type SpawnOptions } from "node:child_process";
+import childProcess from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
@@ -13,10 +13,13 @@ import {
 import { restoreEnv } from "./support/fake-codex-source.ts";
 import {
   CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  workerPermissionProfileOverride,
   assertReadOnlyWorkerPolicy,
+  assertWorkerPermissionProfile,
   assertWorkerSubagentPolicy,
+  captureWorkerLaunches,
+  fakeCodexFixture,
+  workerLaunchForModel,
+  workerPermissionProfileOverride,
 } from "./deep_scan_executor_fixture.ts";
 
 export async function testWorkerSelectedProfileFiles() {
@@ -144,37 +147,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
         process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH!,
         "[worker_runtime]\n",
       );
-      const launches: {
-        command?: string;
-        args: readonly string[];
-        environment?: NodeJS.ProcessEnv;
-        markerPath: string;
-      }[] = [];
-      childProcess.spawn = ((
-        command: string,
-        args: readonly string[],
-        options: SpawnOptions,
-      ) => {
-        const markerPath = path.join(
-          fixture.root,
-          `invocation-${launches.length}.json`,
-        );
-        const environment = {
-          ...options!.env,
-          FAKE_CODEX_MARKER: markerPath,
-          FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
-        };
-        launches.push({ command, args, environment, markerPath });
-        return originalSpawn(
-          command,
-          command === process.execPath ||
-            command === path.toNamespacedPath(process.execPath)
-            ? [fixture.executablePath, ...args]
-            : args,
-          { ...options, env: environment },
-        );
-      }) as typeof childProcess.spawn;
-      syncBuiltinESMExports();
+      const launches = captureWorkerLaunches(originalSpawn, fixture);
       const settings = [
         { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
@@ -300,44 +273,22 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
         );
         assert.equal(workerLaunches.length, settings.length);
         for (const [index, { model, reasoningEffort }] of settings.entries()) {
-          const workerLaunch = workerLaunches.find(({ args }) =>
-            model === undefined
-              ? !args.includes("--model")
-              : args[args.indexOf("--model") + 1] === model,
-          );
-          assert.ok(workerLaunch, `missing worker launch for ${model}`);
+          const workerLaunch = workerLaunchForModel(workerLaunches, model);
           assert.equal(
-            workerLaunch.command,
-            process.platform === "win32"
-              ? path.toNamespacedPath(process.execPath)
-              : process.execPath,
-          );
-          assert.equal(
-            workerLaunch.environment!.CODEX_CLI_PATH,
-            process.execPath,
-          );
-          assert.equal(
-            workerLaunch.environment!.CODEX_HOME,
+            workerLaunch.environment.CODEX_HOME,
             await realpath(codexHome),
           );
           assert.equal(
-            workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
+            workerLaunch.environment.CODEX_SECURITY_CONFIG_PATH,
             scanConfigPaths[index],
           );
           assert.equal(
-            workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+            workerLaunch.environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
             process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
           );
-          assert.deepEqual(
-            JSON.parse(
-              JSON.stringify(
-                parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
-                  .permissions,
-              ),
-            ),
-            {
-              codex_security_deep_scan_worker: deniedWorkerPermissionProfile,
-            },
+          assertWorkerPermissionProfile(
+            workerLaunch.args,
+            deniedWorkerPermissionProfile,
           );
           const invocation = await readJson(workerLaunch.markerPath);
           assert.equal(invocation.providerKey, providerKeys[index]);
@@ -361,7 +312,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               await readFile(path.join(codexHome, "config.toml"), "utf8"),
             );
           }
-          assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
+          assert.equal(workerLaunch.environment.CODEX_API_KEY, undefined);
           assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, providerKeys.at(-1));
           const clearedFiles = modelFiles && index % 2 === 0;
           assertConfigOverrides(invocation.argv, {
