@@ -34,10 +34,15 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     """
     if not isinstance(value, dict):
         return {}
-    prepared: dict[str, Any] = {}
-    for aliases, maximum_bytes, priority_keys, reserved_fields in (
+    core: dict[str, Any] = {}
+    writeup = value.get("writeup")
+    if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
+        core["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)}
+
+    root_key, root_cause = merged_root_cause(value)
+    for key, maximum_bytes, priority_keys, reserved_fields in (
         (
-            ("rootCause", "root_cause"),
+            root_key,
             FINDING_ROOT_CAUSE_PREVIEW_BYTES,
             (
                 "description",
@@ -54,7 +59,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ),
         ),
         (
-            ("validation",),
+            "validation",
             FINDING_VALIDATION_PREVIEW_BYTES,
             (
                 "conclusion",
@@ -77,7 +82,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ),
         ),
         (
-            ("attackPath",),
+            "attackPath",
             FINDING_ATTACK_PATH_PREVIEW_BYTES,
             (
                 "summary",
@@ -103,119 +108,60 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ),
         ),
     ):
-        if aliases == ("rootCause", "root_cause"):
-            key, section = merged_root_cause(value)
-        else:
-            key = next((alias for alias in aliases if alias in value), None)
-            section = value[key] if key is not None else None
-        if key is not None:
-            if key == "attackPath" and isinstance(section, dict):
-                section = dict(section)
-                for assessment in ("impact", "likelihood"):
-                    if isinstance(section.get(assessment), str):
-                        assessment_value = section[assessment]
-                        assessment_key = (
-                            "level"
-                            if re.fullmatch(
-                                r"critical|high|medium|low|informational|ignore|unknown",
-                                assessment_value,
-                                flags=re.IGNORECASE,
-                            )
-                            else "rationale"
+        if key is None or key not in value:
+            continue
+        section = root_cause if key == root_key else value[key]
+        if key == "attackPath" and isinstance(section, dict):
+            section = dict(section)
+            for assessment in ("impact", "likelihood"):
+                if isinstance(section.get(assessment), str):
+                    assessment_value = section[assessment]
+                    assessment_key = (
+                        "level"
+                        if re.fullmatch(
+                            r"critical|high|medium|low|informational|ignore|unknown",
+                            assessment_value,
+                            flags=re.IGNORECASE,
                         )
-                        section[assessment] = {assessment_key: assessment_value}
-            prepared[key] = bounded_finding_section(
-                section,
-                maximum_bytes,
-                priority_keys,
-                reserved_fields,
-            )
-
-    writeup = value.get("writeup")
-    if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
-        prepared["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)[0]}
+                        else "rationale"
+                    )
+                    section[assessment] = {assessment_key: assessment_value}
+        core[key] = bounded_finding_section(section, maximum_bytes, priority_keys, reserved_fields)
 
     evidence_key, evidence = merged_bounded_code_evidence(value)
     if evidence_key is not None:
-        prepared[evidence_key] = evidence
-
-    for key in (
-        "confidence",
-        "detectedAt",
-        "evidence",
-        "evidenceExcerpt",
-        "identity",
-        "provenance",
-        "ruleId",
-        "severity",
-        "status",
-        "taxonomy",
-        "preventiveControls",
-        "remediationTests",
-    ):
+        core[evidence_key] = evidence
+    for key in ("provenance", "evidence", "evidenceExcerpt"):
         if key in value:
-            prepared[key] = (
-                bounded_json_text(value[key], FINDING_EVIDENCE_EXCERPT_BYTES)[0]
-                if key == "evidenceExcerpt" and isinstance(value[key], str)
-                else value[key]
-            )
-
-    guidance = {
-        key: prepared[key]
-        for key in ("remediationTests", "preventiveControls")
-        if key in prepared and isinstance(prepared[key], list)
-    }
-    for key in ("severity", "confidence"):
-        if key in prepared:
-            prepared[key] = bounded_finding_section(
-                prepared[key],
-                FINDING_SUMMARY_BYTES,
-                ("level",),
-                ((("level",), FINDING_LEVEL_BYTES),),
-            )
-    if "taxonomy" in prepared:
-        prepared["taxonomy"] = bounded_finding_section(
-            prepared["taxonomy"], FINDING_SUMMARY_BYTES, ("cwe",), ()
+            core[key] = value[key]
+    if isinstance(core.get("evidenceExcerpt"), str):
+        core["evidenceExcerpt"] = bounded_json_text(
+            core["evidenceExcerpt"], FINDING_EVIDENCE_EXCERPT_BYTES
         )
-    metadata_keys = (
-        "ruleId",
-        "status",
-        "detectedAt",
-        "identity",
-        "taxonomy",
-        "severity",
-        "confidence",
-    )
-    metadata = {
-        key: bounded_json_value(prepared[key], [FINDING_SUMMARY_BYTES])
-        for key in metadata_keys
-        if key in prepared
-    }
+
+    metadata = {}
+    for key in ("ruleId", "status", "detectedAt", "identity", "taxonomy", "severity", "confidence"):
+        if key not in value:
+            continue
+        item = value[key]
+        if key in ("severity", "confidence"):
+            item = bounded_finding_section(
+                item, FINDING_SUMMARY_BYTES, ("level",), ((("level",), FINDING_LEVEL_BYTES),)
+            )
+        elif key == "taxonomy":
+            item = bounded_finding_section(item, FINDING_SUMMARY_BYTES, ("cwe",), ())
+        metadata[key] = bounded_json_value(item, FINDING_SUMMARY_BYTES)
     metadata = dict(sorted(metadata.items(), key=lambda item: json_size(item[1])))
     metadata_budget = FINDING_SUMMARY_BYTES - 2 - sum(json_size(key) + 2 for key in metadata)
     for index, (key, item) in enumerate(metadata.items()):
-        metadata[key] = bounded_json_value(item, [metadata_budget // (len(metadata) - index)])
+        metadata[key] = bounded_json_value(item, metadata_budget // (len(metadata) - index))
         metadata_budget -= json_size(metadata[key])
-    diagnostics = (
-        "rootCause",
-        "root_cause",
-        "validation",
-        "attackPath",
-        "codeEvidence",
-        "code_evidence",
-    )
-    core_keys = (
-        "writeup",
-        *diagnostics,
-        "provenance",
-        "evidence",
-        "evidenceExcerpt",
-    )
-    core = {key: prepared[key] for key in core_keys if key in prepared}
-    extras = {
-        key: item
-        for key, item in prepared.items()
-        if key not in core and key not in guidance and key not in metadata_keys
+
+    guidance_keys = ("remediationTests", "preventiveControls")
+    guidance = {key: value[key] for key in guidance_keys if isinstance(value.get(key), list)}
+    # Non-list guidance comes last, with controls before tests.
+    non_list_guidance = {
+        key: value[key] for key in reversed(guidance_keys) if key in value and key not in guidance
     }
     complete_guidance = {key: items[:1] for key, items in guidance.items()}
     minimum_guidance = {
@@ -235,19 +181,16 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         if reserved >= FINDING_DETAILS_PREVIEW_BYTES:
             continue
         projected_core = bounded_json_value(
-            core,
-            [FINDING_DETAILS_PREVIEW_BYTES - reserved],
-            max_depth=5,
+            core, FINDING_DETAILS_PREVIEW_BYTES - reserved, max_depth=5
         )
         if all(key in projected_core for key in core):
             break
     ordered_guidance = dict(sorted(guidance.items(), key=lambda entry: bool(entry[1])))
-    bounded = bounded_json_value(
-        {**metadata, **projected_core, **ordered_guidance, **extras},
-        [FINDING_DETAILS_PREVIEW_BYTES],
+    return bounded_json_value(
+        {**metadata, **projected_core, **ordered_guidance, **non_list_guidance},
+        FINDING_DETAILS_PREVIEW_BYTES,
         max_depth=5,
     )
-    return bounded if isinstance(bounded, dict) else {}
 
 
 def bounded_finding_section(
@@ -258,12 +201,12 @@ def bounded_finding_section(
 ) -> Any:
     """Apply each field group’s size cap before selecting fields in priority order under the section cap."""
     if not isinstance(value, dict):
-        return bounded_json_value(value, [maximum_bytes])
+        return bounded_json_value(value, maximum_bytes)
     ordered: dict[str, Any] = {}
     for aliases, field_bytes in reserved_fields:
         key = next((alias for alias in aliases if alias in value), None)
         if key is not None:
-            ordered[key] = bounded_json_value(value[key], [field_bytes])
+            ordered[key] = bounded_json_value(value[key], field_bytes)
     # Reserved fields already come first. Order the remaining aliases and fields next.
     for key in (*priority_keys, *value):
         if key in value and key not in ordered:
@@ -272,7 +215,7 @@ def bounded_finding_section(
     if evidence_key is not None:
         ordered[evidence_key] = evidence
         ordered.pop("code_evidence" if evidence_key == "codeEvidence" else "codeEvidence", None)
-    return bounded_json_value(ordered, [maximum_bytes])
+    return bounded_json_value(ordered, maximum_bytes)
 
 
 def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
@@ -321,7 +264,7 @@ def merged_bounded_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any
         evidence["code"] = bounded_json_text(
             evidence["code"],
             FINDING_CODE_EVIDENCE_SNIPPET_BYTES,
-        )[0]
+        )
         bounded[item["id"]] = evidence
     return evidence_keys[0], list(bounded.values())
 
@@ -334,65 +277,43 @@ def json_size(value: Any) -> int:
 
 def bounded_json_value(
     value: Any,
-    budget: list[int],
+    budget: int,
     *,
     depth: int = 0,
     max_depth: int = 4,
 ) -> Any:
-    """Build a depth-limited preview while charging its JSON representation to the shared byte budget."""
-    if budget[0] <= 0:
-        return None
-    if depth >= max_depth:
-        consume_json_budget(budget, 4)
+    """Bound each child independently and charge its final JSON size to the parent."""
+    if budget <= 0 or depth >= max_depth:
         return None
     if isinstance(value, str):
-        bounded, size = bounded_json_text(value, budget[0])
-        consume_json_budget(budget, size)
-        return bounded
+        return bounded_json_text(value, budget)
     if value is None or isinstance(value, (bool, int, float)):
-        consume_json_budget(budget, json_size(value))
         return value
+
+    # Reserve both delimiters and, after each entry, the comma before the next one.
+    remaining = budget - 2
     if isinstance(value, list):
-        if not consume_json_budget(budget, 2):
-            return []
         result = []
         for item in value:
-            remaining = budget[0]
-            separator = 0 if not result else 1
-            if not consume_json_budget(budget, separator):
+            if remaining <= 0:
                 break
-            bounded_item = bounded_json_value(
-                item,
-                budget,
-                depth=depth + 1,
-                max_depth=max_depth,
-            )
+            bounded_item = bounded_json_value(item, remaining, depth=depth + 1, max_depth=max_depth)
             size = json_size(bounded_item)
-            if separator + size > remaining or (
-                isinstance(item, str) and item and bounded_item == ""
-            ):
-                budget[0] = remaining
+            if size > remaining or (isinstance(item, str) and item and bounded_item == ""):
                 break
-            budget[0] = remaining - separator - size
+            remaining -= size + 1
             result.append(bounded_item)
         return result
     if isinstance(value, dict):
-        if not consume_json_budget(budget, 2):
-            return {}
         result = {}
         for key, item in islice(value.items(), 20):
-            if budget[0] <= 0 or not isinstance(key, str):
+            if remaining <= 0 or not isinstance(key, str):
                 break
-            remaining = budget[0]
-            separator = 0 if not result else 1
-            if not consume_json_budget(budget, separator):
-                budget[0] = remaining
+            bounded_key = bounded_json_text(key, min(remaining, 512))
+            remaining -= json_size(bounded_key) + 1
+            if remaining <= 0:
                 break
-            bounded_key, key_size = bounded_json_text(key, min(budget[0], 512))
-            if not consume_json_budget(budget, key_size + 1):
-                budget[0] = remaining
-                break
-            item_budget = budget
+            item_budget = remaining
             if depth == 0 and key == "remediationTests":
                 controls = value.get("preventiveControls")
                 if (
@@ -408,46 +329,27 @@ def bounded_json_value(
                     minimum_tests = json_size([item[0][0]])
                     for control in (controls[0], controls[0][0]):
                         reserved = json_size({"preventiveControls": [control]}) - 1
-                        if budget[0] >= minimum_tests + reserved:
-                            item_budget = [budget[0] - reserved]
+                        if remaining >= minimum_tests + reserved:
+                            item_budget = remaining - reserved
                             break
             bounded_item = bounded_json_value(
-                item,
-                item_budget,
-                depth=depth + 1,
-                max_depth=max_depth,
+                item, item_budget, depth=depth + 1, max_depth=max_depth
             )
-            size = separator + key_size + 1 + json_size(bounded_item)
+            size = json_size(bounded_item)
             if size > remaining or (isinstance(item, str) and item and bounded_item == ""):
-                budget[0] = remaining
                 break
-            budget[0] = remaining - size
+            remaining -= size + 1
             result[bounded_key] = bounded_item
         return result
-    consume_json_budget(budget, 4)
     return None
 
 
-def consume_json_budget(budget: list[int], size: int) -> bool:
-    """Deduct the requested size and return whether it fit, exhausting the budget on failure."""
-    if budget[0] < size:
-        budget[0] = 0
-        return False
-    budget[0] -= size
-    return True
-
-
-def bounded_json_text(value: str, maximum_bytes: int) -> tuple[str, int]:
-    """Return a string prefix and its ASCII-escaped JSON size in bytes.
-
-    Count the surrounding quotes and escape sequences toward maximum_bytes.
-    If even the empty string exceeds the budget, return the empty string and 2.
-    """
+def bounded_json_text(value: str, maximum_bytes: int) -> str:
+    """Find the longest prefix that fits, counting quotes and JSON escapes. Default to empty."""
     length = bisect_right(
         range(min(len(value), maximum_bytes) + 1), maximum_bytes, key=lambda n: json_size(value[:n])
     )
-    selected = value[: max(0, length - 1)]
-    return selected, json_size(selected)
+    return value[: max(0, length - 1)]
 
 
 if __name__ == "__main__":
