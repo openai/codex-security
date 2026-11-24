@@ -334,6 +334,12 @@ const draft_coverage = z.looseObject({
   excludePaths: z.never().optional(),
   receiptRefs: z.never().optional(),
   inventoryStrategy: z.never().optional(),
+  reviewedFiles: z
+    .array(z.string().min(1))
+    .describe(
+      "For a Standard parent draft, list the exact repository-relative inventory paths whose current contents have been fully reviewed in this batch.",
+    )
+    .optional(),
   surfaces: z.array(draft_surface),
   explicitExclusions: z.array(
     z.looseObject({ pattern: nonEmptyText, reason: nonEmptyText }),

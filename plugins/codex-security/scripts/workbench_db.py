@@ -2700,8 +2700,9 @@ def scan_context(
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "progress_only", False):
         scan = connection.execute(
-            """
+            f"""
             SELECT scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at,
+                   {scan_history.FILE_REVIEW_COUNT} AS files_reviewed,
                    progress.*, progress.updated_at AS progress_updated_at
             FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
             WHERE scans.id = ?

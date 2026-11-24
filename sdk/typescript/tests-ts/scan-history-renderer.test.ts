@@ -436,7 +436,12 @@ describe("scan history renderer", () => {
       mode: "standard",
       progress: {
         status: "complete",
-        coverage: { closedRows: 12, worklistRows: 15, filesTotal: 9 },
+        coverage: {
+          closedRows: 12,
+          worklistRows: 15,
+          filesTotal: 9,
+          filesReviewed: 3,
+        },
       },
       findingCount: 75,
       findingsTruncated: true,
@@ -484,8 +489,7 @@ describe("scan history renderer", () => {
       'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
       'trusted_paths=["src","packages/core"]',
       "REVIEW",
-      "12 of 15 reviewed",
-      "9 files",
+      "12 of 15 reviewed  ·  9 files  ·  3 file review receipts",
       "ARTIFACTS",
       "/demo/results/report.md",
     ]) {
@@ -496,7 +500,7 @@ describe("scan history renderer", () => {
       renderScanHistory(
         {
           ...scan,
-          progress: { status: "failed" },
+          progress: { status: "failed", coverage: { filesReviewed: 0 } },
           failureMessage: "Repository checkout became unavailable.",
           findings: [],
         },
@@ -504,6 +508,7 @@ describe("scan history renderer", () => {
       ),
     );
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
+    expect(failed).not.toContain("file review receipt");
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {

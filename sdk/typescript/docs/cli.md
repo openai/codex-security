@@ -1067,6 +1067,11 @@ the saved files:
 | `findings.json`      | Reported findings, source locations and supporting evidence.                                                                                                                                             |
 | `report.md`          | A readable summary of the scope and findings.                                                                                                                                                            |
 
+For a Standard scan, `scans show` displays a file review receipt count when
+the scan has recorded reviews for individual files. In JSON,
+`progress.coverage.filesReviewed` counts distinct in-scope files with a saved
+review receipt. The other counts show completed review rows and files in scope.
+
 When a checkpoint is retained, `checkpoint-head.json` identifies the file in
 `checkpoints/`. In a retained draft or checkpoint, `reviewState.deferred` lists
 unfinished work and `reviewState.openQuestions` lists follow-up questions.

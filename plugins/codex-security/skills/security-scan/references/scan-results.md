@@ -6,6 +6,10 @@ For a scan with bound progress and context tools, persist user-requested context
 
 At the first usable threat model, call `record_codex_security_scan_draft` with the scan ID, handoff token when required, `complete: false`, the model, and empty findings if none are validated yet. The workbench writes the canonical artifacts and derives target metadata and finding identities. If the SDK supplied the scan and no draft tool is bound, follow the [SDK file handoff](sdk-files.md) through completion instead. Other hosts require the draft tool.
 
+A bound Standard draft may include `reviewState.reviewedFiles`. List the exact repository-relative paths of files fully reviewed in this batch, including paths that returning reviewers confirm they fully reviewed. Put partially reviewed paths and their remaining questions in `reviewState.deferred`. The draft records file reviews without separate receipt files.
+
+Omit `reviewedFiles` if the Git checkout was dirty at scan start. Git receipts cover the reviewed checkout bytes, including CRLF, when Git maps them to the registered blob. If a declaration fails validation, the workbench saves the draft with a warning and skips the entire receipt batch. Include eligible paths in a later draft to record those reviews.
+
 Checkpoint returned candidates before merging or validating them. Keep their original evidence under `reviewState.deferred` until resolved. Reuse saved surface IDs. Preserve validation decisions, counterevidence, and unfinished questions as directed by the core audit. Use [artifact storage](../../../references/artifact-storage.md) for supplemental evidence. A caller-supplied custom validation handoff determines which candidates are provisional.
 
 When assigned work finishes, submit one accepted `complete: true` draft with scope, threat model, findings, and `reviewState`. Close finished generic tasks in `reviewState.resolvedDeferred` with their saved ID and a reason. Keep unresolved work. For rejected drafts and interrupted writes, follow [Errors And Recovery](../../../references/final-report.md#errors-and-recovery).

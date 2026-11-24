@@ -13,6 +13,7 @@ from deep_scan_workbench import independent_review_progress, require_current_coo
 from finalize_scan_contract import open_scan_local_file_descriptor
 from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench_constants import PHASES
+from workbench_scan_history import scan_coverage
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 
@@ -84,11 +85,7 @@ def scan_progress_result(
     )
     progress_result = {
         "candidates": {"reportable": scan["reportable_findings_count"]},
-        "coverage": {
-            "closedRows": scan["review_items_completed"],
-            "filesTotal": scan["scope_file_count"],
-            "worklistRows": scan["review_items_total"],
-        },
+        "coverage": scan_coverage(scan),
         "phase": scan["phase"],
         "phaseProgress": {
             "completed": scan["phase_items_completed"],
