@@ -18,7 +18,6 @@ from workbench_test_support import (
     saved_draft,
     select_checkpoint,
     write_checkpoint,
-    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -40,9 +39,8 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     worker_id, output = scan.canceled_discovery_output()
     recovered = worker_finding(scan, "saved-before-deadline")
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[recovered],
         deferred=[{"id": "unfinished-review", "reason": "Review remains unfinished."}],
     )
@@ -86,9 +84,8 @@ def test_discarded_worker_finding_leaves_its_review_pending(workbench_db, deadli
     worker_id, output = scan.canceled_discovery_output()
     invalid = worker_finding(scan, "incomplete-worker-finding")
     invalid.pop("remediation")
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[invalid],
         surfaces=[review_surface("entry", "Worker review", "reported")],
     )
@@ -119,9 +116,8 @@ def test_terminal_worker_authority_requires_valid_findings(
     scan = deadline_scan
     _, output = scan.canceled_discovery_output()
     previous = worker_finding(scan, "earlier-valid-finding")
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[previous],
         deferred=[{"id": "review", "reason": "Review pending."}],
         mtime_ns=100,
@@ -161,7 +157,7 @@ def test_malformed_worker_finding_preserves_a_valid_sibling_outcome(workbench_db
     worker_id, output = scan.canceled_discovery_output()
     earlier = worker_finding(scan, "rejected-candidate")
     earlier["provenance"]["candidateId"] = "candidate"
-    write_draft_checkpoint(output, scan.scan_id, findings=[earlier], mtime_ns=100)
+    scan.checkpoint(output, findings=[earlier], mtime_ns=100)
     invalid = worker_finding(scan, "malformed-sibling")
     invalid.pop("remediation")
     outcome = {
@@ -208,7 +204,7 @@ def test_deadline_keeps_canonical_coverage_validation_strict(workbench_db, deadl
     coverage_file.write_text(json.dumps(scan.coverage))
     original = coverage_file.read_bytes()
     _, output = scan.canceled_discovery_output()
-    write_draft_checkpoint(output, scan.scan_id)
+    scan.checkpoint(output)
 
     with pytest.raises(ContractError, match="surfaces|receiptRefs"):
         scan.finish(terminal_reason="capped")
@@ -240,7 +236,7 @@ def test_worker_writeups_remain_bound_to_their_source_directory(
             writeup.parent.mkdir(parents=True)
             writeup.write_text(f"# Separate worker writeup: {finding['title']}\n")
             originals[writeup] = writeup.read_bytes()
-        checkpoint = write_draft_checkpoint(source, scan.scan_id, findings=[finding])
+        checkpoint = scan.checkpoint(source, findings=[finding])
         originals[checkpoint] = checkpoint.read_bytes()
 
     scan.finish(terminal_reason="capped")
@@ -313,9 +309,8 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     ]
     if colliding_ids:
         surfaces.append({**surfaces[0], "label": "Separate worker review"})
-    write_draft_checkpoint(
+    scan.checkpoint(
         output,
-        scan.scan_id,
         surfaces=surfaces,
         findings=[]
         if reviewed

@@ -18,7 +18,6 @@ from workbench_test_support import (
     saved_coverage,
     saved_draft,
     write_checkpoint,
-    write_draft_checkpoint,
 )
 
 
@@ -126,7 +125,7 @@ def test_deep_publication_keeps_configured_scope_without_worker_observations(
 def test_deep_publication_ignores_empty_canceled_checkpoint(publication_scan):
     scan = publication_scan()
     result = scan.add_worker(status="canceled")
-    checkpoint = write_draft_checkpoint(result.parent, scan.scan_id)
+    checkpoint = scan.checkpoint(result.parent)
     source_bytes = checkpoint.read_bytes()
 
     scan.complete()
@@ -903,7 +902,7 @@ def test_stopped_file_scope_filters_siblings_before_assigning_identity(publicati
     finding["extensions"] = {"candidateId": "candidate-review"}
     descendant = copy.deepcopy(finding)
     descendant["locations"] = [{"path": "subdir/extract.py/generated", "startLine": 1}]
-    checkpoint = write_draft_checkpoint(scan.scan_dir, scan.scan_id, findings=[finding, descendant])
+    checkpoint = scan.checkpoint(scan.scan_dir, findings=[finding, descendant])
     checkpoint_bytes = checkpoint.read_bytes()
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()
